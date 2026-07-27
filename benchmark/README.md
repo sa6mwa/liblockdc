@@ -8,3 +8,10 @@ The pouch benchmark path calls into C through cgo and reports C-measured query
 time as `c-ns/op`, so the cgo bridge is not the metric used for pouch query
 latency. The Go benchmark `ns/op` still includes harness/setup work and is only
 useful as a coarse runner signal.
+
+`BenchmarkFastLockdDisk` and `BenchmarkMediumLockdDisk*` launch a real pinned
+`pkt.systems/lockd` binary with a disk backend rooted in an automatically
+removed `/tmp/liblockdc-lockd-disk-bench-*` directory. The disk side uses the
+exported Go client and full-form LQL expressions. The pouch side still measures
+the C query path directly and currently feeds the equivalent selector JSON
+because the public C request surface exposes `selector_json`.

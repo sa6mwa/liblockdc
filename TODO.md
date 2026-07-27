@@ -1611,12 +1611,24 @@ Latest release targets confirmed on 2026-07-23:
     recovery, search/index rebuild, and large namespace stress scenarios.
   - [x] Add a separate Go/cgo benchmark module under `benchmark/` for opt-in
     e2e perf comparison and stress testing outside the liblockdc release gate.
-  - [ ] Launch a real latest pinned `pkt.systems/lockd` disk backend from the
+  - [x] Launch a real latest pinned `pkt.systems/lockd` disk backend from the
     Go comparison module instead of using in-process lockd internals.
+    Verified with `make __benchmark-pouch-go-fast POUCH_GO_FAST_SEED_ROWS=4
+    POUCH_GO_FAST_BENCHTIME=1x POUCH_GO_FAST_TIMEOUT=45s`: the Go/cgo module
+    now starts `.cache/go/bin/lockd` with a disk backend under an
+    automatically cleaned `/tmp/liblockdc-lockd-disk-bench-*` root.
   - [ ] Compare that real lockd disk server against an actual liblockdc
     `pouch://` client instance with the same full-form LQL selector shape.
+    - [x] Add the first fast comparison cases for sparse equality, `/tags[]`
+      array membership, and recursive exists. The lockd disk side uses the
+      Go client with full-form LQL; the pouch side uses the equivalent
+      `selector_json` through the current public C query request so C-side
+      timing still excludes cgo overhead.
   - [ ] Mirror more of the Go lockd disk benchmark suite shape in the Go/cgo
     module so pouch and Go disk backend results can be compared case by case.
+    - [x] Add `BenchmarkMediumLockdDiskKeys` and
+      `BenchmarkMediumLockdDiskDocuments` with the same document-count,
+      engine, and scenario environment controls as the pouch medium matrix.
     - [ ] Add Go/cgo pouch-vs-lockd disk comparison coverage for the same
       `DateAfter` residual-filter scenario as the native C benchmark: seeded
       documents include valid, invalid, and out-of-range `/created_at` values,
