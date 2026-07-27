@@ -3800,6 +3800,53 @@ int lc_pouch_query_index_visit_scalar_any_merged(
   return rc;
 }
 
+int lc_pouch_query_index_visit_scalar_terms_merged(
+    lc_pouch *pouch, const char *namespace_name,
+    const lc_pouch_query_index_scalar_term *terms, size_t term_count,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error) {
+  lc_pouch_query_index_any_merge_context merge_context;
+  size_t index;
+  int rc;
+
+  memset(&merge_context, 0, sizeof(merge_context));
+  if (pouch == NULL || term_count == 0U) {
+    return lc_pouch_query_index_visit_scalar_terms(
+        pouch, namespace_name, terms, term_count, visit, context, index_seq,
+        error);
+  }
+  if (term_count == 1U) {
+    return lc_pouch_query_index_visit_scalar(
+        pouch, namespace_name, terms[0].field, terms[0].value, visit, context,
+        index_seq, error);
+  }
+  merge_context.allocator = &pouch->allocator;
+  merge_context.list_count = term_count;
+  merge_context.lists = (lc_pouch_query_index_key_list *)lc_alloc_with_allocator(
+      &pouch->allocator, term_count * sizeof(*merge_context.lists));
+  if (merge_context.lists == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query-index term merge "
+                        "lists",
+                        NULL, NULL, NULL);
+  }
+  memset(merge_context.lists, 0,
+         term_count * sizeof(*merge_context.lists));
+  rc = lc_pouch_query_index_visit_scalar_terms(
+      pouch, namespace_name, terms, term_count,
+      lc_pouch_query_index_any_merge_collect, &merge_context, index_seq, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_any_merge_emit(&merge_context, visit, context,
+                                             error);
+  }
+  for (index = 0U; index < term_count; ++index) {
+    lc_pouch_query_index_key_list_cleanup(&pouch->allocator,
+                                          &merge_context.lists[index]);
+  }
+  lc_free_with_allocator(&pouch->allocator, merge_context.lists);
+  return rc;
+}
+
 int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
                                       const char *namespace_name,
                                       const char *field,

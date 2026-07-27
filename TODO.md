@@ -1561,6 +1561,19 @@ Latest release targets confirmed on 2026-07-23:
         `make benchmark-pouch-go-acceptance` completed in 1m35s, with pouch
         indexed `OrSparseOrFlag` at about 37.8 ms keys / 37.3 ms documents
         C-side and Go disk at about 1.7 ms keys / 13.3 ms documents.
+      - [x] Route exact key-only indexed root `or` through a query-index-owned
+        merged scalar-term visitor instead of returning all OR hits to the
+        client for a second sort/pagination pass. Focused root-OR pagination
+        coverage now asserts stable key order across pages. Verified on
+        2026-07-27 with 4096-doc focused `OrSparseOrFlag` key comparison:
+        `make __benchmark-pouch-go-fast POUCH_GO_FAST_BENCH='Fast(Pouch|LockdDisk)/Keys/Docs4096/index/OrSparseOrFlag' POUCH_GO_FAST_SEED_ROWS=4096 POUCH_GO_FAST_BENCHTIME=1x POUCH_GO_FAST_TIMEOUT=90s`
+        measured pouch at about 32.7 ms C-side for 640 rows and Go lockd disk
+        at about 35.4 ms wall time in the same sample. This closes the focused
+        key-only sample. The broader 4096-doc acceptance matrix stayed inside
+        the 3-minute cap on 2026-07-27, completing in 1m34s; pouch indexed
+        `OrSparseOrFlag` measured about 31.5 ms keys / 36.5 ms documents
+        C-side while Go disk measured about 1.1 ms keys / 10.0 ms documents,
+        so typed docID/posting OR remains required to close the broader gap.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

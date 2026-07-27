@@ -6728,6 +6728,8 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
                           &query_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(first_page.count, 2);
+  assert_string_equal(first_page.keys[0], "doc/a");
+  assert_string_equal(first_page.keys[1], "doc/b");
   assert_non_null(query_res.cursor);
   assert_non_null(query_res.metadata_json);
   assert_true(bytes_contain_text(query_res.metadata_json,
@@ -6741,6 +6743,7 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
                           &query_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(second_page.count, 1);
+  assert_string_equal(second_page.keys[0], "doc/overlap");
   assert_null(query_res.cursor);
   assert_true(pouch_query_capture_has(&first_page, "doc/a") ||
               pouch_query_capture_has(&second_page, "doc/a"));

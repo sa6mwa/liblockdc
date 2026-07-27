@@ -1940,10 +1940,17 @@ static int lc_pouch_query_run_index_predicate(
   }
   if (rc == LC_OK && plan.root_or) {
     value_seq = 0UL;
-    rc = lc_pouch_query_index_visit_scalar_terms(
-        scan->client->pouch, scan->namespace_name, plan.or_terms,
-        plan.or_term_count, lc_pouch_query_index_key_collect, &keys,
-        &value_seq, error);
+    if (!scan->emit_documents && plan.candidates_exact) {
+      rc = lc_pouch_query_index_visit_scalar_terms_merged(
+          scan->client->pouch, scan->namespace_name, plan.or_terms,
+          plan.or_term_count, lc_pouch_query_index_visit_exact_key, scan,
+          &value_seq, error);
+    } else {
+      rc = lc_pouch_query_index_visit_scalar_terms(
+          scan->client->pouch, scan->namespace_name, plan.or_terms,
+          plan.or_term_count, lc_pouch_query_index_key_collect, &keys,
+          &value_seq, error);
+    }
     if (rc == LC_OK && value_seq > scan->index_seq) {
       scan->index_seq = value_seq;
     }
