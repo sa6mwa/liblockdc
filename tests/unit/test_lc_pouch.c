@@ -353,6 +353,49 @@ static void test_index_result_key_list_sorts_and_compacts_docids(
   lc_error_cleanup(&error);
 }
 
+static void test_index_result_docid_list_sorts_and_compacts_docids(
+    void **state) {
+  lc_allocator allocator;
+  lc_pouch_index_result_docid_list list;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&list, 0, sizeof(list));
+
+  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 3UL, 2U,
+                                            &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 1UL, 1U,
+                                            &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 2UL, 0U,
+                                            &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 2UL, 3U,
+                                            &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_result_docid_list_add(&allocator, &list, 3UL, 1U,
+                                            &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_pouch_index_result_docid_list_sort_compact(&allocator, &list,
+                                                     &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 3);
+  assert_int_equal(list.items[0].doc_id, 1);
+  assert_int_equal(list.items[0].value_index, 1);
+  assert_int_equal(list.items[1].doc_id, 2);
+  assert_int_equal(list.items[1].value_index, 0);
+  assert_int_equal(list.items[2].doc_id, 3);
+  assert_int_equal(list.items[2].value_index, 1);
+
+  lc_pouch_index_result_docid_list_cleanup(&allocator, &list);
+  lc_error_cleanup(&error);
+}
+
 static void test_index_result_row_list_copies_keys_and_metadata(void **state) {
   lc_allocator allocator;
   lc_pouch_index_result_row_list list;
@@ -7979,7 +8022,9 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   lc_query_key_handler handler;
   pouch_query_key_capture scan_number_page;
   pouch_query_key_capture number_page;
+  pouch_query_key_capture lql_number_page;
   pouch_query_key_capture string_page;
+  pouch_query_key_capture lql_string_page;
   pouch_query_key_capture bool_page;
   pouch_query_key_capture false_page;
   pouch_query_key_capture null_page;
@@ -8001,7 +8046,9 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   memset(&handler, 0, sizeof(handler));
   memset(&scan_number_page, 0, sizeof(scan_number_page));
   memset(&number_page, 0, sizeof(number_page));
+  memset(&lql_number_page, 0, sizeof(lql_number_page));
   memset(&string_page, 0, sizeof(string_page));
+  memset(&lql_string_page, 0, sizeof(lql_string_page));
   memset(&bool_page, 0, sizeof(bool_page));
   memset(&false_page, 0, sizeof(false_page));
   memset(&null_page, 0, sizeof(null_page));
@@ -8070,15 +8117,50 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
                                  "\"query_candidates\":2"));
   lc_query_res_cleanup(&query_res);
 
+  memset(&lql_number_page, 0, sizeof(lql_number_page));
+  query_req.selector_lql = "eq{field=/v,value=1}";
+  query_req.selector_json = NULL;
+  rc = client->query_keys(client, &query_req, &handler, &lql_number_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lql_number_page.count, scan_number_page.count);
+  assert_true(pouch_query_capture_has(&lql_number_page, "doc/number"));
+  assert_false(pouch_query_capture_has(&lql_number_page,
+                                       "doc/string-number"));
+  assert_int_equal(pouch_query_capture_has(&lql_number_page,
+                                           "doc/number-float"),
+                   pouch_query_capture_has(&scan_number_page,
+                                           "doc/number-float"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":2"));
+  lc_query_res_cleanup(&query_res);
+
   memset(&string_page, 0, sizeof(string_page));
   query_req.refresh = NULL;
   query_req.selector_json = "{\"eq\":{\"field\":\"/v\",\"value\":\"1\"}}";
+  query_req.selector_lql = NULL;
   rc = client->query_keys(client, &query_req, &handler, &string_page,
                           &query_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(string_page.count, 1);
   assert_true(pouch_query_capture_has(&string_page, "doc/string-number"));
   assert_false(pouch_query_capture_has(&string_page, "doc/number"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":1"));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&lql_string_page, 0, sizeof(lql_string_page));
+  query_req.selector_lql = "eq{field=/v,value=\"1\"}";
+  query_req.selector_json = NULL;
+  rc = client->query_keys(client, &query_req, &handler, &lql_string_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lql_string_page.count, 1);
+  assert_true(pouch_query_capture_has(&lql_string_page, "doc/string-number"));
+  assert_false(pouch_query_capture_has(&lql_string_page, "doc/number"));
+  assert_false(pouch_query_capture_has(&lql_string_page, "doc/number-float"));
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"query_candidates\":1"));
@@ -10701,6 +10783,7 @@ int main(void) {
       cmocka_unit_test(
           test_index_doc_table_generation_loads_identity_matched_file),
       cmocka_unit_test(test_index_result_key_list_sorts_and_compacts_docids),
+      cmocka_unit_test(test_index_result_docid_list_sorts_and_compacts_docids),
       cmocka_unit_test(test_index_result_row_list_copies_keys_and_metadata),
       cmocka_unit_test(test_index_term_fields_find_sorted_ranges),
       cmocka_unit_test(test_index_term_values_find_sorted_ranges),

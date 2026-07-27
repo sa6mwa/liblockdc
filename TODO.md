@@ -855,7 +855,10 @@ Latest release targets confirmed on 2026-07-23:
         `or` docID visitors now collect docIDs, load/repair the matching
         `index/query.index.lcpdtg`, and resolve page keys/metadata through the
         persisted namespace document table before emitting keys or opening
-        document bodies.
+        document bodies. The exact docID collector keeps only docIDs and
+        matched value slots, not term-row key strings, and preserves `liblql`
+        JSON scalar equality as the correctness target rather than Go lockd's
+        looser scalar coercion.
       - [x] Cut exact-term generation files over to namespace-local docIDs:
         exact generation build stores postings by the matching per-namespace
         document-table generation, prepared exact readers require an

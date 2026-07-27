@@ -66,6 +66,17 @@ typedef struct lc_pouch_index_result_key_list {
   size_t capacity;
 } lc_pouch_index_result_key_list;
 
+typedef struct lc_pouch_index_result_docid {
+  unsigned long doc_id;
+  size_t value_index;
+} lc_pouch_index_result_docid;
+
+typedef struct lc_pouch_index_result_docid_list {
+  lc_pouch_index_result_docid *items;
+  size_t count;
+  size_t capacity;
+} lc_pouch_index_result_docid_list;
+
 typedef struct lc_pouch_index_result_row {
   char *key;
   char *key_hex;
@@ -207,6 +218,14 @@ int lc_pouch_index_result_key_list_add(
     size_t value_index, lc_error *error);
 int lc_pouch_index_result_key_list_sort_compact_docids(
     const lc_allocator *allocator, lc_pouch_index_result_key_list *list,
+    lc_error *error);
+void lc_pouch_index_result_docid_list_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_result_docid_list *list);
+int lc_pouch_index_result_docid_list_add(
+    const lc_allocator *allocator, lc_pouch_index_result_docid_list *list,
+    unsigned long doc_id, size_t value_index, lc_error *error);
+int lc_pouch_index_result_docid_list_sort_compact(
+    const lc_allocator *allocator, lc_pouch_index_result_docid_list *list,
     lc_error *error);
 void lc_pouch_index_result_row_list_cleanup(
     const lc_allocator *allocator, lc_pouch_index_result_row_list *list);

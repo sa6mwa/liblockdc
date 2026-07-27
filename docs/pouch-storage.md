@@ -1529,6 +1529,12 @@ corrupt generation is repaired even when `index/query.index` is already
 current. Exact scalar docID emission now loads that identity-matched
 generation, repairs it through flush when needed, and resolves docIDs through
 the persisted namespace document table before key or document-page emission.
+The exact docID collector stores only docIDs and matched value slots; term-row
+key strings are not carried into the page result before document-table
+resolution. Pouch follows `liblql` JSON scalar equality here: strings,
+numbers, booleans, and null remain separate scalar classes, numeric equality
+compares JSON number values, and Go lockd's looser LQL scalar coercion is only
+a benchmark-reference caveat.
 The current query path still rebuilds the live in-memory global document table
 from summary refresh state for broader plans; exact-term, field-presence,
 numeric range, text/trigram, and temporal compiled generations remain the

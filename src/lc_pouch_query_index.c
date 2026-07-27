@@ -132,10 +132,10 @@ typedef struct lc_pouch_query_index_any_merge_context {
   size_t list_count;
 } lc_pouch_query_index_any_merge_context;
 
-typedef struct lc_pouch_query_index_docid_key_context {
+typedef struct lc_pouch_query_index_docid_context {
   const lc_allocator *allocator;
-  lc_pouch_index_result_key_list *keys;
-} lc_pouch_query_index_docid_key_context;
+  lc_pouch_index_result_docid_list *docids;
+} lc_pouch_query_index_docid_context;
 
 typedef struct lc_pouch_query_index_source_reader {
   lc_source *source;
@@ -4320,26 +4320,25 @@ int lc_pouch_query_index_visit_scalar_terms(
   return rc;
 }
 
-static int lc_pouch_query_index_docid_key_collect(
+static int lc_pouch_query_index_docid_collect(
     const lc_pouch_query_index_key_view *key, void *context,
     lc_error *error) {
-  lc_pouch_query_index_docid_key_context *doc_context;
+  lc_pouch_query_index_docid_context *doc_context;
 
-  doc_context = (lc_pouch_query_index_docid_key_context *)context;
-  if (doc_context == NULL || doc_context->keys == NULL) {
+  doc_context = (lc_pouch_query_index_docid_context *)context;
+  if (doc_context == NULL || doc_context->docids == NULL) {
     return LC_OK;
   }
   if (key == NULL) {
     return LC_OK;
   }
-  return lc_pouch_index_result_key_list_add(
-      doc_context->allocator, doc_context->keys, key->key_hex, key->doc_id,
-      key->version, key->bytes, key->has_query_hidden, key->query_hidden,
+  return lc_pouch_index_result_docid_list_add(
+      doc_context->allocator, doc_context->docids, key->doc_id,
       key->value_index, error);
 }
 
-static int lc_pouch_query_index_docid_key_emit(
-    const lc_allocator *allocator, lc_pouch_index_result_key_list *keys,
+static int lc_pouch_query_index_docid_emit(
+    const lc_allocator *allocator, lc_pouch_index_result_docid_list *docids,
     const lc_pouch_index_doc_table *doc_table,
     lc_pouch_query_index_key_visit_fn visit, void *context, lc_error *error) {
   lc_pouch_query_index_key_view key_view;
@@ -4348,24 +4347,23 @@ static int lc_pouch_query_index_docid_key_emit(
   size_t index;
   int rc;
 
-  if (keys == NULL || doc_table == NULL || visit == NULL) {
+  if (docids == NULL || doc_table == NULL || visit == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index docID key emit requires keys, doc "
+                        "pouch query-index docID emit requires docIDs, doc "
                         "table, and visitor",
                         NULL, NULL, NULL);
   }
-  if (keys->count == 0U) {
+  if (docids->count == 0U) {
     return LC_OK;
   }
-  rc = lc_pouch_index_result_key_list_sort_compact_docids(allocator, keys,
-                                                          error);
+  rc = lc_pouch_index_result_docid_list_sort_compact(allocator, docids, error);
   if (rc != LC_OK) {
     return rc;
   }
-  for (index = 0U; rc == LC_OK && index < keys->count; ++index) {
+  for (index = 0U; rc == LC_OK && index < docids->count; ++index) {
     memset(&key_view, 0, sizeof(key_view));
     doc = NULL;
-    rc = lc_pouch_index_doc_table_get(doc_table, keys->items[index].doc_id,
+    rc = lc_pouch_index_doc_table_get(doc_table, docids->items[index].doc_id,
                                       &doc, error);
     if (rc != LC_OK) {
       break;
@@ -4377,12 +4375,12 @@ static int lc_pouch_query_index_docid_key_emit(
     }
     key_view.key = key;
     key_view.key_hex = doc->key_hex;
-    key_view.doc_id = keys->items[index].doc_id;
+    key_view.doc_id = docids->items[index].doc_id;
     key_view.version = doc->version;
     key_view.bytes = doc->bytes;
     key_view.has_query_hidden = doc->has_query_hidden;
     key_view.query_hidden = doc->query_hidden;
-    key_view.value_index = keys->items[index].value_index;
+    key_view.value_index = docids->items[index].value_index;
     rc = visit(&key_view, context, error);
     lc_free_with_allocator(allocator, key);
   }
@@ -4635,9 +4633,9 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
     unsigned long *index_seq, lc_error *error) {
   lc_pouch_query_index_read_result sidecar;
   lc_pouch_query_index_term_reader term_reader;
-  lc_pouch_index_result_key_list keys;
+  lc_pouch_index_result_docid_list docids;
   lc_pouch_index_doc_table doc_table;
-  lc_pouch_query_index_docid_key_context doc_context;
+  lc_pouch_query_index_docid_context doc_context;
   lc_pouch_index_term_key *exact_terms;
   char *sidecar_path;
   size_t exact_term_count;
@@ -4652,7 +4650,7 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
                         NULL, NULL, NULL);
   }
   memset(&term_reader, 0, sizeof(term_reader));
-  memset(&keys, 0, sizeof(keys));
+  memset(&docids, 0, sizeof(docids));
   memset(&doc_table, 0, sizeof(doc_table));
   memset(&doc_context, 0, sizeof(doc_context));
   *index_seq = 0UL;
@@ -4667,7 +4665,7 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
       error);
   if (rc == LC_OK) {
     doc_context.allocator = &pouch->allocator;
-    doc_context.keys = &keys;
+    doc_context.docids = &docids;
     term_reader.allocator = &pouch->allocator;
     term_reader.exact_terms = exact_terms;
     term_reader.exact_term_count = exact_term_count;
@@ -4675,7 +4673,7 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
         lc_pouch_query_index_term_keys_have_numeric(exact_terms,
                                                     exact_term_count);
     term_reader.visit_doc_ids = 1;
-    term_reader.visit = lc_pouch_query_index_docid_key_collect;
+    term_reader.visit = lc_pouch_query_index_docid_collect;
     term_reader.context = &doc_context;
     rc = lc_pouch_query_index_read_with_reader(sidecar_path, &sidecar, NULL,
                                                &term_reader, NULL, error);
@@ -4691,20 +4689,20 @@ int lc_pouch_query_index_visit_scalar_terms_docids(
     }
     if (rc == LC_OK) {
       *index_seq = sidecar.index_seq;
-      if (keys.count > 0U) {
+      if (docids.count > 0U) {
         rc = lc_pouch_query_index_load_doc_table_generation(
             pouch, namespace_name, &sidecar, &doc_table, error);
       }
       if (rc == LC_OK) {
-        rc = lc_pouch_query_index_docid_key_emit(
-            &pouch->allocator, &keys, &doc_table, visit, context, error);
+        rc = lc_pouch_query_index_docid_emit(
+            &pouch->allocator, &docids, &doc_table, visit, context, error);
       }
     }
   }
   lc_free_with_allocator(&pouch->allocator, term_reader.value_scratch);
   lc_pouch_index_term_keys_cleanup(&pouch->allocator, exact_terms,
                                    term_count);
-  lc_pouch_index_result_key_list_cleanup(&pouch->allocator, &keys);
+  lc_pouch_index_result_docid_list_cleanup(&pouch->allocator, &docids);
   lc_pouch_index_doc_table_cleanup(&pouch->allocator, &doc_table);
   lc_free_with_allocator(&pouch->allocator, sidecar_path);
   return rc;
