@@ -514,6 +514,15 @@ static void cleanup_all_pouch_roots(void) {
                             POUCH_E2E_TMP_PREFIX);
 }
 
+static void pouch_e2e_write_text_file(const char *path, const char *text) {
+  FILE *fp;
+
+  fp = fopen(path, "wb");
+  assert_non_null(fp);
+  assert_int_equal(fputs(text, fp) < 0 ? -1 : 0, 0);
+  assert_int_equal(fclose(fp), 0);
+}
+
 static int setup_pouch_e2e_group(void **state) {
   (void)state;
   cleanup_all_pouch_roots();
@@ -4061,6 +4070,80 @@ static void test_pouch_direct_large_namespace_segmented_index_reopen(
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot(
+    void **state) {
+  lc_client *client;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_error error;
+  char root[256];
+  char endpoint[320];
+  char kind[96];
+  char selector_json[192];
+  char namespace_path[512];
+  char sidecar_path[640];
+  char marker_path[640];
+  size_t rows;
+  const size_t doc_count = 36U;
+  int written;
+  int rc;
+
+  (void)state;
+  make_pouch_root("marker-index-repair", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+
+  client = NULL;
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
+  lc_error_init(&error);
+
+  make_unique_name("pouch-repair", kind, sizeof(kind));
+  snprintf(selector_json, sizeof(selector_json),
+           "{\"eq\":{\"field\":\"/kind\",\"value\":\"%s\"}}", kind);
+  written = snprintf(namespace_path, sizeof(namespace_path),
+                     "%s/namespaces/repair", root);
+  assert_true(written > 0 && (size_t)written < sizeof(namespace_path));
+  written = snprintf(sidecar_path, sizeof(sidecar_path), "%s/index/query.index",
+                     namespace_path);
+  assert_true(written > 0 && (size_t)written < sizeof(sidecar_path));
+  written = snprintf(marker_path, sizeof(marker_path),
+                     "%s/markers/writer-damaged.marker", namespace_path);
+  assert_true(written > 0 && (size_t)written < sizeof(marker_path));
+
+  pouch_e2e_write_segmented_docs_direct(root, "repair", kind, doc_count,
+                                        &error);
+
+  open_pouch_client(endpoint, &client, &error);
+  flush_req.namespace_name = "repair";
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+  rows = pouch_e2e_query_key_count(client, "repair", selector_json, &error);
+  assert_int_equal(rows, doc_count);
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  client = NULL;
+
+  pouch_e2e_force_maintenance_expect_segments(root, "repair", &error);
+  pouch_e2e_run_maintenance(root, "repair", 0, 1, 0L, &error);
+  assert_int_equal(unlink(sidecar_path), 0);
+  pouch_e2e_write_text_file(marker_path, "damaged-marker\n");
+
+  open_pouch_client(endpoint, &client, &error);
+  memset(&flush_res, 0, sizeof(flush_res));
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+  rows = pouch_e2e_query_key_count(client, "repair", selector_json, &error);
+  assert_int_equal(rows, doc_count);
+
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_direct_consumer_service_with_state(void **state) {
   lc_client *client;
   lc_consumer_service *service;
@@ -4197,6 +4280,8 @@ int main(void) {
           test_pouch_direct_lifecycle_maintenance_reopen_roundtrip),
       cmocka_unit_test(
           test_pouch_direct_large_namespace_segmented_index_reopen),
+      cmocka_unit_test(
+          test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot),
       cmocka_unit_test(test_pouch_direct_consumer_service_with_state)};
   return cmocka_run_group_tests(tests, setup_pouch_e2e_group,
                                 teardown_pouch_e2e_group);

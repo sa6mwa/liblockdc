@@ -1871,6 +1871,12 @@ Latest release targets confirmed on 2026-07-23:
       maintenance, forces compaction with multi-segment candidate diagnostics,
       retries cleanup, reopens through `pouch://`, and proves indexed query
       results survive the snapshot/reopen lifecycle.
+    - [x] Add a bounded marker-damage plus query-index rebuild e2e: it writes
+      a segmented namespace, flushes the public indexed query sidecar, forces
+      snapshot compaction and cleanup, removes `index/query.index`, injects a
+      damaged peer writer marker, reopens through `pouch://`, flushes the
+      index, and proves indexed query results rebuild from the compacted
+      namespace lifecycle.
   - [x] Add a separate Go/cgo benchmark module under `benchmark/` for opt-in
     e2e perf comparison and stress testing outside the liblockdc release gate.
   - [x] Launch a real latest pinned `pkt.systems/lockd` disk backend from the
