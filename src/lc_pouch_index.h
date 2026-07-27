@@ -160,6 +160,40 @@ typedef struct lc_pouch_index_adaptive_posting {
   int dense_disabled;
 } lc_pouch_index_adaptive_posting;
 
+typedef struct lc_pouch_index_term_entry {
+  char *field_hex;
+  char *value_hex;
+  char value_type;
+  unsigned long term_id;
+} lc_pouch_index_term_entry;
+
+typedef struct lc_pouch_index_term_table {
+  lc_pouch_index_term_entry *items;
+  size_t count;
+  size_t capacity;
+  unsigned long next_term_id;
+} lc_pouch_index_term_table;
+
+typedef struct lc_pouch_index_term_posting_entry {
+  unsigned long term_id;
+  lc_pouch_index_adaptive_posting posting;
+} lc_pouch_index_term_posting_entry;
+
+typedef struct lc_pouch_index_term_posting_table {
+  lc_pouch_index_term_posting_entry *items;
+  size_t count;
+  size_t capacity;
+} lc_pouch_index_term_posting_table;
+
+typedef struct lc_pouch_index_term_generation {
+  char *namespace_name;
+  unsigned long index_seq;
+  unsigned long row_count;
+  unsigned long row_hash;
+  lc_pouch_index_term_table terms;
+  lc_pouch_index_term_posting_table postings;
+} lc_pouch_index_term_generation;
+
 void lc_pouch_index_docid_set_cleanup(const lc_allocator *allocator,
                                       lc_pouch_index_docid_set *set);
 int lc_pouch_index_docid_set_append_sorted_unique(
@@ -271,6 +305,36 @@ int lc_pouch_index_term_keys_build_exact_for_field(
     const char *field, const char *const *values, const char *value_types,
     size_t value_count, lc_pouch_index_term_key **out_terms,
     size_t *out_count, const lc_allocator *allocator, lc_error *error);
+void lc_pouch_index_term_table_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_term_table *table);
+int lc_pouch_index_term_table_find(
+    const lc_pouch_index_term_table *table, const char *field_hex,
+    const char *value_hex, char value_type, unsigned long *term_id_out);
+int lc_pouch_index_term_table_find_or_add(
+    const lc_allocator *allocator, lc_pouch_index_term_table *table,
+    const char *field_hex, const char *value_hex, char value_type,
+    unsigned long *term_id_out, lc_error *error);
+void lc_pouch_index_term_posting_table_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_term_posting_table *table);
+int lc_pouch_index_term_posting_table_put(
+    const lc_allocator *allocator, lc_pouch_index_term_posting_table *table,
+    unsigned long term_id, const unsigned long *doc_ids, size_t doc_id_count,
+    lc_error *error);
+int lc_pouch_index_term_posting_table_append_to_set(
+    const lc_pouch_index_term_posting_table *table, unsigned long term_id,
+    lc_pouch_index_docid_set *set, const lc_allocator *allocator,
+    lc_error *error);
+void lc_pouch_index_term_generation_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_term_generation *generation);
+int lc_pouch_index_term_generation_encode(
+    const lc_pouch_index_term_generation *generation,
+    const lc_allocator *allocator, char **out_bytes, size_t *out_length,
+    lc_error *error);
+int lc_pouch_index_term_generation_decode(
+    const lc_allocator *allocator, const char *bytes, size_t length,
+    unsigned long expected_index_seq, unsigned long expected_row_count,
+    unsigned long expected_row_hash, lc_pouch_index_term_generation *generation,
+    lc_error *error);
 int lc_pouch_index_term_field_parse_line(
     char *line, lc_pouch_index_term_field *field,
     const lc_allocator *allocator, lc_error *error);

@@ -974,6 +974,185 @@ static void test_index_term_fields_select_merged_range(void **state) {
   assert_int_equal(byte_count, 88);
 }
 
+static void test_index_term_generation_roundtrips_typed_postings(void **state) {
+  lc_allocator allocator;
+  lc_error error;
+  lc_pouch_index_term_generation generation;
+  lc_pouch_index_term_generation decoded;
+  lc_pouch_index_docid_set numeric_set;
+  lc_pouch_index_docid_set string_set;
+  char *bytes;
+  size_t length;
+  unsigned long numeric_term_id;
+  unsigned long numeric_term_id_again;
+  unsigned long string_term_id;
+  unsigned long found_term_id;
+  unsigned long numeric_doc_ids[3];
+  unsigned long string_doc_ids[64];
+  size_t index;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+  memset(&numeric_set, 0, sizeof(numeric_set));
+  memset(&string_set, 0, sizeof(string_set));
+  bytes = NULL;
+  length = 0U;
+
+  generation.namespace_name =
+      lc_strdup_with_allocator(&allocator, "docs/exact-generation");
+  assert_non_null(generation.namespace_name);
+  generation.index_seq = 17UL;
+  generation.row_count = 6UL;
+  generation.row_hash = 12345UL;
+  rc = lc_pouch_index_term_table_find_or_add(
+      &allocator, &generation.terms, "2f76", "31", 'n', &numeric_term_id,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_term_table_find_or_add(
+      &allocator, &generation.terms, "2f76", "31", 'n',
+      &numeric_term_id_again, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(numeric_term_id_again, numeric_term_id);
+  rc = lc_pouch_index_term_table_find_or_add(
+      &allocator, &generation.terms, "2f76", "31", 's', &string_term_id,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(string_term_id != numeric_term_id);
+
+  numeric_doc_ids[0] = 1UL;
+  numeric_doc_ids[1] = 3UL;
+  numeric_doc_ids[2] = 5UL;
+  rc = lc_pouch_index_term_posting_table_put(
+      &allocator, &generation.postings, numeric_term_id, numeric_doc_ids, 3U,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  for (index = 0U; index < 64U; ++index) {
+    string_doc_ids[index] = (unsigned long)index;
+  }
+  rc = lc_pouch_index_term_posting_table_put(
+      &allocator, &generation.postings, string_term_id, string_doc_ids, 64U,
+      &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_pouch_index_term_generation_encode(&generation, &allocator, &bytes,
+                                             &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(bytes);
+  assert_true(length > 0U);
+  rc = lc_pouch_index_term_generation_decode(&allocator, bytes, length, 17UL,
+                                             6UL, 12345UL, &decoded, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decoded.namespace_name, "docs/exact-generation");
+  assert_int_equal(decoded.index_seq, 17);
+  assert_int_equal(decoded.row_count, 6);
+  assert_int_equal(decoded.row_hash, 12345);
+
+  assert_true(lc_pouch_index_term_table_find(&decoded.terms, "2f76", "31",
+                                             'n', &found_term_id));
+  assert_int_equal(found_term_id, numeric_term_id);
+  rc = lc_pouch_index_term_posting_table_append_to_set(
+      &decoded.postings, found_term_id, &numeric_set, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(numeric_set.count, 3);
+  assert_int_equal(numeric_set.items[0], 1);
+  assert_int_equal(numeric_set.items[1], 3);
+  assert_int_equal(numeric_set.items[2], 5);
+
+  assert_true(lc_pouch_index_term_table_find(&decoded.terms, "2f76", "31",
+                                             's', &found_term_id));
+  assert_int_equal(found_term_id, string_term_id);
+  rc = lc_pouch_index_term_posting_table_append_to_set(
+      &decoded.postings, found_term_id, &string_set, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(string_set.count, 64);
+  assert_int_equal(string_set.items[0], 0);
+  assert_int_equal(string_set.items[63], 63);
+
+  lc_pouch_index_docid_set_cleanup(&allocator, &numeric_set);
+  lc_pouch_index_docid_set_cleanup(&allocator, &string_set);
+  lc_pouch_index_term_generation_cleanup(&allocator, &decoded);
+  lc_pouch_index_term_generation_cleanup(&allocator, &generation);
+  lc_free_with_allocator(&allocator, bytes);
+  lc_error_cleanup(&error);
+}
+
+static void test_index_term_generation_rejects_corrupt_identity_and_payload(
+    void **state) {
+  lc_allocator allocator;
+  lc_error error;
+  lc_pouch_index_term_generation generation;
+  lc_pouch_index_term_generation decoded;
+  char *bytes;
+  char *corrupt;
+  char *payload;
+  size_t length;
+  unsigned long term_id;
+  unsigned long doc_ids[2];
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+  bytes = NULL;
+  corrupt = NULL;
+  length = 0U;
+
+  generation.namespace_name =
+      lc_strdup_with_allocator(&allocator, "docs/exact-generation");
+  assert_non_null(generation.namespace_name);
+  generation.index_seq = 9UL;
+  generation.row_count = 2UL;
+  generation.row_hash = 88UL;
+  rc = lc_pouch_index_term_table_find_or_add(
+      &allocator, &generation.terms, "2f76", "31", 'n', &term_id, &error);
+  assert_int_equal(rc, LC_OK);
+  doc_ids[0] = 2UL;
+  doc_ids[1] = 4UL;
+  rc = lc_pouch_index_term_posting_table_put(
+      &allocator, &generation.postings, term_id, doc_ids, 2U, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_term_generation_encode(&generation, &allocator, &bytes,
+                                             &length, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_pouch_index_term_generation_decode(&allocator, bytes, length, 10UL,
+                                             2UL, 88UL, &decoded, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "identity mismatch"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_index_term_generation_decode(&allocator, bytes, length / 2U,
+                                             9UL, 2UL, 88UL, &decoded, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  corrupt = (char *)lc_alloc_with_allocator(&allocator, length + 1U);
+  assert_non_null(corrupt);
+  memcpy(corrupt, bytes, length);
+  corrupt[length] = '\0';
+  payload = strrchr(corrupt, ' ');
+  assert_non_null(payload);
+  assert_true(payload[1] != '\0' && payload[1] != '-');
+  payload[1] = 'x';
+  rc = lc_pouch_index_term_generation_decode(&allocator, corrupt, length, 9UL,
+                                             2UL, 88UL, &decoded, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+
+  lc_free_with_allocator(&allocator, corrupt);
+  lc_pouch_index_term_generation_cleanup(&allocator, &decoded);
+  lc_pouch_index_term_generation_cleanup(&allocator, &generation);
+  lc_free_with_allocator(&allocator, bytes);
+  lc_error_cleanup(&error);
+}
+
 static void test_index_posting_roundtrips_sparse_docids(void **state) {
   lc_allocator allocator;
   lc_pouch_index_posting posting;
@@ -10797,6 +10976,10 @@ int main(void) {
           test_index_term_keys_build_exact_for_field_rejects_invalid_values),
       cmocka_unit_test(test_index_term_values_collect_exact_ranges),
       cmocka_unit_test(test_index_term_fields_select_merged_range),
+      cmocka_unit_test(
+          test_index_term_generation_roundtrips_typed_postings),
+      cmocka_unit_test(
+          test_index_term_generation_rejects_corrupt_identity_and_payload),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
       cmocka_unit_test(test_index_posting_roundtrips_dense_docids),
       cmocka_unit_test(test_index_posting_selects_adaptive_encoding),

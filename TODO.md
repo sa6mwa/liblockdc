@@ -987,8 +987,8 @@ Latest release targets confirmed on 2026-07-23:
       `in`, prefix, contains, and exists can evaluate without repeated string
       scans.
       - [x] Add the first private term dictionary primitive in
-        `lc_pouch_index`: `(field,value)` terms are interned into stable term
-        IDs with sorted lookup and duplicate preservation coverage. Pouch
+        `lc_pouch_index`: `(field,value,type)` terms are interned into stable
+        term IDs with sorted lookup and duplicate preservation coverage. Pouch
         readers still need to build and consume compiled dictionaries broadly.
       - [x] Add the first term-ID posting table primitive in `lc_pouch_index`:
         exact terms now map to adaptive sparse/dense docID postings with
@@ -997,12 +997,14 @@ Latest release targets confirmed on 2026-07-23:
       - [x] Add the first immutable exact-term generation codec in
         `lc_pouch_index`: namespace-scoped term dictionaries and adaptive
         term-ID postings now round-trip under index sequence plus segmented
-        manifest identity, with corruption/truncation rejection coverage.
-      - [x] Publish and consume immutable exact-term generation files from the
-        pouch storage bridge: full query-index rebuilds and compaction publish
-        per-namespace exact generations, prepared equality/`in` readers merge
-        identity-matched files before compiling sidecar fallbacks, and
-        missing/stale/corrupt files repair on the exact query path.
+        manifest identity, preserve `liblql` JSON scalar classes, and reject
+        corrupt identity, truncation, and invalid posting payloads.
+      - [ ] Publish and consume immutable exact-term generation files from the
+        pouch storage bridge: full query-index rebuilds and compaction should
+        publish per-namespace exact generations, prepared equality/`in`
+        readers should merge identity-matched files before compiling sidecar
+        fallbacks, and missing/stale/corrupt files should repair on the exact
+        query path.
       - [x] Publish and consume immutable field-presence generation files from
         the pouch storage bridge: full query-index rebuilds and compaction publish
         per-namespace exists generations, prepared `exists` readers merge

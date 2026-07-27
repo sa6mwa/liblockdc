@@ -1545,28 +1545,24 @@ before compiled reader files can stop depending on the global docID table.
 Even before that cutover, the query path no longer depends on direct
 summary-array-position casts for field predicate candidate sets.
 The same internal layer now owns the initial term dictionary primitive:
-`(field,value)` pairs are interned into stable term IDs with sorted lookup so
-compiled readers can stop carrying raw string scans through the planner.
+`(field,value,type)` terms are interned into stable term IDs with sorted lookup
+so compiled readers can stop carrying raw string scans through the planner.
 Exact-term postings can also be stored by term ID as adaptive sparse/dense
 docID postings, giving the compiled reader a direct lookup target for equality
-and `in` plans before the disk adapter is fully cut over.
+and `in` plans before the pouch storage bridge is fully cut over.
 The index layer now defines the first immutable exact-term generation codec:
 a namespace-scoped dictionary plus term-ID posting table is wrapped with the
 same index sequence and segmented manifest identity used by prepared/result
-caches and temporal generations. Decode validates magic/version headers,
-lengths, term/posting references, posting payload shape, decoded count, sorted
-docID order, and max docID before a reader can trust the artifact. Disk now
-publishes these files under
-`<root>/%2elockd/logstore/query.index.exact/<escaped-namespace>.lcpttg`
-during full query-index rebuilds and after successful compaction replay.
-Prepared exact readers load identity-matched namespace files into the
-generation-scoped exact cache before compiling from sidecar postings; absent,
-stale, or corrupt files trigger a namespace refresh and republish on the exact
-query path. Exact generation postings are stored with namespace-local docIDs;
-loading them requires the identity-matched document-table generation and remaps
-those local IDs into the current in-memory global doc table before publishing
-to the prepared exact cache. Sidecar compilation remains the fallback when a
-current generation does not contain the requested term.
+caches and temporal generations. Terms carry the liblql JSON scalar type, so
+the generation keeps `1`, `"1"`, `true`, `"true"`, and `null` as distinct exact
+terms instead of following Go LQL's looser scalar coercion. Decode validates
+magic/version headers, lengths, term/posting references, posting payload shape,
+decoded count, sorted docID order, max docID, and generation identity before a
+reader can trust the artifact. The remaining pouch storage-bridge cutover is to
+publish these generation files during query-index rebuild/compaction, load
+identity-matched namespace files into the generation-scoped exact cache, repair
+absent/stale/corrupt files on the exact query path, and remap namespace-local
+docIDs through the matching document-table generation before result paging.
 Field-presence terms use the same immutable generation container under
 `<root>/%2elockd/logstore/query.index.exists/<escaped-namespace>.lcpttg`.
 The term field is the namespace-qualified JSON Pointer and the term value is
