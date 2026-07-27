@@ -21,7 +21,8 @@ typedef struct bench_query_key_count {
 } bench_query_key_count;
 
 typedef struct bench_pouch_query_case {
-  const char *selector;
+  const char *selector_json;
+  const char *selector_lql;
   const char *engine;
   int documents;
 } bench_pouch_query_case;
@@ -141,19 +142,49 @@ static int bench_pouch_seed_query_docs(lc_client *client, long count,
   for (i = 0; i < count; ++i) {
     lc_source *source;
     char key[64];
-    char json[256];
+    const char *bucket;
+    const char *group;
+    const char *region;
+    const char *tag0;
+    const char *tag1;
+    const char *created_at;
+    const char *message;
+    const char *flag;
+    char json[512];
     int match;
     int written;
     int rc;
 
     match = (i % 2L) == 0L;
+    bucket = i % 64L == 0L ? "needle" : "haystack";
+    group = match ? "even" : "odd";
+    if (i % 3L == 0L) {
+      region = "us";
+    } else if (i % 3L == 1L) {
+      region = "eu";
+    } else {
+      region = "apac";
+    }
+    tag0 = match ? "planning" : "runtime";
+    tag1 = i % 4L == 0L ? "finance" : "ops";
+    if (i % 5L == 0L) {
+      created_at = "2026-01-01T00:00:00Z";
+    } else if (i % 5L == 1L) {
+      created_at = "not-a-date";
+    } else {
+      created_at = "2024-01-01T00:00:00Z";
+    }
+    message = i % 8L == 0L ? "timeout" : "ordinary";
+    flag = i % 7L == 0L ? "true" : "false";
     snprintf(key, sizeof(key), "doc/%08ld", i);
     written = snprintf(
         json, sizeof(json),
-        "{\"n\":%ld,\"owner\":\"%s\",\"tags\":[\"%s\",\"%s\"],"
-        "\"details\":{\"message\":\"%s benchmark document %ld\"}}",
-        i, match ? "alpha" : "beta", match ? "finance" : "runtime",
-        match ? "planning" : "ops", match ? "finance" : "ordinary", i);
+        "{\"n\":%ld,\"owner\":\"%s\",\"bucket\":\"%s\",\"group\":\"%s\","
+        "\"region\":\"%s\",\"value\":%ld,\"tags\":[\"%s\",\"%s\"],"
+        "\"created_at\":\"%s\",\"details\":{\"message\":\"%s benchmark "
+        "document %ld\"},\"flag\":%s}",
+        i, match ? "alpha" : "beta", bucket, group, region, i, tag0, tag1,
+        created_at, message, i, flag);
     if (written <= 0 || (size_t)written >= sizeof(json)) {
       return 1;
     }
@@ -187,7 +218,8 @@ static int bench_pouch_query_once(lc_client *client,
   memset(&res, 0, sizeof(res));
   lc_query_req_init(&req);
   req.namespace_name = "bench";
-  req.selector_json = query_case->selector;
+  req.selector_json = query_case->selector_json;
+  req.selector_lql = query_case->selector_lql;
   req.engine = query_case->engine;
   req.limit = count > 0L ? count : 1L;
   if (query_case->documents) {
@@ -326,70 +358,78 @@ done:
 
 static int bench_pouch_query_iprefix_index_keys(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", "index", 0};
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", NULL,
+      "index", 0};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
 
 static int bench_pouch_query_iprefix_scan_keys(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", "scan", 0};
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", NULL, "scan",
+      0};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
 
 static int bench_pouch_query_iprefix_index_documents(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", "index", 1};
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", NULL,
+      "index", 1};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
 
 static int bench_pouch_query_iprefix_scan_documents(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", "scan", 1};
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", NULL, "scan",
+      1};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
 
 static int bench_pouch_query_icontains_index_keys(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", "index", 0};
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", NULL,
+      "index", 0};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
 
 static int bench_pouch_query_icontains_scan_keys(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", "scan", 0};
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", NULL,
+      "scan", 0};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
 
 static int bench_pouch_query_icontains_index_documents(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", "index", 1};
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", NULL,
+      "index", 1};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
 
 static int bench_pouch_query_icontains_scan_documents(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", "scan", 1};
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"NAN\"}}", NULL,
+      "scan", 1};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
 
 static int bench_pouch_query_recursive_exists_index_keys(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"exists\":\"/details/**\"}", "index", 0};
+      "{\"exists\":\"/details/**\"}", NULL, "index", 0};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
 
 static int bench_pouch_query_recursive_exists_scan_keys(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"exists\":\"/details/**\"}", "scan", 0};
+      "{\"exists\":\"/details/**\"}", NULL, "scan", 0};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
@@ -397,23 +437,165 @@ static int bench_pouch_query_recursive_exists_scan_keys(long iterations) {
 static int bench_pouch_query_recursive_exists_index_documents(
     long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"exists\":\"/details/**\"}", "index", 1};
+      "{\"exists\":\"/details/**\"}", NULL, "index", 1};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
 
 static int bench_pouch_query_recursive_exists_scan_documents(long iterations) {
   static const bench_pouch_query_case query_case = {
-      "{\"exists\":\"/details/**\"}", "scan", 1};
+      "{\"exists\":\"/details/**\"}", NULL, "scan", 1};
 
   return bench_pouch_query_text(iterations, &query_case);
 }
+
+#define BENCH_POUCH_LQL_FUNC(function_name, selector_text, engine_text,        \
+                             documents_value)                                 \
+  static int function_name(long iterations) {                                  \
+    static const bench_pouch_query_case query_case = {                         \
+        NULL, selector_text, engine_text, documents_value};                    \
+                                                                               \
+    return bench_pouch_query_text(iterations, &query_case);                    \
+  }
+
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_sparse_index_keys,
+                     "eq{field=/bucket,value=needle}", "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_sparse_scan_keys,
+                     "eq{field=/bucket,value=needle}", "scan", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_sparse_index_documents,
+                     "eq{field=/bucket,value=needle}", "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_sparse_scan_documents,
+                     "eq{field=/bucket,value=needle}", "scan", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_dense_index_keys,
+                     "eq{field=/group,value=even}", "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_dense_scan_keys,
+                     "eq{field=/group,value=even}", "scan", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_dense_index_documents,
+                     "eq{field=/group,value=even}", "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_dense_scan_documents,
+                     "eq{field=/group,value=even}", "scan", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_range_half_index_keys,
+                     "range{field=/value,gte=0}", "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_range_half_scan_keys,
+                     "range{field=/value,gte=0}", "scan", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_range_half_index_documents,
+                     "range{field=/value,gte=0}", "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_range_half_scan_documents,
+                     "range{field=/value,gte=0}", "scan", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_region_single_index_keys,
+                     "in{field=/region,any=us}", "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_region_single_scan_keys,
+                     "in{field=/region,any=us}", "scan", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_region_single_index_documents,
+                     "in{field=/region,any=us}", "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_region_single_scan_documents,
+                     "in{field=/region,any=us}", "scan", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_tags_index_keys,
+                     "in{field=/tags[],any=planning|finance}", "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_tags_scan_keys,
+                     "in{field=/tags[],any=planning|finance}", "scan", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_tags_index_documents,
+                     "in{field=/tags[],any=planning|finance}", "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_tags_scan_documents,
+                     "in{field=/tags[],any=planning|finance}", "scan", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_contains_message_index_keys,
+                     "contains{field=/details/message,value=timeout}",
+                     "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_contains_message_scan_keys,
+                     "contains{field=/details/message,value=timeout}", "scan",
+                     0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_contains_message_index_documents,
+                     "contains{field=/details/message,value=timeout}",
+                     "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_contains_message_scan_documents,
+                     "contains{field=/details/message,value=timeout}", "scan",
+                     1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_date_after_index_keys,
+                     "date{field=/created_at,after=2025-01-01T00:00:00Z}",
+                     "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_date_after_scan_keys,
+                     "date{field=/created_at,after=2025-01-01T00:00:00Z}",
+                     "scan", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_date_after_index_documents,
+                     "date{field=/created_at,after=2025-01-01T00:00:00Z}",
+                     "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_date_after_scan_documents,
+                     "date{field=/created_at,after=2025-01-01T00:00:00Z}",
+                     "scan", 1)
+BENCH_POUCH_LQL_FUNC(
+    bench_pouch_query_or_sparse_or_flag_scan_keys,
+    "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}", "scan",
+    0)
+BENCH_POUCH_LQL_FUNC(
+    bench_pouch_query_or_sparse_or_flag_scan_documents,
+    "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}", "scan",
+    1)
 
 static const bench_case *bench_cases(void) {
   static const bench_case cases[] = {
       {"stream-copy", 1000L, bench_stream_copy},
       {"pouch-open", 1000L, bench_pouch_open},
       {"pouch-namespace", 1000L, bench_pouch_namespace},
+      {"pouch-query-eq-sparse-index-keys", 1024L,
+       bench_pouch_query_eq_sparse_index_keys},
+      {"pouch-query-eq-sparse-scan-keys", 1024L,
+       bench_pouch_query_eq_sparse_scan_keys},
+      {"pouch-query-eq-sparse-index-documents", 1024L,
+       bench_pouch_query_eq_sparse_index_documents},
+      {"pouch-query-eq-sparse-scan-documents", 1024L,
+       bench_pouch_query_eq_sparse_scan_documents},
+      {"pouch-query-eq-dense-index-keys", 1024L,
+       bench_pouch_query_eq_dense_index_keys},
+      {"pouch-query-eq-dense-scan-keys", 1024L,
+       bench_pouch_query_eq_dense_scan_keys},
+      {"pouch-query-eq-dense-index-documents", 1024L,
+       bench_pouch_query_eq_dense_index_documents},
+      {"pouch-query-eq-dense-scan-documents", 1024L,
+       bench_pouch_query_eq_dense_scan_documents},
+      {"pouch-query-range-half-index-keys", 1024L,
+       bench_pouch_query_range_half_index_keys},
+      {"pouch-query-range-half-scan-keys", 1024L,
+       bench_pouch_query_range_half_scan_keys},
+      {"pouch-query-range-half-index-documents", 1024L,
+       bench_pouch_query_range_half_index_documents},
+      {"pouch-query-range-half-scan-documents", 1024L,
+       bench_pouch_query_range_half_scan_documents},
+      {"pouch-query-in-region-single-index-keys", 1024L,
+       bench_pouch_query_in_region_single_index_keys},
+      {"pouch-query-in-region-single-scan-keys", 1024L,
+       bench_pouch_query_in_region_single_scan_keys},
+      {"pouch-query-in-region-single-index-documents", 1024L,
+       bench_pouch_query_in_region_single_index_documents},
+      {"pouch-query-in-region-single-scan-documents", 1024L,
+       bench_pouch_query_in_region_single_scan_documents},
+      {"pouch-query-in-tags-index-keys", 1024L,
+       bench_pouch_query_in_tags_index_keys},
+      {"pouch-query-in-tags-scan-keys", 1024L,
+       bench_pouch_query_in_tags_scan_keys},
+      {"pouch-query-in-tags-index-documents", 1024L,
+       bench_pouch_query_in_tags_index_documents},
+      {"pouch-query-in-tags-scan-documents", 1024L,
+       bench_pouch_query_in_tags_scan_documents},
+      {"pouch-query-contains-message-index-keys", 1024L,
+       bench_pouch_query_contains_message_index_keys},
+      {"pouch-query-contains-message-scan-keys", 1024L,
+       bench_pouch_query_contains_message_scan_keys},
+      {"pouch-query-contains-message-index-documents", 1024L,
+       bench_pouch_query_contains_message_index_documents},
+      {"pouch-query-contains-message-scan-documents", 1024L,
+       bench_pouch_query_contains_message_scan_documents},
+      {"pouch-query-date-after-index-keys", 1024L,
+       bench_pouch_query_date_after_index_keys},
+      {"pouch-query-date-after-scan-keys", 1024L,
+       bench_pouch_query_date_after_scan_keys},
+      {"pouch-query-date-after-index-documents", 1024L,
+       bench_pouch_query_date_after_index_documents},
+      {"pouch-query-date-after-scan-documents", 1024L,
+       bench_pouch_query_date_after_scan_documents},
+      {"pouch-query-or-sparse-or-flag-scan-keys", 1024L,
+       bench_pouch_query_or_sparse_or_flag_scan_keys},
+      {"pouch-query-or-sparse-or-flag-scan-documents", 1024L,
+       bench_pouch_query_or_sparse_or_flag_scan_documents},
       {"pouch-query-iprefix-index-keys", 1024L,
        bench_pouch_query_iprefix_index_keys},
       {"pouch-query-iprefix-scan-keys", 1024L,
