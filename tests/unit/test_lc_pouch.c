@@ -1289,6 +1289,142 @@ static void test_pouch_endpoint_query_engine_routes_implicit_queries(
   lc_error_cleanup(&error);
 }
 
+static void test_pouch_namespace_config_persists_and_routes_implicit_queries(
+    void **state) {
+  static const char namespace_name[] = "docs/ns-config";
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
+  lc_client *client;
+  lc_namespace_config_req ns_req;
+  lc_namespace_config_res ns_res;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture capture;
+  lc_source *source;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  memset(&ns_res, 0, sizeof(ns_res));
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  lc_namespace_config_req_init(&ns_req);
+  lc_update_req_init(&update_req);
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+
+  make_root("namespace-config", root, sizeof(root));
+  cleanup_root(root);
+  open_pouch_client(root, &client, &error);
+
+  ns_req.namespace_name = namespace_name;
+  rc = client->get_namespace_config(client, &ns_req, &ns_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(ns_res.namespace_name, namespace_name);
+  assert_string_equal(ns_res.preferred_engine, "index");
+  assert_string_equal(ns_res.fallback_engine, "none");
+  lc_namespace_config_res_cleanup(&ns_res);
+
+  ns_req.preferred_engine = "scan";
+  ns_req.fallback_engine = "none";
+  rc = client->update_namespace_config(client, &ns_req, &ns_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(ns_res.preferred_engine, "scan");
+  assert_string_equal(ns_res.fallback_engine, "none");
+  lc_namespace_config_res_cleanup(&ns_res);
+
+  update_req.lease.namespace_name = namespace_name;
+  update_req.lease.key = "doc/a";
+  rc = lc_source_from_memory("{\"category\":\"planning\"}",
+                             strlen("{\"category\":\"planning\"}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  assert_int_equal(rc, LC_OK);
+  source->close(source);
+  source = NULL;
+  lc_update_res_cleanup(&update_res);
+
+  query_req.namespace_name = namespace_name;
+  query_req.selector_json = selector;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_true(pouch_query_capture_has(&capture, "doc/a"));
+  assert_string_equal(query_res.metadata_json, "{\"engine\":\"scan\"}");
+  lc_query_res_cleanup(&query_res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  query_req.namespace_name = namespace_name;
+  query_req.selector_json = selector;
+  query_req.engine = "index";
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
+  ns_req.preferred_engine = NULL;
+  ns_req.fallback_engine = "scan";
+  rc = client->update_namespace_config(client, &ns_req, &ns_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(ns_res.preferred_engine, "scan");
+  assert_string_equal(ns_res.fallback_engine, "scan");
+  lc_namespace_config_res_cleanup(&ns_res);
+
+  lc_client_close(client);
+  client = NULL;
+  open_pouch_client(root, &client, &error);
+  lc_namespace_config_req_init(&ns_req);
+  ns_req.namespace_name = namespace_name;
+  rc = client->get_namespace_config(client, &ns_req, &ns_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(ns_res.preferred_engine, "scan");
+  assert_string_equal(ns_res.fallback_engine, "scan");
+  lc_namespace_config_res_cleanup(&ns_res);
+
+  ns_req.preferred_engine = "linear";
+  ns_req.fallback_engine = NULL;
+  rc = client->update_namespace_config(client, &ns_req, &ns_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  ns_req.preferred_engine = NULL;
+  ns_req.fallback_engine = "index";
+  rc = client->update_namespace_config(client, &ns_req, &ns_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+
+  lc_error_cleanup(&error);
+  if (source != NULL) {
+    source->close(source);
+  }
+  lc_namespace_config_res_cleanup(&ns_res);
+  lc_query_res_cleanup(&query_res);
+  lc_update_res_cleanup(&update_res);
+  if (client != NULL) {
+    lc_client_close(client);
+  }
+  cleanup_root(root);
+}
+
 static void test_state_write_read_replays_segment_after_reopen(void **state) {
   lc_pouch *pouch;
   lc_source *body;
@@ -8321,6 +8457,8 @@ int main(void) {
           test_pouch_endpoint_opens_new_backend_without_http_engine),
       cmocka_unit_test(
           test_pouch_endpoint_query_engine_routes_implicit_queries),
+      cmocka_unit_test(
+          test_pouch_namespace_config_persists_and_routes_implicit_queries),
       cmocka_unit_test(test_state_write_read_replays_segment_after_reopen),
       cmocka_unit_test(test_state_write_enforces_expected_etag),
       cmocka_unit_test(test_state_writes_roll_active_manifest_segment),

@@ -23,6 +23,9 @@
 
 #define LC_POUCH_ATTACHMENT_DELETE_CONTENT_TYPE                               \
   "application/x-lockdc-pouch-attachment-delete"
+#define LC_POUCH_NAMESPACE_CONFIG_NAMESPACE ".lockd/namespace-config"
+#define LC_POUCH_NAMESPACE_CONFIG_CONTENT_TYPE                                \
+  "application/x-lockdc-pouch-namespace-config"
 
 typedef struct lc_pouch_acquire_for_update_file {
   FILE *fp;
@@ -51,6 +54,12 @@ typedef struct lc_pouch_mutate_file {
   char *etag;
   unsigned long version;
 } lc_pouch_mutate_file;
+
+typedef struct lc_pouch_namespace_config_record {
+  int found;
+  char preferred_engine[sizeof("index")];
+  char fallback_engine[sizeof("scan")];
+} lc_pouch_namespace_config_record;
 
 typedef struct lc_pouch_attachment_key_ref {
   char *key;
@@ -327,17 +336,238 @@ static const char *lc_pouch_client_namespace(lc_client_handle *client,
   return "default";
 }
 
-static const char *lc_pouch_client_query_engine(lc_client_handle *client,
-                                                const char *request_engine) {
-  if (request_engine != NULL && request_engine[0] != '\0') {
-    return request_engine;
-  }
+static const char *lc_pouch_client_endpoint_query_engine(
+    lc_client_handle *client) {
   if (client != NULL && client->pouch != NULL &&
       client->pouch->query_engine != NULL &&
       client->pouch->query_engine[0] != '\0') {
     return client->pouch->query_engine;
   }
   return "index";
+}
+
+static const char *lc_pouch_client_default_fallback_engine(
+    lc_client_handle *client) {
+  if (client != NULL && client->pouch != NULL &&
+      client->pouch->query_fallback_engine != NULL &&
+      strcmp(client->pouch->query_fallback_engine, "scan") == 0) {
+    return "scan";
+  }
+  return "none";
+}
+
+static int lc_pouch_namespace_config_valid_preferred(const char *engine) {
+  return engine != NULL &&
+         (strcmp(engine, "index") == 0 || strcmp(engine, "scan") == 0);
+}
+
+static int lc_pouch_namespace_config_valid_fallback(const char *engine) {
+  return engine != NULL &&
+         (strcmp(engine, "scan") == 0 || strcmp(engine, "none") == 0);
+}
+
+static const char *lc_pouch_namespace_config_normalize_preferred(
+    const char *engine) {
+  return engine != NULL && engine[0] != '\0' ? engine : "index";
+}
+
+static const char *lc_pouch_namespace_config_normalize_fallback(
+    const char *engine) {
+  return engine != NULL && engine[0] != '\0' ? engine : "none";
+}
+
+static char *lc_pouch_namespace_config_key(const char *namespace_name,
+                                           lc_error *error) {
+  static const char hex[] = "0123456789abcdef";
+  const unsigned char *src;
+  size_t namespace_length;
+  size_t prefix_length;
+  size_t offset;
+  char *key;
+
+  namespace_length = strlen(namespace_name);
+  prefix_length = sizeof("namespace/") - 1U;
+  if (namespace_length > (((size_t)-1) - prefix_length - 1U) / 2U) {
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 "pouch namespace config namespace is too large", NULL, NULL,
+                 NULL);
+    return NULL;
+  }
+  key = (char *)malloc(prefix_length + namespace_length * 2U + 1U);
+  if (key == NULL) {
+    lc_error_set(error, LC_ERR_NOMEM, 0L,
+                 "failed to allocate pouch namespace config key", NULL, NULL,
+                 NULL);
+    return NULL;
+  }
+  memcpy(key, "namespace/", prefix_length);
+  offset = prefix_length;
+  src = (const unsigned char *)namespace_name;
+  while (*src != '\0') {
+    key[offset++] = hex[*src >> 4];
+    key[offset++] = hex[*src & 0x0fU];
+    ++src;
+  }
+  key[offset] = '\0';
+  return key;
+}
+
+static int lc_pouch_namespace_config_set_record(
+    lc_pouch_namespace_config_record *record, const char *preferred_engine,
+    const char *fallback_engine, lc_error *error) {
+  if (!lc_pouch_namespace_config_valid_preferred(preferred_engine)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespace preferred_engine must be index or "
+                        "scan",
+                        NULL, NULL, "pouch-redesign");
+  }
+  if (!lc_pouch_namespace_config_valid_fallback(fallback_engine)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespace fallback_engine must be scan or none",
+                        NULL, NULL, "pouch-redesign");
+  }
+  strcpy(record->preferred_engine, preferred_engine);
+  strcpy(record->fallback_engine, fallback_engine);
+  return LC_OK;
+}
+
+static int lc_pouch_namespace_config_parse_body(
+    const char *body, size_t length, lc_pouch_namespace_config_record *record,
+    lc_error *error) {
+  char preferred[sizeof("index")];
+  char fallback[sizeof("scan")];
+  char *copy;
+  int consumed;
+  int matched;
+  int rc;
+
+  if (length > (size_t)INT_MAX) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespace config record is too large", NULL,
+                        NULL, "pouch-redesign");
+  }
+  copy = (char *)malloc(length + 1U);
+  if (copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch namespace config record",
+                        NULL, NULL, NULL);
+  }
+  memcpy(copy, body, length);
+  copy[length] = '\0';
+  preferred[0] = '\0';
+  fallback[0] = '\0';
+  consumed = 0;
+  matched = sscanf(copy, "preferred_engine=%5[^\n]\nfallback_engine=%4[^\n]\n%n",
+                   preferred, fallback, &consumed);
+  if (matched != 2 || consumed != (int)length) {
+    free(copy);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespace config record is corrupt", NULL,
+                        NULL, "pouch-redesign");
+  }
+  rc = lc_pouch_namespace_config_set_record(record, preferred, fallback, error);
+  if (rc == LC_OK) {
+    record->found = 1;
+  }
+  free(copy);
+  return rc;
+}
+
+static int lc_pouch_namespace_config_read(
+    lc_client_handle *client, const char *namespace_name,
+    lc_pouch_namespace_config_record *record, lc_error *error) {
+  lc_pouch_state_read_result read_result;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  char *key;
+  int rc;
+
+  memset(record, 0, sizeof(*record));
+  rc = lc_pouch_namespace_config_set_record(
+      record, lc_pouch_client_endpoint_query_engine(client),
+      lc_pouch_client_default_fallback_engine(client), error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  record->found = 0;
+  memset(&read_result, 0, sizeof(read_result));
+  sink = NULL;
+  key = lc_pouch_namespace_config_key(namespace_name, error);
+  if (key == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  rc = lc_pouch_state_read(client->pouch, LC_POUCH_NAMESPACE_CONFIG_NAMESPACE,
+                           key, &read_result, error);
+  if (rc == LC_OK && read_result.found) {
+    rc = lc_sink_to_memory(&sink, error);
+  }
+  if (rc == LC_OK && read_result.found) {
+    rc = lc_copy(read_result.body, sink, NULL, error);
+  }
+  if (rc == LC_OK && read_result.found) {
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+  }
+  if (rc == LC_OK && read_result.found) {
+    rc = lc_pouch_namespace_config_parse_body((const char *)bytes, length,
+                                              record, error);
+  }
+  if (sink != NULL) {
+    lc_sink_close(sink);
+  }
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  free(key);
+  return rc;
+}
+
+static int lc_pouch_namespace_config_response(
+    lc_namespace_config_res *out, const char *namespace_name,
+    const lc_pouch_namespace_config_record *record, lc_error *error) {
+  memset(out, 0, sizeof(*out));
+  out->namespace_name = lc_strdup_local(namespace_name);
+  out->preferred_engine = lc_strdup_local(record->preferred_engine);
+  out->fallback_engine = lc_strdup_local(record->fallback_engine);
+  out->correlation_id = lc_strdup_local("pouch-namespace-config");
+  if (out->namespace_name == NULL || out->preferred_engine == NULL ||
+      out->fallback_engine == NULL || out->correlation_id == NULL) {
+    lc_namespace_config_res_cleanup(out);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch namespace config response",
+                        NULL, NULL, NULL);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_client_query_engine(lc_client_handle *client,
+                                        const char *namespace_name,
+                                        const char *request_engine,
+                                        const char **out_engine,
+                                        char **owned_engine,
+                                        lc_error *error) {
+  lc_pouch_namespace_config_record record;
+  int rc;
+
+  *owned_engine = NULL;
+  if (request_engine != NULL && request_engine[0] != '\0') {
+    *out_engine = request_engine;
+    return LC_OK;
+  }
+  rc = lc_pouch_namespace_config_read(client, namespace_name, &record, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (!record.found) {
+    *out_engine = lc_pouch_client_endpoint_query_engine(client);
+    return LC_OK;
+  }
+  *owned_engine = lc_strdup_local(record.preferred_engine);
+  if (*owned_engine == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query engine", NULL, NULL,
+                        NULL);
+  }
+  *out_engine = *owned_engine;
+  return LC_OK;
 }
 
 static int lc_pouch_client_can_use_query_fallback(lc_client_handle *client,
@@ -6420,7 +6650,9 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   lql_selector *selector;
   lql_error lql_error_value;
   lql_status status;
+  const char *namespace_name;
   const char *effective_engine;
+  char *owned_engine;
   int use_index_predicate;
   int rc;
 
@@ -6459,7 +6691,13 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
                         NULL, NULL, "pouch-redesign");
   }
   client = (lc_client_handle *)self;
-  effective_engine = lc_pouch_client_query_engine(client, req->engine);
+  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  owned_engine = NULL;
+  rc = lc_pouch_client_query_engine(client, namespace_name, req->engine,
+                                    &effective_engine, &owned_engine, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   if (req->refresh != NULL && req->refresh[0] != '\0' &&
       strcmp(effective_engine, "scan") == 0 &&
       lc_pouch_client_can_use_query_fallback(client, req->engine, "index")) {
@@ -6468,6 +6706,7 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   use_index_predicate = strcmp(effective_engine, "index") == 0;
   if (req->refresh != NULL && req->refresh[0] != '\0' &&
       (!use_index_predicate || strcmp(req->refresh, "wait_for") != 0)) {
+    free(owned_engine);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query refresh is only supported as wait_for on "
                         "indexed queries",
@@ -6478,18 +6717,20 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   lql_error_init(&lql_error_value);
   status = lql_new(&runtime, &lql_error_value);
   if (status != LQL_STATUS_OK) {
+    free(owned_engine);
     return lc_pouch_query_lql_error(error, status, &lql_error_value,
                                     "failed to initialize pouch query runtime");
   }
   rc = lc_pouch_query_parse_selector(runtime, req, &selector, error);
   if (rc != LC_OK) {
     runtime->destroy(runtime);
+    free(owned_engine);
     return rc;
   }
 
   memset(&scan, 0, sizeof(scan));
   scan.client = client;
-  scan.namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  scan.namespace_name = namespace_name;
   scan.request = req;
   scan.limit = lc_pouch_query_effective_limit(req->limit);
   scan.sink = dst;
@@ -6534,6 +6775,7 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   }
   runtime->selector_destroy(runtime, selector);
   runtime->destroy(runtime);
+  free(owned_engine);
   return rc;
 }
 
@@ -6548,7 +6790,9 @@ int lc_pouch_client_query_keys_method(lc_client *self,
   lql_selector *selector;
   lql_error lql_error_value;
   lql_status status;
+  const char *namespace_name;
   const char *effective_engine;
+  char *owned_engine;
   int has_selector;
   int use_index_summary;
   int use_index_predicate;
@@ -6580,7 +6824,13 @@ int lc_pouch_client_query_keys_method(lc_client *self,
                         NULL, NULL, "pouch-redesign");
   }
   client = (lc_client_handle *)self;
-  effective_engine = lc_pouch_client_query_engine(client, req->engine);
+  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  owned_engine = NULL;
+  rc = lc_pouch_client_query_engine(client, namespace_name, req->engine,
+                                    &effective_engine, &owned_engine, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   if (req->refresh != NULL && req->refresh[0] != '\0' &&
       strcmp(effective_engine, "scan") == 0 &&
       lc_pouch_client_can_use_query_fallback(client, req->engine, "index")) {
@@ -6595,6 +6845,7 @@ int lc_pouch_client_query_keys_method(lc_client *self,
   if (req->refresh != NULL && req->refresh[0] != '\0' &&
       (!(use_index_summary || use_index_predicate) ||
        strcmp(req->refresh, "wait_for") != 0)) {
+    free(owned_engine);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query_keys refresh is only supported as "
                         "wait_for on indexed queries",
@@ -6602,13 +6853,14 @@ int lc_pouch_client_query_keys_method(lc_client *self,
   }
   memset(&scan, 0, sizeof(scan));
   scan.client = client;
-  scan.namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  scan.namespace_name = namespace_name;
   scan.request = req;
   scan.limit = lc_pouch_query_effective_limit(req->limit);
   scan.handler = handler;
   scan.handler_context = context;
   rc = lc_pouch_query_parse_cursor(req->cursor, &scan.offset, error);
   if (rc != LC_OK) {
+    free(owned_engine);
     return rc;
   }
   if (use_index_summary) {
@@ -6645,6 +6897,7 @@ int lc_pouch_client_query_keys_method(lc_client *self,
                                 NULL, NULL, NULL);
       }
     }
+    free(owned_engine);
     return rc;
   }
   runtime = NULL;
@@ -6652,6 +6905,7 @@ int lc_pouch_client_query_keys_method(lc_client *self,
   lql_error_init(&lql_error_value);
   status = lql_new(&runtime, &lql_error_value);
   if (status != LQL_STATUS_OK) {
+    free(owned_engine);
     return lc_pouch_query_lql_error(error, status, &lql_error_value,
                                     "failed to initialize pouch query runtime");
   }
@@ -6659,6 +6913,7 @@ int lc_pouch_client_query_keys_method(lc_client *self,
     rc = lc_pouch_query_parse_selector(runtime, req, &selector, error);
     if (rc != LC_OK) {
       runtime->destroy(runtime);
+      free(owned_engine);
       return rc;
     }
   }
@@ -6700,25 +6955,114 @@ int lc_pouch_client_query_keys_method(lc_client *self,
     runtime->selector_destroy(runtime, selector);
   }
   runtime->destroy(runtime);
+  free(owned_engine);
   return rc;
 }
 
 int lc_pouch_client_get_namespace_config_method(
     lc_client *self, const lc_namespace_config_req *req,
     lc_namespace_config_res *out, lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_namespace_config_record record;
+  const char *namespace_name;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "pouch get_namespace_config requires self, req, and out", NULL, NULL,
+        NULL);
+  }
+  client = (lc_client_handle *)self;
+  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  rc = lc_pouch_namespace_config_read(client, namespace_name, &record, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_namespace_config_response(out, namespace_name, &record,
+                                            error);
 }
 
 int lc_pouch_client_update_namespace_config_method(
     lc_client *self, const lc_namespace_config_req *req,
     lc_namespace_config_res *out, lc_error *error) {
-  (void)self;
-  (void)req;
-  (void)out;
-  return lc_pouch_client_rebuilding(error);
+  lc_client_handle *client;
+  lc_pouch_namespace_config_record record;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  lc_source *source;
+  const char *namespace_name;
+  const char *preferred_engine;
+  const char *fallback_engine;
+  char body[96];
+  char *key;
+  int body_length;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "pouch update_namespace_config requires self, req, and out", NULL,
+        NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  client = (lc_client_handle *)self;
+  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  rc = lc_pouch_namespace_config_read(client, namespace_name, &record, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (req->preferred_engine == NULL && req->fallback_engine == NULL) {
+    return lc_pouch_namespace_config_response(out, namespace_name, &record,
+                                              error);
+  }
+  preferred_engine =
+      req->preferred_engine != NULL
+          ? lc_pouch_namespace_config_normalize_preferred(req->preferred_engine)
+          : record.preferred_engine;
+  fallback_engine =
+      req->fallback_engine != NULL
+          ? lc_pouch_namespace_config_normalize_fallback(req->fallback_engine)
+          : record.fallback_engine;
+  rc = lc_pouch_namespace_config_set_record(&record, preferred_engine,
+                                            fallback_engine, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  body_length = snprintf(body, sizeof(body),
+                         "preferred_engine=%s\nfallback_engine=%s\n",
+                         record.preferred_engine, record.fallback_engine);
+  if (body_length < 0 || (size_t)body_length >= sizeof(body)) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to build pouch namespace config record", NULL,
+                        NULL, NULL);
+  }
+  key = lc_pouch_namespace_config_key(namespace_name, error);
+  if (key == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  rc = lc_source_from_memory(body, (size_t)body_length, &source, error);
+  options.content_type = LC_POUCH_NAMESPACE_CONFIG_CONTENT_TYPE;
+  options.has_query_hidden = 1;
+  options.query_hidden = 1;
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_write(client->pouch,
+                              LC_POUCH_NAMESPACE_CONFIG_NAMESPACE, key, source,
+                              &options, &write_result, error);
+  }
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_namespace_config_response(out, namespace_name, &record,
+                                            error);
+  }
+  lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
+  free(key);
+  return rc;
 }
 
 int lc_pouch_client_flush_index_method(lc_client *self,
