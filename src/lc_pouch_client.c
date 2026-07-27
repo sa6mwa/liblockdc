@@ -1496,27 +1496,39 @@ static int lc_pouch_query_run_index_predicate(
       scan->index_seq = value_seq;
     }
   }
-  for (value_index = 0U; rc == LC_OK && value_index < plan.value_count;
-       ++value_index) {
+  if (rc == LC_OK && plan.value_count > 1U && !plan.prefix &&
+      !plan.contains && !plan.range && !plan.date) {
     value_seq = 0UL;
-    if (plan.prefix) {
-      rc = lc_pouch_query_index_visit_prefix(
-          scan->client->pouch, scan->namespace_name, plan.field,
-          plan.values[value_index], plan.ignore_case,
-          lc_pouch_query_index_key_collect, &keys, &value_seq, error);
-    } else if (plan.contains) {
-      rc = lc_pouch_query_index_visit_contains(
-          scan->client->pouch, scan->namespace_name, plan.field,
-          plan.values[value_index], plan.ignore_case,
-          lc_pouch_query_index_key_collect, &keys, &value_seq, error);
-    } else {
-      rc = lc_pouch_query_index_visit_scalar(
-          scan->client->pouch, scan->namespace_name, plan.field,
-          plan.values[value_index], lc_pouch_query_index_key_collect, &keys,
-          &value_seq, error);
-    }
+    rc = lc_pouch_query_index_visit_scalar_any(
+        scan->client->pouch, scan->namespace_name, plan.field,
+        (const char *const *)plan.values, plan.value_count,
+        lc_pouch_query_index_key_collect, &keys, &value_seq, error);
     if (rc == LC_OK && value_seq > scan->index_seq) {
       scan->index_seq = value_seq;
+    }
+  } else {
+    for (value_index = 0U; rc == LC_OK && value_index < plan.value_count;
+         ++value_index) {
+      value_seq = 0UL;
+      if (plan.prefix) {
+        rc = lc_pouch_query_index_visit_prefix(
+            scan->client->pouch, scan->namespace_name, plan.field,
+            plan.values[value_index], plan.ignore_case,
+            lc_pouch_query_index_key_collect, &keys, &value_seq, error);
+      } else if (plan.contains) {
+        rc = lc_pouch_query_index_visit_contains(
+            scan->client->pouch, scan->namespace_name, plan.field,
+            plan.values[value_index], plan.ignore_case,
+            lc_pouch_query_index_key_collect, &keys, &value_seq, error);
+      } else {
+        rc = lc_pouch_query_index_visit_scalar(
+            scan->client->pouch, scan->namespace_name, plan.field,
+            plan.values[value_index], lc_pouch_query_index_key_collect, &keys,
+            &value_seq, error);
+      }
+      if (rc == LC_OK && value_seq > scan->index_seq) {
+        scan->index_seq = value_seq;
+      }
     }
   }
   if (rc == LC_OK && scan->index_seq < flushed_seq) {

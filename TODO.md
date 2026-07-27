@@ -1453,6 +1453,16 @@ Latest release targets confirmed on 2026-07-23:
         `RangeHalf`, 60 ms `InTags`, 38 ms `ContainsMessage`, and 19 ms
         `DateAfter`; indexed document-return measured about 6.6 ms, 60 ms,
         71 ms, 42 ms, and 34 ms respectively.
+      - [x] Route exact multi-value `in` selectors through a single
+        pouch-native scalar postings reader pass instead of reopening and
+        rescanning the sidecar once per `any` value. Verified on 2026-07-27
+        with focused 4096-document indexed `InTags`: pouch measured about
+        39 ms keys / 50 ms documents C-side versus Go lockd disk at about
+        29 ms keys / 53 ms documents in the same run. Key-return array
+        membership is still a tracked gap, but the redundant postings pass
+        has been removed. The bounded acceptance target completed in 1m10s
+        after this change, with pouch indexed `InTags` at about 38 ms keys /
+        51 ms documents C-side.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.
