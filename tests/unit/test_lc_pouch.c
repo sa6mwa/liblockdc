@@ -489,6 +489,96 @@ static void test_index_term_values_find_sorted_ranges(void **state) {
   lc_pouch_index_term_values_cleanup(&allocator, values, 4U);
 }
 
+static void test_index_term_values_collect_exact_ranges(void **state) {
+  lc_allocator allocator;
+  lc_error error;
+  lc_pouch_index_term_value values[4];
+  lc_pouch_index_term_key terms[3];
+  lc_pouch_index_term_range *ranges;
+  size_t range_count;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(values, 0, sizeof(values));
+  values[0].field_hex = "616765";
+  values[0].value_hex = "3330";
+  values[0].first_line = 0UL;
+  values[0].line_count = 1UL;
+  values[1].field_hex = "6e616d65";
+  values[1].value_hex = "616c696365";
+  values[1].first_line = 1UL;
+  values[1].line_count = 2UL;
+  values[2].field_hex = "6e616d65";
+  values[2].value_hex = "626f62";
+  values[2].first_line = 3UL;
+  values[2].line_count = 1UL;
+  values[3].field_hex = "74616773";
+  values[3].value_hex = "706c616e";
+  values[3].first_line = 4UL;
+  values[3].line_count = 5UL;
+  terms[0].field_hex = "616765";
+  terms[0].value_hex = "3330";
+  terms[1].field_hex = "6e616d65";
+  terms[1].value_hex = "626f62";
+  terms[2].field_hex = "74616773";
+  terms[2].value_hex = "6d697373696e67";
+  ranges = NULL;
+  range_count = 99U;
+
+  rc = lc_pouch_index_term_values_collect_ranges(
+      values, 4U, terms, 3U, &ranges, &range_count, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(range_count, 2);
+  assert_non_null(ranges);
+  assert_int_equal(ranges[0].first_line, 0);
+  assert_int_equal(ranges[0].line_count, 1);
+  assert_int_equal(ranges[1].first_line, 3);
+  assert_int_equal(ranges[1].line_count, 1);
+
+  lc_pouch_index_term_ranges_cleanup(&allocator, ranges);
+  lc_error_cleanup(&error);
+}
+
+static void test_index_term_fields_select_merged_range(void **state) {
+  lc_pouch_index_term_field fields[3];
+  lc_pouch_index_term_key terms[2];
+  unsigned long first;
+  unsigned long count;
+  int found;
+
+  (void)state;
+  memset(fields, 0, sizeof(fields));
+  fields[0].field_hex = "616765";
+  fields[0].first_line = 0UL;
+  fields[0].line_count = 2UL;
+  fields[1].field_hex = "6e616d65";
+  fields[1].first_line = 2UL;
+  fields[1].line_count = 4UL;
+  fields[2].field_hex = "74616773";
+  fields[2].first_line = 6UL;
+  fields[2].line_count = 3UL;
+  terms[0].field_hex = "74616773";
+  terms[0].value_hex = "706c616e";
+  terms[1].field_hex = "616765";
+  terms[1].value_hex = "3330";
+  first = 99UL;
+  count = 88UL;
+
+  found = lc_pouch_index_term_fields_select_range(
+      fields, 3U, NULL, terms, 2U, 9UL, &first, &count);
+  assert_true(found);
+  assert_int_equal(first, 0);
+  assert_int_equal(count, 9);
+
+  found = lc_pouch_index_term_fields_select_range(
+      fields, 3U, "6e616d65", NULL, 0U, 9UL, &first, &count);
+  assert_true(found);
+  assert_int_equal(first, 2);
+  assert_int_equal(count, 4);
+}
+
 static void test_index_posting_roundtrips_sparse_docids(void **state) {
   lc_allocator allocator;
   lc_pouch_index_posting posting;
@@ -9856,6 +9946,8 @@ int main(void) {
       cmocka_unit_test(test_index_result_row_list_copies_keys_and_metadata),
       cmocka_unit_test(test_index_term_fields_find_sorted_ranges),
       cmocka_unit_test(test_index_term_values_find_sorted_ranges),
+      cmocka_unit_test(test_index_term_values_collect_exact_ranges),
+      cmocka_unit_test(test_index_term_fields_select_merged_range),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
       cmocka_unit_test(test_index_posting_roundtrips_dense_docids),
       cmocka_unit_test(test_index_posting_selects_adaptive_encoding),

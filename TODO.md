@@ -803,6 +803,10 @@ Latest release targets confirmed on 2026-07-23:
           sidecar term field/value table records, cleanup, and sorted binary
           lookup now live in the private index term module while the query
           bridge still owns sidecar parsing and reader orchestration.
+        - [x] Move sidecar term range selection into
+          `lc_pouch_index_terms.c`: exact value range collection and merged
+          field span selection now operate over private term-key/range records,
+          leaving the query bridge to adapt reader terms and consume slices.
       - [x] Physically split private docID set algebra into
         `src/lc_pouch_index_doc.c`, including sorted unique append and
         merge-based union/intersection/subtraction helpers plus the first
