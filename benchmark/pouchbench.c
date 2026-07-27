@@ -20,6 +20,12 @@ typedef struct lockdc_bench_key_count {
   long rows;
 } lockdc_bench_key_count;
 
+struct lockdc_pouch_bench_fixture {
+  char root[sizeof(LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX")];
+  lc_client *client;
+  long rows;
+};
+
 static uint64_t lockdc_bench_now_ns(void) {
   struct timespec ts;
 
@@ -256,54 +262,117 @@ static int lockdc_bench_query(lc_client *client, const char *scenario,
   return rc;
 }
 
-int lockdc_pouch_bench_run(const char *scenario, long rows, const char *engine,
-                           int documents, lockdc_pouch_bench_result *out) {
+static void lockdc_bench_result_set_error(lockdc_pouch_bench_result *out,
+                                          const lc_error *error) {
+  if (out != NULL && error != NULL && error->message[0] != '\0') {
+    snprintf(out->error, sizeof(out->error), "%s", error->message);
+  }
+}
+
+int lockdc_pouch_bench_fixture_open(long rows,
+                                    lockdc_pouch_bench_fixture **out,
+                                    lockdc_pouch_bench_result *result) {
   char root_template[] = LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX";
-  lc_client *client;
+  lockdc_pouch_bench_fixture *fixture;
+  lc_error error;
+  int rc;
+
+  if (out == NULL || result == NULL) {
+    return LC_ERR_INVALID;
+  }
+  *out = NULL;
+  memset(result, 0, sizeof(*result));
+  if (rows <= 0L) {
+    rows = 1L;
+  }
+  fixture = (lockdc_pouch_bench_fixture *)calloc(1U, sizeof(*fixture));
+  if (fixture == NULL) {
+    result->rc = LC_ERR_NOMEM;
+    return result->rc;
+  }
+  lc_error_init(&error);
+  if (mkdtemp(root_template) == NULL) {
+    result->rc = errno;
+    free(fixture);
+    lc_error_cleanup(&error);
+    return result->rc;
+  }
+  snprintf(fixture->root, sizeof(fixture->root), "%s", root_template);
+  fixture->rows = rows;
+  rc = lockdc_bench_open_client(fixture->root, &fixture->client, &error);
+  if (rc == LC_OK) {
+    rc = lockdc_bench_seed(fixture->client, rows, &error);
+  }
+  if (rc == LC_OK) {
+    rc = lockdc_bench_flush(fixture->client, &error);
+  }
+  if (rc != LC_OK) {
+    result->rc = rc;
+    lockdc_bench_result_set_error(result, &error);
+    lockdc_pouch_bench_fixture_close(fixture);
+    lc_error_cleanup(&error);
+    return rc;
+  }
+  lc_error_cleanup(&error);
+  *out = fixture;
+  return LC_OK;
+}
+
+int lockdc_pouch_bench_fixture_query(lockdc_pouch_bench_fixture *fixture,
+                                     const char *scenario, const char *engine,
+                                     int documents,
+                                     lockdc_pouch_bench_result *out) {
   lc_error error;
   uint64_t start;
   uint64_t end;
   long matched_rows;
   int rc;
 
-  if (out == NULL) {
+  if (fixture == NULL || fixture->client == NULL || out == NULL) {
     return LC_ERR_INVALID;
   }
   memset(out, 0, sizeof(*out));
-  if (rows <= 0L) {
-    rows = 1L;
-  }
-  client = NULL;
   matched_rows = 0L;
   lc_error_init(&error);
-  if (mkdtemp(root_template) == NULL) {
-    out->rc = errno;
-    lc_error_cleanup(&error);
-    return out->rc;
-  }
-  rc = lockdc_bench_open_client(root_template, &client, &error);
-  if (rc == LC_OK) {
-    rc = lockdc_bench_seed(client, rows, &error);
-  }
-  if (rc == LC_OK) {
-    rc = lockdc_bench_flush(client, &error);
-  }
   start = lockdc_bench_now_ns();
-  if (rc == LC_OK) {
-    rc = lockdc_bench_query(client, scenario, engine, documents, rows,
-                            &matched_rows, &error);
-  }
+  rc = lockdc_bench_query(fixture->client, scenario, engine, documents,
+                          fixture->rows, &matched_rows, &error);
   end = lockdc_bench_now_ns();
-  if (client != NULL) {
-    lc_client_close(client);
-  }
-  lockdc_bench_cleanup_root(root_template);
-  if (rc != LC_OK && error.message[0] != '\0') {
-    snprintf(out->error, sizeof(out->error), "%s", error.message);
+  if (rc != LC_OK) {
+    lockdc_bench_result_set_error(out, &error);
   }
   lc_error_cleanup(&error);
   out->rc = rc;
   out->rows = matched_rows;
   out->c_ns = end >= start ? end - start : 0U;
+  return rc;
+}
+
+void lockdc_pouch_bench_fixture_close(lockdc_pouch_bench_fixture *fixture) {
+  if (fixture == NULL) {
+    return;
+  }
+  if (fixture->client != NULL) {
+    lc_client_close(fixture->client);
+  }
+  lockdc_bench_cleanup_root(fixture->root);
+  free(fixture);
+}
+
+int lockdc_pouch_bench_run(const char *scenario, long rows, const char *engine,
+                           int documents, lockdc_pouch_bench_result *out) {
+  lockdc_pouch_bench_fixture *fixture;
+  int rc;
+
+  if (out == NULL) {
+    return LC_ERR_INVALID;
+  }
+  fixture = NULL;
+  rc = lockdc_pouch_bench_fixture_open(rows, &fixture, out);
+  if (rc == LC_OK) {
+    rc = lockdc_pouch_bench_fixture_query(fixture, scenario, engine, documents,
+                                          out);
+  }
+  lockdc_pouch_bench_fixture_close(fixture);
   return rc;
 }

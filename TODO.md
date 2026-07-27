@@ -1419,6 +1419,16 @@ Latest release targets confirmed on 2026-07-23:
         Verified on 2026-07-27 with focused 4096-document indexed `DateAfter`:
         pouch measured about 31 ms keys / 31 ms documents C-side versus Go
         lockd disk at about 46 ms / 44 ms in the same run.
+      - [x] Make the Go/cgo pouch acceptance benchmark seed one reusable
+        pouch fixture per document-count/return-mode group instead of
+        reseeding every subbenchmark. Verified on 2026-07-27:
+        `make benchmark-pouch-go-acceptance` now completes in 1m08s under the
+        3-minute cap. The 4096-document pouch index matrix now identifies
+        `RangeHalf` at about 153 ms keys / 174 ms documents C-side and
+        `InTags` at about 102 ms keys / 110 ms documents C-side as the next
+        concrete index performance targets; `EqSparse` is about 7.5 ms /
+        8.1 ms, `ContainsMessage` about 40 ms / 41 ms, and `DateAfter` about
+        31 ms / 31 ms.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.

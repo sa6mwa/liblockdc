@@ -71,13 +71,15 @@ func benchmarkMediumLQL(b *testing.B, documents bool) {
 	for _, rows := range rowsList {
 		rows := rows
 		b.Run("Docs"+strconv.FormatInt(rows, 10), func(b *testing.B) {
+			fixture := newPouchFixture(b, rows)
+			defer fixture.close()
 			for _, engine := range []string{"index", "scan"} {
 				engine := engine
 				b.Run(engine, func(b *testing.B) {
 					for _, scenario := range scenarios {
 						scenario := scenario
 						b.Run(scenario, func(b *testing.B) {
-							runPouchC(b, rows, engine, scenario, documents)
+							runPouchFixtureC(b, fixture, engine, scenario, documents)
 						})
 					}
 				})
