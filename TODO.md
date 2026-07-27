@@ -908,9 +908,13 @@ Latest release targets confirmed on 2026-07-23:
     - [ ] Add adaptive posting encodings for dense and sparse terms: sparse
       delta-varint docID streams and dense bitsets selected by posting
       density/encoded size.
-      - [x] Add private sparse delta-varint and dense bitset posting primitives
-        with decode/intersect unit coverage; query execution still needs to
-        use persisted compiled postings instead of the current sidecar rows.
+      - [x] Add the first private sparse delta-varint posting primitive in
+        `lc_pouch_index`: sorted docIDs encode into compact delta-varint bytes,
+        decode back into caller-owned docID sets, reject out-of-order appends,
+        and detect truncated postings. The active multi-term exact/`in`
+        query-index docID bridge now exercises this posting append path while
+        collapsing sorted candidate docIDs before key emission. Dense bitsets
+        and persisted compiled posting generation files remain pending.
     - [ ] Add compiled field dictionaries with term IDs, doc tables, numeric
       range term tables, and text/trigram term tables so equality, range,
       `in`, prefix, contains, and exists can evaluate without repeated string

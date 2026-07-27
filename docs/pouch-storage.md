@@ -1400,21 +1400,23 @@ the long-term performance architecture. Incremental hot-loop optimizations are
 allowed only when they move toward this subsystem boundary or protect behavior
 while the subsystem is introduced.
 
-The current C source layout already reflects this subsystem boundary for the
-private index primitives:
+The current C source layout has started this subsystem boundary in
+`src/lc_pouch_index.c`, while the fuller split below remains the target module
+map for the compiled index work:
 
-- `src/lc_pouch_index_doc.c` owns the dense document table and docID set
-  algebra. It maps namespace/key pairs to stable in-memory document IDs,
-  resolves document IDs back to namespace/key pairs, and provides sorted
-  union/intersection/subtraction helpers. Query-time equality
-  intersection/subtraction uses an internal docID scratch object so repeated
-  positive and negative equality terms can reuse temporary term and merge
-  buffers within one collector invocation. It also provides the first private
-  per-namespace document-table generation codec: sorted keys round-trip under
-  index sequence plus segmented manifest identity with implicit dense docIDs.
-- `src/lc_pouch_index_posting.c` owns adaptive sparse/dense posting encoding.
-  Sparse postings are delta-varint docID streams; dense postings are bitsets
-  selected when density and encoded size justify them.
+- `src/lc_pouch_index.c` currently owns the first private docID set algebra,
+  date-bound parsing, and sparse delta-varint posting primitive. The active
+  exact/`in` query-index docID bridge exercises that posting primitive while
+  collapsing sorted candidate docIDs before key emission.
+- `src/lc_pouch_index_doc.c` should own the dense document table and broader
+  docID set algebra once the module split happens. It should map
+  namespace/key pairs to stable in-memory document IDs, resolve document IDs
+  back to namespace/key pairs, and provide sorted
+  union/intersection/subtraction helpers.
+- `src/lc_pouch_index_posting.c` should own adaptive sparse/dense posting
+  encoding after the split. Sparse postings are delta-varint docID streams;
+  dense postings are bitsets selected when density and encoded size justify
+  them. Dense bitsets and persisted posting generation files remain pending.
 - `src/lc_pouch_index_terms.c` owns term dictionaries, term-ID posting tables,
   and prepared-term cache identity refresh/cleanup. Prepared bridge caches are
   keyed by an explicit private index identity containing the current index

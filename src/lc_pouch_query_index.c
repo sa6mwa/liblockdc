@@ -4471,7 +4471,7 @@ static int lc_pouch_query_index_docid_key_collect(
 static int lc_pouch_query_index_docid_key_emit(
     const lc_allocator *allocator, lc_pouch_query_index_docid_key_list *keys,
     lc_pouch_query_index_key_visit_fn visit, void *context, lc_error *error) {
-  lc_pouch_index_docid_set seen;
+  lc_pouch_index_posting posting;
   lc_pouch_query_index_key_view key_view;
   char *key;
   size_t index;
@@ -4492,12 +4492,12 @@ static int lc_pouch_query_index_docid_key_emit(
     qsort(keys->items, keys->count, sizeof(keys->items[0]),
           lc_pouch_query_index_docid_key_item_compare);
   }
-  memset(&seen, 0, sizeof(seen));
+  memset(&posting, 0, sizeof(posting));
   write_index = 0U;
   rc = LC_OK;
   for (index = 0U; index < keys->count; ++index) {
-    rc = lc_pouch_index_docid_set_append_sorted_unique(
-        &seen, keys->items[index].doc_id, &added, allocator, error);
+    rc = lc_pouch_index_posting_append_sorted_unique(
+        &posting, keys->items[index].doc_id, &added, allocator, error);
     if (rc != LC_OK) {
       break;
     }
@@ -4512,7 +4512,7 @@ static int lc_pouch_query_index_docid_key_emit(
     }
     ++write_index;
   }
-  lc_pouch_index_docid_set_cleanup(allocator, &seen);
+  lc_pouch_index_posting_cleanup(allocator, &posting);
   if (rc != LC_OK) {
     return rc;
   }

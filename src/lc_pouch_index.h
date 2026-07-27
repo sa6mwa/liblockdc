@@ -35,6 +35,15 @@ typedef struct lc_pouch_index_docid_set {
   size_t capacity;
 } lc_pouch_index_docid_set;
 
+typedef struct lc_pouch_index_posting {
+  unsigned char *bytes;
+  size_t length;
+  size_t capacity;
+  size_t count;
+  unsigned long last_doc_id;
+  int has_last_doc_id;
+} lc_pouch_index_posting;
+
 void lc_pouch_index_docid_set_cleanup(const lc_allocator *allocator,
                                       lc_pouch_index_docid_set *set);
 int lc_pouch_index_docid_set_append_sorted_unique(
@@ -42,6 +51,14 @@ int lc_pouch_index_docid_set_append_sorted_unique(
     const lc_allocator *allocator, lc_error *error);
 int lc_pouch_index_docid_set_append_unique(
     lc_pouch_index_docid_set *set, unsigned long doc_id, int *added,
+    const lc_allocator *allocator, lc_error *error);
+void lc_pouch_index_posting_cleanup(const lc_allocator *allocator,
+                                    lc_pouch_index_posting *posting);
+int lc_pouch_index_posting_append_sorted_unique(
+    lc_pouch_index_posting *posting, unsigned long doc_id, int *added,
+    const lc_allocator *allocator, lc_error *error);
+int lc_pouch_index_posting_append_to_set(
+    const lc_pouch_index_posting *posting, lc_pouch_index_docid_set *set,
     const lc_allocator *allocator, lc_error *error);
 int lc_pouch_index_parse_lql_datetime(const char *text,
                                       lc_pouch_index_instant *out);

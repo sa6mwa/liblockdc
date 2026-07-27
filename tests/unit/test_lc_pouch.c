@@ -141,6 +141,70 @@ static void test_index_docid_set_keeps_sorted_unique_docids(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_index_posting_roundtrips_sparse_docids(void **state) {
+  lc_allocator allocator;
+  lc_pouch_index_posting posting;
+  lc_pouch_index_docid_set decoded;
+  lc_error error;
+  size_t original_length;
+  int added;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&posting, 0, sizeof(posting));
+  memset(&decoded, 0, sizeof(decoded));
+
+  rc = lc_pouch_index_posting_append_sorted_unique(&posting, 2UL, &added,
+                                                   &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  rc = lc_pouch_index_posting_append_sorted_unique(&posting, 7UL, &added,
+                                                   &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  rc = lc_pouch_index_posting_append_sorted_unique(&posting, 7UL, &added,
+                                                   &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 0);
+  rc = lc_pouch_index_posting_append_sorted_unique(&posting, 130UL, &added,
+                                                   &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(added, 1);
+  assert_int_equal(posting.count, 3);
+  assert_true(posting.length > 0U);
+
+  rc = lc_pouch_index_posting_append_to_set(&posting, &decoded, &allocator,
+                                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(decoded.count, 3);
+  assert_int_equal(decoded.items[0], 2UL);
+  assert_int_equal(decoded.items[1], 7UL);
+  assert_int_equal(decoded.items[2], 130UL);
+
+  rc = lc_pouch_index_posting_append_sorted_unique(&posting, 129UL, &added,
+                                                   &allocator, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "requires sorted input"));
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_pouch_index_docid_set_cleanup(&allocator, &decoded);
+  original_length = posting.length;
+  assert_true(original_length > 0U);
+  --posting.length;
+  rc = lc_pouch_index_posting_append_to_set(&posting, &decoded, &allocator,
+                                            &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "truncated"));
+  posting.length = original_length;
+
+  lc_pouch_index_docid_set_cleanup(&allocator, &decoded);
+  lc_pouch_index_posting_cleanup(&allocator, &posting);
+  lc_error_cleanup(&error);
+}
+
 static void pouch_write_json_state(lc_pouch *pouch, const char *namespace_name,
                                    const char *key, const char *json,
                                    const lc_pouch_state_write_options *options,
@@ -9273,6 +9337,7 @@ static void test_acquire_for_update_rollback_removes_new_state(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_index_docid_set_keeps_sorted_unique_docids),
+      cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
       cmocka_unit_test(test_open_creates_segmented_root_layout),
       cmocka_unit_test(test_ensure_namespace_creates_per_namespace_layout),
       cmocka_unit_test(
