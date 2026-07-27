@@ -783,6 +783,10 @@ Latest release targets confirmed on 2026-07-23:
         `src/lc_pouch_index_result.c`, leaving `lc_pouch_index.c` focused on
         planner/collector orchestration while preserving the same private
         `lc_pouch_index.h` boundary.
+        - [x] Add the first physical `lc_pouch_index_result.c` boundary:
+          sorted result-key vectors now own key allocation, docID/key/value-slot
+          ordering, and adjacent docID compaction for query-index candidate
+          emission, leaving sidecar parsing in the pouch query bridge.
       - [x] Physically split sparse posting encoding into
         `src/lc_pouch_index_posting.c`, keeping the private posting boundary
         separate from document-table, term-dictionary, and result-cache code.

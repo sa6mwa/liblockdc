@@ -299,6 +299,60 @@ static void test_index_doc_table_maps_sorted_keys_to_docids(void **state) {
   lc_pouch_index_doc_table_cleanup(&allocator, &table);
 }
 
+static void test_index_result_key_list_sorts_and_compacts_docids(
+    void **state) {
+  lc_allocator allocator;
+  lc_pouch_index_result_key_list list;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&list, 0, sizeof(list));
+
+  rc = lc_pouch_index_result_key_list_add(&allocator, &list, "0c", 3UL, 30UL,
+                                          300UL, 1, 1, 2U, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_result_key_list_add(&allocator, &list, "0a", 1UL, 10UL,
+                                          100UL, 0, 0, 1U, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_result_key_list_add(&allocator, &list, "0b", 2UL, 20UL,
+                                          200UL, 1, 0, 0U, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_result_key_list_add(&allocator, &list, "0b", 2UL, 21UL,
+                                          201UL, 0, 1, 3U, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_result_key_list_add(&allocator, &list, "0d", 3UL, 31UL,
+                                          301UL, 0, 0, 1U, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_pouch_index_result_key_list_sort_compact_docids(&allocator, &list,
+                                                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 3);
+  assert_int_equal(list.items[0].doc_id, 1);
+  assert_string_equal(list.items[0].key_hex, "0a");
+  assert_int_equal(list.items[0].version, 10);
+  assert_int_equal(list.items[0].bytes, 100);
+  assert_false(list.items[0].has_query_hidden);
+  assert_false(list.items[0].query_hidden);
+  assert_int_equal(list.items[0].value_index, 1);
+  assert_int_equal(list.items[1].doc_id, 2);
+  assert_string_equal(list.items[1].key_hex, "0b");
+  assert_int_equal(list.items[1].version, 20);
+  assert_int_equal(list.items[1].bytes, 200);
+  assert_true(list.items[1].has_query_hidden);
+  assert_false(list.items[1].query_hidden);
+  assert_int_equal(list.items[1].value_index, 0);
+  assert_int_equal(list.items[2].doc_id, 3);
+  assert_string_equal(list.items[2].key_hex, "0c");
+  assert_int_equal(list.items[2].value_index, 2);
+
+  lc_pouch_index_result_key_list_cleanup(&allocator, &list);
+  lc_error_cleanup(&error);
+}
+
 static void test_index_posting_roundtrips_sparse_docids(void **state) {
   lc_allocator allocator;
   lc_pouch_index_posting posting;
@@ -9662,6 +9716,7 @@ int main(void) {
       cmocka_unit_test(test_index_docid_set_keeps_sorted_unique_docids),
       cmocka_unit_test(test_index_docid_set_merges_sorted_sets),
       cmocka_unit_test(test_index_doc_table_maps_sorted_keys_to_docids),
+      cmocka_unit_test(test_index_result_key_list_sorts_and_compacts_docids),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
       cmocka_unit_test(test_index_posting_roundtrips_dense_docids),
       cmocka_unit_test(test_index_posting_selects_adaptive_encoding),

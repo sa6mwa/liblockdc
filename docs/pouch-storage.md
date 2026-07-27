@@ -1425,9 +1425,12 @@ fuller compiled-index module map remains the target for the remaining work:
   and prepared-term cache identity refresh/cleanup. Prepared bridge caches are
   keyed by an explicit private index identity containing the current index
   sequence and segmented manifest generation.
-- `src/lc_pouch_index_result.c` owns cacheable plan-key normalization,
-  identity-scoped result-cache lookup/insert, remapped generation-local result
-  caching, and docID page selection over the document table.
+- `src/lc_pouch_index_result.c` owns the first result-list primitive split out
+  of the query bridge: sorted key/docID vectors, deterministic
+  docID/key/value-slot ordering, key allocation ownership, and adjacent docID
+  compaction before key emission. It should grow into the cacheable plan-key,
+  identity-scoped result-cache, remapped generation-local result caching, and
+  document-table page-selection owner.
 - `src/lc_pouch_index_temporal.c` owns the typed temporal reader primitive for
   normalized date values. It stores per-field normalized temporal docID vectors,
   keeps residual postings for plausible temporal strings that must remain under
