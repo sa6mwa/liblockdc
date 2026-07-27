@@ -1347,6 +1347,19 @@ static int lc_pouch_query_index_process_exact_key(
   return rc;
 }
 
+static int lc_pouch_query_index_visit_exact_key(
+    const lc_pouch_query_index_key_view *key, void *context, lc_error *error) {
+  lc_pouch_query_scan_context *scan;
+  int rc;
+
+  scan = (lc_pouch_query_scan_context *)context;
+  rc = lc_pouch_query_index_process_exact_key(scan, key, error);
+  if (rc == LC_OK && scan != NULL && scan->next_offset != 0U) {
+    return LC_POUCH_STATE_READ_MANY_STOP;
+  }
+  return rc;
+}
+
 static int lc_pouch_query_index_process_key_read(
     const char *key, const lc_pouch_state_read_result *read_result,
     void *read_context, lc_error *error) {
@@ -1552,7 +1565,18 @@ static int lc_pouch_query_run_index_predicate(
       scan->index_seq = value_seq;
     }
   }
-  if (rc == LC_OK && plan.value_count > 1U && !plan.prefix &&
+  if (rc == LC_OK && !scan->emit_documents && plan.candidates_exact &&
+      plan.value_count > 1U && !plan.prefix && !plan.contains &&
+      !plan.range && !plan.date) {
+    value_seq = 0UL;
+    rc = lc_pouch_query_index_visit_scalar_any_merged(
+        scan->client->pouch, scan->namespace_name, plan.field,
+        (const char *const *)plan.values, plan.value_count,
+        lc_pouch_query_index_visit_exact_key, scan, &value_seq, error);
+    if (rc == LC_OK && value_seq > scan->index_seq) {
+      scan->index_seq = value_seq;
+    }
+  } else if (rc == LC_OK && plan.value_count > 1U && !plan.prefix &&
       !plan.contains && !plan.range && !plan.date) {
     value_seq = 0UL;
     rc = lc_pouch_query_index_visit_scalar_any(

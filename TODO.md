@@ -1474,6 +1474,16 @@ Latest release targets confirmed on 2026-07-23:
         `RangeHalf`, 27 ms `InTags`, 59 ms `ContainsMessage`, and 10 ms
         `DateAfter`; document-return stayed body-read-bound at about 7.5 ms,
         70 ms, 58 ms, 46 ms, and 28 ms respectively.
+      - [x] Add a sorted-union visitor for exact multi-value scalar postings
+        and route key-return `in` predicates through it, avoiding the generic
+        global candidate sort/dedup step after posting collection. Verified on
+        2026-07-27 with focused 4096-document indexed `InTags`: pouch measured
+        about 30 ms C-side versus Go lockd disk at about 32 ms in that sample.
+        The bounded acceptance target completed in 1m08s after this change,
+        with pouch indexed key-return `InTags` at about 26 ms C-side. This is
+        only a modest improvement; the remaining path still collects matching
+        postings before merge, so the next larger cut is a key-ordered or
+        field/key/value posting layout that can stop after the cursor page.
   - [x] Cut pouch storage over to the unreleased fresh segmented
     per-namespace logstore format; no legacy `store.log` compatibility or
     import migration is required because pouch has not shipped.
