@@ -8960,6 +8960,12 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"engine\":\"index\""));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":2"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_matches\":2"));
 
   snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
   query_req.cursor = cursor;
@@ -8973,6 +8979,12 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(second_length > 0U);
   assert_null(query_res.cursor);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_candidates\":2"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_matches\":1"));
   assert_true(bytes_contain_text(first_bytes, first_length, "\"n\":1") ||
               bytes_contain_text(second_bytes, second_length, "\"n\":1"));
   assert_true(bytes_contain_text(first_bytes, first_length, "\"n\":3") ||

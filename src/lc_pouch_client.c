@@ -217,6 +217,11 @@ typedef struct lc_pouch_query_index_key_set {
   size_t capacity;
 } lc_pouch_query_index_key_set;
 
+typedef struct lc_pouch_query_index_exact_document_page {
+  lc_pouch_query_scan_context *scan;
+  lc_pouch_query_index_key_set keys;
+} lc_pouch_query_index_exact_document_page;
+
 static size_t lc_pouch_lonejson_source_read(void *context, void *buffer,
                                             size_t count, lc_error *error) {
   lc_pouch_lonejson_source *source;
@@ -2382,6 +2387,98 @@ static int lc_pouch_query_index_visit_exact_key(
   return rc;
 }
 
+static int lc_pouch_query_index_collect_exact_document_key(
+    const lc_pouch_query_index_key_view *key, void *context, lc_error *error) {
+  lc_pouch_query_index_exact_document_page *page;
+  lc_pouch_query_scan_context *scan;
+
+  page = (lc_pouch_query_index_exact_document_page *)context;
+  if (page == NULL || page->scan == NULL || key == NULL ||
+      key->key == NULL) {
+    return LC_OK;
+  }
+  scan = page->scan;
+  if (key->has_query_hidden && key->query_hidden) {
+    return LC_OK;
+  }
+  if (strncmp(key->key, ".staging/", sizeof(".staging/") - 1U) == 0 ||
+      strstr(key->key, "/.staging/") != NULL) {
+    return LC_OK;
+  }
+  if (key->version > scan->index_seq) {
+    scan->index_seq = key->version;
+  }
+  if (scan->seen++ < scan->offset) {
+    return LC_OK;
+  }
+  ++scan->matched;
+  if (page->keys.count >= scan->limit) {
+    if (scan->next_offset == 0U) {
+      scan->next_offset = scan->seen - 1U;
+    }
+    return LC_POUCH_STATE_READ_MANY_STOP;
+  }
+  return lc_pouch_query_index_key_set_add(&page->keys, key, error);
+}
+
+static int lc_pouch_query_index_emit_exact_document_read(
+    const char *key, const lc_pouch_state_read_result *read_result,
+    void *read_context, lc_error *error) {
+  lc_pouch_query_scan_context *context;
+  int rc;
+
+  (void)key;
+  context = (lc_pouch_query_scan_context *)read_context;
+  if (context == NULL || read_result == NULL) {
+    return LC_OK;
+  }
+  if (!read_result->found ||
+      (read_result->has_query_hidden && read_result->query_hidden)) {
+    return LC_OK;
+  }
+  if (read_result->version > context->index_seq) {
+    context->index_seq = read_result->version;
+  }
+  rc = lc_pouch_query_emit_document(context, read_result->body, error);
+  if (rc == LC_OK) {
+    ++context->emitted;
+  }
+  return rc;
+}
+
+static int lc_pouch_query_index_process_exact_document_page(
+    lc_pouch_query_scan_context *context,
+    lc_pouch_query_index_key_set *page_keys, lc_error *error) {
+  const char **read_keys;
+  size_t index;
+  int rc;
+
+  if (context == NULL || page_keys == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch exact indexed document page requires context "
+                        "and keys",
+                        NULL, NULL, NULL);
+  }
+  if (page_keys->count == 0U) {
+    return LC_OK;
+  }
+  read_keys = (const char **)calloc(page_keys->count, sizeof(*read_keys));
+  if (read_keys == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch exact document page keys",
+                        NULL, NULL, NULL);
+  }
+  for (index = 0U; index < page_keys->count; ++index) {
+    read_keys[index] = page_keys->keys[index].key;
+  }
+  rc = lc_pouch_state_read_many(
+      context->client->pouch, context->namespace_name, read_keys,
+      page_keys->count, lc_pouch_query_index_emit_exact_document_read, context,
+      error);
+  free(read_keys);
+  return rc;
+}
+
 static int lc_pouch_query_index_process_key_read(
     const char *key, const lc_pouch_state_read_result *read_result,
     void *read_context, lc_error *error) {
@@ -2537,9 +2634,11 @@ static int lc_pouch_query_run_index_predicate(
     lc_error *error) {
   lc_pouch_query_index_plan plan;
   lc_pouch_query_index_key_set keys;
+  lc_pouch_query_index_exact_document_page exact_document_page;
   unsigned long flushed_seq;
   unsigned long value_seq;
   size_t value_index;
+  int processed_exact_documents;
   int rc;
 
   if (scan == NULL || flushed_seq_out == NULL) {
@@ -2550,7 +2649,10 @@ static int lc_pouch_query_run_index_predicate(
   }
   memset(&plan, 0, sizeof(plan));
   memset(&keys, 0, sizeof(keys));
+  memset(&exact_document_page, 0, sizeof(exact_document_page));
+  exact_document_page.scan = scan;
   flushed_seq = 0UL;
+  processed_exact_documents = 0;
   *flushed_seq_out = 0UL;
   rc = lc_pouch_query_index_plan_from_selector(scan->runtime, scan->selector,
                                                &plan, error);
@@ -2560,7 +2662,13 @@ static int lc_pouch_query_run_index_predicate(
   }
   if (rc == LC_OK && plan.root_or) {
     value_seq = 0UL;
-    if (!scan->emit_documents && plan.candidates_exact) {
+    if (plan.candidates_exact && scan->emit_documents) {
+      rc = lc_pouch_query_index_visit_scalar_terms_docids(
+          scan->client->pouch, scan->namespace_name, plan.or_terms,
+          plan.or_term_count, lc_pouch_query_index_collect_exact_document_key,
+          &exact_document_page, &value_seq, error);
+      processed_exact_documents = 1;
+    } else if (!scan->emit_documents && plan.candidates_exact) {
       rc = lc_pouch_query_index_visit_scalar_terms_docids(
           scan->client->pouch, scan->namespace_name, plan.or_terms,
           plan.or_term_count, lc_pouch_query_index_visit_exact_key, scan,
@@ -2603,7 +2711,20 @@ static int lc_pouch_query_run_index_predicate(
       scan->index_seq = value_seq;
     }
   }
-  if (rc == LC_OK && !scan->emit_documents && plan.candidates_exact &&
+  if (rc == LC_OK && plan.candidates_exact && scan->emit_documents &&
+      plan.value_count > 0U && !plan.prefix && !plan.contains &&
+      !plan.range && !plan.date && !plan.root_or) {
+    value_seq = 0UL;
+    rc = lc_pouch_query_index_visit_scalar_any_docids(
+        scan->client->pouch, scan->namespace_name, plan.field,
+        (const char *const *)plan.values, plan.value_types, plan.value_count,
+        lc_pouch_query_index_collect_exact_document_key, &exact_document_page,
+        &value_seq, error);
+    processed_exact_documents = 1;
+    if (rc == LC_OK && value_seq > scan->index_seq) {
+      scan->index_seq = value_seq;
+    }
+  } else if (rc == LC_OK && !scan->emit_documents && plan.candidates_exact &&
       plan.value_count > 0U && !plan.prefix && !plan.contains &&
       !plan.range && !plan.date) {
     value_seq = 0UL;
@@ -2654,11 +2775,17 @@ static int lc_pouch_query_run_index_predicate(
   }
   if (rc == LC_OK) {
     scan->indexed_candidates_exact = plan.candidates_exact;
-    rc = lc_pouch_query_index_process_keys(scan, &keys, error);
+    if (processed_exact_documents) {
+      rc = lc_pouch_query_index_process_exact_document_page(
+          scan, &exact_document_page.keys, error);
+    } else {
+      rc = lc_pouch_query_index_process_keys(scan, &keys, error);
+    }
   }
   if (rc == LC_OK) {
     *flushed_seq_out = flushed_seq;
   }
+  lc_pouch_query_index_key_set_cleanup(&exact_document_page.keys);
   lc_pouch_query_index_key_set_cleanup(&keys);
   lc_pouch_query_index_plan_cleanup(&plan);
   return rc;

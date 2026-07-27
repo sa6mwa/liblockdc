@@ -1097,6 +1097,11 @@ sorted/compacted docID path because one numeric selector can match several JSON
 number spellings, and OR/in unions can overlap. Go lockd disk benchmark results
 are treated as implementation-performance references only; pouch indexed query
 semantics follow liblql's typed JSON scalar model.
+Exact scalar document-result queries use the same typed docID candidate stream
+to choose the requested cursor page before opening state bodies, then read and
+stream only those selected current documents. This keeps exact predicates out of
+the residual `liblql` body-evaluation path without serving document bytes from
+the index itself.
 Unsupported indexed selector shapes fail closed instead of falling back to
 scan.
 Explicit scan mode remains available for full-log/full-summary scanning through

@@ -1267,6 +1267,17 @@ Latest release targets confirmed on 2026-07-23:
         result pages translate only the selected page of docIDs back through
         disk summaries instead of translating the full match vector before
         cursor/limit handling.
+      - [x] Route exact scalar document-result pages through the typed docID
+        candidate stream before opening state bodies. Equality, non-wildcard
+        `in`, and root equality `or` document queries now choose the visible
+        cursor page from exact index metadata, stop after the first lookahead
+        candidate, and read only the selected page's current bodies. Final
+        `liblql` body evaluation remains skipped only for planner-proven exact
+        predicates, preserving typed JSON scalar equality. Focused regression
+        coverage asserts indexed `/tags[]` exact-`in` document pagination
+        metadata across a resumed cursor. Verified on 2026-07-27 with focused
+        1024-doc indexed `EqDense` document comparison: Go lockd disk measured
+        about 16.2 ms wall time and pouch measured about 10.2 ms C-side.
       - [x] Route simple positive `exists` document/key scans through the same
         index-owned docID result paging bridge, sharing invalid-docID detection
         and avoiding full cached-match summary translation before cursor/limit
