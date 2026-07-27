@@ -380,6 +380,35 @@ static int bench_pouch_query_icontains_scan_documents(long iterations) {
   return bench_pouch_query_text(iterations, &query_case);
 }
 
+static int bench_pouch_query_recursive_exists_index_keys(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"exists\":\"/details/**\"}", "index", 0};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_recursive_exists_scan_keys(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"exists\":\"/details/**\"}", "scan", 0};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_recursive_exists_index_documents(
+    long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"exists\":\"/details/**\"}", "index", 1};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_recursive_exists_scan_documents(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"exists\":\"/details/**\"}", "scan", 1};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
 static const bench_case *bench_cases(void) {
   static const bench_case cases[] = {
       {"stream-copy", 1000L, bench_stream_copy},
@@ -401,6 +430,14 @@ static const bench_case *bench_cases(void) {
        bench_pouch_query_icontains_index_documents},
       {"pouch-query-icontains-scan-documents", 1024L,
        bench_pouch_query_icontains_scan_documents},
+      {"pouch-query-recursive-exists-index-keys", 1024L,
+       bench_pouch_query_recursive_exists_index_keys},
+      {"pouch-query-recursive-exists-scan-keys", 1024L,
+       bench_pouch_query_recursive_exists_scan_keys},
+      {"pouch-query-recursive-exists-index-documents", 1024L,
+       bench_pouch_query_recursive_exists_index_documents},
+      {"pouch-query-recursive-exists-scan-documents", 1024L,
+       bench_pouch_query_recursive_exists_scan_documents},
       {NULL, 0L, NULL}};
 
   return cases;

@@ -1597,6 +1597,10 @@ Latest release targets confirmed on 2026-07-23:
           case-insensitive text selectors: `iprefix` and `icontains` over
           `/tags[]`, with the benchmark iteration argument controlling seeded
           document count.
+        - [x] Add native pouch scan/index document/key benchmark cases for
+          recursive field-presence selectors such as `exists /details/**`, so
+          the release-gate matrix covers the indexed container-presence
+          candidate path that still relies on final `liblql` acceptance.
 - [ ] Expand e2e coverage when new lockd server surfaces are added.
   - [ ] Refine pouch e2e coverage around segmented manifest/snapshot
     lifecycle, manifest repair, background compaction scheduling, marker
