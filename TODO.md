@@ -793,8 +793,10 @@ Latest release targets confirmed on 2026-07-23:
         the private index layer has distinct document, posting, term, and
         result-cache modules.
       - [x] Physically split private docID set algebra into
-        `src/lc_pouch_index_doc.c`, leaving `lc_pouch_index.c` focused on
-        temporal parsing while the dense document-table split remains pending.
+        `src/lc_pouch_index_doc.c`, including sorted unique append and
+        merge-based union/intersection/subtraction helpers. `lc_pouch_index.c`
+        remains focused on temporal parsing while the dense document-table
+        split remains pending.
       - [x] Document the current private index module map in
         `docs/pouch-storage.md`, including the pouch storage bridge responsibility that
         remains in `src/lc_pouch.c`.
@@ -859,6 +861,10 @@ Latest release targets confirmed on 2026-07-23:
         deduplicates multi-term query-index docID hits at collection time
         before duplicate `key_hex` allocation, which is the current active
         bridge for indexed exact `in` and equality-term unions.
+      - [x] Add private merge-based docID algebra for sorted unique sets:
+        union, intersection, and subtraction now run with linear merge scans,
+        reject unsorted or duplicate inputs, and require non-aliased empty
+        output sets so future planner scratch buffers have a strict contract.
       - [x] Add an internal docID scratch-buffer primitive and wire equality
         intersection/subtraction collectors through it, so multi-term query
         algebra reuses allocator-owned temporary buffers instead of allocating

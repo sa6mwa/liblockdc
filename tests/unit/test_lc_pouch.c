@@ -141,6 +141,93 @@ static void test_index_docid_set_keeps_sorted_unique_docids(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_index_docid_set_merges_sorted_sets(void **state) {
+  lc_allocator allocator;
+  lc_pouch_index_docid_set left;
+  lc_pouch_index_docid_set right;
+  lc_pouch_index_docid_set out;
+  lc_error error;
+  int added;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&left, 0, sizeof(left));
+  memset(&right, 0, sizeof(right));
+  memset(&out, 0, sizeof(out));
+
+  rc = lc_pouch_index_docid_set_append_sorted_unique(&left, 1UL, &added,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_docid_set_append_sorted_unique(&left, 3UL, &added,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_docid_set_append_sorted_unique(&left, 9UL, &added,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_docid_set_append_sorted_unique(&right, 3UL, &added,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_docid_set_append_sorted_unique(&right, 4UL, &added,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_docid_set_append_sorted_unique(&right, 9UL, &added,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_docid_set_append_sorted_unique(&right, 12UL, &added,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_pouch_index_docid_set_union_sorted(&left, &right, &out, &allocator,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(out.count, 5);
+  assert_int_equal(out.items[0], 1UL);
+  assert_int_equal(out.items[1], 3UL);
+  assert_int_equal(out.items[2], 4UL);
+  assert_int_equal(out.items[3], 9UL);
+  assert_int_equal(out.items[4], 12UL);
+
+  lc_pouch_index_docid_set_cleanup(&allocator, &out);
+  rc = lc_pouch_index_docid_set_intersect_sorted(&left, &right, &out,
+                                                 &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(out.count, 2);
+  assert_int_equal(out.items[0], 3UL);
+  assert_int_equal(out.items[1], 9UL);
+
+  lc_pouch_index_docid_set_cleanup(&allocator, &out);
+  rc = lc_pouch_index_docid_set_subtract_sorted(&left, &right, &out,
+                                                &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(out.count, 1);
+  assert_int_equal(out.items[0], 1UL);
+
+  lc_pouch_index_docid_set_cleanup(&allocator, &out);
+  rc = lc_pouch_index_docid_set_append_sorted_unique(&out, 99UL, &added,
+                                                     &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_docid_set_union_sorted(&left, &right, &out, &allocator,
+                                             &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "empty output"));
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_pouch_index_docid_set_cleanup(&allocator, &out);
+  right.items[2] = 4UL;
+  rc = lc_pouch_index_docid_set_intersect_sorted(&left, &right, &out,
+                                                 &allocator, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "sorted unique"));
+
+  lc_error_cleanup(&error);
+  lc_pouch_index_docid_set_cleanup(&allocator, &out);
+  lc_pouch_index_docid_set_cleanup(&allocator, &left);
+  lc_pouch_index_docid_set_cleanup(&allocator, &right);
+}
+
 static void test_index_posting_roundtrips_sparse_docids(void **state) {
   lc_allocator allocator;
   lc_pouch_index_posting posting;
@@ -9502,6 +9589,7 @@ static void test_acquire_for_update_rollback_removes_new_state(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_index_docid_set_keeps_sorted_unique_docids),
+      cmocka_unit_test(test_index_docid_set_merges_sorted_sets),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
       cmocka_unit_test(test_index_posting_roundtrips_dense_docids),
       cmocka_unit_test(test_index_posting_selects_adaptive_encoding),

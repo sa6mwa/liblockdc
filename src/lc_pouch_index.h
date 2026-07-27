@@ -73,6 +73,18 @@ int lc_pouch_index_docid_set_append_sorted_unique(
 int lc_pouch_index_docid_set_append_unique(
     lc_pouch_index_docid_set *set, unsigned long doc_id, int *added,
     const lc_allocator *allocator, lc_error *error);
+int lc_pouch_index_docid_set_union_sorted(
+    const lc_pouch_index_docid_set *left,
+    const lc_pouch_index_docid_set *right, lc_pouch_index_docid_set *out,
+    const lc_allocator *allocator, lc_error *error);
+int lc_pouch_index_docid_set_intersect_sorted(
+    const lc_pouch_index_docid_set *left,
+    const lc_pouch_index_docid_set *right, lc_pouch_index_docid_set *out,
+    const lc_allocator *allocator, lc_error *error);
+int lc_pouch_index_docid_set_subtract_sorted(
+    const lc_pouch_index_docid_set *left,
+    const lc_pouch_index_docid_set *right, lc_pouch_index_docid_set *out,
+    const lc_allocator *allocator, lc_error *error);
 void lc_pouch_index_posting_cleanup(const lc_allocator *allocator,
                                     lc_pouch_index_posting *posting);
 int lc_pouch_index_posting_append_sorted_unique(
