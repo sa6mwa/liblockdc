@@ -1356,11 +1356,12 @@ Latest release targets confirmed on 2026-07-23:
         `RangeHalf`, 19.8 ms `InTags`, 25.1 ms `ContainsMessage`, 11.8 ms
         `DateAfter`, and 33.9 ms `OrSparseOrFlag` C-side.
       - [x] Add durable exact term-value posting ranges and dense row-ordinal
-        docIDs to `query.index`, then bump the private sidecar to v9 and store
+        docIDs to `query.index`; this historical slice bumped the private
+        sidecar to v9 and stored
         posting records before row records so exact equality, non-wildcard
         `in`, and root equality `or` readers can select field/value posting
         ranges without scanning unrelated row records first. Focused pouch
-        unit coverage now asserts the v9 sidecar, term-value table, docID
+        unit coverage asserted the v9 sidecar, term-value table, docID
         term fields, root OR pagination, and the large default query header
         limit contract. Verified on 2026-07-27 with the bounded 4096-doc
         acceptance matrix in 1m47s: pouch still only beat Go disk on sparse
@@ -1661,6 +1662,18 @@ Latest release targets confirmed on 2026-07-23:
         29 ms `RangeHalf`, 25 ms `InTags`, 41 ms `ContainsMessage`, and
         9.9 ms `DateAfter`; document-return remained body-read-bound at about
         8.0 ms, 67 ms, 61 ms, 45 ms, and 30 ms respectively.
+      - [x] Add byte spans to durable `query.index` term-field and term-value
+        tables so selected term readers can seek directly to matching posting
+        slices instead of discarding unrelated term lines. The private sidecar
+        is now v11 and keeps line spans for validation while using
+        term-section-relative byte offsets for exact equality, `in`, root
+        equality `or`, range, date, prefix, and contains candidate reads.
+        Verified on 2026-07-27 with focused 4096-document indexed key
+        comparisons: pouch `InTags` measured about 17.3 ms C-side for 1000
+        rows versus Go lockd disk at about 34.2 ms in the same run; pouch
+        `OrSparseOrFlag` measured about 33.7 ms C-side for 640 rows versus Go
+        at about 2.3 ms, so root OR still needs a compiled docID/posting union
+        path.
       - [x] Add indexed `OrSparseOrFlag` to the 4096-document pouch-vs-Go
         acceptance matrix after indexed root `or` support landed. Verified on
         2026-07-27: `make benchmark-pouch-go-acceptance` completed in 1m33s

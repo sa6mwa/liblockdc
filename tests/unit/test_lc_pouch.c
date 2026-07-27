@@ -494,8 +494,8 @@ static void test_index_term_parses_sidecar_records(void **state) {
   lc_error error;
   lc_pouch_index_term_field field;
   lc_pouch_index_term_value value;
-  char field_line[] = "term_field 616765 2 4\n";
-  char value_line[] = "term_value 74616773 706c616e 6 8\n";
+  char field_line[] = "term_field 616765 2 4 11 77\n";
+  char value_line[] = "term_value 74616773 706c616e 6 8 101 303\n";
   int rc;
 
   (void)state;
@@ -510,6 +510,8 @@ static void test_index_term_parses_sidecar_records(void **state) {
   assert_string_equal(field.field_hex, "616765");
   assert_int_equal(field.first_line, 2);
   assert_int_equal(field.line_count, 4);
+  assert_int_equal(field.first_byte, 11);
+  assert_int_equal(field.byte_count, 77);
 
   rc = lc_pouch_index_term_value_parse_line(value_line, &value, &allocator,
                                             &error);
@@ -518,6 +520,8 @@ static void test_index_term_parses_sidecar_records(void **state) {
   assert_string_equal(value.value_hex, "706c616e");
   assert_int_equal(value.first_line, 6);
   assert_int_equal(value.line_count, 8);
+  assert_int_equal(value.first_byte, 101);
+  assert_int_equal(value.byte_count, 303);
 
   lc_free_with_allocator(&allocator, field.field_hex);
   lc_free_with_allocator(&allocator, value.field_hex);
@@ -530,9 +534,10 @@ static void test_index_term_rejects_invalid_sidecar_records(void **state) {
   lc_error error;
   lc_pouch_index_term_field field;
   lc_pouch_index_term_value value;
-  char bad_field_prefix[] = "field 616765 0 1\n";
-  char bad_field_hex[] = "term_field 61676x 0 1\n";
-  char bad_value_number[] = "term_value 74616773 706c616e nope 1\n";
+  char bad_field_prefix[] = "field 616765 0 1 0 9\n";
+  char bad_field_hex[] = "term_field 61676x 0 1 0 9\n";
+  char bad_value_number[] = "term_value 74616773 706c616e nope 1 0 9\n";
+  char bad_value_byte[] = "term_value 74616773 706c616e 0 1 0 nope\n";
   int rc;
 
   (void)state;
@@ -554,6 +559,12 @@ static void test_index_term_rejects_invalid_sidecar_records(void **state) {
   lc_error_init(&error);
 
   rc = lc_pouch_index_term_value_parse_line(bad_value_number, &value,
+                                            &allocator, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_index_term_value_parse_line(bad_value_byte, &value,
                                             &allocator, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
 
@@ -809,18 +820,26 @@ static void test_index_term_values_collect_exact_ranges(void **state) {
   values[0].value_hex = "3330";
   values[0].first_line = 0UL;
   values[0].line_count = 1UL;
+  values[0].first_byte = 0UL;
+  values[0].byte_count = 17UL;
   values[1].field_hex = "6e616d65";
   values[1].value_hex = "616c696365";
   values[1].first_line = 1UL;
   values[1].line_count = 2UL;
+  values[1].first_byte = 17UL;
+  values[1].byte_count = 43UL;
   values[2].field_hex = "6e616d65";
   values[2].value_hex = "626f62";
   values[2].first_line = 3UL;
   values[2].line_count = 1UL;
+  values[2].first_byte = 60UL;
+  values[2].byte_count = 19UL;
   values[3].field_hex = "74616773";
   values[3].value_hex = "706c616e";
   values[3].first_line = 4UL;
   values[3].line_count = 5UL;
+  values[3].first_byte = 79UL;
+  values[3].byte_count = 91UL;
   terms[0].field_hex = "616765";
   terms[0].value_hex = "3330";
   terms[0].value_type = 'n';
@@ -843,10 +862,16 @@ static void test_index_term_values_collect_exact_ranges(void **state) {
   assert_non_null(ranges);
   assert_int_equal(ranges[0].first_line, 0);
   assert_int_equal(ranges[0].line_count, 1);
+  assert_int_equal(ranges[0].first_byte, 0);
+  assert_int_equal(ranges[0].byte_count, 17);
   assert_int_equal(ranges[1].first_line, 3);
   assert_int_equal(ranges[1].line_count, 1);
+  assert_int_equal(ranges[1].first_byte, 60);
+  assert_int_equal(ranges[1].byte_count, 19);
   assert_int_equal(ranges[2].first_line, 4);
   assert_int_equal(ranges[2].line_count, 5);
+  assert_int_equal(ranges[2].first_byte, 79);
+  assert_int_equal(ranges[2].byte_count, 91);
 
   lc_pouch_index_term_ranges_cleanup(&allocator, ranges);
   lc_error_cleanup(&error);
@@ -857,6 +882,8 @@ static void test_index_term_fields_select_merged_range(void **state) {
   lc_pouch_index_term_key terms[2];
   unsigned long first;
   unsigned long count;
+  unsigned long first_byte;
+  unsigned long byte_count;
   int found;
 
   (void)state;
@@ -864,30 +891,44 @@ static void test_index_term_fields_select_merged_range(void **state) {
   fields[0].field_hex = "616765";
   fields[0].first_line = 0UL;
   fields[0].line_count = 2UL;
+  fields[0].first_byte = 0UL;
+  fields[0].byte_count = 31UL;
   fields[1].field_hex = "6e616d65";
   fields[1].first_line = 2UL;
   fields[1].line_count = 4UL;
+  fields[1].first_byte = 31UL;
+  fields[1].byte_count = 88UL;
   fields[2].field_hex = "74616773";
   fields[2].first_line = 6UL;
   fields[2].line_count = 3UL;
+  fields[2].first_byte = 119UL;
+  fields[2].byte_count = 52UL;
   terms[0].field_hex = "74616773";
   terms[0].value_hex = "706c616e";
   terms[1].field_hex = "616765";
   terms[1].value_hex = "3330";
   first = 99UL;
   count = 88UL;
+  first_byte = 77UL;
+  byte_count = 66UL;
 
   found = lc_pouch_index_term_fields_select_range(
-      fields, 3U, NULL, terms, 2U, 9UL, &first, &count);
+      fields, 3U, NULL, terms, 2U, 9UL, 171UL, &first, &count, &first_byte,
+      &byte_count);
   assert_true(found);
   assert_int_equal(first, 0);
   assert_int_equal(count, 9);
+  assert_int_equal(first_byte, 0);
+  assert_int_equal(byte_count, 171);
 
   found = lc_pouch_index_term_fields_select_range(
-      fields, 3U, "6e616d65", NULL, 0U, 9UL, &first, &count);
+      fields, 3U, "6e616d65", NULL, 0U, 9UL, 171UL, &first, &count,
+      &first_byte, &byte_count);
   assert_true(found);
   assert_int_equal(first, 2);
   assert_int_equal(count, 4);
+  assert_int_equal(first_byte, 31);
+  assert_int_equal(byte_count, 88);
 }
 
 static void test_index_posting_roundtrips_sparse_docids(void **state) {
@@ -9156,7 +9197,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_non_null(namespace_path);
   assert_path_file_contains(namespace_path, "index/query.index",
                             "format=pouch-query-index");
-  assert_path_file_contains(namespace_path, "index/query.index", "version=10");
+  assert_path_file_contains(namespace_path, "index/query.index", "version=11");
   assert_path_file_contains(namespace_path, "index/query.index",
                             "state_index_seq=4");
   assert_path_file_contains(namespace_path, "index/query.index",

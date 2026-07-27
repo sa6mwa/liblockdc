@@ -86,6 +86,8 @@ typedef struct lc_pouch_index_term_field {
   char *field_hex;
   unsigned long first_line;
   unsigned long line_count;
+  unsigned long first_byte;
+  unsigned long byte_count;
 } lc_pouch_index_term_field;
 
 typedef struct lc_pouch_index_term_value {
@@ -93,6 +95,8 @@ typedef struct lc_pouch_index_term_value {
   char *value_hex;
   unsigned long first_line;
   unsigned long line_count;
+  unsigned long first_byte;
+  unsigned long byte_count;
 } lc_pouch_index_term_value;
 
 typedef struct lc_pouch_index_term_key {
@@ -110,6 +114,8 @@ typedef struct lc_pouch_index_plain_term {
 typedef struct lc_pouch_index_term_range {
   unsigned long first_line;
   unsigned long line_count;
+  unsigned long first_byte;
+  unsigned long byte_count;
 } lc_pouch_index_term_range;
 
 typedef struct lc_pouch_index_posting {
@@ -247,7 +253,9 @@ int lc_pouch_index_term_fields_select_range(
     const lc_pouch_index_term_field *fields, size_t field_count,
     const char *field_hex, const lc_pouch_index_term_key *terms,
     size_t term_count, unsigned long term_line_count,
-    unsigned long *first_line, unsigned long *line_count);
+    unsigned long term_byte_count, unsigned long *first_line,
+    unsigned long *line_count, unsigned long *first_byte,
+    unsigned long *byte_count);
 void lc_pouch_index_posting_cleanup(const lc_allocator *allocator,
                                     lc_pouch_index_posting *posting);
 int lc_pouch_index_posting_append_sorted_unique(

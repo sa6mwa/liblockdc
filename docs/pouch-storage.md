@@ -1030,18 +1030,21 @@ conjunction. Exists-only root `or` groups may union wildcard/recursive
 expansions with exact presence postings before final acceptance.
 The `query.index` sidecar starts with a format/version record so incompatible
 layouts rebuild from authoritative namespace segments/snapshots instead of
-being trusted. Version 9 stores the namespace state high-water, deterministic
+being trusted. Version 11 stores the namespace state high-water, deterministic
 live-row count, a hash over the row payload, scalar term counts and hashes,
-field-presence counts and hashes, a term-field line table, and a term-value
-posting range table. The field table contains
-`term_field <field_hex> <first_line> <line_count>` entries sorted by strict
-JSON Pointer field. The value table contains
-`term_value <field_hex> <value_hex> <first_line> <line_count>` entries sorted
-by field and encoded value, letting exact equality, `in`, and root equality
-`or` readers skip directly between selected posting ranges. The posting section
-is stored before the row section so exact posting readers do not pay a row-table
-skip before reaching the matched terms. Term records carry the dense row ordinal
-as a per-generation document ID before the field/value/key tuple:
+field-presence counts and hashes, a term-field line/byte span table, and a
+term-value posting range table. The field table contains
+`term_field <field_hex> <first_line> <line_count> <first_byte> <byte_count>`
+entries sorted by strict JSON Pointer field. The value table contains
+`term_value <field_hex> <value_hex> <first_line> <line_count> <first_byte> <byte_count>`
+entries sorted by field and encoded value. Line spans preserve count/order
+validation; byte spans are offsets relative to the term section and let exact
+equality, `in`, root equality `or`, range, date, prefix, and contains readers
+seek directly to selected posting slices instead of discarding unrelated term
+lines. The posting section is stored before the row section so exact posting
+readers do not pay a row-table skip before reaching the matched terms. Term
+records carry the dense row ordinal as a per-generation document ID before the
+field/value/key tuple:
 `term <version> <bytes> <hidden-set> <hidden> <doc_id> <field_hex> <value_hex>
 <key_hex>`. Exact indexed root `or` key queries use those docIDs to union
 candidate rows and page in row-table order instead of re-sorting decoded key

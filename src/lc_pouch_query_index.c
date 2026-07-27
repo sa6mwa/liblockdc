@@ -6,13 +6,14 @@
 #include "lc_pouch_path.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define LC_POUCH_QUERY_INDEX_FORMAT "pouch-query-index"
-#define LC_POUCH_QUERY_INDEX_VERSION 10UL
+#define LC_POUCH_QUERY_INDEX_VERSION 11UL
 #define LC_POUCH_QUERY_INDEX_LEAF "query.index"
 #define LC_POUCH_QUERY_INDEX_HASH_OFFSET 2166136261UL
 #define LC_POUCH_QUERY_INDEX_HASH_PRIME 16777619UL
@@ -2169,6 +2170,31 @@ static int lc_pouch_query_index_read_terms_slice(
   return rc;
 }
 
+static int lc_pouch_query_index_seek_term_slice(
+    FILE *fp, long term_section_start, unsigned long first_byte,
+    const lc_allocator *allocator, int *valid, lc_error *error) {
+  if (valid == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index term seek requires valid output",
+                        NULL, NULL, NULL);
+  }
+  *valid = 0;
+  if (fp == NULL || term_section_start < 0L ||
+      first_byte > (unsigned long)(LONG_MAX - term_section_start)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index term byte range is invalid", NULL,
+                        NULL, NULL);
+  }
+  if (fseek(fp, term_section_start + (long)first_byte, SEEK_SET) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to seek pouch query-index term slice",
+                        strerror(errno), NULL, NULL);
+  }
+  (void)allocator;
+  *valid = 1;
+  return LC_OK;
+}
+
 static int lc_pouch_query_index_read_term_fields(
     FILE *fp, unsigned long term_field_count, unsigned long term_count,
     const lc_allocator *allocator, lc_pouch_index_term_field **out_fields,
@@ -2177,6 +2203,7 @@ static int lc_pouch_query_index_read_term_fields(
   lc_pouch_index_term_field *fields;
   unsigned long actual_fields;
   unsigned long previous_end;
+  unsigned long previous_byte_end;
   int got_line;
   int rc;
 
@@ -2208,6 +2235,7 @@ static int lc_pouch_query_index_read_term_fields(
   line.allocator = allocator;
   actual_fields = 0UL;
   previous_end = 0UL;
+  previous_byte_end = 0UL;
   rc = LC_OK;
   while (actual_fields < term_field_count) {
     lc_pouch_index_term_field parsed;
@@ -2223,7 +2251,9 @@ static int lc_pouch_query_index_read_term_fields(
     if (rc != LC_OK) {
       break;
     }
-    if (parsed.line_count == 0UL || parsed.first_line < previous_end ||
+    if (parsed.line_count == 0UL || parsed.byte_count == 0UL ||
+        parsed.first_line < previous_end ||
+        parsed.first_byte < previous_byte_end ||
         parsed.first_line > term_count ||
         parsed.line_count > term_count - parsed.first_line ||
         (actual_fields > 0UL && fields != NULL &&
@@ -2241,6 +2271,7 @@ static int lc_pouch_query_index_read_term_fields(
       lc_free_with_allocator(allocator, parsed.field_hex);
     }
     previous_end = parsed.first_line + parsed.line_count;
+    previous_byte_end = parsed.first_byte + parsed.byte_count;
     ++actual_fields;
   }
   if (rc == LC_OK && actual_fields == term_field_count) {
@@ -2267,6 +2298,7 @@ static int lc_pouch_query_index_read_term_values(
   lc_pouch_index_term_value *values;
   unsigned long actual_values;
   unsigned long previous_end;
+  unsigned long previous_byte_end;
   int got_line;
   int rc;
 
@@ -2298,6 +2330,7 @@ static int lc_pouch_query_index_read_term_values(
   line.allocator = allocator;
   actual_values = 0UL;
   previous_end = 0UL;
+  previous_byte_end = 0UL;
   rc = LC_OK;
   while (actual_values < term_value_count) {
     lc_pouch_index_term_value parsed;
@@ -2313,7 +2346,9 @@ static int lc_pouch_query_index_read_term_values(
     if (rc != LC_OK) {
       break;
     }
-    if (parsed.line_count == 0UL || parsed.first_line < previous_end ||
+    if (parsed.line_count == 0UL || parsed.byte_count == 0UL ||
+        parsed.first_line < previous_end ||
+        parsed.first_byte < previous_byte_end ||
         parsed.first_line > term_count ||
         parsed.line_count > term_count - parsed.first_line ||
         (actual_values > 0UL && values != NULL &&
@@ -2337,6 +2372,7 @@ static int lc_pouch_query_index_read_term_values(
       lc_free_with_allocator(allocator, parsed.value_hex);
     }
     previous_end = parsed.first_line + parsed.line_count;
+    previous_byte_end = parsed.first_byte + parsed.byte_count;
     ++actual_values;
   }
   if (rc == LC_OK && actual_values == term_value_count) {
@@ -2396,18 +2432,21 @@ static int lc_pouch_query_index_term_keys_have_numeric(
 static int lc_pouch_query_index_term_reader_range(
     const lc_pouch_index_term_field *fields, size_t field_count,
     const lc_pouch_query_index_term_reader *reader, unsigned long term_count,
-    unsigned long *first_line, unsigned long *line_count) {
+    unsigned long term_byte_count, unsigned long *first_line,
+    unsigned long *line_count, unsigned long *first_byte,
+    unsigned long *byte_count) {
   if (reader == NULL || first_line == NULL || line_count == NULL) {
     return 0;
   }
   if (reader->exact_term_count == 0U) {
     return lc_pouch_index_term_fields_select_range(
         fields, field_count, reader->field_hex, NULL, 0U, term_count,
-        first_line, line_count);
+        term_byte_count, first_line, line_count, first_byte, byte_count);
   }
   return lc_pouch_index_term_fields_select_range(
       fields, field_count, reader->field_hex, reader->exact_terms,
-      reader->exact_term_count, term_count, first_line, line_count);
+      reader->exact_term_count, term_count, term_byte_count, first_line,
+      line_count, first_byte, byte_count);
 }
 
 static int lc_pouch_query_index_read_presences(
@@ -2529,10 +2568,14 @@ static int lc_pouch_query_index_read_with_reader(
   unsigned long presence_count;
   unsigned long presence_hash;
   unsigned long presence_index_complete;
+  unsigned long first_byte;
+  unsigned long byte_count;
+  unsigned long term_byte_count;
   lc_pouch_index_term_field *term_fields;
   lc_pouch_index_term_value *term_values;
   size_t term_field_table_count;
   size_t term_value_table_count;
+  long term_section_start;
   FILE *fp;
   int matched;
   int row_valid;
@@ -2574,10 +2617,14 @@ static int lc_pouch_query_index_read_with_reader(
   presence_count = 0UL;
   presence_hash = 0UL;
   presence_index_complete = 0UL;
+  first_byte = 0UL;
+  byte_count = 0UL;
+  term_byte_count = 0UL;
   term_fields = NULL;
   term_values = NULL;
   term_field_table_count = 0U;
   term_value_table_count = 0U;
+  term_section_start = -1L;
   matched = 0;
   if (fgets(line, sizeof(line), fp) != NULL &&
       sscanf(line, "format=%63s\n", format) == 1) {
@@ -2682,17 +2729,32 @@ static int lc_pouch_query_index_read_with_reader(
           want_terms ? &term_value_table_count : NULL, &term_value_valid,
           error);
     }
+    if (rc == LC_OK) {
+      term_section_start = ftell(fp);
+      if (term_section_start < 0L) {
+        rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to locate pouch query-index term section",
+                          strerror(errno), NULL, NULL);
+      }
+    }
+    if (rc == LC_OK && term_field_table_count > 0U) {
+      lc_pouch_index_term_field *last_field;
+
+      last_field = &term_fields[term_field_table_count - 1U];
+      term_byte_count = last_field->first_byte + last_field->byte_count;
+    }
     if (rc == LC_OK && want_terms) {
       lc_pouch_index_term_range *exact_ranges;
       unsigned long first_line;
       unsigned long line_count;
-      unsigned long current_line;
       size_t range_index;
       size_t exact_range_count;
 
       exact_ranges = NULL;
       first_line = 0UL;
       line_count = 0UL;
+      first_byte = 0UL;
+      byte_count = 0UL;
       exact_range_count = 0U;
       if (term_reader != NULL && term_reader->exact_term_count > 0U) {
         rc = lc_pouch_query_index_term_reader_exact_ranges(
@@ -2703,29 +2765,23 @@ static int lc_pouch_query_index_read_with_reader(
             error);
       }
       if (rc == LC_OK && term_reader != NULL && exact_range_count > 0U) {
-        current_line = 0UL;
         term_valid = 1;
         for (range_index = 0U; rc == LC_OK && range_index < exact_range_count;
              ++range_index) {
-          if (exact_ranges[range_index].first_line > current_line) {
-            rc = lc_pouch_query_index_skip_lines(
-                fp, exact_ranges[range_index].first_line - current_line,
-                lc_pouch_query_index_reader_allocator(reader, term_reader,
-                                                      presence_reader),
-                &term_valid, error);
-            current_line = exact_ranges[range_index].first_line;
-          }
+          rc = lc_pouch_query_index_seek_term_slice(
+              fp, term_section_start, exact_ranges[range_index].first_byte,
+              lc_pouch_query_index_reader_allocator(reader, term_reader,
+                                                    presence_reader),
+              &term_valid, error);
           if (rc == LC_OK && term_valid) {
             rc = lc_pouch_query_index_read_terms_slice(
                 fp, exact_ranges[range_index].line_count, term_reader,
                 &term_valid, error);
-            current_line += exact_ranges[range_index].line_count;
           }
         }
-        if (rc == LC_OK && (want_rows || want_presences) && term_valid &&
-            current_line < term_count) {
-          rc = lc_pouch_query_index_skip_lines(
-              fp, term_count - current_line,
+        if (rc == LC_OK && (want_rows || want_presences) && term_valid) {
+          rc = lc_pouch_query_index_seek_term_slice(
+              fp, term_section_start, term_byte_count,
               lc_pouch_query_index_reader_allocator(reader, term_reader,
                                                     presence_reader),
               &term_valid, error);
@@ -2744,24 +2800,33 @@ static int lc_pouch_query_index_read_with_reader(
       } else if (rc == LC_OK && term_reader != NULL &&
           lc_pouch_query_index_term_reader_range(
               term_fields, term_field_table_count, term_reader, term_count,
-              &first_line, &line_count)) {
-        if (first_line > 0UL) {
-          rc = lc_pouch_query_index_skip_lines(
-              fp, first_line,
-              lc_pouch_query_index_reader_allocator(reader, term_reader,
-                                                    presence_reader),
-              &term_valid, error);
-        } else {
-          term_valid = 1;
-        }
+              term_byte_count, &first_line, &line_count, &first_byte,
+              &byte_count)) {
+        rc = lc_pouch_query_index_seek_term_slice(
+            fp, term_section_start, first_byte,
+            lc_pouch_query_index_reader_allocator(reader, term_reader,
+                                                  presence_reader),
+            &term_valid, error);
         if (rc == LC_OK && term_valid) {
           rc = lc_pouch_query_index_read_terms_slice(
               fp, line_count, term_reader, &term_valid, error);
         }
-        if (rc == LC_OK && (want_rows || want_presences) && term_valid &&
-            first_line + line_count < term_count) {
+        if (rc == LC_OK && (want_rows || want_presences) && term_valid) {
+          rc = lc_pouch_query_index_seek_term_slice(
+              fp, term_section_start, term_byte_count,
+              lc_pouch_query_index_reader_allocator(reader, term_reader,
+                                                    presence_reader),
+              &term_valid, error);
+        }
+      } else if (rc == LC_OK && term_reader != NULL && want_rows) {
+        rc = lc_pouch_query_index_seek_term_slice(
+            fp, term_section_start, 0UL,
+            lc_pouch_query_index_reader_allocator(reader, term_reader,
+                                                  presence_reader),
+            &term_valid, error);
+        if (rc == LC_OK && term_valid) {
           rc = lc_pouch_query_index_skip_lines(
-              fp, term_count - first_line - line_count,
+              fp, term_count,
               lc_pouch_query_index_reader_allocator(reader, term_reader,
                                                     presence_reader),
               &term_valid, error);
@@ -2784,6 +2849,13 @@ static int lc_pouch_query_index_read_with_reader(
                                                 presence_reader),
           exact_ranges);
     } else if (rc == LC_OK && (want_rows || want_presences)) {
+      rc = lc_pouch_query_index_seek_term_slice(
+          fp, term_section_start, 0UL,
+          lc_pouch_query_index_reader_allocator(reader, term_reader,
+                                                presence_reader),
+          &term_valid, error);
+    }
+    if (rc == LC_OK && !want_terms && (want_rows || want_presences)) {
       rc = lc_pouch_query_index_skip_lines(
           fp, term_count,
           lc_pouch_query_index_reader_allocator(reader, term_reader,
@@ -3034,8 +3106,10 @@ static int lc_pouch_query_index_build_text(
   unsigned long term_value_line_count;
   unsigned long current_field_first;
   unsigned long current_field_count;
+  unsigned long current_field_first_byte;
   unsigned long current_value_first;
   unsigned long current_value_count;
+  unsigned long current_value_first_byte;
   unsigned long presence_hash;
   unsigned long presence_line_count;
   unsigned long doc_id;
@@ -3097,10 +3171,12 @@ static int lc_pouch_query_index_build_text(
   current_field_hex = NULL;
   current_field_first = 0UL;
   current_field_count = 0UL;
+  current_field_first_byte = 0UL;
   current_value_field_hex = NULL;
   current_value_hex = NULL;
   current_value_first = 0UL;
   current_value_count = 0UL;
+  current_value_first_byte = 0UL;
   presence_hash = lc_pouch_query_index_hash_init();
   presence_line_count = 0UL;
   rc = LC_OK;
@@ -3179,8 +3255,11 @@ static int lc_pouch_query_index_build_text(
               &term_fields, current_field_hex, NULL, error);
         }
         if (rc == LC_OK) {
-          written = snprintf(line, sizeof(line), " %lu %lu\n",
-                             current_field_first, current_field_count);
+          written = snprintf(
+              line, sizeof(line), " %lu %lu %lu %lu\n",
+              current_field_first, current_field_count,
+              current_field_first_byte,
+              (unsigned long)terms.length - current_field_first_byte);
           if (written < 0 || (size_t)written >= sizeof(line)) {
             rc = lc_error_set(
                 error, LC_ERR_INVALID, 0L,
@@ -3199,6 +3278,7 @@ static int lc_pouch_query_index_build_text(
       current_field_hex = term->field_hex;
       current_field_first = term_line_count;
       current_field_count = 0UL;
+      current_field_first_byte = (unsigned long)terms.length;
     }
     if (current_value_field_hex == NULL ||
         strcmp(current_value_field_hex, term->field_hex) != 0 ||
@@ -3219,8 +3299,11 @@ static int lc_pouch_query_index_build_text(
               &term_values, current_value_hex, NULL, error);
         }
         if (rc == LC_OK) {
-          written = snprintf(line, sizeof(line), " %lu %lu\n",
-                             current_value_first, current_value_count);
+          written = snprintf(
+              line, sizeof(line), " %lu %lu %lu %lu\n",
+              current_value_first, current_value_count,
+              current_value_first_byte,
+              (unsigned long)terms.length - current_value_first_byte);
           if (written < 0 || (size_t)written >= sizeof(line)) {
             rc = lc_error_set(
                 error, LC_ERR_INVALID, 0L,
@@ -3240,6 +3323,7 @@ static int lc_pouch_query_index_build_text(
       current_value_hex = term->value_hex;
       current_value_first = term_line_count;
       current_value_count = 0UL;
+      current_value_first_byte = (unsigned long)terms.length;
     }
     written = snprintf(line, sizeof(line), "term %lu %lu %d %d %lu ",
                        term->version, term->bytes,
@@ -3308,8 +3392,11 @@ static int lc_pouch_query_index_build_text(
           &term_values, current_value_hex, NULL, error);
     }
     if (rc == LC_OK) {
-      written = snprintf(line, sizeof(line), " %lu %lu\n",
-                         current_value_first, current_value_count);
+      written = snprintf(line, sizeof(line), " %lu %lu %lu %lu\n",
+                         current_value_first, current_value_count,
+                         current_value_first_byte,
+                         (unsigned long)terms.length -
+                             current_value_first_byte);
       if (written < 0 || (size_t)written >= sizeof(line)) {
         rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch query-index term value exceeds local limit",
@@ -3332,8 +3419,11 @@ static int lc_pouch_query_index_build_text(
           &term_fields, current_field_hex, NULL, error);
     }
     if (rc == LC_OK) {
-      written = snprintf(line, sizeof(line), " %lu %lu\n",
-                         current_field_first, current_field_count);
+      written = snprintf(line, sizeof(line), " %lu %lu %lu %lu\n",
+                         current_field_first, current_field_count,
+                         current_field_first_byte,
+                         (unsigned long)terms.length -
+                             current_field_first_byte);
       if (written < 0 || (size_t)written >= sizeof(line)) {
         rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch query-index term field exceeds local limit",

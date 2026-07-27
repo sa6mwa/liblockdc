@@ -450,8 +450,12 @@ int lc_pouch_index_term_field_parse_line(
   char *field_hex;
   char *first_token;
   char *count_token;
+  char *first_byte_token;
+  char *byte_count_token;
   unsigned long first_line;
   unsigned long line_count;
+  unsigned long first_byte;
+  unsigned long byte_count;
   int rc;
 
   if (line == NULL || field == NULL) {
@@ -467,10 +471,13 @@ int lc_pouch_index_term_field_parse_line(
   cursor = line + sizeof("term_field ") - 1U;
   field_hex = lc_pouch_index_term_next_token(&cursor, 0);
   first_token = lc_pouch_index_term_next_token(&cursor, 0);
-  count_token = lc_pouch_index_term_next_token(&cursor, 1);
+  count_token = lc_pouch_index_term_next_token(&cursor, 0);
+  first_byte_token = lc_pouch_index_term_next_token(&cursor, 0);
+  byte_count_token = lc_pouch_index_term_next_token(&cursor, 1);
   if (field_hex == NULL || strcmp(field_hex, "-") == 0 ||
       !lc_pouch_index_term_hex_token_valid(field_hex) ||
-      first_token == NULL || count_token == NULL) {
+      first_token == NULL || count_token == NULL ||
+      first_byte_token == NULL || byte_count_token == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index term field has invalid fields", NULL,
                         NULL, NULL);
@@ -487,6 +494,18 @@ int lc_pouch_index_term_field_parse_line(
   if (rc != LC_OK) {
     return rc;
   }
+  rc = lc_pouch_index_term_parse_ulong_token(
+      first_byte_token, &first_byte,
+      "pouch index term field has invalid first byte", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_index_term_parse_ulong_token(
+      byte_count_token, &byte_count,
+      "pouch index term field has invalid byte count", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   field->field_hex = lc_strdup_with_allocator(allocator, field_hex);
   if (field->field_hex == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -495,6 +514,8 @@ int lc_pouch_index_term_field_parse_line(
   }
   field->first_line = first_line;
   field->line_count = line_count;
+  field->first_byte = first_byte;
+  field->byte_count = byte_count;
   return LC_OK;
 }
 
@@ -506,8 +527,12 @@ int lc_pouch_index_term_value_parse_line(
   char *value_hex;
   char *first_token;
   char *count_token;
+  char *first_byte_token;
+  char *byte_count_token;
   unsigned long first_line;
   unsigned long line_count;
+  unsigned long first_byte;
+  unsigned long byte_count;
   int rc;
 
   if (line == NULL || value == NULL) {
@@ -524,11 +549,14 @@ int lc_pouch_index_term_value_parse_line(
   field_hex = lc_pouch_index_term_next_token(&cursor, 0);
   value_hex = lc_pouch_index_term_next_token(&cursor, 0);
   first_token = lc_pouch_index_term_next_token(&cursor, 0);
-  count_token = lc_pouch_index_term_next_token(&cursor, 1);
+  count_token = lc_pouch_index_term_next_token(&cursor, 0);
+  first_byte_token = lc_pouch_index_term_next_token(&cursor, 0);
+  byte_count_token = lc_pouch_index_term_next_token(&cursor, 1);
   if (field_hex == NULL || value_hex == NULL || strcmp(field_hex, "-") == 0 ||
       !lc_pouch_index_term_hex_token_valid(field_hex) ||
       !lc_pouch_index_term_hex_token_valid(value_hex) ||
-      first_token == NULL || count_token == NULL) {
+      first_token == NULL || count_token == NULL ||
+      first_byte_token == NULL || byte_count_token == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index term value has invalid fields", NULL,
                         NULL, NULL);
@@ -545,6 +573,18 @@ int lc_pouch_index_term_value_parse_line(
   if (rc != LC_OK) {
     return rc;
   }
+  rc = lc_pouch_index_term_parse_ulong_token(
+      first_byte_token, &first_byte,
+      "pouch index term value has invalid first byte", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_index_term_parse_ulong_token(
+      byte_count_token, &byte_count,
+      "pouch index term value has invalid byte count", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   value->field_hex = lc_strdup_with_allocator(allocator, field_hex);
   value->value_hex = lc_strdup_with_allocator(allocator, value_hex);
   if (value->field_hex == NULL || value->value_hex == NULL) {
@@ -557,6 +597,8 @@ int lc_pouch_index_term_value_parse_line(
   }
   value->first_line = first_line;
   value->line_count = line_count;
+  value->first_byte = first_byte;
+  value->byte_count = byte_count;
   return LC_OK;
 }
 
@@ -574,6 +616,7 @@ int lc_pouch_index_term_values_collect_ranges(
   unsigned long first;
   unsigned long count;
   size_t index;
+  size_t value_index;
   size_t range_count;
 
   if (out_ranges == NULL || out_count == NULL) {
@@ -607,6 +650,18 @@ int lc_pouch_index_term_values_collect_ranges(
                                         &count)) {
       ranges[range_count].first_line = first;
       ranges[range_count].line_count = count;
+      ranges[range_count].first_byte = 0UL;
+      ranges[range_count].byte_count = 0UL;
+      for (value_index = 0U; value_index < value_count; ++value_index) {
+        if (strcmp(values[value_index].field_hex, terms[index].field_hex) ==
+                0 &&
+            strcmp(values[value_index].value_hex, terms[index].value_hex) ==
+                0) {
+          ranges[range_count].first_byte = values[value_index].first_byte;
+          ranges[range_count].byte_count = values[value_index].byte_count;
+          break;
+        }
+      }
       ++range_count;
     }
   }
@@ -623,21 +678,38 @@ int lc_pouch_index_term_fields_select_range(
     const lc_pouch_index_term_field *fields, size_t field_count,
     const char *field_hex, const lc_pouch_index_term_key *terms,
     size_t term_count, unsigned long term_line_count,
-    unsigned long *first_line, unsigned long *line_count) {
+    unsigned long term_byte_count, unsigned long *first_line,
+    unsigned long *line_count, unsigned long *first_byte,
+    unsigned long *byte_count) {
   unsigned long first;
   unsigned long count;
   unsigned long end;
   unsigned long min_first;
   unsigned long max_end;
+  unsigned long min_byte;
+  unsigned long max_byte_end;
+  unsigned long byte_end;
   size_t index;
+  size_t field_index;
   int found;
 
-  if (first_line == NULL || line_count == NULL) {
+  if (first_line == NULL || line_count == NULL || first_byte == NULL ||
+      byte_count == NULL) {
     return 0;
   }
   if (term_count == 0U) {
-    return lc_pouch_index_term_fields_find(fields, field_count, field_hex,
-                                           first_line, line_count);
+    if (!lc_pouch_index_term_fields_find(fields, field_count, field_hex,
+                                         first_line, line_count)) {
+      return 0;
+    }
+    for (index = 0U; index < field_count; ++index) {
+      if (strcmp(fields[index].field_hex, field_hex) == 0) {
+        *first_byte = fields[index].first_byte;
+        *byte_count = fields[index].byte_count;
+        return 1;
+      }
+    }
+    return 0;
   }
   if (terms == NULL) {
     return 0;
@@ -645,6 +717,8 @@ int lc_pouch_index_term_fields_select_range(
   found = 0;
   min_first = term_line_count;
   max_end = 0UL;
+  min_byte = term_byte_count;
+  max_byte_end = 0UL;
   for (index = 0U; index < term_count; ++index) {
     if (lc_pouch_index_term_fields_find(fields, field_count,
                                         terms[index].field_hex, &first,
@@ -656,6 +730,20 @@ int lc_pouch_index_term_fields_select_range(
       if (end > max_end) {
         max_end = end;
       }
+      for (field_index = 0U; field_index < field_count; ++field_index) {
+        if (strcmp(fields[field_index].field_hex, terms[index].field_hex) ==
+            0) {
+          byte_end = fields[field_index].first_byte +
+                     fields[field_index].byte_count;
+          if (!found || fields[field_index].first_byte < min_byte) {
+            min_byte = fields[field_index].first_byte;
+          }
+          if (byte_end > max_byte_end) {
+            max_byte_end = byte_end;
+          }
+          break;
+        }
+      }
       found = 1;
     }
   }
@@ -664,5 +752,7 @@ int lc_pouch_index_term_fields_select_range(
   }
   *first_line = min_first;
   *line_count = max_end - min_first;
+  *first_byte = min_byte;
+  *byte_count = max_byte_end - min_byte;
   return 1;
 }
