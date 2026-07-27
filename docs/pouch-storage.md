@@ -1428,9 +1428,11 @@ fuller compiled-index module map remains the target for the remaining work:
 - `src/lc_pouch_index_result.c` owns the first result-list primitive split out
   of the query bridge: sorted key/docID vectors, deterministic
   docID/key/value-slot ordering, key allocation ownership, and adjacent docID
-  compaction before key emission. It should grow into the cacheable plan-key,
-  identity-scoped result-cache, remapped generation-local result caching, and
-  document-table page-selection owner.
+  compaction before key emission. It also owns decoded result-row buckets used
+  by merged `any`/term query emission, with the query bridge adapting those rows
+  to visitor views. It should grow into the cacheable plan-key, identity-scoped
+  result-cache, remapped generation-local result caching, and document-table
+  page-selection owner.
 - `src/lc_pouch_index_temporal.c` owns the typed temporal reader primitive for
   normalized date values. It stores per-field normalized temporal docID vectors,
   keeps residual postings for plausible temporal strings that must remain under
@@ -1616,18 +1618,18 @@ intersected with optional positive equality docIDs, then the negative
 exact-term docID sets are subtracted before result paging.
 The index layer also owns the first result-cache primitive: a private index
 identity plus normalized-plan key maps to a sorted docID vector. The simple
-result-cache plan key constructors now live in `lc_pouch_index`, and disk
+result-cache plan key constructors now live in `lc_pouch_index`, and pouch
 supplies only the known simple-plan kind, current index identity, and storage
-sidecar readers. Disk lookups include both the index sequence and segmented
+sidecar readers. Pouch lookups include both the index sequence and segmented
 manifest generation, so the normalized-result cache follows the same
 immutable-view key shape as prepared bridge readers.
-The first disk use is deliberately narrow: simple primary equality, positive
+The first pouch use is deliberately narrow: simple primary equality, positive
 `exists`, positive numeric `range`, non-wildcard positive `in`, prefix,
 contains, and `DateAfter` scans cache docIDs by the current index identity and
 a length-prefixed plan key, then ask the index layer to collect, cache, and
-page the candidate docIDs. Disk supplies the identity-matched document-table
+page the candidate docIDs. Pouch supplies the identity-matched document-table
 generation and a global-to-local docID remap callback, but the index result
-layer owns local result-cache insertion and cursor page selection before disk
+layer owns local result-cache insertion and cursor page selection before pouch
 converts the selected page back to summary entries or key snapshots. Updates
 advance the index sequence, so stale cached results miss the cache. DateAfter,
 simple equality, simple `exists`, simple numeric `range`, simple non-wildcard

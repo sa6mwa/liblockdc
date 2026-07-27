@@ -158,3 +158,103 @@ int lc_pouch_index_result_key_list_sort_compact_docids(
   list->count = write_index;
   return LC_OK;
 }
+
+void lc_pouch_index_result_row_list_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_result_row_list *list) {
+  size_t index;
+
+  if (list == NULL) {
+    return;
+  }
+  for (index = 0U; index < list->count; ++index) {
+    lc_free_with_allocator(allocator, list->items[index].key);
+    lc_free_with_allocator(allocator, list->items[index].key_hex);
+  }
+  lc_free_with_allocator(allocator, list->items);
+  memset(list, 0, sizeof(*list));
+}
+
+static int lc_pouch_index_result_row_list_reserve(
+    const lc_allocator *allocator, lc_pouch_index_result_row_list *list,
+    size_t needed, lc_error *error) {
+  lc_pouch_index_result_row *next_items;
+  size_t next_capacity;
+
+  if (list == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index result row list reserve requires list",
+                        NULL, NULL, NULL);
+  }
+  if (needed <= list->capacity) {
+    return LC_OK;
+  }
+  next_capacity = list->capacity == 0U ? 16U : list->capacity;
+  while (next_capacity < needed) {
+    if (next_capacity > ((size_t)-1 / 2U)) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch index result row list exceeds local limit",
+                          NULL, NULL, NULL);
+    }
+    next_capacity *= 2U;
+  }
+  next_items = (lc_pouch_index_result_row *)lc_alloc_with_allocator(
+      allocator, next_capacity * sizeof(*next_items));
+  if (next_items == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index result row list", NULL,
+                        NULL, NULL);
+  }
+  if (list->items != NULL) {
+    memcpy(next_items, list->items, list->count * sizeof(*next_items));
+    lc_free_with_allocator(allocator, list->items);
+  }
+  memset(next_items + list->count, 0,
+         (next_capacity - list->count) * sizeof(*next_items));
+  list->items = next_items;
+  list->capacity = next_capacity;
+  return LC_OK;
+}
+
+int lc_pouch_index_result_row_list_add(
+    const lc_allocator *allocator, lc_pouch_index_result_row_list *list,
+    const char *key, const char *key_hex, unsigned long doc_id,
+    unsigned long version, unsigned long bytes, int has_query_hidden,
+    int query_hidden, size_t value_index, lc_error *error) {
+  lc_pouch_index_result_row *item;
+  int rc;
+
+  if (list == NULL || key == NULL || key[0] == '\0') {
+    return LC_OK;
+  }
+  rc = lc_pouch_index_result_row_list_reserve(allocator, list,
+                                              list->count + 1U, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  item = &list->items[list->count];
+  memset(item, 0, sizeof(*item));
+  item->key = lc_strdup_with_allocator(allocator, key);
+  if (item->key == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index result row key", NULL,
+                        NULL, NULL);
+  }
+  if (key_hex != NULL) {
+    item->key_hex = lc_strdup_with_allocator(allocator, key_hex);
+    if (item->key_hex == NULL) {
+      lc_free_with_allocator(allocator, item->key);
+      memset(item, 0, sizeof(*item));
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch index result row key hex",
+                          NULL, NULL, NULL);
+    }
+  }
+  item->doc_id = doc_id;
+  item->version = version;
+  item->bytes = bytes;
+  item->has_query_hidden = has_query_hidden ? 1 : 0;
+  item->query_hidden = query_hidden ? 1 : 0;
+  item->value_index = value_index;
+  ++list->count;
+  return LC_OK;
+}

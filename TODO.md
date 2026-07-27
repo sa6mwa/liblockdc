@@ -775,7 +775,7 @@ Latest release targets confirmed on 2026-07-23:
         adapts the authoritative temporal generation reader and translates the
         selected docID page back to summaries or key snapshots.
       - [x] Move remapped document-generation result-cache/page orchestration
-        into `lc_pouch_index_result`: disk now reads/publishes the
+        into `lc_pouch_index_result`: the pouch bridge now reads/publishes the
         identity-matched `.lcpdtg` and supplies a global-to-local docID remap
         callback, while the index layer owns miss collection, local docID cache
         insertion, and cursor page selection.
@@ -787,6 +787,9 @@ Latest release targets confirmed on 2026-07-23:
           sorted result-key vectors now own key allocation, docID/key/value-slot
           ordering, and adjacent docID compaction for query-index candidate
           emission, leaving sidecar parsing in the pouch query bridge.
+        - [x] Move decoded result-row bucket ownership for merged `any`/term
+          queries into `lc_pouch_index_result.c`; the query bridge now adapts
+          row views for visitor callbacks instead of owning scratch row lists.
       - [x] Physically split sparse posting encoding into
         `src/lc_pouch_index_posting.c`, keeping the private posting boundary
         separate from document-table, term-dictionary, and result-cache code.

@@ -353,6 +353,44 @@ static void test_index_result_key_list_sorts_and_compacts_docids(
   lc_error_cleanup(&error);
 }
 
+static void test_index_result_row_list_copies_keys_and_metadata(void **state) {
+  lc_allocator allocator;
+  lc_pouch_index_result_row_list list;
+  lc_error error;
+  char key[16];
+  char key_hex[16];
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&list, 0, sizeof(list));
+  strcpy(key, "alpha");
+  strcpy(key_hex, "616c706861");
+
+  rc = lc_pouch_index_result_row_list_add(&allocator, &list, key, key_hex, 7UL,
+                                          11UL, 13UL, 1, 0, 2U, &error);
+  assert_int_equal(rc, LC_OK);
+  strcpy(key, "mutated");
+  strcpy(key_hex, "6d757461746564");
+
+  assert_int_equal(list.count, 1);
+  assert_string_equal(list.items[0].key, "alpha");
+  assert_string_equal(list.items[0].key_hex, "616c706861");
+  assert_int_equal(list.items[0].doc_id, 7);
+  assert_int_equal(list.items[0].version, 11);
+  assert_int_equal(list.items[0].bytes, 13);
+  assert_true(list.items[0].has_query_hidden);
+  assert_false(list.items[0].query_hidden);
+  assert_int_equal(list.items[0].value_index, 2);
+
+  lc_pouch_index_result_row_list_cleanup(&allocator, &list);
+  assert_null(list.items);
+  assert_int_equal(list.count, 0);
+  assert_int_equal(list.capacity, 0);
+  lc_error_cleanup(&error);
+}
+
 static void test_index_posting_roundtrips_sparse_docids(void **state) {
   lc_allocator allocator;
   lc_pouch_index_posting posting;
@@ -9717,6 +9755,7 @@ int main(void) {
       cmocka_unit_test(test_index_docid_set_merges_sorted_sets),
       cmocka_unit_test(test_index_doc_table_maps_sorted_keys_to_docids),
       cmocka_unit_test(test_index_result_key_list_sorts_and_compacts_docids),
+      cmocka_unit_test(test_index_result_row_list_copies_keys_and_metadata),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
       cmocka_unit_test(test_index_posting_roundtrips_dense_docids),
       cmocka_unit_test(test_index_posting_selects_adaptive_encoding),

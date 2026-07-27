@@ -65,6 +65,23 @@ typedef struct lc_pouch_index_result_key_list {
   size_t capacity;
 } lc_pouch_index_result_key_list;
 
+typedef struct lc_pouch_index_result_row {
+  char *key;
+  char *key_hex;
+  unsigned long doc_id;
+  unsigned long version;
+  unsigned long bytes;
+  int has_query_hidden;
+  int query_hidden;
+  size_t value_index;
+} lc_pouch_index_result_row;
+
+typedef struct lc_pouch_index_result_row_list {
+  lc_pouch_index_result_row *items;
+  size_t count;
+  size_t capacity;
+} lc_pouch_index_result_row_list;
+
 typedef struct lc_pouch_index_posting {
   unsigned char *bytes;
   size_t length;
@@ -139,6 +156,13 @@ int lc_pouch_index_result_key_list_add(
 int lc_pouch_index_result_key_list_sort_compact_docids(
     const lc_allocator *allocator, lc_pouch_index_result_key_list *list,
     lc_error *error);
+void lc_pouch_index_result_row_list_cleanup(
+    const lc_allocator *allocator, lc_pouch_index_result_row_list *list);
+int lc_pouch_index_result_row_list_add(
+    const lc_allocator *allocator, lc_pouch_index_result_row_list *list,
+    const char *key, const char *key_hex, unsigned long doc_id,
+    unsigned long version, unsigned long bytes, int has_query_hidden,
+    int query_hidden, size_t value_index, lc_error *error);
 void lc_pouch_index_posting_cleanup(const lc_allocator *allocator,
                                     lc_pouch_index_posting *posting);
 int lc_pouch_index_posting_append_sorted_unique(
