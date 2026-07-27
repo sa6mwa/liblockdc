@@ -686,6 +686,78 @@ static void test_index_term_keys_build_exact_rejects_invalid_terms(
   lc_error_cleanup(&error);
 }
 
+static void test_index_term_keys_build_exact_for_field_values(void **state) {
+  lc_allocator allocator;
+  lc_error error;
+  const char *values[4];
+  lc_pouch_index_term_key *terms;
+  size_t term_count;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  values[0] = "plan";
+  values[1] = "finance";
+  values[2] = "plan";
+  values[3] = "";
+  terms = NULL;
+  term_count = 0U;
+
+  rc = lc_pouch_index_term_keys_build_exact_for_field(
+      "/tags", values, 4U, &terms, &term_count, &allocator, &error);
+
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(terms);
+  assert_int_equal(term_count, 3);
+  assert_string_equal(terms[0].field_hex, "2f74616773");
+  assert_string_equal(terms[0].value_hex, "-");
+  assert_string_equal(terms[1].field_hex, "2f74616773");
+  assert_string_equal(terms[1].value_hex, "66696e616e6365");
+  assert_string_equal(terms[2].field_hex, "2f74616773");
+  assert_string_equal(terms[2].value_hex, "706c616e");
+
+  lc_pouch_index_term_keys_cleanup(&allocator, terms, 4U);
+  lc_error_cleanup(&error);
+}
+
+static void test_index_term_keys_build_exact_for_field_rejects_invalid_values(
+    void **state) {
+  lc_allocator allocator;
+  lc_error error;
+  const char *values[2];
+  lc_pouch_index_term_key *terms;
+  size_t term_count;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  values[0] = "plan";
+  values[1] = NULL;
+  terms = (lc_pouch_index_term_key *)1;
+  term_count = 99U;
+
+  rc = lc_pouch_index_term_keys_build_exact_for_field(
+      "/tags", values, 2U, &terms, &term_count, &allocator, &error);
+
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(terms);
+  assert_int_equal(term_count, 0);
+  lc_error_cleanup(&error);
+
+  lc_error_init(&error);
+  terms = (lc_pouch_index_term_key *)1;
+  term_count = 99U;
+  rc = lc_pouch_index_term_keys_build_exact_for_field(
+      "", values, 1U, &terms, &term_count, &allocator, &error);
+
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(terms);
+  assert_int_equal(term_count, 0);
+  lc_error_cleanup(&error);
+}
+
 static void test_index_term_values_collect_exact_ranges(void **state) {
   lc_allocator allocator;
   lc_error error;
@@ -10148,6 +10220,9 @@ int main(void) {
       cmocka_unit_test(test_index_term_keys_sort_find_and_cleanup),
       cmocka_unit_test(test_index_term_keys_build_exact_sorts_and_deduplicates),
       cmocka_unit_test(test_index_term_keys_build_exact_rejects_invalid_terms),
+      cmocka_unit_test(test_index_term_keys_build_exact_for_field_values),
+      cmocka_unit_test(
+          test_index_term_keys_build_exact_for_field_rejects_invalid_values),
       cmocka_unit_test(test_index_term_values_collect_exact_ranges),
       cmocka_unit_test(test_index_term_fields_select_merged_range),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),

@@ -818,6 +818,8 @@ Latest release targets confirmed on 2026-07-23:
           `lc_pouch_index_terms.c`: raw field/value term arrays are validated,
           hex-encoded, sorted, and deduplicated by the index term module,
           leaving query callers to pass the built key vector to sidecar readers.
+          Single-field value arrays for non-wildcard `in` now use the same
+          term-owned construction path instead of a query-local value-hex set.
       - [x] Physically split private docID set algebra into
         `src/lc_pouch_index_doc.c`, including sorted unique append and
         merge-based union/intersection/subtraction helpers plus the first

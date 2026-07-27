@@ -373,6 +373,49 @@ int lc_pouch_index_term_keys_build_exact(
   return rc;
 }
 
+int lc_pouch_index_term_keys_build_exact_for_field(
+    const char *field, const char *const *values, size_t value_count,
+    lc_pouch_index_term_key **out_terms, size_t *out_count,
+    const lc_allocator *allocator, lc_error *error) {
+  lc_pouch_index_plain_term *terms;
+  size_t index;
+  int rc;
+
+  if (out_terms == NULL || out_count == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index exact field term-key build requires "
+                        "outputs",
+                        NULL, NULL, NULL);
+  }
+  *out_terms = NULL;
+  *out_count = 0U;
+  if (field == NULL || field[0] == '\0' ||
+      (values == NULL && value_count > 0U)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index exact field term-key build requires a "
+                        "field and values",
+                        NULL, NULL, NULL);
+  }
+  if (value_count == 0U) {
+    return LC_OK;
+  }
+  terms = (lc_pouch_index_plain_term *)lc_alloc_with_allocator(
+      allocator, value_count * sizeof(*terms));
+  if (terms == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index exact field terms",
+                        NULL, NULL, NULL);
+  }
+  for (index = 0U; index < value_count; ++index) {
+    terms[index].field = field;
+    terms[index].value = values[index];
+  }
+  rc = lc_pouch_index_term_keys_build_exact(
+      terms, value_count, out_terms, out_count, allocator, error);
+  lc_free_with_allocator(allocator, terms);
+  return rc;
+}
+
 int lc_pouch_index_term_field_parse_line(
     char *line, lc_pouch_index_term_field *field,
     const lc_allocator *allocator, lc_error *error) {

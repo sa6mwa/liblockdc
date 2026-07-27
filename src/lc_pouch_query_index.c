@@ -96,8 +96,6 @@ typedef struct lc_pouch_query_index_term_reader {
   const lc_allocator *allocator;
   const char *field_hex;
   const char *value_hex;
-  const char *const *value_hexes;
-  size_t value_hex_count;
   const lc_pouch_index_term_key *exact_terms;
   size_t exact_term_count;
   const char *value_text;
@@ -957,16 +955,6 @@ static int lc_pouch_query_index_term_compare(const void *left,
   return strcmp(a->key_hex, b->key_hex);
 }
 
-static int lc_pouch_query_index_cstr_ptr_compare(const void *left,
-                                                 const void *right) {
-  const char *const *a;
-  const char *const *b;
-
-  a = (const char *const *)left;
-  b = (const char *const *)right;
-  return strcmp(*a, *b);
-}
-
 static int lc_pouch_query_index_term_equal(
     const lc_pouch_query_index_term *left,
     const lc_pouch_query_index_term *right) {
@@ -1668,37 +1656,6 @@ static int lc_pouch_query_index_term_reader_matches_value(
   return LC_OK;
 }
 
-static int lc_pouch_query_index_term_reader_matches_any_value(
-    lc_pouch_query_index_term_reader *reader, const char *value_hex,
-    size_t *value_index_out) {
-  size_t low;
-  size_t high;
-  size_t mid;
-  int cmp;
-
-  if (reader == NULL || value_hex == NULL || reader->value_hex_count == 0U) {
-    return 0;
-  }
-  low = 0U;
-  high = reader->value_hex_count;
-  while (low < high) {
-    mid = low + ((high - low) / 2U);
-    cmp = strcmp(value_hex, reader->value_hexes[mid]);
-    if (cmp == 0) {
-      if (value_index_out != NULL) {
-        *value_index_out = mid;
-      }
-      return 1;
-    }
-    if (cmp < 0) {
-      high = mid;
-    } else {
-      low = mid + 1U;
-    }
-  }
-  return 0;
-}
-
 static int lc_pouch_query_index_parse_and_visit_term(
     char *line, lc_pouch_query_index_term_reader *reader,
     lc_error *error) {
@@ -1786,18 +1743,11 @@ static int lc_pouch_query_index_parse_and_visit_term(
     if (reader->string_values_only && value_type != 's') {
       matched = 0;
     } else if (!reader->prefix_match && !reader->contains_match &&
-        !reader->range_match && !reader->date_match && !reader->ignore_case) {
-      if (reader->value_hex_count > 0U) {
-        value_cmp = strcmp(value_hex,
-                           reader->value_hexes[reader->value_hex_count - 1U]);
-      } else {
-        value_cmp = strcmp(value_hex, reader->value_hex);
-      }
+               !reader->range_match && !reader->date_match &&
+               !reader->ignore_case) {
+      value_cmp = strcmp(value_hex, reader->value_hex);
       if (value_cmp > 0) {
         reader->stop = 1;
-      } else if (reader->value_hex_count > 0U) {
-        matched = lc_pouch_query_index_term_reader_matches_any_value(
-            reader, value_hex, &value_index);
       } else if (value_cmp == 0) {
         rc = lc_pouch_query_index_term_reader_matches_value(reader, value_hex,
                                                             &matched, error);
@@ -3676,11 +3626,9 @@ int lc_pouch_query_index_visit_scalar_any(
     unsigned long *index_seq, lc_error *error) {
   lc_pouch_query_index_read_result sidecar;
   lc_pouch_query_index_term_reader reader;
+  lc_pouch_index_term_key *exact_terms;
   char *sidecar_path;
-  char *field_hex;
-  char **value_hexes;
-  size_t index;
-  size_t write_index;
+  size_t exact_term_count;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -3703,59 +3651,15 @@ int lc_pouch_query_index_visit_scalar_any(
   if (sidecar_path == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  field_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, field);
-  value_hexes = (char **)lc_alloc_with_allocator(
-      &pouch->allocator, value_count * sizeof(*value_hexes));
-  if (field_hex == NULL || value_hexes == NULL) {
-    lc_free_with_allocator(&pouch->allocator, field_hex);
-    lc_free_with_allocator(&pouch->allocator, value_hexes);
-    lc_free_with_allocator(&pouch->allocator, sidecar_path);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query-index multi-scalar "
-                        "lookup",
-                        NULL, NULL, NULL);
-  }
-  memset(value_hexes, 0, value_count * sizeof(*value_hexes));
-  rc = LC_OK;
-  for (index = 0U; index < value_count; ++index) {
-    if (values[index] == NULL) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index multi-scalar lookup requires "
-                        "non-null values",
-                        NULL, NULL, NULL);
-      break;
-    }
-    value_hexes[index] =
-        lc_pouch_query_index_hex_encode(&pouch->allocator, values[index]);
-    if (value_hexes[index] == NULL) {
-      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query-index multi-scalar "
-                        "value",
-                        NULL, NULL, NULL);
-      break;
-    }
-  }
+  exact_terms = NULL;
+  exact_term_count = 0U;
+  rc = lc_pouch_index_term_keys_build_exact_for_field(
+      field, values, value_count, &exact_terms, &exact_term_count,
+      &pouch->allocator, error);
   if (rc == LC_OK) {
-    qsort(value_hexes, value_count, sizeof(value_hexes[0]),
-          lc_pouch_query_index_cstr_ptr_compare);
-    write_index = 0U;
-    for (index = 0U; index < value_count; ++index) {
-      if (write_index > 0U &&
-          strcmp(value_hexes[write_index - 1U], value_hexes[index]) == 0) {
-        lc_free_with_allocator(&pouch->allocator, value_hexes[index]);
-        value_hexes[index] = NULL;
-        continue;
-      }
-      if (write_index != index) {
-        value_hexes[write_index] = value_hexes[index];
-        value_hexes[index] = NULL;
-      }
-      ++write_index;
-    }
     reader.allocator = &pouch->allocator;
-    reader.field_hex = field_hex;
-    reader.value_hexes = (const char *const *)value_hexes;
-    reader.value_hex_count = write_index;
+    reader.exact_terms = exact_terms;
+    reader.exact_term_count = exact_term_count;
     reader.visit = visit;
     reader.context = context;
     rc = lc_pouch_query_index_read_with_reader(sidecar_path, &sidecar, NULL,
@@ -3775,11 +3679,8 @@ int lc_pouch_query_index_visit_scalar_any(
     }
   }
   lc_free_with_allocator(&pouch->allocator, reader.value_scratch);
-  for (index = 0U; index < value_count; ++index) {
-    lc_free_with_allocator(&pouch->allocator, value_hexes[index]);
-  }
-  lc_free_with_allocator(&pouch->allocator, value_hexes);
-  lc_free_with_allocator(&pouch->allocator, field_hex);
+  lc_pouch_index_term_keys_cleanup(&pouch->allocator, exact_terms,
+                                   value_count);
   lc_free_with_allocator(&pouch->allocator, sidecar_path);
   return rc;
 }

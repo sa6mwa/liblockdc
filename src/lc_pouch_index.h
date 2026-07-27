@@ -224,6 +224,10 @@ int lc_pouch_index_term_keys_build_exact(
     const lc_pouch_index_plain_term *terms, size_t term_count,
     lc_pouch_index_term_key **out_terms, size_t *out_count,
     const lc_allocator *allocator, lc_error *error);
+int lc_pouch_index_term_keys_build_exact_for_field(
+    const char *field, const char *const *values, size_t value_count,
+    lc_pouch_index_term_key **out_terms, size_t *out_count,
+    const lc_allocator *allocator, lc_error *error);
 int lc_pouch_index_term_field_parse_line(
     char *line, lc_pouch_index_term_field *field,
     const lc_allocator *allocator, lc_error *error);
