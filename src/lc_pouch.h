@@ -16,6 +16,9 @@ typedef struct lc_pouch_open_options {
   int single_writer;
   const char *query_engine;
   const char *query_fallback_engine;
+  const char *crypto_key;
+  const char *crypto_key_file;
+  int crypto_generate_key_file;
 } lc_pouch_open_options;
 
 typedef struct lc_pouch_status {
@@ -30,6 +33,8 @@ typedef struct lc_pouch_status {
   int single_writer;
   char *query_engine;
   char *query_fallback_engine;
+  int crypto_enabled;
+  char *crypto_key_file;
 } lc_pouch_status;
 
 typedef struct lc_pouch_maintenance_options {
@@ -69,6 +74,8 @@ typedef struct lc_pouch_state_write_result {
   char *etag;
   unsigned long version;
   unsigned long bytes;
+  unsigned long cipher_bytes;
+  char *descriptor;
   long updated_at_unix;
   int has_query_hidden;
   int query_hidden;
@@ -80,6 +87,8 @@ typedef struct lc_pouch_state_read_result {
   char *etag;
   unsigned long version;
   unsigned long bytes;
+  unsigned long cipher_bytes;
+  char *descriptor;
   long updated_at_unix;
   int has_query_hidden;
   int query_hidden;
@@ -92,6 +101,8 @@ typedef struct lc_pouch_state_visit_entry {
   const char *etag;
   unsigned long version;
   unsigned long bytes;
+  unsigned long cipher_bytes;
+  const char *descriptor;
   long updated_at_unix;
   int has_query_hidden;
   int query_hidden;

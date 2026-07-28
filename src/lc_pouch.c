@@ -119,6 +119,7 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                   const lc_pouch_open_options *options, lc_pouch **out,
                   lc_error *error) {
   lc_pouch *pouch;
+  lc_pouch_crypto_open_options crypto_options;
   int rc;
 
   if (root_path == NULL || root_path[0] == '\0' || out == NULL) {
@@ -165,6 +166,18 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         "pouch query_fallback_engine must be index or scan",
                         NULL, NULL, "pouch");
   }
+  memset(&crypto_options, 0, sizeof(crypto_options));
+  if (options != NULL) {
+    crypto_options.key_string = options->crypto_key;
+    crypto_options.key_file = options->crypto_key_file;
+    crypto_options.generate_key_file = options->crypto_generate_key_file;
+  }
+  rc = lc_pouch_crypto_open(&pouch->allocator, &crypto_options, &pouch->crypto,
+                            &pouch->crypto_key_file, error);
+  if (rc != LC_OK) {
+    lc_pouch_close(pouch);
+    return rc;
+  }
   rc = lc_pouch_init_writer_marker(pouch, error);
   if (rc != LC_OK) {
     lc_pouch_close(pouch);
@@ -188,6 +201,8 @@ void lc_pouch_close(lc_pouch *pouch) {
   allocator = pouch->allocator;
   lc_pouch_query_index_prepared_cache_cleanup(pouch);
   lc_pouch_state_cache_cleanup(pouch);
+  lc_pouch_crypto_close(pouch->crypto);
+  lc_free_with_allocator(&allocator, pouch->crypto_key_file);
   lc_free_with_allocator(&allocator, pouch->writer_marker_leaf);
   lc_free_with_allocator(&allocator, pouch->query_fallback_engine);
   lc_free_with_allocator(&allocator, pouch->query_engine);
@@ -224,10 +239,21 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
       lc_strdup_with_allocator(&pouch->allocator, pouch->query_engine);
   out->query_fallback_engine =
       lc_strdup_with_allocator(&pouch->allocator, pouch->query_fallback_engine);
+  out->crypto_enabled = lc_pouch_crypto_enabled(pouch->crypto);
+  out->crypto_key_file =
+      pouch->crypto_key_file != NULL
+          ? lc_strdup_with_allocator(&pouch->allocator, pouch->crypto_key_file)
+          : NULL;
   if (out->query_engine == NULL || out->query_fallback_engine == NULL) {
     lc_pouch_status_cleanup(&pouch->allocator, out);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to copy pouch query status", NULL, NULL, NULL);
+  }
+  if (pouch->crypto_key_file != NULL && out->crypto_key_file == NULL) {
+    lc_pouch_status_cleanup(&pouch->allocator, out);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch crypto key file status", NULL,
+                        NULL, NULL);
   }
   return LC_OK;
 }
@@ -241,6 +267,7 @@ void lc_pouch_status_cleanup(const lc_allocator *allocator,
   lc_free_with_allocator(allocator, status->layout_name);
   lc_free_with_allocator(allocator, status->query_engine);
   lc_free_with_allocator(allocator, status->query_fallback_engine);
+  lc_free_with_allocator(allocator, status->crypto_key_file);
   memset(status, 0, sizeof(*status));
 }
 

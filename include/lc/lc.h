@@ -1859,6 +1859,35 @@ int lc_sink_memory_bytes(lc_sink *sink, const void **bytes, size_t *length,
 /** Copies all bytes from a source into a sink. */
 int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error);
 
+/** Generates a new `lc-pouch-key-v1:<base64url>` root key string.
+ *
+ * The returned string is allocated by liblockdc and must be released with
+ * `lc_pouch_crypto_key_string_free()`.
+ */
+int lc_pouch_crypto_generate_key_string(char **out, lc_error *error);
+
+/** Releases a key string or path returned by pouch crypto helpers. */
+void lc_pouch_crypto_key_string_free(char *key_string);
+
+/** Returns the default pouch crypto key-file path.
+ *
+ * The path is `$XDG_CONFIG_HOME/liblockdc/pouch.key`, or
+ * `$HOME/.config/liblockdc/pouch.key` when `XDG_CONFIG_HOME` is unset. The
+ * returned string must be released with
+ * `lc_pouch_crypto_key_string_free()`.
+ */
+int lc_pouch_crypto_default_key_file(char **out, lc_error *error);
+
+/** Generates and writes a pouch root key file with mode `0600`.
+ *
+ * Parent directories are created with mode `0700`. When `overwrite` is zero,
+ * an existing key file is rejected. When `key_string_out` is non-NULL, the
+ * generated key string is returned and must be released with
+ * `lc_pouch_crypto_key_string_free()`.
+ */
+int lc_pouch_crypto_generate_key_file(const char *path, int overwrite,
+                                      char **key_string_out, lc_error *error);
+
 /** Closes and frees a client handle. */
 void lc_client_close(lc_client *client);
 /** Closes and frees a lease handle. */

@@ -351,6 +351,7 @@ set(lc_sources
     src/lc_mutate_stream.c
     src/lc_pouch_client.c
     src/lc_pouch.c
+    src/lc_pouch_crypto.c
     src/lc_pouch_index.c
     src/lc_pouch_index_doc.c
     src/lc_pouch_index_posting.c

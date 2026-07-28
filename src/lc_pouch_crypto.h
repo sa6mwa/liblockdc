@@ -1,0 +1,38 @@
+#ifndef LC_POUCH_CRYPTO_H
+#define LC_POUCH_CRYPTO_H
+
+#include "lc/lc.h"
+
+#include <stddef.h>
+
+typedef struct lc_pouch_crypto lc_pouch_crypto;
+
+typedef struct lc_pouch_crypto_open_options {
+  const char *key_string;
+  const char *key_file;
+  int generate_key_file;
+} lc_pouch_crypto_open_options;
+
+int lc_pouch_crypto_generate_key_string(char **out, lc_error *error);
+void lc_pouch_crypto_key_string_free(char *key_string);
+int lc_pouch_crypto_default_key_file(char **out, lc_error *error);
+int lc_pouch_crypto_generate_key_file(const char *path, int overwrite,
+                                      char **key_string_out, lc_error *error);
+
+int lc_pouch_crypto_open(const lc_allocator *allocator,
+                         const lc_pouch_crypto_open_options *options,
+                         lc_pouch_crypto **out, char **key_file_out,
+                         lc_error *error);
+void lc_pouch_crypto_close(lc_pouch_crypto *crypto);
+int lc_pouch_crypto_enabled(const lc_pouch_crypto *crypto);
+int lc_pouch_crypto_stream_to_file(lc_pouch_crypto *crypto,
+                                   const char *context, const char *path,
+                                   lc_source *body, unsigned long *plain_bytes,
+                                   unsigned long *cipher_bytes,
+                                   char **descriptor_out, lc_error *error);
+int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
+                                     const char *context, const char *path,
+                                     const char *descriptor, lc_source **out,
+                                     lc_error *error);
+
+#endif

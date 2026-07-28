@@ -969,6 +969,9 @@ typedef struct lc_pouch_endpoint_options {
   char *root_path;
   char *query_engine;
   char *query_fallback_engine;
+  char *crypto_key;
+  char *crypto_key_file;
+  int crypto_generate_key_file;
   int single_writer;
 } lc_pouch_endpoint_options;
 
@@ -981,6 +984,8 @@ lc_pouch_endpoint_options_cleanup(const lc_allocator *allocator,
   lc_free_with_allocator(allocator, options->root_path);
   lc_free_with_allocator(allocator, options->query_engine);
   lc_free_with_allocator(allocator, options->query_fallback_engine);
+  lc_free_with_allocator(allocator, options->crypto_key);
+  lc_free_with_allocator(allocator, options->crypto_key_file);
   memset(options, 0, sizeof(*options));
 }
 
@@ -1136,6 +1141,56 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
       lc_free_with_allocator(allocator, options->query_engine);
       options->query_engine = copy;
     }
+    lc_free_with_allocator(allocator, decoded_key);
+    return LC_OK;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_crypto_key")) {
+    copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
+                                              "pouch_crypto_key", error);
+    if (copy == NULL) {
+      lc_free_with_allocator(allocator, decoded_key);
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+    lc_free_with_allocator(allocator, options->crypto_key);
+    options->crypto_key = copy;
+    lc_free_with_allocator(allocator, decoded_key);
+    return LC_OK;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_crypto_key_file")) {
+    copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
+                                              "pouch_crypto_key_file", error);
+    if (copy == NULL) {
+      lc_free_with_allocator(allocator, decoded_key);
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+    lc_free_with_allocator(allocator, options->crypto_key_file);
+    options->crypto_key_file = copy;
+    lc_free_with_allocator(allocator, decoded_key);
+    return LC_OK;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_crypto_generate_key_file")) {
+    copy = lc_pouch_endpoint_decode_component(
+        allocator, value, value_len, "pouch_crypto_generate_key_file", error);
+    if (copy == NULL) {
+      lc_free_with_allocator(allocator, decoded_key);
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+    if (strcmp(copy, "true") == 0 || strcmp(copy, "1") == 0) {
+      options->crypto_generate_key_file = 1;
+    } else if (strcmp(copy, "false") == 0 || strcmp(copy, "0") == 0) {
+      options->crypto_generate_key_file = 0;
+    } else {
+      lc_free_with_allocator(allocator, copy);
+      lc_free_with_allocator(allocator, decoded_key);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch endpoint crypto generate flag must be true "
+                          "or false",
+                          NULL, NULL, "pouch");
+    }
+    lc_free_with_allocator(allocator, copy);
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
@@ -1436,6 +1491,10 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     pouch_open_options.query_engine = pouch_endpoint_options.query_engine;
     pouch_open_options.query_fallback_engine =
         pouch_endpoint_options.query_fallback_engine;
+    pouch_open_options.crypto_key = pouch_endpoint_options.crypto_key;
+    pouch_open_options.crypto_key_file = pouch_endpoint_options.crypto_key_file;
+    pouch_open_options.crypto_generate_key_file =
+        pouch_endpoint_options.crypto_generate_key_file;
     rc = lc_pouch_open(pouch_endpoint_options.root_path, &config->allocator,
                        &pouch_open_options, &client->pouch, error);
     if (rc != LC_OK) {

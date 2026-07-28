@@ -1444,6 +1444,74 @@ static int bytes_contain_text(const void *bytes, size_t length,
   return 0;
 }
 
+static int pouch_file_contains_text(const char *path, const char *needle) {
+  unsigned char buffer[8192 + 256];
+  size_t needle_len;
+  size_t carry;
+  FILE *fp;
+
+  needle_len = strlen(needle);
+  assert_true(needle_len > 0U);
+  assert_true(needle_len < 256U);
+  fp = fopen(path, "rb");
+  assert_non_null(fp);
+  carry = 0U;
+  for (;;) {
+    size_t got;
+    size_t length;
+
+    got = fread(buffer + carry, 1U, 8192U, fp);
+    length = carry + got;
+    if (bytes_contain_text(buffer, length, needle)) {
+      fclose(fp);
+      return 1;
+    }
+    if (got < 8192U) {
+      assert_int_equal(ferror(fp), 0);
+      break;
+    }
+    carry = needle_len - 1U;
+    if (carry > length) {
+      carry = length;
+    }
+    memmove(buffer, buffer + length - carry, carry);
+  }
+  fclose(fp);
+  return 0;
+}
+
+static int pouch_tree_contains_text(const char *path, const char *needle) {
+  struct stat st;
+
+  assert_int_equal(lstat(path, &st), 0);
+  if (S_ISREG(st.st_mode)) {
+    return pouch_file_contains_text(path, needle);
+  }
+  if (S_ISDIR(st.st_mode)) {
+    DIR *dir;
+    struct dirent *entry;
+
+    dir = opendir(path);
+    assert_non_null(dir);
+    while ((entry = readdir(dir)) != NULL) {
+      char child[1024];
+      int written;
+
+      if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+        continue;
+      }
+      written = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+      assert_true(written > 0 && (size_t)written < sizeof(child));
+      if (pouch_tree_contains_text(child, needle)) {
+        closedir(dir);
+        return 1;
+      }
+    }
+    closedir(dir);
+  }
+  return 0;
+}
+
 static int setup_pouch_unit_group(void **state) {
   (void)state;
   cleanup_all_roots();
@@ -2332,6 +2400,17 @@ static void open_pouch_client_endpoint(const char *endpoint, lc_client **out,
   rc = lc_client_open(&config, out, error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(*out);
+}
+
+static void open_pouch_client_crypto(const char *root, const char *crypto_key,
+                                     lc_client **out, lc_error *error) {
+  char endpoint[1024];
+  int written;
+
+  written = snprintf(endpoint, sizeof(endpoint), "pouch://%s?pouch_crypto_key=%s",
+                     root, crypto_key);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  open_pouch_client_endpoint(endpoint, out, error);
 }
 
 static void write_client_state(lc_client *client, const char *key,
@@ -5131,6 +5210,220 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   lc_queue_stats_res_cleanup(&stats_res);
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_message *message;
+  lc_source *source;
+  lc_sink *sink;
+  lc_update_res update_res;
+  lc_update_res txn_update_res;
+  lc_get_res get_res;
+  lc_acquire_req acquire_req;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_get_req attachment_get_req;
+  lc_attachment_get_res attachment_get_res;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_update_req txn_update_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char *crypto_key;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  reader = NULL;
+  lease = NULL;
+  message = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  crypto_key = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&txn_update_res, 0, sizeof(txn_update_res));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_acquire_req_init(&acquire_req);
+  lc_attach_req_init(&attach_req);
+  memset(&attach_res, 0, sizeof(attach_res));
+  lc_attachment_get_req_init(&attachment_get_req);
+  memset(&attachment_get_res, 0, sizeof(attachment_get_res));
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_update_req_init(&txn_update_req);
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  lc_error_init(&error);
+  make_root("crypto-public-api", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  open_pouch_client_crypto(root, crypto_key, &client, &error);
+
+  write_client_state(client, "crypto/state",
+                     "{\"secret\":\"state-secret-redaction-required\"}", NULL,
+                     0L, 0, &update_res, &error);
+
+  acquire_req.key = "crypto/attachment-owner";
+  acquire_req.owner = "crypto-test";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  attach_req.name = "secret.txt";
+  attach_req.content_type = "text/plain";
+  rc = lc_source_from_memory("attachment-secret-redaction-required",
+                             strlen("attachment-secret-redaction-required"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  enqueue_req.queue = "crypto-jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.max_attempts = 3;
+  rc = lc_source_from_memory("queue-secret-redaction-required",
+                             strlen("queue-secret-redaction-required"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  txn_update_req.lease.namespace_name = "default";
+  txn_update_req.lease.key = "crypto/txn-state";
+  txn_update_req.lease.txn_id = "crypto-txn";
+  txn_update_req.content_type = "application/json";
+  rc = lc_source_from_memory(
+      "{\"secret\":\"staged-secret-redaction-required\"}",
+      strlen("{\"secret\":\"staged-secret-redaction-required\"}"), &source,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &txn_update_req, source, &txn_update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  participant.namespace_name = "default";
+  participant.key = "crypto/txn-state";
+  participant.backend_hash = "crypto-backend";
+  decision_req.txn_id = "crypto-txn";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, "crypto/state", NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(bytes, length,
+                                 "state-secret-redaction-required"));
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, "crypto/txn-state", NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(bytes, length,
+                                 "staged-secret-redaction-required"));
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  attachment_get_req.selector.name = "secret.txt";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->get_attachment(lease, &attachment_get_req, sink,
+                             &attachment_get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(bytes, length,
+                                 "attachment-secret-redaction-required"));
+  sink->close(sink);
+  sink = NULL;
+  lc_attachment_get_res_cleanup(&attachment_get_res);
+
+  dequeue_req.queue = "crypto-jobs";
+  dequeue_req.owner = "crypto-worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = message->write_payload(message, sink, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(bytes, length,
+                                 "queue-secret-redaction-required"));
+  sink->close(sink);
+  sink = NULL;
+  message->close(message);
+  message = NULL;
+
+  lease->close(lease);
+  lease = NULL;
+  lc_client_close(client);
+  client = NULL;
+
+  open_pouch_client_crypto(root, crypto_key, &reader, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = reader->get(reader, "crypto/state", NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(bytes, length,
+                                 "state-secret-redaction-required"));
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(reader);
+  reader = NULL;
+
+  assert_false(pouch_tree_contains_text(root,
+                                        "state-secret-redaction-required"));
+  assert_false(pouch_tree_contains_text(
+      root, "attachment-secret-redaction-required"));
+  assert_false(pouch_tree_contains_text(root,
+                                        "queue-secret-redaction-required"));
+  assert_false(pouch_tree_contains_text(root,
+                                        "staged-secret-redaction-required"));
+
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_attach_res_cleanup(&attach_res);
+  lc_update_res_cleanup(&txn_update_res);
+  lc_update_res_cleanup(&update_res);
+  lc_pouch_crypto_key_string_free(crypto_key);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -10949,6 +11242,7 @@ int main(void) {
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
       cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
       cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
+      cmocka_unit_test(test_pouch_crypto_encrypts_public_api_payloads_at_rest),
       cmocka_unit_test(test_txn_decisions_apply_queue_side_effects),
       cmocka_unit_test(
           test_txn_decisions_stage_state_update_mutate_and_index_refresh),

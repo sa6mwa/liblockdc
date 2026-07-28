@@ -2382,22 +2382,48 @@ maintenance hook without changing the log semantics.
 
 ## Crypto and Descriptors
 
-Pouch may initially run without storage encryption, but the data model must
-preserve descriptor fields and plaintext byte counts. If encryption is added or
-shared with a future server stack:
+Pouch storage encryption is optional and disabled by default. When configured,
+pouch encrypts production payload records before they are written to the pouch
+payload directory. The current implementation covers the segmented state path,
+which is also the durability path for private state, public state, staged state,
+transaction records, attachment/object payload records, and queue records with
+embedded queue payload bytes.
 
-- metadata records may be encrypted as a whole;
-- state writes mint or reuse state descriptors;
-- state reads can accept descriptor and plaintext-size hints from metadata;
-- staged promotion must not re-encrypt payloads unnecessarily; linking the
-  staged payload preserves descriptor and byte metadata;
-- object payloads may carry descriptors and plaintext-size hints.
+Pouch crypto uses a single provider: AES-256-GCM framed streaming encryption
+with per-payload descriptor material and an HKDF-style HMAC-SHA256 derivation
+from a 32-byte root key. The key string format is:
 
-Encrypted state reads need descriptor and plaintext-size override hooks because
-the authoritative metadata document may carry the descriptor that unlocks a
-state payload. The storage layer should keep those hooks internal, but the data
-model must not assume the state record alone always contains every decryption
-hint needed by higher lockd logic.
+```text
+lc-pouch-key-v1:<base64url-encoded-32-byte-root-key>
+```
+
+The descriptor string is opaque application metadata and currently uses:
+
+```text
+lc-pouch-desc-v1:<base64url-frame-size-salt-nonce-prefix>
+```
+
+Descriptors contain only public decryption parameters: frame size, per-payload
+salt, and nonce prefix. The root key is never stored in descriptors. Each state
+record preserves plaintext byte count, cipher byte count, and descriptor bytes.
+Older plaintext records remain readable because records without descriptors are
+opened as plaintext.
+
+The public C helper `lc_pouch_crypto_generate_key_string()` creates a new root
+key string. `lc_pouch_crypto_generate_key_file()` writes a 0600 key file, and
+`lc_pouch_crypto_default_key_file()` resolves the default path to
+`$XDG_CONFIG_HOME/liblockdc/pouch.key` or `~/.config/liblockdc/pouch.key`.
+Pouch clients can be configured with `pouch_crypto_key`,
+`pouch_crypto_key_file`, or `pouch_crypto_generate_key_file` endpoint options.
+
+Staged promotion links the staged encrypted payload into the committed head and
+preserves descriptor, plaintext bytes, and cipher bytes rather than
+re-encrypting. Snapshot compaction writes descriptor metadata into snapshot
+records, so encrypted payloads remain readable after segment compaction.
+
+Compression is not part of the v1 provider. If compression is added later, it
+must sit below the same descriptor boundary and continue preserving plaintext
+byte counts exposed by the lockd API.
 
 Backend identity also needs a crypto migration path. If the backend-id marker
 was previously stored unencrypted and encryption is enabled later, the store may

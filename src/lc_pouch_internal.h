@@ -2,6 +2,7 @@
 #define LC_POUCH_INTERNAL_H
 
 #include "lc_pouch.h"
+#include "lc_pouch_crypto.h"
 
 typedef struct lc_pouch_state_cache_namespace lc_pouch_state_cache_namespace;
 typedef struct lc_pouch_query_index_prepared_exact
@@ -28,6 +29,8 @@ struct lc_pouch {
   int single_writer;
   char *query_engine;
   char *query_fallback_engine;
+  lc_pouch_crypto *crypto;
+  char *crypto_key_file;
   char *writer_marker_leaf;
   lc_pouch_state_cache_namespace *state_cache_namespaces;
   lc_pouch_query_index_prepared_exact *prepared_exact_readers;

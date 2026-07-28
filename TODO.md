@@ -69,6 +69,11 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
   - [x] Add typed committed-state query metadata for `query_hidden` through
     lease/client metadata calls, state-log metadata records, snapshot replay,
     reopen, and version-precondition enforcement.
+  - [x] Add optional pouch storage encryption through the public pouch API:
+    AES-256-GCM framed streaming payload writes, key string/key-file helpers,
+    descriptor/cipher-byte metadata preservation across state writes,
+    snapshots, staged promotion, attachments, queues, and transaction records,
+    with old plaintext records still readable.
   - [x] Add durable transaction decision records, replay, staged participant
     recovery, and expired staged-state cleanup on reopen.
     - [x] Add private segmented state-log decision records for staged commit
