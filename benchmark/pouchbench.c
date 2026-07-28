@@ -103,15 +103,23 @@ static void lockdc_bench_cleanup_root(const char *path) {
   (void)rmdir(path);
 }
 
-static int lockdc_bench_open_client(const char *root, lc_client **out,
-                                    lc_error *error) {
+static int lockdc_bench_open_client(const char *root, const char *crypto_key,
+                                    lc_client **out, lc_error *error) {
   lc_client_config config;
   const char *endpoints[1];
-  char endpoint[768];
+  char endpoint[1200];
   int written;
+  int rc;
 
-  written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_single_writer=true", root);
+  if (crypto_key != NULL && crypto_key[0] != '\0') {
+    written =
+        snprintf(endpoint, sizeof(endpoint),
+                 "pouch://%s?pouch_single_writer=true&pouch_crypto_key=%s",
+                 root, crypto_key);
+  } else {
+    written = snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?pouch_single_writer=true", root);
+  }
   if (written <= 0 || (size_t)written >= sizeof(endpoint)) {
     return LC_ERR_INVALID;
   }
@@ -120,7 +128,8 @@ static int lockdc_bench_open_client(const char *root, lc_client **out,
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "bench";
-  return lc_client_open(&config, out, error);
+  rc = lc_client_open(&config, out, error);
+  return rc;
 }
 
 static const char *lockdc_bench_selector_lql(const char *scenario) {
@@ -732,7 +741,7 @@ int lockdc_pouch_bench_fixture_open(long rows, lockdc_pouch_bench_fixture **out,
   }
   snprintf(fixture->root, sizeof(fixture->root), "%s", root_template);
   fixture->rows = rows;
-  rc = lockdc_bench_open_client(fixture->root, &fixture->client, &error);
+  rc = lockdc_bench_open_client(fixture->root, NULL, &fixture->client, &error);
   if (rc == LC_OK) {
     rc = lockdc_bench_seed(fixture->client, rows, &error);
   }
@@ -793,7 +802,7 @@ void lockdc_pouch_bench_fixture_close(lockdc_pouch_bench_fixture *fixture) {
 }
 
 int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
-                                      long payload_bytes,
+                                      long payload_bytes, int crypto_enabled,
                                       lockdc_pouch_bench_result *out) {
   char root_template[] = LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX";
   char root[sizeof(LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX")];
@@ -802,6 +811,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   uint64_t start;
   uint64_t end;
   uint64_t phase_start;
+  char *crypto_key;
   long row;
   long matched_rows;
   long queue_messages;
@@ -822,6 +832,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   matched_rows = 0L;
   client = NULL;
+  crypto_key = NULL;
   root[0] = '\0';
   lc_error_init(&error);
   if (mkdtemp(root_template) == NULL) {
@@ -830,7 +841,13 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   snprintf(root, sizeof(root), "%s", root_template);
   start = lockdc_bench_now_ns();
-  rc = lockdc_bench_open_client(root, &client, &error);
+  if (crypto_enabled != 0) {
+    rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+    if (rc != LC_OK) {
+      goto done;
+    }
+  }
+  rc = lockdc_bench_open_client(root, crypto_key, &client, &error);
   if (rc != LC_OK) {
     goto done;
   }
@@ -991,7 +1008,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   phase_start = lockdc_bench_now_ns();
   lc_client_close(client);
   client = NULL;
-  rc = lockdc_bench_open_client(root, &client, &error);
+  rc = lockdc_bench_open_client(root, crypto_key, &client, &error);
   if (rc != LC_OK) {
     goto done;
   }
@@ -1114,6 +1131,7 @@ done_without_error_message:
   if (client != NULL) {
     lc_client_close(client);
   }
+  lc_pouch_crypto_key_string_free(crypto_key);
   lockdc_bench_cleanup_root(root);
   lc_error_cleanup(&error);
   out->rc = rc;

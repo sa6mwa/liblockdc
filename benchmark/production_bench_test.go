@@ -560,16 +560,25 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 	return metrics
 }
 
-func BenchmarkProductionPouch(b *testing.B) {
+func BenchmarkProductionPouchPT(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
-			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes)
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, false)
 		})
 	}
 }
 
-func BenchmarkProductionLockdDisk(b *testing.B) {
+func BenchmarkProductionPouchCrypto(b *testing.B) {
+	for _, scenario := range productionScenarios() {
+		scenario := scenario
+		b.Run(productionBenchName(scenario), func(b *testing.B) {
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, true)
+		})
+	}
+}
+
+func BenchmarkProductionLockdDiskNoCrypto(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {

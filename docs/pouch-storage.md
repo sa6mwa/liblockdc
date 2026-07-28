@@ -2546,9 +2546,14 @@ suite is intentionally outside the liblockdc release gate: it is a performance
 and stress-test tool for iterative tuning, including short iteration runs and
 larger multi-page datasets that expose cursor, segment, and index behavior.
 The 2026-07-28 production comparison now runs a default matrix instead of a
-single acceptance query: `WideLarge` (128 documents, three updates, 256 KiB
-payloads), `DeepNested` (192 documents, two updates, 192 KiB payloads), and
-`HotChurn` (96 documents, six updates, 128 KiB payloads). Setting
+single acceptance query across three storage variants: `ProductionPouchPT`
+for plaintext pouch, `ProductionPouchCrypto` for pouch with the built-in
+AES-256-GCM provider enabled through `pouch_crypto_key`, and
+`ProductionLockdDiskNoCrypto` for the Go lockd disk server started with
+`--disable-storage-encryption`. The scenarios are `WideLarge` (128 documents,
+three updates, 256 KiB payloads), `DeepNested` (192 documents, two updates,
+192 KiB payloads), and `HotChurn` (96 documents, six updates, 128 KiB
+payloads). Setting
 `POUCH_GO_PRODUCTION_ROWS`, `POUCH_GO_PRODUCTION_UPDATES`, or
 `POUCH_GO_PRODUCTION_PAYLOAD_BYTES` switches the target to one explicit custom
 profile. The generated production documents include nested tenant/workflow,
@@ -2562,7 +2567,7 @@ The pouch document-query benchmark uses the public `lc_sink_to_discard` sink and
 query metadata for row assertions so it does not benchmark an extra
 benchmark-side memory materialization.
 
-The latest focused profile
+The previous focused plaintext profile
 (`POUCH_GO_PRODUCTION_ROWS=128 POUCH_GO_PRODUCTION_UPDATES=3
 POUCH_GO_PRODUCTION_PAYLOAD_BYTES=262144 make benchmark-pouch-go-production`)
 passed functionally, wrote 384 state revisions and about 100 MiB of JSON, and

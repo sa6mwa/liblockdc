@@ -15,3 +15,9 @@ removed `/tmp/liblockdc-lockd-disk-bench-*` directory. The disk side uses the
 exported Go client and full-form LQL expressions. The pouch side measures the
 C query path directly through `selector_lql` and reports C-side query time so
 the cgo bridge is excluded from pouch latency metrics.
+
+`make benchmark-pouch-go-production` runs the production workload for three
+explicit variants by default: `ProductionPouchPT`, `ProductionPouchCrypto`, and
+`ProductionLockdDiskNoCrypto`. Pouch crypto is enabled through the public
+`pouch_crypto_key` endpoint option; the Go lockd disk server is started with
+`--disable-storage-encryption`.

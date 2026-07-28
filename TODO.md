@@ -285,6 +285,9 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     segment sizing intact.
   - [x] Keep Go lockd disk comparisons plaintext by starting the benchmark
     server with Kryptograf storage encryption disabled.
+  - [x] Add the pouch crypto comparison variant to the production benchmark
+    target so it reports plaintext pouch, encrypted pouch, and plaintext Go
+    lockd disk side by side.
   - [ ] Close the remaining production benchmark performance gap: pouch now
     wins wall time and most operation phases, but does not yet beat plaintext Go
     lockd disk on every metric. Current gaps are explicit `flush_index`,
