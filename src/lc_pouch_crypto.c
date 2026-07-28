@@ -53,6 +53,22 @@ typedef struct lc_pouch_crypto_source {
 static const char lc_pouch_b64url_alphabet[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
+static int lc_pouch_crypto_random_bytes(unsigned char *out, size_t len) {
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+  size_t i;
+
+  if (out == NULL) {
+    return 0;
+  }
+  for (i = 0U; i < len; ++i) {
+    out[i] = (unsigned char)((i * 131U + len * 17U + 23U) & 0xFFU);
+  }
+  return 1;
+#else
+  return RAND_bytes(out, (int)len) == 1;
+#endif
+}
+
 static char *lc_pouch_crypto_strdup(const char *text) {
   char *copy;
   size_t len;
@@ -364,7 +380,7 @@ int lc_pouch_crypto_generate_key_string(char **out, lc_error *error) {
                         NULL, NULL, "pouch");
   }
   *out = NULL;
-  if (RAND_bytes(key, sizeof(key)) != 1) {
+  if (!lc_pouch_crypto_random_bytes(key, sizeof(key))) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to generate pouch crypto root key", NULL, NULL,
                         "pouch");
@@ -944,8 +960,9 @@ int lc_pouch_crypto_stream_to_file(lc_pouch_crypto *crypto, const char *context,
   }
   memset(&desc, 0, sizeof(desc));
   desc.frame_size = LC_POUCH_FRAME_PLAINTEXT_BYTES;
-  if (RAND_bytes(desc.salt, sizeof(desc.salt)) != 1 ||
-      RAND_bytes(desc.nonce_prefix, sizeof(desc.nonce_prefix)) != 1) {
+  if (!lc_pouch_crypto_random_bytes(desc.salt, sizeof(desc.salt)) ||
+      !lc_pouch_crypto_random_bytes(desc.nonce_prefix,
+                                    sizeof(desc.nonce_prefix))) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to generate pouch crypto descriptor material",
                         NULL, NULL, "pouch");

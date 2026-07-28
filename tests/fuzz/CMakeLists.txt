@@ -66,3 +66,6 @@ set_tests_properties(lc_fuzz_pouch_lifecycle_smoke PROPERTIES LABELS fuzz)
 
 add_test(NAME lc_fuzz_pouch_lifecycle_damage_smoke COMMAND lc_fuzz_pouch_lifecycle ${LC_FUZZ_BINARY_CORPUS_DIR}/pouch_lifecycle/damage-query-index.bin)
 set_tests_properties(lc_fuzz_pouch_lifecycle_damage_smoke PROPERTIES LABELS fuzz)
+
+add_test(NAME lc_fuzz_pouch_lifecycle_crypto_smoke COMMAND lc_fuzz_pouch_lifecycle ${LC_FUZZ_BINARY_CORPUS_DIR}/pouch_lifecycle/crypto-surface.bin)
+set_tests_properties(lc_fuzz_pouch_lifecycle_crypto_smoke PROPERTIES LABELS fuzz)

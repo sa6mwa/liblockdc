@@ -1980,3 +1980,9 @@ Latest release targets confirmed on 2026-07-23:
     - [x] Wire the pouch LQL-planning and lifecycle fuzz targets into
       `scripts/fuzz.sh` so `make fuzz-smoke` / release fuzzing exercises the
       pouch fuzz corpora instead of only registering CTest smokes.
+    - [x] Extend the pouch lifecycle fuzz target and corpus so each seed runs
+      both plaintext and crypto pouch modes with fuzz-derived JSON,
+      attachment, and queue payload material; fuzz builds use deterministic
+      crypto bytes under `FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION` so AFL
+      calibration stays stable while production builds keep OpenSSL
+      `RAND_bytes`.

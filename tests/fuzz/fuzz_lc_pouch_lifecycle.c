@@ -9,6 +9,13 @@
 #include "lc_pouch.h"
 
 #define FUZZ_POUCH_LIFECYCLE_TMP_PREFIX "/tmp/liblockdc-pouch-lifecycle-fuzz-"
+#define FUZZ_POUCH_CRYPTO_KEY                                                  \
+  "lc-pouch-key-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+typedef struct lifecycle_mode {
+  const char *name;
+  const char *crypto_key;
+} lifecycle_mode;
 
 typedef struct lifecycle_key_count {
   size_t rows;
@@ -55,13 +62,51 @@ static lc_source *lifecycle_source_from_text(const char *text,
   return source;
 }
 
-static int lifecycle_open_client(const char *root, lc_client **out,
-                                 lc_error *error) {
-  char endpoint[512];
+static void lifecycle_material_from_input(const uint8_t *data, size_t size,
+                                          char *out, size_t out_size) {
+  static const char hex[] = "0123456789abcdef";
+  size_t limit;
+  size_t i;
+  char *dst;
+
+  if (out == NULL || out_size == 0U) {
+    return;
+  }
+  if (data == NULL || size <= 2U) {
+    snprintf(out, out_size, "empty");
+    return;
+  }
+  limit = size - 2U;
+  if (limit > (out_size - 1U) / 2U) {
+    limit = (out_size - 1U) / 2U;
+  }
+  dst = out;
+  for (i = 0U; i < limit; ++i) {
+    unsigned char byte;
+
+    byte = data[i + 2U];
+    *dst++ = hex[(byte >> 4) & 0x0FU];
+    *dst++ = hex[byte & 0x0FU];
+  }
+  if (dst == out) {
+    snprintf(out, out_size, "empty");
+  } else {
+    *dst = '\0';
+  }
+}
+
+static int lifecycle_open_client(const char *root, const lifecycle_mode *mode,
+                                 lc_client **out, lc_error *error) {
+  char endpoint[768];
   const char *endpoints[1];
   lc_client_config config;
 
-  (void)snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  if (mode != NULL && mode->crypto_key != NULL) {
+    (void)snprintf(endpoint, sizeof(endpoint), "pouch://%s?pouch_crypto_key=%s",
+                   root, mode->crypto_key);
+  } else {
+    (void)snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  }
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
@@ -72,7 +117,8 @@ static int lifecycle_open_client(const char *root, lc_client **out,
 
 static int lifecycle_put_doc(lc_client *client, const char *namespace_name,
                              const char *key, const char *json,
-                             int attach_object, lc_error *error) {
+                             int attach_object, const char *attachment_body,
+                             lc_error *error) {
   lc_acquire_req acquire_req;
   lc_release_req release_req;
   lc_update_opts update_opts;
@@ -112,7 +158,7 @@ static int lifecycle_put_doc(lc_client *client, const char *namespace_name,
   if (rc == LC_OK && attach_object) {
     attach_req.name = "blob.txt";
     attach_req.content_type = "text/plain";
-    source = lifecycle_source_from_text("object-body", error);
+    source = lifecycle_source_from_text(attachment_body, error);
     if (source == NULL) {
       rc = LC_ERR_NOMEM;
     } else {
@@ -133,7 +179,8 @@ static int lifecycle_put_doc(lc_client *client, const char *namespace_name,
   return rc;
 }
 
-static int lifecycle_enqueue(lc_client *client, lc_error *error) {
+static int lifecycle_enqueue(lc_client *client, const char *payload,
+                             lc_error *error) {
   lc_enqueue_req enqueue_req;
   lc_enqueue_res enqueue_res;
   lc_source *source;
@@ -141,7 +188,7 @@ static int lifecycle_enqueue(lc_client *client, lc_error *error) {
 
   lc_enqueue_req_init(&enqueue_req);
   memset(&enqueue_res, 0, sizeof(enqueue_res));
-  source = lifecycle_source_from_text("queue-body", error);
+  source = lifecycle_source_from_text(payload, error);
   if (source == NULL) {
     return LC_ERR_NOMEM;
   }
@@ -202,6 +249,7 @@ static int lifecycle_query_count(lc_client *client, const char *namespace_name,
 static int lifecycle_run_maintenance(const char *root,
                                      const char *namespace_name, int force,
                                      int cleanup_only, long retention_cutoff,
+                                     const lifecycle_mode *mode,
                                      lc_error *error) {
   lc_pouch *pouch;
   lc_pouch_open_options open_options;
@@ -213,6 +261,9 @@ static int lifecycle_run_maintenance(const char *root,
   memset(&open_options, 0, sizeof(open_options));
   memset(&maintenance_options, 0, sizeof(maintenance_options));
   memset(&maintenance_result, 0, sizeof(maintenance_result));
+  if (mode != NULL) {
+    open_options.crypto_key = mode->crypto_key;
+  }
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
   if (rc == LC_OK) {
     maintenance_options.namespace_name = namespace_name;
@@ -402,40 +453,51 @@ static int lifecycle_verify_retention(lc_client *client, lc_error *error) {
   return rc;
 }
 
-int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+static void lifecycle_run_input(const uint8_t *data, size_t size,
+                                const lifecycle_mode *mode) {
   char root_template[] = "/tmp/liblockdc-pouch-lifecycle-fuzz-XXXXXX";
   char root_path[sizeof(root_template)];
   const char *root;
   const char *stage;
   lc_client *client;
   lc_error error;
+  char material[257];
+  char survivor_json[384];
+  char expired_json[384];
   unsigned int knobs;
   int rc;
 
   if (!lc_test_tmp_mkdtemp(root_template, root_path, sizeof(root_path),
                            FUZZ_POUCH_LIFECYCLE_TMP_PREFIX)) {
-    return 0;
+    return;
   }
   root = root_path;
   stage = "open";
   client = NULL;
   knobs = size == 0U ? 0U : (unsigned int)data[0];
+  lifecycle_material_from_input(data, size, material, sizeof(material));
+  (void)snprintf(survivor_json, sizeof(survivor_json),
+                 "{\"bucket\":\"survivor\",\"value\":1,\"fuzz\":\"%s\"}",
+                 material);
+  (void)snprintf(expired_json, sizeof(expired_json),
+                 "{\"bucket\":\"expired\",\"value\":2,\"fuzz\":\"%s\"}",
+                 material);
   lc_error_init(&error);
 
-  rc = lifecycle_open_client(root, &client, &error);
+  rc = lifecycle_open_client(root, mode, &client, &error);
   if (rc == LC_OK) {
     stage = "put-life";
-    rc = lifecycle_put_doc(client, "life", "state/keep",
-                           "{\"bucket\":\"survivor\",\"value\":1}", 1, &error);
+    rc = lifecycle_put_doc(client, "life", "state/keep", survivor_json, 1,
+                           material, &error);
   }
   if (rc == LC_OK) {
     stage = "put-retention";
-    rc = lifecycle_put_doc(client, "life-retain", "state/dead",
-                           "{\"bucket\":\"expired\",\"value\":2}", 0, &error);
+    rc = lifecycle_put_doc(client, "life-retain", "state/dead", expired_json, 0,
+                           material, &error);
   }
   if (rc == LC_OK) {
     stage = "enqueue";
-    rc = lifecycle_enqueue(client, &error);
+    rc = lifecycle_enqueue(client, material, &error);
   }
   if (rc == LC_OK) {
     stage = "flush-life";
@@ -451,15 +513,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   }
   if (rc == LC_OK) {
     stage = "compact-life";
-    rc = lifecycle_run_maintenance(root, "life", 1, 0, 0L, &error);
+    rc = lifecycle_run_maintenance(root, "life", 1, 0, 0L, mode, &error);
   }
   if (rc == LC_OK && (knobs & 1U) != 0U) {
     stage = "cleanup-life";
-    rc = lifecycle_run_maintenance(root, "life", 0, 1, 0L, &error);
+    rc = lifecycle_run_maintenance(root, "life", 0, 1, 0L, mode, &error);
   }
   if (rc == LC_OK) {
     stage = "retention";
-    rc = lifecycle_run_maintenance(root, "life-retain", 0, 0, 2147483647L,
+    rc = lifecycle_run_maintenance(root, "life-retain", 0, 0, 2147483647L, mode,
                                    &error);
   }
   if (rc == LC_OK) {
@@ -474,7 +536,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   }
   if (rc == LC_OK) {
     stage = "reopen";
-    rc = lifecycle_open_client(root, &client, &error);
+    rc = lifecycle_open_client(root, mode, &client, &error);
   }
   if (rc == LC_OK) {
     stage = "verify-life";
@@ -490,10 +552,25 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   }
   lc_test_tmp_cleanup_path(root, FUZZ_POUCH_LIFECYCLE_TMP_PREFIX);
   if (rc != LC_OK) {
-    (void)fprintf(stderr, "pouch lifecycle fuzz failed at %s: rc=%d %s\n",
+    (void)fprintf(stderr,
+                  "pouch lifecycle fuzz failed in %s mode at %s: rc=%d %s\n",
+                  mode != NULL && mode->name != NULL ? mode->name : "unknown",
                   stage, rc, error.message == NULL ? "" : error.message);
   }
   lc_error_cleanup(&error);
   lifecycle_abort_if(rc != LC_OK);
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+  lifecycle_mode plaintext_mode;
+  lifecycle_mode crypto_mode;
+
+  plaintext_mode.name = "plaintext";
+  plaintext_mode.crypto_key = NULL;
+  crypto_mode.name = "crypto";
+  crypto_mode.crypto_key = FUZZ_POUCH_CRYPTO_KEY;
+
+  lifecycle_run_input(data, size, &plaintext_mode);
+  lifecycle_run_input(data, size, &crypto_mode);
   return 0;
 }

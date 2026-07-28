@@ -2743,6 +2743,14 @@ errors for LQL-shaped selector field projections, durable namespace query
 configuration, index flush, and local single-node transaction-coordinator
 leader, cluster, and resource-manager state.
 
+Current pouch fuzz coverage includes LQL planning parity and lifecycle
+cross-surface fuzzing. The lifecycle corpus exercises state records,
+attachments, queue payloads, index flush/query paths, maintenance, retention,
+close/reopen, and damage recovery in both plaintext and crypto configurations.
+Fuzz builds replace crypto randomness with deterministic bytes under
+`FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION` so AFL calibration remains stable;
+production builds still use OpenSSL `RAND_bytes`.
+
 Current pouch unit coverage includes queue nack and extend allocator-failure
 paths, TTL expiry, retry-exhaustion replay paths that prove failed
 redelivery-control mutations leave the active lease ackable and terminal queue
