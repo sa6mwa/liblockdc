@@ -87,6 +87,36 @@ func runPouchFixtureC(b *testing.B, fixture *pouchFixture, engine, scenario stri
 	}
 }
 
+func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes int64) {
+	var totalCNS uint64
+	var result C.lockdc_pouch_bench_result
+
+	for i := 0; i < b.N; i++ {
+		result = C.lockdc_pouch_bench_result{}
+		rc := C.lockdc_pouch_bench_production_run(
+			C.long(rows),
+			C.long(updatesPerKey),
+			C.long(payloadBytes),
+			&result,
+		)
+		if rc != 0 {
+			b.Fatalf("pouch production benchmark failed: rc=%d rows=%d updates=%d payload=%d error=%q", int(rc), rows, updatesPerKey, payloadBytes, C.GoString(&result.error[0]))
+		}
+		totalCNS += uint64(result.c_ns)
+	}
+	if b.N > 0 {
+		b.ReportMetric(float64(totalCNS)/float64(b.N), "c-ns/op")
+	}
+	b.ReportMetric(float64(result.rows), "rows/op")
+	b.ReportMetric(float64(result.writes), "writes/op")
+	b.ReportMetric(float64(result.reads), "reads/op")
+	b.ReportMetric(float64(result.attachments), "attachments/op")
+	b.ReportMetric(float64(result.queue_messages), "queue-msgs/op")
+	b.ReportMetric(float64(result.stale_failures), "stale-failures/op")
+	b.ReportMetric(float64(result.segments), "segments/op")
+	b.ReportMetric(float64(result.bytes), "bytes/op")
+}
+
 func boolToInt(value bool) int {
 	if value {
 		return 1

@@ -2496,44 +2496,37 @@ Benchmarks are required alongside implementation. Initial benchmark targets:
 - NFS-like mode with marker polling and advisory locks enabled
 - allocator counts, peak bytes, pool hit ratio, and allocation failures
 
-Current native benchmark coverage in `bench/lockdc_bench` includes pouch
-state roundtrip, explicit state payload write/read sizes at 1 KiB, 64 KiB,
-1 MiB, and 16 MiB, staged promotion, public mutate throughput, attachment
-put/get, enqueue/dequeue/ack, transactional queue ack rollback/redelivery, and
-transactional queue ack commit/removal, hot-key compaction churn, metadata
-summary scans, open/replay index rebuild,
-direct indexed summary scans, direct key-only indexed scans, public indexed
-document query streaming, public scan-mode document query streaming, public
-indexed key streaming, public scan-mode key streaming, exact-key indexed
-summary/key scans, exact-key public document and key queries in both scan and
-indexed modes, exact-owner and key+owner indexed summary/key scans, exact-owner
-and key+owner public document and key queries in both scan and indexed modes,
-owner document and key queries with removed-state candidates filtered out in
-both scan and indexed modes, low-match strict JSON Pointer LQL field selectors
-over public document and key query paths in both scan and indexed modes, and
-retention sweep throughput over metadata/state rows. The
-native harness also includes a hot-key contention case that repeatedly contends
-two store handles on one key and verifies that lock-contention diagnostics
-advance under that workload.
-The same executable exposes opt-in live Go lockd disk comparison cases for
-low-match strict JSON Pointer field selectors:
-`lockd-disk-query-field-low-match` and
-`lockd-disk-query-keys-field-low-match`. They use
-`LOCKDC_BENCH_DISK_ENDPOINT` / `LOCKDC_BENCH_DISK_BUNDLE`, falling back to the
-disk e2e endpoint and bundle defaults, and are excluded from `all` unless
-`LOCKDC_BENCH_LIVE=1` is set. This keeps default benchmark runs local while
-making pouch-versus-Go disk query comparisons reproducible against the same
-public client surface.
+Current native benchmark coverage in `bench/lockdc_bench` includes local
+stream-copy overhead, pouch open/namespace setup, and public pouch query
+coverage over scan and index modes for key and document result paths. Query
+selectors cover sparse/dense equality, numeric ranges, scalar and array `in`,
+message contains, date residual filters, root `or`, case-insensitive prefix and
+contains, and recursive presence. The retired rich storage-operation benchmark
+matrix from the old pouch implementation is not live in `bench/lockdc_bench`;
+it remains reference material under `deprecated/pouch-legacy/`.
 The separate Go module under `benchmark/` is the broader pouch-versus-Go disk
 comparison suite. It starts the current `pkt.systems/lockd` disk backend,
-exercises equivalent public LQL scenarios against that server and an actual
-liblockdc pouch instance, and reports matched documents, page counts, stream
-bytes, first-page and later-page latency, pouch query candidate metadata, and
-C-side pouch timings. This suite is
-intentionally outside the
-liblockdc release gate: it is a performance and stress-test tool for iterative
-tuning, including short iteration runs and larger multi-page datasets that expose
-cursor, segment, and index behavior.
+with `--disable-storage-encryption` so Kryptograf encryption is off by default
+for disk comparisons, exercises equivalent public LQL scenarios against that
+server and an actual liblockdc pouch instance, and reports matched documents,
+page counts, stream bytes, first-page and later-page latency, pouch query
+candidate metadata, and C-side pouch timings. `make benchmark-pouch-go-production`
+adds the production-like storage workload: acquire/update/release state writes,
+repeated updates over large JSON payloads, expected stale-Etag update failures,
+attachment put/get, queue enqueue/dequeue/ack, close/reopen replay, index flush,
+indexed query, representative public reads, and a hard check that pouch produced
+multiple segment files with the default 64 MiB segment target still intact. This
+suite is intentionally outside the liblockdc release gate: it is a performance
+and stress-test tool for iterative tuning, including short iteration runs and
+larger multi-page datasets that expose cursor, segment, and index behavior.
+The 2026-07-28 default production comparison
+(`make benchmark-pouch-go-production`) wrote 384 state revisions and about
+100 MiB of JSON, produced three pouch segments, and passed functionally. It also
+showed the current write-heavy performance gap: pouch measured about 9.23 s
+C-side / 9.17 s Go-wall, while plaintext Go lockd disk measured about 3.73 s on
+the same public workload. That benchmark is now the evidence gate for closing
+the remaining storage-engine performance gap; implementations must not disable
+pouch durability or lower the segment target just to satisfy it.
 The 4096-document tuning run found a numeric range regression: primary range
 candidate collection was revalidating the same positive range term for each
 candidate key, producing a quadratic first-page cost. The active range reader

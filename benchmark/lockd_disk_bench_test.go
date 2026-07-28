@@ -143,6 +143,7 @@ func startLockdDiskHarness(tb testing.TB) *lockdDiskHarness {
 		"--store", "disk://"+dataRoot,
 		"--listen", addr,
 		"--disable-mtls",
+		"--disable-storage-encryption",
 		"--log-level", "error",
 		"--default-namespace", lockdDiskBenchNamespace,
 		"--qrf-disabled",

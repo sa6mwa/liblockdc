@@ -6,6 +6,13 @@
 typedef struct lockdc_pouch_bench_result {
   int rc;
   long rows;
+  long writes;
+  long reads;
+  long attachments;
+  long queue_messages;
+  long stale_failures;
+  long segments;
+  long bytes;
   uint64_t c_ns;
   char error[256];
 } lockdc_pouch_bench_result;
@@ -22,5 +29,9 @@ void lockdc_pouch_bench_fixture_close(lockdc_pouch_bench_fixture *fixture);
 
 int lockdc_pouch_bench_run(const char *scenario, long rows, const char *engine,
                            int documents, lockdc_pouch_bench_result *out);
+
+int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
+                                      long payload_bytes,
+                                      lockdc_pouch_bench_result *out);
 
 #endif

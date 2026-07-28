@@ -224,6 +224,278 @@ static int lockdc_bench_flush(lc_client *client, lc_error *error) {
   return rc;
 }
 
+static char *lockdc_bench_copy_string(const char *value) {
+  char *copy;
+  size_t len;
+
+  if (value == NULL) {
+    return NULL;
+  }
+  len = strlen(value);
+  copy = (char *)malloc(len + 1U);
+  if (copy == NULL) {
+    return NULL;
+  }
+  memcpy(copy, value, len + 1U);
+  return copy;
+}
+
+static char *lockdc_bench_document(long row, long generation,
+                                   long payload_bytes, size_t *out_len) {
+  const char *bucket;
+  const char *group;
+  const char *region;
+  const char *tag0;
+  const char *tag1;
+  const char *created_at;
+  const char *message;
+  const char *flag;
+  char prefix[512];
+  size_t target;
+  size_t prefix_len;
+  size_t pad_len;
+  char *json;
+  int written;
+
+  target = payload_bytes > 0L ? (size_t)payload_bytes : 1024U;
+  bucket = (row % 64L) == 0L ? "needle" : "haystack";
+  group = (row % 2L) == 0L ? "even" : "odd";
+  region = (row % 3L) == 0L ? "us" : (row % 3L) == 1L ? "eu" : "apac";
+  tag0 = (row % 2L) == 0L ? "planning" : "runtime";
+  tag1 = (row % 4L) == 0L ? "finance" : "ops";
+  created_at = (row % 5L) == 0L   ? "2026-01-01T00:00:00Z"
+               : (row % 5L) == 1L ? "not-a-date"
+                                  : "2024-01-01T00:00:00Z";
+  message = (row % 8L) == 0L ? "timeout" : "ordinary";
+  flag = (row % 7L) == 0L ? "true" : "false";
+  written =
+      snprintf(prefix, sizeof(prefix),
+               "{\"bucket\":\"%s\",\"group\":\"%s\",\"region\":\"%s\","
+               "\"value\":%ld,\"generation\":%ld,\"tags\":[\"%s\",\"%s\"],"
+               "\"created_at\":\"%s\",\"details\":{\"message\":\"%s production "
+               "benchmark document %ld\"},\"flag\":%s,\"pad\":\"",
+               bucket, group, region, row, generation, tag0, tag1, created_at,
+               message, row, flag);
+  if (written <= 0 || (size_t)written >= sizeof(prefix)) {
+    return NULL;
+  }
+  prefix_len = (size_t)written;
+  pad_len = target > prefix_len + 2U ? target - prefix_len - 2U : 32U;
+  json = (char *)malloc(prefix_len + pad_len + 3U);
+  if (json == NULL) {
+    return NULL;
+  }
+  memcpy(json, prefix, prefix_len);
+  memset(json + prefix_len, (int)('a' + (row % 26L)), pad_len);
+  json[prefix_len + pad_len] = '"';
+  json[prefix_len + pad_len + 1U] = '}';
+  json[prefix_len + pad_len + 2U] = '\0';
+  if (out_len != NULL) {
+    *out_len = prefix_len + pad_len + 2U;
+  }
+  return json;
+}
+
+static int lockdc_bench_update_lease(lc_lease *lease, const char *json,
+                                     size_t json_len, const char *if_etag,
+                                     lc_error *error) {
+  lc_update_opts opts;
+  lc_source *source;
+  int rc;
+
+  source = NULL;
+  rc = lc_source_from_memory(json, json_len, &source, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  lc_update_opts_init(&opts);
+  opts.content_type = "application/json";
+  opts.if_state_etag = if_etag;
+  rc = lease->update(lease, source, &opts, error);
+  lc_source_close(source);
+  return rc;
+}
+
+static int lockdc_bench_read_key(lc_client *client, const char *key,
+                                 lc_error *error) {
+  lc_get_opts opts;
+  lc_get_res res;
+  lc_sink *sink;
+  int rc;
+
+  memset(&opts, 0, sizeof(opts));
+  memset(&res, 0, sizeof(res));
+  opts.public_read = 1;
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, error);
+  if (rc == LC_OK) {
+    rc = client->get(client, key, &opts, sink, &res, error);
+  }
+  if (sink != NULL) {
+    lc_sink_close(sink);
+  }
+  lc_get_res_cleanup(&res);
+  return rc;
+}
+
+static int lockdc_bench_attach_and_read(lc_lease *lease, long row,
+                                        lc_error *error) {
+  char payload[4096];
+  char name[64];
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_get_req get_req;
+  lc_attachment_get_res get_res;
+  lc_source *source;
+  lc_sink *sink;
+  int rc;
+
+  memset(payload, (int)('A' + (row % 26L)), sizeof(payload));
+  snprintf(name, sizeof(name), "blob-%08ld.bin", row);
+  lc_attach_req_init(&attach_req);
+  memset(&attach_res, 0, sizeof(attach_res));
+  attach_req.name = name;
+  attach_req.content_type = "application/octet-stream";
+  source = NULL;
+  rc = lc_source_from_memory(payload, sizeof(payload), &source, error);
+  if (rc == LC_OK) {
+    rc = lease->attach(lease, &attach_req, source, &attach_res, error);
+  }
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  lc_attach_res_cleanup(&attach_res);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  lc_attachment_get_req_init(&get_req);
+  memset(&get_res, 0, sizeof(get_res));
+  get_req.selector.name = name;
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, error);
+  if (rc == LC_OK) {
+    rc = lease->get_attachment(lease, &get_req, sink, &get_res, error);
+  }
+  if (sink != NULL) {
+    lc_sink_close(sink);
+  }
+  lc_attachment_get_res_cleanup(&get_res);
+  return rc;
+}
+
+static int lockdc_bench_queue_roundtrip(lc_client *client, long messages,
+                                        lockdc_pouch_bench_result *out,
+                                        lc_error *error) {
+  long i;
+
+  for (i = 0; i < messages; ++i) {
+    char payload[128];
+    lc_enqueue_req enqueue_req;
+    lc_enqueue_res enqueue_res;
+    lc_source *source;
+    int rc;
+    int written;
+
+    written = snprintf(payload, sizeof(payload),
+                       "{\"message\":%ld,\"kind\":\"production\"}", i);
+    if (written <= 0 || (size_t)written >= sizeof(payload)) {
+      return LC_ERR_INVALID;
+    }
+    lc_enqueue_req_init(&enqueue_req);
+    memset(&enqueue_res, 0, sizeof(enqueue_res));
+    enqueue_req.namespace_name = "bench";
+    enqueue_req.queue = "production";
+    enqueue_req.visibility_timeout_seconds = 30L;
+    enqueue_req.ttl_seconds = 3600L;
+    enqueue_req.max_attempts = 3;
+    enqueue_req.content_type = "application/json";
+    source = NULL;
+    rc = lc_source_from_memory(payload, strlen(payload), &source, error);
+    if (rc == LC_OK) {
+      rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, error);
+    }
+    if (source != NULL) {
+      lc_source_close(source);
+    }
+    lc_enqueue_res_cleanup(&enqueue_res);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    out->queue_messages++;
+  }
+
+  for (;;) {
+    lc_dequeue_req dequeue_req;
+    lc_dequeue_batch_res batch;
+    size_t index;
+    int rc;
+
+    lc_dequeue_req_init(&dequeue_req);
+    memset(&batch, 0, sizeof(batch));
+    dequeue_req.namespace_name = "bench";
+    dequeue_req.queue = "production";
+    dequeue_req.owner = "pouch-production-bench";
+    dequeue_req.visibility_timeout_seconds = 30L;
+    dequeue_req.wait_seconds = -1L;
+    dequeue_req.page_size = 16;
+    rc = client->dequeue_batch(client, &dequeue_req, &batch, error);
+    if (rc != LC_OK) {
+      lc_dequeue_batch_cleanup(&batch);
+      return rc;
+    }
+    if (batch.count == 0U) {
+      lc_dequeue_batch_cleanup(&batch);
+      break;
+    }
+    for (index = 0U; index < batch.count; ++index) {
+      if (batch.messages[index] != NULL &&
+          batch.messages[index]->ack(batch.messages[index], error) != LC_OK) {
+        lc_dequeue_batch_cleanup(&batch);
+        return error != NULL && error->code != LC_OK ? error->code
+                                                     : LC_ERR_INVALID;
+      }
+      batch.messages[index] = NULL;
+    }
+    lc_dequeue_batch_cleanup(&batch);
+  }
+  return LC_OK;
+}
+
+static long lockdc_bench_count_segments_in(const char *path) {
+  DIR *dir;
+  struct dirent *entry;
+  long count;
+
+  dir = opendir(path);
+  if (dir == NULL) {
+    return 0L;
+  }
+  count = 0L;
+  while ((entry = readdir(dir)) != NULL) {
+    char child[1024];
+    struct stat st;
+    int written;
+
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    if (strncmp(entry->d_name, "seg-", 4U) == 0 &&
+        strstr(entry->d_name, ".log") != NULL) {
+      ++count;
+    }
+    written = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+    if (written <= 0 || (size_t)written >= sizeof(child)) {
+      continue;
+    }
+    if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+      count += lockdc_bench_count_segments_in(child);
+    }
+  }
+  (void)closedir(dir);
+  return count;
+}
+
 static int lockdc_bench_query(lc_client *client, const char *scenario,
                               const char *engine, int documents, long limit,
                               long *rows, lc_error *error) {
@@ -363,6 +635,206 @@ void lockdc_pouch_bench_fixture_close(lockdc_pouch_bench_fixture *fixture) {
   }
   lockdc_bench_cleanup_root(fixture->root);
   free(fixture);
+}
+
+int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
+                                      long payload_bytes,
+                                      lockdc_pouch_bench_result *out) {
+  char root_template[] = LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX";
+  char root[sizeof(LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX")];
+  lc_client *client;
+  lc_error error;
+  uint64_t start;
+  uint64_t end;
+  long row;
+  long queue_messages;
+  int rc;
+
+  if (out == NULL) {
+    return LC_ERR_INVALID;
+  }
+  memset(out, 0, sizeof(*out));
+  if (rows <= 0L) {
+    rows = 128L;
+  }
+  if (updates_per_key <= 0L) {
+    updates_per_key = 3L;
+  }
+  if (payload_bytes <= 0L) {
+    payload_bytes = 256L * 1024L;
+  }
+  client = NULL;
+  root[0] = '\0';
+  lc_error_init(&error);
+  if (mkdtemp(root_template) == NULL) {
+    out->rc = errno;
+    return out->rc;
+  }
+  snprintf(root, sizeof(root), "%s", root_template);
+  start = lockdc_bench_now_ns();
+  rc = lockdc_bench_open_client(root, &client, &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+
+  for (row = 0L; row < rows; ++row) {
+    lc_acquire_req acquire_req;
+    lc_release_req release_req;
+    lc_lease *lease;
+    char key[64];
+    char *stale_etag;
+    long generation;
+
+    snprintf(key, sizeof(key), "doc/%08ld", row);
+    lc_acquire_req_init(&acquire_req);
+    acquire_req.namespace_name = "bench";
+    acquire_req.key = key;
+    acquire_req.owner = "pouch-production-bench";
+    acquire_req.ttl_seconds = 120L;
+    lease = NULL;
+    rc = client->acquire(client, &acquire_req, &lease, &error);
+    if (rc != LC_OK) {
+      goto done;
+    }
+    stale_etag = NULL;
+    for (generation = 0L; generation < updates_per_key; ++generation) {
+      char *json;
+      size_t json_len;
+
+      json = lockdc_bench_document(row, generation, payload_bytes, &json_len);
+      if (json == NULL) {
+        rc = LC_ERR_NOMEM;
+        lease->close(lease);
+        goto done;
+      }
+      rc = lockdc_bench_update_lease(lease, json, json_len, NULL, &error);
+      free(json);
+      if (rc != LC_OK) {
+        lease->close(lease);
+        goto done;
+      }
+      out->writes++;
+      out->bytes += (long)json_len;
+      if (row == 0L && generation == 0L && lease->state_etag != NULL) {
+        stale_etag = lockdc_bench_copy_string(lease->state_etag);
+        if (stale_etag == NULL) {
+          rc = LC_ERR_NOMEM;
+          lease->close(lease);
+          goto done;
+        }
+      }
+    }
+    if (row == 0L && stale_etag != NULL) {
+      lc_error stale_error;
+      char *json;
+      size_t json_len;
+
+      lc_error_init(&stale_error);
+      json = lockdc_bench_document(row, updates_per_key + 1L, payload_bytes,
+                                   &json_len);
+      if (json == NULL) {
+        free(stale_etag);
+        rc = LC_ERR_NOMEM;
+        lease->close(lease);
+        lc_error_cleanup(&stale_error);
+        goto done;
+      }
+      rc = lockdc_bench_update_lease(lease, json, json_len, stale_etag,
+                                     &stale_error);
+      free(json);
+      if (rc == LC_OK) {
+        free(stale_etag);
+        rc = LC_ERR_INVALID;
+        lease->close(lease);
+        lc_error_cleanup(&stale_error);
+        goto done;
+      }
+      out->stale_failures++;
+      rc = LC_OK;
+      lc_error_cleanup(&stale_error);
+    }
+    free(stale_etag);
+    if ((row % 16L) == 0L) {
+      rc = lockdc_bench_attach_and_read(lease, row, &error);
+      if (rc != LC_OK) {
+        lease->close(lease);
+        goto done;
+      }
+      out->attachments++;
+      out->reads++;
+    }
+    lc_release_req_init(&release_req);
+    rc = lease->release(lease, &release_req, &error);
+    if (rc != LC_OK) {
+      lease->close(lease);
+      goto done;
+    }
+  }
+
+  queue_messages = rows / 8L;
+  if (queue_messages <= 0L) {
+    queue_messages = 1L;
+  }
+  rc = lockdc_bench_queue_roundtrip(client, queue_messages, out, &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  rc = lockdc_bench_flush(client, &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  lc_client_close(client);
+  client = NULL;
+  rc = lockdc_bench_open_client(root, &client, &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  rc = lockdc_bench_flush(client, &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  rc = lockdc_bench_query(client, "RangeHalf", "index", 0, rows, &out->rows,
+                          &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  for (row = 0L; row < rows; row += rows > 8L ? rows / 8L : 1L) {
+    char key[64];
+
+    snprintf(key, sizeof(key), "doc/%08ld", row);
+    rc = lockdc_bench_read_key(client, key, &error);
+    if (rc != LC_OK) {
+      goto done;
+    }
+    out->reads++;
+    if (row == rows - 1L) {
+      break;
+    }
+  }
+  out->segments = lockdc_bench_count_segments_in(root);
+  if (out->segments <= 1L) {
+    rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error),
+             "production pouch benchmark produced %ld segment(s), expected "
+             "multiple segments with default segment target",
+             out->segments);
+    goto done_without_error_message;
+  }
+
+done:
+  if (rc != LC_OK) {
+    lockdc_bench_result_set_error(out, &error);
+  }
+done_without_error_message:
+  end = lockdc_bench_now_ns();
+  if (client != NULL) {
+    lc_client_close(client);
+  }
+  lockdc_bench_cleanup_root(root);
+  lc_error_cleanup(&error);
+  out->rc = rc;
+  out->c_ns = end >= start ? end - start : 0U;
+  return rc;
 }
 
 int lockdc_pouch_bench_run(const char *scenario, long rows, const char *engine,

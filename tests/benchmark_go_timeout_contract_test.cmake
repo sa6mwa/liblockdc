@@ -9,7 +9,10 @@ foreach(snippet
         "timeout --kill-after=5s '$(POUCH_GO_TEST_TIMEOUT)'"
         "$(GO) test -run '^$$' -bench '$(POUCH_GO_BENCH)'"
         "-timeout '$(POUCH_GO_TEST_TIMEOUT)'"
-        "POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_ACCEPTANCE_TIMEOUT)'")
+        "POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_ACCEPTANCE_TIMEOUT)'"
+        "benchmark-pouch-go-production:"
+        "POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_PRODUCTION_TIMEOUT)'"
+        "LOCKDC_BENCH_PRODUCTION_PAYLOAD_BYTES='$(POUCH_GO_PRODUCTION_PAYLOAD_BYTES)'")
     string(FIND "${root_makefile}" "${snippet}" snippet_index)
     if(snippet_index EQUAL -1)
         message(FATAL_ERROR "Makefile is missing Go benchmark timeout contract snippet: ${snippet}")

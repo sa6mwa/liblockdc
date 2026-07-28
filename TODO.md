@@ -1890,6 +1890,29 @@ Latest release targets confirmed on 2026-07-23:
       `IcontainsTags`, while Go lockd disk reported about 0.66 ms and
       0.63 ms respectively, so text postings still need a more compact
       reader/storage path.
+    - [x] Add `make benchmark-pouch-go-production`, a production-like
+      segmented storage workload that compares actual `pouch://` against a
+      real plaintext Go lockd disk server. The workload uses the real default
+      pouch segment target: it writes enough state payload volume to produce
+      multiple segments without a test-only segment-size override, performs
+      acquire/update/release lifecycles, repeated state revisions, expected
+      stale-Etag update failures, attachment put/get, queue enqueue/dequeue/ack,
+      close/reopen replay, index flush, indexed query, and representative
+      public reads. The lockd disk benchmark command now passes
+      `--disable-storage-encryption`, so Kryptograf encryption is off by
+      default for disk comparisons. Verified on 2026-07-28:
+      `make benchmark-pouch-go-production` completed in 21s; pouch wrote
+      384 revisions / about 100 MiB, produced three default-size pouch
+      segments, and passed the functional production workload. Current
+      performance evidence is not acceptable yet: pouch measured about
+      9.23 s wall / 9.17 s C-side versus plaintext Go lockd disk at about
+      3.73 s for the same workload.
+    - [ ] Close the production storage benchmark performance gap without
+      weakening durability, lowering the default pouch segment target, or
+      reintroducing disk/backend terminology into pouch. The current failing
+      evidence gate is `make benchmark-pouch-go-production`; pouch must beat
+      plaintext Go lockd disk on the production workload metrics before this
+      item can be marked complete.
   - [x] Keep pouch timing on the C side and report C-measured operation time
     through Go benchmarks so cgo bridge overhead is excluded.
     Verified on 2026-07-26 with the focused 4096-doc indexed key `InTags`
