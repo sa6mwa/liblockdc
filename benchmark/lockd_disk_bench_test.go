@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -100,8 +101,9 @@ func lockdBenchDocument(i int64) []byte {
 }
 
 type lockdDiskHarness struct {
-	client *lockdclient.Client
-	logs   *bytes.Buffer
+	client   *lockdclient.Client
+	logs     *bytes.Buffer
+	dataRoot string
 }
 
 func startLockdDiskHarness(tb testing.TB) *lockdDiskHarness {
@@ -193,12 +195,42 @@ func startLockdDiskHarness(tb testing.TB) *lockdDiskHarness {
 				cancel()
 				tb.Fatalf("configure lockd disk benchmark namespace query engines: %v\n%s", err, logs.String())
 			}
-			return &lockdDiskHarness{client: cli, logs: logs}
+			return &lockdDiskHarness{client: cli, logs: logs, dataRoot: dataRoot}
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	tb.Fatalf("lockd disk benchmark server did not become ready: %v\n%s", lastErr, logs.String())
 	return nil
+}
+
+func countLockdDiskLogstoreSegments(tb testing.TB, h *lockdDiskHarness) int64 {
+	tb.Helper()
+
+	var count int64
+	err := filepath.WalkDir(h.dataRoot, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if filepath.Base(filepath.Dir(path)) != "segments" ||
+			filepath.Base(filepath.Dir(filepath.Dir(path))) != "logstore" {
+			return nil
+		}
+		matched, err := filepath.Match("seg-*.log", filepath.Base(path))
+		if err != nil {
+			return err
+		}
+		if matched {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		tb.Fatalf("count lockd disk logstore segments: %v\n%s", err, h.logs.String())
+	}
+	return count
 }
 
 func seedLockdDisk(tb testing.TB, h *lockdDiskHarness, rows int64) {

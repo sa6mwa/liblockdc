@@ -13,6 +13,10 @@ import (
 	lockdclient "pkt.systems/lockd/client"
 )
 
+// Mirrors pkt.systems/lockd v0.9.0 DefaultLogstoreSegmentSize without importing
+// the full server package into this focused benchmark module.
+const lockdDiskDefaultLogstoreSegmentSize = int64(64 << 20)
+
 func productionRows() int64 {
 	return envInt64("LOCKDC_BENCH_PRODUCTION_ROWS", 128)
 }
@@ -132,6 +136,8 @@ type productionMetrics struct {
 	attachments   int64
 	queueMessages int64
 	staleFailures int64
+	segments      int64
+	segmentBytes  int64
 	bytes         int64
 }
 
@@ -293,6 +299,15 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 		}
 		row += step
 	}
+	metrics.segments = countLockdDiskLogstoreSegments(b, h)
+	metrics.segmentBytes = lockdDiskDefaultLogstoreSegmentSize
+	if metrics.segments <= 1 {
+		b.Fatalf(
+			"lockd disk production benchmark produced %d logstore segment(s), want >1 with default %d-byte segment target",
+			metrics.segments,
+			metrics.segmentBytes,
+		)
+	}
 	return metrics
 }
 
@@ -320,6 +335,8 @@ func BenchmarkProductionLockdDisk(b *testing.B) {
 		b.ReportMetric(float64(metrics.attachments), "attachments/op")
 		b.ReportMetric(float64(metrics.queueMessages), "queue-msgs/op")
 		b.ReportMetric(float64(metrics.staleFailures), "stale-failures/op")
+		b.ReportMetric(float64(metrics.segments), "segments/op")
+		b.ReportMetric(float64(metrics.segmentBytes), "segment-target-bytes/op")
 		b.ReportMetric(float64(metrics.bytes), "bytes/op")
 	})
 }
