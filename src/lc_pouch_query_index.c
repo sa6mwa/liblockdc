@@ -4085,6 +4085,14 @@ static int lc_pouch_query_index_read_header(
   if (source != NULL) {
     source->close(source);
   }
+  if (rc != LC_OK && rc != LC_ERR_NOMEM) {
+    if (error != NULL) {
+      lc_error_cleanup(error);
+    }
+    memset(out, 0, sizeof(*out));
+    out->present = present;
+    return LC_OK;
+  }
   return rc;
 }
 

@@ -6698,6 +6698,94 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_pouch_crypto_repairs_damaged_query_index(void **state) {
+  lc_client *client;
+  lc_update_res update_res;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture capture;
+  lc_error error;
+  char *crypto_key;
+  char *namespace_path;
+  char sidecar_path[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  crypto_key = NULL;
+  namespace_path = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  lc_error_init(&error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  make_root("crypto-query-index-repair", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  open_pouch_client_crypto(root, crypto_key, &client, &error);
+  write_client_state(client, "crypto/repair",
+                     "{\"secret\":\"state-secret-redaction-required\"}", NULL,
+                     0L, 0, &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(flush_res.flushed);
+  lc_index_flush_res_cleanup(&flush_res);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "default");
+  assert_non_null(namespace_path);
+  snprintf(sidecar_path, sizeof(sidecar_path), "%s/index/query.index",
+           namespace_path);
+  write_text_file(sidecar_path, "not-an-encrypted-query-index\n");
+
+  flush_req.mode = "sync";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(flush_res.flush_id, "pouch-query-index-repair");
+  assert_true(flush_res.flushed);
+  lc_index_flush_res_cleanup(&flush_res);
+  assert_encrypted_query_index_artifact(
+      namespace_path, "query.index", "state-secret-redaction-required");
+
+  query_req.engine = "index";
+  query_req.selector_json =
+      "{\"eq\":{\"field\":\"/secret\",\"value\":\"state-secret-redaction-"
+      "required\"}}";
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_true(pouch_query_capture_has(&capture, "crypto/repair"));
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  assert_false(bytes_contain_text(query_res.metadata_json,
+                                  strlen(query_res.metadata_json),
+                                  "\"engine\":\"scan\""));
+
+  lc_query_res_cleanup(&query_res);
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_pouch_crypto_mode_is_root_invariant(void **state) {
   lc_pouch *pouch;
   lc_pouch_open_options options;
@@ -13654,6 +13742,7 @@ int main(void) {
           test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout),
       cmocka_unit_test(test_client_queue_large_payload_stats_dequeue_and_ack),
       cmocka_unit_test(test_pouch_crypto_encrypts_public_api_payloads_at_rest),
+      cmocka_unit_test(test_pouch_crypto_repairs_damaged_query_index),
       cmocka_unit_test(
           test_pouch_crypto_endpoint_key_is_not_retained_in_endpoint_copy),
       cmocka_unit_test(test_pouch_crypto_rejects_byte_counter_overflow),
