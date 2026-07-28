@@ -51,5 +51,10 @@ int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,
                                        const char *namespace_name,
                                        lc_pouch_state_precondition_fn callback,
                                        void *context, lc_error *error);
+int lc_pouch_state_read_metadata_locked(lc_pouch *pouch,
+                                        const char *namespace_name,
+                                        const char *key,
+                                        lc_pouch_state_read_result *out,
+                                        lc_error *error);
 
 #endif

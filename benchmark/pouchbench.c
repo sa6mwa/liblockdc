@@ -905,8 +905,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
           lease->close(lease);
           goto done;
         }
-        lockdc_bench_add_ns(&out->update_ns, phase_start,
-                            lockdc_bench_now_ns());
+        lockdc_bench_add_ns(&out->flush_ns, phase_start, lockdc_bench_now_ns());
       }
       if (row == 0L && generation == 0L && lease->state_etag != NULL) {
         stale_etag = lockdc_bench_copy_string(lease->state_etag);
@@ -996,11 +995,13 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   if (rc != LC_OK) {
     goto done;
   }
+  lockdc_bench_add_ns(&out->queue_ns, phase_start, lockdc_bench_now_ns());
+  phase_start = lockdc_bench_now_ns();
   rc = lockdc_bench_flush(client, &error);
   if (rc != LC_OK) {
     goto done;
   }
-  lockdc_bench_add_ns(&out->queue_ns, phase_start, lockdc_bench_now_ns());
+  lockdc_bench_add_ns(&out->flush_ns, phase_start, lockdc_bench_now_ns());
   phase_start = lockdc_bench_now_ns();
   rc = lockdc_bench_flush(client, &error);
   if (rc != LC_OK) {

@@ -597,11 +597,23 @@ func BenchmarkProductionLockdDiskNoCrypto(b *testing.B) {
 			b.ReportMetric(float64(metrics.bytes), "bytes/op")
 
 			b.ReportMetric(float64(metrics.acquireNS), "acquire-ns/op")
+			if metrics.rows > 0 {
+				b.ReportMetric(float64(metrics.acquireNS)/float64(metrics.rows), "acquire-one-ns/op")
+			}
 			b.ReportMetric(float64(metrics.updateNS), "update-ns/op")
+			if metrics.writes > 0 {
+				b.ReportMetric(float64(metrics.updateNS)/float64(metrics.writes), "update-one-ns/op")
+			}
 			b.ReportMetric(float64(metrics.releaseNS), "release-ns/op")
+			if metrics.rows > 0 {
+				b.ReportMetric(float64(metrics.releaseNS)/float64(metrics.rows), "release-one-ns/op")
+			}
 			b.ReportMetric(float64(metrics.staleNS), "stale-ns/op")
 			b.ReportMetric(float64(metrics.attachmentNS), "attachment-ns/op")
 			b.ReportMetric(float64(metrics.queueNS), "queue-ns/op")
+			if metrics.queueMessages > 0 {
+				b.ReportMetric(float64(metrics.queueNS)/float64(metrics.queueMessages), "queue-one-ns/op")
+			}
 			b.ReportMetric(float64(metrics.flushNS), "flush-ns/op")
 			b.ReportMetric(float64(metrics.reopenNS), "reopen-ns/op")
 			b.ReportMetric(float64(metrics.getPublicNS), "get-public-ns/op")

@@ -117,11 +117,23 @@ func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes int64, 
 	b.ReportMetric(float64(result.segments), "segments/op")
 	b.ReportMetric(float64(result.bytes), "bytes/op")
 	b.ReportMetric(float64(result.acquire_ns), "acquire-ns/op")
+	if result.rows > 0 {
+		b.ReportMetric(float64(result.acquire_ns)/float64(result.rows), "acquire-one-ns/op")
+	}
 	b.ReportMetric(float64(result.update_ns), "update-ns/op")
+	if result.writes > 0 {
+		b.ReportMetric(float64(result.update_ns)/float64(result.writes), "update-one-ns/op")
+	}
 	b.ReportMetric(float64(result.release_ns), "release-ns/op")
+	if result.rows > 0 {
+		b.ReportMetric(float64(result.release_ns)/float64(result.rows), "release-one-ns/op")
+	}
 	b.ReportMetric(float64(result.stale_ns), "stale-ns/op")
 	b.ReportMetric(float64(result.attachment_ns), "attachment-ns/op")
 	b.ReportMetric(float64(result.queue_ns), "queue-ns/op")
+	if result.queue_messages > 0 {
+		b.ReportMetric(float64(result.queue_ns)/float64(result.queue_messages), "queue-one-ns/op")
+	}
 	b.ReportMetric(float64(result.flush_ns), "flush-ns/op")
 	b.ReportMetric(float64(result.reopen_ns), "reopen-ns/op")
 	b.ReportMetric(float64(result.get_public_ns), "get-public-ns/op")

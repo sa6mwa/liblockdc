@@ -174,6 +174,10 @@ void lc_pouch_state_write_result_cleanup(const lc_allocator *allocator,
 int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
                         const char *key, lc_pouch_state_read_result *out,
                         lc_error *error);
+int lc_pouch_state_read_metadata(lc_pouch *pouch, const char *namespace_name,
+                                 const char *key,
+                                 lc_pouch_state_read_result *out,
+                                 lc_error *error);
 int lc_pouch_state_read_many(lc_pouch *pouch, const char *namespace_name,
                              const char *const *keys, size_t key_count,
                              lc_pouch_state_read_many_fn visitor, void *context,
