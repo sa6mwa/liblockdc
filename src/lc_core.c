@@ -1708,7 +1708,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                         "failed to copy default namespace", NULL, NULL, NULL);
   }
   client->timeout_ms = config->timeout_ms;
-  client->disable_mtls = config->disable_mtls;
+  client->disable_mtls = is_pouch ? 1 : config->disable_mtls;
   client->insecure_skip_verify = config->insecure_skip_verify;
   client->prefer_http_2 = config->prefer_http_2;
   client->disable_logger_sys_field = config->disable_logger_sys_field;

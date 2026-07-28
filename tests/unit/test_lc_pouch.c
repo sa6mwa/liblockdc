@@ -3069,6 +3069,7 @@ test_pouch_endpoint_opens_new_backend_without_http_engine(void **state) {
   int rc;
 
   (void)state;
+  client = NULL;
   lc_error_init(&error);
   make_root("client-open", root, sizeof(root));
   cleanup_root(root);
@@ -3082,6 +3083,8 @@ test_pouch_endpoint_opens_new_backend_without_http_engine(void **state) {
   rc = lc_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(client);
+  assert_int_equal(((lc_client_handle *)client)->disable_mtls, 1);
+  assert_null(((lc_client_handle *)client)->engine);
   assert_path_file(root, "manifest");
 
   lc_client_close(client);

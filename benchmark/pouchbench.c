@@ -601,7 +601,7 @@ static int lockdc_bench_queue_roundtrip(lc_client *client, long messages,
     dequeue_req.queue = "production";
     dequeue_req.owner = "pouch-production-bench";
     dequeue_req.visibility_timeout_seconds = 30L;
-    dequeue_req.wait_seconds = -1L;
+    dequeue_req.wait_seconds = 0L;
     dequeue_req.page_size = 16;
     rc = client->dequeue_batch(client, &dequeue_req, &batch, error);
     if (rc != LC_OK) {
@@ -943,6 +943,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
       if (rc == LC_OK) {
         free(stale_etag);
         rc = LC_ERR_INVALID;
+        lc_error_cleanup(&error);
+        lc_error_init(&error);
         lease->close(lease);
         lc_error_cleanup(&stale_error);
         goto done;
@@ -1027,6 +1029,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   if (out->rows <= 0L) {
     rc = LC_ERR_INVALID;
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
     goto done;
   }
   lockdc_bench_add_ns(&out->index_query_keys_ns, phase_start,
@@ -1040,6 +1044,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   if (matched_rows <= 0L) {
     rc = LC_ERR_INVALID;
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
     goto done;
   }
   lockdc_bench_add_ns(&out->index_query_docs_ns, phase_start,
@@ -1053,6 +1059,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   if (matched_rows <= 0L) {
     rc = LC_ERR_INVALID;
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
     goto done;
   }
   lockdc_bench_add_ns(&out->scan_query_keys_ns, phase_start,
@@ -1066,6 +1074,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   if (matched_rows <= 0L) {
     rc = LC_ERR_INVALID;
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
     goto done;
   }
   lockdc_bench_add_ns(&out->scan_query_docs_ns, phase_start,
@@ -1079,6 +1089,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   if (matched_rows <= 0L) {
     rc = LC_ERR_INVALID;
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
     goto done;
   }
   lockdc_bench_add_ns(&out->full_text_index_keys_ns, phase_start,
@@ -1092,6 +1104,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   if (matched_rows <= 0L) {
     rc = LC_ERR_INVALID;
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
     goto done;
   }
   lockdc_bench_add_ns(&out->full_text_scan_docs_ns, phase_start,
