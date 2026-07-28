@@ -2407,8 +2407,8 @@ static void open_pouch_client_crypto(const char *root, const char *crypto_key,
   char endpoint[1024];
   int written;
 
-  written = snprintf(endpoint, sizeof(endpoint), "pouch://%s?pouch_crypto_key=%s",
-                     root, crypto_key);
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?pouch_crypto_key=%s", root, crypto_key);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   open_pouch_client_endpoint(endpoint, out, error);
 }
@@ -2431,6 +2431,62 @@ static void write_client_state(lc_client *client, const char *key,
   rc = client->update(client, &update_req, source, out, error);
   source->close(source);
   assert_int_equal(rc, LC_OK);
+}
+
+static void pouch_state_payload_path(const char *root,
+                                     const char *namespace_name,
+                                     unsigned long version, char *out,
+                                     size_t out_size) {
+  char *namespace_path;
+  int written;
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
+  assert_non_null(namespace_path);
+  written = snprintf(out, out_size, "%s/payloads/state-%020lu.bin",
+                     namespace_path, version);
+  assert_true(written > 0 && (size_t)written < out_size);
+  lc_free_with_allocator(NULL, namespace_path);
+  assert_true(path_is_file(out));
+}
+
+static void flip_file_byte(const char *path, long offset) {
+  FILE *fp;
+  int ch;
+
+  fp = fopen(path, "r+b");
+  assert_non_null(fp);
+  assert_int_equal(fseek(fp, offset, SEEK_SET), 0);
+  ch = fgetc(fp);
+  assert_true(ch != EOF);
+  assert_int_equal(fseek(fp, offset, SEEK_SET), 0);
+  assert_true(fputc((ch ^ 0x01) & 0xFF, fp) != EOF);
+  assert_int_equal(fclose(fp), 0);
+}
+
+static void truncate_file_tail(const char *path) {
+  struct stat st;
+
+  assert_int_equal(stat(path, &st), 0);
+  assert_true(st.st_size > 0);
+  assert_int_equal(truncate(path, st.st_size - 1), 0);
+}
+
+static void assert_client_get_protocol_failure(lc_client *client,
+                                               const char *key,
+                                               lc_error *error) {
+  lc_sink *sink;
+  lc_get_res get_res;
+  int rc;
+
+  sink = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+  rc = lc_sink_to_memory(&sink, error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_int_equal(error->code, LC_ERR_PROTOCOL);
+  sink->close(sink);
+  lc_get_res_cleanup(&get_res);
 }
 
 static int pouch_acquire_for_update_handler(
@@ -5214,7 +5270,8 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
+static void
+test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   lc_client *client;
   lc_client *reader;
   lc_lease *lease;
@@ -5338,8 +5395,8 @@ static void test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state)
   assert_int_equal(rc, LC_OK);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(bytes_contain_text(bytes, length,
-                                 "state-secret-redaction-required"));
+  assert_true(
+      bytes_contain_text(bytes, length, "state-secret-redaction-required"));
   sink->close(sink);
   sink = NULL;
   lc_get_res_cleanup(&get_res);
@@ -5350,8 +5407,8 @@ static void test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state)
   assert_int_equal(rc, LC_OK);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(bytes_contain_text(bytes, length,
-                                 "staged-secret-redaction-required"));
+  assert_true(
+      bytes_contain_text(bytes, length, "staged-secret-redaction-required"));
   sink->close(sink);
   sink = NULL;
   lc_get_res_cleanup(&get_res);
@@ -5382,8 +5439,8 @@ static void test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state)
   assert_int_equal(rc, LC_OK);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(bytes_contain_text(bytes, length,
-                                 "queue-secret-redaction-required"));
+  assert_true(
+      bytes_contain_text(bytes, length, "queue-secret-redaction-required"));
   sink->close(sink);
   sink = NULL;
   message->close(message);
@@ -5401,27 +5458,265 @@ static void test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state)
   assert_int_equal(rc, LC_OK);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(bytes_contain_text(bytes, length,
-                                 "state-secret-redaction-required"));
+  assert_true(
+      bytes_contain_text(bytes, length, "state-secret-redaction-required"));
   sink->close(sink);
   sink = NULL;
   lc_get_res_cleanup(&get_res);
   lc_client_close(reader);
   reader = NULL;
 
-  assert_false(pouch_tree_contains_text(root,
-                                        "state-secret-redaction-required"));
-  assert_false(pouch_tree_contains_text(
-      root, "attachment-secret-redaction-required"));
-  assert_false(pouch_tree_contains_text(root,
-                                        "queue-secret-redaction-required"));
-  assert_false(pouch_tree_contains_text(root,
-                                        "staged-secret-redaction-required"));
+  assert_false(
+      pouch_tree_contains_text(root, "state-secret-redaction-required"));
+  assert_false(
+      pouch_tree_contains_text(root, "attachment-secret-redaction-required"));
+  assert_false(
+      pouch_tree_contains_text(root, "queue-secret-redaction-required"));
+  assert_false(
+      pouch_tree_contains_text(root, "staged-secret-redaction-required"));
 
   lc_txn_decision_res_cleanup(&decision_res);
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_attach_res_cleanup(&attach_res);
   lc_update_res_cleanup(&txn_update_res);
+  lc_update_res_cleanup(&update_res);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_crypto_roundtrips_large_multiframe_state(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_sink *sink;
+  lc_update_res update_res;
+  lc_get_res get_res;
+  lc_error error;
+  const void *bytes;
+  char *crypto_key;
+  char *json;
+  char root[512];
+  size_t body_len;
+  size_t json_len;
+  size_t length;
+  size_t prefix_len;
+  size_t i;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  reader = NULL;
+  sink = NULL;
+  bytes = NULL;
+  crypto_key = NULL;
+  json = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  make_root("crypto-large-multiframe", root, sizeof(root));
+  cleanup_root(root);
+
+  body_len = (64U * 1024U) + 4096U;
+  prefix_len = strlen("{\"blob\":\"");
+  json_len = prefix_len + body_len + strlen("\"}") + 1U;
+  json = (char *)malloc(json_len);
+  assert_non_null(json);
+  memcpy(json, "{\"blob\":\"", prefix_len);
+  for (i = 0U; i < body_len; ++i) {
+    json[prefix_len + i] = (char)('a' + (i % 26U));
+  }
+  memcpy(json + prefix_len + body_len, "\"}", 3U);
+
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  open_pouch_client_crypto(root, crypto_key, &client, &error);
+  write_client_state(client, "crypto/large", json, NULL, 0L, 0, &update_res,
+                     &error);
+  lc_client_close(client);
+  client = NULL;
+
+  open_pouch_client_crypto(root, crypto_key, &reader, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = reader->get(reader, "crypto/large", NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen(json));
+  assert_memory_equal(bytes, json, length);
+
+  sink->close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(reader);
+  lc_update_res_cleanup(&update_res);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  free(json);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_crypto_rejects_wrong_key(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_update_res update_res;
+  lc_error error;
+  char *crypto_key;
+  char *wrong_key;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  reader = NULL;
+  crypto_key = NULL;
+  wrong_key = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_error_init(&error);
+  make_root("crypto-wrong-key", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_crypto_generate_key_string(&wrong_key, &error);
+  assert_int_equal(rc, LC_OK);
+  open_pouch_client_crypto(root, crypto_key, &client, &error);
+  write_client_state(client, "crypto/wrong-key",
+                     "{\"secret\":\"wrong-key-must-not-decrypt\"}", NULL, 0L, 0,
+                     &update_res, &error);
+  lc_client_close(client);
+  client = NULL;
+
+  open_pouch_client_crypto(root, wrong_key, &reader, &error);
+  assert_client_get_protocol_failure(reader, "crypto/wrong-key", &error);
+
+  lc_client_close(reader);
+  lc_update_res_cleanup(&update_res);
+  lc_pouch_crypto_key_string_free(wrong_key);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_crypto_rejects_tampered_payload(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_update_res update_res;
+  lc_error error;
+  char *crypto_key;
+  char payload_path[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  reader = NULL;
+  crypto_key = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_error_init(&error);
+  make_root("crypto-tamper", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  open_pouch_client_crypto(root, crypto_key, &client, &error);
+  write_client_state(client, "crypto/tamper",
+                     "{\"secret\":\"tamper-must-not-decrypt\"}", NULL, 0L, 0,
+                     &update_res, &error);
+  lc_client_close(client);
+  client = NULL;
+
+  pouch_state_payload_path(root, "default", 1UL, payload_path,
+                           sizeof(payload_path));
+  flip_file_byte(payload_path, 8L);
+
+  open_pouch_client_crypto(root, crypto_key, &reader, &error);
+  assert_client_get_protocol_failure(reader, "crypto/tamper", &error);
+
+  lc_client_close(reader);
+  lc_update_res_cleanup(&update_res);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_crypto_rejects_truncated_payload(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_update_res update_res;
+  lc_error error;
+  char *crypto_key;
+  char payload_path[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  reader = NULL;
+  crypto_key = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_error_init(&error);
+  make_root("crypto-truncated", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  open_pouch_client_crypto(root, crypto_key, &client, &error);
+  write_client_state(client, "crypto/truncated",
+                     "{\"secret\":\"truncated-must-not-decrypt\"}", NULL, 0L, 0,
+                     &update_res, &error);
+  lc_client_close(client);
+  client = NULL;
+
+  pouch_state_payload_path(root, "default", 1UL, payload_path,
+                           sizeof(payload_path));
+  truncate_file_tail(payload_path);
+
+  open_pouch_client_crypto(root, crypto_key, &reader, &error);
+  assert_client_get_protocol_failure(reader, "crypto/truncated", &error);
+
+  lc_client_close(reader);
+  lc_update_res_cleanup(&update_res);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_crypto_rejects_trailing_payload_bytes(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_update_res update_res;
+  lc_error error;
+  char *crypto_key;
+  char payload_path[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  reader = NULL;
+  crypto_key = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_error_init(&error);
+  make_root("crypto-trailing", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  open_pouch_client_crypto(root, crypto_key, &client, &error);
+  write_client_state(client, "crypto/trailing",
+                     "{\"secret\":\"trailing-must-not-decrypt\"}", NULL, 0L, 0,
+                     &update_res, &error);
+  lc_client_close(client);
+  client = NULL;
+
+  pouch_state_payload_path(root, "default", 1UL, payload_path,
+                           sizeof(payload_path));
+  append_text_file(payload_path, "trailing");
+
+  open_pouch_client_crypto(root, crypto_key, &reader, &error);
+  assert_client_get_protocol_failure(reader, "crypto/trailing", &error);
+
+  lc_client_close(reader);
   lc_update_res_cleanup(&update_res);
   lc_pouch_crypto_key_string_free(crypto_key);
   cleanup_root(root);
@@ -11243,6 +11538,11 @@ int main(void) {
       cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
       cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
       cmocka_unit_test(test_pouch_crypto_encrypts_public_api_payloads_at_rest),
+      cmocka_unit_test(test_pouch_crypto_roundtrips_large_multiframe_state),
+      cmocka_unit_test(test_pouch_crypto_rejects_wrong_key),
+      cmocka_unit_test(test_pouch_crypto_rejects_tampered_payload),
+      cmocka_unit_test(test_pouch_crypto_rejects_truncated_payload),
+      cmocka_unit_test(test_pouch_crypto_rejects_trailing_payload_bytes),
       cmocka_unit_test(test_txn_decisions_apply_queue_side_effects),
       cmocka_unit_test(
           test_txn_decisions_stage_state_update_mutate_and_index_refresh),
