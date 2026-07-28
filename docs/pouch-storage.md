@@ -936,11 +936,11 @@ over those field postings.
 Numeric equality and range bounds use canonical numeric keys so equivalent JSON
 number spellings compare consistently instead of relying on raw token text. Text
 predicate postings store the liblql string-predicate view for JSON strings;
-JSON null still has no text-predicate posting. Raw and lowercase
-ASCII-normalized trigram postings are persisted for selective `contains` /
-`icontains` candidate narrowing. Exact substring and case semantics still run
-through text checks and final `liblql` acceptance, so trigram rows may create
-false positives but must not create false negatives. Object and array field
+JSON null still has no text-predicate posting. `contains` / `icontains`
+candidate lookup uses the exact text postings directly, including `field=/...`
+full-text scans over any text-bearing field in the document. Exact substring and
+case semantics still run through text checks and final `liblql` acceptance, so
+indexed text lookup must not create false negatives. Object and array field
 containers also emit presence postings so `exists` can narrow candidates for
 structured values without requiring a scalar leaf.
 Indexed mode also recognizes full-form `and` conjunctions made only of

@@ -50,8 +50,8 @@ func productionScenarios() []productionScenario {
 	}
 	return []productionScenario{
 		{name: "WideLarge", rows: 128, updatesPerKey: 3, payloadBytes: 256 * 1024},
-		{name: "DeepNested", rows: 192, updatesPerKey: 2, payloadBytes: 192 * 1024},
-		{name: "HotChurn", rows: 96, updatesPerKey: 6, payloadBytes: 128 * 1024},
+		{name: "DeepNested", rows: 384, updatesPerKey: 2, payloadBytes: 192 * 1024},
+		{name: "HotChurn", rows: 112, updatesPerKey: 6, payloadBytes: 128 * 1024},
 	}
 }
 
@@ -59,6 +59,18 @@ func productionBenchName(s productionScenario) string {
 	return s.name + "/Rows" + strconv.FormatInt(s.rows, 10) +
 		"/Updates" + strconv.FormatInt(s.updatesPerKey, 10) +
 		"/Payload" + strconv.FormatInt(s.payloadBytes, 10)
+}
+
+func productionPayloadForGeneration(generation, updatesPerKey, payloadBytes int64) int64 {
+	const currentPayloadBytes = int64(2 * 1024)
+
+	if updatesPerKey <= 1 || generation < updatesPerKey-1 {
+		return payloadBytes
+	}
+	if payloadBytes < currentPayloadBytes {
+		return payloadBytes
+	}
+	return currentPayloadBytes
 }
 
 func productionDocument(row, generation, payloadBytes int64) []byte {
@@ -317,7 +329,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 		addMetricDuration(&metrics.acquireNS, phaseStart)
 		var staleETag string
 		for generation := int64(0); generation < updatesPerKey; generation++ {
-			body := productionDocument(row, generation, payloadBytes)
+			body := productionDocument(row, generation, productionPayloadForGeneration(generation, updatesPerKey, payloadBytes))
 			phaseStart = time.Now()
 			ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 			res, err := session.UpdateBytes(ctx, body)
@@ -334,7 +346,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 			}
 		}
 		if row == 0 && staleETag != "" {
-			body := productionDocument(row, updatesPerKey+1, payloadBytes)
+			body := productionDocument(row, updatesPerKey+1, productionPayloadForGeneration(updatesPerKey+1, updatesPerKey, payloadBytes))
 			phaseStart = time.Now()
 			ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 			_, err = session.UpdateWithOptions(ctx, bytes.NewReader(body), lockdclient.UpdateOptions{IfETag: staleETag})

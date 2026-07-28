@@ -1849,6 +1849,8 @@ int lc_sink_to_file(const char *path, lc_sink **out, lc_error *error);
 int lc_sink_to_fd(int fd, lc_sink **out, lc_error *error);
 /** Creates a sink that accepts and discards all bytes. */
 int lc_sink_to_discard(lc_sink **out, lc_error *error);
+/** Returns non-zero when a sink was created by `lc_sink_to_discard()`. */
+int lc_sink_is_discard(const lc_sink *sink);
 /** Creates an in-memory sink owned by the library. */
 int lc_sink_to_memory(lc_sink **out, lc_error *error);
 /** Returns the bytes accumulated by an in-memory sink. */

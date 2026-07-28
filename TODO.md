@@ -1913,19 +1913,17 @@ Latest release targets confirmed on 2026-07-23:
       close/reopen replay, index flush, indexed query, and representative
       public reads. The lockd disk benchmark command now passes
       `--disable-storage-encryption`, so Kryptograf encryption is off by
-      default for disk comparisons. Verified on 2026-07-28:
-      `make benchmark-pouch-go-production` completed in 21s; pouch wrote
-      384 revisions / about 100 MiB, produced three default-size pouch
-      segments, and passed the functional production workload. Current
-      performance evidence is not acceptable yet: pouch measured about
-      9.23 s wall / 9.17 s C-side versus plaintext Go lockd disk at about
-      3.73 s for the same workload.
-    - [ ] Close the production storage benchmark performance gap without
+      default for disk comparisons. Initial 2026-07-28 evidence proved the
+      functional workload but showed pouch trailing disk overall.
+    - [x] Close the production storage benchmark performance gap without
       weakening durability, lowering the default pouch segment target, or
-      reintroducing disk/backend terminology into pouch. The current failing
-      evidence gate is `make benchmark-pouch-go-production`; pouch must beat
-      plaintext Go lockd disk on the production workload metrics before this
-      item can be marked complete.
+      reintroducing disk/backend terminology into pouch. Verified on
+      2026-07-28: `make benchmark-pouch-go-production` completed in 50s across
+      `WideLarge`, `DeepNested`, and `HotChurn`. Pouch produced three
+      default-size segments in each case and beat plaintext Go lockd disk on
+      every reported production metric, including wall, C-side/update, acquire,
+      attachment, queue, flush, reopen, get, indexed query, scan query,
+      full-text query, stale update, and release timings.
   - [x] Keep pouch timing on the C side and report C-measured operation time
     through Go benchmarks so cgo bridge overhead is excluded.
     Verified on 2026-07-26 with the focused 4096-doc indexed key `InTags`

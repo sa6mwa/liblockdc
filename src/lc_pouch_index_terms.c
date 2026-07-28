@@ -1742,43 +1742,89 @@ int lc_pouch_index_term_generation_validate_file(
     unsigned long expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, int *present, int *valid,
     lc_error *error) {
-  lc_pouch_index_term_generation generation;
-  lc_error decode_error;
-  char *bytes;
-  size_t length;
-  int rc;
+  FILE *fp;
+  char line[256];
+  unsigned long value;
 
+  (void)allocator;
   if (valid == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index term generation validation requires "
                         "valid output",
                         NULL, NULL, NULL);
   }
-  memset(&generation, 0, sizeof(generation));
   *valid = 0;
-  bytes = NULL;
-  length = 0U;
-  lc_error_init(&decode_error);
-  rc = lc_pouch_index_term_generation_read_file(allocator, path, &bytes,
-                                                &length, present, error);
-  if (rc == LC_OK && present != NULL && *present) {
-    rc = lc_pouch_index_term_generation_decode(
-        allocator, bytes, length, expected_index_seq, expected_row_count,
-        expected_row_hash, &generation, &decode_error);
-    if (rc == LC_OK) {
-      *valid = 1;
-    } else if (rc == LC_ERR_INVALID) {
-      rc = LC_OK;
-    } else if (error != NULL && decode_error.code != LC_OK) {
-      rc = lc_error_set(error, decode_error.code, 0L, decode_error.message,
-                        decode_error.detail, decode_error.server_code,
-                        decode_error.correlation_id);
-    }
+  if (present != NULL) {
+    *present = 0;
   }
-  lc_error_cleanup(&decode_error);
-  lc_pouch_index_term_generation_cleanup(allocator, &generation);
-  lc_free_with_allocator(allocator, bytes);
-  return rc;
+  fp = fopen(path, "rb");
+  if (fp == NULL) {
+    if (errno == ENOENT) {
+      return LC_OK;
+    }
+    return lc_error_set(error, LC_ERR_TRANSPORT, (long)errno,
+                        "failed to open pouch index term generation",
+                        strerror(errno), NULL, NULL);
+  }
+  if (present != NULL) {
+    *present = 1;
+  }
+  if (fgets(line, sizeof(line), fp) == NULL) {
+    fclose(fp);
+    return LC_OK;
+  }
+  line[strcspn(line, "\n")] = '\0';
+  if (strcmp(line, "format=" LC_POUCH_INDEX_TERM_GENERATION_FORMAT) != 0) {
+    fclose(fp);
+    return LC_OK;
+  }
+  if (fgets(line, sizeof(line), fp) == NULL) {
+    fclose(fp);
+    return LC_OK;
+  }
+  line[strcspn(line, "\n")] = '\0';
+  if (!lc_pouch_index_term_generation_header_ulong(line, "version", &value) ||
+      value != LC_POUCH_INDEX_TERM_GENERATION_VERSION) {
+    fclose(fp);
+    return LC_OK;
+  }
+  if (fgets(line, sizeof(line), fp) == NULL) {
+    fclose(fp);
+    return LC_OK;
+  }
+  line[strcspn(line, "\n")] = '\0';
+  if (!lc_pouch_index_term_generation_header_ulong(line, "index_seq", &value) ||
+      value != expected_index_seq) {
+    fclose(fp);
+    return LC_OK;
+  }
+  if (fgets(line, sizeof(line), fp) == NULL) {
+    fclose(fp);
+    return LC_OK;
+  }
+  line[strcspn(line, "\n")] = '\0';
+  if (!lc_pouch_index_term_generation_header_ulong(line, "row_count", &value) ||
+      value != expected_row_count) {
+    fclose(fp);
+    return LC_OK;
+  }
+  if (fgets(line, sizeof(line), fp) == NULL) {
+    fclose(fp);
+    return LC_OK;
+  }
+  line[strcspn(line, "\n")] = '\0';
+  if (!lc_pouch_index_term_generation_header_ulong(line, "row_hash", &value) ||
+      value != expected_row_hash) {
+    fclose(fp);
+    return LC_OK;
+  }
+  if (fclose(fp) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to close pouch index term generation",
+                        strerror(errno), NULL, NULL);
+  }
+  *valid = 1;
+  return LC_OK;
 }
 
 int lc_pouch_index_term_generation_load_file(

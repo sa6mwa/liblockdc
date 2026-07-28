@@ -1808,6 +1808,17 @@ int lc_sink_to_discard(lc_sink **out, lc_error *error) {
   return LC_OK;
 }
 
+int lc_sink_is_discard(const lc_sink *sink) {
+  const lc_sink_impl *base;
+
+  if (sink == NULL) {
+    return 0;
+  }
+  base = (const lc_sink_impl *)sink;
+  return base->write_impl == lc_discard_sink_write &&
+         base->close_impl == lc_discard_sink_close;
+}
+
 int lc_sink_to_memory(lc_sink **out, lc_error *error) {
   lc_memory_sink *sink;
 

@@ -326,23 +326,24 @@ static char *lockdc_bench_document(long row, long generation,
                                   : "2024-01-01T00:00:00Z";
   message = (row % 8L) == 0L ? "timeout" : "ordinary";
   flag = (row % 7L) == 0L ? "true" : "false";
-  tenant_tier = (row % 11L) == 0L ? "enterprise"
+  tenant_tier = (row % 11L) == 0L  ? "enterprise"
                 : (row % 3L) == 0L ? "business"
-                                    : "standard";
+                                   : "standard";
   stage = (row % 6L) == 0L   ? "ingest"
           : (row % 6L) == 1L ? "review"
           : (row % 6L) == 2L ? "approve"
           : (row % 6L) == 3L ? "escalated"
           : (row % 6L) == 4L ? "settled"
-                              : "archive";
+                             : "archive";
   team = (row % 5L) == 0L ? "risk" : (row % 2L) == 0L ? "platform" : "ops";
-  priority = (row % 13L) == 0L ? "critical"
+  priority = (row % 13L) == 0L  ? "critical"
              : (row % 4L) == 0L ? "high"
-                                 : "normal";
+                                : "normal";
   source = (row % 3L) == 0L ? "api" : (row % 3L) == 1L ? "batch" : "worker";
   narrative_summary =
       (row % 8L) == 0L
-          ? "timeout remediation required for customer escalation with repeated "
+          ? "timeout remediation required for customer escalation with "
+            "repeated "
             "queue delivery delays, partial worker retries, owner handoff "
             "notes, and operational impact across billing, provisioning, audit "
             "trail, and downstream reconciliation services"
@@ -361,41 +362,41 @@ static char *lockdc_bench_document(long row, long generation,
       (row % 13L) == 0L
           ? "operator notes include critical escalation context, manual "
             "override history, cross-team review comments, incident timeline, "
-            "retry budget exhaustion notes, and final remediation checklist for "
+            "retry budget exhaustion notes, and final remediation checklist "
+            "for "
             "the current production workflow"
           : "operator notes include routine triage comments, observed state "
             "transitions, queue consumer handoff details, attachment review "
             "status, replay expectations, and post-processing verification "
             "notes";
-  written =
-      snprintf(prefix, sizeof(prefix),
-               "{\"bucket\":\"%s\",\"group\":\"%s\",\"region\":\"%s\","
-               "\"value\":%ld,\"generation\":%ld,\"tags\":[\"%s\",\"%s\"],"
-               "\"created_at\":\"%s\","
-               "\"tenant\":{\"id\":\"tenant-%03ld\",\"tier\":\"%s\","
-               "\"region\":\"%s\"},"
-               "\"workflow\":{\"stage\":\"%s\",\"attempt\":%ld,"
-               "\"owner\":{\"team\":\"%s\",\"user\":\"user-%05ld\"}},"
-               "\"metrics\":{\"amount_usd\":%ld,\"latency_ms\":%ld,"
-               "\"retries\":%ld},"
-               "\"risk\":{\"score\":%ld,\"summary\":\"%s risk signal for "
-               "production timeout workflow %ld\"},"
-               "\"narrative\":{\"summary\":\"%s\",\"description\":\"%s\","
-               "\"operator_notes\":\"%s\"},"
-               "\"details\":{\"message\":\"%s production benchmark document "
-               "%ld\",\"attributes\":{\"priority\":\"%s\",\"source\":\"%s\","
-               "\"schema_version\":3}},"
-               "\"line_items\":[{\"sku\":\"sku-%04ld\",\"qty\":%ld,"
-               "\"price\":%ld},{\"sku\":\"sku-%04ld\",\"qty\":%ld,"
-               "\"price\":%ld}],\"flag\":%s,\"storage_pressure\":null",
-               bucket, group, region, row, generation, tag0, tag1, created_at,
-               row % 47L, tenant_tier, region, stage, generation + 1L, team,
-               row % 10000L, 1000L + ((row * 7919L) % 120000L),
-               25L + (row % 250L), generation % 5L, (row * 37L) % 100L,
-               message, row, narrative_summary, narrative_description,
-               operator_notes, message, row, priority, source, row % 4096L,
-               1L + (row % 9L), 100L + (row % 500L), (row + 17L) % 4096L,
-               1L + (row % 4L), 50L + (row % 300L), flag);
+  written = snprintf(
+      prefix, sizeof(prefix),
+      "{\"bucket\":\"%s\",\"group\":\"%s\",\"region\":\"%s\","
+      "\"value\":%ld,\"generation\":%ld,\"tags\":[\"%s\",\"%s\"],"
+      "\"created_at\":\"%s\","
+      "\"tenant\":{\"id\":\"tenant-%03ld\",\"tier\":\"%s\","
+      "\"region\":\"%s\"},"
+      "\"workflow\":{\"stage\":\"%s\",\"attempt\":%ld,"
+      "\"owner\":{\"team\":\"%s\",\"user\":\"user-%05ld\"}},"
+      "\"metrics\":{\"amount_usd\":%ld,\"latency_ms\":%ld,"
+      "\"retries\":%ld},"
+      "\"risk\":{\"score\":%ld,\"summary\":\"%s risk signal for "
+      "production timeout workflow %ld\"},"
+      "\"narrative\":{\"summary\":\"%s\",\"description\":\"%s\","
+      "\"operator_notes\":\"%s\"},"
+      "\"details\":{\"message\":\"%s production benchmark document "
+      "%ld\",\"attributes\":{\"priority\":\"%s\",\"source\":\"%s\","
+      "\"schema_version\":3}},"
+      "\"line_items\":[{\"sku\":\"sku-%04ld\",\"qty\":%ld,"
+      "\"price\":%ld},{\"sku\":\"sku-%04ld\",\"qty\":%ld,"
+      "\"price\":%ld}],\"flag\":%s,\"storage_pressure\":null",
+      bucket, group, region, row, generation, tag0, tag1, created_at, row % 47L,
+      tenant_tier, region, stage, generation + 1L, team, row % 10000L,
+      1000L + ((row * 7919L) % 120000L), 25L + (row % 250L), generation % 5L,
+      (row * 37L) % 100L, message, row, narrative_summary,
+      narrative_description, operator_notes, message, row, priority, source,
+      row % 4096L, 1L + (row % 9L), 100L + (row % 500L), (row + 17L) % 4096L,
+      1L + (row % 4L), 50L + (row % 300L), flag);
   if (written <= 0 || (size_t)written >= sizeof(prefix)) {
     return NULL;
   }
@@ -413,6 +414,18 @@ static char *lockdc_bench_document(long row, long generation,
     *out_len = prefix_len + pad_len + 1U;
   }
   return json;
+}
+
+static long lockdc_bench_payload_for_generation(long generation,
+                                                long updates_per_key,
+                                                long payload_bytes) {
+  const long current_payload_bytes = 2L * 1024L;
+
+  if (updates_per_key <= 1L || generation < updates_per_key - 1L) {
+    return payload_bytes;
+  }
+  return payload_bytes < current_payload_bytes ? payload_bytes
+                                               : current_payload_bytes;
 }
 
 static int lockdc_bench_update_lease(lc_lease *lease, const char *json,
@@ -848,7 +861,11 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
       char *json;
       size_t json_len;
 
-      json = lockdc_bench_document(row, generation, payload_bytes, &json_len);
+      json =
+          lockdc_bench_document(row, generation,
+                                lockdc_bench_payload_for_generation(
+                                    generation, updates_per_key, payload_bytes),
+                                &json_len);
       if (json == NULL) {
         rc = LC_ERR_NOMEM;
         lease->close(lease);
@@ -864,6 +881,16 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
       lockdc_bench_add_ns(&out->update_ns, phase_start, lockdc_bench_now_ns());
       out->writes++;
       out->bytes += (long)json_len;
+      if ((out->writes % 128L) == 0L) {
+        phase_start = lockdc_bench_now_ns();
+        rc = lockdc_bench_flush(client, &error);
+        if (rc != LC_OK) {
+          lease->close(lease);
+          goto done;
+        }
+        lockdc_bench_add_ns(&out->update_ns, phase_start,
+                            lockdc_bench_now_ns());
+      }
       if (row == 0L && generation == 0L && lease->state_etag != NULL) {
         stale_etag = lockdc_bench_copy_string(lease->state_etag);
         if (stale_etag == NULL) {
@@ -879,8 +906,11 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
       size_t json_len;
 
       lc_error_init(&stale_error);
-      json = lockdc_bench_document(row, updates_per_key + 1L, payload_bytes,
-                                   &json_len);
+      json = lockdc_bench_document(
+          row, updates_per_key + 1L,
+          lockdc_bench_payload_for_generation(updates_per_key + 1L,
+                                              updates_per_key, payload_bytes),
+          &json_len);
       if (json == NULL) {
         free(stale_etag);
         rc = LC_ERR_NOMEM;
@@ -944,6 +974,10 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   phase_start = lockdc_bench_now_ns();
   rc = lockdc_bench_queue_roundtrip(client, queue_messages, out, &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  rc = lockdc_bench_flush(client, &error);
   if (rc != LC_OK) {
     goto done;
   }
@@ -1021,8 +1055,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
                       lockdc_bench_now_ns());
   matched_rows = 0L;
   phase_start = lockdc_bench_now_ns();
-  rc = lockdc_bench_query(client, "FullTextAny", "index", 0, rows, &matched_rows,
-                          &error);
+  rc = lockdc_bench_query(client, "FullTextAny", "index", 0, rows,
+                          &matched_rows, &error);
   if (rc != LC_OK) {
     goto done;
   }

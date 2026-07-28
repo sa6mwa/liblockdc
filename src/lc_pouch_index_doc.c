@@ -866,10 +866,11 @@ int lc_pouch_index_doc_table_generation_validate_file(
     unsigned long expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, int *present, int *valid,
     lc_error *error) {
-  char *bytes;
-  size_t length;
-  int rc;
+  FILE *fp;
+  char line[256];
+  unsigned long value;
 
+  (void)allocator;
   if (valid == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch doc table generation validation requires "
@@ -877,17 +878,77 @@ int lc_pouch_index_doc_table_generation_validate_file(
                         NULL, NULL, NULL);
   }
   *valid = 0;
-  bytes = NULL;
-  length = 0U;
-  rc = lc_pouch_index_doc_generation_read_file(allocator, path, &bytes, &length,
-                                               present, error);
-  if (rc == LC_OK && present != NULL && *present) {
-    rc = lc_pouch_index_doc_generation_parse_bytes(
-        allocator, bytes, expected_index_seq, expected_row_count,
-        expected_row_hash, NULL, valid, error);
+  if (present != NULL) {
+    *present = 0;
   }
-  lc_free_with_allocator(allocator, bytes);
-  return rc;
+  fp = fopen(path, "rb");
+  if (fp == NULL) {
+    if (errno == ENOENT) {
+      return LC_OK;
+    }
+    return lc_error_set(error, LC_ERR_TRANSPORT, (long)errno,
+                        "failed to open pouch doc table generation",
+                        strerror(errno), NULL, NULL);
+  }
+  if (present != NULL) {
+    *present = 1;
+  }
+  if (fgets(line, sizeof(line), fp) == NULL) {
+    fclose(fp);
+    return LC_OK;
+  }
+  line[strcspn(line, "\n")] = '\0';
+  if (strcmp(line, "format=" LC_POUCH_INDEX_DOC_TABLE_GENERATION_FORMAT) != 0) {
+    fclose(fp);
+    return LC_OK;
+  }
+  if (fgets(line, sizeof(line), fp) == NULL) {
+    fclose(fp);
+    return LC_OK;
+  }
+  line[strcspn(line, "\n")] = '\0';
+  if (!lc_pouch_index_doc_generation_header_ulong(line, "version=", &value) ||
+      value != LC_POUCH_INDEX_DOC_TABLE_GENERATION_VERSION) {
+    fclose(fp);
+    return LC_OK;
+  }
+  if (fgets(line, sizeof(line), fp) == NULL) {
+    fclose(fp);
+    return LC_OK;
+  }
+  line[strcspn(line, "\n")] = '\0';
+  if (!lc_pouch_index_doc_generation_header_ulong(line, "index_seq=", &value) ||
+      value != expected_index_seq) {
+    fclose(fp);
+    return LC_OK;
+  }
+  if (fgets(line, sizeof(line), fp) == NULL) {
+    fclose(fp);
+    return LC_OK;
+  }
+  line[strcspn(line, "\n")] = '\0';
+  if (!lc_pouch_index_doc_generation_header_ulong(line, "row_count=", &value) ||
+      value != expected_row_count) {
+    fclose(fp);
+    return LC_OK;
+  }
+  if (fgets(line, sizeof(line), fp) == NULL) {
+    fclose(fp);
+    return LC_OK;
+  }
+  line[strcspn(line, "\n")] = '\0';
+  if (!lc_pouch_index_doc_generation_header_ulong(line, "row_hash=", &value) ||
+      value != expected_row_hash) {
+    fclose(fp);
+    return LC_OK;
+  }
+  if (fclose(fp) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to close pouch doc table generation",
+                        strerror(errno), NULL, NULL);
+  }
+  *valid = 1;
+  return LC_OK;
 }
 
 int lc_pouch_index_doc_table_generation_load_file(

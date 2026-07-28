@@ -146,6 +146,7 @@ static void test_copy_memory_source_to_discard_sink(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_sink_to_discard(&sink, &error);
   assert_int_equal(rc, LC_OK);
+  assert_true(lc_sink_is_discard(sink));
 
   rc = lc_copy(source, sink, &written, &error);
   assert_int_equal(rc, LC_OK);
@@ -348,6 +349,8 @@ static void test_sink_memory_bytes_rejects_invalid_arguments(void **state) {
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
+  assert_false(lc_sink_is_discard(sink));
+  assert_false(lc_sink_is_discard(NULL));
 
   rc = lc_sink_memory_bytes(NULL, &bytes, &length, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
