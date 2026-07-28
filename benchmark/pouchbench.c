@@ -6,6 +6,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,34 @@ static uint64_t lockdc_bench_now_ns(void) {
     return 0U;
   }
   return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+}
+
+static void lockdc_bench_add_ns(uint64_t *dst, uint64_t start, uint64_t end) {
+  if (dst == NULL || end < start) {
+    return;
+  }
+  *dst += end - start;
+}
+
+static long lockdc_bench_query_matches_from_metadata(const char *metadata) {
+  const char *field;
+  const char *value;
+  char *end;
+  unsigned long rows;
+
+  if (metadata == NULL) {
+    return 0L;
+  }
+  field = strstr(metadata, "\"query_matches\":");
+  if (field == NULL) {
+    return 0L;
+  }
+  value = field + strlen("\"query_matches\":");
+  rows = strtoul(value, &end, 10);
+  if (end == value || rows > (unsigned long)LONG_MAX) {
+    return 0L;
+  }
+  return (long)rows;
 }
 
 static int lockdc_bench_has_tmp_prefix(const char *path) {
@@ -127,6 +156,27 @@ static const char *lockdc_bench_selector_lql(const char *scenario) {
   }
   if (strcmp(scenario, "OrSparseOrFlag") == 0) {
     return "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}";
+  }
+  if (strcmp(scenario, "TenantEnterprise") == 0) {
+    return "eq{field=/tenant/tier,value=enterprise}";
+  }
+  if (strcmp(scenario, "WorkflowEscalated") == 0) {
+    return "in{field=/workflow/stage,any=review|escalated}";
+  }
+  if (strcmp(scenario, "AmountBand") == 0) {
+    return "range{field=/metrics/amount_usd,gte=10000,lt=90000}";
+  }
+  if (strcmp(scenario, "RiskSignal") == 0) {
+    return "icontains{field=/risk/summary,value=timeout}";
+  }
+  if (strcmp(scenario, "NarrativeSummary") == 0) {
+    return "icontains{field=/narrative/summary,value=remediation}";
+  }
+  if (strcmp(scenario, "NarrativeDescription") == 0) {
+    return "contains{field=/narrative/description,value=audit}";
+  }
+  if (strcmp(scenario, "FullTextAny") == 0) {
+    return "icontains{field=/...,value=audit}";
   }
   return "eq{field=/bucket,value=needle}";
 }
@@ -250,7 +300,15 @@ static char *lockdc_bench_document(long row, long generation,
   const char *created_at;
   const char *message;
   const char *flag;
-  char prefix[512];
+  const char *tenant_tier;
+  const char *stage;
+  const char *team;
+  const char *priority;
+  const char *source;
+  const char *narrative_summary;
+  const char *narrative_description;
+  const char *operator_notes;
+  char prefix[4096];
   size_t target;
   size_t prefix_len;
   size_t pad_len;
@@ -268,30 +326,91 @@ static char *lockdc_bench_document(long row, long generation,
                                   : "2024-01-01T00:00:00Z";
   message = (row % 8L) == 0L ? "timeout" : "ordinary";
   flag = (row % 7L) == 0L ? "true" : "false";
+  tenant_tier = (row % 11L) == 0L ? "enterprise"
+                : (row % 3L) == 0L ? "business"
+                                    : "standard";
+  stage = (row % 6L) == 0L   ? "ingest"
+          : (row % 6L) == 1L ? "review"
+          : (row % 6L) == 2L ? "approve"
+          : (row % 6L) == 3L ? "escalated"
+          : (row % 6L) == 4L ? "settled"
+                              : "archive";
+  team = (row % 5L) == 0L ? "risk" : (row % 2L) == 0L ? "platform" : "ops";
+  priority = (row % 13L) == 0L ? "critical"
+             : (row % 4L) == 0L ? "high"
+                                 : "normal";
+  source = (row % 3L) == 0L ? "api" : (row % 3L) == 1L ? "batch" : "worker";
+  narrative_summary =
+      (row % 8L) == 0L
+          ? "timeout remediation required for customer escalation with repeated "
+            "queue delivery delays, partial worker retries, owner handoff "
+            "notes, and operational impact across billing, provisioning, audit "
+            "trail, and downstream reconciliation services"
+          : "standard production summary with customer context, processing "
+            "history, operator observations, reconciliation status, retry "
+            "notes, audit trail references, and downstream service health "
+            "annotations";
+  narrative_description =
+      "long production description capturing the full audit trail, workflow "
+      "transitions, validation notes, customer-visible symptoms, previous "
+      "remediation attempts, backoffice comments, service ownership history, "
+      "deployment context, business priority, compliance review markers, and "
+      "expected follow-up actions for operators and automated reconciliation "
+      "jobs";
+  operator_notes =
+      (row % 13L) == 0L
+          ? "operator notes include critical escalation context, manual "
+            "override history, cross-team review comments, incident timeline, "
+            "retry budget exhaustion notes, and final remediation checklist for "
+            "the current production workflow"
+          : "operator notes include routine triage comments, observed state "
+            "transitions, queue consumer handoff details, attachment review "
+            "status, replay expectations, and post-processing verification "
+            "notes";
   written =
       snprintf(prefix, sizeof(prefix),
                "{\"bucket\":\"%s\",\"group\":\"%s\",\"region\":\"%s\","
                "\"value\":%ld,\"generation\":%ld,\"tags\":[\"%s\",\"%s\"],"
-               "\"created_at\":\"%s\",\"details\":{\"message\":\"%s production "
-               "benchmark document %ld\"},\"flag\":%s,\"pad\":\"",
+               "\"created_at\":\"%s\","
+               "\"tenant\":{\"id\":\"tenant-%03ld\",\"tier\":\"%s\","
+               "\"region\":\"%s\"},"
+               "\"workflow\":{\"stage\":\"%s\",\"attempt\":%ld,"
+               "\"owner\":{\"team\":\"%s\",\"user\":\"user-%05ld\"}},"
+               "\"metrics\":{\"amount_usd\":%ld,\"latency_ms\":%ld,"
+               "\"retries\":%ld},"
+               "\"risk\":{\"score\":%ld,\"summary\":\"%s risk signal for "
+               "production timeout workflow %ld\"},"
+               "\"narrative\":{\"summary\":\"%s\",\"description\":\"%s\","
+               "\"operator_notes\":\"%s\"},"
+               "\"details\":{\"message\":\"%s production benchmark document "
+               "%ld\",\"attributes\":{\"priority\":\"%s\",\"source\":\"%s\","
+               "\"schema_version\":3}},"
+               "\"line_items\":[{\"sku\":\"sku-%04ld\",\"qty\":%ld,"
+               "\"price\":%ld},{\"sku\":\"sku-%04ld\",\"qty\":%ld,"
+               "\"price\":%ld}],\"flag\":%s,\"storage_pressure\":null",
                bucket, group, region, row, generation, tag0, tag1, created_at,
-               message, row, flag);
+               row % 47L, tenant_tier, region, stage, generation + 1L, team,
+               row % 10000L, 1000L + ((row * 7919L) % 120000L),
+               25L + (row % 250L), generation % 5L, (row * 37L) % 100L,
+               message, row, narrative_summary, narrative_description,
+               operator_notes, message, row, priority, source, row % 4096L,
+               1L + (row % 9L), 100L + (row % 500L), (row + 17L) % 4096L,
+               1L + (row % 4L), 50L + (row % 300L), flag);
   if (written <= 0 || (size_t)written >= sizeof(prefix)) {
     return NULL;
   }
   prefix_len = (size_t)written;
-  pad_len = target > prefix_len + 2U ? target - prefix_len - 2U : 32U;
-  json = (char *)malloc(prefix_len + pad_len + 3U);
+  pad_len = target > prefix_len + 1U ? target - prefix_len - 1U : 32U;
+  json = (char *)malloc(prefix_len + pad_len + 2U);
   if (json == NULL) {
     return NULL;
   }
   memcpy(json, prefix, prefix_len);
-  memset(json + prefix_len, (int)('a' + (row % 26L)), pad_len);
-  json[prefix_len + pad_len] = '"';
-  json[prefix_len + pad_len + 1U] = '}';
-  json[prefix_len + pad_len + 2U] = '\0';
+  memset(json + prefix_len, ' ', pad_len);
+  json[prefix_len + pad_len] = '}';
+  json[prefix_len + pad_len + 1U] = '\0';
   if (out_len != NULL) {
-    *out_len = prefix_len + pad_len + 2U;
+    *out_len = prefix_len + pad_len + 1U;
   }
   return json;
 }
@@ -330,6 +449,29 @@ static int lockdc_bench_read_key(lc_client *client, const char *key,
   rc = lc_sink_to_memory(&sink, error);
   if (rc == LC_OK) {
     rc = client->get(client, key, &opts, sink, &res, error);
+  }
+  if (sink != NULL) {
+    lc_sink_close(sink);
+  }
+  lc_get_res_cleanup(&res);
+  return rc;
+}
+
+static int lockdc_bench_read_lease(lc_lease *lease, lc_error *error) {
+  lc_get_opts opts;
+  lc_get_res res;
+  lc_sink *sink;
+  int rc;
+
+  if (lease == NULL) {
+    return LC_ERR_INVALID;
+  }
+  lc_get_opts_init(&opts);
+  memset(&res, 0, sizeof(res));
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, error);
+  if (rc == LC_OK) {
+    rc = lease->get(lease, sink, &opts, &res, error);
   }
   if (sink != NULL) {
     lc_sink_close(sink);
@@ -513,15 +655,15 @@ static int lockdc_bench_query(lc_client *client, const char *scenario,
     lc_sink *sink;
 
     sink = NULL;
-    rc = lc_sink_to_memory(&sink, error);
+    rc = lc_sink_to_discard(&sink, error);
     if (rc == LC_OK) {
       rc = client->query(client, &req, sink, &res, error);
     }
+    if (rc == LC_OK && rows != NULL) {
+      *rows = lockdc_bench_query_matches_from_metadata(res.metadata_json);
+    }
     if (sink != NULL) {
       lc_sink_close(sink);
-    }
-    if (rc == LC_OK && rows != NULL) {
-      *rows = -1L;
     }
   } else {
     lc_query_key_handler handler;
@@ -646,7 +788,9 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   lc_error error;
   uint64_t start;
   uint64_t end;
+  uint64_t phase_start;
   long row;
+  long matched_rows;
   long queue_messages;
   int rc;
 
@@ -663,6 +807,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   if (payload_bytes <= 0L) {
     payload_bytes = 256L * 1024L;
   }
+  matched_rows = 0L;
   client = NULL;
   root[0] = '\0';
   lc_error_init(&error);
@@ -692,10 +837,12 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
     acquire_req.owner = "pouch-production-bench";
     acquire_req.ttl_seconds = 120L;
     lease = NULL;
+    phase_start = lockdc_bench_now_ns();
     rc = client->acquire(client, &acquire_req, &lease, &error);
     if (rc != LC_OK) {
       goto done;
     }
+    lockdc_bench_add_ns(&out->acquire_ns, phase_start, lockdc_bench_now_ns());
     stale_etag = NULL;
     for (generation = 0L; generation < updates_per_key; ++generation) {
       char *json;
@@ -707,12 +854,14 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
         lease->close(lease);
         goto done;
       }
+      phase_start = lockdc_bench_now_ns();
       rc = lockdc_bench_update_lease(lease, json, json_len, NULL, &error);
       free(json);
       if (rc != LC_OK) {
         lease->close(lease);
         goto done;
       }
+      lockdc_bench_add_ns(&out->update_ns, phase_start, lockdc_bench_now_ns());
       out->writes++;
       out->bytes += (long)json_len;
       if (row == 0L && generation == 0L && lease->state_etag != NULL) {
@@ -739,9 +888,11 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
         lc_error_cleanup(&stale_error);
         goto done;
       }
+      phase_start = lockdc_bench_now_ns();
       rc = lockdc_bench_update_lease(lease, json, json_len, stale_etag,
                                      &stale_error);
       free(json);
+      lockdc_bench_add_ns(&out->stale_ns, phase_start, lockdc_bench_now_ns());
       if (rc == LC_OK) {
         free(stale_etag);
         rc = LC_ERR_INVALID;
@@ -755,57 +906,156 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
     }
     free(stale_etag);
     if ((row % 16L) == 0L) {
+      phase_start = lockdc_bench_now_ns();
       rc = lockdc_bench_attach_and_read(lease, row, &error);
       if (rc != LC_OK) {
         lease->close(lease);
         goto done;
       }
+      lockdc_bench_add_ns(&out->attachment_ns, phase_start,
+                          lockdc_bench_now_ns());
       out->attachments++;
       out->reads++;
     }
+    if ((row % 32L) == 0L) {
+      phase_start = lockdc_bench_now_ns();
+      rc = lockdc_bench_read_lease(lease, &error);
+      if (rc != LC_OK) {
+        lease->close(lease);
+        goto done;
+      }
+      lockdc_bench_add_ns(&out->get_lease_ns, phase_start,
+                          lockdc_bench_now_ns());
+      out->reads++;
+    }
     lc_release_req_init(&release_req);
+    phase_start = lockdc_bench_now_ns();
     rc = lease->release(lease, &release_req, &error);
     if (rc != LC_OK) {
       lease->close(lease);
       goto done;
     }
+    lockdc_bench_add_ns(&out->release_ns, phase_start, lockdc_bench_now_ns());
   }
 
   queue_messages = rows / 8L;
   if (queue_messages <= 0L) {
     queue_messages = 1L;
   }
+  phase_start = lockdc_bench_now_ns();
   rc = lockdc_bench_queue_roundtrip(client, queue_messages, out, &error);
   if (rc != LC_OK) {
     goto done;
   }
+  lockdc_bench_add_ns(&out->queue_ns, phase_start, lockdc_bench_now_ns());
+  phase_start = lockdc_bench_now_ns();
   rc = lockdc_bench_flush(client, &error);
   if (rc != LC_OK) {
     goto done;
   }
+  lockdc_bench_add_ns(&out->flush_ns, phase_start, lockdc_bench_now_ns());
+  phase_start = lockdc_bench_now_ns();
   lc_client_close(client);
   client = NULL;
   rc = lockdc_bench_open_client(root, &client, &error);
   if (rc != LC_OK) {
     goto done;
   }
+  lockdc_bench_add_ns(&out->reopen_ns, phase_start, lockdc_bench_now_ns());
+  phase_start = lockdc_bench_now_ns();
   rc = lockdc_bench_flush(client, &error);
   if (rc != LC_OK) {
     goto done;
   }
+  lockdc_bench_add_ns(&out->flush_ns, phase_start, lockdc_bench_now_ns());
+  phase_start = lockdc_bench_now_ns();
   rc = lockdc_bench_query(client, "RangeHalf", "index", 0, rows, &out->rows,
                           &error);
   if (rc != LC_OK) {
     goto done;
   }
+  if (out->rows <= 0L) {
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  lockdc_bench_add_ns(&out->index_query_keys_ns, phase_start,
+                      lockdc_bench_now_ns());
+  matched_rows = 0L;
+  phase_start = lockdc_bench_now_ns();
+  rc = lockdc_bench_query(client, "NarrativeSummary", "index", 1, rows,
+                          &matched_rows, &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  if (matched_rows <= 0L) {
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  lockdc_bench_add_ns(&out->index_query_docs_ns, phase_start,
+                      lockdc_bench_now_ns());
+  matched_rows = 0L;
+  phase_start = lockdc_bench_now_ns();
+  rc = lockdc_bench_query(client, "WorkflowEscalated", "scan", 0, rows,
+                          &matched_rows, &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  if (matched_rows <= 0L) {
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  lockdc_bench_add_ns(&out->scan_query_keys_ns, phase_start,
+                      lockdc_bench_now_ns());
+  matched_rows = 0L;
+  phase_start = lockdc_bench_now_ns();
+  rc = lockdc_bench_query(client, "NarrativeDescription", "scan", 1, rows,
+                          &matched_rows, &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  if (matched_rows <= 0L) {
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  lockdc_bench_add_ns(&out->scan_query_docs_ns, phase_start,
+                      lockdc_bench_now_ns());
+  matched_rows = 0L;
+  phase_start = lockdc_bench_now_ns();
+  rc = lockdc_bench_query(client, "FullTextAny", "index", 0, rows, &matched_rows,
+                          &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  if (matched_rows <= 0L) {
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  lockdc_bench_add_ns(&out->full_text_index_keys_ns, phase_start,
+                      lockdc_bench_now_ns());
+  matched_rows = 0L;
+  phase_start = lockdc_bench_now_ns();
+  rc = lockdc_bench_query(client, "FullTextAny", "scan", 1, rows, &matched_rows,
+                          &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  if (matched_rows <= 0L) {
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  lockdc_bench_add_ns(&out->full_text_scan_docs_ns, phase_start,
+                      lockdc_bench_now_ns());
   for (row = 0L; row < rows; row += rows > 8L ? rows / 8L : 1L) {
     char key[64];
 
     snprintf(key, sizeof(key), "doc/%08ld", row);
+    phase_start = lockdc_bench_now_ns();
     rc = lockdc_bench_read_key(client, key, &error);
     if (rc != LC_OK) {
       goto done;
     }
+    lockdc_bench_add_ns(&out->get_public_ns, phase_start,
+                        lockdc_bench_now_ns());
     out->reads++;
     if (row == rows - 1L) {
       break;

@@ -128,6 +128,34 @@ static void test_copy_memory_source_to_memory_sink(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_copy_memory_source_to_discard_sink(void **state) {
+  static const char payload[] = "discarded stream payload";
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  size_t written;
+  int rc;
+
+  (void)state;
+  source = NULL;
+  sink = NULL;
+  written = 0U;
+  lc_error_init(&error);
+
+  rc = lc_source_from_memory(payload, sizeof(payload) - 1U, &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_to_discard(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_copy(source, sink, &written, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(written, sizeof(payload) - 1U);
+
+  lc_source_close(source);
+  lc_sink_close(sink);
+  lc_error_cleanup(&error);
+}
+
 static void test_copy_propagates_source_error_code(void **state) {
   fake_source source;
   fake_sink sink;
@@ -335,6 +363,7 @@ static void test_sink_memory_bytes_rejects_invalid_arguments(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_copy_memory_source_to_memory_sink),
+      cmocka_unit_test(test_copy_memory_source_to_discard_sink),
       cmocka_unit_test(test_copy_propagates_source_error_code),
       cmocka_unit_test(
           test_copy_returns_transport_when_sink_write_fails_without_error),

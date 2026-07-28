@@ -23,6 +23,8 @@
 #define LC_POUCH_QUERY_INDEX_TEXT_TERM_LEAF "query.index.lcptxg"
 #define LC_POUCH_QUERY_INDEX_TRIGRAM_TERM_LEAF "query.index.lcpt3g"
 #define LC_POUCH_QUERY_INDEX_TEMPORAL_TERM_LEAF "query.index.lcptdg"
+#define LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD "/..."
+#define LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX "2f2e2e2e"
 #define LC_POUCH_QUERY_INDEX_HASH_OFFSET 2166136261UL
 #define LC_POUCH_QUERY_INDEX_HASH_PRIME 16777619UL
 #define LC_POUCH_QUERY_INDEX_HASH_MASK 0xffffffffUL
@@ -7304,17 +7306,24 @@ lc_pouch_query_index_docid_set_contains(const lc_pouch_index_docid_set *set,
   return low < set->count && set->items[low] == doc_id;
 }
 
+static int lc_pouch_query_index_field_hex_is_any_text(const char *field_hex) {
+  return field_hex != NULL &&
+         strcmp(field_hex, LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX) == 0;
+}
+
 static int lc_pouch_query_index_collect_trigram_candidate_docids(
     const lc_allocator *allocator,
     const lc_pouch_index_term_generation *generation, const char *field_hex,
     const char *needle_text, int ignore_case, lc_pouch_index_docid_set *docids,
     int *used, lc_error *error) {
   lc_pouch_index_docid_set current;
+  lc_pouch_index_docid_set gram_docids;
   lc_pouch_index_docid_set posting;
   lc_pouch_index_docid_set next;
   size_t needle_length;
   size_t index;
   int have_current;
+  int any_field;
   int rc;
 
   if (generation == NULL || field_hex == NULL || needle_text == NULL ||
@@ -7325,6 +7334,7 @@ static int lc_pouch_query_index_collect_trigram_candidate_docids(
                         NULL, NULL, NULL);
   }
   memset(&current, 0, sizeof(current));
+  memset(&gram_docids, 0, sizeof(gram_docids));
   memset(&posting, 0, sizeof(posting));
   memset(&next, 0, sizeof(next));
   *used = 0;
@@ -7333,11 +7343,14 @@ static int lc_pouch_query_index_collect_trigram_candidate_docids(
     return LC_OK;
   }
   have_current = 0;
+  any_field = lc_pouch_query_index_field_hex_is_any_text(field_hex);
   rc = LC_OK;
   for (index = 0U; rc == LC_OK && index + 3U <= needle_length; ++index) {
     const unsigned char *bytes;
     char *value_hex;
     unsigned long term_id;
+    int have_gram_docids;
+    size_t term_index;
 
     bytes = (const unsigned char *)needle_text + index;
     value_hex =
@@ -7348,33 +7361,71 @@ static int lc_pouch_query_index_collect_trigram_candidate_docids(
                         NULL, NULL);
       break;
     }
-    term_id = 0UL;
-    if (!lc_pouch_index_term_table_find(&generation->terms, field_hex,
-                                        value_hex, 's', &term_id)) {
-      lc_free_with_allocator(allocator, value_hex);
+    lc_pouch_index_docid_set_cleanup(allocator, &gram_docids);
+    memset(&gram_docids, 0, sizeof(gram_docids));
+    have_gram_docids = 0;
+    if (!any_field) {
+      term_id = 0UL;
+      if (lc_pouch_index_term_table_find(&generation->terms, field_hex,
+                                         value_hex, 's', &term_id)) {
+        rc = lc_pouch_index_term_posting_table_append_to_set(
+            &generation->postings, term_id, &gram_docids, allocator, error);
+        have_gram_docids = rc == LC_OK ? 1 : 0;
+      }
+    } else {
+      for (term_index = 0U;
+           rc == LC_OK && term_index < generation->terms.count; ++term_index) {
+        const lc_pouch_index_term_entry *term;
+
+        term = &generation->terms.items[term_index];
+        if (term->value_type != 's' || term->value_hex == NULL ||
+            strcmp(term->value_hex, value_hex) != 0) {
+          continue;
+        }
+        lc_pouch_index_docid_set_cleanup(allocator, &posting);
+        memset(&posting, 0, sizeof(posting));
+        rc = lc_pouch_index_term_posting_table_append_to_set(
+            &generation->postings, term->term_id, &posting, allocator, error);
+        if (rc != LC_OK) {
+          break;
+        }
+        if (!have_gram_docids) {
+          gram_docids = posting;
+          memset(&posting, 0, sizeof(posting));
+          have_gram_docids = 1;
+          continue;
+        }
+        lc_pouch_index_docid_set_cleanup(allocator, &next);
+        memset(&next, 0, sizeof(next));
+        rc = lc_pouch_index_docid_set_union_sorted(
+            &gram_docids, &posting, &next, allocator, error);
+        lc_pouch_index_docid_set_cleanup(allocator, &gram_docids);
+        lc_pouch_index_docid_set_cleanup(allocator, &posting);
+        gram_docids = next;
+        memset(&next, 0, sizeof(next));
+      }
+    }
+    lc_free_with_allocator(allocator, value_hex);
+    if (rc != LC_OK) {
+      break;
+    }
+    if (!have_gram_docids) {
       lc_pouch_index_docid_set_cleanup(allocator, &current);
       memset(&current, 0, sizeof(current));
       have_current = 1;
       break;
     }
-    lc_free_with_allocator(allocator, value_hex);
-    lc_pouch_index_docid_set_cleanup(allocator, &posting);
-    rc = lc_pouch_index_term_posting_table_append_to_set(
-        &generation->postings, term_id, &posting, allocator, error);
-    if (rc != LC_OK) {
-      break;
-    }
     if (!have_current) {
-      current = posting;
-      memset(&posting, 0, sizeof(posting));
+      current = gram_docids;
+      memset(&gram_docids, 0, sizeof(gram_docids));
       have_current = 1;
       continue;
     }
     lc_pouch_index_docid_set_cleanup(allocator, &next);
-    rc = lc_pouch_index_docid_set_intersect_sorted(&current, &posting, &next,
+    rc = lc_pouch_index_docid_set_intersect_sorted(&current, &gram_docids, &next,
                                                    allocator, error);
     lc_pouch_index_docid_set_cleanup(allocator, &current);
-    lc_pouch_index_docid_set_cleanup(allocator, &posting);
+    lc_pouch_index_docid_set_cleanup(allocator, &gram_docids);
     current = next;
     memset(&next, 0, sizeof(next));
   }
@@ -7385,6 +7436,7 @@ static int lc_pouch_query_index_collect_trigram_candidate_docids(
   }
   lc_pouch_index_docid_set_cleanup(allocator, &next);
   lc_pouch_index_docid_set_cleanup(allocator, &posting);
+  lc_pouch_index_docid_set_cleanup(allocator, &gram_docids);
   lc_pouch_index_docid_set_cleanup(allocator, &current);
   return rc;
 }
@@ -7400,6 +7452,7 @@ static int lc_pouch_query_index_collect_text_generation_docids(
   const lc_pouch_index_term_entry *term;
   size_t term_index;
   size_t doc_index;
+  int any_field;
   int rc;
 
   if (generation == NULL || field_hex == NULL || needle_text == NULL ||
@@ -7410,12 +7463,26 @@ static int lc_pouch_query_index_collect_text_generation_docids(
                         NULL, NULL, NULL);
   }
   rc = LC_OK;
+  any_field = lc_pouch_query_index_field_hex_is_any_text(field_hex);
   memset(&set, 0, sizeof(set));
   for (term_index = 0U; rc == LC_OK && term_index < generation->terms.count;
        ++term_index) {
+    int field_cmp;
+
     term = &generation->terms.items[term_index];
-    if (term->field_hex == NULL || strcmp(term->field_hex, field_hex) != 0 ||
-        term->value_type != 's' || term->value_hex == NULL ||
+    if (term->field_hex == NULL) {
+      continue;
+    }
+    if (!any_field) {
+      field_cmp = strcmp(term->field_hex, field_hex);
+      if (field_cmp < 0) {
+        continue;
+      }
+      if (field_cmp > 0) {
+        break;
+      }
+    }
+    if (term->value_type != 's' || term->value_hex == NULL ||
         strcmp(term->value_hex, "-") == 0 ||
         !lc_pouch_query_index_text_generation_matches(
             term->value_hex, needle_hex, needle_text, prefix_match,

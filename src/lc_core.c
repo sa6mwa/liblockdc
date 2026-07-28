@@ -76,6 +76,10 @@ typedef struct lc_fd_sink {
   int close_fd;
 } lc_fd_sink;
 
+typedef struct lc_discard_sink {
+  lc_sink_impl base;
+} lc_discard_sink;
+
 typedef struct lc_memory_sink {
   lc_sink_impl base;
   unsigned char *bytes;
@@ -660,6 +664,17 @@ static void lc_fd_sink_close(lc_sink_impl *base) {
   }
   free(sink);
 }
+
+static int lc_discard_sink_write(lc_sink_impl *base, const void *bytes,
+                                 size_t count, lc_error *error) {
+  (void)base;
+  (void)bytes;
+  (void)count;
+  (void)error;
+  return 1;
+}
+
+static void lc_discard_sink_close(lc_sink_impl *base) { free(base); }
 
 static int lc_memory_sink_write(lc_sink_impl *base, const void *bytes,
                                 size_t count, lc_error *error) {
@@ -1769,6 +1784,26 @@ int lc_sink_to_fd(int fd, lc_sink **out, lc_error *error) {
   sink->base.pub.close = lc_sink_pub_close;
   sink->base.write_impl = lc_fd_sink_write;
   sink->base.close_impl = lc_fd_sink_close;
+  *out = &sink->base.pub;
+  return LC_OK;
+}
+
+int lc_sink_to_discard(lc_sink **out, lc_error *error) {
+  lc_discard_sink *sink;
+
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "sink_to_discard requires out", NULL, NULL, NULL);
+  }
+  sink = (lc_discard_sink *)calloc(1U, sizeof(*sink));
+  if (sink == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate discard sink", NULL, NULL, NULL);
+  }
+  sink->base.pub.write = lc_sink_pub_write;
+  sink->base.pub.close = lc_sink_pub_close;
+  sink->base.write_impl = lc_discard_sink_write;
+  sink->base.close_impl = lc_discard_sink_close;
   *out = &sink->base.pub;
   return LC_OK;
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -52,6 +53,20 @@ func lockdBenchLQL(scenario string) string {
 		return "exists{/details/**}"
 	case "OrSparseOrFlag":
 		return "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}"
+	case "TenantEnterprise":
+		return "eq{field=/tenant/tier,value=enterprise}"
+	case "WorkflowEscalated":
+		return "in{field=/workflow/stage,any=review|escalated}"
+	case "AmountBand":
+		return "range{field=/metrics/amount_usd,gte=10000,lt=90000}"
+	case "RiskSignal":
+		return "icontains{field=/risk/summary,value=timeout}"
+	case "NarrativeSummary":
+		return "icontains{field=/narrative/summary,value=remediation}"
+	case "NarrativeDescription":
+		return "contains{field=/narrative/description,value=audit}"
+	case "FullTextAny":
+		return "icontains{field=/...,value=audit}"
 	default:
 		return "eq{field=/bucket,value=needle}"
 	}
@@ -103,7 +118,13 @@ func lockdBenchDocument(i int64) []byte {
 type lockdDiskHarness struct {
 	client   *lockdclient.Client
 	logs     *bytes.Buffer
+	bin      string
+	root     string
+	authRoot string
 	dataRoot string
+	addr     string
+	cancel   context.CancelFunc
+	cmd      *exec.Cmd
 }
 
 func startLockdDiskHarness(tb testing.TB) *lockdDiskHarness {
@@ -138,12 +159,29 @@ func startLockdDiskHarness(tb testing.TB) *lockdDiskHarness {
 		tb.Fatalf("create lockd disk data root: %v", err)
 	}
 
+	h := &lockdDiskHarness{
+		bin:      bin,
+		root:     root,
+		authRoot: authRoot,
+		dataRoot: dataRoot,
+		addr:     addr,
+		logs:     &bytes.Buffer{},
+	}
+	h.start(tb)
+	tb.Cleanup(func() {
+		h.stop(tb)
+	})
+	return h
+}
+
+func (h *lockdDiskHarness) start(tb testing.TB) {
+	tb.Helper()
+
 	ctx, cancel := context.WithCancel(context.Background())
-	logs := &bytes.Buffer{}
-	cmd := exec.CommandContext(ctx, bin,
-		"--bootstrap", authRoot,
-		"--store", "disk://"+dataRoot,
-		"--listen", addr,
+	cmd := exec.CommandContext(ctx, h.bin,
+		"--bootstrap", h.authRoot,
+		"--store", "disk://"+h.dataRoot,
+		"--listen", h.addr,
 		"--disable-mtls",
 		"--disable-storage-encryption",
 		"--log-level", "error",
@@ -153,22 +191,16 @@ func startLockdDiskHarness(tb testing.TB) *lockdDiskHarness {
 		"--indexer-flush-docs", "64",
 		"--indexer-flush-interval", "1s",
 	)
-	cmd.Stdout = logs
-	cmd.Stderr = logs
+	cmd.Stdout = h.logs
+	cmd.Stderr = h.logs
 	if err := cmd.Start(); err != nil {
 		cancel()
 		tb.Fatalf("start lockd disk benchmark server: %v", err)
 	}
-	tb.Cleanup(func() {
-		cancel()
-		if err := cmd.Wait(); err != nil && !errors.Is(err, context.Canceled) {
-			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.Success() {
-				tb.Errorf("wait for lockd disk benchmark server: %v", err)
-			}
-		}
-	})
+	h.cancel = cancel
+	h.cmd = cmd
 
-	cli, err := lockdclient.New("http://"+addr,
+	cli, err := lockdclient.New("http://"+h.addr,
 		lockdclient.WithDisableMTLS(true),
 		lockdclient.WithEndpointShuffle(false),
 	)
@@ -193,14 +225,39 @@ func startLockdDiskHarness(tb testing.TB) *lockdDiskHarness {
 			configCancel()
 			if err != nil {
 				cancel()
-				tb.Fatalf("configure lockd disk benchmark namespace query engines: %v\n%s", err, logs.String())
+				tb.Fatalf("configure lockd disk benchmark namespace query engines: %v\n%s", err, h.logs.String())
 			}
-			return &lockdDiskHarness{client: cli, logs: logs, dataRoot: dataRoot}
+			h.client = cli
+			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	tb.Fatalf("lockd disk benchmark server did not become ready: %v\n%s", lastErr, logs.String())
-	return nil
+	tb.Fatalf("lockd disk benchmark server did not become ready: %v\n%s", lastErr, h.logs.String())
+}
+
+func (h *lockdDiskHarness) stop(tb testing.TB) {
+	tb.Helper()
+
+	if h.cancel != nil {
+		h.cancel()
+		h.cancel = nil
+	}
+	if h.cmd != nil {
+		if err := h.cmd.Wait(); err != nil && !errors.Is(err, context.Canceled) {
+			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.Success() {
+				tb.Errorf("wait for lockd disk benchmark server: %v", err)
+			}
+		}
+		h.cmd = nil
+	}
+	h.client = nil
+}
+
+func (h *lockdDiskHarness) restart(tb testing.TB) {
+	tb.Helper()
+
+	h.stop(tb)
+	h.start(tb)
 }
 
 func countLockdDiskLogstoreSegments(tb testing.TB, h *lockdDiskHarness) int64 {
@@ -297,7 +354,21 @@ func runLockdDiskQuery(tb testing.TB, h *lockdDiskHarness, rows int64, engine, s
 		return len(resp.Keys())
 	}
 	count := 0
-	if err := resp.ForEach(func(lockdclient.QueryRow) error {
+	if err := resp.ForEach(func(row lockdclient.QueryRow) error {
+		reader, err := row.DocumentReader()
+		if err != nil {
+			return err
+		}
+		if _, err = io.Copy(io.Discard, reader); err != nil {
+			closeErr := reader.Close()
+			if closeErr != nil {
+				return fmt.Errorf("drain query document: %w; close: %v", err, closeErr)
+			}
+			return err
+		}
+		if err = reader.Close(); err != nil {
+			return err
+		}
 		count++
 		return nil
 	}); err != nil {

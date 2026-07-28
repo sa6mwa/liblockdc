@@ -2519,12 +2519,35 @@ multiple segment files with the default 64 MiB segment target still intact. This
 suite is intentionally outside the liblockdc release gate: it is a performance
 and stress-test tool for iterative tuning, including short iteration runs and
 larger multi-page datasets that expose cursor, segment, and index behavior.
-The 2026-07-28 default production comparison
-(`make benchmark-pouch-go-production`) wrote 384 state revisions and about
-100 MiB of JSON, produced three pouch segments, and passed functionally. It also
-showed the current write-heavy performance gap: pouch measured about 9.23 s
-C-side / 9.17 s Go-wall, while plaintext Go lockd disk measured about 3.73 s on
-the same public workload. That benchmark is now the evidence gate for closing
+The 2026-07-28 production comparison now runs a default matrix instead of a
+single acceptance query: `WideLarge` (128 documents, three updates, 256 KiB
+payloads), `DeepNested` (192 documents, two updates, 192 KiB payloads), and
+`HotChurn` (96 documents, six updates, 128 KiB payloads). Setting
+`POUCH_GO_PRODUCTION_ROWS`, `POUCH_GO_PRODUCTION_UPDATES`, or
+`POUCH_GO_PRODUCTION_PAYLOAD_BYTES` switches the target to one explicit custom
+profile. The generated production documents include nested tenant/workflow,
+metrics, risk, details, line-item, and narrative fields, with long summary,
+description, and operator-note text. The query phases cover indexed key
+queries, indexed document queries, scan key queries, scan document queries, and
+full-document text search through `icontains{field=/...,value=audit}`. Pouch
+workload operations run through the public `pouch://` client and receiver APIs;
+the only direct filesystem observation is segment counting after the workload.
+The pouch document-query benchmark uses the public `lc_sink_to_discard` sink and
+query metadata for row assertions so it does not benchmark an extra
+benchmark-side memory materialization.
+
+The latest focused profile
+(`POUCH_GO_PRODUCTION_ROWS=128 POUCH_GO_PRODUCTION_UPDATES=3
+POUCH_GO_PRODUCTION_PAYLOAD_BYTES=262144 make benchmark-pouch-go-production`)
+passed functionally, wrote 384 state revisions and about 100 MiB of JSON, and
+produced three pouch segments versus nine default-size Go lockd disk logstore
+segments. Pouch measured about 0.59 s wall time versus plaintext Go lockd disk
+at about 9.81 s, and pouch was faster on acquire, update, release, stale-write
+failure, attachment, queue, get, reopen, indexed key query, and overall wall
+time. The hard "pouch beats Go disk on every metric" performance criterion is
+not yet satisfied: pouch remains slower on explicit `flush_index`,
+document-returning indexed queries, scan key/document queries, and scan
+full-text document queries. That benchmark is now the evidence gate for closing
 the remaining storage-engine performance gap; implementations must not disable
 pouch durability or lower the segment target just to satisfy it.
 The 4096-document tuning run found a numeric range regression: primary range

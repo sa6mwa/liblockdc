@@ -1847,6 +1847,8 @@ int lc_source_from_callbacks(lc_source_read_fn read, lc_source_reset_fn reset,
 int lc_sink_to_file(const char *path, lc_sink **out, lc_error *error);
 /** Creates a sink that writes bytes to a file descriptor. */
 int lc_sink_to_fd(int fd, lc_sink **out, lc_error *error);
+/** Creates a sink that accepts and discards all bytes. */
+int lc_sink_to_discard(lc_sink **out, lc_error *error);
 /** Creates an in-memory sink owned by the library. */
 int lc_sink_to_memory(lc_sink **out, lc_error *error);
 /** Returns the bytes accumulated by an in-memory sink. */

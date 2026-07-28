@@ -14,6 +14,22 @@ typedef struct lockdc_pouch_bench_result {
   long segments;
   long bytes;
   uint64_t c_ns;
+  uint64_t acquire_ns;
+  uint64_t update_ns;
+  uint64_t release_ns;
+  uint64_t stale_ns;
+  uint64_t attachment_ns;
+  uint64_t queue_ns;
+  uint64_t flush_ns;
+  uint64_t reopen_ns;
+  uint64_t get_public_ns;
+  uint64_t get_lease_ns;
+  uint64_t index_query_keys_ns;
+  uint64_t index_query_docs_ns;
+  uint64_t scan_query_keys_ns;
+  uint64_t scan_query_docs_ns;
+  uint64_t full_text_index_keys_ns;
+  uint64_t full_text_scan_docs_ns;
   char error[256];
 } lockdc_pouch_bench_result;
 

@@ -272,6 +272,19 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     `benchmark-pouch-go*` Makefile targets, with C-side pouch timing metrics
     and fast/medium benchmark names that compile against the pouch
     `lc_pouch` API.
+  - [x] Reintroduce production-like pouch-vs-Go-disk storage benchmarking
+    through public APIs: acquire/update/release, stale update failure,
+    attachment put/get, queue enqueue/dequeue/ack, close/reopen, get, lease get,
+    indexed query, scan query, and full-document text search over nested,
+    narrative-heavy JSON documents that produce multiple segments with default
+    segment sizing intact.
+  - [x] Keep Go lockd disk comparisons plaintext by starting the benchmark
+    server with Kryptograf storage encryption disabled.
+  - [ ] Close the remaining production benchmark performance gap: pouch now
+    wins wall time and most operation phases, but does not yet beat plaintext Go
+    lockd disk on every metric. Current gaps are explicit `flush_index`,
+    document-returning indexed queries, scan key/document queries, and scan
+    full-text document queries.
 
 ## Foundation
 

@@ -48,9 +48,9 @@ POUCH_GO_ACCEPTANCE_SCALE_SCENARIOS ?= EqSparse,RangeHalf,InTags,ContainsMessage
 POUCH_GO_ACCEPTANCE_TIMEOUT ?= 3m
 POUCH_GO_PRODUCTION_BENCH ?= Production(Pouch|LockdDisk)
 POUCH_GO_PRODUCTION_BENCHTIME ?= 1x
-POUCH_GO_PRODUCTION_ROWS ?= 128
-POUCH_GO_PRODUCTION_UPDATES ?= 3
-POUCH_GO_PRODUCTION_PAYLOAD_BYTES ?= 262144
+POUCH_GO_PRODUCTION_ROWS ?=
+POUCH_GO_PRODUCTION_UPDATES ?=
+POUCH_GO_PRODUCTION_PAYLOAD_BYTES ?=
 POUCH_GO_PRODUCTION_TIMEOUT ?= 10m
 FUZZ_TIME ?= 30
 POUCH_GO_BENCH_CFLAGS := \
@@ -136,7 +136,7 @@ help:
 		'make benchmark-pouch-go-fast Run the bounded Go e2e pouch-vs-disk iteration suite (timeout $(POUCH_GO_FAST_TIMEOUT), seed rows $(POUCH_GO_FAST_SEED_ROWS)).' \
 		'make benchmark-pouch-go-medium Run the bounded 3m Go e2e pouch-vs-disk scan/index scale suite (rows $(POUCH_GO_MEDIUM_SCALE_ROWS)).' \
 		'make benchmark-pouch-go-acceptance Run the bounded 4096-doc pouch-vs-disk acceptance matrix (timeout $(POUCH_GO_ACCEPTANCE_TIMEOUT)).' \
-		'make benchmark-pouch-go-production Run production-like pouch-vs-disk segmented write/read/replay/queue/attachment benchmark (rows $(POUCH_GO_PRODUCTION_ROWS), payload $(POUCH_GO_PRODUCTION_PAYLOAD_BYTES)).' \
+		'make benchmark-pouch-go-production Run production-like pouch-vs-disk segmented write/read/replay/queue/attachment benchmark matrix; set POUCH_GO_PRODUCTION_ROWS/UPDATES/PAYLOAD_BYTES for one custom profile.' \
 		'make package            Build the shipped x86_64-linux-gnu release preset and write the combined release archive, source archive, and Lua source rock to dist/.' \
 		'make package-source     Build the source-only release archive.' \
 		'make package-source-smoke  Build and verify the source-only release archive.' \
