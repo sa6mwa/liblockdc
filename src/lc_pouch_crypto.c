@@ -20,7 +20,7 @@
 #define LC_POUCH_NONCE_BYTES 12U
 #define LC_POUCH_DEK_BYTES 32U
 #define LC_POUCH_GCM_TAG_BYTES 16U
-#define LC_POUCH_FRAME_PLAINTEXT_BYTES 8192U
+#define LC_POUCH_FRAME_PLAINTEXT_BYTES (64U * 1024U)
 #define LC_POUCH_DESC_RAW_BYTES                                                \
   (4U + LC_POUCH_SALT_BYTES + LC_POUCH_NONCE_PREFIX_BYTES)
 
@@ -38,9 +38,11 @@ typedef struct lc_pouch_crypto_desc {
 typedef struct lc_pouch_crypto_source {
   lc_source pub;
   FILE *fp;
+  EVP_CIPHER_CTX *ctx;
   unsigned char key[LC_POUCH_DEK_BYTES];
   unsigned char nonce_prefix[LC_POUCH_NONCE_PREFIX_BYTES];
   unsigned char plain[LC_POUCH_FRAME_PLAINTEXT_BYTES];
+  unsigned char cipher[LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES];
   size_t plain_offset;
   size_t plain_length;
   unsigned long frame_size;
@@ -67,8 +69,8 @@ static char *lc_pouch_crypto_strdup(const char *text) {
   return copy;
 }
 
-static int lc_pouch_crypto_write_all_fd(int fd, const void *bytes,
-                                        size_t count, lc_error *error) {
+static int lc_pouch_crypto_write_all_fd(int fd, const void *bytes, size_t count,
+                                        lc_error *error) {
   const unsigned char *cursor;
 
   cursor = (const unsigned char *)bytes;
@@ -104,21 +106,21 @@ static int lc_pouch_crypto_read_all_file(const char *path, char **out,
 
   if (path == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch key file read requires path and out", NULL,
-                        NULL, "pouch");
+                        "pouch key file read requires path and out", NULL, NULL,
+                        "pouch");
   }
   *out = NULL;
   fp = fopen(path, "rb");
   if (fp == NULL) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to open pouch crypto key file",
-                        strerror(errno), NULL, "pouch");
+                        "failed to open pouch crypto key file", strerror(errno),
+                        NULL, "pouch");
   }
   if (fseek(fp, 0L, SEEK_END) != 0) {
     fclose(fp);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to seek pouch crypto key file",
-                        strerror(errno), NULL, "pouch");
+                        "failed to seek pouch crypto key file", strerror(errno),
+                        NULL, "pouch");
   }
   size = ftell(fp);
   if (size < 0L || size > 8192L) {
@@ -149,9 +151,8 @@ static int lc_pouch_crypto_read_all_file(const char *path, char **out,
                         "pouch");
   }
   fclose(fp);
-  while (got > 0U &&
-         (buffer[got - 1U] == '\n' || buffer[got - 1U] == '\r' ||
-          buffer[got - 1U] == ' ' || buffer[got - 1U] == '\t')) {
+  while (got > 0U && (buffer[got - 1U] == '\n' || buffer[got - 1U] == '\r' ||
+                      buffer[got - 1U] == ' ' || buffer[got - 1U] == '\t')) {
     --got;
   }
   buffer[got] = '\0';
@@ -381,8 +382,8 @@ int lc_pouch_crypto_generate_key_string(char **out, lc_error *error) {
   if (result == NULL) {
     free(encoded);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch crypto root key string",
-                        NULL, NULL, "pouch");
+                        "failed to allocate pouch crypto root key string", NULL,
+                        NULL, "pouch");
   }
   memcpy(result, LC_POUCH_KEY_PREFIX, prefix_len);
   memcpy(result + prefix_len, encoded, encoded_len + 1U);
@@ -453,8 +454,8 @@ int lc_pouch_crypto_generate_key_file(const char *path, int overwrite,
 
   if (path == NULL || path[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "lc_pouch_crypto_generate_key_file requires path",
-                        NULL, NULL, "pouch");
+                        "lc_pouch_crypto_generate_key_file requires path", NULL,
+                        NULL, "pouch");
   }
   if (key_string_out != NULL) {
     *key_string_out = NULL;
@@ -524,9 +525,8 @@ static int lc_pouch_crypto_parse_key(const char *key_string,
   size_t decoded_len;
   int rc;
 
-  if (key_string == NULL ||
-      strncmp(key_string, LC_POUCH_KEY_PREFIX,
-              sizeof(LC_POUCH_KEY_PREFIX) - 1U) != 0) {
+  if (key_string == NULL || strncmp(key_string, LC_POUCH_KEY_PREFIX,
+                                    sizeof(LC_POUCH_KEY_PREFIX) - 1U) != 0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch crypto key must use lc-pouch-key-v1 format",
                         NULL, NULL, "pouch");
@@ -604,8 +604,8 @@ int lc_pouch_crypto_open(const lc_allocator *allocator,
     }
     key_string = loaded_key;
   }
-  crypto =
-      (lc_pouch_crypto *)lc_calloc_with_allocator(allocator, 1U, sizeof(*crypto));
+  crypto = (lc_pouch_crypto *)lc_calloc_with_allocator(allocator, 1U,
+                                                       sizeof(*crypto));
   if (crypto == NULL) {
     free(loaded_key);
     free(resolved_key_file);
@@ -683,8 +683,8 @@ static int lc_pouch_crypto_derive(const lc_pouch_crypto *crypto,
   }
   prk_len = 0U;
   if (EVP_Q_mac(NULL, "HMAC", NULL, "SHA256", NULL, desc->salt,
-                sizeof(desc->salt), crypto->root_key,
-                sizeof(crypto->root_key), prk, sizeof(prk), &prk_len) == NULL ||
+                sizeof(desc->salt), crypto->root_key, sizeof(crypto->root_key),
+                prk, sizeof(prk), &prk_len) == NULL ||
       prk_len == 0U) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to derive pouch crypto PRK", NULL, NULL,
@@ -759,9 +759,8 @@ static int lc_pouch_crypto_descriptor_decode(const char *descriptor,
   size_t raw_len;
   int rc;
 
-  if (descriptor == NULL ||
-      strncmp(descriptor, LC_POUCH_DESC_PREFIX,
-              sizeof(LC_POUCH_DESC_PREFIX) - 1U) != 0) {
+  if (descriptor == NULL || strncmp(descriptor, LC_POUCH_DESC_PREFIX,
+                                    sizeof(LC_POUCH_DESC_PREFIX) - 1U) != 0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch crypto descriptor is missing or invalid", NULL,
                         NULL, "pouch");
@@ -808,15 +807,20 @@ static int lc_pouch_crypto_encrypt_frame(
     const unsigned char nonce_prefix[LC_POUCH_NONCE_PREFIX_BYTES],
     unsigned long counter, const unsigned char *plain, size_t plain_len,
     unsigned long *cipher_total, lc_error *error) {
-  unsigned char header[8];
+  unsigned char
+      frame[8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES];
+  unsigned char *header;
+  unsigned char *cipher;
+  unsigned char *tag;
   unsigned char nonce[LC_POUCH_NONCE_BYTES];
-  unsigned char cipher[LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES];
-  unsigned char tag[LC_POUCH_GCM_TAG_BYTES];
+  size_t cipher_len;
   int out_len;
   int final_len;
   int aad_len;
   int rc;
 
+  header = frame;
+  cipher = frame + 8U;
   lc_pouch_crypto_put32(header, counter);
   lc_pouch_crypto_put32(header + 4U, (unsigned long)plain_len);
   lc_pouch_crypto_nonce(nonce_prefix, counter, nonce);
@@ -824,28 +828,27 @@ static int lc_pouch_crypto_encrypt_frame(
       EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, sizeof(nonce), NULL) !=
           1 ||
       EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1 ||
-      EVP_EncryptUpdate(ctx, NULL, &aad_len, header, sizeof(header)) != 1 ||
+      EVP_EncryptUpdate(ctx, NULL, &aad_len, header, 8) != 1 ||
       EVP_EncryptUpdate(ctx, cipher, &out_len, plain, (int)plain_len) != 1 ||
-      EVP_EncryptFinal_ex(ctx, cipher + out_len, &final_len) != 1 ||
-      EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, sizeof(tag), tag) != 1) {
+      EVP_EncryptFinal_ex(ctx, cipher + out_len, &final_len) != 1) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to encrypt pouch payload frame", NULL, NULL,
                         "pouch");
   }
-  rc = lc_pouch_crypto_write_all_fd(fd, header, sizeof(header), error);
-  if (rc == LC_OK && plain_len > 0U) {
-    rc = lc_pouch_crypto_write_all_fd(fd, cipher,
-                                      (size_t)(out_len + final_len), error);
+  cipher_len = (size_t)(out_len + final_len);
+  tag = cipher + cipher_len;
+  if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, LC_POUCH_GCM_TAG_BYTES,
+                          tag) != 1) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to encrypt pouch payload frame", NULL, NULL,
+                        "pouch");
   }
-  if (rc == LC_OK) {
-    rc = lc_pouch_crypto_write_all_fd(fd, tag, sizeof(tag), error);
-  }
+  rc = lc_pouch_crypto_write_all_fd(
+      fd, frame, 8U + cipher_len + LC_POUCH_GCM_TAG_BYTES, error);
   if (rc == LC_OK && cipher_total != NULL) {
-    *cipher_total += sizeof(header) + plain_len + sizeof(tag);
+    *cipher_total += 8UL + (unsigned long)cipher_len + LC_POUCH_GCM_TAG_BYTES;
   }
   memset(nonce, 0, sizeof(nonce));
-  memset(cipher, 0, sizeof(cipher));
-  memset(tag, 0, sizeof(tag));
   return rc;
 }
 
@@ -862,8 +865,8 @@ static int lc_pouch_crypto_stream_plain_to_file(const char *path,
   fd = open(path, O_CREAT | O_TRUNC | O_WRONLY, 0666);
   if (fd < 0) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to create pouch state payload",
-                        strerror(errno), NULL, "pouch");
+                        "failed to create pouch state payload", strerror(errno),
+                        NULL, "pouch");
   }
   total = 0UL;
   rc = LC_OK;
@@ -906,9 +909,9 @@ static int lc_pouch_crypto_stream_plain_to_file(const char *path,
   return LC_OK;
 }
 
-int lc_pouch_crypto_stream_to_file(lc_pouch_crypto *crypto,
-                                   const char *context, const char *path,
-                                   lc_source *body, unsigned long *plain_bytes,
+int lc_pouch_crypto_stream_to_file(lc_pouch_crypto *crypto, const char *context,
+                                   const char *path, lc_source *body,
+                                   unsigned long *plain_bytes,
                                    unsigned long *cipher_bytes,
                                    char **descriptor_out, lc_error *error) {
   lc_pouch_crypto_desc desc;
@@ -989,9 +992,8 @@ int lc_pouch_crypto_stream_to_file(lc_pouch_crypto *crypto,
       }
       break;
     }
-    rc = lc_pouch_crypto_encrypt_frame(fd, ctx, key, desc.nonce_prefix,
-                                       counter, buffer, got, &cipher_total,
-                                       error);
+    rc = lc_pouch_crypto_encrypt_frame(fd, ctx, key, desc.nonce_prefix, counter,
+                                       buffer, got, &cipher_total, error);
     if (rc != LC_OK) {
       break;
     }
@@ -1074,8 +1076,16 @@ int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
                         "failed to allocate pouch crypto source", NULL, NULL,
                         "pouch");
   }
+  source->ctx = EVP_CIPHER_CTX_new();
+  if (source->ctx == NULL) {
+    free(source);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch decrypt context", NULL, NULL,
+                        "pouch");
+  }
   source->fp = fopen(path, "rb");
   if (source->fp == NULL) {
+    EVP_CIPHER_CTX_free(source->ctx);
     free(source);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to open encrypted pouch payload",
@@ -1084,6 +1094,7 @@ int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
   rc = lc_pouch_crypto_derive(crypto, &desc, context, source->key, error);
   if (rc != LC_OK) {
     fclose(source->fp);
+    EVP_CIPHER_CTX_free(source->ctx);
     free(source);
     return rc;
   }
@@ -1101,9 +1112,7 @@ static int lc_pouch_crypto_read_frame(lc_pouch_crypto_source *source,
                                       lc_error *error) {
   unsigned char header[8];
   unsigned char nonce[LC_POUCH_NONCE_BYTES];
-  unsigned char cipher[LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES];
-  unsigned char tag[LC_POUCH_GCM_TAG_BYTES];
-  EVP_CIPHER_CTX *ctx;
+  unsigned char *tag;
   unsigned long counter;
   unsigned long plain_len;
   int out_len;
@@ -1123,43 +1132,40 @@ static int lc_pouch_crypto_read_frame(lc_pouch_crypto_source *source,
   if (counter != source->counter ||
       plain_len > LC_POUCH_FRAME_PLAINTEXT_BYTES) {
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                        "encrypted pouch payload frame header is invalid",
-                        NULL, NULL, "pouch");
+                        "encrypted pouch payload frame header is invalid", NULL,
+                        NULL, "pouch");
   }
   if (plain_len > 0UL) {
-    got = fread(cipher, 1U, (size_t)plain_len, source->fp);
+    got = fread(source->cipher, 1U, (size_t)plain_len, source->fp);
     if (got != (size_t)plain_len) {
       return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                           "encrypted pouch payload frame is truncated", NULL,
                           NULL, "pouch");
     }
   }
-  got = fread(tag, 1U, sizeof(tag), source->fp);
-  if (got != sizeof(tag)) {
+  tag = source->cipher + plain_len;
+  got = fread(tag, 1U, LC_POUCH_GCM_TAG_BYTES, source->fp);
+  if (got != LC_POUCH_GCM_TAG_BYTES) {
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "encrypted pouch payload frame tag is truncated", NULL,
                         NULL, "pouch");
   }
-  ctx = EVP_CIPHER_CTX_new();
-  if (ctx == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch decrypt context", NULL, NULL,
-                        "pouch");
-  }
   lc_pouch_crypto_nonce(source->nonce_prefix, counter, nonce);
-  ok = EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) == 1 &&
-       EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, sizeof(nonce), NULL) ==
+  ok = EVP_CIPHER_CTX_reset(source->ctx) == 1 &&
+       EVP_DecryptInit_ex(source->ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) ==
            1 &&
-       EVP_DecryptInit_ex(ctx, NULL, NULL, source->key, nonce) == 1 &&
-       EVP_DecryptUpdate(ctx, NULL, &aad_len, header, sizeof(header)) == 1 &&
-       EVP_DecryptUpdate(ctx, source->plain, &out_len, cipher,
+       EVP_CIPHER_CTX_ctrl(source->ctx, EVP_CTRL_GCM_SET_IVLEN, sizeof(nonce),
+                           NULL) == 1 &&
+       EVP_DecryptInit_ex(source->ctx, NULL, NULL, source->key, nonce) == 1 &&
+       EVP_DecryptUpdate(source->ctx, NULL, &aad_len, header, sizeof(header)) ==
+           1 &&
+       EVP_DecryptUpdate(source->ctx, source->plain, &out_len, source->cipher,
                          (int)plain_len) == 1 &&
-       EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, sizeof(tag), tag) == 1 &&
-       EVP_DecryptFinal_ex(ctx, source->plain + out_len, &final_len) == 1;
-  EVP_CIPHER_CTX_free(ctx);
+       EVP_CIPHER_CTX_ctrl(source->ctx, EVP_CTRL_GCM_SET_TAG,
+                           LC_POUCH_GCM_TAG_BYTES, tag) == 1 &&
+       EVP_DecryptFinal_ex(source->ctx, source->plain + out_len, &final_len) ==
+           1;
   memset(nonce, 0, sizeof(nonce));
-  memset(cipher, 0, sizeof(cipher));
-  memset(tag, 0, sizeof(tag));
   if (!ok || (unsigned long)(out_len + final_len) != plain_len) {
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "encrypted pouch payload authentication failed", NULL,
@@ -1216,8 +1222,8 @@ static size_t lc_pouch_crypto_source_read(lc_source *self, void *buffer,
     if (take > available) {
       take = available;
     }
-    memcpy((unsigned char *)buffer + copied, source->plain + source->plain_offset,
-           take);
+    memcpy((unsigned char *)buffer + copied,
+           source->plain + source->plain_offset, take);
     source->plain_offset += take;
     copied += take;
   }
@@ -1229,8 +1235,8 @@ static int lc_pouch_crypto_source_reset(lc_source *self, lc_error *error) {
 
   if (self == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch crypto source reset requires source", NULL,
-                        NULL, "pouch");
+                        "pouch crypto source reset requires source", NULL, NULL,
+                        "pouch");
   }
   source = (lc_pouch_crypto_source *)self->impl;
   if (fseek(source->fp, 0L, SEEK_SET) != 0) {
@@ -1255,6 +1261,7 @@ static void lc_pouch_crypto_source_close(lc_source *self) {
   if (source->fp != NULL) {
     fclose(source->fp);
   }
+  EVP_CIPHER_CTX_free(source->ctx);
   memset(source->key, 0, sizeof(source->key));
   memset(source->plain, 0, sizeof(source->plain));
   free(source);

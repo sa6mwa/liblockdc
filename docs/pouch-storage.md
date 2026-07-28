@@ -2407,7 +2407,10 @@ Descriptors contain only public decryption parameters: frame size, per-payload
 salt, and nonce prefix. The root key is never stored in descriptors. Each state
 record preserves plaintext byte count, cipher byte count, and descriptor bytes.
 Older plaintext records remain readable because records without descriptors are
-opened as plaintext.
+opened as plaintext. New encrypted writes currently use a 64 KiB plaintext
+frame cap; this is a streaming chunk limit, not a minimum storage allocation, so
+small payloads still write only their payload bytes plus per-frame header/tag
+overhead and descriptor metadata.
 
 The public C helper `lc_pouch_crypto_generate_key_string()` creates a new root
 key string. `lc_pouch_crypto_generate_key_file()` writes a 0600 key file, and
