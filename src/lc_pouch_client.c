@@ -525,11 +525,6 @@ lc_pouch_client_default_fallback_engine(lc_client_handle *client) {
   return "none";
 }
 
-static int lc_pouch_client_encrypted(lc_client_handle *client) {
-  return client != NULL && client->pouch != NULL &&
-         lc_pouch_crypto_enabled(client->pouch->crypto);
-}
-
 static int lc_pouch_namespace_config_valid_preferred(const char *engine) {
   return engine != NULL &&
          (strcmp(engine, "index") == 0 || strcmp(engine, "scan") == 0);
@@ -724,10 +719,6 @@ static int lc_pouch_client_query_engine(lc_client_handle *client,
   int rc;
 
   *owned_engine = NULL;
-  if (lc_pouch_client_encrypted(client)) {
-    *out_engine = "scan";
-    return LC_OK;
-  }
   if (request_engine != NULL && request_engine[0] != '\0') {
     *out_engine = request_engine;
     return LC_OK;
@@ -8969,7 +8960,6 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   }
   if (req->refresh != NULL && req->refresh[0] != '\0' &&
       strcmp(effective_engine, "scan") == 0 &&
-      !lc_pouch_client_encrypted(client) &&
       lc_pouch_client_can_use_query_fallback(client, req->engine, "index")) {
     effective_engine = "index";
   }
@@ -9107,7 +9097,6 @@ int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
   }
   if (req->refresh != NULL && req->refresh[0] != '\0' &&
       strcmp(effective_engine, "scan") == 0 &&
-      !lc_pouch_client_encrypted(client) &&
       lc_pouch_client_can_use_query_fallback(client, req->engine, "index")) {
     effective_engine = "index";
   }
@@ -9387,24 +9376,6 @@ int lc_pouch_client_flush_index_method(lc_client *self,
                                 error);
   if (rc != LC_OK) {
     return rc;
-  }
-  if (lc_pouch_client_encrypted(client)) {
-    out->namespace_name = lc_strdup_local(namespace_name);
-    out->mode = lc_strdup_local(mode);
-    out->flush_id = lc_strdup_local("pouch-query-index-disabled-encrypted");
-    out->accepted = 1;
-    out->flushed = 1;
-    out->pending = 0;
-    out->index_seq = index_seq;
-    out->correlation_id = lc_strdup_local("pouch-index-flush");
-    if (out->namespace_name == NULL || out->mode == NULL ||
-        out->flush_id == NULL || out->correlation_id == NULL) {
-      lc_index_flush_res_cleanup(out);
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch index flush response", NULL,
-                          NULL, NULL);
-    }
-    return LC_OK;
   }
   memset(&index_result, 0, sizeof(index_result));
   rc = lc_pouch_query_index_flush(client->pouch, namespace_name, index_seq,

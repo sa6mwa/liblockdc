@@ -1973,6 +1973,23 @@ static void assert_path_file_not_contains(const char *root, const char *leaf,
   assert_file_not_contains(path, needle);
 }
 
+static void assert_encrypted_query_index_artifact(const char *namespace_path,
+                                                  const char *leaf,
+                                                  const char *needle) {
+  char path[1024];
+  char descriptor_path[1100];
+
+  snprintf(path, sizeof(path), "%s/index/%s", namespace_path, leaf);
+  snprintf(descriptor_path, sizeof(descriptor_path), "%s.lcpcrypto", path);
+  assert_true(path_is_file(path));
+  assert_true(path_is_file(descriptor_path));
+  assert_true(pouch_file_contains_text(descriptor_path, "lc-pouch-desc-v1:"));
+  assert_false(pouch_file_contains_text(path, needle));
+  assert_false(pouch_file_contains_text(path, "format=pouch-query-index"));
+  assert_false(pouch_file_contains_text(path, "format=pouch-doc-table"));
+  assert_false(pouch_file_contains_text(path, "format=pouch-term-generation"));
+}
+
 static void find_single_marker_path(const char *root,
                                     const char *namespace_name, char *path,
                                     size_t path_size) {
@@ -6433,7 +6450,6 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   const void *bytes;
   size_t length;
   char *crypto_key;
-  char *index_path;
   char *namespace_path;
   char root[512];
   int rc;
@@ -6470,7 +6486,6 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   lc_index_flush_req_init(&flush_req);
   memset(&flush_res, 0, sizeof(flush_res));
   lc_error_init(&error);
-  index_path = NULL;
   namespace_path = NULL;
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
@@ -6497,20 +6512,35 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   assert_non_null(query_res.metadata_json);
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
-                                 "\"engine\":\"scan\""));
+                                 "\"engine\":\"index\""));
+  assert_false(bytes_contain_text(query_res.metadata_json,
+                                  strlen(query_res.metadata_json),
+                                  "\"engine\":\"scan\""));
   lc_query_res_cleanup(&query_res);
 
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(flush_res.flush_id,
-                      "pouch-query-index-disabled-encrypted");
+  assert_true(flush_res.flushed);
+  assert_false(strcmp(flush_res.flush_id,
+                      "pouch-query-index-disabled-encrypted") == 0);
   namespace_path = lc_pouch_namespace_path(NULL, root, "default");
   assert_non_null(namespace_path);
-  index_path = lc_pouch_path_join(NULL, namespace_path, "index/query.index");
-  assert_non_null(index_path);
-  assert_false(path_is_file(index_path));
-  lc_free_with_allocator(NULL, index_path);
-  index_path = NULL;
+  assert_encrypted_query_index_artifact(
+      namespace_path, "query.index", "state-secret-redaction-required");
+  assert_encrypted_query_index_artifact(
+      namespace_path, "query.index.lcpdtg", "state-secret-redaction-required");
+  assert_encrypted_query_index_artifact(
+      namespace_path, "query.index.lcpttg", "state-secret-redaction-required");
+  assert_encrypted_query_index_artifact(
+      namespace_path, "query.index.lcppg", "state-secret-redaction-required");
+  assert_encrypted_query_index_artifact(
+      namespace_path, "query.index.lcprg", "state-secret-redaction-required");
+  assert_encrypted_query_index_artifact(
+      namespace_path, "query.index.lcptxg", "state-secret-redaction-required");
+  assert_encrypted_query_index_artifact(
+      namespace_path, "query.index.lcpt3g", "state-secret-redaction-required");
+  assert_encrypted_query_index_artifact(
+      namespace_path, "query.index.lcptdg", "state-secret-redaction-required");
   lc_free_with_allocator(NULL, namespace_path);
   namespace_path = NULL;
   lc_index_flush_res_cleanup(&flush_res);
@@ -6663,7 +6693,6 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   lc_update_res_cleanup(&txn_update_res);
   lc_update_res_cleanup(&update_res);
   lc_pouch_crypto_key_string_free(crypto_key);
-  lc_free_with_allocator(NULL, index_path);
   lc_free_with_allocator(NULL, namespace_path);
   cleanup_root(root);
   lc_error_cleanup(&error);

@@ -254,6 +254,11 @@ int lc_pouch_index_doc_table_generation_validate_file(
     const lc_allocator *allocator, const char *path,
     unsigned long expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, int *present, int *valid, lc_error *error);
+int lc_pouch_index_doc_table_generation_load_bytes(
+    const lc_allocator *allocator, char **bytes_inout, size_t length,
+    unsigned long expected_index_seq, unsigned long expected_row_count,
+    unsigned long expected_row_hash, lc_pouch_index_doc_table *table,
+    int *valid, lc_error *error);
 int lc_pouch_index_doc_table_generation_load_file(
     const lc_allocator *allocator, const char *path,
     unsigned long expected_index_seq, unsigned long expected_row_count,
@@ -369,6 +374,11 @@ int lc_pouch_index_term_generation_decode(
     unsigned long expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, lc_pouch_index_term_generation *generation,
     lc_error *error);
+int lc_pouch_index_term_generation_load_bytes(
+    const lc_allocator *allocator, const char *bytes, size_t length,
+    unsigned long expected_index_seq, unsigned long expected_row_count,
+    unsigned long expected_row_hash, lc_pouch_index_term_generation *generation,
+    int *valid, lc_error *error);
 int lc_pouch_index_term_generation_validate_file(
     const lc_allocator *allocator, const char *path,
     unsigned long expected_index_seq, unsigned long expected_row_count,

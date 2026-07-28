@@ -951,6 +951,35 @@ int lc_pouch_index_doc_table_generation_validate_file(
   return LC_OK;
 }
 
+int lc_pouch_index_doc_table_generation_load_bytes(
+    const lc_allocator *allocator, char **bytes_inout, size_t length,
+    unsigned long expected_index_seq, unsigned long expected_row_count,
+    unsigned long expected_row_hash, lc_pouch_index_doc_table *table,
+    int *valid, lc_error *error) {
+  int rc;
+
+  if (bytes_inout == NULL || *bytes_inout == NULL || table == NULL ||
+      valid == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch doc table generation load requires bytes, "
+                        "table, and valid output",
+                        NULL, NULL, NULL);
+  }
+  memset(table, 0, sizeof(*table));
+  *valid = 0;
+  rc = lc_pouch_index_doc_generation_parse_bytes(
+      allocator, *bytes_inout, expected_index_seq, expected_row_count,
+      expected_row_hash, table, valid, error);
+  if (rc == LC_OK && *valid) {
+    table->owned_generation_bytes = *bytes_inout;
+    *bytes_inout = NULL;
+  } else {
+    lc_pouch_index_doc_table_cleanup(allocator, table);
+  }
+  (void)length;
+  return rc;
+}
+
 int lc_pouch_index_doc_table_generation_load_file(
     const lc_allocator *allocator, const char *path,
     unsigned long expected_index_seq, unsigned long expected_row_count,
@@ -973,15 +1002,9 @@ int lc_pouch_index_doc_table_generation_load_file(
   rc = lc_pouch_index_doc_generation_read_file(allocator, path, &bytes, &length,
                                                present, error);
   if (rc == LC_OK && present != NULL && *present) {
-    rc = lc_pouch_index_doc_generation_parse_bytes(
-        allocator, bytes, expected_index_seq, expected_row_count,
+    rc = lc_pouch_index_doc_table_generation_load_bytes(
+        allocator, &bytes, length, expected_index_seq, expected_row_count,
         expected_row_hash, table, valid, error);
-    if (rc == LC_OK && *valid) {
-      table->owned_generation_bytes = bytes;
-      bytes = NULL;
-    } else {
-      lc_pouch_index_doc_table_cleanup(allocator, table);
-    }
   }
   lc_free_with_allocator(allocator, bytes);
   return rc;

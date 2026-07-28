@@ -466,11 +466,16 @@ of rewritten JSON files.
   simple bounded numeric `range`, including `/tags[]` array membership, and
   field `exists` postings before final `liblql` acceptance. Broader typed/text
   postings and richer indexed selector plans remain to be implemented.
-  Encrypted roots do not create persisted query-index sidecars in this release:
-  implicit and explicit indexed requests are routed through the scan/decrypt
-  path, and `flush_index` reports a successful encrypted-root no-op at the
-  current state high-water. This avoids derived plaintext or reversible encoded
-  values on disk until encrypted index artifacts have a dedicated design.
+  Encrypted roots use the same indexed query engine; index-mode requests must
+  not be silently routed through scan. The durable query-index artifact family
+  is encrypted at rest under the pouch crypto provider: `query.index` plus the
+  document-table, exact, presence, range, text, trigram, and temporal
+  generation files are ciphertext, with only per-artifact crypto descriptors
+  stored beside them. Missing, stale, corrupt, or plaintext legacy index
+  artifacts are treated as invalid projections and repaired from authoritative
+  namespace segments/snapshots. This preserves the rebuildable sidecar model
+  without writing derived plaintext or reversible encoded values for encrypted
+  roots.
 - Avoid hidden memory allocation. Storage code must allocate only through a
   pouch allocator interface.
 - Add benchmarks and diagnostics from the start so write latency, read latency,
@@ -1034,9 +1039,11 @@ superset. Multiple positive wildcard or recursive `exists` selectors in an
 matching only one pattern is not returned as an indexed candidate for the
 conjunction. Exists-only root `or` groups may union wildcard/recursive
 expansions with exact presence postings before final acceptance.
-The `query.index` sidecar starts with a format/version record so incompatible
-layouts rebuild from authoritative namespace segments/snapshots instead of
-being trusted. Version 11 stores the namespace state high-water, deterministic
+The plaintext `query.index` sidecar starts with a format/version record so
+incompatible layouts rebuild from authoritative namespace segments/snapshots
+instead of being trusted. On encrypted roots, the same logical bytes are stored
+inside the encrypted artifact payload and are parsed only after successful
+decryption. Version 11 stores the namespace state high-water, deterministic
 live-row count, a hash over the row payload, scalar term counts and hashes,
 field-presence counts and hashes, a term-field line/byte span table, and a
 term-value posting range table. The field table contains
@@ -1074,12 +1081,12 @@ document rows in the same ordered page, embeds JSON state payloads as
 `document`, emits `null` for non-JSON or empty state payloads, and returns
 `documents`. The current pouch `flush_index` is synchronous for the
 local state projection: it refreshes from markers/segments/snapshots, validates
-or repairs the namespace's durable `index/query.index` live-row sidecar, and
-returns accepted/flushed/not-pending plus the latest storage high-water
-sequence. The planned durable query-index implementation extends that same
-boundary by replaying query-index sidecar records, running the lightweight
-query-field posting sort/deduplicate barrier, and returning an index sequence
-that cannot move backwards across compaction or reopen. Indexed match-all queries accept
+or repairs the namespace's durable `index/query.index` live-row sidecar and
+compiled generation artifacts, and returns accepted/flushed/not-pending plus
+the latest storage high-water sequence. Plaintext roots store those artifacts as
+plain index files. Encrypted roots store each artifact as ciphertext and keep a
+small `*.lcpcrypto` descriptor beside it; descriptor and ciphertext signatures
+both participate in prepared-reader cache validation. Indexed match-all queries accept
 `refresh=wait_for` by performing the same synchronous local index flush before
 scanning the indexed projection. The first implemented indexed projection is the
 validated `query.index` live-row summary for selectorless `query_keys`:

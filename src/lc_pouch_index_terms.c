@@ -1652,6 +1652,40 @@ int lc_pouch_index_term_generation_decode(
   return LC_OK;
 }
 
+int lc_pouch_index_term_generation_load_bytes(
+    const lc_allocator *allocator, const char *bytes, size_t length,
+    unsigned long expected_index_seq, unsigned long expected_row_count,
+    unsigned long expected_row_hash, lc_pouch_index_term_generation *generation,
+    int *valid, lc_error *error) {
+  lc_error decode_error;
+  int rc;
+
+  if (generation == NULL || valid == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term generation load requires generation "
+                        "and valid output",
+                        NULL, NULL, NULL);
+  }
+  memset(generation, 0, sizeof(*generation));
+  *valid = 0;
+  lc_error_init(&decode_error);
+  rc = lc_pouch_index_term_generation_decode(
+      allocator, bytes, length, expected_index_seq, expected_row_count,
+      expected_row_hash, generation, &decode_error);
+  if (rc == LC_OK) {
+    *valid = 1;
+  } else if (rc == LC_ERR_INVALID) {
+    lc_pouch_index_term_generation_cleanup(allocator, generation);
+    rc = LC_OK;
+  } else if (error != NULL && decode_error.code != LC_OK) {
+    rc = lc_error_set(error, decode_error.code, 0L, decode_error.message,
+                      decode_error.detail, decode_error.server_code,
+                      decode_error.correlation_id);
+  }
+  lc_error_cleanup(&decode_error);
+  return rc;
+}
+
 static int lc_pouch_index_term_generation_read_file(
     const lc_allocator *allocator, const char *path, char **out_bytes,
     size_t *out_length, int *present, lc_error *error) {
@@ -1851,19 +1885,9 @@ int lc_pouch_index_term_generation_load_file(
   rc = lc_pouch_index_term_generation_read_file(allocator, path, &bytes,
                                                 &length, present, error);
   if (rc == LC_OK && present != NULL && *present) {
-    rc = lc_pouch_index_term_generation_decode(
+    rc = lc_pouch_index_term_generation_load_bytes(
         allocator, bytes, length, expected_index_seq, expected_row_count,
-        expected_row_hash, generation, &decode_error);
-    if (rc == LC_OK) {
-      *valid = 1;
-    } else if (rc == LC_ERR_INVALID) {
-      lc_pouch_index_term_generation_cleanup(allocator, generation);
-      rc = LC_OK;
-    } else if (error != NULL && decode_error.code != LC_OK) {
-      rc = lc_error_set(error, decode_error.code, 0L, decode_error.message,
-                        decode_error.detail, decode_error.server_code,
-                        decode_error.correlation_id);
-    }
+        expected_row_hash, generation, valid, error);
   }
   lc_error_cleanup(&decode_error);
   lc_free_with_allocator(allocator, bytes);
