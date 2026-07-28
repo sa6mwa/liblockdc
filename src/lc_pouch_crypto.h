@@ -25,14 +25,24 @@ int lc_pouch_crypto_open(const lc_allocator *allocator,
                          lc_error *error);
 void lc_pouch_crypto_close(lc_pouch_crypto *crypto);
 int lc_pouch_crypto_enabled(const lc_pouch_crypto *crypto);
-int lc_pouch_crypto_stream_to_file(lc_pouch_crypto *crypto,
-                                   const char *context, const char *path,
-                                   lc_source *body, unsigned long *plain_bytes,
+int lc_pouch_crypto_key_id(const lc_pouch_crypto *crypto, char **out,
+                           lc_error *error);
+int lc_pouch_crypto_stream_to_file(lc_pouch_crypto *crypto, const char *context,
+                                   const char *path, lc_source *body,
+                                   unsigned long *plain_bytes,
                                    unsigned long *cipher_bytes,
                                    char **descriptor_out, lc_error *error);
 int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
                                      const char *context, const char *path,
                                      const char *descriptor, lc_source **out,
                                      lc_error *error);
+
+#ifdef LOCKDC_TEST_BUILD
+int lc_pouch_crypto_test_check_byte_counter(unsigned long total, size_t delta,
+                                            lc_error *error);
+int lc_pouch_crypto_test_generate_key_file_status(const char *path,
+                                                  int *already_exists,
+                                                  lc_error *error);
+#endif
 
 #endif

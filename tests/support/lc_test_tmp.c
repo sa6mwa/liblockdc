@@ -122,6 +122,16 @@ static void lc_test_tmp_remove_owner_marker(const char *path) {
   (void)unlink(marker);
 }
 
+static int lc_test_tmp_has_owner_marker(const char *path) {
+  char marker[LC_TEST_TMP_PATH_MAX];
+  struct stat st;
+
+  if (!lc_test_tmp_marker_path(path, marker, sizeof(marker))) {
+    return 0;
+  }
+  return lstat(marker, &st) == 0 && S_ISREG(st.st_mode);
+}
+
 static int lc_test_tmp_name_has_suffix(const char *name, const char *suffix) {
   size_t name_len;
   size_t suffix_len;
@@ -223,35 +233,10 @@ static void lc_test_tmp_cleanup_tracked(void) {
   lc_test_tmp_tracked_count = 0U;
 }
 
-static void lc_test_tmp_signal_cleanup(int signo) {
-  lc_test_tmp_cleanup_tracked();
-  (void)signal(signo, SIG_DFL);
-  (void)raise(signo);
-}
-
-static void lc_test_tmp_install_one_signal_handler(int signo) {
-  (void)signal(signo, lc_test_tmp_signal_cleanup);
-}
-
 static void lc_test_tmp_install_signal_handlers(void) {
   if (lc_test_tmp_signal_handlers_installed) {
     return;
   }
-#ifdef SIGABRT
-  lc_test_tmp_install_one_signal_handler(SIGABRT);
-#endif
-#ifdef SIGHUP
-  lc_test_tmp_install_one_signal_handler(SIGHUP);
-#endif
-#ifdef SIGINT
-  lc_test_tmp_install_one_signal_handler(SIGINT);
-#endif
-#ifdef SIGQUIT
-  lc_test_tmp_install_one_signal_handler(SIGQUIT);
-#endif
-#ifdef SIGTERM
-  lc_test_tmp_install_one_signal_handler(SIGTERM);
-#endif
   lc_test_tmp_signal_handlers_installed = 1;
 }
 
@@ -588,6 +573,9 @@ void lc_test_tmp_cleanup_stale_older_than(const char *parent_dir,
           lc_test_tmp_is_old_enough(path, min_age_seconds)) {
         (void)unlink(path);
       }
+      continue;
+    }
+    if (!lc_test_tmp_has_owner_marker(path)) {
       continue;
     }
     if (lc_test_tmp_has_live_owner(path)) {

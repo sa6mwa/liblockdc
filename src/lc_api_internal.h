@@ -46,6 +46,9 @@ struct lc_client_handle {
   int insecure_skip_verify;
   int prefer_http_2;
   size_t http_json_response_limit_bytes;
+  char *pouch_crypto_key;
+  char *pouch_crypto_key_file;
+  int pouch_crypto_generate_key_file;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
   pslog_logger *logger;
@@ -156,6 +159,9 @@ char *lc_strdup_with_allocator(const lc_allocator *allocator,
                                const char *value);
 char *lc_dup_bytes_with_allocator(const lc_allocator *allocator,
                                   const void *bytes, size_t length);
+void lc_secret_wipe(void *ptr, size_t length);
+void lc_secret_free_string_with_allocator(const lc_allocator *allocator,
+                                          char *value);
 void *lc_client_alloc(lc_client_handle *client, size_t size);
 void *lc_client_calloc(lc_client_handle *client, size_t count, size_t size);
 void *lc_client_realloc(lc_client_handle *client, void *ptr, size_t size);

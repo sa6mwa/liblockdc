@@ -29,7 +29,16 @@ string(STRIP "${tracked_path}" tracked_path)
 if(tracked_path STREQUAL "")
     message(FATAL_ERROR "tmp cleanup probe wrote an empty tracked path")
 endif()
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+            "LOCKDC_TMP_CLEANUP_MODE=signal-stale"
+            "${LOCKDC_TMP_CLEANUP_PROBE}"
+    RESULT_VARIABLE cleanup_result
+)
+if(NOT cleanup_result STREQUAL "0")
+    message(FATAL_ERROR "stale signal cleanup probe failed: ${cleanup_result}")
+endif()
 if(EXISTS "${tracked_path}")
-    message(FATAL_ERROR "tracked temp path survived signal cleanup: ${tracked_path}")
+    message(FATAL_ERROR "tracked temp path survived stale cleanup: ${tracked_path}")
 endif()
 file(REMOVE "${LOCKDC_TMP_PATH_FILE}")

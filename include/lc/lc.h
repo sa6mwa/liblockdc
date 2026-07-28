@@ -148,6 +148,15 @@ typedef struct lc_client_config {
   int disable_logger_sys_field;
   /** Custom allocator hooks inherited by all derived handles and buffers. */
   lc_allocator allocator;
+  /** Pouch root key string for encrypted local storage. Prefer key files for
+   * long-lived process config; this string is copied as secret material and
+   * wiped before the client releases it.
+   */
+  const char *pouch_crypto_key;
+  /** Pouch root key file path for encrypted local storage. */
+  const char *pouch_crypto_key_file;
+  /** Creates `pouch_crypto_key_file` with a new root key when it is missing. */
+  int pouch_crypto_generate_key_file;
 } lc_client_config;
 
 /** Public status codes returned by all API entry points. */
@@ -462,11 +471,6 @@ typedef struct lc_query_req {
   const char *namespace_name;
   /** JSON selector expression used by the query engine. */
   const char *selector_json;
-  /**
-   * Full-form LQL selector expression used by the query engine. Mutually
-   * exclusive with `selector_json`.
-   */
-  const char *selector_lql;
   /** Maximum number of rows to return in this page. */
   long limit;
   /** Cursor returned by a previous query page, or `NULL` for a fresh query. */
@@ -479,6 +483,11 @@ typedef struct lc_query_req {
   const char *engine;
   /** Optional query refresh mode, for example `wait_for`. */
   const char *refresh;
+  /**
+   * Full-form LQL selector expression used by the query engine. Mutually
+   * exclusive with `selector_json`.
+   */
+  const char *selector_lql;
 } lc_query_req;
 
 /** Query metadata returned alongside streamed query results. */

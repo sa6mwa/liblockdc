@@ -80,6 +80,9 @@ struct lc_consumer_service_handle {
   int insecure_skip_verify;
   int prefer_http_2;
   size_t http_json_response_limit_bytes;
+  char *pouch_crypto_key;
+  char *pouch_crypto_key_file;
+  int pouch_crypto_generate_key_file;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
   pslog_logger *logger;
@@ -112,6 +115,10 @@ static void *lc_consumer_delivery_extend_main(void *context);
 static int lc_consumer_is_stop_requested(lc_consumer_service_handle *service);
 static int lc_consumer_wait_delay(lc_consumer_service_handle *service,
                                   long delay_ms);
+static int lc_consumer_worker_dequeue_pouch(lc_consumer_worker_state *worker,
+                                            lc_client *client,
+                                            lc_message **message,
+                                            lc_error *error);
 static void
 lc_consumer_delivery_stop_extender(lc_consumer_delivery_bridge *bridge);
 static lc_message *
@@ -139,6 +146,9 @@ static long lc_consumer_auto_extend_delay_ms(long visibility_timeout_seconds) {
 
   if (visibility_timeout_seconds <= 0L) {
     return 0L;
+  }
+  if (visibility_timeout_seconds >= 60L) {
+    return 30000L;
   }
   delay_ms = (visibility_timeout_seconds * 1000L) / 2L;
   if (delay_ms < 250L) {
@@ -206,6 +216,25 @@ static int lc_consumer_runtime_message_set_unavailable_error(
   }
   return lc_error_set(error, LC_ERR_INVALID, 0L,
                       "message is no longer available", NULL, NULL, NULL);
+}
+
+static void lc_consumer_runtime_message_clear_inner(
+    lc_consumer_runtime_message *runtime_message) {
+  lc_consumer_delivery_bridge *bridge;
+  lc_message *inner;
+
+  if (runtime_message == NULL || runtime_message->bridge == NULL) {
+    return;
+  }
+  bridge = runtime_message->bridge;
+  pthread_mutex_lock(&bridge->state_mutex);
+  inner = runtime_message->inner;
+  runtime_message->inner = NULL;
+  if (bridge->inner_message == inner) {
+    bridge->inner_message = NULL;
+  }
+  pthread_cond_broadcast(&bridge->state_cond);
+  pthread_mutex_unlock(&bridge->state_mutex);
 }
 
 static void
@@ -293,6 +322,7 @@ static int lc_consumer_runtime_message_begin_terminal_action(
 
 static int lc_consumer_runtime_message_ack(lc_message *self, lc_error *error) {
   lc_consumer_runtime_message *runtime_message;
+  lc_message *inner;
   int rc;
 
   if (self == NULL) {
@@ -300,20 +330,24 @@ static int lc_consumer_runtime_message_ack(lc_message *self, lc_error *error) {
                         NULL, NULL, NULL);
   }
   runtime_message = (lc_consumer_runtime_message *)self;
-  if (runtime_message->inner == NULL) {
-    return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
-                                                             error);
-  }
   if (lc_consumer_runtime_message_begin_terminal_action(
           runtime_message->bridge)) {
     return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
                                                              error);
   }
   pthread_mutex_lock(&runtime_message->bridge->op_mutex);
-  rc = runtime_message->inner->ack(runtime_message->inner, error);
+  pthread_mutex_lock(&runtime_message->bridge->state_mutex);
+  inner = runtime_message->inner;
+  pthread_mutex_unlock(&runtime_message->bridge->state_mutex);
+  if (inner == NULL) {
+    pthread_mutex_unlock(&runtime_message->bridge->op_mutex);
+    lc_consumer_delivery_mark_terminal_indeterminate(runtime_message->bridge);
+    return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
+                                                             error);
+  }
+  rc = inner->ack(inner, error);
   if (rc == LC_OK) {
-    runtime_message->inner = NULL;
-    runtime_message->bridge->inner_message = NULL;
+    lc_consumer_runtime_message_clear_inner(runtime_message);
     lc_consumer_delivery_mark_terminal(runtime_message->bridge);
   } else {
     lc_consumer_delivery_mark_terminal_indeterminate(runtime_message->bridge);
@@ -326,6 +360,7 @@ static int lc_consumer_runtime_message_nack(lc_message *self,
                                             const lc_nack_req *req,
                                             lc_error *error) {
   lc_consumer_runtime_message *runtime_message;
+  lc_message *inner;
   int rc;
 
   if (self == NULL || req == NULL) {
@@ -333,20 +368,24 @@ static int lc_consumer_runtime_message_nack(lc_message *self,
                         "message nack requires self and req", NULL, NULL, NULL);
   }
   runtime_message = (lc_consumer_runtime_message *)self;
-  if (runtime_message->inner == NULL) {
-    return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
-                                                             error);
-  }
   if (lc_consumer_runtime_message_begin_terminal_action(
           runtime_message->bridge)) {
     return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
                                                              error);
   }
   pthread_mutex_lock(&runtime_message->bridge->op_mutex);
-  rc = runtime_message->inner->nack(runtime_message->inner, req, error);
+  pthread_mutex_lock(&runtime_message->bridge->state_mutex);
+  inner = runtime_message->inner;
+  pthread_mutex_unlock(&runtime_message->bridge->state_mutex);
+  if (inner == NULL) {
+    pthread_mutex_unlock(&runtime_message->bridge->op_mutex);
+    lc_consumer_delivery_mark_terminal_indeterminate(runtime_message->bridge);
+    return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
+                                                             error);
+  }
+  rc = inner->nack(inner, req, error);
   if (rc == LC_OK) {
-    runtime_message->inner = NULL;
-    runtime_message->bridge->inner_message = NULL;
+    lc_consumer_runtime_message_clear_inner(runtime_message);
     lc_consumer_delivery_mark_terminal(runtime_message->bridge);
   } else {
     lc_consumer_delivery_mark_terminal_indeterminate(runtime_message->bridge);
@@ -359,6 +398,7 @@ static int lc_consumer_runtime_message_extend(lc_message *self,
                                               const lc_extend_req *req,
                                               lc_error *error) {
   lc_consumer_runtime_message *runtime_message;
+  lc_message *inner;
   int rc;
   int skip;
 
@@ -368,6 +408,7 @@ static int lc_consumer_runtime_message_extend(lc_message *self,
                         NULL);
   }
   runtime_message = (lc_consumer_runtime_message *)self;
+  pthread_mutex_lock(&runtime_message->bridge->op_mutex);
   pthread_mutex_lock(&runtime_message->bridge->state_mutex);
   skip =
       runtime_message->inner == NULL ||
@@ -375,18 +416,14 @@ static int lc_consumer_runtime_message_extend(lc_message *self,
           runtime_message->bridge->state) ||
       runtime_message->bridge->handler_done ||
       lc_consumer_is_stop_requested(runtime_message->bridge->worker->service);
+  inner = runtime_message->inner;
   pthread_mutex_unlock(&runtime_message->bridge->state_mutex);
   if (skip) {
-    return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
-                                                             error);
-  }
-  pthread_mutex_lock(&runtime_message->bridge->op_mutex);
-  if (runtime_message->inner == NULL) {
     pthread_mutex_unlock(&runtime_message->bridge->op_mutex);
     return lc_consumer_runtime_message_set_unavailable_error(runtime_message,
                                                              error);
   }
-  rc = runtime_message->inner->extend(runtime_message->inner, req, error);
+  rc = inner->extend(inner, req, error);
   pthread_mutex_unlock(&runtime_message->bridge->op_mutex);
   return rc;
 }
@@ -464,10 +501,18 @@ static void lc_consumer_runtime_message_close(lc_message *self) {
     return;
   }
   runtime_message = (lc_consumer_runtime_message *)self;
-  if (runtime_message->inner != NULL) {
-    runtime_message->inner->close(runtime_message->inner);
-    runtime_message->inner = NULL;
-    runtime_message->bridge->inner_message = NULL;
+  {
+    lc_message *inner;
+
+    pthread_mutex_lock(&runtime_message->bridge->op_mutex);
+    pthread_mutex_lock(&runtime_message->bridge->state_mutex);
+    inner = runtime_message->inner;
+    pthread_mutex_unlock(&runtime_message->bridge->state_mutex);
+    lc_consumer_runtime_message_clear_inner(runtime_message);
+    pthread_mutex_unlock(&runtime_message->bridge->op_mutex);
+    if (inner != NULL) {
+      inner->close(inner);
+    }
   }
   if (runtime_message->bridge->message == &runtime_message->pub) {
     runtime_message->bridge->message = NULL;
@@ -984,6 +1029,23 @@ static int lc_consumer_copy_base_config(lc_consumer_service_handle *service,
   service->prefer_http_2 = client->prefer_http_2;
   service->http_json_response_limit_bytes =
       client->http_json_response_limit_bytes;
+  service->pouch_crypto_key =
+      lc_strdup_with_allocator(&service->allocator, client->pouch_crypto_key);
+  if (client->pouch_crypto_key != NULL && service->pouch_crypto_key == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy consumer pouch crypto key", NULL, NULL,
+                        NULL);
+  }
+  service->pouch_crypto_key_file = lc_strdup_with_allocator(
+      &service->allocator, client->pouch_crypto_key_file);
+  if (client->pouch_crypto_key_file != NULL &&
+      service->pouch_crypto_key_file == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy consumer pouch crypto key file", NULL,
+                        NULL, NULL);
+  }
+  service->pouch_crypto_generate_key_file =
+      client->pouch_crypto_generate_key_file;
   service->disable_logger_sys_field = client->disable_logger_sys_field;
   service->base_logger =
       client->base_logger != NULL ? client->base_logger : lc_log_noop_logger();
@@ -1045,6 +1107,10 @@ static int lc_consumer_clone_client(lc_consumer_service_handle *service,
   config.prefer_http_2 = service->prefer_http_2;
   config.http_json_response_limit_bytes =
       service->http_json_response_limit_bytes;
+  config.pouch_crypto_key = service->pouch_crypto_key;
+  config.pouch_crypto_key_file = service->pouch_crypto_key_file;
+  config.pouch_crypto_generate_key_file =
+      service->pouch_crypto_generate_key_file;
   config.disable_logger_sys_field = service->disable_logger_sys_field;
   config.logger = service->base_logger;
   config.allocator = service->allocator;
@@ -1728,12 +1794,7 @@ static int lc_consumer_worker_run_pouch(lc_consumer_worker_state *worker,
   service = worker->service;
   attempt = 0;
   failures = 0;
-  poll_delay_ms = worker->config.request.wait_seconds > 0L
-                      ? worker->config.request.wait_seconds * 1000L
-                      : 100L;
-  if (poll_delay_ms > 1000L) {
-    poll_delay_ms = 1000L;
-  }
+  poll_delay_ms = worker->config.request.wait_seconds > 0L ? 1000L : 100L;
   lc_error_init(&delivery_error);
   while (!lc_consumer_is_stop_requested(service)) {
     attempt += 1;
@@ -1743,12 +1804,7 @@ static int lc_consumer_worker_run_pouch(lc_consumer_worker_state *worker,
     lc_error_cleanup(error);
     lc_error_init(error);
     message = NULL;
-    if (worker->config.with_state) {
-      rc = client->dequeue_with_state(client, &worker->config.request, &message,
-                                      error);
-    } else {
-      rc = client->dequeue(client, &worker->config.request, &message, error);
-    }
+    rc = lc_consumer_worker_dequeue_pouch(worker, client, &message, error);
     if (rc == LC_OK && message == NULL) {
       lc_consumer_log_subscribe_event(service, &worker->config,
                                       "client.queue.subscribe.complete");
@@ -1792,6 +1848,38 @@ static int lc_consumer_worker_run_pouch(lc_consumer_worker_state *worker,
     }
   }
   lc_error_cleanup(&delivery_error);
+  return LC_OK;
+}
+
+static int lc_consumer_worker_dequeue_pouch(lc_consumer_worker_state *worker,
+                                            lc_client *client,
+                                            lc_message **message,
+                                            lc_error *error) {
+  lc_dequeue_req request;
+  long remaining_seconds;
+  int rc;
+
+  request = worker->config.request;
+  remaining_seconds = request.wait_seconds;
+  if (remaining_seconds <= 1L) {
+    if (worker->config.with_state) {
+      return client->dequeue_with_state(client, &request, message, error);
+    }
+    return client->dequeue(client, &request, message, error);
+  }
+  while (!lc_consumer_is_stop_requested(worker->service) &&
+         remaining_seconds > 0L) {
+    request.wait_seconds = remaining_seconds > 1L ? 1L : remaining_seconds;
+    if (worker->config.with_state) {
+      rc = client->dequeue_with_state(client, &request, message, error);
+    } else {
+      rc = client->dequeue(client, &request, message, error);
+    }
+    if (rc != LC_OK || *message != NULL) {
+      return rc;
+    }
+    remaining_seconds -= request.wait_seconds;
+  }
   return LC_OK;
 }
 
@@ -1899,6 +1987,7 @@ static void *lc_consumer_delivery_extend_main(void *context) {
   lc_consumer_delivery_bridge *bridge;
   lc_extend_req extend_req;
   lc_error extend_error;
+  lc_message *inner_message;
   long delay_ms;
   long visibility_timeout_seconds;
   struct timespec deadline;
@@ -1938,9 +2027,6 @@ static void *lc_consumer_delivery_extend_main(void *context) {
     if (rc == 0) {
       continue;
     }
-    if (bridge->inner_message == NULL) {
-      return NULL;
-    }
     pthread_mutex_lock(&bridge->op_mutex);
     pthread_mutex_lock(&bridge->state_mutex);
     if (bridge->inner_message == NULL || bridge->handler_done ||
@@ -1950,8 +2036,9 @@ static void *lc_consumer_delivery_extend_main(void *context) {
       pthread_mutex_unlock(&bridge->op_mutex);
       return NULL;
     }
+    inner_message = bridge->inner_message;
     visibility_timeout_seconds =
-        bridge->inner_message->visibility_timeout_seconds;
+        inner_message->visibility_timeout_seconds;
     pthread_mutex_unlock(&bridge->state_mutex);
     if (visibility_timeout_seconds <= 0L) {
       pthread_mutex_unlock(&bridge->op_mutex);
@@ -1960,8 +2047,7 @@ static void *lc_consumer_delivery_extend_main(void *context) {
     lc_extend_req_init(&extend_req);
     extend_req.extend_by_seconds = visibility_timeout_seconds;
     lc_error_init(&extend_error);
-    rc = bridge->inner_message->extend(bridge->inner_message, &extend_req,
-                                       &extend_error);
+    rc = inner_message->extend(inner_message, &extend_req, &extend_error);
     pthread_mutex_unlock(&bridge->op_mutex);
     if (rc != LC_OK) {
       pthread_mutex_lock(&bridge->state_mutex);
@@ -2282,8 +2368,10 @@ void lc_consumer_service_close_method(lc_consumer_service *self) {
     lc_consumer_service_stop_method(self);
     lc_consumer_service_wait_method(self, NULL);
   }
-  for (i = 0U; i < service->worker_count; ++i) {
-    lc_consumer_worker_config_cleanup(&service->workers[i].config);
+  if (service->workers != NULL) {
+    for (i = 0U; i < service->worker_count; ++i) {
+      lc_consumer_worker_config_cleanup(&service->workers[i].config);
+    }
   }
   lc_free_with_allocator(&service->allocator, service->workers);
   lc_consumer_free_string_array(&service->allocator, service->endpoints,
@@ -2292,6 +2380,9 @@ void lc_consumer_service_close_method(lc_consumer_service *self) {
   lc_free_with_allocator(&service->allocator, service->client_bundle_path);
   lc_free_with_allocator(&service->allocator, service->client_bundle_bytes);
   lc_free_with_allocator(&service->allocator, service->default_namespace);
+  lc_secret_free_string_with_allocator(&service->allocator,
+                                       service->pouch_crypto_key);
+  lc_free_with_allocator(&service->allocator, service->pouch_crypto_key_file);
   lc_error_cleanup(&service->fatal_error);
   pthread_cond_destroy(&service->cond);
   pthread_mutex_destroy(&service->mutex);
@@ -2341,6 +2432,12 @@ int lc_client_new_consumer_service_method(
     worker_count = config->consumers[i].worker_count;
     if (worker_count == 0U) {
       worker_count = 1U;
+    }
+    if (worker_count > ((size_t)-1) - service->worker_count) {
+      lc_consumer_service_close_method(&service->pub);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "consumer service worker count is too large", NULL,
+                          NULL, NULL);
     }
     service->worker_count += worker_count;
   }

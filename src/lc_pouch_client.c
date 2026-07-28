@@ -12,14 +12,17 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define LC_POUCH_QUERY_DEFAULT_LIMIT 100L
 #define LC_POUCH_QUERY_MAX_LIMIT 1000L
+#define LC_POUCH_QUEUE_HEADER_LIMIT 8192U
 
 #define LC_POUCH_ATTACHMENT_DELETE_CONTENT_TYPE                                \
   "application/x-lockdc-pouch-attachment-delete"
@@ -27,6 +30,13 @@
 #define LC_POUCH_NAMESPACE_CONFIG_CONTENT_TYPE                                 \
   "application/x-lockdc-pouch-namespace-config"
 #define LC_POUCH_TC_CONTENT_TYPE "application/x-lockdc-pouch-tc"
+#define LC_POUCH_LEASE_NAMESPACE ".lockd/leases"
+#define LC_POUCH_LEASE_CONTENT_TYPE "application/x-lockdc-pouch-lease"
+
+static pthread_mutex_t lc_pouch_queue_message_id_mutex =
+    PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t lc_pouch_lease_id_mutex = PTHREAD_MUTEX_INITIALIZER;
+static unsigned long lc_pouch_lease_id_counter = 0UL;
 
 typedef struct lc_pouch_acquire_for_update_file {
   FILE *fp;
@@ -68,7 +78,36 @@ typedef struct lc_pouch_tc_lease_record {
   char *leader_endpoint;
   unsigned long term;
   long expires_at_unix;
+  unsigned long version;
 } lc_pouch_tc_lease_record;
+
+typedef struct lc_pouch_lease_record {
+  int found;
+  char *namespace_name;
+  char *key;
+  char *owner;
+  char *lease_id;
+  char *txn_id;
+  long fencing_token;
+  long expires_at_unix;
+  unsigned long version;
+} lc_pouch_lease_record;
+
+typedef struct lc_pouch_acquire_context {
+  lc_client_handle *client;
+  const lc_acquire_req *req;
+  const char *namespace_name;
+  lc_pouch_state_read_result read_result;
+  lc_pouch_state_write_result lease_write_result;
+  long lease_expires_at_unix;
+  long held_until_unix;
+  long fencing_token;
+  unsigned long version;
+  int has_query_hidden;
+  int query_hidden;
+  int acquired;
+  char lease_id[128];
+} lc_pouch_acquire_context;
 
 typedef struct lc_pouch_tc_endpoint_list {
   char **items;
@@ -126,6 +165,14 @@ typedef struct lc_pouch_queue_record {
   size_t payload_length;
 } lc_pouch_queue_record;
 
+typedef struct lc_pouch_queue_stream_source_ctx {
+  char *header;
+  size_t header_length;
+  size_t header_offset;
+  lc_source *payload;
+  size_t payload_bytes;
+} lc_pouch_queue_stream_source_ctx;
+
 typedef struct lc_pouch_queue_scan {
   lc_client_handle *client;
   const char *prefix;
@@ -149,6 +196,37 @@ typedef struct lc_pouch_query_source_reader {
   lc_source *source;
 } lc_pouch_query_source_reader;
 
+typedef struct lc_pouch_lease_precondition {
+  lc_client_handle *client;
+  const lc_lease_ref *lease;
+  const char *namespace_name;
+  const char *key;
+} lc_pouch_lease_precondition;
+
+typedef struct lc_pouch_lease_write_context {
+  lc_client_handle *client;
+  const char *storage_key;
+  lc_source *source;
+  lc_pouch_state_write_options *options;
+  lc_pouch_state_write_result *out;
+} lc_pouch_lease_write_context;
+
+typedef struct lc_pouch_counting_source {
+  lc_source *inner;
+  unsigned long bytes;
+  long max_bytes;
+  int has_max_bytes;
+} lc_pouch_counting_source;
+
+typedef struct lc_pouch_attach_write_context {
+  lc_client_handle *client;
+  const lc_attach_op *req;
+  const char *attachment_key;
+  lc_source *source;
+  lc_pouch_state_write_options *options;
+  lc_pouch_state_write_result *result;
+} lc_pouch_attach_write_context;
+
 typedef struct lc_pouch_query_match_state {
   int matched;
 } lc_pouch_query_match_state;
@@ -162,16 +240,26 @@ typedef struct lc_pouch_query_scan_context {
   lc_sink *sink;
   lql *runtime;
   const lql_selector *selector;
-  size_t offset;
+  const char *start_after_key;
+  const char *candidate_key;
+  char *last_emitted_key;
   size_t seen;
   size_t emitted;
   size_t matched;
-  size_t next_offset;
   size_t limit;
   unsigned long index_seq;
+  int track_index_seq;
+  int page_full;
   int emit_documents;
   int indexed_candidates_exact;
 } lc_pouch_query_scan_context;
+
+static void lc_pouch_query_track_index_seq(lc_pouch_query_scan_context *context,
+                                           unsigned long seq) {
+  if (context != NULL && context->track_index_seq && seq > context->index_seq) {
+    context->index_seq = seq;
+  }
+}
 
 static int
 lc_pouch_query_page_enter_candidate(lc_pouch_query_scan_context *context,
@@ -179,8 +267,9 @@ lc_pouch_query_page_enter_candidate(lc_pouch_query_scan_context *context,
 static int
 lc_pouch_query_page_accept_match(lc_pouch_query_scan_context *context,
                                  int *emit, int *stop, lc_error *error);
-static void
-lc_pouch_query_page_mark_emitted(lc_pouch_query_scan_context *context);
+static int
+lc_pouch_query_page_mark_emitted(lc_pouch_query_scan_context *context,
+                                 lc_error *error);
 
 typedef struct lc_pouch_query_index_plan {
   char *field;
@@ -390,6 +479,32 @@ static const char *lc_pouch_client_namespace(lc_client_handle *client,
   return "default";
 }
 
+static int lc_pouch_client_namespace_reserved(const char *namespace_name) {
+  return namespace_name != NULL &&
+         (strcmp(namespace_name, ".lockd") == 0 ||
+          strncmp(namespace_name, ".lockd/", 7U) == 0);
+}
+
+static int lc_pouch_client_public_namespace(lc_client_handle *client,
+                                            const char *namespace_name,
+                                            const char **out, lc_error *error) {
+  const char *resolved;
+
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespace validation requires output", NULL,
+                        NULL, NULL);
+  }
+  resolved = lc_pouch_client_namespace(client, namespace_name);
+  if (lc_pouch_client_namespace_reserved(resolved)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespace is reserved for internal state", NULL,
+                        NULL, "pouch");
+  }
+  *out = resolved;
+  return LC_OK;
+}
+
 static const char *
 lc_pouch_client_endpoint_query_engine(lc_client_handle *client) {
   if (client != NULL && client->pouch != NULL &&
@@ -408,6 +523,11 @@ lc_pouch_client_default_fallback_engine(lc_client_handle *client) {
     return "scan";
   }
   return "none";
+}
+
+static int lc_pouch_client_encrypted(lc_client_handle *client) {
+  return client != NULL && client->pouch != NULL &&
+         lc_pouch_crypto_enabled(client->pouch->crypto);
 }
 
 static int lc_pouch_namespace_config_valid_preferred(const char *engine) {
@@ -604,6 +724,10 @@ static int lc_pouch_client_query_engine(lc_client_handle *client,
   int rc;
 
   *owned_engine = NULL;
+  if (lc_pouch_client_encrypted(client)) {
+    *out_engine = "scan";
+    return LC_OK;
+  }
   if (request_engine != NULL && request_engine[0] != '\0') {
     *out_engine = request_engine;
     return LC_OK;
@@ -684,41 +808,6 @@ static int lc_pouch_query_request_validate_selector(const lc_query_req *req,
                         "selector_json and selector_lql are mutually "
                         "exclusive",
                         NULL, NULL, "pouch");
-  }
-  return LC_OK;
-}
-
-static int lc_pouch_query_validate_fields_json(const lc_query_req *req,
-                                               lc_error *error) {
-  const char *cursor;
-  lonejson *runtime;
-  lonejson_error lj_error;
-  lonejson_status status;
-
-  if (req == NULL || req->fields_json == NULL || req->fields_json[0] == '\0') {
-    return LC_OK;
-  }
-  cursor = req->fields_json;
-  while (*cursor == ' ' || *cursor == '\t' || *cursor == '\n' ||
-         *cursor == '\r') {
-    ++cursor;
-  }
-  if (*cursor != '{') {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query fields_json must be a JSON object", NULL,
-                        NULL, "pouch");
-  }
-  runtime = lc_thread_lonejson_runtime();
-  if (runtime == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to initialize pouch query fields parser", NULL,
-                        NULL, NULL);
-  }
-  lonejson_error_init(&lj_error);
-  status = runtime->validate_cstr(runtime, req->fields_json, &lj_error);
-  if (status != LONEJSON_STATUS_OK) {
-    return lc_lonejson_error_from_status(
-        error, status, &lj_error, "failed to parse pouch query fields_json");
   }
   return LC_OK;
 }
@@ -938,9 +1027,8 @@ lc_pouch_query_index_summary_visit(const lc_pouch_query_index_row_view *row,
   if (row->has_query_hidden && row->query_hidden) {
     return LC_OK;
   }
-  if (row->version > context->index_seq) {
-    context->index_seq = row->version;
-  }
+  lc_pouch_query_track_index_seq(context, row->version);
+  context->candidate_key = row->key;
   active = 0;
   rc = lc_pouch_query_page_enter_candidate(context, &active, error);
   if (rc != LC_OK || !active) {
@@ -955,47 +1043,40 @@ lc_pouch_query_index_summary_visit(const lc_pouch_query_index_row_view *row,
   rc = lc_pouch_query_emit_key(context->handler, context->handler_context,
                                row->key, error);
   if (rc == LC_OK) {
-    lc_pouch_query_page_mark_emitted(context);
+    rc = lc_pouch_query_page_mark_emitted(context, error);
   }
   return rc;
 }
 
-static int lc_pouch_query_parse_cursor(const char *cursor, size_t *out,
+static int lc_pouch_query_parse_cursor(const char *cursor, const char **out,
                                        lc_error *error) {
-  char *end;
-  unsigned long parsed;
-
   if (out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query cursor requires output storage", NULL,
                         NULL, NULL);
   }
-  *out = 0U;
+  *out = NULL;
   if (cursor == NULL || cursor[0] == '\0') {
     return LC_OK;
   }
-  end = NULL;
-  parsed = strtoul(cursor, &end, 10);
-  if (end == cursor || (end != NULL && *end != '\0')) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query cursor is malformed", NULL, NULL, "pouch");
-  }
-  *out = (size_t)parsed;
+  *out = cursor;
   return LC_OK;
 }
 
-static char *lc_pouch_query_cursor_string(size_t offset, lc_error *error) {
-  char stack[64];
-  int written;
+static char *lc_pouch_query_cursor_string(const char *key, lc_error *error) {
+  char *copy;
 
-  written = snprintf(stack, sizeof(stack), "%lu", (unsigned long)offset);
-  if (written < 0 || (size_t)written >= sizeof(stack)) {
-    lc_error_set(error, LC_ERR_INVALID, 0L,
-                 "pouch query cursor exceeds local formatting limit", NULL,
-                 NULL, NULL);
+  if (key == NULL || key[0] == '\0') {
+    lc_error_set(error, LC_ERR_INVALID, 0L, "pouch query cursor requires a key",
+                 NULL, NULL, NULL);
     return NULL;
   }
-  return lc_strdup_local(stack);
+  copy = lc_strdup_local(key);
+  if (copy == NULL) {
+    lc_error_set(error, LC_ERR_NOMEM, 0L,
+                 "failed to allocate pouch query cursor", NULL, NULL, NULL);
+  }
+  return copy;
 }
 
 static char *lc_pouch_query_scan_metadata_string(size_t candidates,
@@ -1450,9 +1531,8 @@ static int lc_pouch_query_selector_json_alloc(lql *runtime,
   lql_error lql_error_value;
   lql_status status;
   FILE *fp;
-  long length;
   char *json;
-  size_t got;
+  size_t json_length;
 
   if (runtime == NULL || selector == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -1461,11 +1541,13 @@ static int lc_pouch_query_selector_json_alloc(lql *runtime,
                         NULL, NULL, NULL);
   }
   *out = NULL;
-  fp = tmpfile();
+  json = NULL;
+  json_length = 0U;
+  fp = open_memstream(&json, &json_length);
   if (fp == NULL) {
     return lc_error_set(error, LC_ERR_PROTOCOL, (long)errno,
                         "failed to create pouch query selector serialization "
-                        "file",
+                        "stream",
                         strerror(errno), NULL, "liblql");
   }
   lql_error_init(&lql_error_value);
@@ -1473,50 +1555,27 @@ static int lc_pouch_query_selector_json_alloc(lql *runtime,
       runtime->selector_write_json(runtime, selector, fp, &lql_error_value);
   if (status != LQL_STATUS_OK) {
     fclose(fp);
+    lc_free_with_allocator(NULL, json);
     return lc_pouch_query_lql_error(
         error, status, &lql_error_value,
         "failed to serialize pouch query selector for index planning");
   }
-  if (fflush(fp) != 0 || fseek(fp, 0L, SEEK_END) != 0) {
+  if (fclose(fp) != 0) {
     int saved_errno;
 
     saved_errno = errno;
-    fclose(fp);
+    lc_free_with_allocator(NULL, json);
     return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
                         "failed to finalize pouch query selector "
                         "serialization",
                         strerror(saved_errno), NULL, "liblql");
   }
-  length = ftell(fp);
-  if (length < 0L || fseek(fp, 0L, SEEK_SET) != 0) {
-    int saved_errno;
-
-    saved_errno = errno;
-    fclose(fp);
-    return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
-                        "failed to rewind pouch query selector serialization",
-                        strerror(saved_errno), NULL, "liblql");
-  }
-  json = (char *)lc_alloc_with_allocator(NULL, (size_t)length + 1U);
   if (json == NULL) {
-    fclose(fp);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch query selector JSON", NULL,
                         NULL, NULL);
   }
-  got = fread(json, 1U, (size_t)length, fp);
-  if (got != (size_t)length || ferror(fp)) {
-    int saved_errno;
-
-    saved_errno = errno;
-    lc_free_with_allocator(NULL, json);
-    fclose(fp);
-    return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
-                        "failed to read pouch query selector serialization",
-                        strerror(saved_errno), NULL, "liblql");
-  }
-  json[(size_t)length] = '\0';
-  fclose(fp);
+  (void)json_length;
   *out = json;
   return LC_OK;
 }
@@ -2284,65 +2343,70 @@ lc_pouch_query_index_key_set_add(lc_pouch_query_index_key_set *set,
   return LC_OK;
 }
 
-static void
-lc_pouch_query_page_to_context(lc_pouch_query_scan_context *context,
-                               const lc_pouch_index_result_page *page) {
-  if (context == NULL || page == NULL) {
-    return;
-  }
-  context->offset = page->offset;
-  context->limit = page->limit;
-  context->seen = page->seen;
-  context->matched = page->matched;
-  context->emitted = page->emitted;
-  context->next_offset = page->next_offset;
-}
-
-static void
-lc_pouch_query_context_to_page(const lc_pouch_query_scan_context *context,
-                               lc_pouch_index_result_page *page) {
-  if (context == NULL || page == NULL) {
-    return;
-  }
-  page->offset = context->offset;
-  page->limit = context->limit;
-  page->seen = context->seen;
-  page->matched = context->matched;
-  page->emitted = context->emitted;
-  page->next_offset = context->next_offset;
-}
-
 static int
 lc_pouch_query_page_enter_candidate(lc_pouch_query_scan_context *context,
                                     int *active, lc_error *error) {
-  lc_pouch_index_result_page page;
-  int rc;
-
-  lc_pouch_query_context_to_page(context, &page);
-  rc = lc_pouch_index_result_page_enter_candidate(&page, active, error);
-  lc_pouch_query_page_to_context(context, &page);
-  return rc;
+  if (context == NULL || active == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query page candidate requires context and "
+                        "active output",
+                        NULL, NULL, NULL);
+  }
+  *active = 0;
+  if (context->candidate_key == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query page candidate requires key", NULL, NULL,
+                        NULL);
+  }
+  if (context->start_after_key != NULL &&
+      strcmp(context->candidate_key, context->start_after_key) <= 0) {
+    return LC_OK;
+  }
+  ++context->seen;
+  *active = 1;
+  return LC_OK;
 }
 
 static int
 lc_pouch_query_page_accept_match(lc_pouch_query_scan_context *context,
                                  int *emit, int *stop, lc_error *error) {
-  lc_pouch_index_result_page page;
-  int rc;
-
-  lc_pouch_query_context_to_page(context, &page);
-  rc = lc_pouch_index_result_page_accept_match(&page, emit, stop, error);
-  lc_pouch_query_page_to_context(context, &page);
-  return rc;
+  if (context == NULL || emit == NULL || stop == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query page match requires context and outputs",
+                        NULL, NULL, NULL);
+  }
+  *emit = 0;
+  *stop = 0;
+  ++context->matched;
+  if (context->emitted >= context->limit) {
+    context->page_full = 1;
+    *stop = 1;
+    return LC_OK;
+  }
+  *emit = 1;
+  return LC_OK;
 }
 
-static void
-lc_pouch_query_page_mark_emitted(lc_pouch_query_scan_context *context) {
-  lc_pouch_index_result_page page;
+static int
+lc_pouch_query_page_mark_emitted(lc_pouch_query_scan_context *context,
+                                 lc_error *error) {
+  char *copy;
 
-  lc_pouch_query_context_to_page(context, &page);
-  lc_pouch_index_result_page_mark_emitted(&page);
-  lc_pouch_query_page_to_context(context, &page);
+  if (context == NULL || context->candidate_key == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query emitted page requires candidate key", NULL,
+                        NULL, NULL);
+  }
+  copy = lc_strdup_local(context->candidate_key);
+  if (copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query emitted cursor key",
+                        NULL, NULL, NULL);
+  }
+  lc_free_with_allocator(NULL, context->last_emitted_key);
+  context->last_emitted_key = copy;
+  ++context->emitted;
+  return LC_OK;
 }
 
 static int
@@ -2391,9 +2455,8 @@ lc_pouch_query_index_process_exact_key(lc_pouch_query_scan_context *context,
   if (key->has_query_hidden && key->query_hidden) {
     return LC_OK;
   }
-  if (key->version > context->index_seq) {
-    context->index_seq = key->version;
-  }
+  lc_pouch_query_track_index_seq(context, key->version);
+  context->candidate_key = key->key;
   active = 0;
   rc = lc_pouch_query_page_enter_candidate(context, &active, error);
   if (rc != LC_OK || !active) {
@@ -2408,7 +2471,7 @@ lc_pouch_query_index_process_exact_key(lc_pouch_query_scan_context *context,
   rc = lc_pouch_query_emit_key(context->handler, context->handler_context,
                                key->key, error);
   if (rc == LC_OK) {
-    lc_pouch_query_page_mark_emitted(context);
+    rc = lc_pouch_query_page_mark_emitted(context, error);
   }
   return rc;
 }
@@ -2421,7 +2484,7 @@ lc_pouch_query_index_visit_exact_key(const lc_pouch_query_index_key_view *key,
 
   scan = (lc_pouch_query_scan_context *)context;
   rc = lc_pouch_query_index_process_exact_key(scan, key, error);
-  if (rc == LC_OK && scan != NULL && scan->next_offset != 0U) {
+  if (rc == LC_OK && scan != NULL && scan->page_full) {
     return LC_POUCH_STATE_READ_MANY_STOP;
   }
   return rc;
@@ -2445,9 +2508,8 @@ static int lc_pouch_query_index_process_exact_discard_document_key(
       strstr(key->key, "/.staging/") != NULL) {
     return LC_OK;
   }
-  if (key->version > context->index_seq) {
-    context->index_seq = key->version;
-  }
+  lc_pouch_query_track_index_seq(context, key->version);
+  context->candidate_key = key->key;
   active = 0;
   rc = lc_pouch_query_page_enter_candidate(context, &active, error);
   if (rc != LC_OK || !active) {
@@ -2459,8 +2521,7 @@ static int lc_pouch_query_index_process_exact_discard_document_key(
   if (rc != LC_OK || !emit) {
     return rc == LC_OK && stop ? LC_POUCH_STATE_READ_MANY_STOP : rc;
   }
-  lc_pouch_query_page_mark_emitted(context);
-  return LC_OK;
+  return lc_pouch_query_page_mark_emitted(context, error);
 }
 
 static int lc_pouch_query_index_collect_exact_document_key(
@@ -2484,9 +2545,8 @@ static int lc_pouch_query_index_collect_exact_document_key(
       strstr(key->key, "/.staging/") != NULL) {
     return LC_OK;
   }
-  if (key->version > scan->index_seq) {
-    scan->index_seq = key->version;
-  }
+  lc_pouch_query_track_index_seq(scan, key->version);
+  scan->candidate_key = key->key;
   active = 0;
   rc = lc_pouch_query_page_enter_candidate(scan, &active, error);
   if (rc != LC_OK || !active) {
@@ -2500,7 +2560,7 @@ static int lc_pouch_query_index_collect_exact_document_key(
   }
   rc = lc_pouch_query_index_key_set_add(&page->keys, key, error);
   if (rc == LC_OK) {
-    lc_pouch_query_page_mark_emitted(scan);
+    rc = lc_pouch_query_page_mark_emitted(scan, error);
   }
   return rc;
 }
@@ -2519,9 +2579,7 @@ static int lc_pouch_query_index_emit_exact_document_read(
       (read_result->has_query_hidden && read_result->query_hidden)) {
     return LC_OK;
   }
-  if (read_result->version > context->index_seq) {
-    context->index_seq = read_result->version;
-  }
+  lc_pouch_query_track_index_seq(context, read_result->version);
   return lc_pouch_query_emit_document(context, read_result->body, error);
 }
 
@@ -2580,9 +2638,8 @@ static int lc_pouch_query_index_process_key_read(
       (read_result->has_query_hidden && read_result->query_hidden)) {
     return LC_OK;
   }
-  if (read_result->version > context->index_seq) {
-    context->index_seq = read_result->version;
-  }
+  lc_pouch_query_track_index_seq(context, read_result->version);
+  context->candidate_key = key;
   active = 0;
   rc = lc_pouch_query_page_enter_candidate(context, &active, error);
   if (rc != LC_OK || !active) {
@@ -2616,7 +2673,7 @@ static int lc_pouch_query_index_process_key_read(
                                      key, error);
       }
       if (rc == LC_OK) {
-        lc_pouch_query_page_mark_emitted(context);
+        rc = lc_pouch_query_page_mark_emitted(context, error);
       }
     }
   }
@@ -2649,6 +2706,10 @@ static int lc_pouch_query_run_scan_predicate(lc_pouch_query_scan_context *scan,
     }
   }
   if (rc == LC_OK && keys.count > 0U) {
+    if (keys.count > 1U) {
+      qsort(keys.keys, keys.count, sizeof(keys.keys[0]),
+            lc_pouch_query_index_key_compare);
+    }
     for (index = 0U; index < keys.count; ++index) {
       read_keys[index] = keys.keys[index].key;
     }
@@ -2741,7 +2802,7 @@ lc_pouch_query_index_process_keys(lc_pouch_query_scan_context *context,
     for (index = 0U; index < keys->count; ++index) {
       rc = lc_pouch_query_index_process_exact_discard_document_key(
           context, &keys->keys[index], error);
-      if (rc != LC_OK || context->next_offset != 0U) {
+      if (rc != LC_OK || context->page_full) {
         return rc == LC_POUCH_STATE_READ_MANY_STOP ? LC_OK : rc;
       }
     }
@@ -2751,7 +2812,7 @@ lc_pouch_query_index_process_keys(lc_pouch_query_scan_context *context,
     for (index = 0U; index < keys->count; ++index) {
       rc = lc_pouch_query_index_process_exact_key(context, &keys->keys[index],
                                                   error);
-      if (rc != LC_OK || context->next_offset != 0U) {
+      if (rc != LC_OK || context->page_full) {
         return rc;
       }
     }
@@ -3004,6 +3065,30 @@ static int lc_pouch_expiration_from_ttl(long ttl_seconds, long *out,
                         NULL);
   }
   *out = now + ttl_seconds;
+  return LC_OK;
+}
+
+static int lc_pouch_timestamp_add(long base, long delta, const char *field,
+                                  long *out, lc_error *error) {
+  char message[128];
+
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch timestamp addition requires output", NULL, NULL,
+                        NULL);
+  }
+  if (delta < 0L) {
+    snprintf(message, sizeof(message), "pouch %s must be non-negative",
+             field != NULL ? field : "duration");
+    return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
+  }
+  if (delta > LONG_MAX - base) {
+    snprintf(message, sizeof(message),
+             "pouch %s exceeds supported timestamp range",
+             field != NULL ? field : "duration");
+    return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
+  }
+  *out = base + delta;
   return LC_OK;
 }
 
@@ -3612,75 +3697,62 @@ static int lc_pouch_attachment_info_fill(lc_attachment_info *info,
   return LC_OK;
 }
 
-static int lc_pouch_attachment_copy_to_temp(lc_source *src, long max_bytes,
-                                            int has_max_bytes, FILE **out,
-                                            unsigned long *bytes_out,
-                                            lc_error *error) {
-  FILE *fp;
-  unsigned char buffer[8192];
-  unsigned long total;
-  int rc;
+static size_t lc_pouch_counting_source_read(void *context, void *buffer,
+                                            size_t count, lc_error *error) {
+  lc_pouch_counting_source *source;
+  size_t nread;
 
-  if (src == NULL || out == NULL || bytes_out == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch attachment copy requires source and output",
-                        NULL, NULL, NULL);
+  source = (lc_pouch_counting_source *)context;
+  if (source == NULL || source->inner == NULL) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch counting source requires inner source", NULL,
+                       NULL, NULL);
+    return 0U;
   }
-  if (has_max_bytes && max_bytes < 0L) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch attachment max_bytes must be non-negative", NULL,
-                        NULL, NULL);
+  nread = source->inner->read(source->inner, buffer, count, error);
+  if (nread == 0U) {
+    return 0U;
   }
-  fp = tmpfile();
-  if (fp == NULL) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to create pouch attachment scratch file",
-                        strerror(errno), NULL, NULL);
+  if ((unsigned long)nread > ULONG_MAX - source->bytes) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch attachment is too large", NULL, NULL, NULL);
+    return 0U;
   }
-  total = 0UL;
-  rc = LC_OK;
-  for (;;) {
-    size_t nread;
+  if (source->has_max_bytes &&
+      source->bytes + (unsigned long)nread > (unsigned long)source->max_bytes) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch attachment exceeds max_bytes", NULL, NULL, NULL);
+    return 0U;
+  }
+  source->bytes += (unsigned long)nread;
+  return nread;
+}
 
-    nread = src->read(src, buffer, sizeof(buffer), error);
-    if (nread == 0U) {
-      if (error != NULL && error->code != LC_OK) {
-        rc = error->code;
-      }
-      break;
-    }
-    if ((unsigned long)nread > ULONG_MAX - total) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch attachment is too large", NULL, NULL, NULL);
-      break;
-    }
-    if (has_max_bytes &&
-        total + (unsigned long)nread > (unsigned long)max_bytes) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch attachment exceeds max_bytes", NULL, NULL, NULL);
-      break;
-    }
-    if (fwrite(buffer, 1U, nread, fp) != nread) {
-      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to write pouch attachment scratch file",
-                        strerror(errno), NULL, NULL);
-      break;
-    }
-    total += (unsigned long)nread;
+static int lc_pouch_counting_source_reset(void *context, lc_error *error) {
+  lc_pouch_counting_source *source;
+
+  source = (lc_pouch_counting_source *)context;
+  if (source == NULL || source->inner == NULL || source->inner->reset == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch counting source is not resettable", NULL, NULL,
+                        NULL);
   }
-  if (rc == LC_OK && fflush(fp) != 0) {
-    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to flush pouch attachment scratch file",
-                      strerror(errno), NULL, NULL);
+  source->bytes = 0UL;
+  return source->inner->reset(source->inner, error);
+}
+
+static int lc_pouch_attach_write_locked(void *context, lc_error *error) {
+  lc_pouch_attach_write_context *ctx;
+
+  ctx = (lc_pouch_attach_write_context *)context;
+  if (lc_pouch_txn_id_present(ctx->req->lease.txn_id)) {
+    return lc_pouch_state_stage_write(
+        ctx->client->pouch, ".lockd/attachments", ctx->attachment_key,
+        ctx->req->lease.txn_id, ctx->source, ctx->options, ctx->result, error);
   }
-  if (rc == LC_OK) {
-    rewind(fp);
-    *out = fp;
-    *bytes_out = total;
-    return LC_OK;
-  }
-  fclose(fp);
-  return rc;
+  return lc_pouch_state_write(ctx->client->pouch, ".lockd/attachments",
+                              ctx->attachment_key, ctx->source, ctx->options,
+                              ctx->result, error);
 }
 
 static void lc_pouch_attachment_list_builder_cleanup(
@@ -4146,6 +4218,7 @@ static char *lc_pouch_queue_message_id(lc_error *error) {
   static unsigned long counter;
   struct timespec now;
   char text[128];
+  unsigned long sequence;
 
   if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
     (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -4153,60 +4226,31 @@ static char *lc_pouch_queue_message_id(lc_error *error) {
                        NULL, NULL);
     return NULL;
   }
-  ++counter;
-  snprintf(text, sizeof(text), "pouch-msg-%ld-%ld-%lu", (long)now.tv_sec,
-           (long)now.tv_nsec, counter);
+  pthread_mutex_lock(&lc_pouch_queue_message_id_mutex);
+  sequence = ++counter;
+  pthread_mutex_unlock(&lc_pouch_queue_message_id_mutex);
+  snprintf(text, sizeof(text), "pouch-msg-%ld-%ld-%ld-%lu", (long)getpid(),
+           (long)now.tv_sec, (long)now.tv_nsec, sequence);
   return lc_strdup_local(text);
 }
 
-static int lc_pouch_queue_source_to_memory(lc_source *src,
-                                           unsigned char **bytes_out,
-                                           size_t *length_out,
-                                           lc_error *error) {
-  lc_sink *sink;
-  const void *bytes;
-  size_t length;
-  unsigned char *copy;
-  int rc;
-
-  if (src == NULL || bytes_out == NULL || length_out == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch queue source copy requires source and output",
-                        NULL, NULL, NULL);
-  }
-  sink = NULL;
-  copy = NULL;
-  rc = lc_sink_to_memory(&sink, error);
-  if (rc == LC_OK) {
-    rc = lc_copy(src, sink, NULL, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
-  }
-  if (rc == LC_OK && length > 0U) {
-    copy = (unsigned char *)lc_alloc_with_allocator(NULL, length);
-    if (copy == NULL) {
-      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch queue payload", NULL, NULL,
-                        NULL);
-    } else {
-      memcpy(copy, bytes, length);
-    }
-  }
-  if (sink != NULL) {
-    lc_sink_close(sink);
-  }
-  if (rc == LC_OK) {
-    *bytes_out = copy;
-    *length_out = length;
-  } else {
-    lc_free_with_allocator(NULL, copy);
-  }
-  return rc;
+static int lc_pouch_queue_retryable_create_collision(lc_error *error) {
+  return error != NULL && error->code == LC_ERR_INVALID &&
+         error->message != NULL &&
+         strstr(error->message, "create-if-absent precondition failed") != NULL;
 }
 
-static int lc_pouch_queue_record_source(const lc_pouch_queue_record *record,
-                                        lc_source **out, lc_error *error) {
+static int lc_pouch_queue_retryable_version_conflict(lc_error *error) {
+  return error != NULL && error->code == LC_ERR_INVALID &&
+         error->message != NULL &&
+         strstr(error->message, "version precondition failed") != NULL;
+}
+
+static int lc_pouch_queue_record_header(const lc_pouch_queue_record *record,
+                                        int include_payload_length,
+                                        char **header_out,
+                                        size_t *header_length_out,
+                                        lc_error *error) {
   lc_pouch_txn_buffer buffer;
   char *namespace_hex;
   char *queue_hex;
@@ -4217,6 +4261,13 @@ static int lc_pouch_queue_record_source(const lc_pouch_queue_record *record,
   char *lease_txn_hex;
   int rc;
 
+  if (header_out == NULL || header_length_out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue header requires outputs", NULL, NULL,
+                        NULL);
+  }
+  *header_out = NULL;
+  *header_length_out = 0U;
   memset(&buffer, 0, sizeof(buffer));
   namespace_hex = lc_pouch_attachment_hex_encode(record->namespace_name);
   queue_hex = lc_pouch_attachment_hex_encode(record->queue);
@@ -4249,26 +4300,25 @@ static int lc_pouch_queue_record_source(const lc_pouch_queue_record *record,
       "enqueued_at_unix %ld\n"
       "expires_at_unix %ld\n"
       "not_visible_until_unix %ld\n"
-      "visibility_timeout_seconds %ld\n"
-      "payload_bytes %lu\n"
-      "\n",
+      "visibility_timeout_seconds %ld\n",
       namespace_hex, queue_hex, message_hex, status_hex, content_type_hex,
       lease_hex, lease_txn_hex, record->attempts, record->max_attempts,
       record->failure_attempts, record->enqueued_at_unix,
       record->expires_at_unix, record->not_visible_until_unix,
-      record->visibility_timeout_seconds,
-      (unsigned long)record->payload_length);
-  if (rc == LC_OK && record->payload_length > 0U) {
-    rc = lc_pouch_txn_buffer_reserve(
-        &buffer, buffer.length + record->payload_length, error);
-    if (rc == LC_OK) {
-      memcpy(buffer.bytes + buffer.length, record->payload,
-             record->payload_length);
-      buffer.length += record->payload_length;
-    }
+      record->visibility_timeout_seconds);
+  if (rc == LC_OK && include_payload_length) {
+    rc = lc_pouch_txn_buffer_appendf(&buffer, error, "payload_bytes %lu\n",
+                                     (unsigned long)record->payload_length);
   }
   if (rc == LC_OK) {
-    rc = lc_source_from_memory(buffer.bytes, buffer.length, out, error);
+    rc = lc_pouch_txn_buffer_appendf(&buffer, error, "\n");
+  }
+  if (rc == LC_OK) {
+    *header_out = (char *)buffer.bytes;
+    *header_length_out = buffer.length;
+    buffer.bytes = NULL;
+    buffer.length = 0U;
+    buffer.capacity = 0U;
   }
 
 cleanup:
@@ -4280,6 +4330,236 @@ cleanup:
   lc_free_with_allocator(NULL, lease_hex);
   lc_free_with_allocator(NULL, lease_txn_hex);
   lc_pouch_txn_buffer_cleanup(&buffer);
+  return rc;
+}
+
+static int lc_pouch_queue_record_source(const lc_pouch_queue_record *record,
+                                        lc_source **out, lc_error *error) {
+  lc_pouch_txn_buffer buffer;
+  char *header;
+  size_t header_length;
+  int rc;
+
+  memset(&buffer, 0, sizeof(buffer));
+  header = NULL;
+  header_length = 0U;
+  if (record->payload == NULL && record->payload_length > 0U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue record payload is not materialized", NULL,
+                        NULL, NULL);
+  }
+  rc = lc_pouch_queue_record_header(record, 1, &header, &header_length, error);
+  if (rc == LC_OK && record->payload_length > 0U) {
+    rc = lc_pouch_txn_buffer_reserve(
+        &buffer, header_length + record->payload_length, error);
+    if (rc == LC_OK) {
+      memcpy(buffer.bytes, header, header_length);
+      buffer.length = header_length;
+      memcpy(buffer.bytes + buffer.length, record->payload,
+             record->payload_length);
+      buffer.length += record->payload_length;
+    }
+  } else if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_reserve(&buffer, header_length, error);
+    if (rc == LC_OK && header_length > 0U) {
+      memcpy(buffer.bytes, header, header_length);
+      buffer.length = header_length;
+    }
+  }
+  if (rc == LC_OK) {
+    rc = lc_source_from_memory(buffer.bytes, buffer.length, out, error);
+  }
+
+  lc_free_with_allocator(NULL, header);
+  lc_pouch_txn_buffer_cleanup(&buffer);
+  return rc;
+}
+
+static size_t lc_pouch_queue_stream_source_read(void *context, void *buffer,
+                                                size_t count, lc_error *error) {
+  lc_pouch_queue_stream_source_ctx *source;
+  size_t available;
+  size_t copied;
+
+  (void)error;
+  if (context == NULL || buffer == NULL || count == 0U) {
+    return 0U;
+  }
+  source = (lc_pouch_queue_stream_source_ctx *)context;
+  if (source->header_offset < source->header_length) {
+    available = source->header_length - source->header_offset;
+    copied = count < available ? count : available;
+    memcpy(buffer, source->header + source->header_offset, copied);
+    source->header_offset += copied;
+    return copied;
+  }
+  copied = source->payload->read(source->payload, buffer, count, error);
+  source->payload_bytes += copied;
+  return copied;
+}
+
+static int lc_pouch_queue_stream_source_reset(void *context, lc_error *error) {
+  lc_pouch_queue_stream_source_ctx *source;
+  int rc;
+
+  if (context == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue stream reset requires context", NULL, NULL,
+                        NULL);
+  }
+  source = (lc_pouch_queue_stream_source_ctx *)context;
+  if (source->payload == NULL || source->payload->reset == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue payload source is not resettable", NULL,
+                        NULL, NULL);
+  }
+  rc = source->payload->reset(source->payload, error);
+  if (rc == LC_OK) {
+    source->header_offset = 0U;
+    source->payload_bytes = 0U;
+  }
+  return rc;
+}
+
+static void lc_pouch_queue_stream_source_close(void *context) {
+  lc_pouch_queue_stream_source_ctx *source;
+
+  if (context == NULL) {
+    return;
+  }
+  source = (lc_pouch_queue_stream_source_ctx *)context;
+  lc_free_with_allocator(NULL, source->header);
+  lc_free_with_allocator(NULL, source);
+}
+
+static int lc_pouch_queue_stream_source_open(
+    const lc_pouch_queue_record *record, lc_source *payload,
+    int include_payload_length, lc_pouch_queue_stream_source_ctx **context_out,
+    lc_source **out, lc_error *error) {
+  lc_pouch_queue_stream_source_ctx *context;
+  int rc;
+
+  if (record == NULL || payload == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue stream source requires record, payload, "
+                        "and out",
+                        NULL, NULL, NULL);
+  }
+  if (context_out != NULL) {
+    *context_out = NULL;
+  }
+  *out = NULL;
+  context = (lc_pouch_queue_stream_source_ctx *)lc_calloc_with_allocator(
+      NULL, 1U, sizeof(*context));
+  if (context == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch queue stream source", NULL,
+                        NULL, NULL);
+  }
+  context->payload = payload;
+  rc = lc_pouch_queue_record_header(record, include_payload_length,
+                                    &context->header,
+                                    &context->header_length, error);
+  if (rc == LC_OK) {
+    rc = lc_source_from_callbacks(
+        lc_pouch_queue_stream_source_read, lc_pouch_queue_stream_source_reset,
+        lc_pouch_queue_stream_source_close, context, out, error);
+  }
+  if (rc != LC_OK) {
+    lc_pouch_queue_stream_source_close(context);
+    return rc;
+  }
+  if (context_out != NULL) {
+    *context_out = context;
+  }
+  return LC_OK;
+}
+
+static int
+lc_pouch_queue_stream_source(const lc_pouch_queue_record *record,
+                             lc_source *payload,
+                             lc_pouch_queue_stream_source_ctx **context_out,
+                             lc_source **out, lc_error *error) {
+  return lc_pouch_queue_stream_source_open(record, payload, 0, context_out, out,
+                                          error);
+}
+
+static int
+lc_pouch_queue_record_stream_source(const lc_pouch_queue_record *record,
+                                    lc_source *payload, lc_source **out,
+                                    lc_error *error) {
+  return lc_pouch_queue_stream_source_open(record, payload, 1, NULL, out,
+                                          error);
+}
+
+static int lc_pouch_queue_read_header(lc_source *source, char **header_out,
+                                      size_t *header_length_out,
+                                      lc_error *error) {
+  char *buffer;
+  size_t length;
+  size_t capacity;
+  int rc;
+
+  if (source == NULL || header_out == NULL || header_length_out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue header read requires source and outputs",
+                        NULL, NULL, NULL);
+  }
+  *header_out = NULL;
+  *header_length_out = 0U;
+  buffer = NULL;
+  length = 0U;
+  capacity = 0U;
+  rc = LC_OK;
+  for (;;) {
+    unsigned char ch;
+    size_t nread;
+
+    if (length >= LC_POUCH_QUEUE_HEADER_LIMIT) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue record header exceeds limit", NULL, NULL,
+                        NULL);
+      break;
+    }
+    if (length + 1U >= capacity) {
+      size_t next_capacity;
+      char *next;
+
+      next_capacity = capacity == 0U ? 256U : capacity * 2U;
+      if (next_capacity > LC_POUCH_QUEUE_HEADER_LIMIT + 1U) {
+        next_capacity = LC_POUCH_QUEUE_HEADER_LIMIT + 1U;
+      }
+      next = (char *)lc_realloc_with_allocator(NULL, buffer, next_capacity);
+      if (next == NULL) {
+        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch queue header", NULL, NULL,
+                          NULL);
+        break;
+      }
+      buffer = next;
+      capacity = next_capacity;
+    }
+    nread = source->read(source, &ch, 1U, error);
+    if (nread == 0U) {
+      if (error != NULL && error->code != LC_OK) {
+        rc = error->code;
+      } else {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch queue record is missing header terminator",
+                          NULL, NULL, NULL);
+      }
+      break;
+    }
+    buffer[length++] = (char)ch;
+    if (length >= 2U && buffer[length - 2U] == '\n' &&
+        buffer[length - 1U] == '\n') {
+      buffer[length] = '\0';
+      *header_out = buffer;
+      *header_length_out = length;
+      return LC_OK;
+    }
+  }
+  lc_free_with_allocator(NULL, buffer);
   return rc;
 }
 
@@ -4360,24 +4640,76 @@ static int lc_pouch_queue_parse_int_field(const char *header, const char *name,
   return 1;
 }
 
-static int lc_pouch_queue_record_parse(
-    lc_client_handle *client, const lc_pouch_state_read_result *read_result,
-    const char *storage_key, lc_pouch_queue_record *record, lc_error *error) {
+static void lc_pouch_lease_record_cleanup(lc_pouch_lease_record *record) {
+  if (record == NULL) {
+    return;
+  }
+  lc_free_with_allocator(NULL, record->namespace_name);
+  lc_free_with_allocator(NULL, record->key);
+  lc_free_with_allocator(NULL, record->owner);
+  lc_free_with_allocator(NULL, record->lease_id);
+  lc_free_with_allocator(NULL, record->txn_id);
+  memset(record, 0, sizeof(*record));
+}
+
+static char *lc_pouch_lease_storage_key(const char *namespace_name,
+                                        const char *key, lc_error *error) {
+  char *namespace_hex;
+  char *key_hex;
+  char *storage_key;
+  size_t length;
+
+  namespace_hex = lc_pouch_attachment_hex_encode(namespace_name);
+  key_hex = lc_pouch_attachment_hex_encode(key);
+  if (namespace_hex == NULL || key_hex == NULL) {
+    lc_free_with_allocator(NULL, namespace_hex);
+    lc_free_with_allocator(NULL, key_hex);
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch lease key", NULL, NULL, NULL);
+    return NULL;
+  }
+  length = strlen("lease//") + strlen(namespace_hex) + strlen(key_hex) + 1U;
+  storage_key = (char *)lc_alloc_with_allocator(NULL, length);
+  if (storage_key == NULL) {
+    lc_free_with_allocator(NULL, namespace_hex);
+    lc_free_with_allocator(NULL, key_hex);
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch lease key", NULL, NULL, NULL);
+    return NULL;
+  }
+  snprintf(storage_key, length, "lease/%s/%s", namespace_hex, key_hex);
+  lc_free_with_allocator(NULL, namespace_hex);
+  lc_free_with_allocator(NULL, key_hex);
+  return storage_key;
+}
+
+static void lc_pouch_generate_lease_id(char *buffer, size_t buffer_size) {
+  unsigned long sequence;
+  long now_seconds;
+
+  pthread_mutex_lock(&lc_pouch_lease_id_mutex);
+  sequence = ++lc_pouch_lease_id_counter;
+  pthread_mutex_unlock(&lc_pouch_lease_id_mutex);
+  now_seconds = (long)time(NULL);
+  snprintf(buffer, buffer_size, "pouch-lease-%ld-%lu", now_seconds, sequence);
+}
+
+static int
+lc_pouch_lease_record_parse(lc_client_handle *client,
+                            const lc_pouch_state_read_result *read_result,
+                            lc_pouch_lease_record *record, lc_error *error) {
   lc_sink *sink;
   const void *bytes;
   size_t length;
-  const unsigned char *payload;
-  const char *separator;
   char *body;
-  long payload_bytes;
   int rc;
 
   memset(record, 0, sizeof(*record));
+  if (read_result == NULL || !read_result->found) {
+    return LC_OK;
+  }
   sink = NULL;
   body = NULL;
-  bytes = NULL;
-  length = 0U;
-  payload_bytes = 0L;
   rc = lc_sink_to_memory(&sink, error);
   if (rc == LC_OK) {
     rc = lc_copy(read_result->body, sink, NULL, error);
@@ -4389,17 +4721,272 @@ static int lc_pouch_queue_record_parse(
     body = (char *)lc_alloc_with_allocator(NULL, length + 1U);
     if (body == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch queue record", NULL, NULL,
+                        "failed to allocate pouch lease record", NULL, NULL,
                         NULL);
     }
   }
   if (rc == LC_OK) {
     memcpy(body, bytes, length);
     body[length] = '\0';
-    separator = strstr(body, "\n\n");
-    if (separator == NULL || strncmp(body, "pouch-queue-v1\n", 15U) != 0) {
+    record->namespace_name = lc_pouch_queue_parse_hex_field(body, "namespace");
+    record->key = lc_pouch_queue_parse_hex_field(body, "key");
+    record->owner = lc_pouch_queue_parse_hex_field(body, "owner");
+    record->lease_id = lc_pouch_queue_parse_hex_field(body, "lease");
+    record->txn_id = lc_pouch_queue_parse_hex_field(body, "txn");
+    if (record->namespace_name == NULL || record->key == NULL ||
+        record->owner == NULL || record->lease_id == NULL ||
+        record->txn_id == NULL ||
+        !lc_pouch_queue_parse_long_field(body, "fencing_token",
+                                         &record->fencing_token) ||
+        !lc_pouch_queue_parse_long_field(body, "expires_at_unix",
+                                         &record->expires_at_unix)) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "failed to parse pouch lease record", NULL, NULL, NULL);
+    }
+  }
+  if (rc == LC_OK) {
+    record->found = 1;
+    record->version = read_result->version;
+  } else {
+    lc_pouch_lease_record_cleanup(record);
+  }
+  lc_free_with_allocator(NULL, body);
+  if (sink != NULL) {
+    sink->close(sink);
+  }
+  (void)client;
+  return rc;
+}
+
+static int lc_pouch_read_lease_record(lc_client_handle *client,
+                                      const char *namespace_name,
+                                      const char *key,
+                                      lc_pouch_lease_record *record,
+                                      lc_error *error) {
+  lc_pouch_state_read_result read_result;
+  char *storage_key;
+  int rc;
+
+  memset(&read_result, 0, sizeof(read_result));
+  storage_key = lc_pouch_lease_storage_key(namespace_name, key, error);
+  if (storage_key == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  rc = lc_pouch_state_read(client->pouch, LC_POUCH_LEASE_NAMESPACE, storage_key,
+                           &read_result, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_lease_record_parse(client, &read_result, record, error);
+  }
+  lc_free_with_allocator(NULL, storage_key);
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  return rc;
+}
+
+static int lc_pouch_write_lease_record_locked(void *context, lc_error *error) {
+  lc_pouch_lease_write_context *ctx;
+
+  ctx = (lc_pouch_lease_write_context *)context;
+  return lc_pouch_state_write(ctx->client->pouch, LC_POUCH_LEASE_NAMESPACE,
+                              ctx->storage_key, ctx->source, ctx->options,
+                              ctx->out, error);
+}
+
+static int lc_pouch_write_lease_record(
+    lc_client_handle *client, const char *namespace_name, const char *key,
+    const char *owner, const char *lease_id, const char *txn_id,
+    long fencing_token, long expires_at_unix, unsigned long expected_version,
+    lc_pouch_state_write_result *out, lc_error *error) {
+  lc_pouch_txn_buffer buffer;
+  lc_pouch_lease_write_context lock_context;
+  lc_pouch_state_write_options options;
+  lc_source *source;
+  char *storage_key;
+  char *namespace_hex;
+  char *key_hex;
+  char *owner_hex;
+  char *lease_hex;
+  char *txn_hex;
+  int rc;
+
+  memset(&buffer, 0, sizeof(buffer));
+  memset(&options, 0, sizeof(options));
+  source = NULL;
+  storage_key = NULL;
+  namespace_hex = NULL;
+  key_hex = NULL;
+  owner_hex = NULL;
+  lease_hex = NULL;
+  txn_hex = NULL;
+  storage_key = lc_pouch_lease_storage_key(namespace_name, key, error);
+  namespace_hex = lc_pouch_attachment_hex_encode(namespace_name);
+  key_hex = lc_pouch_attachment_hex_encode(key);
+  owner_hex = lc_pouch_attachment_hex_encode(owner);
+  lease_hex = lc_pouch_attachment_hex_encode(lease_id);
+  txn_hex = lc_pouch_attachment_hex_encode(txn_id);
+  if (storage_key == NULL || namespace_hex == NULL || key_hex == NULL ||
+      owner_hex == NULL || lease_hex == NULL || txn_hex == NULL) {
+    rc =
+        lc_error_set(error, LC_ERR_NOMEM, 0L,
+                     "failed to allocate pouch lease record", NULL, NULL, NULL);
+    goto cleanup;
+  }
+  rc = lc_pouch_txn_buffer_appendf(&buffer, error, "pouch-lease-v1\n");
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_appendf(
+        &buffer, error,
+        "namespace %s\nkey %s\nowner %s\nlease %s\ntxn %s\n"
+        "fencing_token %ld\nexpires_at_unix %ld\n",
+        namespace_hex, key_hex, owner_hex, lease_hex, txn_hex, fencing_token,
+        expires_at_unix);
+  }
+  if (rc == LC_OK) {
+    rc = lc_source_from_memory(buffer.bytes, buffer.length, &source, error);
+  }
+  if (rc == LC_OK) {
+    options.content_type = LC_POUCH_LEASE_CONTENT_TYPE;
+    options.has_expected_version = 1;
+    options.expected_version = expected_version;
+    memset(&lock_context, 0, sizeof(lock_context));
+    lock_context.client = client;
+    lock_context.storage_key = storage_key;
+    lock_context.source = source;
+    lock_context.options = &options;
+    lock_context.out = out;
+    rc = lc_pouch_state_with_namespace_lock(client->pouch, namespace_name,
+                                            lc_pouch_write_lease_record_locked,
+                                            &lock_context, error);
+  }
+
+cleanup:
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  lc_free_with_allocator(NULL, storage_key);
+  lc_free_with_allocator(NULL, namespace_hex);
+  lc_free_with_allocator(NULL, key_hex);
+  lc_free_with_allocator(NULL, owner_hex);
+  lc_free_with_allocator(NULL, lease_hex);
+  lc_free_with_allocator(NULL, txn_hex);
+  lc_pouch_txn_buffer_cleanup(&buffer);
+  return rc;
+}
+
+static int lc_pouch_write_lease_tombstone(lc_client_handle *client,
+                                          const char *namespace_name,
+                                          const char *key, const char *owner,
+                                          long fencing_token,
+                                          unsigned long expected_version,
+                                          lc_error *error) {
+  lc_pouch_state_write_result result;
+  int rc;
+
+  memset(&result, 0, sizeof(result));
+  rc = lc_pouch_write_lease_record(client, namespace_name, key, owner, "", "",
+                                   fencing_token, 0L, expected_version, &result,
+                                   error);
+  lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+  return rc;
+}
+
+static int lc_pouch_lease_ref_has_credentials(const lc_lease_ref *lease) {
+  return lease != NULL && lease->lease_id != NULL && lease->lease_id[0] != '\0';
+}
+
+static int lc_pouch_validate_lease_record(lc_client_handle *client,
+                                          const lc_lease_ref *lease,
+                                          const char *namespace_name,
+                                          const char *key,
+                                          lc_pouch_lease_record *record,
+                                          lc_error *error) {
+  lc_pouch_lease_record local_record;
+  lc_pouch_lease_record *target;
+  const char *lease_txn_id;
+  const char *stored_txn_id;
+  long now_seconds;
+  int rc;
+
+  if (!lc_pouch_lease_ref_has_credentials(lease)) {
+    if (record != NULL) {
+      memset(record, 0, sizeof(*record));
+    }
+    return LC_OK;
+  }
+  if (lease->fencing_token <= 0L) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease validation requires fencing_token", NULL,
+                        NULL, NULL);
+  }
+  memset(&local_record, 0, sizeof(local_record));
+  target = record != NULL ? record : &local_record;
+  memset(target, 0, sizeof(*target));
+  rc = lc_pouch_read_lease_record(client, namespace_name, key, target, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  now_seconds = (long)time(NULL);
+  if (!target->found || strcmp(target->namespace_name, namespace_name) != 0 ||
+      strcmp(target->key, key) != 0 ||
+      strcmp(target->lease_id, lease->lease_id) != 0 ||
+      target->fencing_token != lease->fencing_token ||
+      target->expires_at_unix <= now_seconds) {
+    lc_pouch_lease_record_cleanup(target);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease validation failed", NULL, NULL, NULL);
+  }
+  lease_txn_id = lease->txn_id != NULL ? lease->txn_id : "";
+  stored_txn_id = target->txn_id != NULL ? target->txn_id : "";
+  if (strcmp(stored_txn_id, lease_txn_id) != 0) {
+    lc_pouch_lease_record_cleanup(target);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease validation failed", NULL, NULL, NULL);
+  }
+  if (record == NULL) {
+    lc_pouch_lease_record_cleanup(&local_record);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_lease_precondition_check(void *context, lc_error *error) {
+  lc_pouch_lease_precondition *precondition;
+
+  precondition = (lc_pouch_lease_precondition *)context;
+  return lc_pouch_validate_lease_record(
+      precondition->client, precondition->lease, precondition->namespace_name,
+      precondition->key, NULL, error);
+}
+
+static int lc_pouch_queue_record_parse(
+    lc_client_handle *client, const lc_pouch_state_read_result *read_result,
+    const char *storage_key, lc_pouch_queue_record *record, lc_error *error) {
+  char *body;
+  size_t header_length;
+  unsigned long available_payload_bytes;
+  long payload_bytes;
+  int has_payload_bytes;
+  int rc;
+
+  memset(record, 0, sizeof(*record));
+  body = NULL;
+  header_length = 0U;
+  available_payload_bytes = 0UL;
+  payload_bytes = 0L;
+  has_payload_bytes = 0;
+  rc = lc_pouch_queue_read_header(read_result->body, &body, &header_length,
+                                  error);
+  if (rc == LC_OK) {
+    if (strncmp(body, "pouch-queue-v1\n", 15U) != 0) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch queue record is corrupt", NULL, NULL, NULL);
+    }
+  }
+  if (rc == LC_OK) {
+    if (read_result->bytes > (unsigned long)((size_t)-1) ||
+        header_length > (size_t)read_result->bytes) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue record is too large", NULL, NULL, NULL);
+    } else {
+      available_payload_bytes =
+          read_result->bytes - (unsigned long)header_length;
     }
   }
   if (rc == LC_OK) {
@@ -4432,8 +5019,6 @@ static int lc_pouch_queue_record_parse(
                                          &record->not_visible_until_unix) ||
         !lc_pouch_queue_parse_long_field(body, "visibility_timeout_seconds",
                                          &record->visibility_timeout_seconds) ||
-        !lc_pouch_queue_parse_long_field(body, "payload_bytes",
-                                         &payload_bytes) ||
         payload_bytes < 0L) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch queue record is missing fields", NULL, NULL,
@@ -4448,27 +5033,33 @@ static int lc_pouch_queue_record_parse(
         lc_error_set(error, LC_ERR_INVALID, 0L,
                      "pouch queue record has invalid expiry", NULL, NULL, NULL);
   }
-  if (rc == LC_OK) {
-    payload = (const unsigned char *)(strstr(body, "\n\n") + 2U);
-    if ((size_t)payload_bytes >
-        length - (size_t)(payload - (const unsigned char *)body)) {
+  if (rc == LC_OK && lc_pouch_queue_find_line(body, "payload_bytes") != NULL) {
+    has_payload_bytes = 1;
+    if (!lc_pouch_queue_parse_long_field(body, "payload_bytes",
+                                         &payload_bytes) ||
+        payload_bytes < 0L) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch queue payload is truncated", NULL, NULL, NULL);
-    } else if (payload_bytes > 0L) {
-      record->payload =
-          (unsigned char *)lc_alloc_with_allocator(NULL, (size_t)payload_bytes);
-      if (record->payload == NULL) {
-        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch queue payload", NULL, NULL,
-                          NULL);
+                        "pouch queue record has invalid payload length", NULL,
+                        NULL, NULL);
+    }
+  }
+  if (rc == LC_OK) {
+    if (!has_payload_bytes) {
+      if (available_payload_bytes > (unsigned long)LONG_MAX) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch queue record is too large", NULL, NULL, NULL);
       } else {
-        memcpy(record->payload, payload, (size_t)payload_bytes);
-        record->payload_length = (size_t)payload_bytes;
+        payload_bytes = (long)available_payload_bytes;
       }
     }
   }
-  if (sink != NULL) {
-    lc_sink_close(sink);
+  if (rc == LC_OK) {
+    if ((unsigned long)payload_bytes > available_payload_bytes) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue payload is truncated", NULL, NULL, NULL);
+    } else {
+      record->payload_length = (size_t)payload_bytes;
+    }
   }
   lc_free_with_allocator(NULL, body);
   if (rc != LC_OK) {
@@ -4598,9 +5189,64 @@ static int lc_pouch_queue_record_is_live_at(const lc_pouch_queue_record *record,
 
 static int lc_pouch_queue_record_available(const lc_pouch_queue_record *record,
                                            long now) {
-  return lc_pouch_queue_record_is_live_at(record, now) &&
-         strcmp(record->status, "available") == 0 &&
-         record->not_visible_until_unix <= now;
+  if (!lc_pouch_queue_record_is_live_at(record, now) ||
+      record->not_visible_until_unix > now) {
+    return 0;
+  }
+  return strcmp(record->status, "available") == 0 ||
+         strcmp(record->status, "inflight") == 0;
+}
+
+static int lc_pouch_queue_wait_deadline(long wait_seconds,
+                                        struct timespec *deadline,
+                                        int *has_deadline, lc_error *error) {
+  if (deadline == NULL || has_deadline == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue wait deadline requires outputs", NULL,
+                        NULL, NULL);
+  }
+  *has_deadline = 0;
+  memset(deadline, 0, sizeof(*deadline));
+  if (wait_seconds < 0L) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dequeue wait_seconds must be non-negative", NULL,
+                        NULL, NULL);
+  }
+  if (wait_seconds == 0L) {
+    return LC_OK;
+  }
+  if (clock_gettime(CLOCK_MONOTONIC, deadline) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to read pouch dequeue wait clock",
+                        strerror(errno), NULL, NULL);
+  }
+  if (wait_seconds > LONG_MAX - (long)deadline->tv_sec) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dequeue wait_seconds is too large", NULL, NULL,
+                        NULL);
+  }
+  deadline->tv_sec += (time_t)wait_seconds;
+  *has_deadline = 1;
+  return LC_OK;
+}
+
+static int
+lc_pouch_queue_wait_deadline_reached(const struct timespec *deadline) {
+  struct timespec now;
+
+  if (deadline == NULL || clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+    return 1;
+  }
+  return now.tv_sec > deadline->tv_sec ||
+         (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec);
+}
+
+static void lc_pouch_queue_dequeue_poll_delay(void) {
+  struct timespec delay;
+
+  delay.tv_sec = 0;
+  delay.tv_nsec = 100L * 1000L * 1000L;
+  (void)nanosleep(&delay, NULL);
 }
 
 static void lc_pouch_queue_touch_notification(lc_client_handle *client,
@@ -4664,18 +5310,97 @@ cleanup:
   lc_error_cleanup(&ignored);
 }
 
+static int lc_pouch_queue_payload_source(lc_client_handle *client,
+                                         const char *storage_key,
+                                         lc_source **out, lc_error *error) {
+  lc_pouch_state_read_result read_result;
+  char *header;
+  size_t header_length;
+  int rc;
+
+  if (client == NULL || storage_key == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue payload source requires client, key, and "
+                        "out",
+                        NULL, NULL, NULL);
+  }
+  *out = NULL;
+  memset(&read_result, 0, sizeof(read_result));
+  header = NULL;
+  header_length = 0U;
+  rc = lc_pouch_state_read(client->pouch, ".lockd/queue", storage_key,
+                           &read_result, error);
+  if (rc == LC_OK && !read_result.found) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch queue payload source record not found", NULL, NULL,
+                      NULL);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_read_header(read_result.body, &header, &header_length,
+                                    error);
+  }
+  if (rc == LC_OK) {
+    if (read_result.bytes > (unsigned long)((size_t)-1) ||
+        header_length > (size_t)read_result.bytes) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue payload source header is invalid", NULL,
+                        NULL, NULL);
+    }
+  }
+  if (rc == LC_OK) {
+    *out = read_result.body;
+    read_result.body = NULL;
+  }
+  lc_free_with_allocator(NULL, header);
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  return rc;
+}
+
+static int lc_pouch_queue_open_record_source(lc_client_handle *client,
+                                             lc_pouch_queue_record *record,
+                                             lc_source **payload_source_out,
+                                             lc_source **out,
+                                             lc_error *error) {
+  int rc;
+
+  if (payload_source_out == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue record source requires outputs", NULL,
+                        NULL, NULL);
+  }
+  *payload_source_out = NULL;
+  *out = NULL;
+  if (record->payload != NULL || record->payload_length == 0U) {
+    return lc_pouch_queue_record_source(record, out, error);
+  }
+  rc = lc_pouch_queue_payload_source(client, record->storage_key,
+                                     payload_source_out, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_record_stream_source(record, *payload_source_out, out,
+                                             error);
+  }
+  if (rc != LC_OK && *payload_source_out != NULL) {
+    lc_source_close(*payload_source_out);
+    *payload_source_out = NULL;
+  }
+  return rc;
+}
+
 static int lc_pouch_queue_write_record(lc_client_handle *client,
                                        lc_pouch_queue_record *record,
                                        lc_error *error) {
   lc_source *source;
+  lc_source *payload_source;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
   int rc;
 
   source = NULL;
+  payload_source = NULL;
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
-  rc = lc_pouch_queue_record_source(record, &source, error);
+  rc = lc_pouch_queue_open_record_source(client, record, &payload_source,
+                                         &source, error);
   if (rc == LC_OK) {
     options.content_type = "application/x-lockdc-pouch-queue";
     options.expected_version = record->version;
@@ -4686,6 +5411,9 @@ static int lc_pouch_queue_write_record(lc_client_handle *client,
   }
   if (source != NULL) {
     lc_source_close(source);
+  }
+  if (payload_source != NULL) {
+    lc_source_close(payload_source);
   }
   if (rc == LC_OK) {
     lc_pouch_queue_touch_notification(client, record->namespace_name,
@@ -4709,14 +5437,17 @@ static int lc_pouch_queue_stage_record(lc_client_handle *client,
                                        lc_pouch_queue_record *record,
                                        const char *txn_id, lc_error *error) {
   lc_source *source;
+  lc_source *payload_source;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
   int rc;
 
   source = NULL;
+  payload_source = NULL;
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
-  rc = lc_pouch_queue_record_source(record, &source, error);
+  rc = lc_pouch_queue_open_record_source(client, record, &payload_source,
+                                         &source, error);
   if (rc == LC_OK) {
     options.content_type = "application/x-lockdc-pouch-queue";
     rc = lc_pouch_state_stage_write(client->pouch, ".lockd/queue",
@@ -4725,6 +5456,9 @@ static int lc_pouch_queue_stage_record(lc_client_handle *client,
   }
   if (source != NULL) {
     lc_source_close(source);
+  }
+  if (payload_source != NULL) {
+    lc_source_close(payload_source);
   }
   lc_pouch_state_write_result_cleanup(&client->allocator, &result);
   return rc;
@@ -4820,8 +5554,13 @@ static int lc_pouch_queue_make_message(lc_client_handle *client,
 
   memset(&response, 0, sizeof(response));
   payload = NULL;
-  rc = lc_source_from_memory(record->payload, record->payload_length, &payload,
-                             error);
+  if (record->payload != NULL || record->payload_length == 0U) {
+    rc = lc_source_from_memory(record->payload, record->payload_length,
+                               &payload, error);
+  } else {
+    rc = lc_pouch_queue_payload_source(client, record->storage_key, &payload,
+                                       error);
+  }
   if (rc != LC_OK) {
     return rc;
   }
@@ -5569,15 +6308,18 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
     return LC_OK;
   }
   for (i = 0U; i < req->participant_count; ++i) {
-    const char *namespace_name;
+    const char *namespace_name = NULL;
     int rc;
 
     rc = lc_pouch_client_validate_public_key(req->participants[i].key, error);
     if (rc != LC_OK) {
       return rc;
     }
-    namespace_name =
-        lc_pouch_client_namespace(client, req->participants[i].namespace_name);
+    rc = lc_pouch_client_public_namespace(
+        client, req->participants[i].namespace_name, &namespace_name, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
     if (strcmp(state, "commit") == 0) {
       lc_pouch_state_write_result result;
 
@@ -5647,14 +6389,19 @@ static int lc_pouch_client_get_namespace(lc_client_handle *client,
                                          const lc_get_opts *opts, lc_sink *dst,
                                          lc_get_res *out, lc_error *error) {
   lc_pouch_state_read_result read_result;
+  const char *resolved_namespace = NULL;
   int rc;
 
   (void)opts;
   memset(out, 0, sizeof(*out));
   memset(&read_result, 0, sizeof(read_result));
-  rc = lc_pouch_state_read(client->pouch,
-                           lc_pouch_client_namespace(client, namespace_name),
-                           key, &read_result, error);
+  rc = lc_pouch_client_public_namespace(client, namespace_name,
+                                        &resolved_namespace, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_state_read(client->pouch, resolved_namespace, key, &read_result,
+                           error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -5685,6 +6432,7 @@ static int lc_pouch_client_load_namespace(lc_client_handle *client,
   lonejson *runtime;
   lonejson_error lj_error;
   lonejson_status status;
+  const char *resolved_namespace = NULL;
   int rc;
 
   (void)opts;
@@ -5692,9 +6440,13 @@ static int lc_pouch_client_load_namespace(lc_client_handle *client,
   memset(&read_result, 0, sizeof(read_result));
   memory_sink = NULL;
   json = NULL;
-  rc = lc_pouch_state_read(client->pouch,
-                           lc_pouch_client_namespace(client, namespace_name),
-                           key, &read_result, error);
+  rc = lc_pouch_client_public_namespace(client, namespace_name,
+                                        &resolved_namespace, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_state_read(client->pouch, resolved_namespace, key, &read_result,
+                           error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -5775,16 +6527,125 @@ static void lc_pouch_patch_lease_methods(lc_lease *lease) {
   lease->delete_all_attachments = lc_pouch_lease_delete_all_attachments_method;
 }
 
+static void lc_pouch_acquire_context_cleanup(lc_pouch_acquire_context *ctx) {
+  if (ctx == NULL) {
+    return;
+  }
+  lc_pouch_state_read_result_cleanup(&ctx->client->allocator,
+                                     &ctx->read_result);
+  lc_pouch_state_write_result_cleanup(&ctx->client->allocator,
+                                      &ctx->lease_write_result);
+  ctx->held_until_unix = 0L;
+  ctx->fencing_token = 0L;
+  ctx->version = 0UL;
+  ctx->has_query_hidden = 0;
+  ctx->query_hidden = 0;
+  ctx->acquired = 0;
+  ctx->lease_id[0] = '\0';
+}
+
+static void lc_pouch_acquire_poll_delay(void) {
+  struct timespec delay;
+
+  delay.tv_sec = 0;
+  delay.tv_nsec = 100L * 1000L * 1000L;
+  (void)nanosleep(&delay, NULL);
+}
+
+static int lc_pouch_acquire_locked(void *context, lc_error *error) {
+  lc_pouch_acquire_context *ctx;
+  lc_pouch_lease_record lease_record;
+  unsigned long expected_lease_version;
+  long now_seconds;
+  int rc;
+
+  ctx = (lc_pouch_acquire_context *)context;
+  if (ctx == NULL || ctx->client == NULL || ctx->req == NULL ||
+      ctx->namespace_name == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch acquire lock requires context", NULL, NULL,
+                        NULL);
+  }
+  memset(&lease_record, 0, sizeof(lease_record));
+  rc = lc_pouch_state_read(ctx->client->pouch, ctx->namespace_name,
+                           ctx->req->key, &ctx->read_result, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (ctx->req->if_not_exists && ctx->read_result.found) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch acquire if_not_exists precondition failed", NULL,
+                        NULL, NULL);
+  }
+  ctx->version = ctx->read_result.found ? ctx->read_result.version : 0UL;
+  ctx->has_query_hidden = ctx->read_result.has_query_hidden;
+  ctx->query_hidden = ctx->read_result.query_hidden;
+  rc = lc_pouch_read_lease_record(ctx->client, ctx->namespace_name,
+                                  ctx->req->key, &lease_record, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  now_seconds = (long)time(NULL);
+  if (lease_record.found && lease_record.expires_at_unix > now_seconds) {
+    ctx->held_until_unix = lease_record.expires_at_unix;
+    lc_pouch_lease_record_cleanup(&lease_record);
+    return LC_OK;
+  }
+  expected_lease_version = lease_record.found ? lease_record.version : 0UL;
+  ctx->fencing_token = lease_record.found && lease_record.fencing_token > 0L
+                           ? lease_record.fencing_token + 1L
+                           : 1L;
+  rc = lc_pouch_expiration_from_ttl(ctx->req->ttl_seconds,
+                                    &ctx->lease_expires_at_unix, error);
+  if (rc != LC_OK) {
+    lc_pouch_lease_record_cleanup(&lease_record);
+    return rc;
+  }
+  lc_pouch_generate_lease_id(ctx->lease_id, sizeof(ctx->lease_id));
+  rc = lc_pouch_write_lease_record(
+      ctx->client, ctx->namespace_name, ctx->req->key, ctx->req->owner,
+      ctx->lease_id, ctx->req->txn_id, ctx->fencing_token,
+      ctx->lease_expires_at_unix, expected_lease_version,
+      &ctx->lease_write_result, error);
+  if (rc != LC_OK) {
+    lc_error rollback_error;
+    lc_pouch_lease_record written_record;
+
+    lc_error_init(&rollback_error);
+    memset(&written_record, 0, sizeof(written_record));
+    if (lc_pouch_read_lease_record(ctx->client, ctx->namespace_name,
+                                   ctx->req->key, &written_record,
+                                   &rollback_error) == LC_OK &&
+        written_record.found &&
+        strcmp(written_record.lease_id, ctx->lease_id) == 0 &&
+        written_record.fencing_token == ctx->fencing_token) {
+      (void)lc_pouch_write_lease_tombstone(
+          ctx->client, ctx->namespace_name, ctx->req->key, written_record.owner,
+          written_record.fencing_token, written_record.version,
+          &rollback_error);
+    }
+    lc_error_cleanup(&rollback_error);
+    lc_error_init(&rollback_error);
+    (void)lc_pouch_write_lease_tombstone(
+        ctx->client, ctx->namespace_name, ctx->req->key, ctx->req->owner,
+        ctx->fencing_token, expected_lease_version + 1UL, &rollback_error);
+    lc_pouch_lease_record_cleanup(&written_record);
+    lc_error_cleanup(&rollback_error);
+  }
+  lc_pouch_lease_record_cleanup(&lease_record);
+  if (rc == LC_OK) {
+    ctx->acquired = 1;
+  }
+  return rc;
+}
+
 int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                                    lc_lease **out, lc_error *error) {
   lc_client_handle *client;
-  lc_pouch_state_read_result read_result;
-  const char *namespace_name;
-  char lease_id[128];
-  unsigned long version;
-  long lease_expires_at_unix;
-  int has_query_hidden;
-  int query_hidden;
+  lc_pouch_acquire_context acquire_context;
+  const char *namespace_name = NULL;
+  long block_deadline_unix;
+  long now_seconds;
   lc_lease *lease;
   int rc;
 
@@ -5799,40 +6660,86 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_expiration_from_ttl(req->ttl_seconds, &lease_expires_at_unix,
-                                    error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
-  memset(&read_result, 0, sizeof(read_result));
-  rc = lc_pouch_state_read(client->pouch, namespace_name, req->key,
-                           &read_result, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  if (req->if_not_exists && read_result.found) {
-    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  if (req->ttl_seconds <= 0L) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch acquire if_not_exists precondition failed", NULL,
-                        NULL, NULL);
+                        "pouch ttl_seconds must be positive", NULL, NULL, NULL);
   }
-  version = read_result.found ? read_result.version : 0UL;
-  has_query_hidden = read_result.has_query_hidden;
-  query_hidden = read_result.query_hidden;
-  snprintf(lease_id, sizeof(lease_id), "pouch-lease-%020lu", version + 1UL);
-  lease = lc_lease_new(client, namespace_name, req->key, req->owner, lease_id,
-                       req->txn_id, 1L, (long)version,
-                       read_result.found ? read_result.etag : NULL, NULL);
-  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  if (req->block_seconds < 0L) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch acquire block_seconds must be non-negative",
+                        NULL, NULL, NULL);
+  }
+  rc = lc_pouch_client_public_namespace(client, req->namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&acquire_context, 0, sizeof(acquire_context));
+  acquire_context.client = client;
+  acquire_context.req = req;
+  acquire_context.namespace_name = namespace_name;
+  now_seconds = (long)time(NULL);
+  block_deadline_unix =
+      req->block_seconds > 0L ? now_seconds + req->block_seconds : now_seconds;
+  for (;;) {
+    lc_pouch_acquire_context_cleanup(&acquire_context);
+    rc = lc_pouch_state_with_namespace_lock(client->pouch, namespace_name,
+                                            lc_pouch_acquire_locked,
+                                            &acquire_context, error);
+    if (rc != LC_OK || acquire_context.acquired) {
+      break;
+    }
+    if (req->block_seconds <= 0L) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L, "pouch lease already held",
+                        NULL, NULL, NULL);
+      break;
+    }
+    now_seconds = (long)time(NULL);
+    if (now_seconds >= block_deadline_unix) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L, "pouch lease already held",
+                        NULL, NULL, NULL);
+      break;
+    }
+    lc_pouch_acquire_poll_delay();
+  }
+  if (rc != LC_OK) {
+    lc_pouch_acquire_context_cleanup(&acquire_context);
+    return rc;
+  }
+  lease = lc_lease_new(
+      client, namespace_name, req->key, req->owner, acquire_context.lease_id,
+      req->txn_id, acquire_context.fencing_token, (long)acquire_context.version,
+      acquire_context.read_result.found ? acquire_context.read_result.etag
+                                        : NULL,
+      NULL);
   if (lease == NULL) {
+    lc_error rollback_error;
+    int rollback_rc;
+
+    lc_error_init(&rollback_error);
+    rollback_rc = lc_pouch_write_lease_tombstone(
+        client, namespace_name, req->key, req->owner,
+        acquire_context.fencing_token,
+        acquire_context.lease_write_result.version, &rollback_error);
+    lc_pouch_acquire_context_cleanup(&acquire_context);
+    if (rollback_rc != LC_OK) {
+      if (error != NULL) {
+        *error = rollback_error;
+        lc_error_init(&rollback_error);
+      }
+      lc_error_cleanup(&rollback_error);
+      return rollback_rc;
+    }
+    lc_error_cleanup(&rollback_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch lease", NULL, NULL, NULL);
   }
   lc_pouch_lease_refresh_expiration((lc_lease_handle *)lease,
-                                    lease_expires_at_unix);
+                                    acquire_context.lease_expires_at_unix);
   lc_pouch_lease_refresh_query_metadata((lc_lease_handle *)lease,
-                                        has_query_hidden, query_hidden);
+                                        acquire_context.has_query_hidden,
+                                        acquire_context.query_hidden);
+  lc_pouch_acquire_context_cleanup(&acquire_context);
   lc_pouch_patch_lease_methods(lease);
   *out = lease;
   return LC_OK;
@@ -6034,8 +6941,10 @@ cleanup:
 int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
                                     lc_describe_res *out, lc_error *error) {
   lc_client_handle *client;
+  lc_pouch_lease_record lease_record;
   lc_pouch_state_read_result read_result;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
+  long now_seconds;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -6049,29 +6958,56 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
   if (rc != LC_OK) {
     return rc;
   }
-  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   memset(&read_result, 0, sizeof(read_result));
   rc = lc_pouch_state_read(client->pouch, namespace_name, req->key,
                            &read_result, error);
   if (rc != LC_OK) {
     return rc;
   }
+  if (!read_result.found) {
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+    return lc_error_set(error, LC_ERR_SERVER, 404L,
+                        "pouch key metadata was not found", NULL, "not_found",
+                        NULL);
+  }
+  memset(&lease_record, 0, sizeof(lease_record));
+  rc = lc_pouch_read_lease_record(client, namespace_name, req->key,
+                                  &lease_record, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+    return rc;
+  }
   out->namespace_name = lc_strdup_local(namespace_name);
   out->key = lc_strdup_local(req->key);
-  out->state_etag =
-      read_result.found ? lc_strdup_local(read_result.etag) : NULL;
+  out->state_etag = lc_strdup_local(read_result.etag);
+  now_seconds = (long)time(NULL);
+  if (lease_record.found && lease_record.expires_at_unix > now_seconds) {
+    out->owner = lc_strdup_local(lease_record.owner);
+    out->lease_id = lc_strdup_local(lease_record.lease_id);
+    out->txn_id = lc_strdup_local(lease_record.txn_id);
+    out->lease_expires_at_unix = lease_record.expires_at_unix;
+    out->fencing_token = lease_record.fencing_token;
+  }
   if (out->namespace_name == NULL || out->key == NULL ||
-      (read_result.found && out->state_etag == NULL)) {
+      out->state_etag == NULL ||
+      (lease_record.found && lease_record.expires_at_unix > now_seconds &&
+       (out->owner == NULL || out->lease_id == NULL || out->txn_id == NULL))) {
+    lc_pouch_lease_record_cleanup(&lease_record);
     lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
     lc_describe_res_cleanup(out);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch describe response", NULL,
                         NULL, NULL);
   }
-  out->version = read_result.found ? (long)read_result.version : 0L;
-  out->fencing_token = 1L;
+  out->version = (long)read_result.version;
   out->has_query_hidden = read_result.has_query_hidden;
   out->query_hidden = read_result.query_hidden;
+  lc_pouch_lease_record_cleanup(&lease_record);
   lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
   return LC_OK;
 }
@@ -6128,9 +7064,10 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
                                   lc_source *src, lc_update_res *out,
                                   lc_error *error) {
   lc_client_handle *client;
+  lc_pouch_lease_precondition lease_precondition;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   int rc;
 
   if (self == NULL || req == NULL || src == NULL || out == NULL) {
@@ -6145,12 +7082,28 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
     return rc;
   }
   memset(out, 0, sizeof(*out));
+  memset(&lease_precondition, 0, sizeof(lease_precondition));
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
-  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
+                                      req->lease.key, NULL, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   options.content_type =
       req->content_type != NULL ? req->content_type : "application/json";
   options.expected_etag = req->if_state_etag;
+  lease_precondition.client = client;
+  lease_precondition.lease = &req->lease;
+  lease_precondition.namespace_name = namespace_name;
+  lease_precondition.key = req->lease.key;
+  options.precondition = lc_pouch_lease_precondition_check;
+  options.precondition_context = &lease_precondition;
   if (req->has_if_version) {
     if (req->if_version < 0L) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -6183,11 +7136,12 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
 int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
                                   lc_mutate_res *out, lc_error *error) {
   lc_client_handle *client;
+  lc_pouch_lease_precondition lease_precondition;
   lc_pouch_mutate_file mutated;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
   lc_source *source;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -6201,11 +7155,21 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
     return rc;
   }
   memset(out, 0, sizeof(*out));
+  memset(&lease_precondition, 0, sizeof(lease_precondition));
   memset(&mutated, 0, sizeof(mutated));
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
   source = NULL;
-  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
+                                      req->lease.key, NULL, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
 
   if (lc_pouch_txn_id_present(req->lease.txn_id)) {
     rc = lc_pouch_client_prepare_txn_mutation_file(
@@ -6228,6 +7192,12 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
   }
   options.content_type = "application/json";
   options.expected_etag = req->if_state_etag;
+  lease_precondition.client = client;
+  lease_precondition.lease = &req->lease;
+  lease_precondition.namespace_name = namespace_name;
+  lease_precondition.key = req->lease.key;
+  options.precondition = lc_pouch_lease_precondition_check;
+  options.precondition_context = &lease_precondition;
   if (req->has_if_version) {
     if (req->if_version < 0L) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -6267,9 +7237,10 @@ cleanup:
 int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
                                     lc_metadata_res *out, lc_error *error) {
   lc_client_handle *client;
+  lc_pouch_lease_precondition lease_precondition;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   char *namespace_copy;
   char *key_copy;
   int rc;
@@ -6290,6 +7261,7 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
     return rc;
   }
   memset(out, 0, sizeof(*out));
+  memset(&lease_precondition, 0, sizeof(lease_precondition));
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
   options.has_query_hidden = 1;
@@ -6303,7 +7275,24 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
     options.expected_version = (unsigned long)req->if_version;
     options.has_expected_version = 1;
   }
-  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    return rc;
+  }
+  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
+                                      req->lease.key, NULL, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    return rc;
+  }
+  lease_precondition.client = client;
+  lease_precondition.lease = &req->lease;
+  lease_precondition.namespace_name = namespace_name;
+  lease_precondition.key = req->lease.key;
+  options.precondition = lc_pouch_lease_precondition_check;
+  options.precondition_context = &lease_precondition;
   rc = lc_pouch_state_update_metadata(client->pouch, namespace_name,
                                       req->lease.key, &options, &result, error);
   if (rc != LC_OK) {
@@ -6332,8 +7321,10 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
 int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
                                   lc_remove_res *out, lc_error *error) {
   lc_client_handle *client;
+  lc_pouch_lease_precondition lease_precondition;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
+  const char *namespace_name = NULL;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -6347,9 +7338,20 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
     return rc;
   }
   memset(out, 0, sizeof(*out));
+  memset(&lease_precondition, 0, sizeof(lease_precondition));
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
   options.expected_etag = req->if_state_etag;
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
+                                      req->lease.key, NULL, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   if (req->has_if_version) {
     if (req->if_version < 0L) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -6359,10 +7361,14 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
     options.expected_version = (unsigned long)req->if_version;
     options.has_expected_version = 1;
   }
-  rc = lc_pouch_state_delete(
-      client->pouch,
-      lc_pouch_client_namespace(client, req->lease.namespace_name),
-      req->lease.key, &options, &result, error);
+  lease_precondition.client = client;
+  lease_precondition.lease = &req->lease;
+  lease_precondition.namespace_name = namespace_name;
+  lease_precondition.key = req->lease.key;
+  options.precondition = lc_pouch_lease_precondition_check;
+  options.precondition_context = &lease_precondition;
+  rc = lc_pouch_state_delete(client->pouch, namespace_name, req->lease.key,
+                             &options, &result, error);
   if (rc == LC_OK) {
     out->removed = result.version > 0UL;
     out->new_version = (long)result.version;
@@ -6376,8 +7382,10 @@ int lc_pouch_client_keepalive_method(lc_client *self,
                                      lc_keepalive_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_state_read_result read_result;
-  const char *namespace_name;
-  long lease_expires_at_unix;
+  lc_pouch_state_write_result lease_write_result;
+  lc_pouch_lease_record lease_record;
+  const char *namespace_name = NULL;
+  long lease_expires_at_unix = 0L;
   char *state_etag;
   int rc;
 
@@ -6396,8 +7404,32 @@ int lc_pouch_client_keepalive_method(lc_client *self,
   if (rc != LC_OK) {
     return rc;
   }
-  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  if (!lc_pouch_lease_ref_has_credentials(&req->lease)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch keepalive requires lease_id", NULL, NULL, NULL);
+  }
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   memset(&read_result, 0, sizeof(read_result));
+  memset(&lease_write_result, 0, sizeof(lease_write_result));
+  memset(&lease_record, 0, sizeof(lease_record));
+  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
+                                      req->lease.key, &lease_record, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_write_lease_record(
+      client, namespace_name, req->lease.key, lease_record.owner,
+      lease_record.lease_id, lease_record.txn_id, lease_record.fencing_token,
+      lease_expires_at_unix, lease_record.version, &lease_write_result, error);
+  lc_pouch_lease_record_cleanup(&lease_record);
+  lc_pouch_state_write_result_cleanup(&client->allocator, &lease_write_result);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_state_read(client->pouch, namespace_name, req->lease.key,
                            &read_result, error);
   if (rc != LC_OK) {
@@ -6422,6 +7454,8 @@ int lc_pouch_client_keepalive_method(lc_client *self,
 int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
                                    lc_release_res *out, lc_error *error) {
   lc_client_handle *client;
+  lc_pouch_lease_record lease_record;
+  const char *namespace_name = NULL;
   int discarded;
   int rc;
 
@@ -6435,15 +7469,37 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
   if (rc != LC_OK) {
     return rc;
   }
+  if (!lc_pouch_lease_ref_has_credentials(&req->lease)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch release requires lease_id", NULL, NULL, NULL);
+  }
+  memset(&lease_record, 0, sizeof(lease_record));
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
+                                      req->lease.key, &lease_record, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   if (req->rollback && req->lease.txn_id != NULL &&
       req->lease.txn_id[0] != '\0') {
-    rc = lc_pouch_state_discard_staged(
-        client->pouch,
-        lc_pouch_client_namespace(client, req->lease.namespace_name),
-        req->lease.key, req->lease.txn_id, &discarded, error);
+    rc = lc_pouch_state_discard_staged(client->pouch, namespace_name,
+                                       req->lease.key, req->lease.txn_id,
+                                       &discarded, error);
     if (rc != LC_OK) {
+      lc_pouch_lease_record_cleanup(&lease_record);
       return rc;
     }
+  }
+  rc = lc_pouch_write_lease_tombstone(
+      client, namespace_name, req->lease.key, lease_record.owner,
+      lease_record.fencing_token, lease_record.version, error);
+  lc_pouch_lease_record_cleanup(&lease_record);
+  if (rc != LC_OK) {
+    return rc;
   }
   memset(out, 0, sizeof(*out));
   out->released = 1;
@@ -6454,16 +7510,17 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
                                   lc_source *src, lc_attach_res *out,
                                   lc_error *error) {
   lc_client_handle *client;
+  lc_pouch_attach_write_context attach_context;
+  lc_pouch_counting_source counting_source;
+  lc_pouch_lease_precondition lease_precondition;
   lc_pouch_state_read_result existing;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
-  lc_source *file_source;
-  const char *namespace_name;
+  lc_source *counted_source;
+  const char *namespace_name = NULL;
   const char *content_type;
   char *attachment_key;
   char *staged_key;
-  FILE *fp;
-  unsigned long bytes;
   int rc;
 
   if (self == NULL || req == NULL || src == NULL || out == NULL) {
@@ -6482,15 +7539,31 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
     return rc;
   }
   memset(out, 0, sizeof(*out));
+  memset(&attach_context, 0, sizeof(attach_context));
+  memset(&counting_source, 0, sizeof(counting_source));
+  memset(&lease_precondition, 0, sizeof(lease_precondition));
   memset(&existing, 0, sizeof(existing));
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
-  file_source = NULL;
+  counted_source = NULL;
   attachment_key = NULL;
   staged_key = NULL;
-  fp = NULL;
-  bytes = 0UL;
-  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  if (req->has_max_bytes && req->max_bytes < 0L) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch attachment max_bytes must be non-negative", NULL,
+                      NULL, NULL);
+    goto cleanup;
+  }
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
+                                      req->lease.key, NULL, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
   content_type = req->content_type != NULL && req->content_type[0] != '\0'
                      ? req->content_type
                      : "application/octet-stream";
@@ -6533,30 +7606,35 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
       }
     }
   }
-  rc = lc_pouch_attachment_copy_to_temp(src, req->max_bytes, req->has_max_bytes,
-                                        &fp, &bytes, error);
+  counting_source.inner = src;
+  counting_source.max_bytes = req->max_bytes;
+  counting_source.has_max_bytes = req->has_max_bytes;
+  rc = lc_source_from_callbacks(lc_pouch_counting_source_read,
+                                lc_pouch_counting_source_reset, NULL,
+                                &counting_source, &counted_source, error);
   if (rc != LC_OK) {
     goto cleanup;
   }
-  file_source = lc_source_from_open_file(fp, 0);
-  if (file_source == NULL) {
-    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                      "failed to wrap pouch attachment source", NULL, NULL,
-                      NULL);
-    goto cleanup;
-  }
   options.content_type = content_type;
-  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
-    rc = lc_pouch_state_stage_write(client->pouch, ".lockd/attachments",
-                                    attachment_key, req->lease.txn_id,
-                                    file_source, &options, &result, error);
-  } else {
-    rc = lc_pouch_state_write(client->pouch, ".lockd/attachments",
-                              attachment_key, file_source, &options, &result,
-                              error);
-  }
+  options.create_if_absent = req->prevent_overwrite;
+  lease_precondition.client = client;
+  lease_precondition.lease = &req->lease;
+  lease_precondition.namespace_name = namespace_name;
+  lease_precondition.key = req->lease.key;
+  options.precondition = lc_pouch_lease_precondition_check;
+  options.precondition_context = &lease_precondition;
+  attach_context.client = client;
+  attach_context.req = req;
+  attach_context.attachment_key = attachment_key;
+  attach_context.source = counted_source;
+  attach_context.options = &options;
+  attach_context.result = &result;
+  rc = lc_pouch_state_with_namespace_lock(client->pouch, namespace_name,
+                                          lc_pouch_attach_write_locked,
+                                          &attach_context, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_attachment_info_fill(&out->attachment, req->name, (long)bytes,
+    rc = lc_pouch_attachment_info_fill(&out->attachment, req->name,
+                                       (long)counting_source.bytes,
                                        content_type, result.version, error);
   }
   if (rc == LC_OK) {
@@ -6570,11 +7648,8 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   }
 
 cleanup:
-  if (file_source != NULL) {
-    lc_source_close(file_source);
-  }
-  if (fp != NULL) {
-    fclose(fp);
+  if (counted_source != NULL) {
+    lc_source_close(counted_source);
   }
   lc_free_with_allocator(NULL, attachment_key);
   lc_free_with_allocator(NULL, staged_key);
@@ -6592,7 +7667,7 @@ int lc_pouch_client_list_attachments_method(lc_client *self,
                                             lc_error *error) {
   lc_client_handle *client;
   lc_pouch_attachment_list_builder builder;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -6607,7 +7682,11 @@ int lc_pouch_client_list_attachments_method(lc_client *self,
   }
   memset(out, 0, sizeof(*out));
   memset(&builder, 0, sizeof(builder));
-  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_collect_attachments(client, namespace_name, req->lease.key,
                                     &builder, error);
   if (rc == LC_OK) {
@@ -6636,7 +7715,7 @@ int lc_pouch_client_get_attachment_method(lc_client *self,
                                           lc_error *error) {
   lc_client_handle *client;
   lc_pouch_state_read_result read_result;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   char *name;
   char *attachment_key;
   int rc;
@@ -6656,7 +7735,11 @@ int lc_pouch_client_get_attachment_method(lc_client *self,
   memset(&read_result, 0, sizeof(read_result));
   name = NULL;
   attachment_key = NULL;
-  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
 
   name = lc_pouch_attachment_name_from_selector(&req->selector, error);
   if (name == NULL) {
@@ -6708,7 +7791,7 @@ int lc_pouch_client_delete_attachment_method(lc_client *self,
   lc_pouch_state_read_result read_result;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   char *name;
   char *attachment_key;
   char *staged_key;
@@ -6734,7 +7817,16 @@ int lc_pouch_client_delete_attachment_method(lc_client *self,
   attachment_key = NULL;
   staged_key = NULL;
   found = 0;
-  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
+                                      req->lease.key, NULL, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
 
   name = lc_pouch_attachment_name_from_selector(&req->selector, error);
   if (name == NULL) {
@@ -6798,7 +7890,7 @@ int lc_pouch_client_delete_all_attachments_method(
   lc_pouch_attachment_list_builder builder;
   lc_pouch_txn_key_list staged_keys;
   lc_pouch_txn_key_list affected_keys;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   size_t i;
   int rc;
 
@@ -6817,7 +7909,16 @@ int lc_pouch_client_delete_all_attachments_method(
   memset(&builder, 0, sizeof(builder));
   memset(&staged_keys, 0, sizeof(staged_keys));
   memset(&affected_keys, 0, sizeof(affected_keys));
-  namespace_name = lc_pouch_client_namespace(client, req->lease.namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
+                                      req->lease.key, NULL, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_collect_attachments(client, namespace_name, req->lease.key,
                                     &builder, error);
   if (rc == LC_OK && lc_pouch_txn_id_present(req->lease.txn_id)) {
@@ -6876,7 +7977,7 @@ int lc_pouch_client_queue_stats_method(lc_client *self,
                                        lc_error *error) {
   lc_client_handle *client;
   lc_pouch_queue_scan scan;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   long now;
   size_t i;
   int rc;
@@ -6894,7 +7995,11 @@ int lc_pouch_client_queue_stats_method(lc_client *self,
   client = (lc_client_handle *)self;
   memset(out, 0, sizeof(*out));
   memset(&scan, 0, sizeof(scan));
-  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_now_unix(&now, error);
   if (rc == LC_OK) {
     rc = lc_pouch_queue_scan_load(client, namespace_name, req->queue, &scan,
@@ -7026,7 +8131,10 @@ int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
       rc = lc_pouch_queue_clear_lease(&record, error);
     }
     if (rc == LC_OK) {
-      record.not_visible_until_unix = now + req->delay_seconds;
+      rc = lc_pouch_timestamp_add(now, req->delay_seconds, "delay_seconds",
+                                  &record.not_visible_until_unix, error);
+    }
+    if (rc == LC_OK) {
       if (req->intent == LC_NACK_INTENT_UNSPECIFIED ||
           req->intent == LC_NACK_INTENT_FAILURE) {
         record.failure_attempts += 1;
@@ -7098,7 +8206,11 @@ int lc_pouch_client_queue_extend_method(lc_client *self,
                       "pouch queue message is already acked", NULL, NULL, NULL);
   }
   if (rc == LC_OK) {
-    record.not_visible_until_unix = now + req->extend_by_seconds;
+    rc =
+        lc_pouch_timestamp_add(now, req->extend_by_seconds, "extend_by_seconds",
+                               &record.not_visible_until_unix, error);
+  }
+  if (rc == LC_OK) {
     record.visibility_timeout_seconds = req->extend_by_seconds;
     rc = lc_pouch_queue_write_or_stage_record(client, &record,
                                               req->message.txn_id, error);
@@ -7126,11 +8238,13 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
                                    lc_error *error) {
   lc_client_handle *client;
   lc_pouch_queue_record record;
+  lc_pouch_queue_stream_source_ctx *stream_context;
   lc_source *record_source;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   long now;
+  unsigned int attempt;
   int rc;
 
   if (self == NULL || req == NULL || src == NULL || out == NULL) {
@@ -7150,17 +8264,21 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
   }
   now = 0L;
   client = (lc_client_handle *)self;
-  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   memset(out, 0, sizeof(*out));
   memset(&record, 0, sizeof(record));
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
+  stream_context = NULL;
   record_source = NULL;
   rc = lc_pouch_now_unix(&now, error);
   if (rc == LC_OK) {
     record.namespace_name = lc_strdup_local(namespace_name);
     record.queue = lc_strdup_local(req->queue);
-    record.message_id = lc_pouch_queue_message_id(error);
     record.status = lc_strdup_local("available");
     record.content_type = lc_strdup_local(req->content_type != NULL &&
                                                   req->content_type[0] != '\0'
@@ -7172,39 +8290,70 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
     record.max_attempts = req->max_attempts;
     record.failure_attempts = 0;
     record.enqueued_at_unix = now;
-    record.expires_at_unix =
-        req->ttl_seconds > 0L ? now + req->ttl_seconds : 0L;
-    record.not_visible_until_unix = now + req->delay_seconds;
+    record.expires_at_unix = 0L;
+    if (req->ttl_seconds > 0L) {
+      rc = lc_pouch_timestamp_add(now, req->ttl_seconds, "ttl_seconds",
+                                  &record.expires_at_unix, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_timestamp_add(now, req->delay_seconds, "delay_seconds",
+                                  &record.not_visible_until_unix, error);
+    }
     record.visibility_timeout_seconds = req->visibility_timeout_seconds;
-    if (record.namespace_name == NULL || record.queue == NULL ||
-        record.message_id == NULL || record.status == NULL ||
-        record.content_type == NULL || record.lease_id == NULL ||
-        record.lease_txn_id == NULL) {
-      rc = error != NULL && error->code != LC_OK
-               ? error->code
-               : lc_error_set(error, LC_ERR_NOMEM, 0L,
-                              "failed to allocate pouch queue record", NULL,
-                              NULL, NULL);
+    if (rc == LC_OK &&
+        (record.namespace_name == NULL || record.queue == NULL ||
+         record.status == NULL || record.content_type == NULL ||
+         record.lease_id == NULL || record.lease_txn_id == NULL)) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch queue record", NULL, NULL,
+                        NULL);
     }
   }
-  if (rc == LC_OK) {
-    record.storage_key = lc_pouch_queue_key(namespace_name, req->queue,
-                                            record.message_id, error);
-    if (record.storage_key == NULL) {
+  options.create_if_absent = 1;
+  options.content_type = "application/x-lockdc-pouch-queue";
+  for (attempt = 0U; rc == LC_OK && attempt < 16U; ++attempt) {
+    lc_free_with_allocator(NULL, record.message_id);
+    lc_free_with_allocator(NULL, record.storage_key);
+    record.message_id = NULL;
+    record.storage_key = NULL;
+    record.message_id = lc_pouch_queue_message_id(error);
+    record.storage_key = record.message_id != NULL
+                             ? lc_pouch_queue_key(namespace_name, req->queue,
+                                                  record.message_id, error)
+                             : NULL;
+    if (record.message_id == NULL || record.storage_key == NULL) {
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+      break;
     }
+    rc = lc_pouch_queue_stream_source(&record, src, &stream_context,
+                                      &record_source, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_write(client->pouch, ".lockd/queue",
+                                record.storage_key, record_source, &options,
+                                &result, error);
+    }
+    if (rc == LC_OK) {
+      break;
+    }
+    if (lc_pouch_queue_retryable_create_collision(error)) {
+      lc_error_cleanup(error);
+      lc_error_init(error);
+      if (record_source != NULL) {
+        lc_source_close(record_source);
+        record_source = NULL;
+        stream_context = NULL;
+      }
+      continue;
+    }
+    break;
   }
-  if (rc == LC_OK) {
-    rc = lc_pouch_queue_source_to_memory(src, &record.payload,
-                                         &record.payload_length, error);
+  if (rc == LC_OK && attempt == 16U) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "failed to allocate unique pouch queue message id", NULL,
+                      NULL, "pouch");
   }
-  if (rc == LC_OK) {
-    rc = lc_pouch_queue_record_source(&record, &record_source, error);
-  }
-  if (rc == LC_OK) {
-    options.content_type = "application/x-lockdc-pouch-queue";
-    rc = lc_pouch_state_write(client->pouch, ".lockd/queue", record.storage_key,
-                              record_source, &options, &result, error);
+  if (rc == LC_OK && stream_context != NULL) {
+    record.payload_length = stream_context->payload_bytes;
   }
   if (rc == LC_OK) {
     lc_pouch_queue_touch_notification(client, namespace_name, req->queue);
@@ -7238,35 +8387,20 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
   return rc;
 }
 
-int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
-                                   lc_message **out, lc_error *error) {
-  lc_client_handle *client;
+static int lc_pouch_client_dequeue_once(lc_client_handle *client,
+                                        const char *namespace_name,
+                                        const lc_dequeue_req *req,
+                                        long visibility_timeout,
+                                        lc_message **out, lc_error *error) {
   lc_pouch_queue_scan scan;
-  const char *namespace_name;
   const char *next_cursor;
   long now;
-  long visibility_timeout;
   size_t i;
   int after_cursor;
   int rc;
 
-  if (self == NULL || req == NULL || out == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch dequeue requires self, req, and out", NULL, NULL,
-                        NULL);
-  }
-  *out = NULL;
-  if (req->queue == NULL || req->queue[0] == '\0') {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch dequeue requires queue", NULL, NULL, NULL);
-  }
   now = 0L;
-  client = (lc_client_handle *)self;
   memset(&scan, 0, sizeof(scan));
-  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
-  visibility_timeout = req->visibility_timeout_seconds > 0L
-                           ? req->visibility_timeout_seconds
-                           : 30L;
   rc = lc_pouch_now_unix(&now, error);
   if (rc == LC_OK) {
     rc = lc_pouch_queue_scan_load(client, namespace_name, req->queue, &scan,
@@ -7297,7 +8431,12 @@ int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
     record->lease_id = lc_strdup_local(lease_id);
     record->lease_txn_id =
         lc_strdup_local(req->txn_id != NULL ? req->txn_id : "");
-    record->not_visible_until_unix = now + visibility_timeout;
+    rc = lc_pouch_timestamp_add(now, visibility_timeout,
+                                "visibility_timeout_seconds",
+                                &record->not_visible_until_unix, error);
+    if (rc != LC_OK) {
+      break;
+    }
     record->visibility_timeout_seconds = visibility_timeout;
     if (record->status == NULL || record->lease_id == NULL ||
         record->lease_txn_id == NULL) {
@@ -7307,15 +8446,65 @@ int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
       break;
     }
     rc = lc_pouch_queue_write_record(client, record, error);
+    if (rc != LC_OK && lc_pouch_queue_retryable_version_conflict(error)) {
+      lc_error_cleanup(error);
+      lc_error_init(error);
+      rc = LC_OK;
+      continue;
+    }
     if (rc == LC_OK) {
-      next_cursor =
-          i + 1U < scan.count ? scan.records[i + 1U].message_id : NULL;
+      next_cursor = record->message_id;
       rc = lc_pouch_queue_make_message(client, record, next_cursor, NULL, out,
                                        error);
     }
     break;
   }
   lc_pouch_queue_scan_cleanup(&scan);
+  return rc;
+}
+
+int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
+                                   lc_message **out, lc_error *error) {
+  lc_client_handle *client;
+  const char *namespace_name = NULL;
+  struct timespec deadline;
+  long visibility_timeout;
+  int has_deadline;
+  int rc;
+
+  if (self == NULL || req == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dequeue requires self, req, and out", NULL, NULL,
+                        NULL);
+  }
+  *out = NULL;
+  if (req->queue == NULL || req->queue[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dequeue requires queue", NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  rc = lc_pouch_client_public_namespace(client, req->namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_queue_wait_deadline(req->wait_seconds, &deadline, &has_deadline,
+                                    error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  visibility_timeout = req->visibility_timeout_seconds > 0L
+                           ? req->visibility_timeout_seconds
+                           : 30L;
+  do {
+    rc = lc_pouch_client_dequeue_once(client, namespace_name, req,
+                                      visibility_timeout, out, error);
+    if (rc != LC_OK || *out != NULL || !has_deadline ||
+        lc_pouch_queue_wait_deadline_reached(&deadline)) {
+      break;
+    }
+    lc_pouch_queue_dequeue_poll_delay();
+  } while (1);
   return rc;
 }
 
@@ -7327,9 +8516,13 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
   lc_message *message;
   lc_message_handle *handle;
   lc_pouch_state_read_result read_result;
+  lc_pouch_state_write_result lease_write_result;
+  lc_pouch_lease_record lease_record;
   char *state_key;
   char state_lease_id[192];
   long state_version;
+  long state_fencing_token;
+  long now_seconds;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -7342,6 +8535,8 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
   message = NULL;
   state_key = NULL;
   memset(&read_result, 0, sizeof(read_result));
+  memset(&lease_write_result, 0, sizeof(lease_write_result));
+  memset(&lease_record, 0, sizeof(lease_record));
   rc = lc_pouch_client_dequeue_method(self, req, &message, error);
   if (rc != LC_OK || message == NULL) {
     return rc;
@@ -7361,6 +8556,28 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
   state_version = read_result.found ? (long)read_result.version : 0L;
   snprintf(state_lease_id, sizeof(state_lease_id), "pouch-qstate-%s-%d",
            handle->message_id, handle->attempts);
+  rc = lc_pouch_read_lease_record(client, handle->namespace_name, state_key,
+                                  &lease_record, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  now_seconds = (long)time(NULL);
+  if (lease_record.found && lease_record.expires_at_unix > now_seconds) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch queue state lease already held", NULL, NULL, NULL);
+    goto cleanup;
+  }
+  state_fencing_token = lease_record.found && lease_record.fencing_token > 0L
+                            ? lease_record.fencing_token + 1L
+                            : 1L;
+  rc = lc_pouch_write_lease_record(
+      client, handle->namespace_name, state_key, req->owner, state_lease_id,
+      handle->txn_id, state_fencing_token, handle->not_visible_until_unix,
+      lease_record.found ? lease_record.version : 0UL, &lease_write_result,
+      error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
   handle->state_etag =
       lc_client_strdup(client, read_result.found ? read_result.etag : NULL);
   handle->state_lease_id = lc_client_strdup(client, state_lease_id);
@@ -7374,7 +8591,7 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
     goto cleanup;
   }
   handle->state_lease_expires_at_unix = handle->not_visible_until_unix;
-  handle->state_fencing_token = 1L;
+  handle->state_fencing_token = state_fencing_token;
   handle->state_lease = lc_lease_new(
       client, handle->namespace_name, state_key, req->owner,
       handle->state_lease_id, handle->state_txn_id, handle->state_fencing_token,
@@ -7393,6 +8610,8 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
 
 cleanup:
   lc_free_with_allocator(NULL, state_key);
+  lc_pouch_lease_record_cleanup(&lease_record);
+  lc_pouch_state_write_result_cleanup(&client->allocator, &lease_write_result);
   lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
   if (message != NULL) {
     message->close(message);
@@ -7697,7 +8916,7 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   lql_selector *selector;
   lql_error lql_error_value;
   lql_status status;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   const char *effective_engine;
   char *owned_engine;
   int use_index_predicate;
@@ -7713,9 +8932,10 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_query_validate_fields_json(req, error);
-  if (rc != LC_OK) {
-    return rc;
+  if (req->fields_json != NULL && req->fields_json[0] != '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query does not accept fields_json", NULL, NULL,
+                        "pouch");
   }
   if (!lc_pouch_query_request_has_selector(req)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -7736,7 +8956,11 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
                         "pouch");
   }
   client = (lc_client_handle *)self;
-  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   owned_engine = NULL;
   rc = lc_pouch_client_query_engine(client, namespace_name, req->engine,
                                     &effective_engine, &owned_engine, error);
@@ -7745,6 +8969,7 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   }
   if (req->refresh != NULL && req->refresh[0] != '\0' &&
       strcmp(effective_engine, "scan") == 0 &&
+      !lc_pouch_client_encrypted(client) &&
       lc_pouch_client_can_use_query_fallback(client, req->engine, "index")) {
     effective_engine = "index";
   }
@@ -7782,7 +9007,8 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   scan.runtime = runtime;
   scan.selector = selector;
   scan.emit_documents = 1;
-  rc = lc_pouch_query_parse_cursor(req->cursor, &scan.offset, error);
+  scan.track_index_seq = use_index_predicate;
+  rc = lc_pouch_query_parse_cursor(req->cursor, &scan.start_after_key, error);
   if (rc == LC_OK) {
     if (use_index_predicate) {
       unsigned long flushed_seq;
@@ -7801,13 +9027,14 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
                              : lc_pouch_query_scan_metadata_string(
                                    scan.seen, scan.matched, error);
     out->correlation_id = lc_strdup_local("pouch-query");
-    out->index_seq = scan.index_seq;
-    if (scan.next_offset != 0U) {
-      out->cursor = lc_pouch_query_cursor_string(scan.next_offset, error);
+    out->index_seq = use_index_predicate ? scan.index_seq : 0UL;
+    if (scan.page_full && scan.last_emitted_key != NULL) {
+      out->cursor = lc_pouch_query_cursor_string(scan.last_emitted_key, error);
     }
     if (out->return_mode == NULL || out->metadata_json == NULL ||
         out->correlation_id == NULL ||
-        (scan.next_offset != 0U && out->cursor == NULL)) {
+        (scan.page_full && scan.last_emitted_key != NULL &&
+         out->cursor == NULL)) {
       lc_query_res_cleanup(out);
       rc = error != NULL && error->code != LC_OK
                ? error->code
@@ -7819,6 +9046,7 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   runtime->selector_destroy(runtime, selector);
   runtime->destroy(runtime);
   lc_free_with_allocator(NULL, owned_engine);
+  lc_free_with_allocator(NULL, scan.last_emitted_key);
   return rc;
 }
 
@@ -7832,7 +9060,7 @@ int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
   lql_selector *selector;
   lql_error lql_error_value;
   lql_status status;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   const char *effective_engine;
   char *owned_engine;
   int has_selector;
@@ -7866,7 +9094,11 @@ int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
                         NULL, "pouch");
   }
   client = (lc_client_handle *)self;
-  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   owned_engine = NULL;
   rc = lc_pouch_client_query_engine(client, namespace_name, req->engine,
                                     &effective_engine, &owned_engine, error);
@@ -7875,6 +9107,7 @@ int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
   }
   if (req->refresh != NULL && req->refresh[0] != '\0' &&
       strcmp(effective_engine, "scan") == 0 &&
+      !lc_pouch_client_encrypted(client) &&
       lc_pouch_client_can_use_query_fallback(client, req->engine, "index")) {
     effective_engine = "index";
   }
@@ -7900,7 +9133,8 @@ int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
   scan.limit = lc_pouch_query_effective_limit(req->limit);
   scan.handler = handler;
   scan.handler_context = context;
-  rc = lc_pouch_query_parse_cursor(req->cursor, &scan.offset, error);
+  scan.track_index_seq = use_index_summary || use_index_predicate;
+  rc = lc_pouch_query_parse_cursor(req->cursor, &scan.start_after_key, error);
   if (rc != LC_OK) {
     lc_free_with_allocator(NULL, owned_engine);
     return rc;
@@ -7925,12 +9159,14 @@ int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
           scan.seen, scan.matched, error);
       out->correlation_id = lc_strdup_local("pouch-query-keys");
       out->index_seq = scan.index_seq;
-      if (scan.next_offset != 0U) {
-        out->cursor = lc_pouch_query_cursor_string(scan.next_offset, error);
+      if (scan.page_full && scan.last_emitted_key != NULL) {
+        out->cursor =
+            lc_pouch_query_cursor_string(scan.last_emitted_key, error);
       }
       if (out->return_mode == NULL || out->metadata_json == NULL ||
           out->correlation_id == NULL ||
-          (scan.next_offset != 0U && out->cursor == NULL)) {
+          (scan.page_full && scan.last_emitted_key != NULL &&
+           out->cursor == NULL)) {
         lc_query_res_cleanup(out);
         rc = error != NULL && error->code != LC_OK
                  ? error->code
@@ -7940,6 +9176,7 @@ int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
       }
     }
     lc_free_with_allocator(NULL, owned_engine);
+    lc_free_with_allocator(NULL, scan.last_emitted_key);
     return rc;
   }
   runtime = NULL;
@@ -7976,13 +9213,14 @@ int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
                                    scan.seen, scan.matched, error)
                              : lc_strdup_local("{\"engine\":\"scan\"}");
     out->correlation_id = lc_strdup_local("pouch-query-keys");
-    out->index_seq = scan.index_seq;
-    if (scan.next_offset != 0U) {
-      out->cursor = lc_pouch_query_cursor_string(scan.next_offset, error);
+    out->index_seq = use_index_predicate ? scan.index_seq : 0UL;
+    if (scan.page_full && scan.last_emitted_key != NULL) {
+      out->cursor = lc_pouch_query_cursor_string(scan.last_emitted_key, error);
     }
     if (out->return_mode == NULL || out->metadata_json == NULL ||
         out->correlation_id == NULL ||
-        (scan.next_offset != 0U && out->cursor == NULL)) {
+        (scan.page_full && scan.last_emitted_key != NULL &&
+         out->cursor == NULL)) {
       lc_query_res_cleanup(out);
       rc = error != NULL && error->code != LC_OK
                ? error->code
@@ -7996,6 +9234,7 @@ int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
   }
   runtime->destroy(runtime);
   lc_free_with_allocator(NULL, owned_engine);
+  lc_free_with_allocator(NULL, scan.last_emitted_key);
   return rc;
 }
 
@@ -8004,7 +9243,7 @@ int lc_pouch_client_get_namespace_config_method(
     lc_namespace_config_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_namespace_config_record record;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -8014,7 +9253,11 @@ int lc_pouch_client_get_namespace_config_method(
         NULL);
   }
   client = (lc_client_handle *)self;
-  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_namespace_config_read(client, namespace_name, &record, error);
   if (rc != LC_OK) {
     return rc;
@@ -8031,7 +9274,7 @@ int lc_pouch_client_update_namespace_config_method(
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
   lc_source *source;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   const char *preferred_engine;
   const char *fallback_engine;
   char body[96];
@@ -8047,7 +9290,11 @@ int lc_pouch_client_update_namespace_config_method(
   }
   memset(out, 0, sizeof(*out));
   client = (lc_client_handle *)self;
-  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_namespace_config_read(client, namespace_name, &record, error);
   if (rc != LC_OK) {
     return rc;
@@ -8111,7 +9358,7 @@ int lc_pouch_client_flush_index_method(lc_client *self,
                                        lc_error *error) {
   lc_client_handle *client;
   lc_pouch_query_index_flush_result index_result;
-  const char *namespace_name;
+  const char *namespace_name = NULL;
   const char *mode;
   unsigned long index_seq;
   int rc;
@@ -8129,13 +9376,35 @@ int lc_pouch_client_flush_index_method(lc_client *self,
                         NULL, "pouch");
   }
   client = (lc_client_handle *)self;
-  namespace_name = lc_pouch_client_namespace(client, req->namespace_name);
+  rc = lc_pouch_client_public_namespace(client, req->namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   mode = req->mode != NULL && req->mode[0] != '\0' ? req->mode : "wait";
   index_seq = 0UL;
   rc = lc_pouch_state_index_seq(client->pouch, namespace_name, &index_seq,
                                 error);
   if (rc != LC_OK) {
     return rc;
+  }
+  if (lc_pouch_client_encrypted(client)) {
+    out->namespace_name = lc_strdup_local(namespace_name);
+    out->mode = lc_strdup_local(mode);
+    out->flush_id = lc_strdup_local("pouch-query-index-disabled-encrypted");
+    out->accepted = 1;
+    out->flushed = 1;
+    out->pending = 0;
+    out->index_seq = index_seq;
+    out->correlation_id = lc_strdup_local("pouch-index-flush");
+    if (out->namespace_name == NULL || out->mode == NULL ||
+        out->flush_id == NULL || out->correlation_id == NULL) {
+      lc_index_flush_res_cleanup(out);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch index flush response", NULL,
+                          NULL, NULL);
+    }
+    return LC_OK;
   }
   memset(&index_result, 0, sizeof(index_result));
   rc = lc_pouch_query_index_flush(client->pouch, namespace_name, index_seq,
@@ -8512,6 +9781,7 @@ static int lc_pouch_tc_read_lease(lc_client_handle *client,
                         "pouch");
     } else {
       record->found = 1;
+      record->version = read_result.version;
     }
   }
   lc_client_free(client, body);
@@ -8526,6 +9796,7 @@ static int lc_pouch_tc_write_lease(lc_client_handle *client,
                                    const char *leader_id,
                                    const char *leader_endpoint,
                                    unsigned long term, long expires_at_unix,
+                                   unsigned long expected_version,
                                    lc_error *error) {
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
@@ -8562,6 +9833,8 @@ static int lc_pouch_tc_write_lease(lc_client_handle *client,
   options.content_type = LC_POUCH_TC_CONTENT_TYPE;
   options.has_query_hidden = 1;
   options.query_hidden = 1;
+  options.has_expected_version = 1;
+  options.expected_version = expected_version;
   rc = lc_source_from_memory(body, (size_t)body_length, &source, error);
   if (rc == LC_OK) {
     rc = lc_pouch_state_write(client->pouch, ".lockd/tc", "leader", source,
@@ -8576,6 +9849,8 @@ static int lc_pouch_tc_write_lease(lc_client_handle *client,
 
 static int lc_pouch_tc_delete_key(lc_client_handle *client,
                                   const char *namespace_name, const char *key,
+                                  int has_expected_version,
+                                  unsigned long expected_version,
                                   lc_error *error) {
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
@@ -8585,6 +9860,10 @@ static int lc_pouch_tc_delete_key(lc_client_handle *client,
   memset(&result, 0, sizeof(result));
   options.has_query_hidden = 1;
   options.query_hidden = 1;
+  if (has_expected_version) {
+    options.has_expected_version = 1;
+    options.expected_version = expected_version;
+  }
   rc = lc_pouch_state_delete(client->pouch, namespace_name, key, &options,
                              &result, error);
   lc_pouch_state_write_result_cleanup(&client->allocator, &result);
@@ -9060,9 +10339,9 @@ int lc_pouch_client_tc_lease_acquire_method(lc_client *self,
             (req->term == record.term &&
              strcmp(record.leader_id, req->candidate_id) == 0);
     if (grant) {
-      rc = lc_pouch_tc_write_lease(client, req->candidate_id,
-                                   req->candidate_endpoint, req->term,
-                                   expires_at_unix, error);
+      rc = lc_pouch_tc_write_lease(
+          client, req->candidate_id, req->candidate_endpoint, req->term,
+          expires_at_unix, record.found ? record.version : 0UL, error);
     }
   }
   if (rc == LC_OK) {
@@ -9120,7 +10399,7 @@ int lc_pouch_client_tc_lease_renew_method(lc_client *self,
     renewed = 1;
     rc = lc_pouch_tc_write_lease(client, record.leader_id,
                                  record.leader_endpoint, record.term,
-                                 expires_at_unix, error);
+                                 expires_at_unix, record.version, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_tc_copy_lease_renew_res(
@@ -9167,7 +10446,8 @@ int lc_pouch_client_tc_lease_release_method(lc_client *self,
       record.term == req->term &&
       strcmp(record.leader_id, req->leader_id) == 0) {
     released = 1;
-    rc = lc_pouch_tc_delete_key(client, ".lockd/tc", "leader", error);
+    rc = lc_pouch_tc_delete_key(client, ".lockd/tc", "leader", 1,
+                                record.version, error);
   }
   if (rc == LC_OK) {
     memset(out, 0, sizeof(*out));
@@ -9245,7 +10525,8 @@ int lc_pouch_client_tc_cluster_leave_method(lc_client *self,
                         NULL, NULL);
   }
   client = (lc_client_handle *)self;
-  rc = lc_pouch_tc_delete_key(client, ".lockd/tc-cluster", "self", error);
+  rc = lc_pouch_tc_delete_key(client, ".lockd/tc-cluster", "self", 0, 0UL,
+                              error);
   if (rc == LC_OK) {
     rc = lc_pouch_tc_cluster_response(client, out, error);
   }
@@ -9321,7 +10602,7 @@ int lc_pouch_client_tc_rm_unregister_method(lc_client *self,
   if (key == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  rc = lc_pouch_tc_delete_key(client, ".lockd/tc-rm", key, error);
+  rc = lc_pouch_tc_delete_key(client, ".lockd/tc-rm", key, 0, 0UL, error);
   if (rc == LC_OK) {
     rc = lc_pouch_tc_rm_res_response(client, req->backend_hash, out, error);
   }
@@ -9497,6 +10778,26 @@ int lc_pouch_message_extend_method(lc_message *self, const lc_extend_req *req,
   return rc;
 }
 
+static int lc_pouch_lease_validate_private_read(lc_lease_handle *lease,
+                                                lc_error *error) {
+  lc_lease_ref ref;
+
+  if (lease == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch private lease read requires lease", NULL, NULL,
+                        NULL);
+  }
+  memset(&ref, 0, sizeof(ref));
+  ref.namespace_name = lease->namespace_name;
+  ref.key = lease->key;
+  ref.lease_id = lease->lease_id;
+  ref.txn_id = lease->txn_id;
+  ref.fencing_token = lease->fencing_token;
+  return lc_pouch_validate_lease_record(lease->client, &ref,
+                                        lease->namespace_name, lease->key, NULL,
+                                        error);
+}
+
 int lc_pouch_lease_describe_method(lc_lease *self, lc_error *error) {
   lc_lease_handle *lease;
   lc_pouch_state_read_result read_result;
@@ -9507,6 +10808,10 @@ int lc_pouch_lease_describe_method(lc_lease *self, lc_error *error) {
                         "pouch lease describe requires self", NULL, NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
+  rc = lc_pouch_lease_validate_private_read(lease, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   memset(&read_result, 0, sizeof(read_result));
   rc = lc_pouch_state_read(lease->client->pouch, lease->namespace_name,
                            lease->key, &read_result, error);
@@ -9531,6 +10836,12 @@ int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
                         NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
+  if (opts == NULL || !opts->public_read) {
+    rc = lc_pouch_lease_validate_private_read(lease, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
   rc = lc_pouch_client_get_namespace(lease->client, lease->namespace_name,
                                      lease->key, opts, dst, out, error);
   if (rc == LC_OK && !out->no_content) {
@@ -9552,6 +10863,12 @@ static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
                         NULL, NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
+  if (opts == NULL || !opts->public_read) {
+    rc = lc_pouch_lease_validate_private_read(lease, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
   rc = lc_pouch_client_load_namespace(lease->client, lease->namespace_name,
                                       lease->key, map, dst, opts, out, error);
   if (rc == LC_OK && !out->no_content) {

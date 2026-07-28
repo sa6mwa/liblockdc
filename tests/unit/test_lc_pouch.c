@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <limits.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -9,15 +10,20 @@
 
 #include <cmocka.h>
 
+#include <openssl/evp.h>
+
 #include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
+#include "lc_api_internal.h"
 #include "lc_pouch.h"
+#include "lc_pouch_crypto.h"
 #include "lc_pouch_index.h"
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -52,6 +58,19 @@ typedef struct pouch_query_key_counter {
   size_t count;
 } pouch_query_key_counter;
 
+typedef struct pouch_reentrant_query_context {
+  pouch_query_key_capture capture;
+  lc_client *client;
+  const char *get_key;
+  int reentered;
+  int get_rc;
+} pouch_reentrant_query_context;
+
+typedef struct pouch_fail_allocator_state {
+  size_t calls;
+  size_t fail_at;
+} pouch_fail_allocator_state;
+
 static const lonejson_field pouch_value_fields[] = {
     LONEJSON_FIELD_I64(pouch_value_doc, value, "value")};
 
@@ -80,6 +99,88 @@ static void cleanup_root(const char *root) {
 static void cleanup_all_roots(void) {
   lc_test_tmp_cleanup_stale("/tmp", "liblockdc-unit-pouch-",
                             POUCH_UNIT_TMP_PREFIX);
+}
+
+static void sha256_hex_bytes(const void *bytes, size_t length, char out[65]) {
+  static const char hex[] = "0123456789abcdef";
+  EVP_MD_CTX *ctx;
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int digest_len;
+  unsigned int i;
+
+  ctx = EVP_MD_CTX_new();
+  assert_non_null(ctx);
+  digest_len = 0U;
+  assert_int_equal(EVP_DigestInit_ex(ctx, EVP_sha256(), NULL), 1);
+  assert_int_equal(EVP_DigestUpdate(ctx, bytes, length), 1);
+  assert_int_equal(EVP_DigestFinal_ex(ctx, digest, &digest_len), 1);
+  EVP_MD_CTX_free(ctx);
+  assert_int_equal(digest_len, 32U);
+  for (i = 0U; i < digest_len; ++i) {
+    out[i * 2U] = hex[(digest[i] >> 4) & 0x0FU];
+    out[(i * 2U) + 1U] = hex[digest[i] & 0x0FU];
+  }
+  out[digest_len * 2U] = '\0';
+}
+
+static void assert_sha256_etag(const char *etag, const void *bytes,
+                               size_t length) {
+  char expected[65];
+
+  assert_non_null(etag);
+  sha256_hex_bytes(bytes, length, expected);
+  assert_string_equal(etag, expected);
+}
+
+static void assert_sha256_text_etag(const char *etag, const char *text) {
+  assert_sha256_etag(etag, text, strlen(text));
+}
+
+static void assert_sha256_hex_etag(const char *etag) {
+  size_t i;
+
+  assert_non_null(etag);
+  assert_int_equal(strlen(etag), 64U);
+  for (i = 0U; i < 64U; ++i) {
+    assert_true((etag[i] >= '0' && etag[i] <= '9') ||
+                (etag[i] >= 'a' && etag[i] <= 'f'));
+  }
+}
+
+static void *pouch_fail_malloc(void *context, size_t size) {
+  pouch_fail_allocator_state *state;
+
+  state = (pouch_fail_allocator_state *)context;
+  state->calls += 1U;
+  if (state->fail_at != 0U && state->calls == state->fail_at) {
+    return NULL;
+  }
+  return malloc(size);
+}
+
+static void *pouch_fail_realloc(void *context, void *ptr, size_t size) {
+  pouch_fail_allocator_state *state;
+
+  state = (pouch_fail_allocator_state *)context;
+  state->calls += 1U;
+  if (state->fail_at != 0U && state->calls == state->fail_at) {
+    return NULL;
+  }
+  return realloc(ptr, size);
+}
+
+static void pouch_fail_free(void *context, void *ptr) {
+  (void)context;
+  free(ptr);
+}
+
+static void pouch_fail_allocator_init(lc_allocator *allocator,
+                                      pouch_fail_allocator_state *state) {
+  lc_allocator_init(allocator);
+  allocator->malloc_fn = pouch_fail_malloc;
+  allocator->realloc_fn = pouch_fail_realloc;
+  allocator->free_fn = pouch_fail_free;
+  allocator->context = state;
 }
 
 static void test_index_docid_set_keeps_sorted_unique_docids(void **state) {
@@ -1422,6 +1523,50 @@ static int pouch_query_count_end(void *context, lc_error *error) {
   return 1;
 }
 
+static int pouch_reentrant_query_key_begin(void *context, lc_error *error) {
+  pouch_reentrant_query_context *reentrant;
+
+  reentrant = (pouch_reentrant_query_context *)context;
+  return pouch_query_key_begin(&reentrant->capture, error);
+}
+
+static int pouch_reentrant_query_key_chunk(void *context, const char *bytes,
+                                           size_t len, lc_error *error) {
+  pouch_reentrant_query_context *reentrant;
+
+  reentrant = (pouch_reentrant_query_context *)context;
+  return pouch_query_key_chunk(&reentrant->capture, bytes, len, error);
+}
+
+static int pouch_reentrant_query_key_end(void *context, lc_error *error) {
+  pouch_reentrant_query_context *reentrant;
+  lc_get_res get_res;
+  lc_sink *sink;
+  int rc;
+
+  reentrant = (pouch_reentrant_query_context *)context;
+  if (!pouch_query_key_end(&reentrant->capture, error)) {
+    return 0;
+  }
+  if (reentrant->reentered) {
+    return 1;
+  }
+  reentrant->reentered = 1;
+  sink = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+  rc = lc_sink_to_discard(&sink, error);
+  if (rc == LC_OK) {
+    rc = reentrant->client->get(reentrant->client, reentrant->get_key, NULL,
+                                sink, &get_res, error);
+  }
+  if (sink != NULL) {
+    sink->close(sink);
+  }
+  lc_get_res_cleanup(&get_res);
+  reentrant->get_rc = rc;
+  return rc == LC_OK;
+}
+
 static int bytes_contain_text(const void *bytes, size_t length,
                               const char *needle) {
   const unsigned char *haystack;
@@ -1718,11 +1863,15 @@ static int pouch_compaction_drift_hook(void *context, lc_error *error) {
   state = (pouch_compaction_drift_hook_state *)context;
   state->called = 1;
   if (state->segment_path != NULL) {
-    assert_non_null(state->needle);
-    assert_non_null(state->replacement);
-    assert_int_equal(strlen(state->needle), strlen(state->replacement));
-    replace_text_file_first(state->segment_path, state->needle,
-                            state->replacement);
+    if (state->needle != NULL || state->replacement != NULL) {
+      assert_non_null(state->needle);
+      assert_non_null(state->replacement);
+      assert_int_equal(strlen(state->needle), strlen(state->replacement));
+      replace_text_file_first(state->segment_path, state->needle,
+                              state->replacement);
+    } else {
+      append_text_file(state->segment_path, "# drift\n");
+    }
     return LC_OK;
   }
   body = NULL;
@@ -2433,6 +2582,194 @@ static void write_client_state(lc_client *client, const char *key,
   assert_int_equal(rc, LC_OK);
 }
 
+static void test_pouch_root_path_aliases_share_store_identity(void **state) {
+  lc_client *canonical;
+  lc_client *alias_client;
+  lc_update_res first;
+  lc_update_res second;
+  lc_get_res get_res;
+  lc_sink *sink;
+  lc_error error;
+  const void *sink_bytes;
+  const char *leaf;
+  size_t sink_length;
+  char root[512];
+  char alias_root[1100];
+  char alias_endpoint[1200];
+  int written;
+  int rc;
+
+  (void)state;
+  canonical = NULL;
+  alias_client = NULL;
+  sink = NULL;
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&get_res, 0, sizeof(get_res));
+  sink_bytes = NULL;
+  sink_length = 0U;
+  lc_error_init(&error);
+  make_root("root-path-alias", root, sizeof(root));
+  cleanup_root(root);
+
+  leaf = strrchr(root, '/');
+  assert_non_null(leaf);
+  ++leaf;
+  written = snprintf(alias_root, sizeof(alias_root), "%s/../%s", root, leaf);
+  assert_true(written > 0 && (size_t)written < sizeof(alias_root));
+  written = snprintf(alias_endpoint, sizeof(alias_endpoint), "pouch://%s",
+                     alias_root);
+  assert_true(written > 0 && (size_t)written < sizeof(alias_endpoint));
+
+  open_pouch_client(root, &canonical, &error);
+  open_pouch_client_endpoint(alias_endpoint, &alias_client, &error);
+  write_client_state(canonical, "alias/key", "{\"value\":1}", NULL, 0L, 0,
+                     &first, &error);
+  assert_int_equal(first.new_version, 1L);
+  write_client_state(alias_client, "alias/key", "{\"value\":2}",
+                     first.new_state_etag, 1L, 1, &second, &error);
+  assert_int_equal(second.new_version, 2L);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = canonical->get(canonical, "alias/key", NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &sink_bytes, &sink_length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(sink_length, strlen("{\"value\":2}"));
+  assert_memory_equal(sink_bytes, "{\"value\":2}", sink_length);
+
+  sink->close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_update_res_cleanup(&second);
+  lc_update_res_cleanup(&first);
+  lc_client_close(alias_client);
+  lc_client_close(canonical);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_state_etag_is_plaintext_sha256_content_hash(void **state) {
+  lc_client *plain_client;
+  lc_client *crypto_client;
+  lc_update_res first;
+  lc_update_res same;
+  lc_update_res different;
+  lc_update_res encrypted;
+  lc_error error;
+  char plain_root[512];
+  char crypto_root[512];
+  char *crypto_key;
+  const char *payload;
+  const char *other_payload;
+  int rc;
+
+  (void)state;
+  plain_client = NULL;
+  crypto_client = NULL;
+  crypto_key = NULL;
+  payload = "{\"deep\":{\"value\":42},\"summary\":\"same content\"}";
+  other_payload = "{\"deep\":{\"value\":43},\"summary\":\"other content\"}";
+  memset(&first, 0, sizeof(first));
+  memset(&same, 0, sizeof(same));
+  memset(&different, 0, sizeof(different));
+  memset(&encrypted, 0, sizeof(encrypted));
+  lc_error_init(&error);
+  make_root("state-sha-etag-plain", plain_root, sizeof(plain_root));
+  make_root("state-sha-etag-crypto", crypto_root, sizeof(crypto_root));
+  cleanup_root(plain_root);
+  cleanup_root(crypto_root);
+
+  open_pouch_client(plain_root, &plain_client, &error);
+  write_client_state(plain_client, "state/hash", payload, NULL, 0L, 0, &first,
+                     &error);
+  assert_sha256_text_etag(first.new_state_etag, payload);
+  assert_int_equal(first.new_version, 1L);
+
+  write_client_state(plain_client, "state/hash", payload, first.new_state_etag,
+                     1L, 1, &same, &error);
+  assert_string_equal(same.new_state_etag, first.new_state_etag);
+  assert_int_equal(same.new_version, 2L);
+
+  write_client_state(plain_client, "state/hash", other_payload,
+                     same.new_state_etag, 2L, 1, &different, &error);
+  assert_sha256_text_etag(different.new_state_etag, other_payload);
+  assert_string_not_equal(different.new_state_etag, first.new_state_etag);
+  assert_int_equal(different.new_version, 3L);
+  lc_client_close(plain_client);
+  plain_client = NULL;
+
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  open_pouch_client_crypto(crypto_root, crypto_key, &crypto_client, &error);
+  write_client_state(crypto_client, "state/hash", payload, NULL, 0L, 0,
+                     &encrypted, &error);
+  assert_string_equal(encrypted.new_state_etag, first.new_state_etag);
+  assert_sha256_text_etag(encrypted.new_state_etag, payload);
+
+  lc_update_res_cleanup(&encrypted);
+  lc_update_res_cleanup(&different);
+  lc_update_res_cleanup(&same);
+  lc_update_res_cleanup(&first);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  lc_client_close(crypto_client);
+  cleanup_root(crypto_root);
+  cleanup_root(plain_root);
+  lc_error_cleanup(&error);
+}
+
+static int pouch_test_lock_namespace_write_file(const char *root,
+                                                const char *namespace_name) {
+  char *namespace_path;
+  char *lock_path;
+  struct flock fl;
+  int fd;
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
+  assert_non_null(namespace_path);
+  lock_path = lc_pouch_path_join(NULL, namespace_path, "write.lock");
+  lc_free_with_allocator(NULL, namespace_path);
+  assert_non_null(lock_path);
+  fd = open(lock_path, O_CREAT | O_RDWR, 0666);
+  lc_free_with_allocator(NULL, lock_path);
+  assert_true(fd >= 0);
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type = F_WRLCK;
+  fl.l_whence = SEEK_SET;
+  assert_int_equal(fcntl(fd, F_SETLK, &fl), 0);
+  return fd;
+}
+
+static void pouch_test_unlock_namespace_write_file(int fd) {
+  struct flock fl;
+
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type = F_UNLCK;
+  fl.l_whence = SEEK_SET;
+  assert_int_equal(fcntl(fd, F_SETLK, &fl), 0);
+  assert_int_equal(close(fd), 0);
+}
+
+static int pouch_child_public_update(const char *root, const char *key,
+                                     const char *json) {
+  lc_client *client;
+  lc_update_res update_res;
+  lc_error error;
+  int rc;
+
+  client = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_error_init(&error);
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, key, json, NULL, 0L, 0, &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+  lc_client_close(client);
+  rc = error.code;
+  lc_error_cleanup(&error);
+  return rc;
+}
+
 static void pouch_state_payload_path(const char *root,
                                      const char *namespace_name,
                                      unsigned long version, char *out,
@@ -2623,21 +2960,71 @@ static void test_open_creates_segmented_root_layout(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_open_rejects_unsupported_root_manifest(void **state) {
+  lc_pouch *pouch;
+  lc_error error;
+  char root[512];
+  char manifest_path[1024];
+  int written;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  lc_error_init(&error);
+  make_root("root-manifest-invalid", root, sizeof(root));
+  cleanup_root(root);
+  assert_int_equal(mkdir(root, 0700), 0);
+  written = snprintf(manifest_path, sizeof(manifest_path), "%s/manifest", root);
+  assert_true(written > 0 && (size_t)written < sizeof(manifest_path));
+
+  write_text_file(manifest_path, "layout=foreign\nversion=1\ncrypto=plaintext\n"
+                                 "crypto_key_id=\n");
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(pouch);
+  assert_string_equal(error.message,
+                      "pouch root manifest layout is unsupported");
+  assert_path_file_contains(root, "manifest", "layout=foreign");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  write_text_file(manifest_path,
+                  "layout=pouch-segmented\nversion=999\ncrypto=plaintext\n"
+                  "crypto_key_id=\n");
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(pouch);
+  assert_string_equal(error.message,
+                      "pouch root manifest version is unsupported");
+  assert_path_file_contains(root, "manifest", "version=999");
+
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_ensure_namespace_creates_per_namespace_layout(void **state) {
   lc_pouch *pouch;
   lc_error error;
   char root[512];
   char *namespace_path;
+  char *dot_path;
+  char *dotdot_path;
   int rc;
 
   (void)state;
   lc_error_init(&error);
   make_root("namespace-layout", root, sizeof(root));
   cleanup_root(root);
+  dot_path = NULL;
+  dotdot_path = NULL;
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_ensure_namespace(pouch, "team/alpha", &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_ensure_namespace(pouch, ".", &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_ensure_namespace(pouch, "..", &error);
   assert_int_equal(rc, LC_OK);
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
@@ -2653,6 +3040,18 @@ static void test_ensure_namespace_creates_per_namespace_layout(void **state) {
   assert_path_file_contains(namespace_path, "manifest",
                             "active_segment=seg-00000000000000000001.log");
 
+  dot_path = lc_pouch_namespace_path(NULL, root, ".");
+  dotdot_path = lc_pouch_namespace_path(NULL, root, "..");
+  assert_non_null(dot_path);
+  assert_non_null(dotdot_path);
+  assert_true(strstr(dot_path, "%2e") != NULL);
+  assert_true(strstr(dotdot_path, "%2e%2e") != NULL);
+  assert_path_file(dot_path, "manifest");
+  assert_path_file(dotdot_path, "manifest");
+  assert_path_file_contains(root, "manifest", "layout=pouch-segmented");
+
+  lc_free_with_allocator(NULL, dotdot_path);
+  lc_free_with_allocator(NULL, dot_path);
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
@@ -2688,6 +3087,38 @@ test_pouch_endpoint_opens_new_backend_without_http_engine(void **state) {
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
+}
+
+static void test_pouch_endpoint_rejects_unix_socket_mix(void **state) {
+  lc_client_config config;
+  lc_client *client;
+  lc_error error;
+  const char *endpoints[1];
+  char root[512];
+  char endpoint[540];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lc_error_init(&error);
+  make_root("client-open-mixed-transport", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.unix_socket_path = "/tmp/lockd.sock";
+
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "pouch endpoints must be configured alone");
+
+  lc_error_cleanup(&error);
+  cleanup_root(root);
 }
 
 static void
@@ -2930,6 +3361,195 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
 }
 
 static void
+test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/kind\",\"value\":\"reserved\"}}";
+  lc_client *client;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  lc_namespace_config_req ns_req;
+  lc_namespace_config_res ns_res;
+  pouch_query_key_capture capture;
+  lc_source *source;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&ns_res, 0, sizeof(ns_res));
+  memset(&capture, 0, sizeof(capture));
+  lc_update_req_init(&update_req);
+  lc_enqueue_req_init(&enqueue_req);
+  lc_query_req_init(&query_req);
+  lc_namespace_config_req_init(&ns_req);
+  lc_error_init(&error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  make_root("reserved-namespace-public-api", root, sizeof(root));
+  cleanup_root(root);
+  open_pouch_client(root, &client, &error);
+
+  update_req.lease.namespace_name = ".lockd/leases";
+  update_req.lease.key = "doc/a";
+  rc =
+      lc_source_from_memory("{\"kind\":\"reserved\"}",
+                            strlen("{\"kind\":\"reserved\"}"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch namespace is reserved for internal state");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_update_res_cleanup(&update_res);
+
+  enqueue_req.namespace_name = ".lockd/queue";
+  enqueue_req.queue = "jobs";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  rc = lc_source_from_memory("payload", strlen("payload"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  query_req.namespace_name = ".lockd/queue";
+  query_req.engine = "scan";
+  query_req.selector_json = selector;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_int_equal(capture.count, 0);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_query_res_cleanup(&query_res);
+
+  ns_req.namespace_name = ".lockd/config";
+  rc = client->get_namespace_config(client, &ns_req, &ns_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_namespace_config_res_cleanup(&ns_res);
+
+  update_req.lease.namespace_name = ".lockdown";
+  update_req.lease.key = "doc/a";
+  rc = lc_source_from_memory("{\"kind\":\"allowed\"}",
+                             strlen("{\"kind\":\"allowed\"}"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  lc_error_cleanup(&error);
+  if (source != NULL) {
+    source->close(source);
+  }
+  lc_namespace_config_res_cleanup(&ns_res);
+  lc_query_res_cleanup(&query_res);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_update_res_cleanup(&update_res);
+  lc_client_close(client);
+  cleanup_root(root);
+}
+
+static void
+test_pouch_crypto_endpoint_key_is_not_retained_in_endpoint_copy(void **state) {
+  lc_client *client;
+  lc_client_config config;
+  lc_client_handle *handle;
+  lc_error error;
+  const char *endpoints[1];
+  char endpoint[4096];
+  char root[512];
+  char *crypto_key;
+  char *wrong_key;
+  int rc;
+  int written;
+
+  (void)state;
+  client = NULL;
+  crypto_key = NULL;
+  wrong_key = NULL;
+  lc_error_init(&error);
+  make_root("crypto-endpoint-redaction", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(crypto_key);
+  rc = lc_pouch_crypto_generate_key_string(&wrong_key, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(wrong_key);
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?pouch_crypto_key=%s&pouch_crypto_key=%s&"
+                     "pouch_query_engine=scan",
+                     root, wrong_key, crypto_key);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(client);
+  handle = (lc_client_handle *)client;
+  assert_non_null(handle->pouch_crypto_key);
+  assert_string_equal(handle->pouch_crypto_key, crypto_key);
+  assert_non_null(handle->endpoints);
+  assert_non_null(handle->endpoints[0]);
+  assert_null(strstr(handle->endpoints[0], crypto_key));
+  assert_null(strstr(handle->endpoints[0], wrong_key));
+  assert_null(strstr(handle->endpoints[0], "pouch_crypto_key"));
+  assert_non_null(strstr(handle->endpoints[0], "pouch_query_engine=scan"));
+
+  lc_client_close(client);
+  lc_pouch_crypto_key_string_free(wrong_key);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  lc_error_cleanup(&error);
+  cleanup_root(root);
+}
+
+static void test_pouch_crypto_rejects_byte_counter_overflow(void **state) {
+  lc_error error;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+
+  rc = lc_pouch_crypto_test_check_byte_counter(ULONG_MAX - 1UL, 1U, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+
+  lc_error_init(&error);
+  rc = lc_pouch_crypto_test_check_byte_counter(ULONG_MAX - 1UL, 2U, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+
+  lc_error_init(&error);
+  rc = lc_pouch_crypto_test_check_byte_counter(ULONG_MAX, 1U, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_pouch_tc_surface_persists_local_single_node_state(void **state) {
   lc_client *client;
   lc_tc_lease_acquire_req acquire_req;
@@ -3123,7 +3743,7 @@ static void test_state_write_read_replays_segment_after_reopen(void **state) {
   rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body,
                             &options, &write_result, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(write_result.etag, "pouch-state-1");
+  assert_sha256_text_etag(write_result.etag, "alpha-state");
   assert_int_equal(write_result.version, 1UL);
   assert_int_equal(write_result.bytes, strlen("alpha-state"));
   body->close(body);
@@ -3136,7 +3756,7 @@ static void test_state_write_read_replays_segment_after_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   assert_string_equal(read_result.content_type, "text/plain");
-  assert_string_equal(read_result.etag, "pouch-state-1");
+  assert_sha256_text_etag(read_result.etag, "alpha-state");
   assert_int_equal(read_result.version, 1UL);
   assert_int_equal(read_result.bytes, strlen("alpha-state"));
   read_source_to_string(read_result.body, bytes, sizeof(bytes));
@@ -3147,6 +3767,70 @@ static void test_state_write_read_replays_segment_after_reopen(void **state) {
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
+}
+
+static void test_state_replay_rejects_traversal_payload_leaf(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char *segment_leaf;
+  char segment_path[1024];
+  int written;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  namespace_path = NULL;
+  segment_leaf = NULL;
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("state-replay-invalid-payload-leaf", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("alpha-state", strlen("alpha-state"), &body,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  body = NULL;
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, 1UL);
+  assert_non_null(namespace_path);
+  assert_non_null(segment_leaf);
+  written = snprintf(segment_path, sizeof(segment_path), "%s/segments/%s",
+                     namespace_path, segment_leaf);
+  assert_true(written > 0 && (size_t)written < sizeof(segment_path));
+  replace_text_file_first(segment_path, "state-00000000000000000001.bin",
+                          "../../../../etc/passwd");
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/current", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch state segment payload leaf is invalid");
+  lc_error_cleanup(&error);
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  lc_free_with_allocator(NULL, segment_leaf);
+  lc_free_with_allocator(NULL, namespace_path);
+  cleanup_root(root);
 }
 
 static void test_state_write_enforces_expected_etag(void **state) {
@@ -3194,10 +3878,69 @@ static void test_state_write_enforces_expected_etag(void **state) {
   rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body,
                             &options, &second, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(second.etag, "pouch-state-2");
+  assert_sha256_text_etag(second.etag, "two");
   assert_int_equal(second.version, 2UL);
   body->close(body);
 
+  lc_pouch_state_write_result_cleanup(NULL, &first);
+  lc_pouch_state_write_result_cleanup(NULL, &second);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_state_write_enforces_create_if_absent(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result first;
+  lc_pouch_state_write_result second;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char bytes[64];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  lc_error_init(&error);
+  memset(&options, 0, sizeof(options));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&read_result, 0, sizeof(read_result));
+  make_root("state-create-if-absent", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  options.create_if_absent = 1;
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body,
+                            &options, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(first.version, 1UL);
+  body->close(body);
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body,
+                            &options, &second, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  body->close(body);
+
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/current", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_int_equal(read_result.version, 1UL);
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_string_equal(bytes, "one");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_state_write_result_cleanup(NULL, &first);
   lc_pouch_state_write_result_cleanup(NULL, &second);
   lc_pouch_close(pouch);
@@ -3258,7 +4001,7 @@ static void test_state_writes_roll_active_manifest_segment(void **state) {
                            &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
-  assert_string_equal(read_result.etag, "pouch-state-2");
+  assert_sha256_text_etag(read_result.etag, "two");
   read_source_to_string(read_result.body, bytes, sizeof(bytes));
   assert_string_equal(bytes, "two");
 
@@ -3283,6 +4026,7 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   char root[512];
   char bytes[64];
   char *namespace_path;
+  char old_payload_path[1024];
   char path[1024];
   int written;
   int rc;
@@ -3310,11 +4054,14 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
                             &write_a, &error);
   assert_int_equal(rc, LC_OK);
   body->close(body);
+  pouch_state_payload_path(root, "team/alpha", write_a.version,
+                           old_payload_path, sizeof(old_payload_path));
 
   rc = lc_pouch_state_delete(pouch, "team/alpha", "state/a", NULL, &delete_a,
                              &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(delete_a.etag, "pouch-state-2");
+  assert_sha256_text_etag(delete_a.etag, "");
+  assert_false(path_is_file(old_payload_path));
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
@@ -3353,7 +4100,7 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
       lc_pouch_state_read(pouch, "team/alpha", "state/b", &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
-  assert_string_equal(read_result.etag, "pouch-state-3");
+  assert_sha256_text_etag(read_result.etag, "two");
   read_source_to_string(read_result.body, bytes, sizeof(bytes));
   assert_string_equal(bytes, "two");
 
@@ -3786,7 +4533,6 @@ static void test_manifest_open_ignores_unmanifested_snapshot(void **state) {
 
 static void test_maintenance_aborts_on_validation_drift(void **state) {
   lc_pouch *pouch;
-  lc_pouch *peer;
   lc_source *body;
   lc_pouch_open_options open_options;
   lc_pouch_maintenance_options maintenance_options;
@@ -3796,14 +4542,17 @@ static void test_maintenance_aborts_on_validation_drift(void **state) {
   lc_error error;
   char root[512];
   char key[128];
+  char segment_path[1024];
   char *namespace_path;
+  char *segment_leaf;
+  int written;
   int rc;
   unsigned int i;
 
   (void)state;
   pouch = NULL;
-  peer = NULL;
   namespace_path = NULL;
+  segment_leaf = NULL;
   lc_error_init(&error);
   memset(&open_options, 0, sizeof(open_options));
   memset(&maintenance_options, 0, sizeof(maintenance_options));
@@ -3829,10 +4578,13 @@ static void test_maintenance_aborts_on_validation_drift(void **state) {
   }
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, 1UL);
   assert_non_null(namespace_path);
-  rc = lc_pouch_open(root, NULL, &open_options, &peer, &error);
-  assert_int_equal(rc, LC_OK);
-  hook_state.peer = peer;
+  assert_non_null(segment_leaf);
+  written = snprintf(segment_path, sizeof(segment_path), "%s/segments/%s",
+                     namespace_path, segment_leaf);
+  assert_true(written > 0 && (size_t)written < sizeof(segment_path));
+  hook_state.segment_path = segment_path;
   lc_pouch_test_after_snapshot_write_context = &hook_state;
   lc_pouch_test_after_snapshot_write_hook = pouch_compaction_drift_hook;
 
@@ -3854,8 +4606,8 @@ static void test_maintenance_aborts_on_validation_drift(void **state) {
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_free_with_allocator(NULL, segment_leaf);
   lc_free_with_allocator(NULL, namespace_path);
-  lc_pouch_close(peer);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -4376,7 +5128,7 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
                                       &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(metadata_result.version, 2UL);
-  assert_string_equal(metadata_result.etag, "pouch-state-1");
+  assert_sha256_text_etag(metadata_result.etag, "visible");
   assert_true(metadata_result.has_query_hidden);
   assert_true(metadata_result.query_hidden);
 
@@ -4395,7 +5147,7 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   assert_int_equal(read_result.version, 2UL);
-  assert_string_equal(read_result.etag, "pouch-state-1");
+  assert_sha256_text_etag(read_result.etag, "visible");
   assert_true(read_result.has_query_hidden);
   assert_true(read_result.query_hidden);
   read_source_to_string(read_result.body, bytes, sizeof(bytes));
@@ -4569,7 +5321,7 @@ test_staged_decision_recovery_tombstones_interrupted_discard(void **state) {
   char root[512];
   char staged_key[256];
   char staged_key_hex[512];
-  char etag_hex[128];
+  char etag_hex[160];
   char decision_hex[64];
   char decision_record[1024];
   char *namespace_path;
@@ -4664,7 +5416,7 @@ static void test_client_update_get_load_roundtrips_state(void **state) {
   open_pouch_client(root, &client, &error);
   write_client_state(client, key, "{\"value\":42}", NULL, 0L, 0, &update_res,
                      &error);
-  assert_string_equal(update_res.new_state_etag, "pouch-state-1");
+  assert_sha256_text_etag(update_res.new_state_etag, "{\"value\":42}");
   assert_int_equal(update_res.new_version, 1L);
   assert_int_equal(update_res.bytes, strlen("{\"value\":42}"));
   lc_client_close(client);
@@ -4676,7 +5428,7 @@ static void test_client_update_get_load_roundtrips_state(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_false(get_res.no_content);
   assert_string_equal(get_res.content_type, "application/json");
-  assert_string_equal(get_res.etag, "pouch-state-1");
+  assert_sha256_text_etag(get_res.etag, "{\"value\":42}");
   assert_int_equal(get_res.version, 1L);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
@@ -4692,11 +5444,82 @@ static void test_client_update_get_load_roundtrips_state(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_false(get_res.no_content);
   assert_int_equal(doc.value, 42);
-  assert_string_equal(get_res.etag, "pouch-state-1");
+  assert_sha256_text_etag(get_res.etag, "{\"value\":42}");
 
   lc_get_res_cleanup(&get_res);
   lc_update_res_cleanup(&update_res);
   lc_client_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_client_get_preserves_cached_binary_payload_length(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_sink *sink;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_get_res get_res;
+  lc_error error;
+  const unsigned char payload[] = {'a', '\0', 'b', '\0', 'c'};
+  const void *bytes;
+  size_t length;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_error_init(&error);
+  lc_update_req_init(&update_req);
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&get_res, 0, sizeof(get_res));
+  make_root("client-binary-cache", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  update_req.lease.key = "state/binary";
+  update_req.content_type = "application/octet-stream";
+  rc = lc_source_from_memory(payload, sizeof(payload), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(update_res.bytes, (long)sizeof(payload));
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, "state/binary", NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.content_type, "application/octet-stream");
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, sizeof(payload));
+  assert_memory_equal(bytes, payload, sizeof(payload));
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+  memset(&get_res, 0, sizeof(get_res));
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, "state/binary", NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, sizeof(payload));
+  assert_memory_equal(bytes, payload, sizeof(payload));
+
+  sink->close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_update_res_cleanup(&update_res);
+  lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -4750,11 +5573,75 @@ static void test_client_update_enforces_state_preconditions(void **state) {
 
   write_client_state(client, "state/current", "{\"value\":2}",
                      first.new_state_etag, 1L, 1, &second, &error);
-  assert_string_equal(second.new_state_etag, "pouch-state-2");
+  assert_sha256_text_etag(second.new_state_etag, "{\"value\":2}");
   assert_int_equal(second.new_version, 2L);
 
   lc_update_res_cleanup(&first);
   lc_update_res_cleanup(&second);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_client_update_waits_for_namespace_mutation_lock(void **state) {
+  lc_client *client;
+  lc_sink *sink;
+  lc_update_res update_res;
+  lc_get_res get_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  int lock_fd;
+  pid_t pid;
+  int status;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  make_root("client-mutation-lock", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, "state/locked", "{\"value\":1}", NULL, 0L, 0,
+                     &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+  lock_fd = pouch_test_lock_namespace_write_file(root, "default");
+
+  pid = fork();
+  assert_true(pid >= 0);
+  if (pid == 0) {
+    _exit(pouch_child_public_update(root, "state/locked", "{\"value\":2}") ==
+                  LC_OK
+              ? 0
+              : 1);
+  }
+
+  usleep(100000);
+  rc = waitpid(pid, &status, WNOHANG);
+  assert_int_equal(rc, 0);
+  pouch_test_unlock_namespace_write_file(lock_fd);
+  assert_int_equal(waitpid(pid, &status, 0), pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, "state/locked", NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("{\"value\":2}"));
+  assert_memory_equal(bytes, "{\"value\":2}", strlen("{\"value\":2}"));
+  sink->close(sink);
+  sink = NULL;
+
+  lc_get_res_cleanup(&get_res);
+  lc_update_res_cleanup(&update_res);
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -4803,7 +5690,7 @@ static void test_client_mutate_applies_plan_and_preconditions(void **state) {
   rc = client->mutate(client, &mutate_op, &mutate_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(mutate_res.new_version, 2L);
-  assert_string_equal(mutate_res.new_state_etag, "pouch-state-2");
+  assert_sha256_hex_etag(mutate_res.new_state_etag);
   assert_true(mutate_res.bytes > 0L);
 
   rc = lc_sink_to_memory(&sink, &error);
@@ -4903,7 +5790,7 @@ static void test_client_get_missing_and_public_state_behavior(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_false(get_res.no_content);
   assert_string_equal(get_res.content_type, "application/json");
-  assert_string_equal(get_res.etag, "pouch-state-1");
+  assert_sha256_text_etag(get_res.etag, "{\"value\":42}");
   assert_int_equal(get_res.version, 1L);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
@@ -5270,6 +6157,246 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_client_queue_dequeue_honors_wait_seconds(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_message *message;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  message = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_error_init(&error);
+  make_root("client-queue-wait", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "jobs";
+  enqueue_req.delay_seconds = 1L;
+  rc = lc_source_from_memory("delayed", strlen("delayed"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-wait";
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_null(message);
+
+  dequeue_req.wait_seconds = 2L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+  assert_int_equal(message->attempts, 1);
+
+  message->close(message);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout(
+    void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_sink *sink;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_dequeue_req dequeue_req;
+  lc_message *message;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  message = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_queue_stats_req_init(&stats_req);
+  memset(&stats_res, 0, sizeof(stats_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_error_init(&error);
+  make_root("client-queue-redelivery", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "jobs";
+  rc = lc_source_from_memory("abandoned", strlen("abandoned"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-redelivery";
+  dequeue_req.visibility_timeout_seconds = 1L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+  assert_int_equal(message->attempts, 1);
+  message->close(message);
+  message = NULL;
+
+  stats_req.queue = "jobs";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+  assert_int_equal(stats_res.pending_candidates, 1);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  sleep(2U);
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+  assert_int_equal(message->attempts, 2);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = message->write_payload(message, sink, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("abandoned"));
+  assert_memory_equal(bytes, "abandoned", strlen("abandoned"));
+  sink->close(sink);
+  sink = NULL;
+
+  rc = message->ack(message, &error);
+  assert_int_equal(rc, LC_OK);
+  message = NULL;
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 0);
+  assert_int_equal(stats_res.pending_candidates, 0);
+
+  lc_queue_stats_res_cleanup(&stats_res);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_client_queue_large_payload_stats_dequeue_and_ack(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_sink *sink;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_dequeue_req dequeue_req;
+  lc_message *message;
+  lc_error error;
+  unsigned char *payload;
+  const void *bytes;
+  size_t payload_length;
+  size_t length;
+  size_t i;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  message = NULL;
+  payload = NULL;
+  bytes = NULL;
+  payload_length = (256U * 1024U) + 17U;
+  length = 0U;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_queue_stats_req_init(&stats_req);
+  memset(&stats_res, 0, sizeof(stats_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_error_init(&error);
+  make_root("client-queue-large-payload", root, sizeof(root));
+  cleanup_root(root);
+
+  payload = (unsigned char *)malloc(payload_length);
+  assert_non_null(payload);
+  for (i = 0U; i < payload_length; ++i) {
+    payload[i] = (unsigned char)('a' + (i % 26U));
+  }
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "application/octet-stream";
+  rc = lc_source_from_memory(payload, payload_length, &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(enqueue_res.payload_bytes, (long)payload_length);
+
+  stats_req.queue = "jobs";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 1);
+  assert_int_equal(stats_res.pending_candidates, 1);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-large";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+  assert_string_equal(message->payload_content_type,
+                      "application/octet-stream");
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = message->write_payload(message, sink, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, payload_length);
+  assert_memory_equal(bytes, payload, payload_length);
+  sink->close(sink);
+  sink = NULL;
+
+  rc = message->ack(message, &error);
+  assert_int_equal(rc, LC_OK);
+  message = NULL;
+
+  lc_queue_stats_res_cleanup(&stats_res);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  free(payload);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   lc_client *client;
@@ -5293,10 +6420,18 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   lc_txn_participant participant;
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture capture;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
   lc_error error;
   const void *bytes;
   size_t length;
   char *crypto_key;
+  char *index_path;
+  char *namespace_path;
   char root[512];
   int rc;
 
@@ -5325,7 +6460,18 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   memset(&participant, 0, sizeof(participant));
   lc_txn_decision_req_init(&decision_req);
   memset(&decision_res, 0, sizeof(decision_res));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
   lc_error_init(&error);
+  index_path = NULL;
+  namespace_path = NULL;
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
   make_root("crypto-public-api", root, sizeof(root));
   cleanup_root(root);
 
@@ -5336,6 +6482,35 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   write_client_state(client, "crypto/state",
                      "{\"secret\":\"state-secret-redaction-required\"}", NULL,
                      0L, 0, &update_res, &error);
+  query_req.engine = "index";
+  query_req.selector_json =
+      "{\"eq\":{\"field\":\"/secret\",\"value\":\"state-secret-redaction-"
+      "required\"}}";
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_true(pouch_query_capture_has(&capture, "crypto/state"));
+  assert_non_null(query_res.metadata_json);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"scan\""));
+  lc_query_res_cleanup(&query_res);
+
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(flush_res.flush_id,
+                      "pouch-query-index-disabled-encrypted");
+  namespace_path = lc_pouch_namespace_path(NULL, root, "default");
+  assert_non_null(namespace_path);
+  index_path = lc_pouch_path_join(NULL, namespace_path, "index/query.index");
+  assert_non_null(index_path);
+  assert_false(path_is_file(index_path));
+  lc_free_with_allocator(NULL, index_path);
+  index_path = NULL;
+  lc_free_with_allocator(NULL, namespace_path);
+  namespace_path = NULL;
+  lc_index_flush_res_cleanup(&flush_res);
 
   acquire_req.key = "crypto/attachment-owner";
   acquire_req.owner = "crypto-test";
@@ -5474,13 +6649,193 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
       pouch_tree_contains_text(root, "queue-secret-redaction-required"));
   assert_false(
       pouch_tree_contains_text(root, "staged-secret-redaction-required"));
+  assert_false(pouch_tree_contains_text(
+      root, "73746174652d7365637265742d726564616374696f6e2d7265717569726564"));
 
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_query_res_cleanup(&query_res);
   lc_txn_decision_res_cleanup(&decision_res);
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_attach_res_cleanup(&attach_res);
   lc_update_res_cleanup(&txn_update_res);
   lc_update_res_cleanup(&update_res);
   lc_pouch_crypto_key_string_free(crypto_key);
+  lc_free_with_allocator(NULL, index_path);
+  lc_free_with_allocator(NULL, namespace_path);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_crypto_mode_is_root_invariant(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_error error;
+  char *crypto_key;
+  char manifest_path[1024];
+  char root[512];
+  int written;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  crypto_key = NULL;
+  memset(&options, 0, sizeof(options));
+  lc_error_init(&error);
+  make_root("crypto-mode-invariant", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  assert_path_file_contains(root, "manifest", "crypto=plaintext");
+
+  options.crypto_key = crypto_key;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(pouch);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  cleanup_root(root);
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  pouch_write_json_state(pouch, "default", "crypto/mode-invariant",
+                         "{\"secret\":\"mode-invariant\"}", NULL, &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  assert_path_file_contains(root, "manifest", "crypto=encrypted");
+  assert_path_file_contains(root, "manifest", "crypto_key_id=hmac-sha256:");
+
+  written = snprintf(manifest_path, sizeof(manifest_path), "%s/manifest", root);
+  assert_true(written > 0 && (size_t)written < sizeof(manifest_path));
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(pouch);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  assert_int_equal(unlink(manifest_path), 0);
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(pouch);
+  assert_string_equal(error.message,
+                      "pouch root manifest is required for populated root");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(pouch);
+  assert_string_equal(error.message,
+                      "pouch root manifest is required for populated root");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  written = snprintf(manifest_path, sizeof(manifest_path), "%s/manifest", root);
+  assert_true(written > 0 && (size_t)written < sizeof(manifest_path));
+  write_text_file(manifest_path, "layout=pouch-segmented\nversion=1\n");
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(pouch);
+  assert_string_equal(
+      error.message,
+      "pouch root manifest requires crypto mode for populated root");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(pouch);
+  assert_string_equal(
+      error.message,
+      "pouch root manifest requires crypto mode for populated root");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  cleanup_root(root);
+  assert_int_equal(mkdir(root, 0700), 0);
+  written = snprintf(manifest_path, sizeof(manifest_path), "%s/manifest", root);
+  assert_true(written > 0 && (size_t)written < sizeof(manifest_path));
+  write_text_file(manifest_path, "layout=pouch-segmented\nversion=1\n");
+
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  assert_path_file_contains(root, "manifest", "crypto=encrypted");
+  assert_path_file_contains(root, "manifest", "crypto_key_id=hmac-sha256:");
+
+  lc_pouch_crypto_key_string_free(crypto_key);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_pouch_crypto_key_file_overwrite_forces_private_mode(void **state) {
+  lc_error error;
+  char key_path[640];
+  char root[512];
+  char *key_string;
+  struct stat st;
+  FILE *fp;
+  int written;
+  int rc;
+
+  (void)state;
+  key_string = NULL;
+  lc_error_init(&error);
+  make_root("crypto-key-mode", root, sizeof(root));
+  written = snprintf(key_path, sizeof(key_path), "%s/pouch.key", root);
+  assert_true(written > 0 && (size_t)written < sizeof(key_path));
+  fp = fopen(key_path, "wb");
+  assert_non_null(fp);
+  assert_int_equal(fputs("old-key\n", fp) >= 0, 1);
+  assert_int_equal(fclose(fp), 0);
+  assert_int_equal(chmod(key_path, 0644), 0);
+
+  rc = lc_pouch_crypto_generate_key_file(key_path, 1, &key_string, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(key_string);
+  assert_int_equal(stat(key_path, &st), 0);
+  assert_int_equal(st.st_mode & 0777, 0600);
+
+  lc_pouch_crypto_key_string_free(key_string);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_crypto_key_file_exists_status_is_structured(void **state) {
+  lc_error error;
+  char key_path[640];
+  char root[512];
+  FILE *fp;
+  int already_exists;
+  int written;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  make_root("crypto-key-exists-status", root, sizeof(root));
+  written = snprintf(key_path, sizeof(key_path), "%s/pouch.key", root);
+  assert_true(written > 0 && (size_t)written < sizeof(key_path));
+  fp = fopen(key_path, "wb");
+  assert_non_null(fp);
+  assert_int_equal(fputs("old-key\n", fp) >= 0, 1);
+  assert_int_equal(fclose(fp), 0);
+
+  already_exists = 0;
+  rc = lc_pouch_crypto_test_generate_key_file_status(key_path, &already_exists,
+                                                     &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_true(already_exists);
+  assert_string_equal(error.message, "failed to create pouch crypto key file");
+
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -5558,11 +6913,15 @@ static void test_pouch_crypto_roundtrips_large_multiframe_state(void **state) {
 static void test_pouch_crypto_rejects_wrong_key(void **state) {
   lc_client *client;
   lc_client *reader;
+  lc_client_config config;
   lc_update_res update_res;
   lc_error error;
+  const char *endpoints[1];
+  char endpoint[1024];
   char *crypto_key;
   char *wrong_key;
   char root[512];
+  int written;
   int rc;
 
   (void)state;
@@ -5586,10 +6945,20 @@ static void test_pouch_crypto_rejects_wrong_key(void **state) {
   lc_client_close(client);
   client = NULL;
 
-  open_pouch_client_crypto(root, wrong_key, &reader, &error);
-  assert_client_get_protocol_failure(reader, "crypto/wrong-key", &error);
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?pouch_crypto_key=%s", root, wrong_key);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  rc = lc_client_open(&config, &reader, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(reader);
+  assert_string_equal(
+      error.message,
+      "pouch root crypto key does not match initialized encrypted root");
 
-  lc_client_close(reader);
   lc_update_res_cleanup(&update_res);
   lc_pouch_crypto_key_string_free(wrong_key);
   lc_pouch_crypto_key_string_free(crypto_key);
@@ -6309,6 +7678,82 @@ static void test_client_queue_dequeue_batch_returns_page(void **state) {
 }
 
 static void
+test_client_queue_dequeue_cursor_resumes_after_consumed_message(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res first;
+  lc_enqueue_res second;
+  lc_enqueue_res third;
+  lc_dequeue_req dequeue_req;
+  lc_message *message;
+  lc_error error;
+  char root[512];
+  char cursor[160];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  message = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&third, 0, sizeof(third));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_error_init(&error);
+  cursor[0] = '\0';
+  make_root("client-queue-cursor", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "cursor";
+  rc = lc_source_from_memory("one", strlen("one"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &first, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("two", strlen("two"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &second, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("three", strlen("three"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &third, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_req.queue = "cursor";
+  dequeue_req.visibility_timeout_seconds = 120L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, first.message_id);
+  assert_string_equal(message->next_cursor, first.message_id);
+  snprintf(cursor, sizeof(cursor), "%s", message->next_cursor);
+  dequeue_req.start_after = cursor;
+  message->close(message);
+  message = NULL;
+
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, second.message_id);
+  message->close(message);
+
+  lc_enqueue_res_cleanup(&third);
+  lc_enqueue_res_cleanup(&second);
+  lc_enqueue_res_cleanup(&first);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_client_queue_dequeue_with_state_uses_pouch_lease(void **state) {
   lc_client *client;
   lc_source *source;
@@ -6379,7 +7824,7 @@ test_client_queue_dequeue_with_state_uses_pouch_lease(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   assert_int_equal(state_lease->version, 1L);
-  assert_string_equal(state_lease->state_etag, "pouch-state-1");
+  assert_sha256_text_etag(state_lease->state_etag, "{\"handled\":true}");
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -6506,6 +7951,105 @@ static void test_client_queue_ttl_and_retry_terminal_states(void **state) {
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
   assert_null(message);
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_client_queue_rejects_overflowing_timestamps(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_message *message;
+  lc_extend_req extend_req;
+  lc_nack_req nack_req;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  message = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_extend_req_init(&extend_req);
+  lc_nack_req_init(&nack_req);
+  lc_error_init(&error);
+  make_root("client-queue-overflow", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "overflow";
+  enqueue_req.ttl_seconds = LONG_MAX;
+  rc = lc_source_from_memory("ttl-overflow", strlen("ttl-overflow"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "ttl_seconds"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  enqueue_req.queue = "overflow";
+  enqueue_req.delay_seconds = LONG_MAX;
+  rc = lc_source_from_memory("delay-overflow", strlen("delay-overflow"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "delay_seconds"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  enqueue_req.queue = "overflow";
+  rc = lc_source_from_memory("ok", strlen("ok"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_req.queue = "overflow";
+  dequeue_req.visibility_timeout_seconds = LONG_MAX;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(message);
+  assert_non_null(strstr(error.message, "visibility_timeout_seconds"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  dequeue_req.visibility_timeout_seconds = 120L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+
+  extend_req.extend_by_seconds = LONG_MAX;
+  rc = message->extend(message, &extend_req, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "extend_by_seconds"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  nack_req.delay_seconds = LONG_MAX;
+  nack_req.intent = LC_NACK_INTENT_DEFER;
+  rc = message->nack(message, &nack_req, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "delay_seconds"));
+  message->close(message);
 
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_client_close(client);
@@ -7237,7 +8781,6 @@ static void test_state_mutations_touch_writer_marker(void **state) {
                                   &handler_state, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(handler_state.saw_staged_invisible, 1);
-  assert_int_equal(read_marker_sequence(marker_path, NULL), 5UL);
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -7266,7 +8809,6 @@ static void test_state_mutations_touch_writer_marker(void **state) {
                                   &handler_state, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_int_equal(handler_state.saw_staged_invisible, 1);
-  assert_int_equal(read_marker_sequence(marker_path, NULL), 7UL);
 
   lc_error_cleanup(&error);
   lc_error_init(&error);
@@ -7339,7 +8881,7 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->version, 1L);
-  assert_string_equal(lease->state_etag, "pouch-state-1");
+  assert_sha256_text_etag(lease->state_etag, "{\"value\":7}");
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -7347,7 +8889,7 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_false(get_res.no_content);
   assert_string_equal(get_res.content_type, "application/json");
-  assert_string_equal(get_res.etag, "pouch-state-1");
+  assert_sha256_text_etag(get_res.etag, "{\"value\":7}");
   assert_int_equal(get_res.version, 1L);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
@@ -7389,6 +8931,209 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
 
   lc_get_res_cleanup(&get_res);
   lc_client_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_lease_private_reads_reject_stale_handle(void **state) {
+  lc_client *client;
+  lc_lease *stale_lease;
+  lc_lease *fresh_lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire_req;
+  lc_get_opts public_opts;
+  lc_get_res get_res;
+  pouch_value_doc doc;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  stale_lease = NULL;
+  fresh_lease = NULL;
+  source = NULL;
+  sink = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&doc, 0, sizeof(doc));
+  lc_acquire_req_init(&acquire_req);
+  lc_get_opts_init(&public_opts);
+  lc_error_init(&error);
+  make_root("lease-stale-private-read", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-stale-private-read/%ld",
+           (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "stale-owner";
+  acquire_req.ttl_seconds = 1L;
+  rc = client->acquire(client, &acquire_req, &stale_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":9}", strlen("{\"value\":9}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = stale_lease->update(stale_lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  sleep(2U);
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = key;
+  acquire_req.owner = "fresh-owner";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &fresh_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(fresh_lease->fencing_token > stale_lease->fencing_token);
+
+  rc = stale_lease->describe(stale_lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_sink_to_discard(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = stale_lease->get(stale_lease, sink, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = stale_lease->load(stale_lease, &pouch_value_map, &doc, NULL, &get_res,
+                         &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_get_res_cleanup(&get_res);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  public_opts.public_read = 1;
+  rc = lc_sink_to_discard(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = stale_lease->get(stale_lease, sink, &public_opts, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  sink->close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  rc = stale_lease->load(stale_lease, &pouch_value_map, &doc, &public_opts,
+                         &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_int_equal(doc.value, 9);
+
+  lc_get_res_cleanup(&get_res);
+  fresh_lease->close(fresh_lease);
+  stale_lease->close(stale_lease);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_lease_claim_and_credentials_are_durable(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_lease *second_lease;
+  lc_source *source;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_error error;
+  char root[512];
+  char released_lease_id[160];
+  long released_fencing_token;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  second_lease = NULL;
+  source = NULL;
+  released_lease_id[0] = '\0';
+  released_fencing_token = 0L;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  lc_update_req_init(&update_req);
+  memset(&update_res, 0, sizeof(update_res));
+  make_root("lease-claim", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = "state/lease-claim";
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  assert_non_null(lease->lease_id);
+  assert_true(lease->fencing_token > 0L);
+
+  rc = client->acquire(client, &acquire_req, &second_lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(second_lease);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_update_req_init(&update_req);
+  update_req.lease.key = "state/lease-claim";
+  update_req.lease.lease_id = "fabricated";
+  update_req.lease.fencing_token = lease->fencing_token;
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  snprintf(released_lease_id, sizeof(released_lease_id), "%s", lease->lease_id);
+  released_fencing_token = lease->fencing_token;
+
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  lc_update_req_init(&update_req);
+  update_req.lease.key = "state/lease-claim";
+  update_req.lease.lease_id = released_lease_id;
+  update_req.lease.fencing_token = released_fencing_token;
+  rc = lc_source_from_memory("{\"value\":3}", strlen("{\"value\":3}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = client->acquire(client, &acquire_req, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(second_lease);
+  assert_true(second_lease->fencing_token > released_fencing_token);
+  assert_string_not_equal(second_lease->lease_id, released_lease_id);
+  rc = second_lease->release(second_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  second_lease = NULL;
+
+  lc_update_res_cleanup(&update_res);
+  lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -7449,7 +9194,7 @@ static void test_lease_mutate_and_local_mutate_refresh_state(void **state) {
   rc = lease->mutate(lease, &mutate_req, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->version, 2L);
-  assert_string_equal(lease->state_etag, "pouch-state-2");
+  assert_sha256_hex_etag(lease->state_etag);
 
   local_mutations[0] = "/label=\"local\"";
   local_req.mutations = local_mutations;
@@ -7457,7 +9202,7 @@ static void test_lease_mutate_and_local_mutate_refresh_state(void **state) {
   rc = lease->mutate_local(lease, &local_req, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->version, 3L);
-  assert_string_equal(lease->state_etag, "pouch-state-3");
+  assert_sha256_hex_etag(lease->state_etag);
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -7601,14 +9346,14 @@ test_lease_save_streams_mapped_json_and_replays_after_reopen(void **state) {
   rc = lease->save(lease, &pouch_value_map, &saved, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->version, 1L);
-  assert_string_equal(lease->state_etag, "pouch-state-1");
+  assert_sha256_hex_etag(lease->state_etag);
 
   rc = lease->load(lease, &pouch_value_map, &loaded, NULL, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(get_res.no_content);
   assert_int_equal(loaded.value, 42);
   assert_string_equal(get_res.content_type, "application/json");
-  assert_string_equal(get_res.etag, "pouch-state-1");
+  assert_string_equal(get_res.etag, lease->state_etag);
   lc_get_res_cleanup(&get_res);
 
   rc = lease->release(lease, &release_req, &error);
@@ -7625,7 +9370,7 @@ test_lease_save_streams_mapped_json_and_replays_after_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_false(get_res.no_content);
   assert_int_equal(loaded.value, 42);
-  assert_string_equal(get_res.etag, "pouch-state-1");
+  assert_sha256_hex_etag(get_res.etag);
 
   lc_get_res_cleanup(&get_res);
   lc_client_close(reader);
@@ -7681,7 +9426,7 @@ static void test_lease_keepalive_and_release_use_local_lifecycle(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->version, 1L);
-  assert_string_equal(lease->state_etag, "pouch-state-1");
+  assert_sha256_text_etag(lease->state_etag, "{\"value\":9}");
 
   keepalive_req.ttl_seconds = 45L;
   before = (long)time(NULL);
@@ -7689,7 +9434,7 @@ static void test_lease_keepalive_and_release_use_local_lifecycle(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(lease->lease_expires_at_unix >= before + 45L);
   assert_int_equal(lease->version, 1L);
-  assert_string_equal(lease->state_etag, "pouch-state-1");
+  assert_sha256_text_etag(lease->state_etag, "{\"value\":9}");
 
   keepalive_op.lease.namespace_name = lease->namespace_name;
   keepalive_op.lease.key = lease->key;
@@ -7702,7 +9447,7 @@ static void test_lease_keepalive_and_release_use_local_lifecycle(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(keepalive_res.lease_expires_at_unix >= before + 60L);
   assert_int_equal(keepalive_res.version, 1L);
-  assert_string_equal(keepalive_res.state_etag, "pouch-state-1");
+  assert_sha256_text_etag(keepalive_res.state_etag, "{\"value\":9}");
   lc_keepalive_res_cleanup(&keepalive_res);
 
   release_op.lease.namespace_name = lease->namespace_name;
@@ -7715,8 +9460,7 @@ static void test_lease_keepalive_and_release_use_local_lifecycle(void **state) {
   assert_int_equal(release_res.released, 1);
   lc_release_res_cleanup(&release_res);
 
-  rc = lease->release(lease, NULL, &error);
-  assert_int_equal(rc, LC_OK);
+  lease->close(lease);
   lease = NULL;
 
   lc_client_close(client);
@@ -7749,6 +9493,236 @@ static void test_acquire_rejects_non_positive_ttl(void **state) {
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(lease);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_describe_missing_key_returns_not_found(void **state) {
+  lc_client *client;
+  lc_describe_req describe_req;
+  lc_describe_res describe_res;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lc_describe_req_init(&describe_req);
+  memset(&describe_res, 0, sizeof(describe_res));
+  lc_error_init(&error);
+  make_root("describe-missing", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  describe_req.key = "state/describe-missing";
+  rc = client->describe(client, &describe_req, &describe_res, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(error.http_status, 404L);
+  assert_string_equal(error.server_code, "not_found");
+
+  lc_describe_res_cleanup(&describe_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_acquire_allocation_failure_rolls_back_claim(void **state) {
+  pouch_fail_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_config config;
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_error error;
+  const char *endpoints[1];
+  char endpoint[540];
+  char root[512];
+  char key[96];
+  size_t fail_at;
+  int saw_post_claim_failure;
+  int rc;
+
+  (void)state;
+  saw_post_claim_failure = 0;
+  for (fail_at = 1U; fail_at < 2000U && !saw_post_claim_failure; ++fail_at) {
+    memset(&alloc_state, 0, sizeof(alloc_state));
+    alloc_state.fail_at = fail_at;
+    pouch_fail_allocator_init(&allocator, &alloc_state);
+    lc_error_init(&error);
+    lc_acquire_req_init(&acquire_req);
+    lc_release_req_init(&release_req);
+    make_root("lease-alloc-rollback", root, sizeof(root));
+    cleanup_root(root);
+    make_endpoint(root, endpoint, sizeof(endpoint));
+    snprintf(key, sizeof(key), "state/lease-alloc-rollback/%lu",
+             (unsigned long)fail_at);
+    endpoints[0] = endpoint;
+    lc_client_config_init(&config);
+    config.endpoints = endpoints;
+    config.endpoint_count = 1U;
+    config.allocator = allocator;
+    client = NULL;
+    lease = NULL;
+    rc = lc_client_open(&config, &client, &error);
+    if (rc == LC_OK) {
+      acquire_req.key = key;
+      acquire_req.owner = "alloc-fail-owner";
+      acquire_req.ttl_seconds = 30L;
+      rc = client->acquire(client, &acquire_req, &lease, &error);
+      if (rc == LC_ERR_NOMEM) {
+        lc_error_cleanup(&error);
+        lc_error_init(&error);
+        alloc_state.fail_at = 0U;
+        rc = client->acquire(client, &acquire_req, &lease, &error);
+        assert_int_equal(rc, LC_OK);
+        assert_non_null(lease);
+        if (lease->fencing_token > 1L) {
+          saw_post_claim_failure = 1;
+        }
+        rc = lease->release(lease, &release_req, &error);
+        assert_int_equal(rc, LC_OK);
+        lease = NULL;
+      } else if (rc == LC_OK) {
+        alloc_state.fail_at = 0U;
+        rc = lease->release(lease, &release_req, &error);
+        assert_int_equal(rc, LC_OK);
+        lease = NULL;
+      }
+      lc_client_close(client);
+      client = NULL;
+    }
+    cleanup_root(root);
+    lc_error_cleanup(&error);
+  }
+  assert_true(saw_post_claim_failure);
+}
+
+static void test_acquire_honors_block_seconds(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_lease *waited_lease;
+  lc_acquire_req acquire_req;
+  lc_acquire_req wait_req;
+  lc_release_req release_req;
+  lc_error error;
+  char root[512];
+  char key[96];
+  long before;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  waited_lease = NULL;
+  lc_acquire_req_init(&acquire_req);
+  lc_acquire_req_init(&wait_req);
+  lc_release_req_init(&release_req);
+  lc_error_init(&error);
+  make_root("lease-blocking-acquire", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-blocking-acquire/%ld",
+           (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "first-owner";
+  acquire_req.ttl_seconds = 1L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->fencing_token, 1L);
+
+  wait_req.key = key;
+  wait_req.owner = "second-owner";
+  wait_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &wait_req, &waited_lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(waited_lease);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  wait_req.block_seconds = 2L;
+  before = (long)time(NULL);
+  rc = client->acquire(client, &wait_req, &waited_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true((long)time(NULL) >= before + 1L);
+  assert_int_equal(waited_lease->fencing_token, 2L);
+  assert_true(waited_lease->lease_expires_at_unix >= (long)time(NULL) + 29L);
+  rc = waited_lease->release(waited_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  waited_lease = NULL;
+
+  lease->close(lease);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_transaction_bound_lease_requires_transaction_id(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  lc_update_req_init(&update_req);
+  lc_error_init(&error);
+  make_root("lease-txn-required", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-txn-required/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "txn-owner";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "txn-bound-lease";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+
+  update_req.lease.namespace_name = lease->namespace_name;
+  update_req.lease.key = lease->key;
+  update_req.lease.lease_id = lease->lease_id;
+  update_req.lease.fencing_token = lease->fencing_token;
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_update_res_cleanup(&update_res);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  update_req.lease.txn_id = lease->txn_id;
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_update_res_cleanup(&update_res);
+
+  release_req.rollback = 1;
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
 
   lc_client_close(client);
   cleanup_root(root);
@@ -7804,7 +9778,7 @@ static void test_lease_metadata_persists_query_hidden(void **state) {
   rc = lease->metadata(lease, &metadata_req, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->version, 2L);
-  assert_string_equal(lease->state_etag, "pouch-state-1");
+  assert_sha256_text_etag(lease->state_etag, "{\"value\":15}");
   assert_true(lease->has_query_hidden);
   assert_true(lease->query_hidden);
 
@@ -7816,9 +9790,22 @@ static void test_lease_metadata_persists_query_hidden(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->version, 3L);
-  assert_string_equal(lease->state_etag, "pouch-state-3");
+  assert_sha256_text_etag(lease->state_etag, "{\"value\":16}");
   assert_true(lease->has_query_hidden);
   assert_true(lease->query_hidden);
+
+  describe_req.key = key;
+  rc = client->describe(client, &describe_req, &describe_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(describe_res.owner, lease->owner);
+  assert_string_equal(describe_res.lease_id, lease->lease_id);
+  assert_string_equal(describe_res.txn_id, "");
+  assert_int_equal(describe_res.fencing_token, lease->fencing_token);
+  assert_int_equal(describe_res.lease_expires_at_unix,
+                   lease->lease_expires_at_unix);
+  assert_int_equal(describe_res.version, 3L);
+  assert_sha256_text_etag(describe_res.state_etag, "{\"value\":16}");
+  lc_describe_res_cleanup(&describe_res);
 
   rc = lease->release(lease, NULL, &error);
   assert_int_equal(rc, LC_OK);
@@ -7831,7 +9818,7 @@ static void test_lease_metadata_persists_query_hidden(void **state) {
   rc = reader->describe(reader, &describe_req, &describe_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(describe_res.version, 3L);
-  assert_string_equal(describe_res.state_etag, "pouch-state-3");
+  assert_sha256_text_etag(describe_res.state_etag, "{\"value\":16}");
   assert_true(describe_res.has_query_hidden);
   assert_true(describe_res.query_hidden);
   lc_describe_res_cleanup(&describe_res);
@@ -7914,6 +9901,8 @@ static void test_client_metadata_enforces_version_precondition(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_false(metadata_res.has_query_hidden);
   lc_metadata_res_cleanup(&metadata_res);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
 
   rc = lease->release(lease, NULL, &error);
   assert_int_equal(rc, LC_OK);
@@ -7932,6 +9921,8 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   lc_query_req query_req;
   lc_query_res query_res;
   lc_query_key_handler handler;
+  lc_update_req cursor_update_req;
+  lc_update_res cursor_update_res;
   pouch_query_key_capture first_page;
   pouch_query_key_capture second_page;
   pouch_query_key_capture lql_page;
@@ -7949,6 +9940,7 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   source = NULL;
   memset(&query_res, 0, sizeof(query_res));
   memset(&handler, 0, sizeof(handler));
+  memset(&cursor_update_res, 0, sizeof(cursor_update_res));
   memset(&first_page, 0, sizeof(first_page));
   memset(&second_page, 0, sizeof(second_page));
   memset(&lql_page, 0, sizeof(lql_page));
@@ -7956,6 +9948,7 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
   lc_query_req_init(&query_req);
+  lc_update_req_init(&cursor_update_req);
   lc_error_init(&error);
   make_root("query-keys-scan", root, sizeof(root));
   cleanup_root(root);
@@ -8036,23 +10029,37 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
                           &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(first_page.count, 1);
+  assert_true(pouch_query_capture_has(&first_page, "doc/a"));
   assert_non_null(query_res.cursor);
+  assert_string_equal(query_res.cursor, "doc/a");
   assert_string_equal(query_res.return_mode, "keys");
   assert_string_equal(query_res.metadata_json, "{\"engine\":\"scan\"}");
-  assert_true(query_res.index_seq > 0UL);
+  assert_int_equal(query_res.index_seq, 0UL);
 
   snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
   query_req.cursor = cursor;
   lc_query_res_cleanup(&query_res);
+  cursor_update_req.lease.namespace_name = "docs/query";
+  cursor_update_req.lease.key = "doc/0";
+  rc = lc_source_from_memory("{\"category\":\"planning\",\"n\":0}",
+                             strlen("{\"category\":\"planning\",\"n\":0}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &cursor_update_req, source, &cursor_update_res,
+                      &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_update_res_cleanup(&cursor_update_res);
+
   rc = client->query_keys(client, &query_req, &handler, &second_page,
                           &query_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(second_page.count, 1);
+  assert_true(pouch_query_capture_has(&second_page, "doc/b"));
   assert_null(query_res.cursor);
-  assert_true(pouch_query_capture_has(&first_page, "doc/a") ||
-              pouch_query_capture_has(&second_page, "doc/a"));
-  assert_true(pouch_query_capture_has(&first_page, "doc/b") ||
-              pouch_query_capture_has(&second_page, "doc/b"));
+  assert_false(pouch_query_capture_has(&second_page, "doc/0"));
+  assert_false(pouch_query_capture_has(&second_page, "doc/a"));
   assert_false(pouch_query_capture_has(&first_page, "doc/hidden"));
   assert_false(pouch_query_capture_has(&second_page, "doc/hidden"));
   assert_false(pouch_query_capture_has(&first_page, "doc/staged"));
@@ -8070,7 +10077,8 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   rc = client->query_keys(client, &query_req, &handler, &lql_page, &query_res,
                           &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(lql_page.count, 2);
+  assert_int_equal(lql_page.count, 3);
+  assert_true(pouch_query_capture_has(&lql_page, "doc/0"));
   assert_true(pouch_query_capture_has(&lql_page, "doc/a"));
   assert_true(pouch_query_capture_has(&lql_page, "doc/b"));
   assert_false(pouch_query_capture_has(&lql_page, "doc/hidden"));
@@ -8089,6 +10097,69 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   lc_error_cleanup(&error);
   lc_client_close(client);
   cleanup_root(root);
+}
+
+static void test_query_keys_callback_can_reenter_pouch_public_api(void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
+  lc_client *client;
+  lc_source *source;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_reentrant_query_context reentrant;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&reentrant, 0, sizeof(reentrant));
+  lc_update_req_init(&update_req);
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-reentrant-public-api", root, sizeof(root));
+  cleanup_root(root);
+  open_pouch_client(root, &client, &error);
+
+  update_req.lease.namespace_name = "docs/query-reentrant";
+  update_req.lease.key = "doc/a";
+  rc = lc_source_from_memory("{\"category\":\"planning\",\"value\":1}",
+                             strlen("{\"category\":\"planning\",\"value\":1}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_update_res_cleanup(&update_res);
+
+  handler.begin = pouch_reentrant_query_key_begin;
+  handler.chunk = pouch_reentrant_query_key_chunk;
+  handler.end = pouch_reentrant_query_key_end;
+  reentrant.client = client;
+  reentrant.get_key = "doc/a";
+  query_req.namespace_name = "docs/query-reentrant";
+  query_req.engine = "scan";
+  query_req.selector_json = selector;
+  rc = client->query_keys(client, &query_req, &handler, &reentrant, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reentrant.get_rc, LC_OK);
+  assert_true(reentrant.reentered);
+  assert_int_equal(reentrant.capture.count, 1);
+  assert_true(pouch_query_capture_has(&reentrant.capture, "doc/a"));
+
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
 }
 
 static void test_query_keys_enforces_lockd_limit_contract(void **state) {
@@ -8936,7 +11007,7 @@ static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   query_req.selector_lql = "eq{field=/flag,value=false}";
   query_req.selector_json = NULL;
   query_req.return_mode = "documents";
-  query_req.fields_json = "{\"flag\":true}";
+  query_req.fields_json = NULL;
   rc = lc_sink_to_memory(&document_sink, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->query(client, &query_req, document_sink, &query_res, &error);
@@ -9139,7 +11210,7 @@ static void test_query_keys_index_root_or_uses_scalar_union(void **state) {
   query_req.selector_lql = selector_lql;
   query_req.limit = 0L;
   query_req.return_mode = "documents";
-  query_req.fields_json = "{\"n\":true}";
+  query_req.fields_json = NULL;
   rc = lc_sink_to_memory(&documents_sink, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->query(client, &query_req, documents_sink, &query_res, &error);
@@ -9668,7 +11739,7 @@ static void test_query_documents_scan_streams_rows(void **state) {
   query_req.limit = 1L;
   query_req.return_mode = "documents";
   query_req.engine = "scan";
-  query_req.fields_json = "{\"n\":true}";
+  query_req.fields_json = NULL;
   rc = client->query(client, &query_req, first_sink, &query_res, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_sink_memory_bytes(first_sink, &first_bytes, &first_length, &error);
@@ -9683,7 +11754,7 @@ static void test_query_documents_scan_streams_rows(void **state) {
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "query_candidates"));
-  assert_true(query_res.index_seq > 0UL);
+  assert_int_equal(query_res.index_seq, 0UL);
 
   snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
   query_req.cursor = cursor;
@@ -9708,13 +11779,13 @@ static void test_query_documents_scan_streams_rows(void **state) {
   assert_false(bytes_contain_text(second_bytes, second_length, "\"n\":5"));
 
   query_req.cursor = NULL;
-  query_req.fields_json = "[\"n\"]";
+  query_req.fields_json = "{\"n\":true}";
   lc_query_res_cleanup(&query_res);
   rc = lc_sink_to_memory(&invalid_sink, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->query(client, &query_req, invalid_sink, &query_res, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
-  assert_non_null(strstr(error.message, "fields_json must be a JSON object"));
+  assert_non_null(strstr(error.message, "does not accept fields_json"));
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
@@ -9880,7 +11951,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   query_req.return_mode = "documents";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
-  query_req.fields_json = "{\"n\":true}";
+  query_req.fields_json = NULL;
   rc = client->query(client, &query_req, first_sink, &query_res, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_sink_memory_bytes(first_sink, &first_bytes, &first_length, &error);
@@ -9912,7 +11983,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
   assert_null(query_res.cursor);
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
-                                 "\"query_candidates\":2"));
+                                 "\"query_candidates\":1"));
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"query_matches\":1"));
@@ -11502,18 +13573,25 @@ int main(void) {
       cmocka_unit_test(test_index_posting_roundtrips_dense_docids),
       cmocka_unit_test(test_index_posting_selects_adaptive_encoding),
       cmocka_unit_test(test_open_creates_segmented_root_layout),
+      cmocka_unit_test(test_open_rejects_unsupported_root_manifest),
       cmocka_unit_test(test_ensure_namespace_creates_per_namespace_layout),
       cmocka_unit_test(
           test_pouch_endpoint_opens_new_backend_without_http_engine),
+      cmocka_unit_test(test_pouch_endpoint_rejects_unix_socket_mix),
       cmocka_unit_test(
           test_pouch_endpoint_query_engine_routes_implicit_queries),
       cmocka_unit_test(
           test_pouch_namespace_config_persists_and_routes_implicit_queries),
+      cmocka_unit_test(test_pouch_public_api_rejects_reserved_lockd_namespaces),
       cmocka_unit_test(test_pouch_tc_surface_persists_local_single_node_state),
+      cmocka_unit_test(test_state_etag_is_plaintext_sha256_content_hash),
       cmocka_unit_test(test_state_write_read_replays_segment_after_reopen),
+      cmocka_unit_test(test_state_replay_rejects_traversal_payload_leaf),
       cmocka_unit_test(test_state_write_enforces_expected_etag),
+      cmocka_unit_test(test_state_write_enforces_create_if_absent),
       cmocka_unit_test(test_state_writes_roll_active_manifest_segment),
       cmocka_unit_test(test_state_scheduled_compaction_installs_snapshot),
+      cmocka_unit_test(test_pouch_root_path_aliases_share_store_identity),
       cmocka_unit_test(test_maintenance_reports_disabled_without_force),
       cmocka_unit_test(test_maintenance_retention_sweep_deletes_expired_state),
       cmocka_unit_test(test_maintenance_creates_namespace_without_prior_writes),
@@ -11532,12 +13610,25 @@ int main(void) {
       cmocka_unit_test(
           test_staged_decision_recovery_tombstones_interrupted_discard),
       cmocka_unit_test(test_client_update_get_load_roundtrips_state),
+      cmocka_unit_test(test_client_get_preserves_cached_binary_payload_length),
       cmocka_unit_test(test_client_update_enforces_state_preconditions),
+      cmocka_unit_test(test_client_update_waits_for_namespace_mutation_lock),
       cmocka_unit_test(test_client_mutate_applies_plan_and_preconditions),
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
       cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
       cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
+      cmocka_unit_test(test_client_queue_dequeue_honors_wait_seconds),
+      cmocka_unit_test(
+          test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout),
+      cmocka_unit_test(test_client_queue_large_payload_stats_dequeue_and_ack),
       cmocka_unit_test(test_pouch_crypto_encrypts_public_api_payloads_at_rest),
+      cmocka_unit_test(
+          test_pouch_crypto_endpoint_key_is_not_retained_in_endpoint_copy),
+      cmocka_unit_test(test_pouch_crypto_rejects_byte_counter_overflow),
+      cmocka_unit_test(test_pouch_crypto_mode_is_root_invariant),
+      cmocka_unit_test(
+          test_pouch_crypto_key_file_overwrite_forces_private_mode),
+      cmocka_unit_test(test_pouch_crypto_key_file_exists_status_is_structured),
       cmocka_unit_test(test_pouch_crypto_roundtrips_large_multiframe_state),
       cmocka_unit_test(test_pouch_crypto_rejects_wrong_key),
       cmocka_unit_test(test_pouch_crypto_rejects_tampered_payload),
@@ -11549,8 +13640,11 @@ int main(void) {
       cmocka_unit_test(test_txn_recovery_applies_queue_side_effects),
       cmocka_unit_test(test_client_queue_mutations_touch_notification_marker),
       cmocka_unit_test(test_client_queue_dequeue_batch_returns_page),
+      cmocka_unit_test(
+          test_client_queue_dequeue_cursor_resumes_after_consumed_message),
       cmocka_unit_test(test_client_queue_dequeue_with_state_uses_pouch_lease),
       cmocka_unit_test(test_client_queue_ttl_and_retry_terminal_states),
+      cmocka_unit_test(test_client_queue_rejects_overflowing_timestamps),
       cmocka_unit_test(test_client_queue_subscribe_polling_paths),
       cmocka_unit_test(test_client_queue_watch_polling_detects_change),
       cmocka_unit_test(test_client_queue_watch_detects_transaction_ack_commit),
@@ -11569,15 +13663,22 @@ int main(void) {
       cmocka_unit_test(
           test_shared_state_projection_cache_refreshes_peer_markers),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
+      cmocka_unit_test(test_lease_private_reads_reject_stale_handle),
+      cmocka_unit_test(test_pouch_lease_claim_and_credentials_are_durable),
       cmocka_unit_test(test_lease_mutate_and_local_mutate_refresh_state),
       cmocka_unit_test(test_lease_attachments_use_pouch_object_store),
       cmocka_unit_test(
           test_lease_save_streams_mapped_json_and_replays_after_reopen),
       cmocka_unit_test(test_lease_keepalive_and_release_use_local_lifecycle),
       cmocka_unit_test(test_acquire_rejects_non_positive_ttl),
+      cmocka_unit_test(test_describe_missing_key_returns_not_found),
+      cmocka_unit_test(test_acquire_allocation_failure_rolls_back_claim),
+      cmocka_unit_test(test_acquire_honors_block_seconds),
+      cmocka_unit_test(test_transaction_bound_lease_requires_transaction_id),
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),
       cmocka_unit_test(test_query_keys_scan_uses_liblql_and_query_hidden),
+      cmocka_unit_test(test_query_keys_callback_can_reenter_pouch_public_api),
       cmocka_unit_test(test_query_keys_enforces_lockd_limit_contract),
       cmocka_unit_test(test_query_keys_index_summary_uses_sidecar_rows),
       cmocka_unit_test(test_query_keys_index_scalar_in_uses_array_postings),

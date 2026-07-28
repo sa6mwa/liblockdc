@@ -6,11 +6,17 @@
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
 
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -25,6 +31,200 @@
 lc_pouch_test_hook lc_pouch_test_after_snapshot_write_hook = NULL;
 void *lc_pouch_test_after_snapshot_write_context = NULL;
 #endif
+
+typedef struct lc_pouch_state_namespace_lock {
+  int fd;
+  struct lc_pouch_state_process_namespace_mutex *process_mutex;
+} lc_pouch_state_namespace_lock;
+
+typedef struct lc_pouch_state_process_namespace_mutex {
+  char *identity;
+  pthread_mutex_t mutex;
+  unsigned long refcount;
+  struct lc_pouch_state_process_namespace_mutex *next;
+} lc_pouch_state_process_namespace_mutex;
+
+static pthread_mutex_t lc_pouch_state_process_mutex_registry =
+    PTHREAD_MUTEX_INITIALIZER;
+static lc_pouch_state_process_namespace_mutex
+    *lc_pouch_state_process_mutexes;
+
+static int lc_pouch_state_mutex_init_recursive(pthread_mutex_t *mutex,
+                                               lc_error *error) {
+  pthread_mutexattr_t attr;
+  int pthread_rc;
+
+  pthread_rc = pthread_mutexattr_init(&attr);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch mutex attributes",
+                        strerror(pthread_rc), NULL, NULL);
+  }
+  pthread_rc = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  if (pthread_rc == 0) {
+    pthread_rc = pthread_mutex_init(mutex, &attr);
+  }
+  (void)pthread_mutexattr_destroy(&attr);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch namespace mutex",
+                        strerror(pthread_rc), NULL, NULL);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_state_process_mutex_identity(
+    const char *root_path, const char *namespace_name, char **out,
+    lc_error *error) {
+  struct stat st;
+  char root_identity[128];
+  int root_identity_len;
+  size_t namespace_len;
+  char *identity;
+
+  if (root_path == NULL || namespace_name == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespace mutex identity requires root, "
+                        "namespace, and output",
+                        NULL, NULL, NULL);
+  }
+  *out = NULL;
+  if (stat(root_path, &st) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to stat pouch root for namespace mutex",
+                        strerror(errno), NULL, "pouch");
+  }
+  root_identity_len =
+      snprintf(root_identity, sizeof(root_identity), "%lu:%lu",
+               (unsigned long)st.st_dev, (unsigned long)st.st_ino);
+  if (root_identity_len < 0 ||
+      (size_t)root_identity_len >= sizeof(root_identity)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespace mutex identity is too large", NULL,
+                        NULL, "pouch");
+  }
+  namespace_len = strlen(namespace_name);
+  identity = (char *)lc_alloc_with_allocator(
+      NULL, (size_t)root_identity_len + namespace_len + 2U);
+  if (identity == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch namespace mutex identity",
+                        NULL, NULL, NULL);
+  }
+  memcpy(identity, root_identity, (size_t)root_identity_len);
+  identity[root_identity_len] = '\n';
+  memcpy(identity + root_identity_len + 1U, namespace_name, namespace_len + 1U);
+  *out = identity;
+  return LC_OK;
+}
+
+static int lc_pouch_state_process_namespace_mutex_lock(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_state_process_namespace_mutex **out, lc_error *error) {
+  lc_pouch_state_process_namespace_mutex *entry;
+  lc_pouch_state_process_namespace_mutex *created;
+  char *identity;
+  int pthread_rc;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespace mutex requires pouch, namespace, and "
+                        "output",
+                        NULL, NULL, NULL);
+  }
+  *out = NULL;
+  identity = NULL;
+  rc = lc_pouch_state_process_mutex_identity(pouch->root_path, namespace_name,
+                                             &identity, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  pthread_rc = pthread_mutex_lock(&lc_pouch_state_process_mutex_registry);
+  if (pthread_rc != 0) {
+    lc_free_with_allocator(NULL, identity);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch namespace mutex registry",
+                        strerror(pthread_rc), NULL, NULL);
+  }
+  for (entry = lc_pouch_state_process_mutexes; entry != NULL;
+       entry = entry->next) {
+    if (strcmp(entry->identity, identity) == 0) {
+      break;
+    }
+  }
+  if (entry == NULL) {
+    created = (lc_pouch_state_process_namespace_mutex *)lc_calloc_with_allocator(
+        NULL, 1U, sizeof(*created));
+    if (created == NULL) {
+      pthread_mutex_unlock(&lc_pouch_state_process_mutex_registry);
+      lc_free_with_allocator(NULL, identity);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch namespace mutex", NULL,
+                          NULL, NULL);
+    }
+    rc = lc_pouch_state_mutex_init_recursive(&created->mutex, error);
+    if (rc != LC_OK) {
+      pthread_mutex_unlock(&lc_pouch_state_process_mutex_registry);
+      lc_free_with_allocator(NULL, identity);
+      lc_free_with_allocator(NULL, created);
+      return rc;
+    }
+    created->identity = identity;
+    created->next = lc_pouch_state_process_mutexes;
+    lc_pouch_state_process_mutexes = created;
+    entry = created;
+    identity = NULL;
+  }
+  entry->refcount += 1UL;
+  pthread_mutex_unlock(&lc_pouch_state_process_mutex_registry);
+  lc_free_with_allocator(NULL, identity);
+  pthread_rc = pthread_mutex_lock(&entry->mutex);
+  if (pthread_rc != 0) {
+    pthread_mutex_lock(&lc_pouch_state_process_mutex_registry);
+    entry->refcount -= 1UL;
+    pthread_mutex_unlock(&lc_pouch_state_process_mutex_registry);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch namespace mutex",
+                        strerror(pthread_rc), NULL, NULL);
+  }
+  *out = entry;
+  return LC_OK;
+}
+
+static void
+lc_pouch_state_process_namespace_mutex_unlock(
+    lc_pouch_state_process_namespace_mutex **mutex) {
+  lc_pouch_state_process_namespace_mutex **cursor;
+  lc_pouch_state_process_namespace_mutex *entry;
+
+  if (mutex == NULL || *mutex == NULL) {
+    return;
+  }
+  entry = *mutex;
+  *mutex = NULL;
+  pthread_mutex_unlock(&entry->mutex);
+  pthread_mutex_lock(&lc_pouch_state_process_mutex_registry);
+  if (entry->refcount > 0UL) {
+    entry->refcount -= 1UL;
+  }
+  if (entry->refcount == 0UL) {
+    cursor = &lc_pouch_state_process_mutexes;
+    while (*cursor != NULL && *cursor != entry) {
+      cursor = &(*cursor)->next;
+    }
+    if (*cursor == entry) {
+      *cursor = entry->next;
+    }
+    pthread_mutex_unlock(&lc_pouch_state_process_mutex_registry);
+    pthread_mutex_destroy(&entry->mutex);
+    lc_free_with_allocator(NULL, entry->identity);
+    lc_free_with_allocator(NULL, entry);
+    return;
+  }
+  pthread_mutex_unlock(&lc_pouch_state_process_mutex_registry);
+}
 
 typedef struct lc_pouch_state_entry {
   char *key;
@@ -58,8 +258,6 @@ typedef struct lc_pouch_state_cache_record {
   char *etag;
   char *payload_leaf;
   char *descriptor;
-  char *payload_bytes;
-  size_t payload_length;
   unsigned long version;
   unsigned long bytes;
   unsigned long cipher_bytes;
@@ -69,6 +267,8 @@ typedef struct lc_pouch_state_cache_record {
   int found;
   struct lc_pouch_state_cache_record *next;
 } lc_pouch_state_cache_record;
+
+static int lc_pouch_state_payload_leaf_is_generated(const char *leaf);
 
 typedef struct lc_pouch_state_visit_snapshot {
   char *key;
@@ -83,8 +283,335 @@ typedef struct lc_pouch_state_visit_snapshot {
   int query_hidden;
 } lc_pouch_state_visit_snapshot;
 
+typedef struct lc_pouch_state_read_many_snapshot {
+  char *key;
+  char *content_type;
+  char *etag;
+  char *payload_path;
+  char *descriptor;
+  char *crypto_context;
+  lc_source *body;
+  unsigned long version;
+  unsigned long bytes;
+  unsigned long cipher_bytes;
+  long updated_at_unix;
+  int has_query_hidden;
+  int query_hidden;
+  int found;
+} lc_pouch_state_read_many_snapshot;
+
+typedef struct lc_pouch_state_hash_source {
+  lc_source pub;
+  lc_source *inner;
+  EVP_MD_CTX *ctx;
+  int failed;
+} lc_pouch_state_hash_source;
+
 static int lc_pouch_state_read_text_file(lc_pouch *pouch, const char *path,
-                                         char **out, lc_error *error);
+                                         char **out, size_t *out_length,
+                                         lc_error *error);
+static char *lc_pouch_state_child_path(const lc_allocator *allocator,
+                                       const char *namespace_path,
+                                       const char *child_dir,
+                                       const char *leaf);
+static int lc_pouch_state_recover_staged_decisions_locked(
+    lc_pouch *pouch, const char *namespace_name, lc_error *error);
+static int
+lc_pouch_state_delete_locked(lc_pouch *pouch, const char *namespace_name,
+                             const char *key,
+                             const lc_pouch_state_write_options *options,
+                             lc_pouch_state_write_result *out, lc_error *error);
+static int lc_pouch_state_lock_namespace_for_mutation(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_state_namespace_lock *lock, lc_error *error);
+static int lc_pouch_state_visit_internal(lc_pouch *pouch,
+                                         const char *namespace_name,
+                                         lc_pouch_state_visit_fn visitor,
+                                         void *context, int locked,
+                                         lc_error *error);
+
+static size_t lc_pouch_state_hash_source_read(lc_source *self, void *buffer,
+                                              size_t count, lc_error *error) {
+  lc_pouch_state_hash_source *source;
+  size_t got;
+
+  source = (lc_pouch_state_hash_source *)self->impl;
+  got = source->inner->read(source->inner, buffer, count, error);
+  if (got > 0U &&
+      EVP_DigestUpdate(source->ctx, (const unsigned char *)buffer, got) != 1) {
+    source->failed = 1;
+    (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                       "failed to hash pouch state payload", NULL, NULL,
+                       "pouch");
+    return 0U;
+  }
+  return got;
+}
+
+static int lc_pouch_state_hash_source_reset(lc_source *self, lc_error *error) {
+  lc_pouch_state_hash_source *source;
+  int rc;
+
+  source = (lc_pouch_state_hash_source *)self->impl;
+  if (source->inner->reset == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state hash source cannot reset inner source",
+                        NULL, NULL, "pouch");
+  }
+  rc = source->inner->reset(source->inner, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (EVP_DigestInit_ex(source->ctx, EVP_sha256(), NULL) != 1) {
+    source->failed = 1;
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to reset pouch state payload hash", NULL, NULL,
+                        "pouch");
+  }
+  source->failed = 0;
+  return LC_OK;
+}
+
+static void lc_pouch_state_hash_source_close(lc_source *self) { (void)self; }
+
+static int lc_pouch_state_hash_source_init(lc_pouch_state_hash_source *source,
+                                           lc_source *inner, EVP_MD_CTX *ctx,
+                                           lc_error *error) {
+  if (source == NULL || inner == NULL || ctx == NULL) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "pouch state hash source requires source, inner and ctx", NULL, NULL,
+        "pouch");
+  }
+  memset(source, 0, sizeof(*source));
+  source->pub.read = lc_pouch_state_hash_source_read;
+  source->pub.reset = lc_pouch_state_hash_source_reset;
+  source->pub.close = lc_pouch_state_hash_source_close;
+  source->pub.impl = source;
+  source->inner = inner;
+  source->ctx = ctx;
+  if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch state payload hash", NULL,
+                        NULL, "pouch");
+  }
+  return LC_OK;
+}
+
+static char *lc_pouch_state_hash_final(const lc_allocator *allocator,
+                                       EVP_MD_CTX *ctx, lc_error *error) {
+  static const char hex[] = "0123456789abcdef";
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int digest_len;
+  char *etag;
+  unsigned int i;
+
+  digest_len = 0U;
+  etag = NULL;
+  if (EVP_DigestFinal_ex(ctx, digest, &digest_len) != 1) {
+    (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                       "failed to finalize pouch state payload hash", NULL,
+                       NULL, "pouch");
+    return NULL;
+  }
+  if (digest_len != 32U) {
+    OPENSSL_cleanse(digest, sizeof(digest));
+    (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                       "pouch state payload hash length is invalid", NULL, NULL,
+                       "pouch");
+    return NULL;
+  }
+  etag = (char *)lc_alloc_with_allocator(allocator,
+                                         ((size_t)digest_len * 2U) + 1U);
+  if (etag == NULL) {
+    OPENSSL_cleanse(digest, sizeof(digest));
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch state payload etag", NULL,
+                       NULL, "pouch");
+    return NULL;
+  }
+  for (i = 0U; i < digest_len; ++i) {
+    etag[i * 2U] = hex[(digest[i] >> 4) & 0x0FU];
+    etag[(i * 2U) + 1U] = hex[digest[i] & 0x0FU];
+  }
+  etag[digest_len * 2U] = '\0';
+  OPENSSL_cleanse(digest, sizeof(digest));
+  return etag;
+}
+
+static char *lc_pouch_state_empty_etag(const lc_allocator *allocator,
+                                       lc_error *error) {
+  EVP_MD_CTX *ctx;
+  char *etag;
+
+  ctx = EVP_MD_CTX_new();
+  if (ctx == NULL) {
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch state payload hash context",
+                       NULL, NULL, "pouch");
+    return NULL;
+  }
+  if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1) {
+    EVP_MD_CTX_free(ctx);
+    (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                       "failed to initialize pouch state empty hash", NULL,
+                       NULL, "pouch");
+    return NULL;
+  }
+  etag = lc_pouch_state_hash_final(allocator, ctx, error);
+  EVP_MD_CTX_free(ctx);
+  return etag;
+}
+
+static int lc_pouch_state_namespace_lock_acquire(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_state_namespace_lock *lock, lc_error *error) {
+  char *namespace_path;
+  char *lock_path;
+  struct flock fl;
+  int fd;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      lock == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch mutation lock requires pouch and namespace",
+                        NULL, NULL, NULL);
+  }
+  lock->fd = -1;
+  lock->process_mutex = NULL;
+  if (lc_pouch_state_process_namespace_mutex_lock(
+          pouch, namespace_name, &lock->process_mutex, error) != LC_OK) {
+    return error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_TRANSPORT;
+  }
+
+  namespace_path = lc_pouch_namespace_path(&pouch->allocator, pouch->root_path,
+                                           namespace_name);
+  lock_path =
+      namespace_path != NULL
+          ? lc_pouch_path_join(&pouch->allocator, namespace_path, "write.lock")
+          : NULL;
+  lc_free_with_allocator(&pouch->allocator, namespace_path);
+  if (lock_path == NULL) {
+    lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch mutation lock path", NULL,
+                        NULL, NULL);
+  }
+  fd = open(lock_path, O_CREAT | O_RDWR, 0666);
+  lc_free_with_allocator(&pouch->allocator, lock_path);
+  if (fd < 0) {
+    lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to open pouch mutation lock", strerror(errno),
+                        NULL, NULL);
+  }
+
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type = F_WRLCK;
+  fl.l_whence = SEEK_SET;
+  while (fcntl(fd, F_SETLKW, &fl) != 0) {
+    if (errno == EINTR) {
+      continue;
+    }
+    close(fd);
+    lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch mutation file", strerror(errno),
+                        NULL, NULL);
+  }
+  lock->fd = fd;
+  return LC_OK;
+}
+
+static void
+lc_pouch_state_namespace_lock_release(lc_pouch_state_namespace_lock *lock) {
+  if (lock == NULL) {
+    return;
+  }
+  if (lock->fd >= 0) {
+    struct flock fl;
+
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type = F_UNLCK;
+    fl.l_whence = SEEK_SET;
+    (void)fcntl(lock->fd, F_SETLK, &fl);
+    close(lock->fd);
+    lock->fd = -1;
+  }
+  lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+}
+
+int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,
+                                       const char *namespace_name,
+                                       lc_pouch_state_precondition_fn callback,
+                                       void *context, lc_error *error) {
+  lc_pouch_state_namespace_lock lock;
+  int rc;
+
+  if (callback == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespace lock requires callback", NULL, NULL,
+                        NULL);
+  }
+  rc = lc_pouch_state_lock_namespace_for_mutation(pouch, namespace_name, &lock,
+                                                  error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = callback(context, error);
+  lc_pouch_state_namespace_lock_release(&lock);
+  return rc;
+}
+
+static int lc_pouch_state_lock_namespace_for_mutation(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_state_namespace_lock *lock, lc_error *error) {
+  int rc;
+
+  rc = lc_pouch_namespace_ensure_layout(&pouch->allocator, pouch->root_path,
+                                        namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_state_namespace_lock_acquire(pouch, namespace_name, lock,
+                                               error);
+}
+
+static int lc_pouch_state_ensure_namespace_locked(lc_pouch *pouch,
+                                                  const char *namespace_name,
+                                                  lc_error *error) {
+  int rc;
+
+  rc = lc_pouch_namespace_ensure(&pouch->allocator, pouch->root_path,
+                                 namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_state_recover_staged_decisions_locked(pouch, namespace_name,
+                                                        error);
+}
+
+static int lc_pouch_state_fsync_payload_directory(
+    lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
+    lc_error *error) {
+  char *payloads_path;
+  int rc;
+
+  payloads_path = manifest != NULL
+                      ? lc_pouch_path_join(&pouch->allocator,
+                                           manifest->namespace_path, "payloads")
+                      : NULL;
+  if (payloads_path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch payload directory path", NULL,
+                        NULL, NULL);
+  }
+  rc = lc_pouch_path_fsync_directory(
+      payloads_path, "failed to fsync pouch payload directory", error);
+  lc_free_with_allocator(&pouch->allocator, payloads_path);
+  return rc;
+}
 
 static char *lc_pouch_state_crypto_context(const lc_allocator *allocator,
                                            const char *namespace_name,
@@ -98,8 +625,8 @@ static char *lc_pouch_state_crypto_context(const lc_allocator *allocator,
   }
   ns_len = strlen(namespace_name);
   key_len = strlen(key);
-  context = (char *)lc_alloc_with_allocator(allocator,
-                                            ns_len + 1U + key_len + 1U);
+  context =
+      (char *)lc_alloc_with_allocator(allocator, ns_len + 1U + key_len + 1U);
   if (context == NULL) {
     return NULL;
   }
@@ -176,7 +703,6 @@ lc_pouch_state_cache_record_cleanup(const lc_allocator *allocator,
   lc_free_with_allocator(allocator, record->etag);
   lc_free_with_allocator(allocator, record->payload_leaf);
   lc_free_with_allocator(allocator, record->descriptor);
-  lc_free_with_allocator(allocator, record->payload_bytes);
   lc_free_with_allocator(allocator, record);
 }
 
@@ -273,6 +799,122 @@ static int lc_pouch_state_visit_snapshot_append(
   snapshot->has_query_hidden = record->has_query_hidden;
   snapshot->query_hidden = record->query_hidden;
   ++(*count);
+  return LC_OK;
+}
+
+static void lc_pouch_state_read_many_snapshot_cleanup(
+    const lc_allocator *allocator, lc_pouch_state_read_many_snapshot *snapshot) {
+  if (snapshot == NULL) {
+    return;
+  }
+  if (snapshot->body != NULL) {
+    snapshot->body->close(snapshot->body);
+  }
+  lc_free_with_allocator(allocator, snapshot->key);
+  lc_free_with_allocator(allocator, snapshot->content_type);
+  lc_free_with_allocator(allocator, snapshot->etag);
+  lc_free_with_allocator(allocator, snapshot->payload_path);
+  lc_free_with_allocator(allocator, snapshot->descriptor);
+  lc_free_with_allocator(allocator, snapshot->crypto_context);
+  memset(snapshot, 0, sizeof(*snapshot));
+}
+
+static void lc_pouch_state_read_many_snapshots_cleanup(
+    const lc_allocator *allocator, lc_pouch_state_read_many_snapshot *snapshots,
+    size_t count) {
+  size_t i;
+
+  if (snapshots == NULL) {
+    return;
+  }
+  for (i = 0U; i < count; ++i) {
+    lc_pouch_state_read_many_snapshot_cleanup(allocator, &snapshots[i]);
+  }
+  lc_free_with_allocator(allocator, snapshots);
+}
+
+static int lc_pouch_state_read_many_snapshot_from_entry(
+    lc_pouch *pouch, const char *namespace_name,
+    const lc_pouch_namespace_manifest *manifest, const char *requested_key,
+    const lc_pouch_state_entry *current, int include_body,
+    lc_pouch_state_read_many_snapshot *snapshot, lc_error *error) {
+  if (pouch == NULL || namespace_name == NULL || manifest == NULL ||
+      requested_key == NULL || current == NULL || snapshot == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch read-many snapshot requires pouch, namespace, "
+                        "manifest, key, entry, and snapshot",
+                        NULL, NULL, NULL);
+  }
+  memset(snapshot, 0, sizeof(*snapshot));
+  snapshot->key = lc_strdup_with_allocator(&pouch->allocator, requested_key);
+  if (snapshot->key == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch read-many key", NULL, NULL,
+                        NULL);
+  }
+  if (!current->found) {
+    return LC_OK;
+  }
+  if (!lc_pouch_state_payload_leaf_is_generated(current->payload_leaf)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state segment payload leaf is invalid", NULL,
+                        current->payload_leaf, NULL);
+  }
+  snapshot->content_type =
+      current->content_type != NULL
+          ? lc_strdup_with_allocator(&pouch->allocator, current->content_type)
+          : NULL;
+  snapshot->etag = current->etag != NULL
+                       ? lc_strdup_with_allocator(&pouch->allocator,
+                                                  current->etag)
+                       : NULL;
+  snapshot->descriptor =
+      current->descriptor != NULL
+          ? lc_strdup_with_allocator(&pouch->allocator, current->descriptor)
+          : NULL;
+  if ((current->content_type != NULL && snapshot->content_type == NULL) ||
+      (current->etag != NULL && snapshot->etag == NULL) ||
+      (current->descriptor != NULL && snapshot->descriptor == NULL)) {
+    lc_pouch_state_read_many_snapshot_cleanup(&pouch->allocator, snapshot);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch read-many metadata", NULL,
+                        NULL, NULL);
+  }
+  if (include_body) {
+    snapshot->payload_path =
+        lc_pouch_state_child_path(&pouch->allocator, manifest->namespace_path,
+                                  "payloads", current->payload_leaf);
+    if (snapshot->payload_path == NULL) {
+      lc_pouch_state_read_many_snapshot_cleanup(&pouch->allocator, snapshot);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch read-many payload path",
+                          NULL, NULL, NULL);
+    }
+    if (current->descriptor != NULL) {
+      snapshot->crypto_context = lc_pouch_state_crypto_context(
+          &pouch->allocator, namespace_name, current->payload_leaf);
+      if (snapshot->crypto_context == NULL) {
+        lc_pouch_state_read_many_snapshot_cleanup(&pouch->allocator, snapshot);
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "failed to allocate pouch read-many crypto context",
+                            NULL, NULL, NULL);
+      }
+    }
+    if (lc_pouch_crypto_source_from_file(
+            pouch->crypto, snapshot->crypto_context, snapshot->payload_path,
+            snapshot->descriptor, &snapshot->body, error) != LC_OK) {
+      lc_pouch_state_read_many_snapshot_cleanup(&pouch->allocator, snapshot);
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_TRANSPORT;
+    }
+  }
+  snapshot->version = current->version;
+  snapshot->bytes = current->bytes;
+  snapshot->cipher_bytes = current->cipher_bytes;
+  snapshot->updated_at_unix = current->updated_at_unix;
+  snapshot->has_query_hidden = current->has_query_hidden;
+  snapshot->query_hidden = current->query_hidden;
+  snapshot->found = 1;
   return LC_OK;
 }
 
@@ -512,14 +1154,11 @@ static int lc_pouch_state_cache_apply_entry(lc_pouch *pouch,
   lc_free_with_allocator(&pouch->allocator, record->etag);
   lc_free_with_allocator(&pouch->allocator, record->payload_leaf);
   lc_free_with_allocator(&pouch->allocator, record->descriptor);
-  lc_free_with_allocator(&pouch->allocator, record->payload_bytes);
   record->key = key;
   record->content_type = content_type;
   record->etag = etag;
   record->payload_leaf = payload_leaf;
   record->descriptor = descriptor;
-  record->payload_bytes = NULL;
-  record->payload_length = 0U;
   record->version = entry->version;
   record->bytes = entry->bytes;
   record->cipher_bytes = entry->cipher_bytes;
@@ -817,10 +1456,8 @@ static int lc_pouch_state_parse_record(const lc_allocator *allocator,
   cipher_bytes = 0UL;
   descriptor_hex[0] = '\0';
   matched =
-      sscanf(line,
-             "%c %lu %lu %8191s %8191s %8191s %255s %d %d %ld %lu %8191s",
-             &tag,
-             &version, &bytes, key_hex, content_type_hex, etag_hex,
+      sscanf(line, "%c %lu %lu %8191s %8191s %8191s %255s %d %d %ld %lu %8191s",
+             &tag, &version, &bytes, key_hex, content_type_hex, etag_hex,
              payload_leaf, &has_query_hidden, &query_hidden, &updated_at_unix,
              &cipher_bytes, descriptor_hex);
   if ((matched != 9 && matched != 10 && matched != 12) ||
@@ -865,6 +1502,11 @@ static int lc_pouch_state_parse_record(const lc_allocator *allocator,
   }
   if (tag != 'S' && tag != 'L' && tag != 'M') {
     return LC_OK;
+  }
+  if (!lc_pouch_state_payload_leaf_is_generated(payload_leaf)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state segment payload leaf is invalid", NULL,
+                        payload_leaf, NULL);
   }
   lc_pouch_state_entry_cleanup(allocator, entry);
   entry->key = lc_pouch_state_hex_decode(allocator, key_hex);
@@ -1288,14 +1930,12 @@ lc_pouch_state_cache_lookup(lc_pouch *pouch, const char *namespace_name,
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
   force_refresh = 0;
-  if (!pouch->single_writer) {
-    rc = lc_pouch_namespace_marker_refresh_should_scan(
-        &pouch->allocator, manifest->namespace_path, pouch->writer_marker_leaf,
-        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
-        &force_refresh, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
+  rc = lc_pouch_namespace_marker_refresh_should_scan(
+      &pouch->allocator, manifest->namespace_path, pouch->writer_marker_leaf,
+      &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
+      &force_refresh, error);
+  if (rc != LC_OK) {
+    return rc;
   }
   rc = lc_pouch_state_cache_refresh(pouch, cache, manifest, force_refresh,
                                     error);
@@ -1324,6 +1964,11 @@ static int lc_pouch_state_read_result_from_entry(
   if (!current->found) {
     return LC_OK;
   }
+  if (!lc_pouch_state_payload_leaf_is_generated(current->payload_leaf)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state segment payload leaf is invalid", NULL,
+                        current->payload_leaf, NULL);
+  }
   payload_path =
       lc_pouch_state_child_path(&pouch->allocator, manifest->namespace_path,
                                 "payloads", current->payload_leaf);
@@ -1332,9 +1977,8 @@ static int lc_pouch_state_read_result_from_entry(
                         "failed to allocate pouch state payload path", NULL,
                         NULL, NULL);
   }
-  crypto_context =
-      lc_pouch_state_crypto_context(&pouch->allocator, namespace_name,
-                                    current->payload_leaf);
+  crypto_context = lc_pouch_state_crypto_context(
+      &pouch->allocator, namespace_name, current->payload_leaf);
   if (crypto_context == NULL) {
     lc_free_with_allocator(&pouch->allocator, payload_path);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -1346,66 +1990,6 @@ static int lc_pouch_state_read_result_from_entry(
                                         &out->body, error);
   lc_free_with_allocator(&pouch->allocator, crypto_context);
   lc_free_with_allocator(&pouch->allocator, payload_path);
-  if (rc == LC_OK) {
-    out->content_type = current->content_type;
-    out->etag = current->etag;
-    out->descriptor = current->descriptor;
-    out->version = current->version;
-    out->bytes = current->bytes;
-    out->cipher_bytes = current->cipher_bytes;
-    out->updated_at_unix = current->updated_at_unix;
-    out->has_query_hidden = current->has_query_hidden;
-    out->query_hidden = current->query_hidden;
-    out->found = 1;
-    current->content_type = NULL;
-    current->etag = NULL;
-    current->descriptor = NULL;
-  }
-  return rc;
-}
-
-static int lc_pouch_state_read_result_from_cached_payload(
-    lc_pouch *pouch, const char *namespace_name,
-    const lc_pouch_namespace_manifest *manifest, lc_pouch_state_cache_record *record,
-    lc_pouch_state_entry *current, lc_pouch_state_read_result *out,
-    lc_error *error) {
-  char *payload_path;
-  int rc;
-
-  if (pouch == NULL || manifest == NULL || record == NULL || current == NULL ||
-      out == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch cached state read requires pouch, manifest, "
-                        "record, entry, and out",
-                        NULL, NULL, NULL);
-  }
-  memset(out, 0, sizeof(*out));
-  if (!current->found) {
-    return LC_OK;
-  }
-  if (current->descriptor != NULL) {
-    return lc_pouch_state_read_result_from_entry(
-        pouch, namespace_name, manifest, current, out, error);
-  }
-  if (record->payload_bytes == NULL) {
-    payload_path =
-        lc_pouch_state_child_path(&pouch->allocator, manifest->namespace_path,
-                                  "payloads", current->payload_leaf);
-    if (payload_path == NULL) {
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch state payload path", NULL,
-                          NULL, NULL);
-    }
-    rc = lc_pouch_state_read_text_file(pouch, payload_path,
-                                       &record->payload_bytes, error);
-    lc_free_with_allocator(&pouch->allocator, payload_path);
-    if (rc != LC_OK) {
-      return rc;
-    }
-    record->payload_length = strlen(record->payload_bytes);
-  }
-  rc = lc_source_from_memory(record->payload_bytes, record->payload_length,
-                             &out->body, error);
   if (rc == LC_OK) {
     out->content_type = current->content_type;
     out->etag = current->etag;
@@ -1458,13 +2042,12 @@ lc_pouch_state_snapshot_write_record(lc_pouch *pouch, int fd,
                         NULL, NULL);
   }
   if (record->found && descriptor_hex != NULL) {
-    len = snprintf(line, sizeof(line),
-                   "S %lu %lu %s %s %s %s %d %d %ld %lu %s\n",
-                   record->version, record->bytes, key_hex, content_type_hex,
-                   etag_hex, record->payload_leaf,
-                   record->has_query_hidden ? 1 : 0,
-                   record->query_hidden ? 1 : 0, record->updated_at_unix,
-                   record->cipher_bytes, descriptor_hex);
+    len =
+        snprintf(line, sizeof(line), "S %lu %lu %s %s %s %s %d %d %ld %lu %s\n",
+                 record->version, record->bytes, key_hex, content_type_hex,
+                 etag_hex, record->payload_leaf,
+                 record->has_query_hidden ? 1 : 0, record->query_hidden ? 1 : 0,
+                 record->updated_at_unix, record->cipher_bytes, descriptor_hex);
   } else if (record->found) {
     len = snprintf(line, sizeof(line), "S %lu %lu %s %s %s %s %d %d %ld\n",
                    record->version, record->bytes, key_hex, content_type_hex,
@@ -1728,7 +2311,8 @@ static void lc_pouch_state_compaction_capture_cleanup(
 }
 
 static int lc_pouch_state_read_text_file(lc_pouch *pouch, const char *path,
-                                         char **out, lc_error *error) {
+                                         char **out, size_t *out_length,
+                                         lc_error *error) {
   char buffer[4096];
   char *bytes;
   FILE *fp;
@@ -1816,6 +2400,9 @@ static int lc_pouch_state_read_text_file(lc_pouch *pouch, const char *path,
     bytes[length] = '\0';
   }
   *out = bytes;
+  if (out_length != NULL) {
+    *out_length = length;
+  }
   return LC_OK;
 }
 
@@ -1834,7 +2421,7 @@ static int lc_pouch_state_compaction_capture_now(
                         NULL, NULL, NULL);
   }
   rc = lc_pouch_state_read_text_file(pouch, manifest_path,
-                                     &capture->manifest_text, error);
+                                     &capture->manifest_text, NULL, error);
   lc_free_with_allocator(&pouch->allocator, manifest_path);
   if (rc != LC_OK) {
     return rc;
@@ -2050,8 +2637,8 @@ static int lc_pouch_state_retention_sweep(lc_pouch *pouch,
   memset(&scan, 0, sizeof(scan));
   scan.pouch = pouch;
   scan.cutoff_unix = cutoff_unix;
-  rc = lc_pouch_state_visit(pouch, namespace_name,
-                            lc_pouch_retention_scan_visit, &scan, error);
+  rc = lc_pouch_state_visit_internal(
+      pouch, namespace_name, lc_pouch_retention_scan_visit, &scan, 1, error);
   if (rc != LC_OK) {
     lc_pouch_retention_scan_cleanup(&scan);
     return rc;
@@ -2068,8 +2655,9 @@ static int lc_pouch_state_retention_sweep(lc_pouch *pouch,
     lc_error_init(&delete_error);
     delete_options.has_expected_version = 1;
     delete_options.expected_version = scan.keys[index].version;
-    rc = lc_pouch_state_delete(pouch, namespace_name, scan.keys[index].key,
-                               &delete_options, &delete_result, &delete_error);
+    rc = lc_pouch_state_delete_locked(pouch, namespace_name,
+                                      scan.keys[index].key, &delete_options,
+                                      &delete_result, &delete_error);
     if (rc == LC_OK) {
       ++deleted_count;
     } else {
@@ -2099,8 +2687,136 @@ static int lc_pouch_state_compact_namespace(
 static int lc_pouch_state_queue_compacted_files(
     lc_pouch *pouch, lc_pouch_namespace_manifest *manifest,
     const char *namespace_name, unsigned long compacted_segment_id,
-    const char *old_snapshot, unsigned long *cleanup_deleted_count,
-    unsigned long *cleanup_pending_count, lc_error *error) {
+    const char *old_snapshot, const lc_pouch_state_cache_namespace *live_cache,
+    unsigned long *cleanup_deleted_count, unsigned long *cleanup_pending_count,
+    lc_error *error);
+
+static int lc_pouch_state_payload_leaf_is_generated(const char *leaf) {
+  const char prefix[] = "state-";
+  const char suffix[] = ".bin";
+  size_t prefix_len;
+  size_t suffix_len;
+  size_t leaf_len;
+  size_t i;
+
+  if (leaf == NULL) {
+    return 0;
+  }
+  prefix_len = sizeof(prefix) - 1U;
+  suffix_len = sizeof(suffix) - 1U;
+  leaf_len = strlen(leaf);
+  if (leaf_len != prefix_len + 20U + suffix_len ||
+      strncmp(leaf, prefix, prefix_len) != 0 ||
+      strcmp(leaf + leaf_len - suffix_len, suffix) != 0) {
+    return 0;
+  }
+  for (i = prefix_len; i < prefix_len + 20U; ++i) {
+    if (leaf[i] < '0' || leaf[i] > '9') {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int lc_pouch_state_payload_leaf_is_live(
+    const lc_pouch_state_cache_namespace *live_cache, const char *leaf) {
+  lc_pouch_state_cache_record *record;
+
+  if (live_cache == NULL || leaf == NULL) {
+    return 0;
+  }
+  for (record = live_cache->records; record != NULL; record = record->next) {
+    if (record->found && record->payload_leaf != NULL &&
+        strcmp(record->payload_leaf, leaf) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int lc_pouch_state_cleanup_obsolete_payloads(
+    lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
+    const lc_pouch_state_cache_namespace *live_cache,
+    unsigned long *cleanup_deleted_count, unsigned long *cleanup_pending_count,
+    lc_error *error) {
+  char *payloads_path;
+  DIR *dir;
+  struct dirent *entry;
+  int saved_errno;
+
+  if (pouch == NULL || manifest == NULL || manifest->namespace_path == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch payload cleanup requires pouch and manifest",
+                        NULL, NULL, NULL);
+  }
+  payloads_path =
+      lc_pouch_path_join(&pouch->allocator, manifest->namespace_path, "payloads");
+  if (payloads_path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch payload directory", NULL,
+                        NULL, NULL);
+  }
+  dir = opendir(payloads_path);
+  if (dir == NULL) {
+    saved_errno = errno;
+    lc_free_with_allocator(&pouch->allocator, payloads_path);
+    if (saved_errno == ENOENT) {
+      return LC_OK;
+    }
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to scan pouch payload directory",
+                        strerror(saved_errno), NULL, NULL);
+  }
+  errno = 0;
+  while ((entry = readdir(dir)) != NULL) {
+    char *payload_path;
+
+    if (!lc_pouch_state_payload_leaf_is_generated(entry->d_name) ||
+        lc_pouch_state_payload_leaf_is_live(live_cache, entry->d_name)) {
+      continue;
+    }
+    payload_path =
+        lc_pouch_path_join(&pouch->allocator, payloads_path, entry->d_name);
+    if (payload_path == NULL) {
+      saved_errno = errno;
+      closedir(dir);
+      lc_free_with_allocator(&pouch->allocator, payloads_path);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch obsolete payload path",
+                          saved_errno != 0 ? strerror(saved_errno) : NULL, NULL,
+                          NULL);
+    }
+    if (unlink(payload_path) == 0) {
+      if (cleanup_deleted_count != NULL) {
+        ++(*cleanup_deleted_count);
+      }
+    } else if (errno != ENOENT) {
+      if (cleanup_pending_count != NULL) {
+        ++(*cleanup_pending_count);
+      }
+    }
+    lc_free_with_allocator(&pouch->allocator, payload_path);
+    errno = 0;
+  }
+  saved_errno = errno;
+  if (closedir(dir) != 0 && saved_errno == 0) {
+    saved_errno = errno != 0 ? errno : EIO;
+  }
+  lc_free_with_allocator(&pouch->allocator, payloads_path);
+  if (saved_errno != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to scan pouch payload directory",
+                        strerror(saved_errno), NULL, NULL);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_state_queue_compacted_files(
+    lc_pouch *pouch, lc_pouch_namespace_manifest *manifest,
+    const char *namespace_name, unsigned long compacted_segment_id,
+    const char *old_snapshot, const lc_pouch_state_cache_namespace *live_cache,
+    unsigned long *cleanup_deleted_count, unsigned long *cleanup_pending_count,
+    lc_error *error) {
   unsigned long segment_id;
   int rc;
 
@@ -2135,9 +2851,15 @@ static int lc_pouch_state_queue_compacted_files(
   if (rc != LC_OK) {
     return rc;
   }
-  return lc_pouch_namespace_manifest_cleanup_obsolete(
+  rc = lc_pouch_namespace_manifest_cleanup_obsolete(
       &pouch->allocator, namespace_name, manifest, cleanup_deleted_count,
       cleanup_pending_count, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_state_cleanup_obsolete_payloads(
+      pouch, manifest, live_cache, cleanup_deleted_count, cleanup_pending_count,
+      error);
 }
 
 static int lc_pouch_state_compact_namespace_if_needed(
@@ -2333,7 +3055,7 @@ static int lc_pouch_state_compact_namespace(
   if (rc == LC_OK) {
     rc = lc_pouch_state_queue_compacted_files(
         pouch, manifest, namespace_name, compacted_segment_id, old_snapshot,
-        cleanup_deleted_count, cleanup_pending_count, error);
+        &snapshot_cache, cleanup_deleted_count, cleanup_pending_count, error);
     if (rc != LC_OK && abort_diagnostic != NULL) {
       *abort_diagnostic = "obsolete-cleanup-aborted";
     }
@@ -2372,10 +3094,9 @@ lc_pouch_state_maybe_compact(lc_pouch *pouch, const char *namespace_name,
   lc_error_cleanup(&ignored);
 }
 
-int lc_pouch_maintenance_run(lc_pouch *pouch,
-                             const lc_pouch_maintenance_options *options,
-                             lc_pouch_maintenance_result *out,
-                             lc_error *error) {
+static int lc_pouch_maintenance_run_locked(
+    lc_pouch *pouch, const lc_pouch_maintenance_options *options,
+    lc_pouch_maintenance_result *out, lc_error *error) {
   lc_pouch_namespace_manifest manifest;
   const char *namespace_name;
   unsigned long cleanup_deleted_count;
@@ -2438,6 +3159,28 @@ int lc_pouch_maintenance_run(lc_pouch *pouch,
     }
   }
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  return rc;
+}
+
+int lc_pouch_maintenance_run(lc_pouch *pouch,
+                             const lc_pouch_maintenance_options *options,
+                             lc_pouch_maintenance_result *out,
+                             lc_error *error) {
+  lc_pouch_state_namespace_lock lock;
+  const char *namespace_name;
+  int rc;
+
+  namespace_name = options != NULL ? options->namespace_name : NULL;
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_pouch_maintenance_run_locked(pouch, options, out, error);
+  }
+  rc = lc_pouch_state_lock_namespace_for_mutation(pouch, namespace_name, &lock,
+                                                  error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_maintenance_run_locked(pouch, options, out, error);
+  lc_pouch_state_namespace_lock_release(&lock);
   return rc;
 }
 
@@ -2693,10 +3436,10 @@ static int lc_pouch_state_append_record(
   key_hex = lc_pouch_state_hex_encode(&pouch->allocator, key);
   content_type_hex = lc_pouch_state_hex_encode(&pouch->allocator, content_type);
   etag_hex = lc_pouch_state_hex_encode(&pouch->allocator, etag);
-  descriptor_hex = descriptor != NULL
-                       ? lc_pouch_state_hex_encode(&pouch->allocator,
-                                                   descriptor)
-                       : NULL;
+  descriptor_hex =
+      descriptor != NULL
+          ? lc_pouch_state_hex_encode(&pouch->allocator, descriptor)
+          : NULL;
   if (key_hex == NULL || content_type_hex == NULL || etag_hex == NULL ||
       (descriptor != NULL && descriptor_hex == NULL)) {
     lc_free_with_allocator(&pouch->allocator, key_hex);
@@ -2711,9 +3454,8 @@ static int lc_pouch_state_append_record(
     len = snprintf(record, sizeof(record),
                    "%c %lu %lu %s %s %s %s %d %d %ld %lu %s\n", record_tag,
                    version, bytes, key_hex, content_type_hex, etag_hex,
-                   payload_leaf, has_query_hidden ? 1 : 0,
-                   query_hidden ? 1 : 0, updated_at_unix, cipher_bytes,
-                   descriptor_hex);
+                   payload_leaf, has_query_hidden ? 1 : 0, query_hidden ? 1 : 0,
+                   updated_at_unix, cipher_bytes, descriptor_hex);
   } else {
     len = snprintf(record, sizeof(record), "%c %lu %lu %s %s %s %s %d %d %ld\n",
                    record_tag, version, bytes, key_hex, content_type_hex,
@@ -2782,14 +3524,6 @@ static int lc_pouch_state_append_record(
   return rc;
 }
 
-static char *lc_pouch_state_etag(const lc_allocator *allocator,
-                                 unsigned long version) {
-  char stack[64];
-
-  snprintf(stack, sizeof(stack), "pouch-state-%lu", version);
-  return lc_strdup_with_allocator(allocator, stack);
-}
-
 static char *lc_pouch_state_payload_leaf(const lc_allocator *allocator,
                                          unsigned long version) {
   char stack[96];
@@ -2823,9 +3557,8 @@ static char *lc_pouch_state_staged_key(const lc_allocator *allocator,
   return staged;
 }
 
-int lc_pouch_state_recover_staged_decisions(lc_pouch *pouch,
-                                            const char *namespace_name,
-                                            lc_error *error) {
+static int lc_pouch_state_recover_staged_decisions_locked(
+    lc_pouch *pouch, const char *namespace_name, lc_error *error) {
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_decision *decisions;
@@ -2902,13 +3635,37 @@ int lc_pouch_state_recover_staged_decisions(lc_pouch *pouch,
   return rc;
 }
 
-int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
-                         const char *key, lc_source *body,
-                         const lc_pouch_state_write_options *options,
-                         lc_pouch_state_write_result *out, lc_error *error) {
+int lc_pouch_state_recover_staged_decisions(lc_pouch *pouch,
+                                            const char *namespace_name,
+                                            lc_error *error) {
+  lc_pouch_state_namespace_lock lock;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_pouch_state_recover_staged_decisions_locked(pouch, namespace_name,
+                                                          error);
+  }
+  rc = lc_pouch_state_lock_namespace_for_mutation(pouch, namespace_name, &lock,
+                                                  error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_state_recover_staged_decisions_locked(pouch, namespace_name,
+                                                      error);
+  lc_pouch_state_namespace_lock_release(&lock);
+  return rc;
+}
+
+static int
+lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
+                            const char *key, lc_source *body,
+                            const lc_pouch_state_write_options *options,
+                            lc_pouch_state_write_result *out, lc_error *error) {
   lc_pouch_state_entry current;
   lc_pouch_namespace_manifest manifest;
+  lc_pouch_state_hash_source hash_source;
   const char *content_type;
+  EVP_MD_CTX *hash_ctx;
   char *payload_leaf;
   char *payload_path;
   char *descriptor;
@@ -2932,7 +3689,7 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
                         NULL, NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
-  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  rc = lc_pouch_state_ensure_namespace_locked(pouch, namespace_name, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -2961,7 +3718,15 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
     }
   }
   if (options != NULL && options->has_expected_version) {
-    if (!current.found || current.version != options->expected_version) {
+    if (options->expected_version == 0UL) {
+      if (current.found) {
+        lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+        lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+        return lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch state version precondition failed", NULL,
+                            NULL, NULL);
+      }
+    } else if (!current.found || current.version != options->expected_version) {
       lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
       lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
       return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -2969,17 +3734,31 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
                           NULL);
     }
   }
+  if (options != NULL && options->create_if_absent && current.found) {
+    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state create-if-absent precondition failed",
+                        NULL, NULL, NULL);
+  }
+  if (options != NULL && options->precondition != NULL) {
+    rc = options->precondition(options->precondition_context, error);
+    if (rc != LC_OK) {
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      return rc;
+    }
+  }
   version = max_version + 1UL;
   updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
-  etag = lc_pouch_state_etag(&pouch->allocator, version);
+  etag = NULL;
   payload_leaf = lc_pouch_state_payload_leaf(&pouch->allocator, version);
   payload_path = payload_leaf != NULL
                      ? lc_pouch_state_child_path(&pouch->allocator,
                                                  manifest.namespace_path,
                                                  "payloads", payload_leaf)
                      : NULL;
-  if (etag == NULL || payload_leaf == NULL || payload_path == NULL) {
-    lc_free_with_allocator(&pouch->allocator, etag);
+  if (payload_leaf == NULL || payload_path == NULL) {
     lc_free_with_allocator(&pouch->allocator, payload_leaf);
     lc_free_with_allocator(&pouch->allocator, payload_path);
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
@@ -2992,11 +3771,29 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   bytes = 0UL;
   cipher_bytes = 0UL;
   descriptor = NULL;
-  crypto_context =
-      lc_pouch_state_crypto_context(&pouch->allocator, namespace_name,
-                                    payload_leaf);
+  hash_ctx = EVP_MD_CTX_new();
+  if (hash_ctx == NULL) {
+    lc_free_with_allocator(&pouch->allocator, payload_leaf);
+    lc_free_with_allocator(&pouch->allocator, payload_path);
+    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch state payload hash context",
+                        NULL, NULL, "pouch");
+  }
+  rc = lc_pouch_state_hash_source_init(&hash_source, body, hash_ctx, error);
+  if (rc != LC_OK) {
+    EVP_MD_CTX_free(hash_ctx);
+    lc_free_with_allocator(&pouch->allocator, payload_leaf);
+    lc_free_with_allocator(&pouch->allocator, payload_path);
+    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+    return rc;
+  }
+  crypto_context = lc_pouch_state_crypto_context(&pouch->allocator,
+                                                 namespace_name, payload_leaf);
   if (crypto_context == NULL) {
-    lc_free_with_allocator(&pouch->allocator, etag);
+    EVP_MD_CTX_free(hash_ctx);
     lc_free_with_allocator(&pouch->allocator, payload_leaf);
     lc_free_with_allocator(&pouch->allocator, payload_path);
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
@@ -3007,9 +3804,24 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   }
   record_appended = 0;
   rc = lc_pouch_crypto_stream_to_file(pouch->crypto, crypto_context,
-                                      payload_path, body, &bytes,
+                                      payload_path, &hash_source.pub, &bytes,
                                       &cipher_bytes, &descriptor, error);
   lc_free_with_allocator(&pouch->allocator, crypto_context);
+  if (rc == LC_OK && hash_source.failed) {
+    rc =
+        lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                     "failed to hash pouch state payload", NULL, NULL, "pouch");
+  }
+  if (rc == LC_OK) {
+    etag = lc_pouch_state_hash_final(&pouch->allocator, hash_ctx, error);
+    if (etag == NULL) {
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+  }
+  EVP_MD_CTX_free(hash_ctx);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_fsync_payload_directory(pouch, &manifest, error);
+  }
   content_type = options != NULL && options->content_type != NULL
                      ? options->content_type
                      : "application/octet-stream";
@@ -3021,11 +3833,10 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   }
   updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
   if (rc == LC_OK) {
-    rc = lc_pouch_state_append_record(pouch, namespace_name, &manifest, 'S',
-                                      key, content_type, etag, payload_leaf,
-                                      version, bytes, cipher_bytes, descriptor,
-                                      updated_at_unix, has_query_hidden,
-                                      query_hidden, error);
+    rc = lc_pouch_state_append_record(
+        pouch, namespace_name, &manifest, 'S', key, content_type, etag,
+        payload_leaf, version, bytes, cipher_bytes, descriptor, updated_at_unix,
+        has_query_hidden, query_hidden, error);
     if (rc == LC_OK) {
       record_appended = 1;
     }
@@ -3065,6 +3876,28 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   return rc;
 }
 
+int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
+                         const char *key, lc_source *body,
+                         const lc_pouch_state_write_options *options,
+                         lc_pouch_state_write_result *out, lc_error *error) {
+  lc_pouch_state_namespace_lock lock;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_pouch_state_write_locked(pouch, namespace_name, key, body,
+                                       options, out, error);
+  }
+  rc = lc_pouch_state_lock_namespace_for_mutation(pouch, namespace_name, &lock,
+                                                  error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_state_write_locked(pouch, namespace_name, key, body, options,
+                                   out, error);
+  lc_pouch_state_namespace_lock_release(&lock);
+  return rc;
+}
+
 void lc_pouch_state_write_result_cleanup(const lc_allocator *allocator,
                                          lc_pouch_state_write_result *result) {
   if (result == NULL) {
@@ -3075,11 +3908,10 @@ void lc_pouch_state_write_result_cleanup(const lc_allocator *allocator,
   memset(result, 0, sizeof(*result));
 }
 
-int lc_pouch_state_update_metadata(lc_pouch *pouch, const char *namespace_name,
-                                   const char *key,
-                                   const lc_pouch_state_write_options *options,
-                                   lc_pouch_state_write_result *out,
-                                   lc_error *error) {
+static int lc_pouch_state_update_metadata_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const lc_pouch_state_write_options *options,
+    lc_pouch_state_write_result *out, lc_error *error) {
   lc_pouch_state_entry current;
   lc_pouch_namespace_manifest manifest;
   unsigned long max_version;
@@ -3100,7 +3932,7 @@ int lc_pouch_state_update_metadata(lc_pouch *pouch, const char *namespace_name,
                         NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
-  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  rc = lc_pouch_state_ensure_namespace_locked(pouch, namespace_name, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -3132,6 +3964,14 @@ int lc_pouch_state_update_metadata(lc_pouch *pouch, const char *namespace_name,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch metadata version precondition failed", NULL,
                         NULL, NULL);
+  }
+  if (options->precondition != NULL) {
+    rc = options->precondition(options->precondition_context, error);
+    if (rc != LC_OK) {
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      return rc;
+    }
   }
   version = max_version + 1UL;
   updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
@@ -3185,10 +4025,33 @@ int lc_pouch_state_update_metadata(lc_pouch *pouch, const char *namespace_name,
   return rc;
 }
 
-int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
-                          const char *key,
-                          const lc_pouch_state_write_options *options,
-                          lc_pouch_state_write_result *out, lc_error *error) {
+int lc_pouch_state_update_metadata(lc_pouch *pouch, const char *namespace_name,
+                                   const char *key,
+                                   const lc_pouch_state_write_options *options,
+                                   lc_pouch_state_write_result *out,
+                                   lc_error *error) {
+  lc_pouch_state_namespace_lock lock;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_pouch_state_update_metadata_locked(pouch, namespace_name, key,
+                                                 options, out, error);
+  }
+  rc = lc_pouch_state_lock_namespace_for_mutation(pouch, namespace_name, &lock,
+                                                  error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_state_update_metadata_locked(pouch, namespace_name, key,
+                                             options, out, error);
+  lc_pouch_state_namespace_lock_release(&lock);
+  return rc;
+}
+
+static int lc_pouch_state_delete_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const lc_pouch_state_write_options *options,
+    lc_pouch_state_write_result *out, lc_error *error) {
   lc_pouch_state_entry current;
   lc_pouch_namespace_manifest manifest;
   char *etag;
@@ -3205,7 +4068,7 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
                         NULL, NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
-  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  rc = lc_pouch_state_ensure_namespace_locked(pouch, namespace_name, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -3241,19 +4104,25 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
                           NULL, NULL, NULL);
     }
   }
+  if (options != NULL && options->precondition != NULL) {
+    rc = options->precondition(options->precondition_context, error);
+    if (rc != LC_OK) {
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      return rc;
+    }
+  }
   if (!current.found) {
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return LC_OK;
   }
   version = max_version + 1UL;
-  etag = lc_pouch_state_etag(&pouch->allocator, version);
+  etag = lc_pouch_state_empty_etag(&pouch->allocator, error);
   if (etag == NULL) {
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch state tombstone etag", NULL,
-                        NULL, NULL);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
   updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
   rc = lc_pouch_state_append_tombstone(pouch, namespace_name, &manifest, key,
@@ -3264,8 +4133,7 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
   if (rc == LC_OK) {
     (void)lc_pouch_state_cache_apply_write(pouch, namespace_name, &manifest,
                                            key, NULL, etag, NULL, version, 0UL,
-                                           0UL, NULL, updated_at_unix, 0, 0,
-                                           0);
+                                           0UL, NULL, updated_at_unix, 0, 0, 0);
     lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
   }
   if (rc == LC_OK) {
@@ -3278,6 +4146,28 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
   lc_free_with_allocator(&pouch->allocator, etag);
   lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  return rc;
+}
+
+int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
+                          const char *key,
+                          const lc_pouch_state_write_options *options,
+                          lc_pouch_state_write_result *out, lc_error *error) {
+  lc_pouch_state_namespace_lock lock;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_pouch_state_delete_locked(pouch, namespace_name, key, options,
+                                        out, error);
+  }
+  rc = lc_pouch_state_lock_namespace_for_mutation(pouch, namespace_name, &lock,
+                                                  error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_state_delete_locked(pouch, namespace_name, key, options, out,
+                                    error);
+  lc_pouch_state_namespace_lock_release(&lock);
   return rc;
 }
 
@@ -3310,11 +4200,10 @@ int lc_pouch_state_stage_write(lc_pouch *pouch, const char *namespace_name,
   return rc;
 }
 
-int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
-                                  const char *key, const char *txn_id,
-                                  const char *expected_committed_etag,
-                                  lc_pouch_state_write_result *out,
-                                  lc_error *error) {
+static int lc_pouch_state_promote_staged_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *txn_id, const char *expected_committed_etag,
+    lc_pouch_state_write_result *out, lc_error *error) {
   lc_pouch_state_entry committed;
   lc_pouch_state_entry staged;
   lc_pouch_namespace_manifest manifest;
@@ -3342,7 +4231,7 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
                         "failed to allocate pouch staged state key", NULL, NULL,
                         NULL);
   }
-  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  rc = lc_pouch_state_ensure_namespace_locked(pouch, namespace_name, error);
   if (rc != LC_OK) {
     lc_free_with_allocator(&pouch->allocator, staged_key);
     return rc;
@@ -3395,8 +4284,7 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
       pouch, namespace_name, &manifest, 'L', key, staged.content_type,
       staged.etag, staged.payload_leaf, version, staged.bytes,
       staged.cipher_bytes, staged.descriptor, updated_at_unix,
-      staged.has_query_hidden,
-      staged.query_hidden, error);
+      staged.has_query_hidden, staged.query_hidden, error);
   if (rc != LC_OK) {
     goto cleanup;
   }
@@ -3460,10 +4348,33 @@ cleanup:
   return rc;
 }
 
-int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
-                                 const char *key, const char *txn_id,
-                                 lc_pouch_state_write_result *out,
-                                 lc_error *error) {
+int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
+                                  const char *key, const char *txn_id,
+                                  const char *expected_committed_etag,
+                                  lc_pouch_state_write_result *out,
+                                  lc_error *error) {
+  lc_pouch_state_namespace_lock lock;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_pouch_state_promote_staged_locked(pouch, namespace_name, key,
+                                                txn_id, expected_committed_etag,
+                                                out, error);
+  }
+  rc = lc_pouch_state_lock_namespace_for_mutation(pouch, namespace_name, &lock,
+                                                  error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_state_promote_staged_locked(
+      pouch, namespace_name, key, txn_id, expected_committed_etag, out, error);
+  lc_pouch_state_namespace_lock_release(&lock);
+  return rc;
+}
+
+static int lc_pouch_state_commit_staged_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *txn_id, lc_pouch_state_write_result *out, lc_error *error) {
   lc_pouch_state_entry committed;
   lc_pouch_state_entry staged;
   lc_pouch_namespace_manifest manifest;
@@ -3491,7 +4402,7 @@ int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
                         "failed to allocate pouch staged state key", NULL, NULL,
                         NULL);
   }
-  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  rc = lc_pouch_state_ensure_namespace_locked(pouch, namespace_name, error);
   if (rc != LC_OK) {
     lc_free_with_allocator(&pouch->allocator, staged_key);
     return rc;
@@ -3527,8 +4438,7 @@ int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
       pouch, namespace_name, &manifest, 'L', key, staged.content_type,
       staged.etag, staged.payload_leaf, version, staged.bytes,
       staged.cipher_bytes, staged.descriptor, updated_at_unix,
-      staged.has_query_hidden,
-      staged.query_hidden, error);
+      staged.has_query_hidden, staged.query_hidden, error);
   if (rc != LC_OK) {
     goto cleanup;
   }
@@ -3594,9 +4504,31 @@ cleanup:
   return rc;
 }
 
-int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
-                                  const char *key, const char *txn_id,
-                                  int *discarded, lc_error *error) {
+int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
+                                 const char *key, const char *txn_id,
+                                 lc_pouch_state_write_result *out,
+                                 lc_error *error) {
+  lc_pouch_state_namespace_lock lock;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_pouch_state_commit_staged_locked(pouch, namespace_name, key,
+                                               txn_id, out, error);
+  }
+  rc = lc_pouch_state_lock_namespace_for_mutation(pouch, namespace_name, &lock,
+                                                  error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_state_commit_staged_locked(pouch, namespace_name, key, txn_id,
+                                           out, error);
+  lc_pouch_state_namespace_lock_release(&lock);
+  return rc;
+}
+
+static int lc_pouch_state_discard_staged_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *txn_id, int *discarded, lc_error *error) {
   lc_pouch_state_entry staged;
   lc_pouch_namespace_manifest manifest;
   char *staged_key;
@@ -3623,7 +4555,7 @@ int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
                         "failed to allocate pouch staged state key", NULL, NULL,
                         NULL);
   }
-  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  rc = lc_pouch_state_ensure_namespace_locked(pouch, namespace_name, error);
   if (rc != LC_OK) {
     lc_free_with_allocator(&pouch->allocator, staged_key);
     return rc;
@@ -3644,11 +4576,9 @@ int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
     decision_version = max_version + 1UL;
     tombstone_version = decision_version + 1UL;
     updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
-    etag = lc_pouch_state_etag(&pouch->allocator, tombstone_version);
+    etag = lc_pouch_state_empty_etag(&pouch->allocator, error);
     if (etag == NULL) {
-      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch staged discard etag", NULL,
-                        NULL, NULL);
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     } else {
       rc = lc_pouch_state_append_decision(
           pouch, namespace_name, &manifest, staged_key, etag,
@@ -3679,11 +4609,33 @@ int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
   return rc;
 }
 
+int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
+                                  const char *key, const char *txn_id,
+                                  int *discarded, lc_error *error) {
+  lc_pouch_state_namespace_lock lock;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_pouch_state_discard_staged_locked(pouch, namespace_name, key,
+                                                txn_id, discarded, error);
+  }
+  rc = lc_pouch_state_lock_namespace_for_mutation(pouch, namespace_name, &lock,
+                                                  error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_state_discard_staged_locked(pouch, namespace_name, key, txn_id,
+                                            discarded, error);
+  lc_pouch_state_namespace_lock_release(&lock);
+  return rc;
+}
+
 int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
                         const char *key, lc_pouch_state_read_result *out,
                         lc_error *error) {
   lc_pouch_state_entry current;
   lc_pouch_namespace_manifest manifest;
+  lc_pouch_state_process_namespace_mutex *process_mutex;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -3694,16 +4646,22 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
                         NULL, NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
-  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  process_mutex = NULL;
+  rc = lc_pouch_state_process_namespace_mutex_lock(
+      pouch, namespace_name, &process_mutex, error);
   if (rc != LC_OK) {
     return rc;
+  }
+  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  if (rc != LC_OK) {
+    goto cleanup_unlocked;
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
                                         namespace_name, &manifest, NULL, NULL,
                                         error);
   if (rc != LC_OK) {
-    return rc;
+    goto cleanup_unlocked;
   }
   memset(&current, 0, sizeof(current));
   rc = lc_pouch_state_cache_lookup(pouch, namespace_name, &manifest, key,
@@ -3711,12 +4669,14 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
   if (rc != LC_OK || !current.found) {
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-    return rc;
+    goto cleanup_unlocked;
   }
   rc = lc_pouch_state_read_result_from_entry(pouch, namespace_name, &manifest,
                                              &current, out, error);
   lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+cleanup_unlocked:
+  lc_pouch_state_process_namespace_mutex_unlock(&process_mutex);
   return rc;
 }
 
@@ -3727,8 +4687,11 @@ static int lc_pouch_state_read_many_internal(
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_cache_record **record_index;
+  lc_pouch_state_read_many_snapshot *snapshots;
   size_t record_index_count;
   size_t index;
+  size_t snapshot_count;
+  lc_pouch_state_process_namespace_mutex *process_mutex;
   int force_refresh;
   int rc;
 
@@ -3739,80 +4702,121 @@ static int lc_pouch_state_read_many_internal(
                         "keys, and visitor",
                         NULL, NULL, NULL);
   }
+  snapshots = NULL;
+  snapshot_count = 0U;
+  record_index = NULL;
+  record_index_count = 0U;
+  if (key_count > 0U) {
+    snapshots = (lc_pouch_state_read_many_snapshot *)lc_calloc_with_allocator(
+        &pouch->allocator, key_count, sizeof(*snapshots));
+    if (snapshots == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch read-many snapshots", NULL,
+                          NULL, NULL);
+    }
+  }
+  process_mutex = NULL;
+  rc = lc_pouch_state_process_namespace_mutex_lock(
+      pouch, namespace_name, &process_mutex, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_read_many_snapshots_cleanup(&pouch->allocator, snapshots,
+                                               snapshot_count);
+    return rc;
+  }
   rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
   if (rc != LC_OK) {
-    return rc;
+    goto cleanup_unlocked;
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
                                         namespace_name, &manifest, NULL, NULL,
                                         error);
   if (rc != LC_OK) {
-    return rc;
+    goto cleanup_unlocked;
   }
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
   if (cache == NULL) {
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup_unlocked;
   }
   force_refresh = 0;
-  if (!pouch->single_writer) {
-    rc = lc_pouch_namespace_marker_refresh_should_scan(
-        &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
-        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
-        &force_refresh, error);
-  }
+  rc = lc_pouch_namespace_marker_refresh_should_scan(
+      &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
+      &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
+      &force_refresh, error);
   if (rc == LC_OK) {
     rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest, force_refresh,
                                       error);
   }
-  record_index = NULL;
-  record_index_count = 0U;
   if (rc == LC_OK && key_count > 8U) {
     rc = lc_pouch_state_cache_record_index_build(pouch, cache, &record_index,
                                                  &record_index_count, error);
   }
   for (index = 0U; rc == LC_OK && index < key_count; ++index) {
-    lc_pouch_state_read_result read_result;
     lc_pouch_state_entry current;
     lc_pouch_state_cache_record *record;
 
-    memset(&read_result, 0, sizeof(read_result));
+    if (keys[index] == NULL || keys[index][0] == '\0') {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch read-many requires non-empty keys", NULL, NULL,
+                        NULL);
+      break;
+    }
     memset(&current, 0, sizeof(current));
     record = record_index != NULL
                  ? lc_pouch_state_cache_record_index_find(
                        record_index, record_index_count, keys[index])
                  : lc_pouch_state_cache_record_find(cache, keys[index]);
     rc = lc_pouch_state_entry_from_cache_record(pouch, record, &current, error);
-    if (rc == LC_OK && include_body) {
-      if (record != NULL) {
-        rc = lc_pouch_state_read_result_from_cached_payload(
-            pouch, namespace_name, &manifest, record, &current, &read_result,
-            error);
-      } else {
-        rc = lc_pouch_state_read_result_from_entry(
-            pouch, namespace_name, &manifest, &current, &read_result, error);
-      }
-    } else if (rc == LC_OK && current.found) {
-      read_result.found = 1;
-      read_result.version = current.version;
-      read_result.bytes = current.bytes;
-      read_result.updated_at_unix = current.updated_at_unix;
-      read_result.has_query_hidden = current.has_query_hidden;
-      read_result.query_hidden = current.query_hidden;
-    }
     if (rc == LC_OK) {
-      rc = visitor(keys[index], &read_result, context, error);
+      rc = lc_pouch_state_read_many_snapshot_from_entry(
+          pouch, namespace_name, &manifest, keys[index], &current, include_body,
+          &snapshots[index], error);
+      if (rc == LC_OK) {
+        snapshot_count = index + 1U;
+      }
     }
-    lc_pouch_state_read_result_cleanup(&pouch->allocator, &read_result);
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-    if (rc == LC_POUCH_STATE_READ_MANY_STOP) {
-      rc = LC_OK;
-      break;
-    }
   }
   lc_free_with_allocator(&pouch->allocator, record_index);
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+cleanup_unlocked:
+  lc_pouch_state_process_namespace_mutex_unlock(&process_mutex);
+  if (rc == LC_OK) {
+    for (index = 0U; rc == LC_OK && index < snapshot_count; ++index) {
+      lc_pouch_state_read_result read_result;
+
+      memset(&read_result, 0, sizeof(read_result));
+      if (snapshots[index].found) {
+        if (include_body) {
+          read_result.body = snapshots[index].body;
+          snapshots[index].body = NULL;
+        }
+        read_result.content_type = snapshots[index].content_type;
+        read_result.etag = snapshots[index].etag;
+        read_result.descriptor = snapshots[index].descriptor;
+        read_result.version = snapshots[index].version;
+        read_result.bytes = snapshots[index].bytes;
+        read_result.cipher_bytes = snapshots[index].cipher_bytes;
+        read_result.updated_at_unix = snapshots[index].updated_at_unix;
+        read_result.has_query_hidden = snapshots[index].has_query_hidden;
+        read_result.query_hidden = snapshots[index].query_hidden;
+        read_result.found = 1;
+        snapshots[index].content_type = NULL;
+        snapshots[index].etag = NULL;
+        snapshots[index].descriptor = NULL;
+      }
+      rc = visitor(snapshots[index].key, &read_result, context, error);
+      lc_pouch_state_read_result_cleanup(&pouch->allocator, &read_result);
+      if (rc == LC_POUCH_STATE_READ_MANY_STOP) {
+        rc = LC_OK;
+        break;
+      }
+    }
+  }
+  lc_pouch_state_read_many_snapshots_cleanup(&pouch->allocator, snapshots,
+                                             snapshot_count);
   return rc;
 }
 
@@ -3833,9 +4837,11 @@ int lc_pouch_state_read_many_metadata(lc_pouch *pouch,
       pouch, namespace_name, keys, key_count, visitor, context, 0, error);
 }
 
-int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
-                         lc_pouch_state_visit_fn visitor, void *context,
-                         lc_error *error) {
+static int lc_pouch_state_visit_internal(lc_pouch *pouch,
+                                         const char *namespace_name,
+                                         lc_pouch_state_visit_fn visitor,
+                                         void *context, int locked,
+                                         lc_error *error) {
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_cache_record *record;
@@ -3843,6 +4849,7 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
   size_t snapshot_count;
   size_t snapshot_capacity;
   size_t i;
+  lc_pouch_state_process_namespace_mutex *process_mutex;
   int force_refresh;
   int rc;
 
@@ -3853,16 +4860,26 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
                         "visitor",
                         NULL, NULL, NULL);
   }
-  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  process_mutex = NULL;
+  if (!locked) {
+    rc = lc_pouch_state_process_namespace_mutex_lock(
+        pouch, namespace_name, &process_mutex, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  rc = locked ? lc_pouch_state_ensure_namespace_locked(pouch, namespace_name,
+                                                       error)
+              : lc_pouch_ensure_namespace(pouch, namespace_name, error);
   if (rc != LC_OK) {
-    return rc;
+    goto cleanup_unlocked;
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
                                         namespace_name, &manifest, NULL, NULL,
                                         error);
   if (rc != LC_OK) {
-    return rc;
+    goto cleanup_unlocked;
   }
   snapshots = NULL;
   snapshot_count = 0U;
@@ -3870,15 +4887,14 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
   if (cache == NULL) {
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup_unlocked;
   }
   force_refresh = 0;
-  if (!pouch->single_writer) {
-    rc = lc_pouch_namespace_marker_refresh_should_scan(
-        &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
-        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
-        &force_refresh, error);
-  }
+  rc = lc_pouch_namespace_marker_refresh_should_scan(
+      &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
+      &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
+      &force_refresh, error);
   if (rc == LC_OK) {
     rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest, force_refresh,
                                       error);
@@ -3894,6 +4910,10 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
     if (rc != LC_OK) {
       break;
     }
+  }
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  if (!locked) {
+    lc_pouch_state_process_namespace_mutex_unlock(&process_mutex);
   }
   for (i = 0U; rc == LC_OK && i < snapshot_count; ++i) {
     lc_pouch_state_visit_entry entry;
@@ -3916,14 +4936,23 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
   }
   lc_pouch_state_visit_snapshots_cleanup(&pouch->allocator, snapshots,
                                          snapshot_count);
-  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+cleanup_unlocked:
+  lc_pouch_state_process_namespace_mutex_unlock(&process_mutex);
   return rc;
+}
+
+int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
+                         lc_pouch_state_visit_fn visitor, void *context,
+                         lc_error *error) {
+  return lc_pouch_state_visit_internal(pouch, namespace_name, visitor, context,
+                                       0, error);
 }
 
 int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
                              unsigned long *out, lc_error *error) {
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_cache_namespace *cache;
+  lc_pouch_state_process_namespace_mutex *process_mutex;
   int force_refresh;
   int rc;
 
@@ -3935,29 +4964,34 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
                         NULL, NULL, NULL);
   }
   *out = 0UL;
-  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  process_mutex = NULL;
+  rc = lc_pouch_state_process_namespace_mutex_lock(
+      pouch, namespace_name, &process_mutex, error);
   if (rc != LC_OK) {
     return rc;
+  }
+  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  if (rc != LC_OK) {
+    goto cleanup_unlocked;
   }
   memset(&manifest, 0, sizeof(manifest));
   rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
                                         namespace_name, &manifest, NULL, NULL,
                                         error);
   if (rc != LC_OK) {
-    return rc;
+    goto cleanup_unlocked;
   }
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
   if (cache == NULL) {
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup_unlocked;
   }
   force_refresh = 0;
-  if (!pouch->single_writer) {
-    rc = lc_pouch_namespace_marker_refresh_should_scan(
-        &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
-        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
-        &force_refresh, error);
-  }
+  rc = lc_pouch_namespace_marker_refresh_should_scan(
+      &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
+      &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
+      &force_refresh, error);
   if (rc == LC_OK) {
     rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest, force_refresh,
                                       error);
@@ -3966,6 +5000,8 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
     *out = cache->max_version;
   }
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+cleanup_unlocked:
+  lc_pouch_state_process_namespace_mutex_unlock(&process_mutex);
   return rc;
 }
 

@@ -1,6 +1,8 @@
 #include <errno.h>
+#include <limits.h>
 #include <setjmp.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,6 +76,10 @@ typedef struct consumer_test_state {
   int last_followup_rc;
   int last_followup_error_code;
   char last_followup_error_message[160];
+  size_t pouch_dequeue_calls;
+  size_t pouch_dequeue_with_state_calls;
+  long last_pouch_wait_seconds;
+  size_t stop_after_pouch_dequeue_calls;
 } consumer_test_state;
 
 enum {
@@ -125,6 +131,8 @@ static consumer_test_state *g_consumer_test_state = NULL;
 static lc_allocator g_test_allocator;
 static pslog_logger *g_test_client_logger = NULL;
 
+static void stop_test_service(consumer_test_state *state);
+
 int __real_lc_client_open(const lc_client_config *config, lc_client **out,
                           lc_error *error);
 int __real_pthread_create(pthread_t *thread, const pthread_attr_t *attr,
@@ -162,6 +170,9 @@ struct lc_consumer_service_handle {
   int insecure_skip_verify;
   int prefer_http_2;
   size_t http_json_response_limit_bytes;
+  char *pouch_crypto_key;
+  char *pouch_crypto_key_file;
+  int pouch_crypto_generate_key_file;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
   pslog_logger *logger;
@@ -295,6 +306,47 @@ static void fake_test_client_close(lc_client *self) {
   client = (lc_client_handle *)self;
   lc_engine_client_close(client->engine);
   lc_free_with_allocator(&client->allocator, client);
+}
+
+static int fake_pouch_dequeue_common(lc_client *self,
+                                     const lc_dequeue_req *request,
+                                     lc_message **out, lc_error *error,
+                                     int with_state) {
+  consumer_test_state *state;
+  size_t calls;
+  size_t stop_after;
+
+  (void)self;
+  (void)error;
+  state = g_consumer_test_state;
+  assert_non_null(state);
+  assert_non_null(request);
+  assert_non_null(out);
+  *out = NULL;
+  pthread_mutex_lock(&state->mutex);
+  state->pouch_dequeue_calls += 1U;
+  if (with_state) {
+    state->pouch_dequeue_with_state_calls += 1U;
+  }
+  state->last_pouch_wait_seconds = request->wait_seconds;
+  calls = state->pouch_dequeue_calls;
+  stop_after = state->stop_after_pouch_dequeue_calls;
+  pthread_mutex_unlock(&state->mutex);
+  if (stop_after != 0U && calls >= stop_after) {
+    stop_test_service(state);
+  }
+  return LC_OK;
+}
+
+static int fake_pouch_dequeue(lc_client *self, const lc_dequeue_req *request,
+                              lc_message **out, lc_error *error) {
+  return fake_pouch_dequeue_common(self, request, out, error, 0);
+}
+
+static int fake_pouch_dequeue_with_state(lc_client *self,
+                                         const lc_dequeue_req *request,
+                                         lc_message **out, lc_error *error) {
+  return fake_pouch_dequeue_common(self, request, out, error, 1);
 }
 
 static void stop_test_service(consumer_test_state *state) {
@@ -861,6 +913,21 @@ int __wrap_lc_client_open(const lc_client_config *config, lc_client **out,
                         "failed to allocate fake worker client", NULL, NULL,
                         NULL);
   }
+  if (config->endpoint_count == 1U && config->endpoints != NULL &&
+      config->endpoints[0] != NULL &&
+      strncmp(config->endpoints[0], "pouch:", 6U) == 0) {
+    client->allocator = config->allocator;
+    client->is_pouch = 1;
+    client->base_logger = g_test_client_logger != NULL ? g_test_client_logger
+                                                       : lc_log_noop_logger();
+    client->logger = g_test_client_logger != NULL ? g_test_client_logger
+                                                  : lc_log_noop_logger();
+    client->pub.close = fake_test_client_close;
+    client->pub.dequeue = fake_pouch_dequeue;
+    client->pub.dequeue_with_state = fake_pouch_dequeue_with_state;
+    *out = &client->pub;
+    return LC_OK;
+  }
   lc_engine_client_config_init(&engine_config);
   lc_engine_error_init(&engine_error);
   dummy_endpoint = "https://127.0.0.1:1";
@@ -1237,6 +1304,108 @@ test_consumer_service_multi_worker_releases_tracked_allocations(void **state) {
   assert_int_equal(error.code, LC_OK);
   assert_true(alloc_state.total_allocations > 0U);
   assert_int_equal(alloc_state.live_allocations, 0U);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void test_consumer_service_rejects_worker_count_overflow(void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumers[2];
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  memset(consumers, 0, sizeof(consumers));
+  lc_consumer_config_init(&consumers[0]);
+  lc_consumer_config_init(&consumers[1]);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+
+  consumers[0].name = "worker-a";
+  consumers[0].request.queue = "jobs-a";
+  consumers[0].handle = handle_consumer_message;
+  consumers[0].worker_count = SIZE_MAX;
+  consumers[1].name = "worker-b";
+  consumers[1].request.queue = "jobs-b";
+  consumers[1].handle = handle_consumer_message;
+  consumers[1].worker_count = 1U;
+  config.consumers = consumers;
+  config.consumer_count = 2U;
+  service = NULL;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(service);
+  assert_int_equal(error.code, LC_ERR_INVALID);
+  assert_int_equal(alloc_state.live_allocations, 0U);
+
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void
+test_consumer_service_pouch_dequeue_wait_is_shutdown_bounded(void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  char *endpoints[1];
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  endpoints[0] = "pouch:///tmp/liblockdc-consumer-service-pouch-test";
+  client.endpoints = endpoints;
+  client.endpoint_count = 1U;
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.stop_after_pouch_dequeue_calls = 1U;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.request.wait_seconds = LONG_MAX;
+  consumer.handle = handle_consumer_message;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(runtime_state.pouch_dequeue_calls, 1U);
+  assert_int_equal(runtime_state.pouch_dequeue_with_state_calls, 0U);
+  assert_int_equal(runtime_state.last_pouch_wait_seconds, 1L);
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
   lc_error_cleanup(&error);
   tracked_allocator_state_cleanup(&alloc_state);
 }
@@ -2677,6 +2846,9 @@ int main(void) {
       cmocka_unit_test(test_consumer_service_wrappers_delegate),
       cmocka_unit_test(
           test_consumer_service_multi_worker_releases_tracked_allocations),
+      cmocka_unit_test(test_consumer_service_rejects_worker_count_overflow),
+      cmocka_unit_test(
+          test_consumer_service_pouch_dequeue_wait_is_shutdown_bounded),
       cmocka_unit_test(
           test_consumer_service_multi_worker_runs_without_transport),
       cmocka_unit_test(

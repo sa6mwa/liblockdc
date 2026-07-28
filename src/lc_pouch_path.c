@@ -13,6 +13,20 @@ static int lc_pouch_path_char_safe(unsigned char value) {
          value == '.';
 }
 
+static int lc_pouch_path_dot_only(const char *name) {
+  const char *cursor;
+
+  if (name == NULL || name[0] == '\0') {
+    return 0;
+  }
+  for (cursor = name; *cursor != '\0'; ++cursor) {
+    if (*cursor != '.') {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 char *lc_pouch_path_join(const lc_allocator *allocator, const char *root,
                          const char *leaf) {
   char *path;
@@ -46,14 +60,16 @@ char *lc_pouch_path_escape_name(const lc_allocator *allocator,
   char *escaped;
   char *dst;
   size_t length;
+  int dot_only;
 
   if (name == NULL || name[0] == '\0') {
     return NULL;
   }
+  dot_only = lc_pouch_path_dot_only(name);
   length = 0U;
   cursor = (const unsigned char *)name;
   while (*cursor != '\0') {
-    length += lc_pouch_path_char_safe(*cursor) ? 1U : 3U;
+    length += !dot_only && lc_pouch_path_char_safe(*cursor) ? 1U : 3U;
     ++cursor;
   }
   escaped = (char *)lc_alloc_with_allocator(allocator, length + 1U);
@@ -63,7 +79,7 @@ char *lc_pouch_path_escape_name(const lc_allocator *allocator,
   dst = escaped;
   cursor = (const unsigned char *)name;
   while (*cursor != '\0') {
-    if (lc_pouch_path_char_safe(*cursor)) {
+    if (!dot_only && lc_pouch_path_char_safe(*cursor)) {
       *dst++ = (char)*cursor;
     } else {
       *dst++ = '%';
@@ -98,6 +114,36 @@ int lc_pouch_path_ensure_directory(const char *path, const char *message,
   return LC_OK;
 }
 
+int lc_pouch_path_fsync_directory(const char *path, const char *message,
+                                  lc_error *error) {
+  int fd;
+  int flags;
+  int rc;
+
+  if (path == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
+  }
+  flags = O_RDONLY;
+#ifdef O_DIRECTORY
+  flags |= O_DIRECTORY;
+#endif
+  fd = open(path, flags);
+  if (fd < 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L, message, strerror(errno),
+                        NULL, NULL);
+  }
+  rc = LC_OK;
+  if (fsync(fd) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L, message, strerror(errno),
+                      NULL, NULL);
+  }
+  if (close(fd) != 0 && rc == LC_OK) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L, message, strerror(errno),
+                      NULL, NULL);
+  }
+  return rc;
+}
+
 static int lc_pouch_path_write_all(int fd, const char *text, size_t length) {
   size_t offset;
 
@@ -120,8 +166,54 @@ static int lc_pouch_path_write_all(int fd, const char *text, size_t length) {
   return 1;
 }
 
+static char *lc_pouch_path_dirname(const char *path) {
+  const char *slash;
+  char *out;
+  size_t len;
+
+  if (path == NULL) {
+    return NULL;
+  }
+  slash = strrchr(path, '/');
+  if (slash == NULL) {
+    return lc_strdup_with_allocator(NULL, ".");
+  }
+  if (slash == path) {
+    return lc_strdup_with_allocator(NULL, "/");
+  }
+  len = (size_t)(slash - path);
+  out = (char *)lc_alloc_with_allocator(NULL, len + 1U);
+  if (out == NULL) {
+    return NULL;
+  }
+  memcpy(out, path, len);
+  out[len] = '\0';
+  return out;
+}
+
+static char *lc_pouch_path_temp_path(const char *path, unsigned int attempt) {
+  char suffix[64];
+  char *out;
+  size_t path_len;
+  size_t suffix_len;
+
+  snprintf(suffix, sizeof(suffix), ".tmp.%ld.%u", (long)getpid(), attempt);
+  path_len = strlen(path);
+  suffix_len = strlen(suffix);
+  out = (char *)lc_alloc_with_allocator(NULL, path_len + suffix_len + 1U);
+  if (out == NULL) {
+    return NULL;
+  }
+  memcpy(out, path, path_len);
+  memcpy(out + path_len, suffix, suffix_len + 1U);
+  return out;
+}
+
 int lc_pouch_path_write_text_file(const char *path, const char *text,
                                   lc_error *error) {
+  char *dir;
+  char *tmp_path;
+  unsigned int attempt;
   int fd;
   int rc;
 
@@ -130,8 +222,32 @@ int lc_pouch_path_write_text_file(const char *path, const char *text,
                         "pouch text write requires path and text", NULL, NULL,
                         NULL);
   }
-  fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+  dir = lc_pouch_path_dirname(path);
+  if (dir == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch file directory", NULL, NULL,
+                        NULL);
+  }
+  tmp_path = NULL;
+  fd = -1;
+  for (attempt = 0U; attempt < 100U; ++attempt) {
+    tmp_path = lc_pouch_path_temp_path(path, attempt);
+    if (tmp_path == NULL) {
+      lc_free_with_allocator(NULL, dir);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch temp file path", NULL, NULL,
+                          NULL);
+    }
+    fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL, 0666);
+    if (fd >= 0 || errno != EEXIST) {
+      break;
+    }
+    lc_free_with_allocator(NULL, tmp_path);
+    tmp_path = NULL;
+  }
   if (fd < 0) {
+    lc_free_with_allocator(NULL, tmp_path);
+    lc_free_with_allocator(NULL, dir);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to create pouch file", strerror(errno), NULL,
                         NULL);
@@ -148,5 +264,19 @@ int lc_pouch_path_write_text_file(const char *path, const char *text,
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L, "failed to close pouch file",
                       strerror(errno), NULL, NULL);
   }
+  if (rc == LC_OK && rename(tmp_path, path) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to replace pouch file", strerror(errno), NULL,
+                      NULL);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_path_fsync_directory(dir, "failed to fsync pouch directory",
+                                       error);
+  }
+  if (rc != LC_OK) {
+    unlink(tmp_path);
+  }
+  lc_free_with_allocator(NULL, tmp_path);
+  lc_free_with_allocator(NULL, dir);
   return rc;
 }

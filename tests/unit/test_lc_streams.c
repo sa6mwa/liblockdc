@@ -335,6 +335,7 @@ static void test_copy_rejects_null_endpoints(void **state) {
 }
 
 static void test_sink_memory_bytes_rejects_invalid_arguments(void **state) {
+  fake_sink public_sink;
   lc_sink *sink;
   lc_error error;
   const void *bytes;
@@ -346,10 +347,14 @@ static void test_sink_memory_bytes_rejects_invalid_arguments(void **state) {
   bytes = NULL;
   length = 0U;
   lc_error_init(&error);
+  memset(&public_sink, 0, sizeof(public_sink));
+  public_sink.pub.write = fake_sink_write;
+  public_sink.pub.close = fake_sink_close;
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(lc_sink_is_discard(sink));
+  assert_false(lc_sink_is_discard(&public_sink.pub));
   assert_false(lc_sink_is_discard(NULL));
 
   rc = lc_sink_memory_bytes(NULL, &bytes, &length, &error);

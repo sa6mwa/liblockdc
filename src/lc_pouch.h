@@ -61,11 +61,16 @@ typedef struct lc_pouch_maintenance_result {
   int aborted;
 } lc_pouch_maintenance_result;
 
+typedef int (*lc_pouch_state_precondition_fn)(void *context, lc_error *error);
+
 typedef struct lc_pouch_state_write_options {
   const char *content_type;
   const char *expected_etag;
+  lc_pouch_state_precondition_fn precondition;
+  void *precondition_context;
   unsigned long expected_version;
   int has_expected_version;
+  int create_if_absent;
   int has_query_hidden;
   int query_hidden;
 } lc_pouch_state_write_options;

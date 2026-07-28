@@ -82,7 +82,8 @@ Several older storage and search systems also inform the design:
 - Database manifest/journal patterns: the manifest is a lifecycle accelerator
   and repairable journal, similar in spirit to manifest files in embedded
   stores. It is not authoritative by itself; segment and snapshot scans can
-  repair missing, legacy, or crash-incomplete manifest state.
+  repair missing, legacy, or crash-incomplete namespace lifecycle state. Root
+  crypto mode metadata is an identity invariant once namespace data exists.
 - JSON Pointer and LQL query systems: public document filters are expressed as
   LQL over strict JSON Pointer paths. Storage-owned indexes may generate
   candidate supersets for supported path predicates, but final correctness stays
@@ -261,7 +262,8 @@ Record and replay boundaries:
   projection must reset and rebuild from the new ordered history.
 - The manifest is an accelerator and lifecycle journal. It is not the sole
   authority for valid committed records: segment and snapshot directory scans
-  repair missing, legacy, or crash-incomplete manifest state.
+  repair missing, legacy, or crash-incomplete namespace lifecycle state. Root
+  crypto mode metadata is not silently inferred for populated roots.
 - Legacy open-only manifests need a repair path. Historical segments are
   backfilled as sealed while the current open tail remains active, otherwise
   old data becomes a permanent uncompacted tail.
@@ -314,8 +316,8 @@ Compaction boundaries:
   only when the payload source is being compacted safely.
 - Any current state-link target outside the compaction result protects its
   source segment or snapshot from obsolete cleanup.
-- Cleanup is retryable. Delete failures keep obsolete entries in memory and in
-  manifest-derived state so later passes can remove them.
+- Cleanup is retryable. Delete failures keep obsolete entries or pending payload
+  files observable so later passes can remove them.
 
 Integration-derived compatibility boundaries:
 
@@ -411,20 +413,19 @@ Required invariants:
   segment metadata changes, abandons the snapshot and leaves indexes, manifest,
   and obsolete sets unchanged.
 - Manifest state accelerates lifecycle tracking but is not authoritative for
-  payload correctness. Missing or legacy manifest information can be repaired
-  by scanning segment and snapshot directories, but a valid manifest does not
-  adopt stray snapshot files that were never installed through a manifest
-  record.
+  payload correctness. Missing or legacy namespace manifest information can be
+  repaired by scanning segment and snapshot directories, but a valid manifest
+  does not adopt stray snapshot files that were never installed through a
+  manifest record.
 - Writer markers are optimization hints. A missing marker update must not hide
   committed data because forced refresh and segment scans remain authoritative.
 - Single-writer mode can skip peer-marker scans for the owning process, but it
   must publish an exclusive-writer heartbeat so other processes can fence or
   wait safely.
-- Shared-root safety is a layered contract: process-local stripe locks avoid
-  in-process races, global process stripe locks avoid two handles in one process
-  racing each other, advisory per-key file locks coordinate other processes or
-  hosts, and refresh/marker scans make other committed records visible after
-  locks are released.
+- Shared-root safety is a layered contract: process-local root/namespace locks
+  avoid in-process races between handles for the same namespace, advisory
+  namespace file locks coordinate other processes or hosts, and refresh/marker
+  scans make other committed records visible after locks are released.
 - `Close` performs graceful cleanup of background work and writer presence.
   `Abort` simulates process loss: it stops background work without removing
   crash-detectable writer presence.
@@ -450,18 +451,26 @@ of rewritten JSON files.
   `query` have initial scan-mode paths over the segmented state projection.
   Both stream each candidate JSON body through `liblql` for final selector
   acceptance, skip `query_hidden` and staged records, and return paginated scan
-  metadata. `flush_index` synchronously refreshes the local pouch state
-  projection, validates or repairs a durable per-namespace `index/query.index`
-  sidecar, and returns its storage high-water token, including tombstones and
-  peer-writer marker invalidation. The sidecar now carries deterministic live
-  summary rows with row-count/hash validation, query-hidden flags, and the
-  first durable scalar field plus field-presence postings. Selectorless
+  metadata. Query cursors are lexical document-key boundaries: the cursor is the
+  last emitted key, and the next page resumes after that key so inserts before
+  the boundary cannot repeat or skip already emitted rows. On plaintext roots,
+  `flush_index` synchronously refreshes the local pouch state projection,
+  validates or repairs a durable per-namespace `index/query.index` sidecar, and
+  returns its storage high-water token, including tombstones and peer-writer
+  marker invalidation. The sidecar now carries deterministic live summary rows
+  with row-count/hash validation, query-hidden flags, and the first durable
+  scalar field plus field-presence postings. Selectorless
   `query_keys` can use the validated summary as the first indexed path;
   explicit indexed `query_keys` and document `query` can use scalar equality,
   scalar `in`, simple `prefix` / `iprefix` and `contains` / `icontains`,
   simple bounded numeric `range`, including `/tags[]` array membership, and
   field `exists` postings before final `liblql` acceptance. Broader typed/text
   postings and richer indexed selector plans remain to be implemented.
+  Encrypted roots do not create persisted query-index sidecars in this release:
+  implicit and explicit indexed requests are routed through the scan/decrypt
+  path, and `flush_index` reports a successful encrypted-root no-op at the
+  current state high-water. This avoids derived plaintext or reversible encoded
+  values on disk until encrypted index artifacts have a dedicated design.
 - Avoid hidden memory allocation. Storage code must allocate only through a
   pouch allocator interface.
 - Add benchmarks and diagnostics from the start so write latency, read latency,
@@ -707,11 +716,14 @@ snapshot file, installs it in the namespace manifest, advances the active
 segment, and records superseded segments or prior snapshots as manifest
 obsolete entries. Obsolete cleanup is retryable: post-compaction cleanup and
 later namespace manifest opens attempt to delete the tracked file and prune the
-manifest entry only after the file is gone or already missing. The root
-`store.log` file is a non-authoritative placeholder and is not replaced during
-compaction. Each compacted state snapshot starts with a private high-water
-control record, so replayed state/index sequence cannot move backwards after
-older segment history has been removed; that record participates in replay
+manifest entry only after the file is gone or already missing. After a snapshot
+is installed, compaction also scans the namespace payload directory and removes
+pouch-generated payload files no longer referenced by the live projection. The
+root `store.log` file is a non-authoritative placeholder and is not replaced
+during compaction. Each compacted state snapshot starts with a private
+high-water control record, so replayed state/index sequence cannot move
+backwards after older segment history has been removed; that record participates
+in replay
 metadata but is not projected as user state.
 Idle read descriptors are cached separately from active read sources. The cache
 is a performance artifact only: entries are bounded, allocator-backed, reusable
@@ -828,11 +840,12 @@ index feature exists.
 Current implementation milestone: the pouch handle stores preferred and
 fallback query engines from `lc_pouch_open` options and from `pouch://`
 endpoint query parameters. Implicit `query` and `query_keys` requests use
-indexed mode by default, scan-preferred endpoints route implicit requests
-through scan mode, explicit request-level `engine` still overrides endpoint
-configuration, and scan-preferred endpoints with
-`query_fallback_engine=index` route implicit `refresh=wait_for` requests
-through the indexed path.
+indexed mode by default on plaintext roots, scan-preferred endpoints route
+implicit requests through scan mode, explicit request-level `engine` still
+overrides endpoint configuration on plaintext roots, and scan-preferred
+endpoints with `query_fallback_engine=index` route implicit `refresh=wait_for`
+requests through the indexed path. Encrypted roots always route pouch queries
+through scan mode regardless of endpoint or request-level index selection.
 
 This configuration is part of pouch setup, not just a per-request hint. A pouch
 instance opened with scan as the preferred engine must route ordinary match-all
@@ -1982,8 +1995,9 @@ must be unique and must not collide with segment names.
 
 An opened segment should be recorded in the manifest when possible, but replay
 must not depend on that manifest entry to find valid history. A missing manifest
-or legacy manifest can be repaired by scanning segment files. The manifest is a
-compact lifecycle index, not the only source of truth for committed records.
+or legacy namespace manifest can be repaired by scanning segment files. The
+manifest is a compact lifecycle index, not the only source of truth for
+committed records.
 
 ## Compaction
 
@@ -2406,10 +2420,19 @@ lc-pouch-desc-v1:<base64url-frame-size-salt-nonce-prefix>
 Descriptors contain only public decryption parameters: frame size, per-payload
 salt, and nonce prefix. The root key is never stored in descriptors. Each state
 record preserves plaintext byte count, cipher byte count, and descriptor bytes.
-Older plaintext records remain readable because records without descriptors are
-opened as plaintext. New encrypted writes currently use a 64 KiB plaintext
-frame cap; this is a streaming chunk limit, not a minimum storage allocation, so
-small payloads still write only their payload bytes plus per-frame header/tag
+An initialized pouch root is permanently either plaintext or encrypted for the
+v1 release. Opening an initialized plaintext root with crypto enabled, or an
+initialized encrypted root without crypto enabled, is rejected. Mixing plaintext
+records and encrypted records in one pouch root is not supported; any future
+mode change must be an explicit migration tool, not an implicit open-time
+fallback. Encrypted roots also bind the root manifest to
+`crypto_key_id=hmac-sha256:<base64url-hmac>` derived from the configured root
+key; opening the root with a different key is rejected before state replay or
+payload access. A populated root whose manifest is missing crypto mode metadata
+is rejected instead of being downgraded or inferred. New encrypted writes
+currently use a 64 KiB plaintext frame cap;
+this is a streaming chunk limit, not a minimum storage allocation, so small
+payloads still write only their payload bytes plus per-frame header/tag
 overhead and descriptor metadata.
 
 The public C helper `lc_pouch_crypto_generate_key_string()` creates a new root
@@ -2417,7 +2440,11 @@ key string. `lc_pouch_crypto_generate_key_file()` writes a 0600 key file, and
 `lc_pouch_crypto_default_key_file()` resolves the default path to
 `$XDG_CONFIG_HOME/liblockdc/pouch.key` or `~/.config/liblockdc/pouch.key`.
 Pouch clients can be configured with `pouch_crypto_key`,
-`pouch_crypto_key_file`, or `pouch_crypto_generate_key_file` endpoint options.
+`pouch_crypto_key_file`, or `pouch_crypto_generate_key_file` on
+`lc_client_config`. Inline `pouch_crypto_key` endpoint query parameters remain
+accepted for compatibility, but the client stores only a redacted endpoint copy
+and carries the key through dedicated secret fields that are wiped on cleanup.
+Key-file configuration is preferred for long-lived process config and logs.
 
 Staged promotion links the staged encrypted payload into the committed head and
 preserves descriptor, plaintext bytes, and cipher bytes rather than
@@ -2428,10 +2455,8 @@ Compression is not part of the v1 provider. If compression is added later, it
 must sit below the same descriptor boundary and continue preserving plaintext
 byte counts exposed by the lockd API.
 
-Backend identity also needs a crypto migration path. If the backend-id marker
-was previously stored unencrypted and encryption is enabled later, the store may
-rewrite the same identity encrypted under an expected ETag. The identity value
-itself must not change during that migration.
+Backend identity and stored records also need a future crypto migration path.
+That path is deliberately not part of the v1 release.
 
 ## Failure Mode Matrix
 
@@ -2497,10 +2522,10 @@ Pouch will require a public ABI bump only when the final public surface is
 introduced. To avoid multiple bumps:
 
 - Keep the first implementation under private headers and internal symbols.
-- Do not expose experimental pouch structs in `include/lc/lc.h` until the
-  endpoint behavior and any public config fields are settled.
-- Add public config only once, likely endpoint-compatible with
-  `config.endpoints = { "pouch:///..." }`.
+- Do not expose experimental pouch structs in `include/lc/lc.h`.
+- Keep pouch client configuration endpoint-compatible with
+  `config.endpoints = { "pouch:///..." }`, with encryption material carried by
+  explicit config fields rather than retained endpoint URI secrets.
 - If diagnostics are needed publicly, group them into one stable stats API
   rather than adding fields piecemeal.
 

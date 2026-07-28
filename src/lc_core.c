@@ -80,6 +80,8 @@ typedef struct lc_discard_sink {
   lc_sink_impl base;
 } lc_discard_sink;
 
+static int lc_discard_sink_marker;
+
 typedef struct lc_memory_sink {
   lc_sink_impl base;
   unsigned char *bytes;
@@ -156,6 +158,28 @@ void lc_free_with_allocator(const lc_allocator *allocator, void *ptr) {
     return;
   }
   free(ptr);
+}
+
+void lc_secret_wipe(void *ptr, size_t length) {
+  volatile unsigned char *cursor;
+
+  if (ptr == NULL) {
+    return;
+  }
+  cursor = (volatile unsigned char *)ptr;
+  while (length > 0U) {
+    *cursor++ = 0U;
+    --length;
+  }
+}
+
+void lc_secret_free_string_with_allocator(const lc_allocator *allocator,
+                                          char *value) {
+  if (value == NULL) {
+    return;
+  }
+  lc_secret_wipe(value, strlen(value));
+  lc_free_with_allocator(allocator, value);
 }
 
 char *lc_strdup_with_allocator(const lc_allocator *allocator,
@@ -984,7 +1008,7 @@ lc_pouch_endpoint_options_cleanup(const lc_allocator *allocator,
   lc_free_with_allocator(allocator, options->root_path);
   lc_free_with_allocator(allocator, options->query_engine);
   lc_free_with_allocator(allocator, options->query_fallback_engine);
-  lc_free_with_allocator(allocator, options->crypto_key);
+  lc_secret_free_string_with_allocator(allocator, options->crypto_key);
   lc_free_with_allocator(allocator, options->crypto_key_file);
   memset(options, 0, sizeof(*options));
 }
@@ -1152,7 +1176,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
       lc_free_with_allocator(allocator, decoded_key);
       return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     }
-    lc_free_with_allocator(allocator, options->crypto_key);
+    lc_secret_free_string_with_allocator(allocator, options->crypto_key);
     options->crypto_key = copy;
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
@@ -1257,6 +1281,94 @@ static int lc_pouch_endpoint_options_parse(const lc_allocator *allocator,
     }
     cursor = *next == '&' ? next + 1 : next;
   }
+  return LC_OK;
+}
+
+static int lc_pouch_endpoint_redacted_copy(const lc_allocator *allocator,
+                                           const char *endpoint, char **out,
+                                           lc_error *error) {
+  const char *path;
+  const char *query;
+  const char *cursor;
+  char *copy;
+  size_t prefix_len;
+  size_t dst;
+
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch endpoint redaction requires out", NULL, NULL,
+                        NULL);
+  }
+  *out = NULL;
+  if (!lc_endpoint_is_pouch(endpoint)) {
+    *out = lc_strdup_with_allocator(allocator, endpoint);
+    if (*out == NULL && endpoint != NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to copy client endpoint", NULL, NULL, NULL);
+    }
+    return LC_OK;
+  }
+
+  path = lc_pouch_endpoint_path(endpoint);
+  query = path != NULL ? strchr(path, '?') : NULL;
+  if (query == NULL) {
+    *out = lc_strdup_with_allocator(allocator, endpoint);
+    if (*out == NULL && endpoint != NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to copy client endpoint", NULL, NULL, NULL);
+    }
+    return LC_OK;
+  }
+
+  copy = (char *)lc_alloc_with_allocator(allocator, strlen(endpoint) + 1U);
+  if (copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy client endpoint", NULL, NULL, NULL);
+  }
+  prefix_len = (size_t)(query - endpoint);
+  memcpy(copy, endpoint, prefix_len);
+  dst = prefix_len;
+  cursor = query + 1;
+  while (*cursor != '\0') {
+    const char *part;
+    const char *equals;
+    const char *next;
+    char *decoded_key;
+    size_t key_len;
+    size_t part_len;
+    int is_secret;
+
+    part = cursor;
+    next = strchr(part, '&');
+    if (next == NULL) {
+      next = part + strlen(part);
+    }
+    equals = part;
+    while (equals < next && *equals != '=') {
+      ++equals;
+    }
+    key_len = (size_t)(equals - part);
+    part_len = (size_t)(next - part);
+    decoded_key = lc_pouch_endpoint_decode_component(allocator, part, key_len,
+                                                     "query option", error);
+    if (decoded_key == NULL) {
+      lc_free_with_allocator(allocator, copy);
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+    is_secret = strcmp(decoded_key, "pouch_crypto_key") == 0 ? 1 : 0;
+    lc_free_with_allocator(allocator, decoded_key);
+    if (!is_secret) {
+      copy[dst] = dst == prefix_len ? '?' : '&';
+      ++dst;
+      if (part_len > 0U) {
+        memcpy(copy + dst, part, part_len);
+        dst += part_len;
+      }
+    }
+    cursor = *next == '&' ? next + 1 : next;
+  }
+  copy[dst] = '\0';
+  *out = copy;
   return LC_OK;
 }
 
@@ -1417,7 +1529,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
       }
     }
   }
-  if (pouch_endpoint_count != 0U && config->endpoint_count != 1U) {
+  if (pouch_endpoint_count != 0U &&
+      (config->endpoint_count != 1U || config->unix_socket_path != NULL)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch endpoints must be configured alone", NULL, NULL,
                         NULL);
@@ -1491,10 +1604,17 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     pouch_open_options.query_engine = pouch_endpoint_options.query_engine;
     pouch_open_options.query_fallback_engine =
         pouch_endpoint_options.query_fallback_engine;
-    pouch_open_options.crypto_key = pouch_endpoint_options.crypto_key;
-    pouch_open_options.crypto_key_file = pouch_endpoint_options.crypto_key_file;
+    pouch_open_options.crypto_key = config->pouch_crypto_key != NULL
+                                        ? config->pouch_crypto_key
+                                        : pouch_endpoint_options.crypto_key;
+    pouch_open_options.crypto_key_file =
+        config->pouch_crypto_key_file != NULL
+            ? config->pouch_crypto_key_file
+            : pouch_endpoint_options.crypto_key_file;
     pouch_open_options.crypto_generate_key_file =
-        pouch_endpoint_options.crypto_generate_key_file;
+        config->pouch_crypto_generate_key_file != 0
+            ? config->pouch_crypto_generate_key_file
+            : pouch_endpoint_options.crypto_generate_key_file;
     rc = lc_pouch_open(pouch_endpoint_options.root_path, &config->allocator,
                        &pouch_open_options, &client->pouch, error);
     if (rc != LC_OK) {
@@ -1505,6 +1625,33 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                                         &pouch_endpoint_options);
       return rc;
     }
+    client->pouch_crypto_key = lc_strdup_with_allocator(
+        &config->allocator, pouch_open_options.crypto_key);
+    if (pouch_open_options.crypto_key != NULL &&
+        client->pouch_crypto_key == NULL) {
+      lc_client_close_method(&client->pub);
+      lc_engine_error_cleanup(&engine_error);
+      lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
+      lc_pouch_endpoint_options_cleanup(&config->allocator,
+                                        &pouch_endpoint_options);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to copy pouch crypto key", NULL, NULL, NULL);
+    }
+    client->pouch_crypto_key_file = lc_strdup_with_allocator(
+        &config->allocator, pouch_open_options.crypto_key_file);
+    if (pouch_open_options.crypto_key_file != NULL &&
+        client->pouch_crypto_key_file == NULL) {
+      lc_client_close_method(&client->pub);
+      lc_engine_error_cleanup(&engine_error);
+      lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
+      lc_pouch_endpoint_options_cleanup(&config->allocator,
+                                        &pouch_endpoint_options);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to copy pouch crypto key file", NULL, NULL,
+                          NULL);
+    }
+    client->pouch_crypto_generate_key_file =
+        pouch_open_options.crypto_generate_key_file;
     lc_pouch_endpoint_options_cleanup(&config->allocator,
                                       &pouch_endpoint_options);
   }
@@ -1525,13 +1672,13 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                           NULL);
     }
     for (i = 0U; i < config->endpoint_count; ++i) {
-      client->endpoints[i] =
-          lc_strdup_with_allocator(&config->allocator, config->endpoints[i]);
-      if (client->endpoints[i] == NULL && config->endpoints[i] != NULL) {
+      rc = lc_pouch_endpoint_redacted_copy(&config->allocator,
+                                           config->endpoints[i],
+                                           &client->endpoints[i], error);
+      if (rc != LC_OK) {
         lc_client_close_method(&client->pub);
         lc_engine_error_cleanup(&engine_error);
-        return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                            "failed to copy client endpoint", NULL, NULL, NULL);
+        return rc;
       }
     }
   }
@@ -1861,6 +2008,7 @@ int lc_sink_to_discard(lc_sink **out, lc_error *error) {
   }
   sink->base.pub.write = lc_sink_pub_write;
   sink->base.pub.close = lc_sink_pub_close;
+  sink->base.pub.impl = &lc_discard_sink_marker;
   sink->base.write_impl = lc_discard_sink_write;
   sink->base.close_impl = lc_discard_sink_close;
   *out = &sink->base.pub;
@@ -1868,14 +2016,11 @@ int lc_sink_to_discard(lc_sink **out, lc_error *error) {
 }
 
 int lc_sink_is_discard(const lc_sink *sink) {
-  const lc_sink_impl *base;
-
   if (sink == NULL) {
     return 0;
   }
-  base = (const lc_sink_impl *)sink;
-  return base->write_impl == lc_discard_sink_write &&
-         base->close_impl == lc_discard_sink_close;
+  return sink->write == lc_sink_pub_write && sink->close == lc_sink_pub_close &&
+         sink->impl == &lc_discard_sink_marker;
 }
 
 int lc_sink_to_memory(lc_sink **out, lc_error *error) {

@@ -18,9 +18,8 @@ static int lc_client_query_request_selector_json(const lc_query_req *req,
   lql_error lql_error_value;
   lql_status status;
   FILE *fp;
-  long length;
   char *json;
-  size_t got;
+  size_t json_length;
 
   if (out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -46,6 +45,7 @@ static int lc_client_query_request_selector_json(const lc_query_req *req,
   selector = NULL;
   fp = NULL;
   json = NULL;
+  json_length = 0U;
   lql_error_init(&lql_error_value);
   status = lql_new(&runtime, &lql_error_value);
   if (status != LQL_STATUS_OK) {
@@ -61,12 +61,12 @@ static int lc_client_query_request_selector_json(const lc_query_req *req,
         error, LC_ERR_INVALID, 0L, "failed to parse query selector_lql",
         lql_error_value.message, lql_status_string(status), "liblql");
   }
-  fp = tmpfile();
+  fp = open_memstream(&json, &json_length);
   if (fp == NULL) {
     runtime->selector_destroy(runtime, selector);
     runtime->destroy(runtime);
     return lc_error_set(error, LC_ERR_PROTOCOL, (long)errno,
-                        "failed to create query selector serialization file",
+                        "failed to create query selector serialization stream",
                         strerror(errno), NULL, "liblql");
   }
   status =
@@ -74,6 +74,7 @@ static int lc_client_query_request_selector_json(const lc_query_req *req,
   runtime->selector_destroy(runtime, selector);
   if (status != LQL_STATUS_OK) {
     fclose(fp);
+    free(json);
     runtime->destroy(runtime);
     return lc_error_set(
         error, LC_ERR_INVALID, 0L, "failed to serialize query selector_lql",
@@ -81,45 +82,21 @@ static int lc_client_query_request_selector_json(const lc_query_req *req,
   }
   runtime->destroy(runtime);
   runtime = NULL;
-  if (fflush(fp) != 0 || fseek(fp, 0L, SEEK_END) != 0) {
-    int saved_errno;
-
-    saved_errno = errno;
-    fclose(fp);
-    return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
-                        "failed to finalize query selector serialization",
-                        strerror(saved_errno), NULL, "liblql");
-  }
-  length = ftell(fp);
-  if (length < 0L || fseek(fp, 0L, SEEK_SET) != 0) {
-    int saved_errno;
-
-    saved_errno = errno;
-    fclose(fp);
-    return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
-                        "failed to rewind query selector serialization",
-                        strerror(saved_errno), NULL, "liblql");
-  }
-  json = (char *)malloc((size_t)length + 1U);
-  if (json == NULL) {
-    fclose(fp);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate query selector JSON", NULL, NULL,
-                        NULL);
-  }
-  got = fread(json, 1U, (size_t)length, fp);
-  if (got != (size_t)length || ferror(fp)) {
+  if (fclose(fp) != 0) {
     int saved_errno;
 
     saved_errno = errno;
     free(json);
-    fclose(fp);
     return lc_error_set(error, LC_ERR_PROTOCOL, (long)saved_errno,
-                        "failed to read query selector serialization",
+                        "failed to finalize query selector serialization",
                         strerror(saved_errno), NULL, "liblql");
   }
-  json[(size_t)length] = '\0';
-  fclose(fp);
+  if (json == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate query selector JSON", NULL, NULL,
+                        NULL);
+  }
+  (void)json_length;
   *out = json;
   return LC_OK;
 }
@@ -2868,5 +2845,8 @@ void lc_client_close_method(lc_client *self) {
   lc_client_free(client, client->client_bundle_bytes);
   lc_client_free(client, client->client_bundle_path);
   lc_client_free(client, client->default_namespace);
+  lc_secret_free_string_with_allocator(&client->allocator,
+                                       client->pouch_crypto_key);
+  lc_client_free(client, client->pouch_crypto_key_file);
   lc_client_free(client, client);
 }

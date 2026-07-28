@@ -119,6 +119,15 @@ set_tests_properties(lc_unit_tmp_cleanup_orphan_owner_marker PROPERTIES
   LABELS "unit;local"
   TIMEOUT 15
 )
+add_test(NAME lc_unit_tmp_cleanup_unmarked_global_prefix
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "LOCKDC_TMP_CLEANUP_MODE=unmarked-global-prefix"
+    "$<TARGET_FILE:lc_unit_tmp_cleanup_probe>"
+)
+set_tests_properties(lc_unit_tmp_cleanup_unmarked_global_prefix PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 15
+)
 lc_add_unit_test(lc_unit_engine_allocator test_lc_engine_allocator.c)
 lc_add_unit_test(lc_unit_contracts test_lc_contracts.c mock_lc_public.c)
 lc_add_unit_test(lc_unit_public_mock_usage test_lc_public_mock_usage.c mock_lc_public.c)

@@ -367,6 +367,21 @@ static void test_public_struct_layout_preserves_stable_prefixes(void **state) {
                        sizeof(((lc_client_config *)0)->logger));
   assert_true(offsetof(lc_client_config, allocator) >
               offsetof(lc_client_config, disable_logger_sys_field));
+  assert_int_equal(offsetof(lc_client_config, pouch_crypto_key),
+                   offsetof(lc_client_config, allocator) +
+                       sizeof(((lc_client_config *)0)->allocator));
+  assert_int_equal(offsetof(lc_client_config, pouch_crypto_key_file),
+                   offsetof(lc_client_config, pouch_crypto_key) +
+                       sizeof(((lc_client_config *)0)->pouch_crypto_key));
+  assert_int_equal(offsetof(lc_client_config, pouch_crypto_generate_key_file),
+                   offsetof(lc_client_config, pouch_crypto_key_file) +
+                       sizeof(((lc_client_config *)0)->pouch_crypto_key_file));
+
+  assert_int_equal(offsetof(lc_query_req, limit),
+                   offsetof(lc_query_req, selector_json) +
+                       sizeof(((lc_query_req *)0)->selector_json));
+  assert_true(offsetof(lc_query_req, selector_lql) >
+              offsetof(lc_query_req, refresh));
 
   assert_int_equal(offsetof(lc_client, get_namespace_config),
                    offsetof(lc_client, query) +

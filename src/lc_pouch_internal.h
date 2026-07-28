@@ -47,5 +47,9 @@ extern void *lc_pouch_test_after_snapshot_write_context;
 #endif
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);
+int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,
+                                       const char *namespace_name,
+                                       lc_pouch_state_precondition_fn callback,
+                                       void *context, lc_error *error);
 
 #endif
