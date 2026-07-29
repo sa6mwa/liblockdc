@@ -12525,6 +12525,194 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   cleanup_root(root);
 }
 
+static void
+test_flush_index_external_accept_invalidates_cached_summary(void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"beta\"}}";
+  lc_client *cached_client;
+  lc_client *external_client;
+  lc_pouch *writer;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture capture;
+  lc_error error;
+  char *namespace_path;
+  char root[512];
+  int rc;
+
+  (void)state;
+  cached_client = NULL;
+  external_client = NULL;
+  writer = NULL;
+  namespace_path = NULL;
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  lc_error_init(&error);
+  make_root("flush-index-external-accept", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &cached_client, &error);
+  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  pouch_write_json_state(writer, "docs/external-accept", "doc/a",
+                         "{\"category\":\"alpha\"}", NULL, &error);
+  lc_pouch_close(writer);
+  writer = NULL;
+
+  flush_req.namespace_name = "docs/external-accept";
+  flush_req.mode = "wait";
+  rc = cached_client->flush_index(cached_client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_index_flush_res_cleanup(&flush_res);
+
+  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  pouch_write_json_state(writer, "docs/external-accept", "doc/b",
+                         "{\"category\":\"beta\"}", NULL, &error);
+  lc_pouch_close(writer);
+  writer = NULL;
+
+  open_pouch_client(root, &external_client, &error);
+  flush_req.mode = "sync";
+  rc = external_client->flush_index(external_client, &flush_req, &flush_res,
+                                   &error);
+  assert_int_equal(rc, LC_OK);
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(external_client);
+  external_client = NULL;
+
+  rc = cached_client->flush_index(cached_client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_index_flush_res_cleanup(&flush_res);
+
+  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  pouch_write_json_state(writer, "docs/external-accept", "doc/c",
+                         "{\"category\":\"gamma\"}", NULL, &error);
+  lc_pouch_close(writer);
+  writer = NULL;
+
+  rc = cached_client->flush_index(cached_client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_index_flush_res_cleanup(&flush_res);
+
+  namespace_path =
+      lc_pouch_namespace_path(NULL, root, "docs/external-accept");
+  assert_non_null(namespace_path);
+  assert_path_file_contains(namespace_path, "index/query.index", "row_count=3");
+
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = "docs/external-accept";
+  query_req.selector_json = selector;
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = cached_client->query_keys(cached_client, &query_req, &handler, &capture,
+                                 &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_true(pouch_query_capture_has(&capture, "doc/b"));
+
+  lc_query_res_cleanup(&query_res);
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_client_close(cached_client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_flush_index_rebuilds_incomplete_summary_after_document_fix(void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"fixed\"}}";
+  lc_client *client;
+  lc_pouch *writer;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture capture;
+  lc_error error;
+  char *namespace_path;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  writer = NULL;
+  namespace_path = NULL;
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  lc_error_init(&error);
+  make_root("flush-index-incomplete-fix", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  pouch_write_json_state(writer, "docs/incomplete-fix", "doc/bad", "{", NULL,
+                         &error);
+
+  flush_req.namespace_name = "docs/incomplete-fix";
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_index_flush_res_cleanup(&flush_res);
+
+  namespace_path =
+      lc_pouch_namespace_path(NULL, root, "docs/incomplete-fix");
+  assert_non_null(namespace_path);
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_index_complete=0");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "presence_index_complete=0");
+
+  pouch_write_json_state(writer, "docs/incomplete-fix", "doc/bad",
+                         "{\"category\":\"fixed\",\"n\":1}", NULL, &error);
+  lc_pouch_close(writer);
+  writer = NULL;
+
+  flush_req.mode = "sync";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_index_flush_res_cleanup(&flush_res);
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "term_index_complete=1");
+  assert_path_file_contains(namespace_path, "index/query.index",
+                            "presence_index_complete=1");
+
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = "docs/incomplete-fix";
+  query_req.selector_json = selector;
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_true(pouch_query_capture_has(&capture, "doc/bad"));
+
+  lc_query_res_cleanup(&query_res);
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_txn_decisions_persist_participant_records(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -13813,6 +14001,10 @@ int main(void) {
       cmocka_unit_test(test_query_documents_scan_streams_rows),
       cmocka_unit_test(test_query_documents_index_uses_scalar_postings),
       cmocka_unit_test(test_flush_index_reports_projection_high_water),
+      cmocka_unit_test(
+          test_flush_index_external_accept_invalidates_cached_summary),
+      cmocka_unit_test(
+          test_flush_index_rebuilds_incomplete_summary_after_document_fix),
       cmocka_unit_test(test_txn_decisions_persist_participant_records),
       cmocka_unit_test(test_txn_decisions_apply_attachment_side_effects),
       cmocka_unit_test(test_txn_recovery_applies_attachment_side_effects),

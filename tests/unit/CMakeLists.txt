@@ -71,9 +71,16 @@ add_executable(lc_unit_tmp_cleanup_probe
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
 )
 lc_configure_c_test_target(lc_unit_tmp_cleanup_probe)
+set(lc_unit_tmp_cleanup_probe_command "$<TARGET_FILE:lc_unit_tmp_cleanup_probe>")
+if(CMAKE_CROSSCOMPILING AND CMAKE_CROSSCOMPILING_EMULATOR)
+  set(lc_unit_tmp_cleanup_probe_command
+    ${CMAKE_CROSSCOMPILING_EMULATOR}
+    "$<TARGET_FILE:lc_unit_tmp_cleanup_probe>"
+  )
+endif()
 add_test(NAME lc_unit_tmp_cleanup_signal
   COMMAND "${CMAKE_COMMAND}"
-    -DLOCKDC_TMP_CLEANUP_PROBE=$<TARGET_FILE:lc_unit_tmp_cleanup_probe>
+    "-DLOCKDC_TMP_CLEANUP_PROBE_COMMAND=${lc_unit_tmp_cleanup_probe_command}"
     -DLOCKDC_TMP_PATH_FILE=${CMAKE_BINARY_DIR}/tmp-cleanup-signal.path
     -P "${CMAKE_SOURCE_DIR}/tests/tmp_cleanup_signal_test.cmake"
 )
@@ -83,7 +90,7 @@ set_tests_properties(lc_unit_tmp_cleanup_signal PROPERTIES
 )
 add_test(NAME lc_unit_tmp_cleanup_abort
   COMMAND "${CMAKE_COMMAND}"
-    -DLOCKDC_TMP_CLEANUP_PROBE=$<TARGET_FILE:lc_unit_tmp_cleanup_probe>
+    "-DLOCKDC_TMP_CLEANUP_PROBE_COMMAND=${lc_unit_tmp_cleanup_probe_command}"
     -DLOCKDC_TMP_PATH_FILE=${CMAKE_BINARY_DIR}/tmp-cleanup-abort.path
     -DLOCKDC_TMP_CLEANUP_SIGNAL=ABRT
     -P "${CMAKE_SOURCE_DIR}/tests/tmp_cleanup_signal_test.cmake"
@@ -95,7 +102,7 @@ set_tests_properties(lc_unit_tmp_cleanup_abort PROPERTIES
 add_test(NAME lc_unit_tmp_cleanup_auto_stale
   COMMAND "${CMAKE_COMMAND}" -E env
     "LOCKDC_TMP_CLEANUP_MODE=auto-stale"
-    "$<TARGET_FILE:lc_unit_tmp_cleanup_probe>"
+    ${lc_unit_tmp_cleanup_probe_command}
 )
 set_tests_properties(lc_unit_tmp_cleanup_auto_stale PROPERTIES
   LABELS "unit;local"
@@ -104,7 +111,7 @@ set_tests_properties(lc_unit_tmp_cleanup_auto_stale PROPERTIES
 add_test(NAME lc_unit_tmp_cleanup_explicit_global_stale
   COMMAND "${CMAKE_COMMAND}" -E env
     "LOCKDC_TMP_CLEANUP_MODE=explicit-global-stale"
-    "$<TARGET_FILE:lc_unit_tmp_cleanup_probe>"
+    ${lc_unit_tmp_cleanup_probe_command}
 )
 set_tests_properties(lc_unit_tmp_cleanup_explicit_global_stale PROPERTIES
   LABELS "unit;local"
@@ -113,7 +120,7 @@ set_tests_properties(lc_unit_tmp_cleanup_explicit_global_stale PROPERTIES
 add_test(NAME lc_unit_tmp_cleanup_orphan_owner_marker
   COMMAND "${CMAKE_COMMAND}" -E env
     "LOCKDC_TMP_CLEANUP_MODE=orphan-owner-marker"
-    "$<TARGET_FILE:lc_unit_tmp_cleanup_probe>"
+    ${lc_unit_tmp_cleanup_probe_command}
 )
 set_tests_properties(lc_unit_tmp_cleanup_orphan_owner_marker PROPERTIES
   LABELS "unit;local"
@@ -122,7 +129,7 @@ set_tests_properties(lc_unit_tmp_cleanup_orphan_owner_marker PROPERTIES
 add_test(NAME lc_unit_tmp_cleanup_unmarked_global_prefix
   COMMAND "${CMAKE_COMMAND}" -E env
     "LOCKDC_TMP_CLEANUP_MODE=unmarked-global-prefix"
-    "$<TARGET_FILE:lc_unit_tmp_cleanup_probe>"
+    ${lc_unit_tmp_cleanup_probe_command}
 )
 set_tests_properties(lc_unit_tmp_cleanup_unmarked_global_prefix PROPERTIES
   LABELS "unit;local"

@@ -1,5 +1,9 @@
-if(NOT DEFINED LOCKDC_TMP_CLEANUP_PROBE)
-    message(FATAL_ERROR "LOCKDC_TMP_CLEANUP_PROBE is required")
+if(NOT DEFINED LOCKDC_TMP_CLEANUP_PROBE_COMMAND)
+    if(DEFINED LOCKDC_TMP_CLEANUP_PROBE)
+        set(LOCKDC_TMP_CLEANUP_PROBE_COMMAND "${LOCKDC_TMP_CLEANUP_PROBE}")
+    else()
+        message(FATAL_ERROR "LOCKDC_TMP_CLEANUP_PROBE_COMMAND is required")
+    endif()
 endif()
 if(NOT DEFINED LOCKDC_TMP_PATH_FILE)
     message(FATAL_ERROR "LOCKDC_TMP_PATH_FILE is required")
@@ -13,7 +17,7 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
             "LOCKDC_TMP_CLEANUP_PATH_FILE=${LOCKDC_TMP_PATH_FILE}"
             "LOCKDC_TMP_CLEANUP_SIGNAL=${LOCKDC_TMP_CLEANUP_SIGNAL}"
-            "${LOCKDC_TMP_CLEANUP_PROBE}"
+            ${LOCKDC_TMP_CLEANUP_PROBE_COMMAND}
     RESULT_VARIABLE probe_result
 )
 
@@ -32,7 +36,7 @@ endif()
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
             "LOCKDC_TMP_CLEANUP_MODE=signal-stale"
-            "${LOCKDC_TMP_CLEANUP_PROBE}"
+            ${LOCKDC_TMP_CLEANUP_PROBE_COMMAND}
     RESULT_VARIABLE cleanup_result
 )
 if(NOT cleanup_result STREQUAL "0")

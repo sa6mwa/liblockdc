@@ -341,6 +341,17 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 			addMetricDuration(&metrics.updateNS, phaseStart)
 			metrics.writes++
 			metrics.bytes += int64(len(body))
+			if metrics.writes%128 == 0 {
+				phaseStart = time.Now()
+				ctx, cancel = context.WithTimeout(context.Background(), 60*time.Second)
+				_, err = h.client.FlushIndex(ctx, lockdDiskBenchNamespace, lockdclient.WithFlushModeWait())
+				cancel()
+				if err != nil {
+					_ = session.Release(context.Background())
+					b.Fatalf("lockd disk production intermediate flush index: %v\n%s", err, h.logs.String())
+				}
+				addMetricDuration(&metrics.flushNS, phaseStart)
+			}
 			if row == 0 && generation == 0 {
 				staleETag = res.NewStateETag
 			}
@@ -473,6 +484,14 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 	cancel()
 	if err != nil {
 		b.Fatalf("lockd disk production flush index: %v\n%s", err, h.logs.String())
+	}
+	addMetricDuration(&metrics.flushNS, phaseStart)
+	phaseStart = time.Now()
+	ctx, cancel = context.WithTimeout(context.Background(), 60*time.Second)
+	_, err = h.client.FlushIndex(ctx, lockdDiskBenchNamespace, lockdclient.WithFlushModeWait())
+	cancel()
+	if err != nil {
+		b.Fatalf("lockd disk production no-op flush index: %v\n%s", err, h.logs.String())
 	}
 	addMetricDuration(&metrics.flushNS, phaseStart)
 	phaseStart = time.Now()

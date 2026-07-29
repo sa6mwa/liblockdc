@@ -15,6 +15,26 @@ typedef struct lc_pouch_query_index_prepared_text
     lc_pouch_query_index_prepared_text;
 typedef struct lc_pouch_query_index_prepared_temporal
     lc_pouch_query_index_prepared_temporal;
+typedef struct lc_pouch_query_index_flush_cache
+    lc_pouch_query_index_flush_cache;
+
+typedef struct lc_pouch_state_change_visit_entry {
+  const char *key;
+  const char *content_type;
+  const char *etag;
+  unsigned long version;
+  unsigned long bytes;
+  unsigned long cipher_bytes;
+  const char *descriptor;
+  long updated_at_unix;
+  int has_query_hidden;
+  int query_hidden;
+  int found;
+} lc_pouch_state_change_visit_entry;
+
+typedef int (*lc_pouch_state_change_visit_fn)(
+    const lc_pouch_state_change_visit_entry *entry, void *context,
+    lc_error *error);
 
 struct lc_pouch {
   lc_allocator allocator;
@@ -38,6 +58,7 @@ struct lc_pouch {
   lc_pouch_query_index_prepared_range *prepared_range_readers;
   lc_pouch_query_index_prepared_text *prepared_text_readers;
   lc_pouch_query_index_prepared_temporal *prepared_temporal_readers;
+  lc_pouch_query_index_flush_cache *query_index_flush_cache;
 };
 
 #ifdef LOCKDC_TEST_BUILD
@@ -56,5 +77,9 @@ int lc_pouch_state_read_metadata_locked(lc_pouch *pouch,
                                         const char *key,
                                         lc_pouch_state_read_result *out,
                                         lc_error *error);
+int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
+                               unsigned long after_version,
+                               lc_pouch_state_change_visit_fn visitor,
+                               void *context, lc_error *error);
 
 #endif

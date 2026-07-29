@@ -2603,10 +2603,10 @@ static int lc_pouch_query_index_process_exact_document_page(
   for (index = 0U; index < page_keys->count; ++index) {
     read_keys[index] = page_keys->keys[index].key;
   }
-  rc = lc_pouch_state_read_many(context->client->pouch, context->namespace_name,
-                                read_keys, page_keys->count,
-                                lc_pouch_query_index_emit_exact_document_read,
-                                context, error);
+  rc = lc_pouch_state_read_many_cached(
+      context->client->pouch, context->namespace_name, read_keys,
+      page_keys->count, lc_pouch_query_index_emit_exact_document_read, context,
+      error);
   lc_free_with_allocator(NULL, read_keys);
   return rc;
 }
@@ -2705,9 +2705,74 @@ static int lc_pouch_query_run_scan_predicate(lc_pouch_query_scan_context *scan,
       read_keys[index] = keys.keys[index].key;
     }
     scan->indexed_candidates_exact = 0;
-    rc = lc_pouch_state_read_many(
-        scan->client->pouch, scan->namespace_name, read_keys, keys.count,
-        lc_pouch_query_index_process_key_read, scan, error);
+    if (scan->emit_documents) {
+      rc = lc_pouch_state_read_many(
+          scan->client->pouch, scan->namespace_name, read_keys, keys.count,
+          lc_pouch_query_index_process_key_read, scan, error);
+    } else {
+      rc = lc_pouch_state_read_many_cached(
+          scan->client->pouch, scan->namespace_name, read_keys, keys.count,
+          lc_pouch_query_index_process_key_read, scan, error);
+    }
+  }
+  lc_free_with_allocator(NULL, read_keys);
+  lc_pouch_query_index_key_set_cleanup(&keys);
+  return rc;
+}
+
+static int
+lc_pouch_query_warm_body_cache_read(const char *key,
+                                    const lc_pouch_state_read_result *result,
+                                    void *context, lc_error *error) {
+  (void)key;
+  (void)result;
+  (void)context;
+  (void)error;
+  return LC_OK;
+}
+
+static int lc_pouch_query_warm_encrypted_body_cache(lc_client_handle *client,
+                                                    const char *namespace_name,
+                                                    lc_error *error) {
+  lc_pouch_query_index_key_set keys;
+  const char **read_keys;
+  size_t index;
+  int rc;
+
+  if (client == NULL || client->pouch == NULL || namespace_name == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch encrypted body-cache warmup requires client and "
+                        "namespace",
+                        NULL, NULL, NULL);
+  }
+  if (!lc_pouch_crypto_enabled(client->pouch->crypto)) {
+    return LC_OK;
+  }
+  memset(&keys, 0, sizeof(keys));
+  read_keys = NULL;
+  rc = lc_pouch_state_visit(client->pouch, namespace_name,
+                            lc_pouch_query_scan_key_collect, &keys, error);
+  if (rc == LC_OK && keys.count > 1U) {
+    qsort(keys.keys, keys.count, sizeof(keys.keys[0]),
+          lc_pouch_query_index_key_compare);
+  }
+  if (rc == LC_OK && keys.count > 0U) {
+    read_keys = (const char **)lc_calloc_with_allocator(NULL, keys.count,
+                                                        sizeof(*read_keys));
+    if (read_keys == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch encrypted body-cache warmup "
+                        "keys",
+                        NULL, NULL, NULL);
+    }
+  }
+  if (rc == LC_OK && keys.count > 0U) {
+    for (index = 0U; index < keys.count; ++index) {
+      read_keys[index] = keys.keys[index].key;
+    }
+    rc = lc_pouch_state_read_many_cached(
+        client->pouch, namespace_name, read_keys, keys.count,
+        lc_pouch_query_warm_body_cache_read, NULL, error);
   }
   lc_free_with_allocator(NULL, read_keys);
   lc_pouch_query_index_key_set_cleanup(&keys);
@@ -2819,7 +2884,7 @@ lc_pouch_query_index_process_keys(lc_pouch_query_scan_context *context,
   for (index = 0U; index < keys->count; ++index) {
     read_keys[index] = keys->keys[index].key;
   }
-  rc = lc_pouch_state_read_many(
+  rc = lc_pouch_state_read_many_cached(
       context->client->pouch, context->namespace_name, read_keys, keys->count,
       lc_pouch_query_index_process_key_read, context, error);
   lc_free_with_allocator(NULL, read_keys);
@@ -9513,6 +9578,10 @@ int lc_pouch_client_flush_index_method(lc_client *self,
   memset(&index_result, 0, sizeof(index_result));
   rc = lc_pouch_query_index_flush(client->pouch, namespace_name, index_seq,
                                   &index_result, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_query_warm_encrypted_body_cache(client, namespace_name, error);
   if (rc != LC_OK) {
     return rc;
   }

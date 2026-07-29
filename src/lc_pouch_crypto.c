@@ -22,6 +22,7 @@
 #define LC_POUCH_NONCE_BYTES 12U
 #define LC_POUCH_DEK_BYTES 32U
 #define LC_POUCH_GCM_TAG_BYTES 16U
+#define LC_POUCH_FIRST_FRAME_PLAINTEXT_BYTES (4U * 1024U)
 #define LC_POUCH_FRAME_PLAINTEXT_BYTES (64U * 1024U)
 #define LC_POUCH_DESC_RAW_BYTES                                                \
   (4U + LC_POUCH_SALT_BYTES + LC_POUCH_NONCE_PREFIX_BYTES)
@@ -1266,8 +1267,11 @@ int lc_pouch_crypto_stream_to_file(lc_pouch_crypto *crypto, const char *context,
   rc = LC_OK;
   for (;;) {
     size_t got;
+    size_t target;
 
-    got = body->read(body, buffer, desc.frame_size, error);
+    target = counter == 0UL ? LC_POUCH_FIRST_FRAME_PLAINTEXT_BYTES
+                            : desc.frame_size;
+    got = body->read(body, buffer, target, error);
     if (got == 0U) {
       if (error != NULL && error->code != LC_OK) {
         rc = error->code;
