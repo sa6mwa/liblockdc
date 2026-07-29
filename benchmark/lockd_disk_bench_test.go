@@ -73,46 +73,7 @@ func lockdBenchLQL(scenario string) string {
 }
 
 func lockdBenchDocument(i int64) []byte {
-	bucket := "haystack"
-	if i%64 == 0 {
-		bucket = "needle"
-	}
-	group := "odd"
-	if i%2 == 0 {
-		group = "even"
-	}
-	region := "apac"
-	if i%3 == 0 {
-		region = "us"
-	} else if i%3 == 1 {
-		region = "eu"
-	}
-	tag0 := "runtime"
-	if i%2 == 0 {
-		tag0 = "planning"
-	}
-	tag1 := "ops"
-	if i%4 == 0 {
-		tag1 = "finance"
-	}
-	createdAt := "2024-01-01T00:00:00Z"
-	if i%5 == 0 {
-		createdAt = "2026-01-01T00:00:00Z"
-	} else if i%5 == 1 {
-		createdAt = "not-a-date"
-	}
-	message := "ordinary"
-	if i%8 == 0 {
-		message = "timeout"
-	}
-	flag := "false"
-	if i%7 == 0 {
-		flag = "true"
-	}
-	return []byte(fmt.Sprintf(
-		`{"bucket":"%s","group":"%s","region":"%s","value":%d,"tags":["%s","%s"],"created_at":"%s","details":{"message":"%s benchmark document %d"},"flag":%s}`,
-		bucket, group, region, i, tag0, tag1, createdAt, message, i, flag,
-	))
+	return productionDocument(i, 0, 4096)
 }
 
 type lockdDiskHarness struct {
@@ -391,6 +352,13 @@ func benchmarkLockdDisk(b *testing.B, documents bool) {
 		"DateAfter",
 		"OrSparseOrFlag",
 		"RecursiveExists",
+		"TenantEnterprise",
+		"WorkflowEscalated",
+		"AmountBand",
+		"RiskSignal",
+		"NarrativeSummary",
+		"NarrativeDescription",
+		"FullTextAny",
 	})
 	for _, rows := range rowsList {
 		rows := rows

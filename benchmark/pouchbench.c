@@ -28,6 +28,9 @@ struct lockdc_pouch_bench_fixture {
   long rows;
 };
 
+static char *lockdc_bench_document(long row, long generation,
+                                   long payload_bytes, size_t *out_len);
+
 static uint64_t lockdc_bench_now_ns(void) {
   struct timespec ts;
 
@@ -42,6 +45,20 @@ static void lockdc_bench_add_ns(uint64_t *dst, uint64_t start, uint64_t end) {
     return;
   }
   *dst += end - start;
+}
+
+static void lockdc_bench_add_phase_ns(uint64_t *phase, uint64_t *total,
+                                      uint64_t start, uint64_t end) {
+  uint64_t before;
+
+  if (phase == NULL) {
+    return;
+  }
+  before = *phase;
+  lockdc_bench_add_ns(phase, start, end);
+  if (total != NULL) {
+    *total += *phase - before;
+  }
 }
 
 static long lockdc_bench_query_matches_from_metadata(const char *metadata) {
@@ -223,31 +240,13 @@ static int lockdc_bench_seed(lc_client *client, long rows, lc_error *error) {
     lc_update_res res;
     lc_source *source;
     char key[64];
-    char json[512];
-    int written;
+    char *json;
+    size_t json_len;
     int rc;
 
-    written =
-        snprintf(json, sizeof(json),
-                 "{\"bucket\":\"%s\",\"group\":\"%s\",\"region\":\"%s\","
-                 "\"value\":%ld,\"tags\":[\"%s\",\"%s\"],"
-                 "\"created_at\":\"%s\","
-                 "\"details\":{\"message\":\"%s benchmark document %ld\"},"
-                 "\"flag\":%s}",
-                 (i % 64L) == 0L ? "needle" : "haystack",
-                 (i % 2L) == 0L ? "even" : "odd",
-                 (i % 3L) == 0L   ? "us"
-                 : (i % 3L) == 1L ? "eu"
-                                  : "apac",
-                 i, (i % 2L) == 0L ? "planning" : "runtime",
-                 (i % 4L) == 0L ? "finance" : "ops",
-                 (i % 5L) == 0L   ? "2026-01-01T00:00:00Z"
-                 : (i % 5L) == 1L ? "not-a-date"
-                                  : "2024-01-01T00:00:00Z",
-                 (i % 8L) == 0L ? "timeout" : "ordinary", i,
-                 (i % 7L) == 0L ? "true" : "false");
-    if (written <= 0 || (size_t)written >= sizeof(json)) {
-      return LC_ERR_INVALID;
+    json = lockdc_bench_document(i, 0L, 4096L, &json_len);
+    if (json == NULL) {
+      return LC_ERR_NOMEM;
     }
     snprintf(key, sizeof(key), "doc/%08ld", i);
     lc_update_req_init(&req);
@@ -255,7 +254,7 @@ static int lockdc_bench_seed(lc_client *client, long rows, lc_error *error) {
     req.lease.key = key;
     req.content_type = "application/json";
     source = NULL;
-    rc = lc_source_from_memory(json, strlen(json), &source, error);
+    rc = lc_source_from_memory(json, json_len, &source, error);
     if (rc == LC_OK) {
       rc = client->update(client, &req, source, &res, error);
     }
@@ -263,6 +262,7 @@ static int lockdc_bench_seed(lc_client *client, long rows, lc_error *error) {
       lc_source_close(source);
     }
     lc_update_res_cleanup(&res);
+    free(json);
     if (rc != LC_OK) {
       return rc;
     }
@@ -1006,7 +1006,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
           lease->close(lease);
           goto done;
         }
-        lockdc_bench_add_ns(&out->flush_ns, phase_start, lockdc_bench_now_ns());
+        lockdc_bench_add_phase_ns(&out->flush_intermediate_ns, &out->flush_ns,
+                                  phase_start, lockdc_bench_now_ns());
       }
       if (row == 0L && generation == 0L && lease->state_etag != NULL) {
         stale_etag = lockdc_bench_copy_string(lease->state_etag);
@@ -1102,13 +1103,15 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   if (rc != LC_OK) {
     goto done;
   }
-  lockdc_bench_add_ns(&out->flush_ns, phase_start, lockdc_bench_now_ns());
+  lockdc_bench_add_phase_ns(&out->flush_final_ns, &out->flush_ns, phase_start,
+                            lockdc_bench_now_ns());
   phase_start = lockdc_bench_now_ns();
   rc = lockdc_bench_flush(client, &error);
   if (rc != LC_OK) {
     goto done;
   }
-  lockdc_bench_add_ns(&out->flush_ns, phase_start, lockdc_bench_now_ns());
+  lockdc_bench_add_phase_ns(&out->flush_noop_ns, &out->flush_ns, phase_start,
+                            lockdc_bench_now_ns());
   phase_start = lockdc_bench_now_ns();
   lc_client_close(client);
   client = NULL;
@@ -1122,7 +1125,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   if (rc != LC_OK) {
     goto done;
   }
-  lockdc_bench_add_ns(&out->flush_ns, phase_start, lockdc_bench_now_ns());
+  lockdc_bench_add_phase_ns(&out->flush_reopen_ns, &out->flush_ns, phase_start,
+                            lockdc_bench_now_ns());
   phase_start = lockdc_bench_now_ns();
   rc = lockdc_bench_query(client, "RangeHalf", "index", 0, rows, &out->rows,
                           &error);

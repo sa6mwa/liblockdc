@@ -70,6 +70,13 @@ func benchmarkMediumLQL(b *testing.B, documents bool) {
 		"DateAfter",
 		"OrSparseOrFlag",
 		"RecursiveExists",
+		"TenantEnterprise",
+		"WorkflowEscalated",
+		"AmountBand",
+		"RiskSignal",
+		"NarrativeSummary",
+		"NarrativeDescription",
+		"FullTextAny",
 	})
 	for _, rows := range rowsList {
 		rows := rows

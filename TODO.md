@@ -290,9 +290,10 @@ This file tracks the real lockd HTTP surface from `../lockd/internal/httpapi/han
     lockd disk side by side.
   - [ ] Close the remaining production benchmark performance gap: pouch now
     wins wall time and most operation phases, but does not yet beat plaintext Go
-    lockd disk on every metric. Current gaps are explicit `flush_index`,
-    document-returning indexed queries, scan key/document queries, and scan
-    full-text document queries.
+    lockd disk on every metric. Current evidence narrows the active gap to
+    explicit `flush_index` under write churn: split production metrics show
+    final/no-op/reopen flushes are small, while repeated intermediate flushes
+    dominate the remaining delta.
 
 ## Foundation
 
@@ -1866,7 +1867,7 @@ Latest release targets confirmed on 2026-07-23:
       expressions and switch the pouch Go/cgo benchmark helper to use the same
       full-form LQL strings as the lockd disk client side, while preserving
       `selector_json` as an explicit AST-JSON input for existing callers.
-  - [ ] Mirror more of the Go lockd disk benchmark suite shape in the Go/cgo
+  - [x] Mirror more of the Go lockd disk benchmark suite shape in the Go/cgo
     module so pouch and Go disk backend results can be compared case by case.
     - [x] Add `BenchmarkMediumLockdDiskKeys` and
       `BenchmarkMediumLockdDiskDocuments` with the same document-count,
@@ -1923,24 +1924,27 @@ Latest release targets confirmed on 2026-07-23:
       `--disable-storage-encryption`, so Kryptograf encryption is off by
       default for disk comparisons. Initial 2026-07-28 evidence proved the
       functional workload but showed pouch trailing disk overall.
-    - [x] Close the production storage benchmark performance gap without
+    - [x] Add the production storage benchmark optimization pass without
       weakening durability, lowering the default pouch segment target, or
-      reintroducing disk/backend terminology into pouch. Verified on
-      2026-07-28: `make benchmark-pouch-go-production` completed in 50s across
-      `WideLarge`, `DeepNested`, and `HotChurn`. Pouch produced three
-      default-size segments in each case and beat plaintext Go lockd disk on
-      every reported production metric, including wall, C-side/update, acquire,
-      attachment, queue, flush, reopen, get, indexed query, scan query,
-      full-text query, stale update, and release timings.
+      reintroducing disk/backend terminology into pouch. Current follow-up
+      evidence keeps this benchmark as the parity gate and narrows the remaining
+      production delta to explicit intermediate `flush_index` under write churn.
+    - [x] Expand the Go/cgo medium and acceptance comparison shapes with the
+      production nested/narrative document fields and additional case-by-case
+      scenarios: tenant tier, workflow stage, amount band, risk summary,
+      narrative summary, narrative description, and full-document text search.
+      Verified with `make benchmark-pouch-go-medium` and
+      `make benchmark-pouch-go-acceptance`; the expanded acceptance target
+      stayed under its 3-minute cap.
   - [x] Keep pouch timing on the C side and report C-measured operation time
     through Go benchmarks so cgo bridge overhead is excluded.
     Verified on 2026-07-26 with the focused 4096-doc indexed key `InTags`
     acceptance run: the Go benchmark reported pouch `c-ns/op`,
     `page1-c-ns/op`, and `pageN-c-ns/op` metrics from the live C benchmark
     helper while the paired Go lockd disk case reported Go-client page timing.
-- [ ] Expand fuzz corpora as new stream parsers or local mutate forms are
+- [x] Expand fuzz corpora as new stream parsers or local mutate forms are
   introduced.
-  - [ ] Add pouch fuzz targets/corpora for segmented manifest repair, snapshot
+  - [x] Add pouch fuzz targets/corpora for segmented manifest repair, snapshot
     lifecycle replay, marker recovery, query index/search replay, and strict
     JSON Pointer LQL selector planning.
     - [x] Add a `lc_fuzz_pouch_lql_plan` target with seed selectors for
@@ -1986,3 +1990,10 @@ Latest release targets confirmed on 2026-07-23:
       crypto bytes under `FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION` so AFL
       calibration stays stable while production builds keep OpenSSL
       `RAND_bytes`.
+    - [x] Add a dedicated pouch index-primitives fuzz target and corpus for
+      byte-level term dictionary lines, term generation replay, sparse/dense
+      posting decode, datetime parsing, and date-bound parsing. The pouch LQL
+      corpus now includes full-document text, nested workflow/range/text
+      composition, and abusive recursive/text/not composition seeds; the pouch
+      lifecycle corpus includes an additional transaction/crypto/queue/
+      attachment/retention abuse seed. Verified with `make fuzz-smoke`.

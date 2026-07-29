@@ -1,0 +1,10 @@
+format=pouch-query-index-terms
+version=1
+state_index_seq=1
+row_count=0
+summary_hash=0
+term_count=0
+term_hash=1469598103934665603
+term_field_count=0
+term_value_count=0
+

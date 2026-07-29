@@ -26,6 +26,10 @@ typedef struct lockdc_pouch_bench_result {
   uint64_t attachment_ns;
   uint64_t queue_ns;
   uint64_t flush_ns;
+  uint64_t flush_intermediate_ns;
+  uint64_t flush_final_ns;
+  uint64_t flush_noop_ns;
+  uint64_t flush_reopen_ns;
   uint64_t compaction_ns;
   uint64_t reopen_ns;
   uint64_t get_public_ns;

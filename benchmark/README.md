@@ -20,7 +20,18 @@ the cgo bridge is excluded from pouch latency metrics.
 explicit variants by default: `ProductionPouchPT`, `ProductionPouchCrypto`, and
 `ProductionLockdDiskNoCrypto`. Pouch crypto is enabled through the public
 `pouch_crypto_key` endpoint option; the Go lockd disk server is started with
-`--disable-storage-encryption`.
+`--disable-storage-encryption`. The production target reports split flush
+metrics so index flush work can be attributed to intermediate write-churn
+flushes, final flush, no-op flush, and post-reopen flush.
+
+`make benchmark-pouch-go-medium` mirrors the Go lockd disk comparison shape over
+both key and document result modes for scan and indexed engines. The default
+matrix includes sparse/dense equality, numeric range, `in`, array membership,
+case-sensitive and case-insensitive text, date, root OR, recursive exists,
+tenant/workflow/amount predicates, narrative text, and full-document text search
+over production-shaped nested documents. `make benchmark-pouch-go-acceptance`
+keeps the same 4096-document cap and runs the broader indexed comparison plus a
+bounded scan subset.
 
 `make benchmark-pouch-go-compaction` runs opt-in pouch-only compaction
 benchmarks. It reports forced maintenance compaction time as `compaction-ns/op`

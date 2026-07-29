@@ -2602,20 +2602,15 @@ The pouch document-query benchmark uses the public `lc_sink_to_discard` sink and
 query metadata for row assertions so it does not benchmark an extra
 benchmark-side memory materialization.
 
-The previous focused plaintext profile
-(`POUCH_GO_PRODUCTION_ROWS=128 POUCH_GO_PRODUCTION_UPDATES=3
-POUCH_GO_PRODUCTION_PAYLOAD_BYTES=262144 make benchmark-pouch-go-production`)
-passed functionally, wrote 384 state revisions and about 100 MiB of JSON, and
-produced three pouch segments versus nine default-size Go lockd disk logstore
-segments. Pouch measured about 0.59 s wall time versus plaintext Go lockd disk
-at about 9.81 s, and pouch was faster on acquire, update, release, stale-write
-failure, attachment, queue, get, reopen, indexed key query, and overall wall
-time. The hard "pouch beats Go disk on every metric" performance criterion is
-not yet satisfied: pouch remains slower on explicit `flush_index`,
-document-returning indexed queries, scan key/document queries, and scan
-full-text document queries. That benchmark is now the evidence gate for closing
-the remaining storage-engine performance gap; implementations must not disable
-pouch durability or lower the segment target just to satisfy it.
+The production benchmark now reports `flush-ns/op` plus
+`flush-intermediate-ns/op`, `flush-final-ns/op`, `flush-noop-ns/op`, and
+`flush-reopen-ns/op`. Current evidence narrows the remaining hard "pouch beats
+Go disk on every metric" gap to explicit `flush_index` under write churn:
+final/no-op/reopen flushes are small, while repeated intermediate flushes during
+large update phases dominate the pouch-vs-disk delta. That benchmark is now the
+evidence gate for closing the remaining storage-engine performance gap;
+implementations must not disable pouch durability or lower the segment target
+just to satisfy it.
 The 4096-document tuning run found a numeric range regression: primary range
 candidate collection was revalidating the same positive range term for each
 candidate key, producing a quadratic first-page cost. The active range reader
@@ -2775,8 +2770,13 @@ errors for LQL-shaped selector field projections, durable namespace query
 configuration, index flush, and local single-node transaction-coordinator
 leader, cluster, and resource-manager state.
 
-Current pouch fuzz coverage includes LQL planning parity and lifecycle
-cross-surface fuzzing. The lifecycle corpus exercises state records,
+Current pouch fuzz coverage includes LQL planning parity, pouch index primitive
+parser fuzzing, and lifecycle cross-surface fuzzing. The LQL corpus includes
+strict JSON Pointer predicates, nested workflow/range/text compositions,
+full-document text search, recursive paths, and abusive recursive/text/not
+composition seeds. The index primitive corpus covers term dictionary field/value
+lines, term generation replay, sparse/dense posting decode, datetime parsing,
+and date-bound parsing. The lifecycle corpus exercises state records,
 attachments, queue payloads, index flush/query paths, maintenance, retention,
 close/reopen, and damage recovery in both plaintext and crypto configurations.
 Fuzz builds replace crypto randomness with deterministic bytes under

@@ -399,6 +399,10 @@ type productionMetrics struct {
 	attachmentNS        int64
 	queueNS             int64
 	flushNS             int64
+	flushIntermediateNS int64
+	flushFinalNS        int64
+	flushNoopNS         int64
+	flushReopenNS       int64
 	reopenNS            int64
 	getPublicNS         int64
 	getLeaseNS          int64
@@ -412,6 +416,12 @@ type productionMetrics struct {
 
 func addMetricDuration(dst *int64, start time.Time) {
 	*dst += time.Since(start).Nanoseconds()
+}
+
+func addMetricPhaseDuration(phase *int64, total *int64, start time.Time) {
+	before := *phase
+	addMetricDuration(phase, start)
+	*total += *phase - before
 }
 
 func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int64) productionMetrics {
@@ -457,7 +467,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 					_ = session.Release(context.Background())
 					b.Fatalf("lockd disk production intermediate flush index: %v\n%s", err, h.logs.String())
 				}
-				addMetricDuration(&metrics.flushNS, phaseStart)
+				addMetricPhaseDuration(&metrics.flushIntermediateNS, &metrics.flushNS, phaseStart)
 			}
 			if row == 0 && generation == 0 {
 				staleETag = res.NewStateETag
@@ -592,7 +602,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 	if err != nil {
 		b.Fatalf("lockd disk production flush index: %v\n%s", err, h.logs.String())
 	}
-	addMetricDuration(&metrics.flushNS, phaseStart)
+	addMetricPhaseDuration(&metrics.flushFinalNS, &metrics.flushNS, phaseStart)
 	phaseStart = time.Now()
 	ctx, cancel = context.WithTimeout(context.Background(), 60*time.Second)
 	_, err = h.client.FlushIndex(ctx, lockdDiskBenchNamespace, lockdclient.WithFlushModeWait())
@@ -600,7 +610,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 	if err != nil {
 		b.Fatalf("lockd disk production no-op flush index: %v\n%s", err, h.logs.String())
 	}
-	addMetricDuration(&metrics.flushNS, phaseStart)
+	addMetricPhaseDuration(&metrics.flushNoopNS, &metrics.flushNS, phaseStart)
 	phaseStart = time.Now()
 	h.restart(b)
 	addMetricDuration(&metrics.reopenNS, phaseStart)
@@ -611,7 +621,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 	if err != nil {
 		b.Fatalf("lockd disk production post-restart flush index: %v\n%s", err, h.logs.String())
 	}
-	addMetricDuration(&metrics.flushNS, phaseStart)
+	addMetricPhaseDuration(&metrics.flushReopenNS, &metrics.flushNS, phaseStart)
 
 	phaseStart = time.Now()
 	matched := runLockdDiskQuery(b, h, rows, "index", "RangeHalf", false)
@@ -741,6 +751,10 @@ func BenchmarkProductionLockdDiskNoCrypto(b *testing.B) {
 				b.ReportMetric(float64(metrics.queueNS)/float64(metrics.queueMessages), "queue-one-ns/op")
 			}
 			b.ReportMetric(float64(metrics.flushNS), "flush-ns/op")
+			b.ReportMetric(float64(metrics.flushIntermediateNS), "flush-intermediate-ns/op")
+			b.ReportMetric(float64(metrics.flushFinalNS), "flush-final-ns/op")
+			b.ReportMetric(float64(metrics.flushNoopNS), "flush-noop-ns/op")
+			b.ReportMetric(float64(metrics.flushReopenNS), "flush-reopen-ns/op")
 			b.ReportMetric(float64(metrics.reopenNS), "reopen-ns/op")
 			b.ReportMetric(float64(metrics.getPublicNS), "get-public-ns/op")
 			b.ReportMetric(float64(metrics.getLeaseNS), "get-lease-ns/op")
