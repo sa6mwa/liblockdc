@@ -3,6 +3,7 @@
 #include "pouchbench.h"
 
 #include "lc/lc.h"
+#include "lc_pouch.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -660,6 +661,106 @@ static long lockdc_bench_count_segments_in(const char *path) {
   return count;
 }
 
+static long lockdc_bench_count_files_with_prefix_in(const char *path,
+                                                    const char *prefix,
+                                                    const char *suffix) {
+  DIR *dir;
+  struct dirent *entry;
+  long count;
+  size_t prefix_len;
+  size_t suffix_len;
+
+  if (path == NULL || prefix == NULL || suffix == NULL) {
+    return 0L;
+  }
+  dir = opendir(path);
+  if (dir == NULL) {
+    return 0L;
+  }
+  count = 0L;
+  prefix_len = strlen(prefix);
+  suffix_len = strlen(suffix);
+  while ((entry = readdir(dir)) != NULL) {
+    char child[1024];
+    struct stat st;
+    size_t name_len;
+    int written;
+
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    name_len = strlen(entry->d_name);
+    if (name_len >= prefix_len + suffix_len &&
+        strncmp(entry->d_name, prefix, prefix_len) == 0 &&
+        strcmp(entry->d_name + name_len - suffix_len, suffix) == 0) {
+      ++count;
+    }
+    written = snprintf(child, sizeof(child), "%s/%s", path, entry->d_name);
+    if (written <= 0 || (size_t)written >= sizeof(child)) {
+      continue;
+    }
+    if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) {
+      count += lockdc_bench_count_files_with_prefix_in(child, prefix, suffix);
+    }
+  }
+  (void)closedir(dir);
+  return count;
+}
+
+static int lockdc_bench_pouch_write_document(
+    lc_pouch *pouch, long row, long generation, long updates_per_key,
+    long payload_bytes, lockdc_pouch_bench_result *out, lc_error *error) {
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  lc_source *source;
+  char *json;
+  char key[64];
+  size_t json_len;
+  uint64_t phase_start;
+  uint64_t phase_end;
+  int rc;
+
+  if (pouch == NULL || out == NULL) {
+    return LC_ERR_INVALID;
+  }
+  snprintf(key, sizeof(key), "doc/%08ld", row);
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  options.content_type = "application/json";
+  json = lockdc_bench_document(row, generation,
+                               lockdc_bench_payload_for_generation(
+                                   generation, updates_per_key, payload_bytes),
+                               &json_len);
+  if (json == NULL) {
+    return LC_ERR_NOMEM;
+  }
+  source = NULL;
+  rc = lc_source_from_memory(json, json_len, &source, error);
+  if (rc == LC_OK) {
+    phase_start = lockdc_bench_now_ns();
+    rc = lc_pouch_state_write(pouch, "bench", key, source, &options, &result,
+                              error);
+    phase_end = lockdc_bench_now_ns();
+    if (rc == LC_OK) {
+      uint64_t elapsed;
+
+      elapsed = phase_end >= phase_start ? phase_end - phase_start : 0U;
+      out->update_ns += elapsed;
+      if (elapsed > out->max_update_ns) {
+        out->max_update_ns = elapsed;
+      }
+      ++out->writes;
+      out->bytes += (long)json_len;
+    }
+  }
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  lc_pouch_state_write_result_cleanup(NULL, &result);
+  free(json);
+  return rc;
+}
+
 static int lockdc_bench_query(lc_client *client, const char *scenario,
                               const char *engine, int documents, long limit,
                               long *rows, lc_error *error) {
@@ -1145,6 +1246,147 @@ done_without_error_message:
   end = lockdc_bench_now_ns();
   if (client != NULL) {
     lc_client_close(client);
+  }
+  lc_pouch_crypto_key_string_free(crypto_key);
+  lockdc_bench_cleanup_root(root);
+  lc_error_cleanup(&error);
+  out->rc = rc;
+  out->c_ns = end >= start ? end - start : 0U;
+  return rc;
+}
+
+int lockdc_pouch_bench_compaction_run(long rows, long updates_per_key,
+                                      long payload_bytes,
+                                      long segment_target_bytes,
+                                      long compaction_min_segment_count,
+                                      long compaction_min_reclaimable_bytes,
+                                      int scheduled, int crypto_enabled,
+                                      lockdc_pouch_bench_result *out) {
+  char root_template[] = LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX";
+  char root[sizeof(LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX")];
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_error error;
+  char *crypto_key;
+  uint64_t start;
+  uint64_t end;
+  uint64_t phase_start;
+  long row;
+  long generation;
+  int rc;
+
+  if (out == NULL) {
+    return LC_ERR_INVALID;
+  }
+  memset(out, 0, sizeof(*out));
+  if (rows <= 0L) {
+    rows = 512L;
+  }
+  if (updates_per_key <= 0L) {
+    updates_per_key = 2L;
+  }
+  if (payload_bytes <= 0L) {
+    payload_bytes = 16L * 1024L;
+  }
+  if (segment_target_bytes <= 0L) {
+    segment_target_bytes = 256L * 1024L;
+  }
+  if (compaction_min_segment_count <= 0L) {
+    compaction_min_segment_count = 2L;
+  }
+  if (compaction_min_reclaimable_bytes <= 0L) {
+    compaction_min_reclaimable_bytes = 1L;
+  }
+  pouch = NULL;
+  crypto_key = NULL;
+  root[0] = '\0';
+  lc_error_init(&error);
+  if (mkdtemp(root_template) == NULL) {
+    out->rc = errno;
+    return out->rc;
+  }
+  snprintf(root, sizeof(root), "%s", root_template);
+  start = lockdc_bench_now_ns();
+  if (crypto_enabled != 0) {
+    rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+    if (rc != LC_OK) {
+      goto done;
+    }
+  }
+  memset(&open_options, 0, sizeof(open_options));
+  open_options.segment_target_bytes = (unsigned long)segment_target_bytes;
+  open_options.compaction_min_segment_count =
+      (unsigned long)compaction_min_segment_count;
+  open_options.compaction_min_reclaimable_bytes =
+      (unsigned long)compaction_min_reclaimable_bytes;
+  open_options.background_compaction_enabled = scheduled != 0 ? 1 : 0;
+  open_options.single_writer = 1;
+  open_options.query_engine = "index";
+  open_options.crypto_key = crypto_key;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+
+  for (row = 0L; row < rows; ++row) {
+    for (generation = 0L; generation < updates_per_key; ++generation) {
+      rc = lockdc_bench_pouch_write_document(
+          pouch, row, generation, updates_per_key, payload_bytes, out, &error);
+      if (rc != LC_OK) {
+        goto done;
+      }
+    }
+  }
+  out->rows = rows;
+  out->segments = lockdc_bench_count_segments_in(root);
+  out->snapshots =
+      lockdc_bench_count_files_with_prefix_in(root, "snapshot-", ".log");
+
+  if (scheduled == 0) {
+    memset(&maintenance_options, 0, sizeof(maintenance_options));
+    memset(&maintenance_result, 0, sizeof(maintenance_result));
+    maintenance_options.namespace_name = "bench";
+    maintenance_options.force = 1;
+    phase_start = lockdc_bench_now_ns();
+    rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                  &maintenance_result, &error);
+    lockdc_bench_add_ns(&out->compaction_ns, phase_start,
+                        lockdc_bench_now_ns());
+    if (rc != LC_OK) {
+      lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+      goto done;
+    }
+    if (maintenance_result.compacted) {
+      ++out->compactions;
+    }
+    out->candidate_segments = (long)maintenance_result.candidate_segment_count;
+    out->candidate_bytes = (long)maintenance_result.candidate_bytes;
+    lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  }
+
+  out->segments = lockdc_bench_count_segments_in(root);
+  out->snapshots =
+      lockdc_bench_count_files_with_prefix_in(root, "snapshot-", ".log");
+  if (scheduled != 0) {
+    out->compactions = out->snapshots;
+  }
+  if (scheduled == 0 && (out->compactions <= 0L || out->snapshots <= 0L)) {
+    rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error),
+             "forced compaction benchmark did not compact");
+    goto done_without_error_message;
+  }
+
+done:
+  if (rc != LC_OK) {
+    lockdc_bench_result_set_error(out, &error);
+  }
+done_without_error_message:
+  end = lockdc_bench_now_ns();
+  if (pouch != NULL) {
+    lc_pouch_close(pouch);
   }
   lc_pouch_crypto_key_string_free(crypto_key);
   lockdc_bench_cleanup_root(root);

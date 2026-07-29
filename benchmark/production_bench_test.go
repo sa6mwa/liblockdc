@@ -25,6 +25,16 @@ type productionScenario struct {
 	payloadBytes  int64
 }
 
+type compactionScenario struct {
+	name                string
+	rows                int64
+	updatesPerKey       int64
+	payloadBytes        int64
+	segmentTargetBytes  int64
+	minSegmentCount     int64
+	minReclaimableBytes int64
+}
+
 func productionRows() int64 {
 	return envInt64("LOCKDC_BENCH_PRODUCTION_ROWS", 128)
 }
@@ -55,10 +65,107 @@ func productionScenarios() []productionScenario {
 	}
 }
 
+func compactionRows() int64 {
+	return envInt64("LOCKDC_BENCH_COMPACTION_ROWS", 512)
+}
+
+func compactionUpdatesPerKey() int64 {
+	return envInt64("LOCKDC_BENCH_COMPACTION_UPDATES", 2)
+}
+
+func compactionPayloadBytes() int64 {
+	return envInt64("LOCKDC_BENCH_COMPACTION_PAYLOAD_BYTES", 16*1024)
+}
+
+func compactionSegmentTargetBytes() int64 {
+	return envInt64("LOCKDC_BENCH_COMPACTION_SEGMENT_TARGET_BYTES", 256*1024)
+}
+
+func compactionMinSegmentCount() int64 {
+	return envInt64("LOCKDC_BENCH_COMPACTION_MIN_SEGMENTS", 1)
+}
+
+func compactionMinReclaimableBytes() int64 {
+	return envInt64("LOCKDC_BENCH_COMPACTION_MIN_RECLAIMABLE_BYTES", 1)
+}
+
+func compactionEnvConfigured() bool {
+	return os.Getenv("LOCKDC_BENCH_COMPACTION_ROWS") != "" ||
+		os.Getenv("LOCKDC_BENCH_COMPACTION_UPDATES") != "" ||
+		os.Getenv("LOCKDC_BENCH_COMPACTION_PAYLOAD_BYTES") != "" ||
+		os.Getenv("LOCKDC_BENCH_COMPACTION_SEGMENT_TARGET_BYTES") != "" ||
+		os.Getenv("LOCKDC_BENCH_COMPACTION_MIN_SEGMENTS") != "" ||
+		os.Getenv("LOCKDC_BENCH_COMPACTION_MIN_RECLAIMABLE_BYTES") != ""
+}
+
+func envCompactionScenarios() []compactionScenario {
+	return []compactionScenario{{
+		name:                "Env",
+		rows:                compactionRows(),
+		updatesPerKey:       compactionUpdatesPerKey(),
+		payloadBytes:        compactionPayloadBytes(),
+		segmentTargetBytes:  compactionSegmentTargetBytes(),
+		minSegmentCount:     compactionMinSegmentCount(),
+		minReclaimableBytes: compactionMinReclaimableBytes(),
+	}}
+}
+
+func forcedCompactionScenarios() []compactionScenario {
+	if compactionEnvConfigured() {
+		return envCompactionScenarios()
+	}
+	return []compactionScenario{
+		{
+			name:                "Early256K",
+			rows:                512,
+			updatesPerKey:       2,
+			payloadBytes:        16 * 1024,
+			segmentTargetBytes:  256 * 1024,
+			minSegmentCount:     1,
+			minReclaimableBytes: 1,
+		},
+		{
+			name:                "Large1M",
+			rows:                2048,
+			updatesPerKey:       2,
+			payloadBytes:        32 * 1024,
+			segmentTargetBytes:  1024 * 1024,
+			minSegmentCount:     1,
+			minReclaimableBytes: 1,
+		},
+	}
+}
+
+func scheduledCompactionScenarios() []compactionScenario {
+	if compactionEnvConfigured() {
+		return envCompactionScenarios()
+	}
+	return []compactionScenario{
+		{
+			name:                "Early256K",
+			rows:                512,
+			updatesPerKey:       2,
+			payloadBytes:        16 * 1024,
+			segmentTargetBytes:  256 * 1024,
+			minSegmentCount:     1,
+			minReclaimableBytes: 1,
+		},
+	}
+}
+
 func productionBenchName(s productionScenario) string {
 	return s.name + "/Rows" + strconv.FormatInt(s.rows, 10) +
 		"/Updates" + strconv.FormatInt(s.updatesPerKey, 10) +
 		"/Payload" + strconv.FormatInt(s.payloadBytes, 10)
+}
+
+func compactionBenchName(s compactionScenario) string {
+	return s.name + "/Rows" + strconv.FormatInt(s.rows, 10) +
+		"/Updates" + strconv.FormatInt(s.updatesPerKey, 10) +
+		"/Payload" + strconv.FormatInt(s.payloadBytes, 10) +
+		"/SegmentTarget" + strconv.FormatInt(s.segmentTargetBytes, 10) +
+		"/MinSegments" + strconv.FormatInt(s.minSegmentCount, 10) +
+		"/MinReclaimable" + strconv.FormatInt(s.minReclaimableBytes, 10)
 }
 
 func productionPayloadForGeneration(generation, updatesPerKey, payloadBytes int64) int64 {
@@ -643,6 +750,42 @@ func BenchmarkProductionLockdDiskNoCrypto(b *testing.B) {
 			b.ReportMetric(float64(metrics.scanQueryDocsNS), "scan-query-docs-ns/op")
 			b.ReportMetric(float64(metrics.fullTextIndexKeysNS), "full-text-index-keys-ns/op")
 			b.ReportMetric(float64(metrics.fullTextScanDocsNS), "full-text-scan-docs-ns/op")
+		})
+	}
+}
+
+func BenchmarkCompactionPouchPTForced(b *testing.B) {
+	for _, scenario := range forcedCompactionScenarios() {
+		scenario := scenario
+		b.Run(compactionBenchName(scenario), func(b *testing.B) {
+			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, false, false)
+		})
+	}
+}
+
+func BenchmarkCompactionPouchCryptoForced(b *testing.B) {
+	for _, scenario := range forcedCompactionScenarios() {
+		scenario := scenario
+		b.Run(compactionBenchName(scenario), func(b *testing.B) {
+			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, false, true)
+		})
+	}
+}
+
+func BenchmarkCompactionPouchPTScheduled(b *testing.B) {
+	for _, scenario := range scheduledCompactionScenarios() {
+		scenario := scenario
+		b.Run(compactionBenchName(scenario), func(b *testing.B) {
+			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, true, false)
+		})
+	}
+}
+
+func BenchmarkCompactionPouchCryptoScheduled(b *testing.B) {
+	for _, scenario := range scheduledCompactionScenarios() {
+		scenario := scenario
+		b.Run(compactionBenchName(scenario), func(b *testing.B) {
+			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, true, true)
 		})
 	}
 }

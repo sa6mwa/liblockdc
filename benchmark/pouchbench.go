@@ -146,6 +146,47 @@ func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes int64, 
 	b.ReportMetric(float64(result.full_text_scan_docs_ns), "full-text-scan-docs-ns/op")
 }
 
+func runPouchCompactionC(b *testing.B, rows, updatesPerKey, payloadBytes, segmentTargetBytes, minSegmentCount, minReclaimableBytes int64, scheduled, cryptoEnabled bool) {
+	var totalCNS uint64
+	var result C.lockdc_pouch_bench_result
+
+	for i := 0; i < b.N; i++ {
+		result = C.lockdc_pouch_bench_result{}
+		rc := C.lockdc_pouch_bench_compaction_run(
+			C.long(rows),
+			C.long(updatesPerKey),
+			C.long(payloadBytes),
+			C.long(segmentTargetBytes),
+			C.long(minSegmentCount),
+			C.long(minReclaimableBytes),
+			C.int(boolToInt(scheduled)),
+			C.int(boolToInt(cryptoEnabled)),
+			&result,
+		)
+		if rc != 0 {
+			b.Fatalf("pouch compaction benchmark failed: rc=%d rows=%d updates=%d payload=%d segment_target=%d min_segments=%d min_reclaimable=%d scheduled=%t crypto=%t error=%q", int(rc), rows, updatesPerKey, payloadBytes, segmentTargetBytes, minSegmentCount, minReclaimableBytes, scheduled, cryptoEnabled, C.GoString(&result.error[0]))
+		}
+		totalCNS += uint64(result.c_ns)
+	}
+	if b.N > 0 {
+		b.ReportMetric(float64(totalCNS)/float64(b.N), "c-ns/op")
+	}
+	b.ReportMetric(float64(result.rows), "rows/op")
+	b.ReportMetric(float64(result.writes), "writes/op")
+	b.ReportMetric(float64(result.bytes), "bytes/op")
+	b.ReportMetric(float64(result.segments), "segments/op")
+	b.ReportMetric(float64(result.snapshots), "snapshots/op")
+	b.ReportMetric(float64(result.compactions), "compactions/op")
+	b.ReportMetric(float64(result.candidate_segments), "candidate-segments/op")
+	b.ReportMetric(float64(result.candidate_bytes), "candidate-bytes/op")
+	b.ReportMetric(float64(result.update_ns), "write-ns/op")
+	if result.writes > 0 {
+		b.ReportMetric(float64(result.update_ns)/float64(result.writes), "write-one-ns/op")
+	}
+	b.ReportMetric(float64(result.max_update_ns), "max-write-ns/op")
+	b.ReportMetric(float64(result.compaction_ns), "compaction-ns/op")
+}
+
 func boolToInt(value bool) int {
 	if value {
 		return 1

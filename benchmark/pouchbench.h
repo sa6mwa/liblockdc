@@ -12,15 +12,21 @@ typedef struct lockdc_pouch_bench_result {
   long queue_messages;
   long stale_failures;
   long segments;
+  long snapshots;
+  long candidate_segments;
+  long compactions;
   long bytes;
+  long candidate_bytes;
   uint64_t c_ns;
   uint64_t acquire_ns;
   uint64_t update_ns;
+  uint64_t max_update_ns;
   uint64_t release_ns;
   uint64_t stale_ns;
   uint64_t attachment_ns;
   uint64_t queue_ns;
   uint64_t flush_ns;
+  uint64_t compaction_ns;
   uint64_t reopen_ns;
   uint64_t get_public_ns;
   uint64_t get_lease_ns;
@@ -48,6 +54,14 @@ int lockdc_pouch_bench_run(const char *scenario, long rows, const char *engine,
 
 int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
                                       long payload_bytes, int crypto_enabled,
+                                      lockdc_pouch_bench_result *out);
+
+int lockdc_pouch_bench_compaction_run(long rows, long updates_per_key,
+                                      long payload_bytes,
+                                      long segment_target_bytes,
+                                      long compaction_min_segment_count,
+                                      long compaction_min_reclaimable_bytes,
+                                      int scheduled, int crypto_enabled,
                                       lockdc_pouch_bench_result *out);
 
 #endif
