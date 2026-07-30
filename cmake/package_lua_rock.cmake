@@ -60,6 +60,7 @@ file(COPY "${LOCKDC_ROOT}/src/lua/lockdc_lua.c" DESTINATION "${lockdc_lua_source
 file(COPY "${LOCKDC_ROOT}/src/lc_api_internal.h" DESTINATION "${lockdc_lua_source_root}/src")
 file(COPY "${LOCKDC_ROOT}/src/lc_engine_api.h" DESTINATION "${lockdc_lua_source_root}/src")
 file(COPY "${LOCKDC_ROOT}/src/lc_pouch.h" DESTINATION "${lockdc_lua_source_root}/src")
+file(COPY "${LOCKDC_ROOT}/scripts/build_lua_rock.sh" DESTINATION "${lockdc_lua_source_root}/scripts")
 file(COPY "${LOCKDC_ROOT}/scripts/build_lockdc_lua_rock.sh" DESTINATION "${lockdc_lua_source_root}/scripts")
 
 file(REMOVE "${lockdc_lua_source_archive_base}" "${lockdc_lua_source_archive_path}")

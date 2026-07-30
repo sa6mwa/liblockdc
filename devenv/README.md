@@ -48,7 +48,7 @@ scripts/dev-down.sh
 scripts/dev-ps.sh
 scripts/compose.sh logs -f lockd-disk-a
 scripts/deps.sh deps-x86_64-linux-gnu
-scripts/dev-e2e.sh
+scripts/test-e2e.sh
 make build
 make test
 make fuzz
@@ -223,9 +223,9 @@ The e2e binary defaults to this devenv layout, but you can override endpoints an
 Or just run:
 
 ```bash
-scripts/dev-e2e.sh
+scripts/test-e2e.sh
 ```
 
-`dev-e2e.sh` exports the default bundle/socket paths for this repo layout before invoking CMake/CTest.
+`test-e2e.sh` exports the default bundle/socket paths for this repo layout before invoking CMake/CTest. `dev-e2e.sh` remains as a compatibility wrapper.
 
 The current devenv certs are generated for local development only, so the e2e client enables `lc_client_config.insecure_skip_verify=1` for the mTLS test nodes only. The normal client default remains strict verification.

@@ -248,7 +248,7 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         ${test_env}
         "LOCKDC_RUN_LUA_SMOKE=${lockdc_run_lua_smoke_env}"
-        "${LOCKDC_BASH_BIN}" "${LOCKDC_ROOT}/scripts/validate_lockdc_luarocks.sh"
+        "${LOCKDC_BASH_BIN}" "${LOCKDC_ROOT}/scripts/validate_luarocks.sh"
         "${lua_tree_dir}"
         "${LOCKDC_SDK_PREFIX}"
         "${LOCKDC_LUA_PACKAGE_PATH}"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eu
+set -euo pipefail
 
 if [ -n "${OSXCROSS_ROOT:-}" ]; then
   osxcross_root=$OSXCROSS_ROOT

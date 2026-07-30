@@ -17,7 +17,7 @@ endif()
 set(test_root "${LOCKDC_BINARY_DIR}/lua-external-sdk-contract-test")
 set(fake_bin_dir "${test_root}/bin")
 set(fake_prefix "${test_root}/fake-prefix")
-set(script_path "${LOCKDC_ROOT}/scripts/build_lockdc_lua_rock.sh")
+set(script_path "${LOCKDC_ROOT}/scripts/build_lua_rock.sh")
 set(fake_path "${fake_bin_dir}:/usr/bin:/bin")
 
 file(REMOVE_RECURSE "${test_root}")
@@ -28,7 +28,7 @@ execute_process(COMMAND chmod +x "${fake_bin_dir}/pkg-config")
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         "PATH=${fake_path}"
-        /bin/sh "${script_path}" /bin/true "" -shared o so "${LOCKDC_ROOT}/include" "${LOCKDC_VERSION}"
+        bash "${script_path}" /bin/true "" -shared o so "${LOCKDC_ROOT}/include" "${LOCKDC_VERSION}"
     WORKING_DIRECTORY "${LOCKDC_ROOT}"
     RESULT_VARIABLE missing_result
     OUTPUT_VARIABLE missing_stdout
@@ -56,7 +56,7 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         "PATH=${fake_path}"
         "LOCKDC_PREFIX=${fake_prefix}"
-        /bin/sh "${script_path}" /bin/true "" -shared o so "${LOCKDC_ROOT}/include" "${LOCKDC_VERSION}"
+        bash "${script_path}" /bin/true "" -shared o so "${LOCKDC_ROOT}/include" "${LOCKDC_VERSION}"
     WORKING_DIRECTORY "${LOCKDC_ROOT}"
     RESULT_VARIABLE mismatch_result
     OUTPUT_VARIABLE mismatch_stdout

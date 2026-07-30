@@ -165,7 +165,7 @@ foreach(required_snippet
     "url = \"git+https://github.com/sa6mwa/liblockdc.git\""
     "tag = \"v${LOCKDC_VERSION}\""
     "\"lonejson == 0.42.0-1\""
-    "scripts/build_lockdc_lua_rock.sh"
+    "scripts/build_lua_rock.sh"
 )
     string(FIND "${lockdc_lua_rockspec_text}" "${required_snippet}" snippet_index)
     if(snippet_index EQUAL -1)

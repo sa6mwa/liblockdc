@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -eu
+set -euo pipefail
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 repo_root="$(CDPATH= cd -- "$script_dir/.." && pwd)"
@@ -125,7 +125,7 @@ cmake \
     -DLOCKDC_VERIFY_WORK_DIR="$repo_root/build/release-matrix-verify" \
     -DLOCKDC_RELEASE_PRESETS="$release_preset_list" \
     -P "$repo_root/tests/release_matrix_archives_test.cmake"
-bash "$repo_root/scripts/test_release_source.sh" "$repo_root" "$repo_root/dist/liblockdc-$(sed -n 's/^set(LOCKDC_VERSION "\(.*\)")$/\1/p' "$repo_root/build/$host_release_preset/package-metadata.cmake").tar.gz"
+bash "$repo_root/scripts/test_release_from_source.sh" "$repo_root" "$repo_root/dist/liblockdc-$(sed -n 's/^set(LOCKDC_VERSION "\(.*\)")$/\1/p' "$repo_root/build/$host_release_preset/package-metadata.cmake").tar.gz"
 cmake \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \

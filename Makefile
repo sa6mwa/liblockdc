@@ -69,6 +69,7 @@ POUCH_PERF_PAYLOAD_BYTES ?= 4096
 POUCH_PERF_CRYPTO ?= 0
 POUCH_PERF_TIMEOUT ?= 60s
 FUZZ_TIME ?= 30
+FUZZ_LONG_TIME ?= 300
 POUCH_GO_BENCH_CFLAGS := \
 	-I$(ROOT)/include \
 	-I$(ROOT)/src \
@@ -102,19 +103,19 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-asan __build-coverage __build-fuzz \
 	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
 	__format \
-	__finalize-slice __valgrind __asan __coverage __fuzz __fuzz-smoke __benchmarks __bench-gate __benchmark-pouch-perf __benchmark-pouch-go __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-compaction __benchmark-pouch-go-parity-gate \
-	__package __package-source __package-source-smoke __package-checksums __package-verify __clean-dist \
-	__lua-rock __lua-test __lua-env \
-	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test \
+	__finalize-slice __valgrind __asan __coverage __fuzz __fuzz-smoke __fuzz-long __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf __benchmark-pouch-go __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-compaction __benchmark-pouch-go-parity-gate \
+	__package __package-source __package-source-smoke __package-checksums __package-verify __verify-release-privacy __clean-dist \
+	__lua-rock __lua-test __lua-env __release-lua-artifacts \
+	__dev-up __dev-down __dev-reset __dev-ps __dev-logs __cross-build __cross-preset-test __cross-test \
 	__prerelease __prerelease-live __prerelease-hardening __lifecycle-version-contract __release __release-pipeline __release-matrix __release-package-only __clean \
 	deps-debug deps-release deps-cross \
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
 	format \
-	finalize-slice valgrind asan coverage fuzz fuzz-smoke benchmarks bench-gate benchmark-pouch-perf benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-compaction benchmark-pouch-go-parity-gate \
-	package package-source package-source-smoke package-checksums package-verify verify-release-archives clean-dist \
-	lua-rock lua-test lua-env \
-	dev-up dev-down dev-reset cross-build cross-preset-test cross-test \
+	finalize-slice valgrind asan coverage fuzz fuzz-smoke fuzz-long bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-compaction benchmark-pouch-go-parity-gate \
+	package package-source package-source-smoke package-checksums package-verify verify-release-archives verify-release-privacy clean-dist \
+	lua-rock lua-test lua-env release-lua-artifacts \
+	dev-up dev-down dev-reset dev-ps dev-logs cross-build cross-preset-test cross-test \
 	prerelease prerelease-live prerelease-hardening lifecycle-version-contract print-release-version release release-matrix clean
 
 help:
@@ -140,6 +141,8 @@ help:
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
 		'make dev-reset          Stop the local compose-backed devenv and remove its generated state.' \
+		'make dev-ps             Show the local compose-backed devenv service state.' \
+		'make dev-logs           Show local compose-backed devenv logs.' \
 		'make format             Run clang-format over repo .c and .h files.' \
 		'make finalize-slice     Run formatting plus the narrow debug test gate for an ordinary implementation slice.' \
 		'make valgrind           Build the valgrind preset and run the native Valgrind Memcheck subset.' \
@@ -147,8 +150,13 @@ help:
 		'make coverage           Run the coverage preset and generate coverage-report.' \
 		'make fuzz               Build fuzz targets and run bounded corpus passes.' \
 		'make fuzz-smoke         Build fuzz targets and run short bounded corpus passes (FUZZ_TIME=5).' \
+		'make fuzz-long          Build fuzz targets and run longer bounded corpus passes (FUZZ_LONG_TIME=$(FUZZ_LONG_TIME)).' \
+		'make bench              Compatibility alias for benchmarks.' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
+		'make bench-check        Compatibility alias for bench-gate.' \
 		'make bench-gate         Compatibility alias for benchmarks.' \
+		'make benchmarks-go      Compatibility alias for benchmark-pouch-go.' \
+		'make perf-gate          Compatibility alias for benchmark-pouch-go-parity-gate.' \
 		'make benchmark-pouch-perf Run one sub-minute native pouch perf case (POUCH_PERF_CASE=$(POUCH_PERF_CASE), POUCH_PERF_ROWS=$(POUCH_PERF_ROWS), POUCH_PERF_CRYPTO=$(POUCH_PERF_CRYPTO)).' \
 		'make benchmark-pouch-perf-index-docs Run the isolated public-API indexed narrative document query perf case.' \
 		'make benchmark-pouch-perf-full-text-keys Run the isolated public-API full-text key query perf case.' \
@@ -169,9 +177,11 @@ help:
 		'make package-checksums  Refresh the dist/ checksum manifest.' \
 		'make package-verify     Build release packages and run package verification.' \
 		'make verify-release-archives  Assert the complete shipped Linux release archive set and checksums.' \
+		'make verify-release-privacy  Scan checksum-listed release artifacts for local private traces.' \
 		'make lua-rock           Build the Lua release package and source rock artifacts.' \
 		'make lua-test           Run local Lua layout, SDK, facade, and binding smoke tests.' \
 		'make lua-env            Print shell exports for the repo-local Lua rock tree.' \
+		'make release-lua-artifacts  Compatibility alias for lua-rock.' \
 		'make clean-dist         Reset dist/ release artifacts.' \
 		'make cross-build        Build all non-host cross release presets.' \
 		'make cross-preset-test  Run the host ASan/UBSan debug cross-preset packaging-isolation check.' \
@@ -279,7 +289,7 @@ test-e2e:
 	$(TIMED) test-e2e $(MAKE) __test-e2e
 
 __test-e2e:
-	bash ./scripts/test.sh e2e
+	bash ./scripts/test-e2e.sh
 
 test-all:
 	$(TIMED) test-all $(MAKE) __test-all
@@ -303,6 +313,18 @@ dev-reset:
 
 __dev-reset:
 	bash ./scripts/dev-reset.sh
+
+dev-ps:
+	$(TIMED) dev-ps $(MAKE) __dev-ps
+
+__dev-ps:
+	bash ./scripts/dev-ps.sh
+
+dev-logs:
+	$(TIMED) dev-logs $(MAKE) __dev-logs
+
+__dev-logs:
+	bash ./scripts/dev-logs.sh
 
 format:
 	$(TIMED) format $(MAKE) __format
@@ -355,6 +377,17 @@ fuzz-smoke:
 __fuzz-smoke:
 	bash ./scripts/fuzz.sh 5
 
+fuzz-long:
+	$(TIMED) fuzz-long $(MAKE) __fuzz-long
+
+__fuzz-long:
+	bash ./scripts/fuzz.sh $(FUZZ_LONG_TIME)
+
+bench:
+	$(TIMED) bench $(MAKE) __bench
+
+__bench: __benchmarks
+
 benchmarks:
 	$(TIMED) benchmarks $(MAKE) __benchmarks
 
@@ -365,6 +398,21 @@ bench-gate:
 	$(TIMED) bench-gate $(MAKE) __bench-gate
 
 __bench-gate: __benchmarks
+
+bench-check:
+	$(TIMED) bench-check $(MAKE) __bench-check
+
+__bench-check: __bench-gate
+
+benchmarks-go:
+	$(TIMED) benchmarks-go $(MAKE) __benchmarks-go
+
+__benchmarks-go: __benchmark-pouch-go
+
+perf-gate:
+	$(TIMED) perf-gate $(MAKE) __perf-gate
+
+__perf-gate: __benchmark-pouch-go-parity-gate
 
 benchmark-pouch-perf:
 	$(TIMED) benchmark-pouch-perf timeout --kill-after=5s \
@@ -522,7 +570,7 @@ package-source-smoke:
 	$(TIMED) package-source-smoke $(MAKE) __package-source-smoke
 
 __package-source-smoke: __package-source
-	bash ./scripts/test_release_source.sh $(ROOT) $$(ls -t $(DIST_DIR)/liblockdc-*.tar.gz | grep -v -- 'liblockdc-lua-' | grep -v -- '-linux-' | grep -v -- '-apple-darwin' | head -n1)
+	bash ./scripts/test_release_from_source.sh $(ROOT) $$(ls -t $(DIST_DIR)/liblockdc-*.tar.gz | grep -v -- 'liblockdc-lua-' | grep -v -- '-linux-' | grep -v -- '-apple-darwin' | head -n1)
 
 package-checksums:
 	$(TIMED) package-checksums $(MAKE) __package-checksums
@@ -538,6 +586,12 @@ package-verify:
 
 __package-verify:
 	bash ./scripts/package-verify.sh
+
+verify-release-privacy:
+	$(TIMED) verify-release-privacy $(MAKE) __verify-release-privacy
+
+__verify-release-privacy:
+	bash ./scripts/verify_release_privacy.sh
 
 lua-rock:
 	$(TIMED) lua-rock $(MAKE) __lua-rock
@@ -558,6 +612,11 @@ __lua-env:
 	@printf 'export LOCKDC_PREFIX=%s\n' '$(X86_64_GNU_RELEASE_BUILD_DIR)/package/liblockdc-$$(sed -n '"'"'s/^set(LOCKDC_VERSION "\(.*\)")$$/\1/p'"'"' $(X86_64_GNU_RELEASE_BUILD_DIR)/package-metadata.cmake)-x86_64-linux-gnu'
 	@printf 'export LUA_PATH=%s\n' '$(ROOT)/lua/?.lua;$(ROOT)/lua/?/init.lua;;'
 	@printf 'export LUA_CPATH=%s\n' '$(ROOT)/build/luarocks/lib/lua/5.5/?.so;;'
+
+release-lua-artifacts:
+	$(TIMED) release-lua-artifacts $(MAKE) __release-lua-artifacts
+
+__release-lua-artifacts: __lua-rock
 
 verify-release-archives:
 	release_presets='x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release'; \
@@ -627,7 +686,7 @@ __lifecycle-version-contract:
 	bash ./scripts/lifecycle-version-contract.sh
 
 print-release-version:
-	@bash ./scripts/print-release-version.sh
+	@bash ./scripts/release_version.sh
 
 __release:
 	bash ./scripts/release.sh
@@ -637,10 +696,8 @@ __release-pipeline: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-te
 release-matrix:
 	$(TIMED) release-matrix $(MAKE) __release-matrix
 
-__release-matrix: __build-release
-	$(MAKE) __test-host
-	bash ./scripts/cross_test.sh release
-	bash ./scripts/run_linux_package_matrix.sh
+__release-matrix:
+	bash ./scripts/run_linux_release_matrix.sh
 
 __release-package-only: __build-release
 	bash ./scripts/run_linux_package_matrix.sh

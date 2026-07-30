@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -eu
+set -euo pipefail
 
 usage() {
   echo "usage: scripts/discover_target_tools.sh --build-dir DIR --target-id TARGET [--tool TOOL]" >&2

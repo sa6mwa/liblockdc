@@ -4,10 +4,12 @@ endif()
 
 set(makefile_path "${LOCKDC_ROOT}/Makefile")
 set(release_script_path "${LOCKDC_ROOT}/scripts/release.sh")
+set(release_matrix_script_path "${LOCKDC_ROOT}/scripts/run_linux_release_matrix.sh")
 set(ledger_path "${LOCKDC_ROOT}/docs/lifecycle-migration.md")
 
 file(READ "${makefile_path}" root_makefile)
 file(READ "${release_script_path}" release_script)
+file(READ "${release_matrix_script_path}" release_matrix_script)
 file(READ "${ledger_path}" lifecycle_ledger)
 
 function(assert_contains haystack needle description)
@@ -25,6 +27,15 @@ foreach(target
         prerelease-hardening
         lifecycle-version-contract
         print-release-version
+        verify-release-privacy
+        fuzz-long
+        bench
+        bench-check
+        benchmarks-go
+        perf-gate
+        dev-ps
+        dev-logs
+        release-lua-artifacts
         release-matrix)
     assert_contains(root_makefile "make ${target}" "make help entry for ${target}")
     assert_contains(root_makefile "${target}:" "make target ${target}")
@@ -39,9 +50,17 @@ assert_contains(root_makefile "__prerelease-hardening: __prerelease __fuzz __ben
 assert_contains(root_makefile "__lifecycle-version-contract:" "lifecycle version contract target")
 assert_contains(root_makefile "bash ./scripts/lifecycle-version-contract.sh" "lifecycle version contract runner")
 assert_contains(root_makefile "print-release-version:" "Make-owned release version surface")
-assert_contains(root_makefile "bash ./scripts/print-release-version.sh" "release version printer runner")
+assert_contains(root_makefile "bash ./scripts/release_version.sh" "standard release version printer runner")
+assert_contains(root_makefile "bash ./scripts/test-e2e.sh" "standard e2e runner")
+assert_contains(root_makefile "bash ./scripts/test_release_from_source.sh" "standard source archive smoke runner")
+assert_contains(root_makefile "bash ./scripts/verify_release_privacy.sh" "standard release privacy runner")
+assert_contains(root_makefile "bash ./scripts/run_linux_release_matrix.sh" "standard release matrix runner")
 assert_contains(root_makefile "__release-pipeline: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test __bench-gate __release-matrix" "shared release pipeline graph")
 assert_contains(release_script "run_step __lifecycle-version-contract\nrun_step __clean\nrun_step __release-pipeline" "release version contract, clean, shared pipeline order")
+assert_contains(release_matrix_script "\"$make_bin\" __build-release" "standard release matrix build step")
+assert_contains(release_matrix_script "\"$make_bin\" __test-host" "standard release matrix host test step")
+assert_contains(release_matrix_script "bash \"$script_dir/cross_test.sh\" release" "standard release matrix cross test step")
+assert_contains(release_matrix_script "bash \"$script_dir/run_linux_package_matrix.sh\"" "standard release matrix package step")
 
 execute_process(
     COMMAND
@@ -85,6 +104,15 @@ foreach(target
         prerelease-hardening
         lifecycle-version-contract
         print-release-version
+        verify-release-privacy
+        fuzz-long
+        bench
+        bench-check
+        benchmarks-go
+        perf-gate
+        dev-ps
+        dev-logs
+        release-lua-artifacts
         release-matrix)
     string(FIND "${help_stdout}" "make ${target}" help_match)
     if(help_match EQUAL -1)

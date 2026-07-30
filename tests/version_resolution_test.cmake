@@ -186,7 +186,7 @@ endif()
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         LOCKDC_VERSION_SOURCE_DIR=${repo_dir}
-        bash "${LOCKDC_ROOT}/scripts/print-release-version.sh"
+        bash "${LOCKDC_ROOT}/scripts/release_version.sh"
     RESULT_VARIABLE make_version_result
     OUTPUT_VARIABLE make_version_stdout
     ERROR_VARIABLE make_version_stderr
@@ -225,7 +225,7 @@ endif()
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         LOCKDC_VERSION_SOURCE_DIR=${nested_source_dir}
-        bash "${LOCKDC_ROOT}/scripts/print-release-version.sh"
+        bash "${LOCKDC_ROOT}/scripts/release_version.sh"
     RESULT_VARIABLE nested_make_result
     OUTPUT_VARIABLE nested_make_stdout
     ERROR_VARIABLE nested_make_stderr
@@ -268,7 +268,7 @@ endif()
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         LOCKDC_VERSION_SOURCE_DIR=${repo_dir}
-        bash "${LOCKDC_ROOT}/scripts/print-release-version.sh"
+        bash "${LOCKDC_ROOT}/scripts/release_version.sh"
     RESULT_VARIABLE annotated_make_result
     OUTPUT_QUIET
     ERROR_QUIET

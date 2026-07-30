@@ -14,7 +14,12 @@ behavior is not silently lost.
 | No live prerelease gate | `make prerelease-live` | Live-provider checks remain opt-in and are not part of normal local confidence. | `lifecycle_command_surface_test` asserts the `LOCKDC_PRERELEASE_LIVE=1` opt-in diagnostic. | Placeholder until live checks exist |
 | Expensive release rehearsal split across long fuzzing and parity commands | `make prerelease-hardening` | Full fuzzing and the Pouch Go parity gate remain available after the shared prerelease proof. | `lifecycle_command_surface_test` asserts the hardening graph. | Active |
 | Release version checks embedded in later release work | `make lifecycle-version-contract` | Exact semver release tags are validated before clean release work; only lightweight tags are accepted, and the reserved temporary tag is cleaned up. | `version_resolution_test` rejects annotated tags; `lifecycle_command_surface_test` asserts the release ordering. | Active |
-| Existing `make release-matrix` | `make release-matrix` | Incremental release matrix rehearsal remains the standard surface. | Existing release targeting tests plus command-surface help coverage. | Active |
+| Repo-local release version script | `scripts/release_version.sh` through `make print-release-version` | Git worktrees resolve only exact lightweight `vX.Y.Z` tags, then explicit override, otherwise `0.0.0`; non-git source archives read `VERSION`. | `version_resolution_test` and `lifecycle-version-contract` cover Make and CMake version behavior. | Active |
+| `scripts/dev-e2e.sh` as the e2e entrypoint | `scripts/test-e2e.sh` through `make test-e2e` | Default bundle, endpoint, and socket environment setup is preserved; `dev-e2e.sh` remains a compatibility wrapper. | `lifecycle_command_surface_test` asserts the standard runner. | Active |
+| `scripts/test_release_source.sh` | `scripts/test_release_from_source.sh` through `make package-source-smoke` | Source archive extraction, version agreement, build, and unit smoke behavior is preserved; old script remains a compatibility wrapper. | `release_package_matrix_targeting_test` and command-surface coverage assert the standard runner. | Active |
+| Existing release-matrix recipe directly expanded in Make | `scripts/run_linux_release_matrix.sh` through `make release-matrix` | Incremental release matrix rehearsal still builds, tests, packages, checksums, verifies archives, and runs source/Lua package checks while reusing caches. | `release_targeting_test` and `lifecycle_command_surface_test` assert delegation and matrix order. | Active |
+| Lockdc-prefixed Lua rock scripts in release metadata | `scripts/build_lua_rock.sh` and `scripts/validate_luarocks.sh` | Lua source rock builds and validation keep the existing implementation through compatibility wrappers while release metadata uses standard script names. | Lua layout, SDK contract, install/run, and release package tests assert the standard names. | Active |
+| Existing service, fuzz, benchmark, Go parity, and Lua release commands lacked all standard aliases | Standard aliases `dev-ps`, `dev-logs`, `fuzz-long`, `bench`, `bench-check`, `benchmarks-go`, `perf-gate`, `release-lua-artifacts`, and `verify-release-privacy` | Existing service inspection, fuzzing, benchmark, Go parity, Lua artifact, and privacy scan behavior is preserved behind lifecycle names. | `lifecycle_command_surface_test` asserts help entries and target wiring. | Active |
 
 ## Dependency Surface
 
@@ -40,6 +45,10 @@ behavior is not silently lost.
 ## Removed Or Deprecated Behavior
 
 - No lifecycle command has been removed in this slice.
+- `scripts/dev-e2e.sh`, `scripts/test_release_source.sh`,
+  `scripts/build_lockdc_lua_rock.sh`, and
+  `scripts/validate_lockdc_luarocks.sh` remain compatibility wrappers or
+  compatibility implementation targets behind the standard lifecycle names.
 - `make asan`, `make test-asan`, and `make build-asan` remain compatibility
   aliases after the native Valgrind gate, so existing sanitizer workflows stay
   available while lifecycle hardening moves to Memcheck.

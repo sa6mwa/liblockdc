@@ -32,12 +32,12 @@ endforeach()
 file(COPY "${LOCKDC_ROOT}/scripts/run_linux_package_matrix.sh" DESTINATION "${fake_script_dir}")
 file(COPY "${LOCKDC_ROOT}/scripts/osxcross_available.sh" DESTINATION "${fake_script_dir}")
 
-set(fake_release_source_script "${fake_script_dir}/test_release_source.sh")
+set(fake_release_source_script "${fake_script_dir}/test_release_from_source.sh")
 file(WRITE "${fake_release_source_script}" [=[
 #!/usr/bin/env bash
 set -eu
 {
-  printf 'test_release_source|'
+  printf 'test_release_from_source|'
   for arg in "$@"; do
     printf '%s|' "$arg"
   done
@@ -112,7 +112,7 @@ assert_log_contains("cmake\\|-DLOCKDC_BINARY_DIR=.*/build/armhf-linux-musl-relea
 assert_log_contains("cmake\\|-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-release\\|-DLOCKDC_ROOT=.*-DLOCKDC_DIST_DIR=.*/dist\\|-P\\|.*/cmake/package_lua_rock\\.cmake\\|" "Lua packaging invocation")
 assert_log_contains("cmake\\|-DLOCKDC_ROOT=.*-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-release\\|-DLOCKDC_DIST_DIR=.*/dist\\|-P\\|.*/cmake/package_checksums\\.cmake\\|" "checksums invocation")
 assert_log_contains("cmake\\|-DLOCKDC_ROOT=.*-DLOCKDC_DIST_DIR=.*/dist\\|-DLOCKDC_VERIFY_WORK_DIR=.*/build/release-matrix-verify\\|-DLOCKDC_RELEASE_PRESETS=x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release\\|-P\\|.*/tests/release_matrix_archives_test\\.cmake\\|" "archive verification invocation")
-assert_log_contains("test_release_source\\|.*/fake-root\\|.*/dist/liblockdc-0\\.0\\.0-test\\.tar\\.gz\\|" "source release verification invocation")
+assert_log_contains("test_release_from_source\\|.*/fake-root\\|.*/dist/liblockdc-0\\.0\\.0-test\\.tar\\.gz\\|" "source release verification invocation")
 assert_log_contains("cmake\\|-DLOCKDC_ROOT=.*-DLOCKDC_DIST_DIR=.*/dist\\|-DLOCKDC_RELEASE_PRESETS=x86_64-linux-gnu-release;x86_64-linux-musl-release;aarch64-linux-gnu-release;aarch64-linux-musl-release;armhf-linux-gnu-release;armhf-linux-musl-release\\|-P\\|.*/tests/release_tarball_sdk_matrix_test\\.cmake\\|" "release tarball SDK matrix verification invocation")
 assert_log_contains("cmake\\|-DLOCKDC_ROOT=.*-DLOCKDC_BINARY_DIR=.*/build/x86_64-linux-gnu-release\\|-DLOCKDC_DIST_DIR=.*/dist\\|-P\\|.*/tests/release_tarball_sdk_test\\.cmake\\|" "host release tarball SDK verification invocation")
 assert_log_not_contains("ctest\\|" "ctest invocation")
