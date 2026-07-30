@@ -12,14 +12,12 @@ TIMED := bash ./scripts/run_timed.sh
 DEBUG_PRESET := debug
 E2E_PRESET := e2e
 X86_64_GNU_RELEASE_PRESET := x86_64-linux-gnu-release
-ASAN_PRESET := asan
 COVERAGE_PRESET := coverage
 FUZZ_PRESET := fuzz
 
 DEBUG_BUILD_DIR := $(ROOT)/build/$(DEBUG_PRESET)
 E2E_BUILD_DIR := $(ROOT)/build/$(E2E_PRESET)
 X86_64_GNU_RELEASE_BUILD_DIR := $(ROOT)/build/$(X86_64_GNU_RELEASE_PRESET)
-ASAN_BUILD_DIR := $(ROOT)/build/$(ASAN_PRESET)
 COVERAGE_BUILD_DIR := $(ROOT)/build/$(COVERAGE_PRESET)
 
 DIST_DIR := $(ROOT)/dist
@@ -100,19 +98,19 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 .PHONY: \
 	help \
 	__deps-debug __deps-release __deps-cross \
-	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-asan __build-coverage __build-fuzz \
-	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
+	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-coverage __build-fuzz \
+	__test-debug __test-host __test-cross __test-e2e __test-all __test-coverage \
 	__format \
-	__finalize-slice __valgrind __asan __coverage __fuzz __fuzz-smoke __fuzz-long __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf __benchmark-pouch-go __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-compaction __benchmark-pouch-go-parity-gate \
+	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf __benchmark-pouch-go __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-compaction __benchmark-pouch-go-parity-gate \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __verify-release-privacy __clean-dist \
 	__lua-rock __lua-test __lua-env __release-lua-artifacts \
 	__dev-up __dev-down __dev-reset __dev-ps __dev-logs __cross-build __cross-preset-test __cross-test \
-	__prerelease __prerelease-live __prerelease-hardening __lifecycle-version-contract __release __release-pipeline __release-matrix __release-package-only __clean \
+	__prerelease __prerelease-live __prerelease-hardening __lifecycle-version-contract __release __release-pipeline __release-matrix __clean \
 	deps-debug deps-release deps-cross \
-	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
-	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
+	build build-debug build-release build-e2e build-coverage build-fuzz \
+	test test-debug test-host test-cross test-e2e test-all test-coverage \
 	format \
-	finalize-slice valgrind asan coverage fuzz fuzz-smoke fuzz-long bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-compaction benchmark-pouch-go-parity-gate \
+	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-compaction benchmark-pouch-go-parity-gate \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives verify-release-privacy clean-dist \
 	lua-rock lua-test lua-env release-lua-artifacts \
 	dev-up dev-down dev-reset dev-ps dev-logs cross-build cross-preset-test cross-test \
@@ -124,10 +122,9 @@ help:
 		'make build-debug        Configure and build the ASan/UBSan debug preset.' \
 		'make build-release      Configure and build the full shipped Linux release matrix.' \
 		'make build-e2e          Configure and build the e2e preset.' \
-		'make build-asan         Compatibility alias for the ASan/UBSan debug build.' \
 		'make build-coverage     Configure and build the coverage preset.' \
 		'make build-fuzz         Configure and build the fuzz preset.' \
-		'make deps-debug         Provision the host-native release dependency tree used by debug/e2e/asan/coverage/fuzz.' \
+		'make deps-debug         Provision the host-native release dependency tree used by debug/e2e/coverage/fuzz.' \
 		'make deps-release       Provision the shipped x86_64 GNU/musl release dependency trees.' \
 		'make deps-cross         Provision all non-host cross release dependency trees.' \
 		'make test-debug         Run the ASan/UBSan debug preset test suite.' \
@@ -136,7 +133,6 @@ help:
 		'make test-cross         Run the non-host cross release suites.' \
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
 		'make test-all           Run ASan/UBSan debug first, then the host-native release suite.' \
-		'make test-asan          Compatibility alias for test-debug.' \
 		'make test-coverage      Run the coverage preset test suite and build the coverage report.' \
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
@@ -146,17 +142,16 @@ help:
 		'make format             Run clang-format over repo .c and .h files.' \
 		'make finalize-slice     Run formatting plus the narrow debug test gate for an ordinary implementation slice.' \
 		'make valgrind           Build the valgrind preset and run the native Valgrind Memcheck subset.' \
-		'make asan               Compatibility alias for test-debug.' \
 		'make coverage           Run the coverage preset and generate coverage-report.' \
 		'make fuzz               Build fuzz targets and run bounded corpus passes.' \
 		'make fuzz-smoke         Build fuzz targets and run short bounded corpus passes (FUZZ_TIME=5).' \
 		'make fuzz-long          Build fuzz targets and run longer bounded corpus passes (FUZZ_LONG_TIME=$(FUZZ_LONG_TIME)).' \
-		'make bench              Compatibility alias for benchmarks.' \
+		'make bench              Standard short name for benchmarks.' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
-		'make bench-check        Compatibility alias for bench-gate.' \
-		'make bench-gate         Compatibility alias for benchmarks.' \
-		'make benchmarks-go      Compatibility alias for benchmark-pouch-go.' \
-		'make perf-gate          Compatibility alias for benchmark-pouch-go-parity-gate.' \
+		'make bench-check        Run the benchmark regression gate.' \
+		'make bench-gate         Run the benchmark regression gate.' \
+		'make benchmarks-go      Run Go parity benchmarks through the standard lifecycle name.' \
+		'make perf-gate          Run the Pouch Go parity performance gate.' \
 		'make benchmark-pouch-perf Run one sub-minute native pouch perf case (POUCH_PERF_CASE=$(POUCH_PERF_CASE), POUCH_PERF_ROWS=$(POUCH_PERF_ROWS), POUCH_PERF_CRYPTO=$(POUCH_PERF_CRYPTO)).' \
 		'make benchmark-pouch-perf-index-docs Run the isolated public-API indexed narrative document query perf case.' \
 		'make benchmark-pouch-perf-full-text-keys Run the isolated public-API full-text key query perf case.' \
@@ -181,7 +176,7 @@ help:
 		'make lua-rock           Build the Lua release package and source rock artifacts.' \
 		'make lua-test           Run local Lua layout, SDK, facade, and binding smoke tests.' \
 		'make lua-env            Print shell exports for the repo-local Lua rock tree.' \
-		'make release-lua-artifacts  Compatibility alias for lua-rock.' \
+		'make release-lua-artifacts  Build Lua release artifacts under dist/.' \
 		'make clean-dist         Reset dist/ release artifacts.' \
 		'make cross-build        Build all non-host cross release presets.' \
 		'make cross-preset-test  Run the host ASan/UBSan debug cross-preset packaging-isolation check.' \
@@ -243,13 +238,6 @@ build-e2e:
 __build-e2e: __deps-debug
 	$(CMAKE) --preset $(E2E_PRESET)
 	$(CMAKE) --build --preset $(E2E_PRESET)
-
-build-asan:
-	$(TIMED) build-asan $(MAKE) __build-asan
-
-__build-asan: __deps-debug
-	$(CMAKE) --preset $(ASAN_PRESET)
-	$(CMAKE) --build --preset $(ASAN_PRESET)
 
 build-coverage:
 	$(TIMED) build-coverage $(MAKE) __build-coverage
@@ -342,16 +330,6 @@ valgrind:
 
 __valgrind:
 	bash ./scripts/valgrind.sh
-
-test-asan:
-	$(TIMED) test-asan $(MAKE) __test-asan
-
-__test-asan: __test-debug
-
-asan:
-	$(TIMED) asan $(MAKE) __asan
-
-__asan: __test-debug
 
 test-coverage:
 	$(TIMED) test-coverage $(MAKE) __test-coverage
@@ -698,9 +676,6 @@ release-matrix:
 
 __release-matrix:
 	bash ./scripts/run_linux_release_matrix.sh
-
-__release-package-only: __build-release
-	bash ./scripts/run_linux_package_matrix.sh
 
 clean:
 	$(TIMED) clean $(MAKE) __clean

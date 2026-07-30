@@ -39,7 +39,6 @@ foreach(unexpected
     "[release] __cross-test"
     "[release] __test-e2e"
     "[release] __benchmarks"
-    "[release] __release-package-only"
 )
     string(FIND "${release_stdout}" "${unexpected}" unexpected_match_index)
     if(NOT unexpected_match_index EQUAL -1)

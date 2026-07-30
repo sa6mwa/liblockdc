@@ -19,6 +19,24 @@ function(assert_contains haystack needle description)
     endif()
 endfunction()
 
+function(assert_not_contains haystack needle description)
+    string(FIND "${${haystack}}" "${needle}" found_at)
+    if(NOT found_at EQUAL -1)
+        message(FATAL_ERROR "unexpected ${description}")
+    endif()
+endfunction()
+
+foreach(obsolete_script
+        scripts/dev-e2e.sh
+        scripts/print-release-version.sh
+        scripts/test_release_source.sh
+        scripts/build_lockdc_lua_rock.sh
+        scripts/validate_lockdc_luarocks.sh)
+    if(EXISTS "${LOCKDC_ROOT}/${obsolete_script}")
+        message(FATAL_ERROR "obsolete compatibility script still exists: ${obsolete_script}")
+    endif()
+endforeach()
+
 foreach(target
         finalize-slice
         valgrind
@@ -55,6 +73,10 @@ assert_contains(root_makefile "bash ./scripts/test-e2e.sh" "standard e2e runner"
 assert_contains(root_makefile "bash ./scripts/test_release_from_source.sh" "standard source archive smoke runner")
 assert_contains(root_makefile "bash ./scripts/verify_release_privacy.sh" "standard release privacy runner")
 assert_contains(root_makefile "bash ./scripts/run_linux_release_matrix.sh" "standard release matrix runner")
+assert_not_contains(root_makefile "build-asan:" "non-standard build-asan compatibility target")
+assert_not_contains(root_makefile "test-asan:" "non-standard test-asan compatibility target")
+assert_not_contains(root_makefile "asan:" "non-standard asan compatibility target")
+assert_not_contains(root_makefile "__release-package-only" "obsolete release package-only internal target")
 assert_contains(root_makefile "__release-pipeline: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test __bench-gate __release-matrix" "shared release pipeline graph")
 assert_contains(release_script "run_step __lifecycle-version-contract\nrun_step __clean\nrun_step __release-pipeline" "release version contract, clean, shared pipeline order")
 assert_contains(release_matrix_script "\"$make_bin\" __build-release" "standard release matrix build step")

@@ -226,6 +226,6 @@ Or just run:
 scripts/test-e2e.sh
 ```
 
-`test-e2e.sh` exports the default bundle/socket paths for this repo layout before invoking CMake/CTest. `dev-e2e.sh` remains as a compatibility wrapper.
+`test-e2e.sh` exports the default bundle/socket paths for this repo layout before invoking CMake/CTest.
 
 The current devenv certs are generated for local development only, so the e2e client enables `lc_client_config.insecure_skip_verify=1` for the mTLS test nodes only. The normal client default remains strict verification.

@@ -24,7 +24,6 @@ foreach(required_path
     "${LOCKDC_ROOT}/src/lc_engine_api.h"
     "${LOCKDC_ROOT}/src/lc_pouch.h"
     "${LOCKDC_ROOT}/scripts/build_lua_rock.sh"
-    "${LOCKDC_ROOT}/scripts/build_lockdc_lua_rock.sh"
     "${LOCKDC_ROOT}/lockdc.rockspec.in"
     "${generated_rockspec_path}"
 )
@@ -34,10 +33,8 @@ foreach(required_path
 endforeach()
 
 file(READ "${generated_rockspec_path}" rockspec_text)
-file(READ "${LOCKDC_ROOT}/scripts/validate_luarocks.sh" validate_luarocks_wrapper)
-file(READ "${LOCKDC_ROOT}/scripts/validate_lockdc_luarocks.sh" validate_luarocks_script)
-file(READ "${LOCKDC_ROOT}/scripts/build_lua_rock.sh" build_luarock_wrapper)
-file(READ "${LOCKDC_ROOT}/scripts/build_lockdc_lua_rock.sh" build_luarock_script)
+file(READ "${LOCKDC_ROOT}/scripts/validate_luarocks.sh" validate_luarocks_script)
+file(READ "${LOCKDC_ROOT}/scripts/build_lua_rock.sh" build_luarock_script)
 foreach(required_snippet
     "package = \"lockdc\""
     "\"lonejson == 0.42.0-1\""
@@ -58,26 +55,7 @@ foreach(required_snippet
 endforeach()
 
 foreach(required_snippet
-    "build_lockdc_lua_rock.sh"
-    "set -euo pipefail")
-    string(FIND "${build_luarock_wrapper}" "${required_snippet}" snippet_index)
-    if(snippet_index EQUAL -1)
-        message(FATAL_ERROR
-            "standard Lua rock builder wrapper is missing expected snippet '${required_snippet}'")
-    endif()
-endforeach()
-
-foreach(required_snippet
-    "validate_lockdc_luarocks.sh"
-    "set -euo pipefail")
-    string(FIND "${validate_luarocks_wrapper}" "${required_snippet}" snippet_index)
-    if(snippet_index EQUAL -1)
-        message(FATAL_ERROR
-            "standard LuaRocks validator wrapper is missing expected snippet '${required_snippet}'")
-    endif()
-endforeach()
-
-foreach(required_snippet
+    "set -euo pipefail"
     "-llockdc"
     "LOCKDC_CFLAGS_EXTRA"
     "LOCKDC_LIBS_EXTRA")
@@ -102,6 +80,7 @@ foreach(forbidden_snippet
 endforeach()
 
 foreach(required_snippet
+    "set -euo pipefail"
     "https://github.com/sa6mwa/lonejson/releases/download/v0.42.0/lonejson-0.42.0-1.src.rock"
     "export LONEJSON_LIBDIR"
 )

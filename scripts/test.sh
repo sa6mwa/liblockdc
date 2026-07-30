@@ -158,9 +158,6 @@ case "$kind" in
     "$script_dir/build.sh" release
     ctest --preset x86_64-linux-gnu-release --progress --stop-on-failure --timeout "$ctest_timeout"
     ;;
-  asan)
-    "$script_dir/test.sh" debug
-    ;;
   coverage)
     "$script_dir/build.sh" coverage
     ctest --preset coverage --progress --stop-on-failure --timeout "$ctest_timeout"
@@ -174,7 +171,7 @@ case "$kind" in
     "$script_dir/test.sh" e2e
     ;;
   *)
-    echo "usage: scripts/test.sh [unit|debug|e2e|release|asan|coverage|fuzz|all]" >&2
+    echo "usage: scripts/test.sh [unit|debug|e2e|release|coverage|fuzz|all]" >&2
     exit 2
     ;;
 esac

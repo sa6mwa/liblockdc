@@ -99,7 +99,7 @@ Run focused verification layers:
 
 ```bash
 make test-e2e
-make asan
+make test-debug
 make coverage
 make fuzz
 make benchmarks
