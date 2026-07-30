@@ -30,7 +30,7 @@ assert_contains(root_makefile "bash ./scripts/valgrind.sh" "Valgrind runner wiri
 assert_contains(root_makefile "LOCKDC_PRERELEASE_LIVE=1" "live prerelease opt-in diagnostic")
 assert_contains(root_makefile "__finalize-slice: __format __test-debug" "ordinary slice gate graph")
 assert_contains(root_makefile "__test-all: __test-debug __test-host" "bounded test-all graph")
-assert_contains(root_makefile "__prerelease: __finalize-slice __valgrind __fuzz-smoke __lua-test" "deterministic prerelease graph")
+assert_contains(root_makefile "__prerelease: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test" "deterministic prerelease graph")
 assert_contains(root_makefile "__prerelease-hardening: __prerelease __bench-gate __benchmark-pouch-go-parity-gate __release-matrix" "hardening prerelease graph")
 
 execute_process(

@@ -176,7 +176,7 @@ help:
 		'make cross-build        Build all non-host cross release presets.' \
 		'make cross-preset-test  Run the host ASan/UBSan debug cross-preset packaging-isolation check.' \
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
-		'make prerelease         Run deterministic local prerelease confidence: finalize-slice, Valgrind, fuzz smoke, and Lua tests.' \
+		'make prerelease         Run deterministic local prerelease confidence: finalize-slice, Valgrind, fuzz smoke, e2e, and Lua tests.' \
 		'make prerelease-live    Refuse without LOCKDC_PRERELEASE_LIVE=1; no live-provider checks are currently defined.' \
 		'make prerelease-hardening  Run prerelease plus fuzz smoke, benchmark gate, and release matrix.' \
 		'make release            Run the clean-slate final release workflow: tests, AFL++ fuzzing, e2e, benchmarks, package generation, and final release verification.' \
@@ -592,7 +592,7 @@ release:
 prerelease:
 	$(TIMED) prerelease $(MAKE) __prerelease
 
-__prerelease: __finalize-slice __valgrind __fuzz-smoke __lua-test
+__prerelease: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test
 
 prerelease-live:
 	$(TIMED) prerelease-live $(MAKE) __prerelease-live
