@@ -85,14 +85,15 @@ Run the non-host cross release suites:
 make test-cross
 ```
 
-Run the full release verification path across host and cross targets:
+Run the local debug and host-release verification path:
 
 ```bash
 make test-all
 ```
 
 `make test-all` starts with the sanitizer-instrumented debug suite before the
-host and cross release suites.
+host release suite. Cross release verification lives behind `make test-cross`,
+`make release-matrix`, and `make release`.
 
 Run focused verification layers:
 
@@ -154,9 +155,10 @@ make release
 ```
 
 `make release` is the final clean-slate release workflow. It removes generated
-state, formats the C tree, runs the debug sanitizer, host, cross, e2e,
-benchmark, and optional fuzz layers, then generates and verifies the release
-archive set. Use
+state, verifies release tag semantics, formats the C tree, runs the debug
+sanitizer, host, cross, fuzz, and benchmark layers, then generates and verifies
+the release archive set. Deterministic lockd e2e is part of `make prerelease`.
+Use
 `make release-matrix` when you explicitly want to reuse existing build and
 dependency caches for a faster release matrix/package rerun.
 

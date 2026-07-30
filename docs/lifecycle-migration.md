@@ -8,11 +8,12 @@ behavior is not silently lost.
 
 | Old command or behavior | New lifecycle surface | Behavior preserved | Verification added | Status |
 | --- | --- | --- | --- | --- |
-| `make test-host` as the ordinary local confidence gate | `make finalize-slice` | Formatting and host release tests remain the pre-commit slice gate. | `lifecycle_command_surface_test` asserts the target and help entry. | Active |
+| `make test-host` as the ordinary local confidence gate | `make finalize-slice` | Formatting and the narrow debug test gate are the pre-commit slice gate; host release tests stay on `make test-host` and `make test-all`. | `lifecycle_command_surface_test` asserts the target, help entry, and graph. | Active |
 | Ad hoc ASan/UBSan hardening through `make asan` and `make test-debug` | `make valgrind` | ASan/UBSan compatibility aliases remain available while native Memcheck runs through the dedicated lifecycle gate. | `lifecycle_command_surface_test` asserts the runner wiring and dry-run target set. | Active host runner |
-| Manually choosing release rehearsal commands | `make prerelease` | Deterministic local checks are grouped without requiring live credentials. | `lifecycle_command_surface_test` asserts the graph includes slice, broad tests, package verification, and Lua tests. | Active |
+| Manually choosing release rehearsal commands | `make prerelease` | Deterministic local checks are grouped without requiring live credentials: slice gate, Valgrind, fuzz smoke, lockd e2e, and Lua tests. | `lifecycle_command_surface_test` asserts the graph includes those surfaces. | Active |
 | No live prerelease gate | `make prerelease-live` | Live-provider checks remain opt-in and are not part of normal local confidence. | `lifecycle_command_surface_test` asserts the `LOCKDC_PRERELEASE_LIVE=1` opt-in diagnostic. | Placeholder until live checks exist |
-| Expensive release rehearsal split across fuzz, benchmark, package, and matrix commands | `make prerelease-hardening` | Existing fuzz smoke, benchmark gate, and release matrix behavior remain available. | `lifecycle_command_surface_test` asserts the hardening graph. | Active |
+| Expensive release rehearsal split across benchmark, parity, package, and matrix commands | `make prerelease-hardening` | Pouch parity, benchmark gates, and release matrix behavior remain available after deterministic prerelease checks. | `lifecycle_command_surface_test` asserts the hardening graph. | Active |
+| Release version checks embedded in later release work | `make lifecycle-version-contract` | Exact semver release tags are validated before clean release work; only lightweight tags are accepted, and the reserved temporary tag is cleaned up. | `version_resolution_test` rejects annotated tags; `lifecycle_command_surface_test` asserts the release ordering. | Active |
 | Existing `make release-matrix` | `make release-matrix` | Incremental release matrix rehearsal remains the standard surface. | Existing release targeting tests plus command-surface help coverage. | Active |
 
 ## Dependency Surface
@@ -45,9 +46,6 @@ behavior is not silently lost.
 
 ## Decisions Still Required
 
-- Whether Valgrind becomes part of `make prerelease` immediately when the
-  Bootlin-backed compiler policy lands, or first stays as a separate hardening
-  gate for one migration slice.
 - Whether live provider checks should exist for `make prerelease-live`; no live
   prerelease checks are currently defined.
 - Whether the migration ledger should be retained as project documentation after

@@ -3,9 +3,11 @@ if(NOT DEFINED LOCKDC_ROOT)
 endif()
 
 set(makefile_path "${LOCKDC_ROOT}/Makefile")
+set(release_script_path "${LOCKDC_ROOT}/scripts/release.sh")
 set(ledger_path "${LOCKDC_ROOT}/docs/lifecycle-migration.md")
 
 file(READ "${makefile_path}" root_makefile)
+file(READ "${release_script_path}" release_script)
 file(READ "${ledger_path}" lifecycle_ledger)
 
 function(assert_contains haystack needle description)
@@ -21,6 +23,7 @@ foreach(target
         prerelease
         prerelease-live
         prerelease-hardening
+        lifecycle-version-contract
         release-matrix)
     assert_contains(root_makefile "make ${target}" "make help entry for ${target}")
     assert_contains(root_makefile "${target}:" "make target ${target}")
@@ -32,6 +35,9 @@ assert_contains(root_makefile "__finalize-slice: __format __test-debug" "ordinar
 assert_contains(root_makefile "__test-all: __test-debug __test-host" "bounded test-all graph")
 assert_contains(root_makefile "__prerelease: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test" "deterministic prerelease graph")
 assert_contains(root_makefile "__prerelease-hardening: __prerelease __bench-gate __benchmark-pouch-go-parity-gate __release-matrix" "hardening prerelease graph")
+assert_contains(root_makefile "__lifecycle-version-contract:" "lifecycle version contract target")
+assert_contains(root_makefile "bash ./scripts/lifecycle-version-contract.sh" "lifecycle version contract runner")
+assert_contains(release_script "run_step __lifecycle-version-contract\nrun_step __clean" "release version contract before clean")
 
 execute_process(
     COMMAND
@@ -73,6 +79,7 @@ foreach(target
         prerelease
         prerelease-live
         prerelease-hardening
+        lifecycle-version-contract
         release-matrix)
     string(FIND "${help_stdout}" "make ${target}" help_match)
     if(help_match EQUAL -1)
@@ -83,4 +90,5 @@ endforeach()
 assert_contains(lifecycle_ledger "## Command Surface" "migration ledger command surface section")
 assert_contains(lifecycle_ledger "make finalize-slice" "migration ledger finalize-slice entry")
 assert_contains(lifecycle_ledger "make valgrind" "migration ledger valgrind entry")
+assert_contains(lifecycle_ledger "make lifecycle-version-contract" "migration ledger version contract entry")
 assert_contains(lifecycle_ledger "## Decisions Still Required" "migration ledger decisions section")

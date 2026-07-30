@@ -20,12 +20,12 @@ if(NOT release_result EQUAL 0)
 endif()
 
 foreach(expected
+    "[release] __lifecycle-version-contract"
     "[release] __clean"
     "[release] __test-debug"
     "[release] __test-host"
     "[release] __cross-test"
     "[release] __fuzz"
-    "[release] __test-e2e"
     "[release] __benchmarks"
     "[release] __release-package-only"
 )
@@ -37,3 +37,11 @@ foreach(expected
             "stderr:\n${release_stderr}")
     endif()
 endforeach()
+
+string(FIND "${release_stdout}" "[release] __test-e2e" e2e_match_index)
+if(NOT e2e_match_index EQUAL -1)
+    message(FATAL_ERROR
+        "Did not expect release to rerun e2e; e2e belongs to prerelease\n"
+        "stdout:\n${release_stdout}\n"
+        "stderr:\n${release_stderr}")
+endif()

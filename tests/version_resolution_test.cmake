@@ -142,3 +142,28 @@ if(NOT untagged_probe_contents STREQUAL "0.0.0|0|0|0")
     message(FATAL_ERROR
         "expected untagged commit to resolve to 0.0.0, got '${untagged_probe_contents}'")
 endif()
+
+execute_process(
+    COMMAND "${LOCKDC_GIT_BIN}" -c tag.gpgSign=false tag -a v2.3.4 -m "annotated"
+    WORKING_DIRECTORY "${repo_dir}"
+    RESULT_VARIABLE annotated_tag_result
+    OUTPUT_QUIET
+    ERROR_QUIET
+)
+if(NOT annotated_tag_result EQUAL 0)
+    message(FATAL_ERROR "failed to create temporary annotated repository tag")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+        -DLOCKDC_ROOT=${LOCKDC_ROOT}
+        -DLOCKDC_VERSION_SOURCE_DIR=${repo_dir}
+        -DLOCKDC_VERSION_PROBE_OUTPUT=${untagged_output}
+        -P ${LOCKDC_ROOT}/tests/version_resolution_probe.cmake
+    RESULT_VARIABLE annotated_probe_result
+    OUTPUT_QUIET
+    ERROR_QUIET
+)
+if(annotated_probe_result EQUAL 0)
+    message(FATAL_ERROR "expected annotated exact release tag to be rejected")
+endif()

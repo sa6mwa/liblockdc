@@ -20,12 +20,12 @@ run_step() {
 
 cd "$repo_root"
 
+run_step __lifecycle-version-contract
 run_step __clean
 run_step __format
 run_step __test-debug
 run_step __test-host
 run_step __cross-test
 run_step __fuzz
-run_step __test-e2e
 run_step __benchmarks
 run_step __release-package-only
