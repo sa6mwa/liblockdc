@@ -2076,8 +2076,8 @@ static void test_binary_buffer_reserve(test_binary_buffer *buffer,
   while (capacity < needed) {
     capacity *= 2U;
   }
-  next = (unsigned char *)lc_realloc_with_allocator(NULL, buffer->bytes,
-                                                    capacity);
+  next =
+      (unsigned char *)lc_realloc_with_allocator(NULL, buffer->bytes, capacity);
   assert_non_null(next);
   buffer->bytes = next;
   buffer->capacity = capacity;
@@ -2102,8 +2102,7 @@ static void test_binary_buffer_u16(test_binary_buffer *buffer,
   test_binary_buffer_append(buffer, bytes, sizeof(bytes));
 }
 
-static void test_binary_buffer_u64(test_binary_buffer *buffer,
-                                   uint64_t value) {
+static void test_binary_buffer_u64(test_binary_buffer *buffer, uint64_t value) {
   unsigned char bytes[8];
   size_t i;
 
@@ -2132,14 +2131,11 @@ static void test_binary_buffer_string(test_binary_buffer *buffer,
   }
 }
 
-static void test_write_binary_txn_record(lc_pouch *pouch, const char *key,
-                                         const char *state,
-                                         long expires_at_unix,
-                                         unsigned long tc_term,
-                                         const char *target_backend_hash,
-                                         const lc_txn_participant *participants,
-                                         size_t participant_count,
-                                         lc_error *error) {
+static void test_write_binary_txn_record(
+    lc_pouch *pouch, const char *key, const char *state, long expires_at_unix,
+    unsigned long tc_term, const char *target_backend_hash,
+    const lc_txn_participant *participants, size_t participant_count,
+    lc_error *error) {
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
   test_binary_buffer buffer;
@@ -14966,11 +14962,11 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   assert_true(txn_record_length > 4U);
   assert_memory_equal(txn_record, "LPT1", 4U);
   assert_true(bytes_contain_text(txn_record, txn_record_length, "commit"));
-  assert_true(bytes_contain_text(txn_record, txn_record_length,
-                                 "target-backend"));
+  assert_true(
+      bytes_contain_text(txn_record, txn_record_length, "target-backend"));
   assert_true(bytes_contain_text(txn_record, txn_record_length, "orders/eu"));
-  assert_true(bytes_contain_text(txn_record, txn_record_length,
-                                 "state/order-1"));
+  assert_true(
+      bytes_contain_text(txn_record, txn_record_length, "state/order-1"));
   assert_true(bytes_contain_text(txn_record, txn_record_length, "backend-a"));
 
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
@@ -15583,8 +15579,8 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
     participant.namespace_name = "orders/recover";
     participant.key = "state/recover-commit";
     participant.backend_hash = "backend-recover";
-    test_write_binary_txn_record(pouch, "txn/txn-recover-commit", "commit",
-                                 0L, 1UL, "", &participant, 1U, &error);
+    test_write_binary_txn_record(pouch, "txn/txn-recover-commit", "commit", 0L,
+                                 1UL, "", &participant, 1U, &error);
   }
   rc = lc_source_from_memory("expired-stage", strlen("expired-stage"), &source,
                              &error);

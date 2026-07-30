@@ -2113,7 +2113,7 @@ int lc_sink_memory_reserve(lc_sink *sink, size_t capacity, lc_error *error) {
 }
 
 int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error) {
-  unsigned char buffer[8192];
+  unsigned char buffer[65536];
   size_t total;
   size_t nread;
   int rc;

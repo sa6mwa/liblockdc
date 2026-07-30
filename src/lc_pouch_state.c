@@ -562,9 +562,8 @@ typedef struct lc_pouch_state_cache_record {
 } lc_pouch_state_cache_record;
 
 static lc_pouch_state_cache_namespace *
-lc_pouch_state_cache_namespace_find(lc_pouch *pouch,
-                                    const char *namespace_name, int create,
-                                    lc_error *error);
+lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
+                                    int create, lc_error *error);
 static lc_pouch_state_cache_record *
 lc_pouch_state_cache_record_find(lc_pouch_state_cache_namespace *ns,
                                  const char *key);
@@ -1592,14 +1591,14 @@ static int lc_pouch_state_scan_body_snapshot_open_result(
   process_mutex = NULL;
   if (rc == LC_OK && out->body == NULL &&
       snapshot->bytes <= LC_POUCH_STATE_BODY_CACHE_RECORD_MAX_BYTES) {
-    rc = lc_pouch_state_process_namespace_mutex_lock(
-        pouch, namespace_name, &process_mutex, error);
+    rc = lc_pouch_state_process_namespace_mutex_lock(pouch, namespace_name,
+                                                     &process_mutex, error);
     if (rc == LC_OK) {
-      cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0,
-                                                  error);
-      record = cache != NULL ? lc_pouch_state_cache_record_find(
-                                   cache, snapshot->key)
-                             : NULL;
+      cache =
+          lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, error);
+      record = cache != NULL
+                   ? lc_pouch_state_cache_record_find(cache, snapshot->key)
+                   : NULL;
       if (record != NULL && record->found &&
           record->version == snapshot->version &&
           record->bytes == snapshot->bytes) {
@@ -1789,8 +1788,8 @@ static int lc_pouch_state_read_many_snapshot_body_from_cache(
 
 static void lc_pouch_state_cache_record_store_body_source(
     lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
-    lc_pouch_state_cache_record *record, lc_source *body,
-    unsigned long version, unsigned long bytes) {
+    lc_pouch_state_cache_record *record, lc_source *body, unsigned long version,
+    unsigned long bytes) {
   lc_pouch_state_body_cache_entry *entry;
   lc_sink *sink;
   const void *data;
@@ -3684,7 +3683,8 @@ static int lc_pouch_state_read_next_record(
     lc_free_with_allocator(allocator, meta);
     return rc;
   }
-  if (payload_length > file_size || payload_offset > file_size - payload_length) {
+  if (payload_length > file_size ||
+      payload_offset > file_size - payload_length) {
     lc_free_with_allocator(allocator, key);
     lc_free_with_allocator(allocator, meta);
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
@@ -3843,16 +3843,18 @@ static int lc_pouch_state_skip_file_bytes(FILE *fp, uint64_t length,
   return LC_OK;
 }
 
-static int lc_pouch_state_scan_file_max_version(
-    lc_pouch *pouch, const char *segment_path, int allow_truncated_tail,
-    unsigned long *max_version, lc_error *error) {
+static int lc_pouch_state_scan_file_max_version(lc_pouch *pouch,
+                                                const char *segment_path,
+                                                int allow_truncated_tail,
+                                                unsigned long *max_version,
+                                                lc_error *error) {
   FILE *fp;
   int rc;
 
   if (pouch == NULL || segment_path == NULL || max_version == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch state sequence scan requires inputs", NULL,
-                        NULL, "pouch");
+                        "pouch state sequence scan requires inputs", NULL, NULL,
+                        "pouch");
   }
   fp = fopen(segment_path, "rb");
   if (fp == NULL) {
@@ -4012,8 +4014,7 @@ static int lc_pouch_state_manifest_max_version(
       return rc;
     }
   }
-  for (segment_id = 1UL; segment_id <= manifest->max_segment_id;
-       ++segment_id) {
+  for (segment_id = 1UL; segment_id <= manifest->max_segment_id; ++segment_id) {
     char *segment_leaf;
     char *segment_path;
     int allow_truncated_tail;
@@ -4034,9 +4035,8 @@ static int lc_pouch_state_manifest_max_version(
                           "failed to allocate pouch state segment path", NULL,
                           NULL, NULL);
     }
-    allow_truncated_tail =
-        manifest->active_segment != NULL &&
-        strcmp(segment_leaf, manifest->active_segment) == 0;
+    allow_truncated_tail = manifest->active_segment != NULL &&
+                           strcmp(segment_leaf, manifest->active_segment) == 0;
     rc = lc_pouch_state_scan_file_max_version(
         pouch, segment_path, allow_truncated_tail, max_version, error);
     lc_free_with_allocator(&pouch->allocator, segment_leaf);
@@ -4386,8 +4386,7 @@ static int lc_pouch_state_cache_warm_transformed_bodies(
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || cache == NULL ||
-      manifest == NULL ||
-      manifest->namespace_path == NULL) {
+      manifest == NULL || manifest->namespace_path == NULL) {
     return LC_OK;
   }
   transformed = lc_pouch_crypto_enabled(pouch->crypto) ||
@@ -4447,8 +4446,8 @@ static int lc_pouch_state_cache_warm_transformed_bodies(
     source = NULL;
     rc = lc_pouch_state_read_many_snapshot_body_from_cache(
         pouch, cache, record, crypto_context, payload_span_path,
-        record->payload_span.payload_offset, record->payload_span.payload_length,
-        &current, 0, &source, error);
+        record->payload_span.payload_offset,
+        record->payload_span.payload_length, &current, 0, &source, error);
     if (source != NULL) {
       source->close(source);
     }
@@ -4676,6 +4675,52 @@ static int lc_pouch_state_read_result_from_entry(
     current->descriptor = NULL;
   }
   return rc;
+}
+
+static int lc_pouch_state_read_result_from_cache_record(
+    lc_pouch *pouch, const lc_pouch_state_cache_record *record,
+    lc_pouch_state_read_result *out, lc_error *error) {
+  if (pouch == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch cached read result requires pouch and out", NULL,
+                        NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  if (record == NULL || !record->found) {
+    return LC_OK;
+  }
+  if (!record->payload_span.present) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch cached state payload span is invalid", NULL,
+                        NULL, "pouch");
+  }
+  out->content_type =
+      record->content_type != NULL
+          ? lc_strdup_with_allocator(&pouch->allocator, record->content_type)
+          : NULL;
+  out->etag = record->etag != NULL
+                  ? lc_strdup_with_allocator(&pouch->allocator, record->etag)
+                  : NULL;
+  out->descriptor =
+      record->descriptor != NULL
+          ? lc_strdup_with_allocator(&pouch->allocator, record->descriptor)
+          : NULL;
+  if ((record->content_type != NULL && out->content_type == NULL) ||
+      (record->etag != NULL && out->etag == NULL) ||
+      (record->descriptor != NULL && out->descriptor == NULL)) {
+    lc_pouch_state_read_result_cleanup(&pouch->allocator, out);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch cached read metadata", NULL,
+                        NULL, NULL);
+  }
+  out->version = record->version;
+  out->bytes = record->bytes;
+  out->cipher_bytes = record->cipher_bytes;
+  out->updated_at_unix = record->updated_at_unix;
+  out->has_query_hidden = record->has_query_hidden;
+  out->query_hidden = record->query_hidden;
+  out->found = 1;
+  return LC_OK;
 }
 
 static int lc_pouch_state_snapshot_write_record(
@@ -6556,7 +6601,8 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
         pouch, namespace_name, &manifest, key, content_type, etag,
         &payload_span, payload_context, version, bytes, cipher_bytes,
         descriptor, updated_at_unix, has_query_hidden, query_hidden, 1);
-    if (body->reset != NULL && bytes <= LC_POUCH_STATE_BODY_CACHE_RECORD_MAX_BYTES) {
+    if (body->reset != NULL &&
+        bytes <= LC_POUCH_STATE_BODY_CACHE_RECORD_MAX_BYTES) {
       lc_pouch_state_cache_namespace *cache;
       lc_pouch_state_cache_record *record;
       lc_error cache_error;
@@ -6564,12 +6610,12 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
       lc_error_init(&cache_error);
       cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0,
                                                   &cache_error);
-      record = cache != NULL ? lc_pouch_state_cache_record_find(cache, key)
-                             : NULL;
+      record =
+          cache != NULL ? lc_pouch_state_cache_record_find(cache, key) : NULL;
       if (record != NULL && record->found && record->version == version &&
           record->bytes == bytes) {
-        lc_pouch_state_cache_record_store_body_source(
-            pouch, cache, record, body, version, bytes);
+        lc_pouch_state_cache_record_store_body_source(pouch, cache, record,
+                                                      body, version, bytes);
       }
       lc_error_cleanup(&cache_error);
     }
@@ -7570,6 +7616,107 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
                                       error);
 }
 
+int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
+                        const char *key, lc_sink *dst,
+                        lc_pouch_state_read_result *out, lc_error *error) {
+  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_state_cache_record *record;
+  lc_pouch_state_entry current;
+  lc_pouch_namespace_manifest manifest;
+  lc_pouch_state_process_namespace_mutex *process_mutex;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      key == NULL || key[0] == '\0' || dst == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "lc_pouch_state_copy requires pouch, namespace, key, "
+                        "sink, and out",
+                        NULL, NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  process_mutex = NULL;
+  rc = lc_pouch_state_process_namespace_mutex_lock(pouch, namespace_name,
+                                                   &process_mutex, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (pouch->single_writer) {
+    cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+    record =
+        cache != NULL ? lc_pouch_state_cache_record_find(cache, key) : NULL;
+    if (record != NULL && record->found && record->body_cache != NULL &&
+        record->body_cache->version == record->version &&
+        record->body_cache->length == (size_t)record->bytes) {
+      rc = lc_pouch_state_read_result_from_cache_record(pouch, record, out,
+                                                        error);
+      if (rc == LC_OK) {
+        rc = lc_sink_memory_reserve(dst, record->body_cache->length, error);
+      }
+      if (rc == LC_OK && record->body_cache->length > 0U &&
+          !dst->write(dst, record->body_cache->bytes,
+                      record->body_cache->length, error)) {
+        rc = error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_TRANSPORT;
+      }
+      goto cleanup_unlocked;
+    }
+  }
+  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  if (rc != LC_OK) {
+    goto cleanup_unlocked;
+  }
+  memset(&manifest, 0, sizeof(manifest));
+  rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
+                                        namespace_name, &manifest, NULL, NULL,
+                                        error);
+  if (rc != LC_OK) {
+    goto cleanup_unlocked;
+  }
+  memset(&current, 0, sizeof(current));
+  rc = lc_pouch_state_cache_lookup(pouch, namespace_name, &manifest, key,
+                                   &current, NULL, error);
+  if (rc != LC_OK || !current.found) {
+    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+    goto cleanup_unlocked;
+  }
+  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  record = cache != NULL ? lc_pouch_state_cache_record_find(cache, key) : NULL;
+  if (cache != NULL && record != NULL && record->body_cache != NULL &&
+      record->body_cache->version == record->version &&
+      record->body_cache->length == (size_t)record->bytes) {
+    rc = lc_sink_memory_reserve(dst, record->body_cache->length, error);
+    if (rc == LC_OK && record->body_cache->length > 0U &&
+        !dst->write(dst, record->body_cache->bytes, record->body_cache->length,
+                    error)) {
+      rc = error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_TRANSPORT;
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_read_result_from_entry(
+          pouch, namespace_name, &manifest, &current, 0, out, error);
+    }
+  } else {
+    rc = lc_pouch_state_read_result_from_entry(pouch, namespace_name, &manifest,
+                                               &current, 1, out, error);
+    if (rc == LC_OK && out->found) {
+      rc = out->bytes > 0UL
+               ? lc_sink_memory_reserve(dst, (size_t)out->bytes, error)
+               : LC_OK;
+    }
+    if (rc == LC_OK && out->found && out->body != NULL) {
+      rc = lc_copy(out->body, dst, NULL, error);
+      out->body->close(out->body);
+      out->body = NULL;
+    }
+  }
+  lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+cleanup_unlocked:
+  lc_pouch_state_process_namespace_mutex_unlock(&process_mutex);
+  return rc;
+}
+
 int lc_pouch_state_read_metadata(lc_pouch *pouch, const char *namespace_name,
                                  const char *key,
                                  lc_pouch_state_read_result *out,
@@ -8058,7 +8205,8 @@ int lc_pouch_state_visible_count(lc_pouch *pouch, const char *namespace_name,
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, error);
   if (pouch->single_writer && cache != NULL && cache->initialized) {
     for (record = cache->records; record != NULL; record = record->next) {
-      if (!record->found || (record->has_query_hidden && record->query_hidden)) {
+      if (!record->found ||
+          (record->has_query_hidden && record->query_hidden)) {
         continue;
       }
       if (strncmp(record->key, ".staging/", sizeof(".staging/") - 1U) == 0 ||
@@ -8269,8 +8417,8 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
                  : manifest.state_max_version;
       if (*out > manifest.state_max_version) {
         manifest.state_max_version = *out;
-        rc = lc_pouch_namespace_manifest_save(&pouch->allocator,
-                                              namespace_name, &manifest, error);
+        rc = lc_pouch_namespace_manifest_save(&pouch->allocator, namespace_name,
+                                              &manifest, error);
       }
     } else if (manifest.state_max_version > 0UL) {
       *out = manifest.state_max_version;
@@ -8279,12 +8427,13 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
       rc = lc_pouch_state_manifest_max_version(pouch, &manifest, out, error);
       if (rc == LC_OK && *out > manifest.state_max_version) {
         manifest.state_max_version = *out;
-        rc = lc_pouch_namespace_manifest_save(&pouch->allocator,
-                                              namespace_name, &manifest, error);
+        rc = lc_pouch_namespace_manifest_save(&pouch->allocator, namespace_name,
+                                              &manifest, error);
       }
     }
   } else {
-    cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+    cache =
+        lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
     if (cache == NULL) {
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     } else {
@@ -8301,9 +8450,8 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
         *out = cache->max_version;
         if (*out > manifest.state_max_version) {
           manifest.state_max_version = *out;
-          rc = lc_pouch_namespace_manifest_save(&pouch->allocator,
-                                                namespace_name, &manifest,
-                                                error);
+          rc = lc_pouch_namespace_manifest_save(
+              &pouch->allocator, namespace_name, &manifest, error);
         }
       }
     }

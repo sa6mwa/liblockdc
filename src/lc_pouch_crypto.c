@@ -1519,9 +1519,9 @@ int lc_pouch_crypto_stream_to_fd(lc_pouch_crypto *crypto, const char *context,
                                  unsigned long *plain_bytes,
                                  unsigned long *cipher_bytes,
                                  char **descriptor_out, lc_error *error) {
-  return lc_pouch_crypto_stream_to_fd_crc_impl(
-      crypto, context, fd, body, plain_bytes, cipher_bytes, NULL,
-      descriptor_out, 1, error);
+  return lc_pouch_crypto_stream_to_fd_crc_impl(crypto, context, fd, body,
+                                               plain_bytes, cipher_bytes, NULL,
+                                               descriptor_out, 1, error);
 }
 
 static int lc_pouch_crypto_stream_to_fd_crc_impl(
@@ -1554,7 +1554,8 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
     *stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
   }
   encrypted = crypto != NULL && crypto->encryption_enabled;
-  compressed = allow_compression && crypto != NULL && crypto->compression_enabled;
+  compressed =
+      allow_compression && crypto != NULL && crypto->compression_enabled;
   if (!encrypted && !compressed) {
     return lc_pouch_crypto_stream_plain_to_fd(fd, body, plain_bytes,
                                               cipher_bytes, stored_crc, error);

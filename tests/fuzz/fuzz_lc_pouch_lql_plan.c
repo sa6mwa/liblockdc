@@ -11,7 +11,7 @@
 #include "lc_pouch.h"
 
 #define FUZZ_POUCH_LQL_TMP_PREFIX "/tmp/liblockdc-pouch-lql-fuzz-"
-#define FUZZ_POUCH_LQL_CRYPTO_KEY                                             \
+#define FUZZ_POUCH_LQL_CRYPTO_KEY                                              \
   "lc-pouch-key-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 typedef struct fuzz_key_count {
@@ -168,7 +168,8 @@ static int fuzz_seed_store(lc_client *client, lc_error *error) {
   return rc;
 }
 
-static int fuzz_install_snapshot(const char *root, const fuzz_storage_mode *mode,
+static int fuzz_install_snapshot(const char *root,
+                                 const fuzz_storage_mode *mode,
                                  lc_error *error) {
   lc_pouch *pouch;
   lc_pouch_open_options open_options;
@@ -335,7 +336,7 @@ static void fuzz_damage_query_index(const char *root, unsigned int mode) {
       artifact_leaf = "query.index.lcpdtg";
     }
     if (!fuzz_newest_query_segment_artifact_path(root, artifact_leaf, path,
-                                                sizeof(path))) {
+                                                 sizeof(path))) {
       return;
     }
     if (mode == 7U) {

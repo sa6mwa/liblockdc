@@ -307,8 +307,7 @@ static int lc_pouch_namespace_manifest_read(
     unsigned long *active_segment_id, unsigned long *snapshot_segment_id,
     unsigned long *state_max_version, char **latest_snapshot,
     char ***obsolete_segments, unsigned long *obsolete_segment_count,
-    char ***obsolete_snapshots,
-    unsigned long *obsolete_snapshot_count) {
+    char ***obsolete_snapshots, unsigned long *obsolete_snapshot_count) {
   char line[256];
   FILE *fp;
   int ok;
@@ -474,14 +473,13 @@ static int lc_pouch_namespace_manifest_write(
   text = NULL;
   length = 0U;
   capacity = 0U;
-  written =
-      snprintf(line, sizeof(line),
-               "layout=%s\nversion=%lu\nnamespace=%s\n"
-               "active_segment=%s\nmax_segment_id=%lu\n"
-               "state_max_version=%lu\n",
-               LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION, namespace_name,
-               manifest->active_segment, manifest->max_segment_id,
-               manifest->state_max_version);
+  written = snprintf(line, sizeof(line),
+                     "layout=%s\nversion=%lu\nnamespace=%s\n"
+                     "active_segment=%s\nmax_segment_id=%lu\n"
+                     "state_max_version=%lu\n",
+                     LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION,
+                     namespace_name, manifest->active_segment,
+                     manifest->max_segment_id, manifest->state_max_version);
   if (written < 0 || (size_t)written >= sizeof(line)) {
     lc_free_with_allocator(allocator, manifest_path);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,

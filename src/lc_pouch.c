@@ -662,9 +662,8 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
   int saved_errno;
   int rc;
 
-  if (pouch == NULL ||
-      (!lc_pouch_crypto_enabled(pouch->crypto) &&
-       !lc_pouch_crypto_compression_enabled(pouch->crypto))) {
+  if (pouch == NULL || (!lc_pouch_crypto_enabled(pouch->crypto) &&
+                        !lc_pouch_crypto_compression_enabled(pouch->crypto))) {
     return LC_OK;
   }
   namespaces_path =

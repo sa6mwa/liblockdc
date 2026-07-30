@@ -15,8 +15,17 @@ def parse_float(value):
         return None
 
 
+def median(values):
+    ordered = sorted(values)
+    count = len(ordered)
+    middle = count // 2
+    if count % 2 == 1:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
 def parse(path):
-    variants = {
+    samples = {
         "PouchPT": {},
         "PouchCrypto": {},
         "PouchCompression": {},
@@ -34,7 +43,7 @@ def parse(path):
             name = re.sub(r"-\d+$", "", fields[0])
             variant = None
             scenario = None
-            for candidate in variants:
+            for candidate in samples:
                 prefix = "BenchmarkProduction%s/" % candidate
                 if name.startswith(prefix):
                     variant = candidate
@@ -42,16 +51,21 @@ def parse(path):
                     break
             if variant is None or scenario is None:
                 continue
-            metrics = {}
+            metrics = samples[variant].setdefault(scenario, {})
             idx = 2
             while idx + 1 < len(fields):
                 value = parse_float(fields[idx])
                 unit = fields[idx + 1]
                 if value is not None:
-                    metrics[unit] = value
+                    metrics.setdefault(unit, []).append(value)
                 idx += 2
-            variants[variant][scenario] = metrics
-    return variants
+    return {
+        variant: {
+            scenario: {unit: median(values) for unit, values in metrics.items()}
+            for scenario, metrics in scenarios.items()
+        }
+        for variant, scenarios in samples.items()
+    }
 
 
 def performance_metrics(metrics):

@@ -82,8 +82,7 @@ static int lc_pouch_txn_buffer_append_string(lc_pouch_txn_buffer *buffer,
                                              const char *value,
                                              lc_error *error);
 static int lc_pouch_binary_cursor_magic(lc_pouch_binary_cursor *cursor,
-                                        const char magic[4],
-                                        lc_error *error);
+                                        const char magic[4], lc_error *error);
 static int lc_pouch_binary_cursor_string(lc_pouch_binary_cursor *cursor,
                                          char **out, lc_error *error);
 static char *lc_pouch_query_dup_bytes(const char *bytes, size_t length,
@@ -704,7 +703,7 @@ lc_pouch_namespace_config_parse_body(const char *body, size_t length,
   }
   if (rc == LC_OK) {
     rc = lc_pouch_namespace_config_set_record(record, preferred, fallback,
-                                             error);
+                                              error);
   }
   if (rc == LC_OK) {
     record->found = 1;
@@ -714,25 +713,22 @@ lc_pouch_namespace_config_parse_body(const char *body, size_t length,
   return rc;
 }
 
-static int
-lc_pouch_namespace_config_build_record(const lc_pouch_namespace_config_record
-                                           *record,
-                                       lc_pouch_txn_buffer *buffer,
-                                       lc_error *error) {
+static int lc_pouch_namespace_config_build_record(
+    const lc_pouch_namespace_config_record *record, lc_pouch_txn_buffer *buffer,
+    lc_error *error) {
   int rc;
 
   memset(buffer, 0, sizeof(*buffer));
-  rc = lc_pouch_txn_buffer_append_bytes(
-      buffer, LC_POUCH_NAMESPACE_CONFIG_MAGIC,
-      strlen(LC_POUCH_NAMESPACE_CONFIG_MAGIC), error);
+  rc = lc_pouch_txn_buffer_append_bytes(buffer, LC_POUCH_NAMESPACE_CONFIG_MAGIC,
+                                        strlen(LC_POUCH_NAMESPACE_CONFIG_MAGIC),
+                                        error);
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_string(buffer, record->preferred_engine,
                                            error);
   }
   if (rc == LC_OK) {
-    rc =
-        lc_pouch_txn_buffer_append_string(buffer, record->fallback_engine,
-                                          error);
+    rc = lc_pouch_txn_buffer_append_string(buffer, record->fallback_engine,
+                                           error);
   }
   if (rc != LC_OK) {
     lc_pouch_txn_buffer_cleanup(buffer);
@@ -1187,8 +1183,9 @@ lc_pouch_query_scan_scalar_lonejson_read(void *user, unsigned char *buffer,
   return result;
 }
 
-static int lc_pouch_query_scan_scalar_field_matches_path(
-    const char *field, const lonejson_value_path *path) {
+static int
+lc_pouch_query_scan_scalar_field_matches_path(const char *field,
+                                              const lonejson_value_path *path) {
   const char *cursor;
   size_t segment_index;
 
@@ -1220,9 +1217,10 @@ static int lc_pouch_query_scan_scalar_field_matches_path(
   return segment_index == path->segment_count;
 }
 
-static int lc_pouch_query_scan_scalar_value_matches(
-    const lc_pouch_query_index_plan *plan, const char *value, size_t value_len,
-    char value_type) {
+static int
+lc_pouch_query_scan_scalar_value_matches(const lc_pouch_query_index_plan *plan,
+                                         const char *value, size_t value_len,
+                                         char value_type) {
   char stack_value[128];
   char *value_copy;
   size_t index;
@@ -1454,8 +1452,9 @@ static int lc_pouch_query_scan_scalar_reader_next(
   return rc;
 }
 
-static int lc_pouch_query_scan_scalar_reader_ws(
-    lc_pouch_query_scan_scalar_reader *reader, int *out, lc_error *error) {
+static int
+lc_pouch_query_scan_scalar_reader_ws(lc_pouch_query_scan_scalar_reader *reader,
+                                     int *out, lc_error *error) {
   int c;
   int rc;
 
@@ -1476,8 +1475,10 @@ static int lc_pouch_query_scan_scalar_reader_ws(
   }
 }
 
-static int lc_pouch_query_scan_scalar_field_segment(
-    const char *field, size_t wanted, const char **segment, size_t *len) {
+static int lc_pouch_query_scan_scalar_field_segment(const char *field,
+                                                    size_t wanted,
+                                                    const char **segment,
+                                                    size_t *len) {
   const char *cursor;
   size_t index;
 
@@ -1508,8 +1509,8 @@ static int lc_pouch_query_scan_scalar_field_segment(
   return 0;
 }
 
-static size_t lc_pouch_query_scan_scalar_field_segment_count(
-    const char *field) {
+static size_t
+lc_pouch_query_scan_scalar_field_segment_count(const char *field) {
   const char *cursor;
   size_t count;
 
@@ -1628,8 +1629,8 @@ static int lc_pouch_query_scan_scalar_json_string(
         state->plan->contains) {
       lonejson_status status;
 
-      status = lc_pouch_query_any_text_string_chunk(
-          &state->contains_matcher, NULL, &out, 1U, NULL);
+      status = lc_pouch_query_any_text_string_chunk(&state->contains_matcher,
+                                                    NULL, &out, 1U, NULL);
       if (status != LONEJSON_STATUS_OK) {
         return LC_ERR_INVALID;
       }
@@ -1684,8 +1685,7 @@ static int lc_pouch_query_scan_scalar_json_number(
     }
     if (!((c >= '0' && c <= '9') || c == '-' || c == '+' || c == '.' ||
           c == 'e' || c == 'E')) {
-      return state == NULL || state->scratch_len > 0U ? LC_OK
-                                                      : LC_ERR_INVALID;
+      return state == NULL || state->scratch_len > 0U ? LC_OK : LC_ERR_INVALID;
     }
     rc = lc_pouch_query_scan_scalar_reader_next(reader, &c, error);
     if (rc != LC_OK) {
@@ -1702,8 +1702,9 @@ static int lc_pouch_query_scan_scalar_json_number(
   }
 }
 
-static int lc_pouch_query_scan_scalar_skip_value(
-    lc_pouch_query_scan_scalar_reader *reader, lc_error *error);
+static int
+lc_pouch_query_scan_scalar_skip_value(lc_pouch_query_scan_scalar_reader *reader,
+                                      lc_error *error);
 
 static int lc_pouch_query_scan_scalar_skip_container(
     lc_pouch_query_scan_scalar_reader *reader, int object, lc_error *error) {
@@ -1770,8 +1771,9 @@ static int lc_pouch_query_scan_scalar_skip_container(
   }
 }
 
-static int lc_pouch_query_scan_scalar_skip_value(
-    lc_pouch_query_scan_scalar_reader *reader, lc_error *error) {
+static int
+lc_pouch_query_scan_scalar_skip_value(lc_pouch_query_scan_scalar_reader *reader,
+                                      lc_error *error) {
   int c;
   int equal;
   int rc;
@@ -1833,19 +1835,19 @@ static int lc_pouch_query_scan_scalar_parse_target(
   if (c == 't') {
     rc = lc_pouch_query_scan_scalar_json_literal(reader, "true", error);
     *matched = rc == LC_OK && lc_pouch_query_scan_scalar_value_matches(
-                              state->plan, "true", 4U, 'b');
+                                  state->plan, "true", 4U, 'b');
     return rc;
   }
   if (c == 'f') {
     rc = lc_pouch_query_scan_scalar_json_literal(reader, "false", error);
     *matched = rc == LC_OK && lc_pouch_query_scan_scalar_value_matches(
-                              state->plan, "false", 5U, 'b');
+                                  state->plan, "false", 5U, 'b');
     return rc;
   }
   if (c == 'n') {
     rc = lc_pouch_query_scan_scalar_json_literal(reader, "null", error);
     *matched = rc == LC_OK && lc_pouch_query_scan_scalar_value_matches(
-                              state->plan, "null", 4U, 'z');
+                                  state->plan, "null", 4U, 'z');
     return rc;
   }
   if (c == '{' || c == '[') {
@@ -1907,9 +1909,8 @@ static int lc_pouch_query_scan_scalar_scan_object(
   for (;;) {
     int key_equal;
 
-    rc = lc_pouch_query_scan_scalar_json_string(reader, NULL, segment,
-                                                segment_len, 0, &key_equal,
-                                                error);
+    rc = lc_pouch_query_scan_scalar_json_string(
+        reader, NULL, segment, segment_len, 0, &key_equal, error);
     if (rc != LC_OK) {
       return rc;
     }
@@ -2004,14 +2005,15 @@ static int lc_pouch_query_match_scan_scalar_body_direct(
   memset(&reader, 0, sizeof(reader));
   lc_error_init(&reader.read_error);
   reader.source = state->source;
-  rc = lc_pouch_query_scan_scalar_scan_object(
-      &reader, state, 0U, segment_count, 0, decided, matched, error);
+  rc = lc_pouch_query_scan_scalar_scan_object(&reader, state, 0U, segment_count,
+                                              0, decided, matched, error);
   lc_error_cleanup(&reader.read_error);
   return rc;
 }
 
-static lonejson_status lc_pouch_query_scan_scalar_lonejson_error(
-    lonejson_error *lj_error, const lc_error *error) {
+static lonejson_status
+lc_pouch_query_scan_scalar_lonejson_error(lonejson_error *lj_error,
+                                          const lc_error *error) {
   if (lj_error != NULL) {
     lonejson_error_init(lj_error);
     lj_error->code = error != NULL && error->code == LC_ERR_NOMEM
@@ -2042,16 +2044,17 @@ static lonejson_status lc_pouch_query_scan_scalar_stop_after_decision(
   return LONEJSON_STATUS_CALLBACK_FAILED;
 }
 
-static lonejson_status lc_pouch_query_scan_scalar_begin(
-    void *user, const lonejson_value_path *path, char value_type,
-    lonejson_error *lj_error) {
+static lonejson_status
+lc_pouch_query_scan_scalar_begin(void *user, const lonejson_value_path *path,
+                                 char value_type, lonejson_error *lj_error) {
   lc_pouch_query_scan_scalar_match_state *state;
   lc_error error;
   int rc;
 
   state = (lc_pouch_query_scan_scalar_match_state *)user;
   if (state == NULL || state->matched ||
-      !lc_pouch_query_scan_scalar_field_matches_path(state->plan->field, path)) {
+      !lc_pouch_query_scan_scalar_field_matches_path(state->plan->field,
+                                                     path)) {
     if (state != NULL) {
       state->capturing = 0;
     }
@@ -2081,9 +2084,10 @@ static lonejson_status lc_pouch_query_scan_scalar_number_begin(
   return lc_pouch_query_scan_scalar_begin(user, path, 'n', lj_error);
 }
 
-static lonejson_status lc_pouch_query_scan_scalar_chunk(
-    void *user, const lonejson_value_path *path, const char *data, size_t len,
-    lonejson_error *lj_error) {
+static lonejson_status
+lc_pouch_query_scan_scalar_chunk(void *user, const lonejson_value_path *path,
+                                 const char *data, size_t len,
+                                 lonejson_error *lj_error) {
   lc_pouch_query_scan_scalar_match_state *state;
   lc_error error;
   int rc;
@@ -2135,7 +2139,8 @@ lc_pouch_query_scan_scalar_boolean_value(void *user,
   (void)lj_error;
   state = (lc_pouch_query_scan_scalar_match_state *)user;
   if (state == NULL || state->matched ||
-      !lc_pouch_query_scan_scalar_field_matches_path(state->plan->field, path)) {
+      !lc_pouch_query_scan_scalar_field_matches_path(state->plan->field,
+                                                     path)) {
     return LONEJSON_STATUS_OK;
   }
   text = value ? "true" : "false";
@@ -2146,16 +2151,15 @@ lc_pouch_query_scan_scalar_boolean_value(void *user,
   return lc_pouch_query_scan_scalar_stop_after_decision(state, 0, lj_error);
 }
 
-static lonejson_status
-lc_pouch_query_scan_scalar_null_value(void *user,
-                                      const lonejson_value_path *path,
-                                      lonejson_error *lj_error) {
+static lonejson_status lc_pouch_query_scan_scalar_null_value(
+    void *user, const lonejson_value_path *path, lonejson_error *lj_error) {
   lc_pouch_query_scan_scalar_match_state *state;
 
   (void)lj_error;
   state = (lc_pouch_query_scan_scalar_match_state *)user;
   if (state == NULL || state->matched ||
-      !lc_pouch_query_scan_scalar_field_matches_path(state->plan->field, path)) {
+      !lc_pouch_query_scan_scalar_field_matches_path(state->plan->field,
+                                                     path)) {
     return LONEJSON_STATUS_OK;
   }
   if (lc_pouch_query_scan_scalar_value_matches(state->plan, "null", 4U, 'z')) {
@@ -2173,9 +2177,10 @@ static int lc_pouch_query_scan_scalar_plan_supported(
          !plan->exists && !plan->range && !plan->date && !plan->root_or;
 }
 
-static int lc_pouch_query_match_scan_scalar_body(
-    lc_pouch_query_scan_context *context, lc_source *body, int *matched,
-    lc_error *error) {
+static int
+lc_pouch_query_match_scan_scalar_body(lc_pouch_query_scan_context *context,
+                                      lc_source *body, int *matched,
+                                      lc_error *error) {
   lc_pouch_query_scan_scalar_match_state state;
   lonejson_path_value_visitor visitor;
   lonejson_error lj_error;
@@ -4351,8 +4356,7 @@ static int lc_pouch_query_run_scan_predicate(lc_pouch_query_scan_context *scan,
   if (scan->selector != NULL) {
     rc = lc_pouch_query_index_plan_from_selector(scan->runtime, scan->selector,
                                                  &plan, error);
-    if (rc == LC_OK &&
-        lc_pouch_query_scan_scalar_plan_supported(&plan)) {
+    if (rc == LC_OK && lc_pouch_query_scan_scalar_plan_supported(&plan)) {
       scan->scan_scalar_plan = &plan;
       if (!scan->emit_documents) {
         unsigned long flushed_seq;
@@ -4498,9 +4502,8 @@ lc_pouch_query_index_process_keys(lc_pouch_query_scan_context *context,
   }
   if (!context->emit_documents && context->indexed_candidates_exact) {
     for (index = 0U; index < keys->count; ++index) {
-      rc =
-          lc_pouch_query_index_process_exact_key(context, &keys->keys[index],
-                                                error);
+      rc = lc_pouch_query_index_process_exact_key(context, &keys->keys[index],
+                                                  error);
       if (rc != LC_OK || context->page_full) {
         return rc;
       }
@@ -4628,8 +4631,8 @@ run_index_query:
     } else if (!scan->emit_documents && plan.candidates_exact) {
       rc = lc_pouch_query_index_visit_scalar_terms_docids(
           scan->client->pouch, scan->namespace_name, plan.or_terms,
-          plan.or_term_count, lc_pouch_query_index_process_exact_key_visit, scan,
-          &value_seq, error);
+          plan.or_term_count, lc_pouch_query_index_process_exact_key_visit,
+          scan, &value_seq, error);
     } else {
       rc = lc_pouch_query_index_visit_scalar_terms(
           scan->client->pouch, scan->namespace_name, plan.or_terms,
@@ -4650,7 +4653,8 @@ run_index_query:
     } else if (!scan->emit_documents && plan.candidates_exact) {
       rc = lc_pouch_query_index_visit_exists(
           scan->client->pouch, scan->namespace_name, plan.field,
-          lc_pouch_query_index_process_exact_key_visit, scan, &value_seq, error);
+          lc_pouch_query_index_process_exact_key_visit, scan, &value_seq,
+          error);
     } else {
       rc = lc_pouch_query_index_visit_exists(
           scan->client->pouch, scan->namespace_name, plan.field,
@@ -4694,8 +4698,8 @@ run_index_query:
     } else if (!scan->emit_documents && plan.candidates_exact) {
       rc = lc_pouch_query_index_visit_range(
           scan->client->pouch, scan->namespace_name, plan.field,
-          &plan.range_bounds, lc_pouch_query_index_process_exact_key_visit, scan,
-          &value_seq, error);
+          &plan.range_bounds, lc_pouch_query_index_process_exact_key_visit,
+          scan, &value_seq, error);
     } else {
       rc = lc_pouch_query_index_visit_range(
           scan->client->pouch, scan->namespace_name, plan.field,
@@ -5973,8 +5977,8 @@ static int lc_pouch_txn_buffer_append_bytes(lc_pouch_txn_buffer *buffer,
   }
   if (buffer == NULL || bytes == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch binary record append requires bytes", NULL,
-                        NULL, "pouch");
+                        "pouch binary record append requires bytes", NULL, NULL,
+                        "pouch");
   }
   if (length > (size_t)-1 - buffer->length) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -6058,8 +6062,7 @@ static int lc_pouch_binary_cursor_read(lc_pouch_binary_cursor *cursor,
 }
 
 static int lc_pouch_binary_cursor_magic(lc_pouch_binary_cursor *cursor,
-                                        const char magic[4],
-                                        lc_error *error) {
+                                        const char magic[4], lc_error *error) {
   unsigned char actual[4];
   int rc;
 
@@ -6359,9 +6362,9 @@ static int lc_pouch_queue_record_header(const lc_pouch_queue_record *record,
   *header_out = NULL;
   *header_length_out = 0U;
   memset(&buffer, 0, sizeof(buffer));
-  rc = lc_pouch_txn_buffer_append_bytes(
-      &buffer, LC_POUCH_QUEUE_RECORD_MAGIC, strlen(LC_POUCH_QUEUE_RECORD_MAGIC),
-      error);
+  rc = lc_pouch_txn_buffer_append_bytes(&buffer, LC_POUCH_QUEUE_RECORD_MAGIC,
+                                        strlen(LC_POUCH_QUEUE_RECORD_MAGIC),
+                                        error);
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_string(&buffer, record->namespace_name,
                                            error);
@@ -6415,11 +6418,11 @@ static int lc_pouch_queue_record_header(const lc_pouch_queue_record *record,
         &buffer, (int64_t)record->visibility_timeout_seconds, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_txn_buffer_append_u64(
-        &buffer,
-        include_payload_length ? (uint64_t)record->payload_length
-                               : ~(uint64_t)0U,
-        error);
+    rc = lc_pouch_txn_buffer_append_u64(&buffer,
+                                        include_payload_length
+                                            ? (uint64_t)record->payload_length
+                                            : ~(uint64_t)0U,
+                                        error);
   }
   if (rc == LC_OK) {
     *header_out = (char *)buffer.bytes;
@@ -6704,10 +6707,9 @@ lc_pouch_lease_record_parse(lc_client_handle *client,
                       "pouch lease record has trailing bytes", NULL, NULL,
                       "pouch");
   }
-  if (rc == LC_OK &&
-      (record->namespace_name == NULL || record->key == NULL ||
-       record->owner == NULL || record->lease_id == NULL ||
-       record->txn_id == NULL)) {
+  if (rc == LC_OK && (record->namespace_name == NULL || record->key == NULL ||
+                      record->owner == NULL || record->lease_id == NULL ||
+                      record->txn_id == NULL)) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "failed to parse pouch lease record", NULL, NULL, NULL);
   }
@@ -6780,9 +6782,9 @@ static int lc_pouch_write_lease_record_with_lock_state(
                      "failed to allocate pouch lease record", NULL, NULL, NULL);
     goto cleanup;
   }
-  rc = lc_pouch_txn_buffer_append_bytes(
-      &buffer, LC_POUCH_LEASE_RECORD_MAGIC,
-      strlen(LC_POUCH_LEASE_RECORD_MAGIC), error);
+  rc = lc_pouch_txn_buffer_append_bytes(&buffer, LC_POUCH_LEASE_RECORD_MAGIC,
+                                        strlen(LC_POUCH_LEASE_RECORD_MAGIC),
+                                        error);
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_string(&buffer, namespace_name, error);
   }
@@ -6799,8 +6801,7 @@ static int lc_pouch_write_lease_record_with_lock_state(
     rc = lc_pouch_txn_buffer_append_string(&buffer, txn_id, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_txn_buffer_append_i64(&buffer, (int64_t)fencing_token,
-                                        error);
+    rc = lc_pouch_txn_buffer_append_i64(&buffer, (int64_t)fencing_token, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_i64(&buffer, (int64_t)expires_at_unix,
@@ -7032,8 +7033,8 @@ static int lc_pouch_queue_record_parse(
   signed_value = 0;
   rc = lc_pouch_source_read_exact(read_result->body, magic, sizeof(magic),
                                   error);
-  if (rc == LC_OK && memcmp(magic, LC_POUCH_QUEUE_RECORD_MAGIC,
-                            sizeof(magic)) != 0) {
+  if (rc == LC_OK &&
+      memcmp(magic, LC_POUCH_QUEUE_RECORD_MAGIC, sizeof(magic)) != 0) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch queue record is corrupt", NULL, NULL, NULL);
   }
@@ -7058,9 +7059,8 @@ static int lc_pouch_queue_record_parse(
     }
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_queue_source_string(read_result->body,
-                                      &record->namespace_name, &header_length,
-                                      error);
+    rc = lc_pouch_queue_source_string(
+        read_result->body, &record->namespace_name, &header_length, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_string(read_result->body, &record->queue,
@@ -7092,8 +7092,7 @@ static int lc_pouch_queue_record_parse(
        record->content_type == NULL || record->lease_id == NULL ||
        record->lease_txn_id == NULL)) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch queue record is missing fields", NULL, NULL,
-                      NULL);
+                      "pouch queue record is missing fields", NULL, NULL, NULL);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
@@ -7757,8 +7756,8 @@ static int lc_pouch_txn_parse_record(const char *bytes, size_t length,
   }
   if (rc == LC_OK && cursor.offset != cursor.length) {
     rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                      "pouch transaction record has trailing bytes", NULL,
-                      NULL, NULL);
+                      "pouch transaction record has trailing bytes", NULL, NULL,
+                      NULL);
   }
   if (rc != LC_OK) {
     lc_pouch_txn_record_cleanup(record);
@@ -7822,9 +7821,9 @@ static int lc_pouch_txn_build_record(const lc_txn_decision_req *req,
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_txn_buffer_append_bytes(
-      record, LC_POUCH_TXN_RECORD_MAGIC, strlen(LC_POUCH_TXN_RECORD_MAGIC),
-      error);
+  rc = lc_pouch_txn_buffer_append_bytes(record, LC_POUCH_TXN_RECORD_MAGIC,
+                                        strlen(LC_POUCH_TXN_RECORD_MAGIC),
+                                        error);
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_string(record, state, error);
   }
@@ -8332,9 +8331,10 @@ static int lc_pouch_client_get_namespace(lc_client_handle *client,
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_state_read(client->pouch, resolved_namespace, key, &read_result,
-                           error);
+  rc = lc_pouch_state_copy(client->pouch, resolved_namespace, key, dst,
+                           &read_result, error);
   if (rc != LC_OK) {
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
     return rc;
   }
   if (!read_result.found) {
@@ -8342,15 +8342,7 @@ static int lc_pouch_client_get_namespace(lc_client_handle *client,
     lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
     return LC_OK;
   }
-  rc = read_result.bytes > 0UL
-           ? lc_sink_memory_reserve(dst, (size_t)read_result.bytes, error)
-           : LC_OK;
-  if (rc == LC_OK) {
-    rc = lc_copy(read_result.body, dst, NULL, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_client_copy_state_metadata(&read_result, out, error);
-  }
+  rc = lc_pouch_client_copy_state_metadata(&read_result, out, error);
   lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
   return rc;
 }
@@ -11494,8 +11486,8 @@ int lc_pouch_client_flush_index_method(lc_client *self,
     if (rc != LC_OK) {
       return rc;
     }
-    has_pending = lc_pouch_query_index_has_pending(client->pouch,
-                                                  namespace_name);
+    has_pending =
+        lc_pouch_query_index_has_pending(client->pouch, namespace_name);
     if (!has_pending && manifest_seq == index_seq) {
       index_result.index_seq = index_seq;
     } else {
@@ -11889,8 +11881,8 @@ static int lc_pouch_tc_read_lease(lc_client_handle *client,
     }
     if (rc == LC_OK && cursor.offset != cursor.length) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch TC leader record has trailing bytes", NULL,
-                        NULL, "pouch");
+                        "pouch TC leader record has trailing bytes", NULL, NULL,
+                        "pouch");
     }
     if (rc == LC_OK &&
         (record->leader_id == NULL || record->leader_endpoint == NULL)) {
@@ -11924,9 +11916,9 @@ static int lc_pouch_tc_write_lease(lc_client_handle *client,
   int rc;
 
   memset(&buffer, 0, sizeof(buffer));
-  rc = lc_pouch_txn_buffer_append_bytes(
-      &buffer, LC_POUCH_TC_RECORD_MAGIC, strlen(LC_POUCH_TC_RECORD_MAGIC),
-      error);
+  rc =
+      lc_pouch_txn_buffer_append_bytes(&buffer, LC_POUCH_TC_RECORD_MAGIC,
+                                       strlen(LC_POUCH_TC_RECORD_MAGIC), error);
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_string(&buffer, leader_id, error);
   }
@@ -12961,7 +12953,7 @@ int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
   }
   rc = lc_pouch_client_get_namespace(lease->client, lease->namespace_name,
                                      lease->key, opts, dst, out, error);
-  if (rc == LC_OK && !out->no_content) {
+  if (rc == LC_OK && !out->no_content && (opts == NULL || !opts->public_read)) {
     rc = lc_pouch_lease_refresh_state(lease, out->etag, out->version, error);
   }
   return rc;
@@ -12988,7 +12980,7 @@ static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
   }
   rc = lc_pouch_client_load_namespace(lease->client, lease->namespace_name,
                                       lease->key, map, dst, opts, out, error);
-  if (rc == LC_OK && !out->no_content) {
+  if (rc == LC_OK && !out->no_content && (opts == NULL || !opts->public_read)) {
     rc = lc_pouch_lease_refresh_state(lease, out->etag, out->version, error);
   }
   return rc;

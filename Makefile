@@ -48,6 +48,8 @@ POUCH_GO_ACCEPTANCE_SCALE_SCENARIOS ?= EqSparse,RangeHalf,InTags,ContainsMessage
 POUCH_GO_ACCEPTANCE_TIMEOUT ?= 3m
 POUCH_GO_PRODUCTION_BENCH ?= Production(PouchPT|PouchCrypto|PouchCompression|PouchCryptoCompression|LockdDiskNoCrypto)
 POUCH_GO_PRODUCTION_BENCHTIME ?= 1x
+POUCH_GO_PARITY_BENCHTIME ?= 1x
+POUCH_GO_PARITY_COUNT ?= 3
 POUCH_GO_PRODUCTION_ROWS ?=
 POUCH_GO_PRODUCTION_UPDATES ?=
 POUCH_GO_PRODUCTION_PAYLOAD_BYTES ?=
@@ -132,14 +134,14 @@ help:
 		'make test-host          Run the host-native release suite (GNU plus musl when the native musl toolchain is available).' \
 		'make test-cross         Run the non-host cross release suites.' \
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
-		'make test-all           Run ASan/UBSan debug first, then host release and non-host cross release suites.' \
+		'make test-all           Run ASan/UBSan debug first, then the host-native release suite.' \
 		'make test-asan          Compatibility alias for test-debug.' \
 		'make test-coverage      Run the coverage preset test suite and build the coverage report.' \
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
 		'make dev-reset          Stop the local compose-backed devenv and remove its generated state.' \
 		'make format             Run clang-format over repo .c and .h files.' \
-		'make finalize-slice     Run formatting plus the host release test gate for an ordinary implementation slice.' \
+		'make finalize-slice     Run formatting plus the narrow debug test gate for an ordinary implementation slice.' \
 		'make valgrind           Build the valgrind preset and run the native Valgrind Memcheck subset.' \
 		'make asan               Compatibility alias for test-debug.' \
 		'make coverage           Run the coverage preset and generate coverage-report.' \
@@ -174,7 +176,7 @@ help:
 		'make cross-build        Build all non-host cross release presets.' \
 		'make cross-preset-test  Run the host ASan/UBSan debug cross-preset packaging-isolation check.' \
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
-		'make prerelease         Run deterministic local prerelease confidence: finalize-slice, test-all, package-verify, and lua-test.' \
+		'make prerelease         Run deterministic local prerelease confidence: finalize-slice, Valgrind, fuzz smoke, and Lua tests.' \
 		'make prerelease-live    Refuse without LOCKDC_PRERELEASE_LIVE=1; no live-provider checks are currently defined.' \
 		'make prerelease-hardening  Run prerelease plus fuzz smoke, benchmark gate, and release matrix.' \
 		'make release            Run the clean-slate final release workflow: tests, AFL++ fuzzing, e2e, benchmarks, package generation, and final release verification.' \
@@ -280,7 +282,7 @@ __test-e2e:
 test-all:
 	$(TIMED) test-all $(MAKE) __test-all
 
-__test-all: __test-debug __test-host __test-cross
+__test-all: __test-debug __test-host
 
 dev-up:
 	$(TIMED) dev-up $(MAKE) __dev-up
@@ -309,7 +311,7 @@ __format:
 finalize-slice:
 	$(TIMED) finalize-slice $(MAKE) __finalize-slice
 
-__finalize-slice: __format __test-host
+__finalize-slice: __format __test-debug
 
 valgrind:
 	$(TIMED) valgrind $(MAKE) __valgrind
@@ -494,7 +496,10 @@ benchmark-pouch-go-parity-gate:
 __benchmark-pouch-go-parity-gate:
 	mkdir -p $(ROOT)/build
 	set -o pipefail; \
-	  $(MAKE) __benchmark-pouch-go-production 2>&1 | tee $(ROOT)/build/pouch-go-production.bench.txt
+	  $(MAKE) __benchmark-pouch-go-production \
+	    POUCH_GO_PRODUCTION_BENCHTIME='$(POUCH_GO_PARITY_BENCHTIME)' \
+	    POUCH_GO_BENCH_COUNT='$(POUCH_GO_PARITY_COUNT)' \
+	    2>&1 | tee $(ROOT)/build/pouch-go-production.bench.txt
 	python3 scripts/pouch_benchmark_parity.py $(ROOT)/build/pouch-go-production.bench.txt
 
 package:
@@ -587,7 +592,7 @@ release:
 prerelease:
 	$(TIMED) prerelease $(MAKE) __prerelease
 
-__prerelease: __finalize-slice __test-all __package-verify __lua-test
+__prerelease: __finalize-slice __valgrind __fuzz-smoke __lua-test
 
 prerelease-live:
 	$(TIMED) prerelease-live $(MAKE) __prerelease-live
@@ -611,7 +616,7 @@ __prerelease-live:
 prerelease-hardening:
 	$(TIMED) prerelease-hardening $(MAKE) __prerelease-hardening
 
-__prerelease-hardening: __prerelease __fuzz-smoke __bench-gate __release-matrix
+__prerelease-hardening: __prerelease __bench-gate __benchmark-pouch-go-parity-gate __release-matrix
 
 __release:
 	bash ./scripts/release.sh

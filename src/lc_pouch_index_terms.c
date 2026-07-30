@@ -1498,8 +1498,8 @@ static int lc_pouch_index_term_generation_cursor_u64(
 
   if (out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch index term generation u64 requires output",
-                        NULL, NULL, NULL);
+                        "pouch index term generation u64 requires output", NULL,
+                        NULL, NULL);
   }
   bytes = NULL;
   rc = lc_pouch_index_term_generation_cursor_read(cursor, 8U, &bytes, error);
@@ -1564,8 +1564,8 @@ static int lc_pouch_index_term_generation_cursor_string(
   if (length > cursor->length || cursor->offset > cursor->length - length ||
       cursor->offset + length >= cursor->length) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch index term generation string is truncated",
-                        NULL, NULL, "pouch");
+                        "pouch index term generation string is truncated", NULL,
+                        NULL, "pouch");
   }
   bytes = cursor->bytes + cursor->offset;
   if (memchr(bytes, '\0', length) != NULL ||
@@ -1599,8 +1599,8 @@ static int lc_pouch_index_term_generation_decode_posting_bytes(
       (count == 0UL && payload_length != 0U) ||
       (count > 0UL && payload_length == 0U)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch index term generation posting is invalid",
-                        NULL, NULL, "pouch");
+                        "pouch index term generation posting is invalid", NULL,
+                        NULL, "pouch");
   }
   if (payload_length > 0U) {
     payload_copy =
@@ -1633,8 +1633,8 @@ static int lc_pouch_index_term_generation_decode_posting_bytes(
     dense.last_doc_id = max_doc_id;
     dense.has_last_doc_id = count > 0UL ? 1 : 0;
     payload_copy = NULL;
-    rc = lc_pouch_index_dense_posting_append_to_set(&dense, &decoded,
-                                                    allocator, error);
+    rc = lc_pouch_index_dense_posting_append_to_set(&dense, &decoded, allocator,
+                                                    error);
   } else {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch index term generation has invalid posting kind",
@@ -1708,9 +1708,8 @@ int lc_pouch_index_term_generation_decode(
   namespace_length = 0U;
   rc = lc_pouch_index_term_generation_cursor_read(
       &cursor, LC_POUCH_INDEX_TERM_GENERATION_MAGIC_LEN, &magic, error);
-  if (rc == LC_OK &&
-      memcmp(magic, LC_POUCH_INDEX_TERM_GENERATION_MAGIC,
-             LC_POUCH_INDEX_TERM_GENERATION_MAGIC_LEN) != 0) {
+  if (rc == LC_OK && memcmp(magic, LC_POUCH_INDEX_TERM_GENERATION_MAGIC,
+                            LC_POUCH_INDEX_TERM_GENERATION_MAGIC_LEN) != 0) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch index term generation has invalid format", NULL,
                       NULL, "pouch");
@@ -1739,8 +1738,8 @@ int lc_pouch_index_term_generation_decode(
         "pouch index term generation missing row hash", error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_index_term_generation_cursor_string(
-        &cursor, &namespace_name, &namespace_length, error);
+    rc = lc_pouch_index_term_generation_cursor_string(&cursor, &namespace_name,
+                                                      &namespace_length, error);
   }
   if (rc == LC_OK && namespace_length == 0U) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -1759,8 +1758,8 @@ int lc_pouch_index_term_generation_decode(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_cursor_ulong(
-        &cursor, &term_count,
-        "pouch index term generation missing term count", error);
+        &cursor, &term_count, "pouch index term generation missing term count",
+        error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_cursor_ulong(
@@ -1776,19 +1775,19 @@ int lc_pouch_index_term_generation_decode(
     unsigned char value_type;
 
     rc = lc_pouch_index_term_generation_cursor_ulong(
-        &cursor, &term_id,
-        "pouch index term generation term has invalid id", error);
+        &cursor, &term_id, "pouch index term generation term has invalid id",
+        error);
     if (rc == LC_OK) {
-      rc = lc_pouch_index_term_generation_cursor_u8(&cursor, &value_type,
-                                                    error);
+      rc =
+          lc_pouch_index_term_generation_cursor_u8(&cursor, &value_type, error);
     }
     if (rc == LC_OK) {
-      rc = lc_pouch_index_term_generation_cursor_string(
-          &cursor, &field_hex, &field_length, error);
+      rc = lc_pouch_index_term_generation_cursor_string(&cursor, &field_hex,
+                                                        &field_length, error);
     }
     if (rc == LC_OK) {
-      rc = lc_pouch_index_term_generation_cursor_string(
-          &cursor, &value_hex, &value_length, error);
+      rc = lc_pouch_index_term_generation_cursor_string(&cursor, &value_hex,
+                                                        &value_length, error);
     }
     if (rc != LC_OK) {
       break;
@@ -1870,8 +1869,8 @@ int lc_pouch_index_term_generation_decode(
     if (rc != LC_OK) {
       break;
     }
-    if (term_id == 0UL || (kind != (unsigned char)'s' &&
-                           kind != (unsigned char)'d') ||
+    if (term_id == 0UL ||
+        (kind != (unsigned char)'s' && kind != (unsigned char)'d') ||
         (previous_posting_term_id != 0UL &&
          previous_posting_term_id >= term_id) ||
         !lc_pouch_index_term_table_contains_id(&decoded.terms, term_id)) {

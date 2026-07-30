@@ -12255,9 +12255,9 @@ typedef struct lc_pouch_query_index_binary_cursor {
   size_t offset;
 } lc_pouch_query_index_binary_cursor;
 
-static int lc_pouch_query_index_binary_read(
-    lc_pouch_query_index_binary_cursor *cursor, size_t length,
-    const unsigned char **out) {
+static int
+lc_pouch_query_index_binary_read(lc_pouch_query_index_binary_cursor *cursor,
+                                 size_t length, const unsigned char **out) {
   if (out != NULL) {
     *out = NULL;
   }
@@ -12274,26 +12274,26 @@ static int lc_pouch_query_index_binary_read(
   return 1;
 }
 
-static int lc_pouch_query_index_binary_u8(
-    lc_pouch_query_index_binary_cursor *cursor, unsigned char *out) {
+static int
+lc_pouch_query_index_binary_u8(lc_pouch_query_index_binary_cursor *cursor,
+                               unsigned char *out) {
   const unsigned char *bytes;
 
-  if (out == NULL ||
-      !lc_pouch_query_index_binary_read(cursor, 1U, &bytes)) {
+  if (out == NULL || !lc_pouch_query_index_binary_read(cursor, 1U, &bytes)) {
     return 0;
   }
   *out = bytes[0];
   return 1;
 }
 
-static int lc_pouch_query_index_binary_u64(
-    lc_pouch_query_index_binary_cursor *cursor, uint64_t *out) {
+static int
+lc_pouch_query_index_binary_u64(lc_pouch_query_index_binary_cursor *cursor,
+                                uint64_t *out) {
   const unsigned char *bytes;
   uint64_t value;
   size_t index;
 
-  if (out == NULL ||
-      !lc_pouch_query_index_binary_read(cursor, 8U, &bytes)) {
+  if (out == NULL || !lc_pouch_query_index_binary_read(cursor, 8U, &bytes)) {
     return 0;
   }
   value = (uint64_t)0U;
@@ -12304,8 +12304,9 @@ static int lc_pouch_query_index_binary_u64(
   return 1;
 }
 
-static int lc_pouch_query_index_binary_ulong(
-    lc_pouch_query_index_binary_cursor *cursor, unsigned long *out) {
+static int
+lc_pouch_query_index_binary_ulong(lc_pouch_query_index_binary_cursor *cursor,
+                                  unsigned long *out) {
   uint64_t value;
 
   if (out == NULL || !lc_pouch_query_index_binary_u64(cursor, &value) ||
@@ -12316,8 +12317,9 @@ static int lc_pouch_query_index_binary_ulong(
   return 1;
 }
 
-static int lc_pouch_query_index_binary_string(
-    lc_pouch_query_index_binary_cursor *cursor, char **out) {
+static int
+lc_pouch_query_index_binary_string(lc_pouch_query_index_binary_cursor *cursor,
+                                   char **out) {
   const unsigned char *bytes;
   uint64_t length64;
   size_t length;
@@ -12430,10 +12432,8 @@ static int lc_pouch_query_index_generation_cache_parse(
   entry->term_count = (size_t)term_count;
   entry->posting_count = (size_t)posting_count;
   if (term_count > 0UL) {
-    term_id_seen =
-        (unsigned char *)lc_calloc_with_allocator(allocator,
-                                                  (size_t)term_count + 1U,
-                                                  sizeof(term_id_seen[0]));
+    term_id_seen = (unsigned char *)lc_calloc_with_allocator(
+        allocator, (size_t)term_count + 1U, sizeof(term_id_seen[0]));
     if (term_id_seen == NULL) {
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch generation term id set",
@@ -12453,10 +12453,8 @@ static int lc_pouch_query_index_generation_cache_parse(
         !lc_pouch_query_index_binary_string(&cursor, &field_hex) ||
         !lc_pouch_query_index_binary_string(&cursor, &value_hex) ||
         term_id == 0UL ||
-        (value_type != (unsigned char)'s' &&
-         value_type != (unsigned char)'n' &&
-         value_type != (unsigned char)'b' &&
-         value_type != (unsigned char)'z' &&
+        (value_type != (unsigned char)'s' && value_type != (unsigned char)'n' &&
+         value_type != (unsigned char)'b' && value_type != (unsigned char)'z' &&
          value_type != (unsigned char)LC_POUCH_QUERY_INDEX_EXACT_HASH_TYPE &&
          value_type != (unsigned char)LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE &&
          value_type != (unsigned char)LC_POUCH_QUERY_INDEX_TEXT_TOKEN_TYPE) ||
@@ -12951,8 +12949,8 @@ static int lc_pouch_query_index_read_sparse_posting_varint(
 
   if ((bytes == NULL && length > 0U) || offset == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch posting varint read requires inputs", NULL,
-                        NULL, NULL);
+                        "pouch posting varint read requires inputs", NULL, NULL,
+                        NULL);
   }
   value = 0UL;
   shift = 0U;
@@ -12974,8 +12972,7 @@ static int lc_pouch_query_index_read_sparse_posting_varint(
     shift += 7U;
   }
   return lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch posting varint is truncated", NULL, NULL,
-                      "pouch");
+                      "pouch posting varint is truncated", NULL, NULL, "pouch");
 }
 
 static int lc_pouch_query_index_docid_list_contains_sorted(
@@ -13185,8 +13182,8 @@ static int lc_pouch_query_index_append_generation_posting(
   }
   if (payload_length > (unsigned long)((size_t)-1)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch posting payload exceeds local limit", NULL,
-                        NULL, "pouch");
+                        "pouch posting payload exceeds local limit", NULL, NULL,
+                        "pouch");
   }
   rc = LC_OK;
   if (kind == 's') {
@@ -13206,21 +13203,21 @@ static int lc_pouch_query_index_append_generation_posting(
         break;
       }
       doc_id = index == 0U ? delta : doc_id + delta;
-      if (lc_pouch_query_index_docid_list_contains_sorted(
-              docid_filter_sorted, doc_id)) {
+      if (lc_pouch_query_index_docid_list_contains_sorted(docid_filter_sorted,
+                                                          doc_id)) {
         rc = lc_pouch_index_result_docid_list_add(allocator, docids, doc_id,
                                                   value_index, error);
       }
     }
     if (rc == LC_OK && offset != (size_t)payload_length) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch posting has trailing bytes", NULL, NULL,
-                        "pouch");
+      rc =
+          lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch posting has trailing bytes", NULL, NULL, "pouch");
     }
     if (rc == LC_OK && count > 0UL && doc_id != max_doc_id) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch posting max docID mismatch", NULL, NULL,
-                        "pouch");
+      rc =
+          lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch posting max docID mismatch", NULL, NULL, "pouch");
     }
   } else if (kind == 'd') {
     seen = 0U;
@@ -13239,8 +13236,8 @@ static int lc_pouch_query_index_append_generation_posting(
                             NULL, "pouch");
           break;
         }
-        if (lc_pouch_query_index_docid_list_contains_sorted(
-                docid_filter_sorted, doc_id)) {
+        if (lc_pouch_query_index_docid_list_contains_sorted(docid_filter_sorted,
+                                                            doc_id)) {
           rc = lc_pouch_index_result_docid_list_add(allocator, docids, doc_id,
                                                     value_index, error);
           if (rc != LC_OK) {
