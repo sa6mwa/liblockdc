@@ -56,9 +56,11 @@ int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
                                unsigned long state_index_seq,
                                lc_pouch_query_index_flush_result *out,
                                lc_error *error);
-int lc_pouch_query_index_flush_validated(
-    lc_pouch *pouch, const char *namespace_name, unsigned long state_index_seq,
-    lc_pouch_query_index_flush_result *out, lc_error *error);
+int lc_pouch_query_index_flush_validated(lc_pouch *pouch,
+                                         const char *namespace_name,
+                                         unsigned long state_index_seq,
+                                         lc_pouch_query_index_flush_result *out,
+                                         lc_error *error);
 int lc_pouch_query_index_has_pending(lc_pouch *pouch,
                                      const char *namespace_name);
 int lc_pouch_query_index_manifest_seq(lc_pouch *pouch,
@@ -70,6 +72,9 @@ int lc_pouch_query_index_ensure_current(lc_pouch *pouch,
                                         unsigned long state_index_seq,
                                         int validate_current,
                                         lc_pouch_query_index_flush_result *out,
+                                        lc_error *error);
+int lc_pouch_query_index_warm_namespace(lc_pouch *pouch,
+                                        const char *namespace_name,
                                         lc_error *error);
 void lc_pouch_query_index_note_state_write(
     lc_pouch *pouch, const char *namespace_name, const char *key,

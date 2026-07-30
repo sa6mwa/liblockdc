@@ -1638,9 +1638,9 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
         config->pouch_crypto_generate_key_file != 0
             ? config->pouch_crypto_generate_key_file
             : pouch_endpoint_options.crypto_generate_key_file;
-    pouch_open_options.compression =
-        config->pouch_compression != NULL ? config->pouch_compression
-                                          : pouch_endpoint_options.compression;
+    pouch_open_options.compression = config->pouch_compression != NULL
+                                         ? config->pouch_compression
+                                         : pouch_endpoint_options.compression;
     rc = lc_pouch_open(pouch_endpoint_options.root_path, &config->allocator,
                        &pouch_open_options, &client->pouch, error);
     if (rc != LC_OK) {
@@ -2080,6 +2080,35 @@ int lc_sink_memory_bytes(lc_sink *sink, const void **bytes, size_t *length,
   memory_sink = (lc_memory_sink *)sink;
   *bytes = memory_sink->bytes;
   *length = memory_sink->length;
+  return LC_OK;
+}
+
+int lc_sink_memory_reserve(lc_sink *sink, size_t capacity, lc_error *error) {
+  lc_sink_impl *impl;
+  lc_memory_sink *memory_sink;
+  unsigned char *next;
+
+  if (sink == NULL) {
+    return LC_OK;
+  }
+  if (sink->write != lc_sink_pub_write || sink->close != lc_sink_pub_close) {
+    return LC_OK;
+  }
+  impl = (lc_sink_impl *)sink;
+  if (impl->write_impl != lc_memory_sink_write) {
+    return LC_OK;
+  }
+  memory_sink = (lc_memory_sink *)sink;
+  if (capacity <= memory_sink->capacity) {
+    return LC_OK;
+  }
+  next = (unsigned char *)realloc(memory_sink->bytes, capacity);
+  if (next == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to grow memory sink",
+                        NULL, NULL, NULL);
+  }
+  memory_sink->bytes = next;
+  memory_sink->capacity = capacity;
   return LC_OK;
 }
 

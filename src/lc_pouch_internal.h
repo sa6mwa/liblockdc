@@ -4,7 +4,10 @@
 #include "lc_pouch.h"
 #include "lc_pouch_crypto.h"
 
+#include <pthread.h>
+
 typedef struct lc_pouch_state_cache_namespace lc_pouch_state_cache_namespace;
+typedef struct lc_pouch_source_cache_entry lc_pouch_source_cache_entry;
 typedef struct lc_pouch_query_index_generation_cache_entry
     lc_pouch_query_index_generation_cache_entry;
 typedef struct lc_pouch_query_index_doc_table_cache_entry
@@ -17,6 +20,7 @@ typedef struct lc_pouch_query_index_pending_segment
     lc_pouch_query_index_pending_segment;
 typedef struct lc_pouch_query_index_manifest_trust_entry
     lc_pouch_query_index_manifest_trust_entry;
+typedef struct lc_pouch_fsync_request lc_pouch_fsync_request;
 
 typedef struct lc_pouch_state_change_visit_entry {
   const char *key;
@@ -75,7 +79,20 @@ struct lc_pouch {
   lc_pouch_crypto *crypto;
   char *crypto_key_file;
   char *writer_marker_leaf;
+  pthread_mutex_t fsync_mutex;
+  pthread_cond_t fsync_cond;
+  pthread_t fsync_thread;
+  lc_pouch_fsync_request *fsync_head;
+  lc_pouch_fsync_request *fsync_tail;
+  size_t fsync_queue_count;
+  int fsync_mutex_initialized;
+  int fsync_cond_initialized;
+  int fsync_thread_started;
+  int fsync_stop;
   lc_pouch_state_cache_namespace *state_cache_namespaces;
+  lc_pouch_source_cache_entry *source_cache_entries;
+  size_t source_cache_count;
+  unsigned long source_cache_tick;
   lc_pouch_query_index_generation_cache_entry *query_generation_cache;
   size_t query_generation_cache_count;
   lc_pouch_query_index_doc_table_cache_entry *query_doc_table_cache;
@@ -96,6 +113,7 @@ extern void *lc_pouch_test_after_snapshot_write_context;
 #endif
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);
+void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch);
 void lc_pouch_query_index_cache_cleanup(lc_pouch *pouch);
 int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,
                                        const char *namespace_name,
@@ -112,15 +130,21 @@ int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
                                void *context, lc_error *error);
 int lc_pouch_state_visible_count(lc_pouch *pouch, const char *namespace_name,
                                  size_t *count, lc_error *error);
-int lc_pouch_state_scan_summaries(
-    lc_pouch *pouch, const char *namespace_name, const char *start_after,
-    size_t limit, lc_pouch_state_scan_summary_visit_fn visitor, void *context,
-    lc_pouch_state_scan_summaries_result *out, lc_error *error);
+int lc_pouch_state_warm_namespace(lc_pouch *pouch, const char *namespace_name,
+                                  lc_error *error);
+int lc_pouch_state_scan_summaries(lc_pouch *pouch, const char *namespace_name,
+                                  const char *start_after, size_t limit,
+                                  lc_pouch_state_scan_summary_visit_fn visitor,
+                                  void *context,
+                                  lc_pouch_state_scan_summaries_result *out,
+                                  lc_error *error);
 int lc_pouch_state_scan_summary_read_body(
     lc_pouch *pouch, const char *namespace_name,
     const lc_pouch_state_scan_summary_entry *entry,
     lc_pouch_state_read_result *out, lc_error *error);
 void lc_pouch_state_scan_summaries_result_cleanup(
-    const lc_allocator *allocator, lc_pouch_state_scan_summaries_result *result);
+    const lc_allocator *allocator,
+    lc_pouch_state_scan_summaries_result *result);
+int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error);
 
 #endif

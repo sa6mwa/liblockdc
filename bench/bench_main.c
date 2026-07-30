@@ -463,8 +463,8 @@ static int bench_pouch_perf_full_text_reopen_keys(long iterations) {
   start = bench_now_seconds();
   if (rc == LC_OK) {
     rc = bench_pouch_perf_query(fixture.client,
-                                "icontains{field=/...,value=audit}", "index",
-                                0, rows, &error);
+                                "icontains{field=/...,value=audit}", "index", 0,
+                                rows, &error);
   }
   elapsed = bench_now_seconds() - start;
   printf("metric=pouch-perf-full-text-reopen-keys rows=%ld crypto=%d "

@@ -87,7 +87,7 @@ func runPouchFixtureC(b *testing.B, fixture *pouchFixture, engine, scenario stri
 	}
 }
 
-func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes int64, cryptoEnabled bool) {
+func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes int64, cryptoEnabled, compressionEnabled bool) {
 	var totalCNS uint64
 	var result C.lockdc_pouch_bench_result
 
@@ -98,6 +98,7 @@ func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes int64, 
 			C.long(updatesPerKey),
 			C.long(payloadBytes),
 			C.int(boolToInt(cryptoEnabled)),
+			C.int(boolToInt(compressionEnabled)),
 			&result,
 		)
 		if rc != 0 {
@@ -150,7 +151,7 @@ func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes int64, 
 	b.ReportMetric(float64(result.full_text_scan_docs_ns), "full-text-scan-docs-ns/op")
 }
 
-func runPouchCompactionC(b *testing.B, rows, updatesPerKey, payloadBytes, segmentTargetBytes, minSegmentCount, minReclaimableBytes int64, scheduled, cryptoEnabled bool) {
+func runPouchCompactionC(b *testing.B, rows, updatesPerKey, payloadBytes, segmentTargetBytes, minSegmentCount, minReclaimableBytes int64, scheduled, cryptoEnabled, compressionEnabled bool) {
 	var totalCNS uint64
 	var result C.lockdc_pouch_bench_result
 
@@ -165,6 +166,7 @@ func runPouchCompactionC(b *testing.B, rows, updatesPerKey, payloadBytes, segmen
 			C.long(minReclaimableBytes),
 			C.int(boolToInt(scheduled)),
 			C.int(boolToInt(cryptoEnabled)),
+			C.int(boolToInt(compressionEnabled)),
 			&result,
 		)
 		if rc != 0 {

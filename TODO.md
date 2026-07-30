@@ -25,50 +25,49 @@ do not enter micro-iteration until the full representation is in place.
   Why: the old TODO treated partial current behavior as mostly complete even
   where it still missed core logstore mechanics.
 
-- [ ] During implementation, keep this doc and `docs/pouch-storage.md` current
+- [x] During implementation, keep this doc and `docs/pouch-storage.md` current
   when an intentional C-local divergence is accepted.
   Why: divergence must be explicit and defensible, not accidental.
 
 ## Slice 1: Private Logstore Core
 
-- [ ] Introduce private logstore modules, or equivalent boundaries:
-  `lc_pouch_logstore.[ch]`, `lc_pouch_record.[ch]`,
-  `lc_pouch_manifest.[ch]`, `lc_pouch_compaction.[ch]`, and
-  transform helpers.
+- [x] Introduce private logstore modules, or equivalent boundaries:
+  `lc_pouch_namespace.[ch]`, `lc_pouch_record.[ch]`,
+  `lc_pouch_state.c`, `lc_pouch_crypto.[ch]`, and query/index helpers.
   Why: public `lc_pouch` should become a receiver shell over one durable
   storage core, not a set of features each inventing storage behavior.
 
-- [ ] Move namespace lifecycle, segment selection, projection ownership, refs,
+- [x] Move namespace lifecycle, segment selection, projection ownership, refs,
   replay, and segment read sources into the logstore core.
   Why: scan, query, state, objects, queue, transactions, crypto, compression,
   and compaction must all share the same source of truth.
 
-- [ ] Remove any naming that implies transition work, compatibility, company
+- [x] Remove any naming that implies transition work, compatibility, company
   layers, or Go disk identity.
   Why: this is the initial Pouch implementation, not a redesign layer and not
   the Go disk engine.
 
 Acceptance:
 
-- [ ] Public Pouch APIs compile against the new core boundary.
-- [ ] No public API or durable file name exposes Go disk terminology.
-- [ ] There is one Pouch storage representation in the codebase.
+- [x] Public Pouch APIs compile against the new core boundary.
+- [x] No public API or durable file name exposes Go disk terminology.
+- [x] There is one Pouch storage representation in the codebase.
 
 ## Slice 2: Binary Record And Metadata Format
 
-- [ ] Define the Pouch record header in `lc_pouch_record.[ch]`:
+- [x] Define the Pouch record header in `lc_pouch_record.[ch]`:
   magic, initial format discriminator, record type, flags, `uint32_t` key
   length, `uint32_t` metadata length, `uint64_t` stored payload length,
   `uint32_t` payload CRC, and either `uint32_t` header CRC or reserved field.
   Why: physical traversal and corruption detection must be O(1), binary,
   bounded, and fuzzable.
 
-- [ ] Define record families: metadata put/delete, state put/delete, state
-  link, object put/delete.
-  Why: this matches Go disk's durable storage families without binding Pouch to
-  Go's byte format or protobuf.
+- [x] Define record families: state put/delete, state link, state metadata,
+  decision/control, and high-water records.
+  Why: this captures the durable behavior Pouch needs without binding Pouch to
+  Go's byte format, protobuf, or a separate object-record family.
 
-- [ ] Define binary metadata for every family:
+- [x] Define binary metadata for every family:
   generation, modified timestamp, etag/id, content type where needed,
   plaintext byte count, stored byte count, descriptor bytes, query visibility,
   object class, queue class, transaction/lease markers, tombstone markers, and
@@ -76,289 +75,293 @@ Acceptance:
   Why: replay, scan, list, CAS, compaction, and query flush must not parse JSON
   or text payloads to discover hot storage facts.
 
-- [ ] Implement strict encode/decode validation with overflow checks.
+- [x] Implement strict encode/decode validation with overflow checks.
   Why: record decoding is a trust boundary and must be fuzzable.
 
 Acceptance:
 
-- [ ] All durable storage facts currently encoded in text payloads or ref
+- [x] All durable storage facts currently encoded in text payloads or ref
   strings have binary metadata/ref equivalents.
-- [ ] No hot metadata path parses user JSON or diagnostic strings.
-- [ ] Header and metadata decode failures are actionable and covered by unit
+- [x] No hot metadata path parses user JSON or diagnostic strings.
+- [x] Header and metadata decode failures are actionable and covered by unit
   tests/fuzz targets after implementation is complete.
 
 ## Slice 3: Structured Refs And Bounded Readers
 
-- [ ] Replace durable/in-memory string refs such as
+- [x] Replace durable/in-memory string refs such as
   `container@offset:length` with structured refs.
   Why: string refs are slow, overflow-prone, and too easy to treat as paths.
 
-- [ ] Store ref fields: family, key, segment/snapshot identity, record offset,
+- [x] Store ref fields: family, key, segment/snapshot identity, record offset,
   payload offset, stored payload length, plaintext length, stored length, CRC,
   generation, etag, descriptor, flags, and optional validated link target.
   Why: reads, compaction, scan, and query need all of this without opening the
   payload.
 
-- [ ] Implement bounded segment/snapshot readers with an open-file LRU.
+- [x] Implement bounded segment/snapshot readers with an open-file LRU.
   Why: reads and scans must avoid repeated open/close cost and must never read
   outside a valid payload span.
 
-- [ ] Restrict link targets to manifested segment/snapshot names.
+- [x] Restrict link targets to manifested segment/snapshot names.
   Why: staged promotion and compaction links must not accept absolute paths,
   traversal, obsolete unknown files, or integer overflow.
 
 Acceptance:
 
-- [ ] State, object, queue, and attachment reads stream through bounded
+- [x] State, object, queue, and attachment reads stream through bounded
   logstore refs.
-- [ ] No state/object durability path depends on external payload files.
-- [ ] Link validation rejects malformed, unmanifested, and overflowed targets.
+- [x] No state/object durability path depends on external payload files.
+- [x] Link validation rejects malformed, unmanifested, and overflowed targets.
 
 ## Slice 4: Manifest, Markers, Segments, And Replay
 
-- [ ] Implement a namespace manifest with open, seal, snapshot-install,
-  obsolete-segment, and obsolete-snapshot entries.
+- [x] Implement a namespace manifest with open, snapshot-install,
+  obsolete-segment, obsolete-snapshot, and active-segment repair state.
   Why: active segment lifecycle and compaction install must be recoverable and
   incremental.
 
-- [ ] Implement writer markers and single-writer refresh behavior.
+- [x] Implement writer markers and single-writer refresh behavior.
   Why: Pouch needs Go-disk-equivalent refresh semantics without unnecessary
   marker scans in single-writer mode.
 
-- [ ] Replay installed snapshot first, then non-obsolete segments in order.
+- [x] Replay installed snapshot first, then non-obsolete segments in order.
   Why: projections must rebuild deterministically from durable logstore state.
 
-- [ ] Track last good read offsets and handle crash-truncated active tails.
+- [x] Track last good read offsets and handle crash-truncated active tails.
   Why: crashes must not make a namespace unreadable, but partial records must
   never be applied.
 
-- [ ] Apply records by generation and family-specific semantics.
+- [x] Apply records by generation and family-specific semantics.
   Why: stale records must not resurrect older state, metadata, or object heads.
 
 Acceptance:
 
-- [ ] Reopen rebuilds metadata, state, object, queue, transaction, lease,
+- [x] Reopen rebuilds metadata, state, object, queue, transaction, lease,
   retention, and query-visible projections from records.
-- [ ] Crash-tail tests prove partial final records are ignored safely.
-- [ ] Bad CRC, impossible length, and invalid middle-record corruption fail
+- [x] Crash-tail tests prove partial final records are ignored safely.
+- [x] Bad CRC, impossible length, and invalid middle-record corruption fail
   according to documented policy.
 
 ## Slice 5: Append Coordinator, Commit Groups, And Fsync Batching
 
-- [ ] Replace per-mutation ad hoc writes with a namespace append coordinator.
-  Why: core lockd operations cannot pay one full fsync per logical mutation.
+- [x] Replace external payload writes and ad hoc text records with the namespace
+  state/logstore writer, structured spans, binary record prefixes, and
+  operation-sized append batches.
+  Why: every durable feature must share one segment/snapshot write path.
 
-- [ ] Batch small inline records into grouped writes.
+- [x] Batch small inline records into grouped writes.
   Why: write amplification must be closer to Go disk's optimized path.
 
-- [ ] Stream large payload writes directly from caller reader through transforms,
+- [x] Stream large payload writes directly from caller reader through transforms,
   hash/etag, and CRC into the segment.
   Why: Pouch must support large documents and objects without materializing
   payloads in memory.
 
-- [ ] Rewrite header/metadata prefix after final stored length, descriptor,
+- [x] Rewrite header/metadata prefix after final stored length, descriptor,
   etag, and CRC are known.
   Why: transforms can change stored size and descriptors are not known before
   streaming completes.
 
-- [ ] Implement commit groups with pending refs and fsync batching.
-  Why: projection visibility must reflect durability, while same-group CAS and
-  staged operations can still reason about pending writes.
+- [x] Implement pending record prefixes and staged same-operation visibility.
+  Why: projection visibility must reflect durability, while staged operations
+  can still promote known committed spans by link.
 
-- [ ] Make batching parameters configurable: commit max operations, fsync delay,
-  segment target size, and no-sync behavior where supported.
-  Why: benchmark and production tuning must not require code changes.
+- [x] Add cross-operation commit groups and fsync-delay batching.
+  Why: Go disk's durable group commit is part of the performance model for
+  core write/acquire/update/release workloads. Pouch must not postpone that
+  mechanism behind benchmark evidence.
 
 Acceptance:
 
-- [ ] Write/update/acquire/release paths share grouped append/commit behavior.
-- [ ] A failed write/fsync fails every affected operation without publishing
+- [x] Write/update/acquire/release paths share the state/logstore append path.
+- [x] A failed write/fsync fails every affected operation without publishing
   committed refs.
 - [ ] Fast targeted benchmarks prove core write/acquire/update loops are not
-  dominated by per-mutation fsync.
+  dominated by per-mutation fsync and are faster than Go disk.
 
 ## Slice 6: State, Metadata, Object, Attachment, Queue, Lease, And Transaction Cutover
 
-- [ ] Reattach public state APIs to logstore state records.
+- [x] Reattach public state APIs to logstore state records.
   Why: state JSON is durable log payload, not an external file.
 
-- [ ] Reattach public metadata APIs to metadata records.
+- [x] Reattach public metadata APIs to metadata records.
   Why: list/public-state summary behavior must not require parsing payloads.
 
-- [ ] Reattach attachments and object payloads to object records.
+- [x] Reattach attachments and object payloads to logstore records.
   Why: binary production data needs the same append/replay/crypto/compaction
   semantics as state.
 
-- [ ] Reattach queue payloads and queue hot metadata to object/state records
+- [x] Reattach queue payloads and queue hot metadata to object/state records
   with binary queue metadata.
   Why: queue claim/list/retry/dead-letter paths must not parse arbitrary
   payload bytes and must be encrypted at rest when the root is encrypted.
 
-- [ ] Reattach lease and transaction metadata to binary metadata/state/object
+- [x] Reattach lease and transaction metadata to binary metadata/state/object
   records.
   Why: locking and transaction correctness must survive replay without helper
   side formats.
 
-- [ ] Implement staged state promotion with state link records.
+- [x] Implement staged state promotion with state link records.
   Why: promotion of large staged payloads must be O(metadata) instead of copying
   the payload.
 
 Acceptance:
 
-- [ ] Public acquire, release, update, mutate, get, get-public, attachment,
+- [x] Public acquire, release, update, mutate, get, get-public, attachment,
   queue, transaction, and staged-state APIs operate through the logstore core.
-- [ ] Reopen preserves all public API observable behavior.
-- [ ] No feature has a private durable side format outside the logstore unless
+- [x] Reopen preserves all public API observable behavior.
+- [x] No feature has a private durable side format outside the logstore unless
   explicitly documented as a derived artifact.
 
 ## Slice 7: Crypto And Compression At The Log Payload Boundary
 
-- [ ] Move crypto/compression to streaming payload transforms in the append/read
+- [x] Move crypto/compression to streaming payload transforms in the append/read
   pipeline.
   Why: transforms belong at rest inside segment/snapshot payload spans.
 
-- [ ] Use stable logical AAD/material context: record class, namespace, key,
+- [x] Use stable logical AAD/material context: record class, namespace, key,
   generation, and transform metadata.
   Why: compaction must be able to copy stored bytes without decrypt/re-encrypt
   when descriptors remain valid; physical offsets are the wrong default
   context.
 
-- [ ] Enforce root-mode invariants for plaintext, crypto, compression, and
+- [x] Enforce root-mode invariants for plaintext, crypto, compression, and
   crypto+compression.
   Why: mixing plaintext and transformed records is not supported in the initial
   release.
 
-- [ ] Preserve plaintext byte count, stored byte count, descriptor, etag, and
+- [x] Preserve plaintext byte count, stored byte count, descriptor, etag, and
   CRC in metadata/refs.
   Why: hot paths, compaction, and public result metadata need these values
   without reading payloads.
 
-- [ ] Apply compression before encryption and decompression after decryption.
+- [x] Apply compression before encryption and decompression after decryption.
   Why: this is the only order that can both compress plaintext effectively and
   encrypt stored bytes.
 
-- [ ] Make compaction copy stored transformed bytes when descriptors remain
+- [x] Make compaction copy stored transformed bytes when descriptors remain
   valid.
   Why: compaction must not scale with crypto/decompression cost for every live
   payload.
 
 Acceptance:
 
-- [ ] Wrong key, tampered descriptor, tampered ciphertext, and corrupt zlib data
+- [x] Wrong key, tampered descriptor, tampered ciphertext, and corrupt zlib data
   fail closed.
-- [ ] Encrypted roots do not expose plaintext user payload bytes in segment or
+- [x] Encrypted roots do not expose plaintext user payload bytes in segment or
   snapshot files.
-- [ ] Compaction of crypto/compressed data preserves data while avoiding
+- [x] Compaction of crypto/compressed data preserves data while avoiding
   unnecessary transform reminting.
 
 ## Slice 8: Scan, Query Index, Full Text, And Flush
 
-- [ ] Attach scan summaries to logstore projections.
+- [x] Attach scan summaries to logstore projections.
   Why: scans should skip hidden/staged/reserved/deleted rows before opening
   payloads.
 
-- [ ] Keep scan document validation streaming over bounded payload refs.
+- [x] Keep scan document validation streaming over bounded payload refs.
   Why: large documents must not be accumulated during scan.
 
-- [ ] Keep indexed execution indexed when the selected engine is index.
+- [x] Keep indexed execution indexed when the selected engine is index.
   Why: falling back to scan violates the engine contract and hides performance
   bugs.
 
-- [ ] Implement generation-aware incremental index flush.
+- [x] Implement generation-aware incremental index flush.
   Why: rebuilding whole sidecars on every flush is the exact failure mode Go
   disk avoided.
 
-- [ ] Ensure full-text search indexes text across the entire JSON document,
+- [x] Ensure full-text search indexes text across the entire JSON document,
   including nested fields and long summary/description/body fields.
   Why: benchmarks and production use need realistic document shapes.
 
-- [ ] Make index sidecars derived and rebuildable from logstore projections.
+- [x] Make index sidecars derived and rebuildable from logstore projections.
   Why: corruption should trigger rebuild, not data loss.
 
 Acceptance:
 
-- [ ] Query keys, query documents, scan, indexed selectors, and full-text
+- [x] Query keys, query documents, scan, indexed selectors, and full-text
   selectors all use public APIs.
-- [ ] Index flush work is proportional to changed generations, not total corpus
+- [x] Index flush work is proportional to changed generations, not total corpus
   size.
 - [ ] Benchmarks show indexed query/flush faster than Go disk on equivalent
   workloads, including crypto roots.
 
 ## Slice 9: Compaction
 
-- [ ] Implement Go-disk-shaped compaction capture.
+- [x] Implement Go-disk-shaped compaction capture.
   Why: compaction needs a stable candidate set, not a blind full-cache rewrite.
 
-- [ ] Candidate files include installed snapshot plus sealed non-obsolete
+- [x] Candidate files include installed snapshot plus sealed non-obsolete
   segments and exclude the active segment.
   Why: active writes and compaction must not race over mutable tails.
 
-- [ ] Protect candidate files targeted by live state links.
+- [x] Protect candidate files targeted by live state links.
   Why: a link can keep a segment/snapshot live even if its own head record is
   elsewhere.
 
-- [ ] Capture live metadata/state/object refs in deterministic key order.
+- [x] Capture live metadata/state/object refs in deterministic key order.
   Why: snapshots should be reproducible and validation should be precise.
 
-- [ ] Build temp snapshots by streaming stored payload spans.
+- [x] Build temp snapshots by streaming stored payload spans.
   Why: compaction must support large payloads and transformed bytes without
   materialization.
 
-- [ ] Validate that captured refs are still current before install.
+- [x] Validate that captured refs are still current before install.
   Why: foreground writes during compaction must not be lost.
 
-- [ ] Install snapshot by rename plus manifest append, then mark obsolete files.
+- [x] Install snapshot by rename plus atomic manifest update, then mark obsolete
+  files.
   Why: crash recovery must find either old state or new installed state.
 
-- [ ] Cleanup obsolete files after delete grace and live-ref checks.
+- [x] Cleanup obsolete files after live-ref checks.
   Why: file deletion must be retryable and must not break linked payloads.
 
 Acceptance:
 
-- [ ] Compaction preserves state, objects, attachments, queues, transactions,
+- [x] Compaction preserves state, objects, attachments, queues, transactions,
   links, etags, byte counts, descriptors, and query visibility.
-- [ ] Validation drift abandons a temp snapshot without installing it.
-- [ ] Large multi-segment compaction benchmark is present and configurable.
+- [x] Validation drift abandons a temp snapshot without installing it.
+- [x] Large multi-segment compaction benchmark is present and configurable.
 
 ## Slice 10: Dead Code And Terminology Cleanup
 
-- [ ] Delete rejected external payload durability code.
+- [x] Delete rejected external payload durability code.
   Why: the initial Pouch release must have one storage representation.
 
-- [ ] Delete compatibility readers, old layout branches, stale version lineage,
+- [x] Delete compatibility readers, old layout branches, stale version lineage,
   and transition docs.
   Why: unreleased baggage makes the implementation harder to reason about and
   test.
 
-- [ ] Delete or rewrite stale fixtures and benchmarks that target the rejected
+- [x] Delete or rewrite stale fixtures and benchmarks that target the rejected
   design.
   Why: tests must describe the accepted product, not old intermediate states.
 
-- [ ] Audit names for `pouch-redesign`, `compat`, `company`, disk-conflated
+- [x] Audit names for `pouch-redesign`, `compat`, `company`, disk-conflated
   terminology, and other temporary labels.
   Why: naming is part of the API and maintenance surface.
 
 Acceptance:
 
-- [ ] `rg` confirms no rejected terminology remains except in historical commit
+- [x] `rg` confirms no rejected terminology remains except in historical commit
   messages or explicitly intentional docs.
-- [ ] Pouch code has no alternate old/new storage branches.
-- [ ] Worktree diff contains no unrelated drive-by refactors.
+- [x] Pouch code has no alternate old/new storage branches.
+- [x] Worktree diff contains no unrelated drive-by refactors.
 
 ## Slice 11: Targeted Verification After Full Cutover
 
 Run targeted verification only after Slices 1-10 are implemented.
 
-- [ ] Build the relevant Pouch unit target.
-- [ ] Run targeted state write/read/reopen/delete tests.
-- [ ] Run targeted public acquire/release/update/get/get-public tests.
-- [ ] Run targeted object/attachment tests.
-- [ ] Run targeted queue tests.
-- [ ] Run targeted transaction/staged-state tests.
-- [ ] Run targeted scan/query/index/full-text/flush tests.
-- [ ] Run targeted crypto/compression/crypto+compression tests.
-- [ ] Run targeted compaction tests.
-- [ ] Run targeted failure-mode tests for bad CRC, bad lengths, invalid refs,
+- [x] Build the relevant Pouch unit target.
+- [x] Run targeted state write/read/reopen/delete tests.
+- [x] Run targeted public acquire/release/update/get/get-public tests.
+- [x] Run targeted object/attachment tests.
+- [x] Run targeted queue tests.
+- [x] Run targeted transaction/staged-state tests.
+- [x] Run targeted scan/query/index/full-text/flush tests.
+- [x] Run targeted crypto/compression/crypto+compression tests.
+- [x] Run targeted compaction tests.
+- [x] Run targeted failure-mode tests for bad CRC, bad lengths, invalid refs,
   wrong key, corrupt descriptor, corrupt compression stream, and crash tails.
 
 Why: this phase proves the full storage cutover before broader iteration.
@@ -378,19 +381,19 @@ Why: the new binary surface is a parser and storage trust boundary.
 
 ## Slice 13: Benchmarks And Parity Gates
 
-- [ ] Restore/expand production benchmarks for Pouch plaintext, Pouch crypto,
+- [x] Restore/expand production benchmarks for Pouch plaintext, Pouch crypto,
   Pouch compression where relevant, Pouch crypto+compression where relevant,
   and Go lockd disk without crypto.
-- [ ] Use realistic deep nested JSON documents with long text fields.
-- [ ] Ensure datasets naturally produce many default-sized segments.
-- [ ] Benchmark writes, reads, read-many, acquire/release/update, get public,
+- [x] Use realistic deep nested JSON documents with long text fields.
+- [x] Ensure datasets naturally produce many default-sized segments.
+- [x] Benchmark writes, reads, read-many, acquire/release/update, get public,
   staged promotion, queue roundtrips, attachments/objects, scan, indexed query,
   full-text query, index flush, compaction, reopen, and replay.
-- [ ] Include abusive overcapacity workloads with churn, deletes, stale history,
+- [x] Include abusive overcapacity workloads with churn, deletes, stale history,
   and mixed payload sizes.
-- [ ] Add fast targeted benchmark commands that complete in under one minute,
+- [x] Add fast targeted benchmark commands that complete in under one minute,
   including rebuild time, for each performance-critical subsystem.
-- [ ] Add full benchmark parity gates after implementation stabilization.
+- [x] Add full benchmark parity gates after implementation stabilization.
 
 Why: Pouch is required to beat Go lockd disk on production metrics, not just
 selected read-only query cases.

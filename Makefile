@@ -46,7 +46,7 @@ POUCH_GO_ACCEPTANCE_SEED_ROWS ?= 64
 POUCH_GO_ACCEPTANCE_SCALE_ROWS ?= 4096
 POUCH_GO_ACCEPTANCE_SCALE_SCENARIOS ?= EqSparse,RangeHalf,InTags,ContainsMessage,DateAfter,OrSparseOrFlag,TenantEnterprise,WorkflowEscalated,AmountBand,RiskSignal,NarrativeSummary,NarrativeDescription,FullTextAny
 POUCH_GO_ACCEPTANCE_TIMEOUT ?= 3m
-POUCH_GO_PRODUCTION_BENCH ?= Production(PouchPT|PouchCrypto|LockdDiskNoCrypto)
+POUCH_GO_PRODUCTION_BENCH ?= Production(PouchPT|PouchCrypto|PouchCompression|PouchCryptoCompression|LockdDiskNoCrypto)
 POUCH_GO_PRODUCTION_BENCHTIME ?= 1x
 POUCH_GO_PRODUCTION_ROWS ?=
 POUCH_GO_PRODUCTION_UPDATES ?=
@@ -100,7 +100,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-asan __build-coverage __build-fuzz \
 	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
 	__format \
-	__finalize-slice __valgrind __asan __coverage __fuzz __fuzz-smoke __benchmarks __bench-gate __benchmark-pouch-perf __benchmark-pouch-go __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-compaction \
+	__finalize-slice __valgrind __asan __coverage __fuzz __fuzz-smoke __benchmarks __bench-gate __benchmark-pouch-perf __benchmark-pouch-go __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-compaction __benchmark-pouch-go-parity-gate \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __clean-dist \
 	__lua-rock __lua-test __lua-env \
 	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test \
@@ -109,7 +109,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
 	format \
-	finalize-slice valgrind asan coverage fuzz fuzz-smoke benchmarks bench-gate benchmark-pouch-perf benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-compaction \
+	finalize-slice valgrind asan coverage fuzz fuzz-smoke benchmarks bench-gate benchmark-pouch-perf benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-compaction benchmark-pouch-go-parity-gate \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives clean-dist \
 	lua-rock lua-test lua-env \
 	dev-up dev-down dev-reset cross-build cross-preset-test cross-test \
@@ -160,6 +160,7 @@ help:
 		'make benchmark-pouch-go-acceptance Run the bounded 4096-doc pouch-vs-disk acceptance matrix (timeout $(POUCH_GO_ACCEPTANCE_TIMEOUT)).' \
 		'make benchmark-pouch-go-production Run production-like pouch-vs-disk segmented write/read/replay/queue/attachment benchmark matrix; set POUCH_GO_PRODUCTION_ROWS/UPDATES/PAYLOAD_BYTES for one custom profile.' \
 		'make benchmark-pouch-go-compaction Run opt-in pouch forced/scheduled compaction benchmarks; set POUCH_GO_COMPACTION_* to tune early compaction.' \
+		'make benchmark-pouch-go-parity-gate Run production pouch-vs-disk benchmarks and fail if any Pouch performance metric is slower than Go disk.' \
 		'make package            Build the shipped x86_64-linux-gnu release preset and write the combined release archive, source archive, and Lua source rock to dist/.' \
 		'make package-source     Build the source-only release archive.' \
 		'make package-source-smoke  Build and verify the source-only release archive.' \
@@ -485,6 +486,16 @@ __benchmark-pouch-go-compaction:
 	  LOCKDC_BENCH_COMPACTION_SEGMENT_TARGET_BYTES='$(POUCH_GO_COMPACTION_SEGMENT_TARGET_BYTES)' \
 	  LOCKDC_BENCH_COMPACTION_MIN_SEGMENTS='$(POUCH_GO_COMPACTION_MIN_SEGMENTS)' \
 	  LOCKDC_BENCH_COMPACTION_MIN_RECLAIMABLE_BYTES='$(POUCH_GO_COMPACTION_MIN_RECLAIMABLE_BYTES)'
+
+benchmark-pouch-go-parity-gate:
+	$(TIMED) benchmark-pouch-go-parity-gate timeout --kill-after=5s \
+	  '$(POUCH_GO_PRODUCTION_TIMEOUT)' $(MAKE) __benchmark-pouch-go-parity-gate
+
+__benchmark-pouch-go-parity-gate:
+	mkdir -p $(ROOT)/build
+	set -o pipefail; \
+	  $(MAKE) __benchmark-pouch-go-production 2>&1 | tee $(ROOT)/build/pouch-go-production.bench.txt
+	python3 scripts/pouch_benchmark_parity.py $(ROOT)/build/pouch-go-production.bench.txt
 
 package:
 	$(TIMED) package $(MAKE) __package

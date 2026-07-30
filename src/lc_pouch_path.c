@@ -27,6 +27,19 @@ static int lc_pouch_path_dot_only(const char *name) {
   return 1;
 }
 
+static int lc_pouch_path_hex_value(unsigned char value) {
+  if (value >= '0' && value <= '9') {
+    return (int)(value - '0');
+  }
+  if (value >= 'a' && value <= 'f') {
+    return (int)(value - 'a' + 10);
+  }
+  if (value >= 'A' && value <= 'F') {
+    return (int)(value - 'A' + 10);
+  }
+  return -1;
+}
+
 char *lc_pouch_path_join(const lc_allocator *allocator, const char *root,
                          const char *leaf) {
   char *path;
@@ -90,6 +103,52 @@ char *lc_pouch_path_escape_name(const lc_allocator *allocator,
   }
   *dst = '\0';
   return escaped;
+}
+
+char *lc_pouch_path_unescape_name(const lc_allocator *allocator,
+                                  const char *name) {
+  const char *cursor;
+  char *unescaped;
+  char *dst;
+  size_t length;
+
+  if (name == NULL || name[0] == '\0') {
+    return NULL;
+  }
+  length = strlen(name);
+  unescaped = (char *)lc_alloc_with_allocator(allocator, length + 1U);
+  if (unescaped == NULL) {
+    return NULL;
+  }
+  cursor = name;
+  dst = unescaped;
+  while (*cursor != '\0') {
+    if (*cursor == '%') {
+      int high;
+      int low;
+
+      if (cursor[1] == '\0' || cursor[2] == '\0') {
+        lc_free_with_allocator(allocator, unescaped);
+        return NULL;
+      }
+      high = lc_pouch_path_hex_value((unsigned char)cursor[1]);
+      low = lc_pouch_path_hex_value((unsigned char)cursor[2]);
+      if (high < 0 || low < 0) {
+        lc_free_with_allocator(allocator, unescaped);
+        return NULL;
+      }
+      *dst++ = (char)(((unsigned int)high << 4U) | (unsigned int)low);
+      cursor += 3;
+    } else {
+      *dst++ = *cursor++;
+    }
+  }
+  *dst = '\0';
+  if (unescaped[0] == '\0') {
+    lc_free_with_allocator(allocator, unescaped);
+    return NULL;
+  }
+  return unescaped;
 }
 
 int lc_pouch_path_ensure_directory(const char *path, const char *message,
@@ -210,8 +269,8 @@ static char *lc_pouch_path_temp_path(const char *path, unsigned int attempt) {
 }
 
 static int lc_pouch_path_write_bytes_file_impl(const char *path,
-                                               const char *bytes,
-                                               size_t length, int sync_file,
+                                               const char *bytes, size_t length,
+                                               int sync_file,
                                                int sync_directory,
                                                lc_error *error) {
   char *dir;

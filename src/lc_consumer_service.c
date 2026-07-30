@@ -2037,8 +2037,7 @@ static void *lc_consumer_delivery_extend_main(void *context) {
       return NULL;
     }
     inner_message = bridge->inner_message;
-    visibility_timeout_seconds =
-        inner_message->visibility_timeout_seconds;
+    visibility_timeout_seconds = inner_message->visibility_timeout_seconds;
     pthread_mutex_unlock(&bridge->state_mutex);
     if (visibility_timeout_seconds <= 0L) {
       pthread_mutex_unlock(&bridge->op_mutex);

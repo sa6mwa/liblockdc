@@ -708,7 +708,7 @@ func BenchmarkProductionPouchPT(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
-			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, false)
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, false, false)
 		})
 	}
 }
@@ -717,7 +717,25 @@ func BenchmarkProductionPouchCrypto(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
-			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, true)
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, true, false)
+		})
+	}
+}
+
+func BenchmarkProductionPouchCompression(b *testing.B) {
+	for _, scenario := range productionScenarios() {
+		scenario := scenario
+		b.Run(productionBenchName(scenario), func(b *testing.B) {
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, false, true)
+		})
+	}
+}
+
+func BenchmarkProductionPouchCryptoCompression(b *testing.B) {
+	for _, scenario := range productionScenarios() {
+		scenario := scenario
+		b.Run(productionBenchName(scenario), func(b *testing.B) {
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, true, true)
 		})
 	}
 }
@@ -780,7 +798,7 @@ func BenchmarkCompactionPouchPTForced(b *testing.B) {
 	for _, scenario := range forcedCompactionScenarios() {
 		scenario := scenario
 		b.Run(compactionBenchName(scenario), func(b *testing.B) {
-			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, false, false)
+			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, false, false, false)
 		})
 	}
 }
@@ -789,7 +807,25 @@ func BenchmarkCompactionPouchCryptoForced(b *testing.B) {
 	for _, scenario := range forcedCompactionScenarios() {
 		scenario := scenario
 		b.Run(compactionBenchName(scenario), func(b *testing.B) {
-			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, false, true)
+			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, false, true, false)
+		})
+	}
+}
+
+func BenchmarkCompactionPouchCompressionForced(b *testing.B) {
+	for _, scenario := range forcedCompactionScenarios() {
+		scenario := scenario
+		b.Run(compactionBenchName(scenario), func(b *testing.B) {
+			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, false, false, true)
+		})
+	}
+}
+
+func BenchmarkCompactionPouchCryptoCompressionForced(b *testing.B) {
+	for _, scenario := range forcedCompactionScenarios() {
+		scenario := scenario
+		b.Run(compactionBenchName(scenario), func(b *testing.B) {
+			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, false, true, true)
 		})
 	}
 }
@@ -798,7 +834,7 @@ func BenchmarkCompactionPouchPTScheduled(b *testing.B) {
 	for _, scenario := range scheduledCompactionScenarios() {
 		scenario := scenario
 		b.Run(compactionBenchName(scenario), func(b *testing.B) {
-			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, true, false)
+			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, true, false, false)
 		})
 	}
 }
@@ -807,7 +843,25 @@ func BenchmarkCompactionPouchCryptoScheduled(b *testing.B) {
 	for _, scenario := range scheduledCompactionScenarios() {
 		scenario := scenario
 		b.Run(compactionBenchName(scenario), func(b *testing.B) {
-			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, true, true)
+			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, true, true, false)
+		})
+	}
+}
+
+func BenchmarkCompactionPouchCompressionScheduled(b *testing.B) {
+	for _, scenario := range scheduledCompactionScenarios() {
+		scenario := scenario
+		b.Run(compactionBenchName(scenario), func(b *testing.B) {
+			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, true, false, true)
+		})
+	}
+}
+
+func BenchmarkCompactionPouchCryptoCompressionScheduled(b *testing.B) {
+	for _, scenario := range scheduledCompactionScenarios() {
+		scenario := scenario
+		b.Run(compactionBenchName(scenario), func(b *testing.B) {
+			runPouchCompactionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, scenario.minSegmentCount, scenario.minReclaimableBytes, true, true, true)
 		})
 	}
 }

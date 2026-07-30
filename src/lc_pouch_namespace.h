@@ -23,6 +23,7 @@ typedef struct lc_pouch_namespace_manifest {
   unsigned long active_segment_id;
   unsigned long max_segment_id;
   unsigned long latest_snapshot_segment_id;
+  unsigned long state_max_version;
   unsigned long obsolete_segment_count;
   unsigned long obsolete_snapshot_count;
   int repaired;

@@ -15,6 +15,7 @@
 typedef struct lifecycle_mode {
   const char *name;
   const char *crypto_key;
+  const char *compression;
 } lifecycle_mode;
 
 typedef struct lifecycle_key_count {
@@ -101,17 +102,16 @@ static int lifecycle_open_client(const char *root, const lifecycle_mode *mode,
   const char *endpoints[1];
   lc_client_config config;
 
-  if (mode != NULL && mode->crypto_key != NULL) {
-    (void)snprintf(endpoint, sizeof(endpoint), "pouch://%s?pouch_crypto_key=%s",
-                   root, mode->crypto_key);
-  } else {
-    (void)snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
-  }
+  (void)snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "life";
+  if (mode != NULL) {
+    config.pouch_crypto_key = mode->crypto_key;
+    config.pouch_compression = mode->compression;
+  }
   return lc_client_open(&config, out, error);
 }
 
@@ -263,6 +263,7 @@ static int lifecycle_run_maintenance(const char *root,
   memset(&maintenance_result, 0, sizeof(maintenance_result));
   if (mode != NULL) {
     open_options.crypto_key = mode->crypto_key;
+    open_options.compression = mode->compression;
   }
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
   if (rc == LC_OK) {
@@ -564,13 +565,25 @@ static void lifecycle_run_input(const uint8_t *data, size_t size,
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   lifecycle_mode plaintext_mode;
   lifecycle_mode crypto_mode;
+  lifecycle_mode compression_mode;
+  lifecycle_mode crypto_compression_mode;
 
   plaintext_mode.name = "plaintext";
   plaintext_mode.crypto_key = NULL;
+  plaintext_mode.compression = NULL;
   crypto_mode.name = "crypto";
   crypto_mode.crypto_key = FUZZ_POUCH_CRYPTO_KEY;
+  crypto_mode.compression = NULL;
+  compression_mode.name = "compression";
+  compression_mode.crypto_key = NULL;
+  compression_mode.compression = "zlib";
+  crypto_compression_mode.name = "crypto+compression";
+  crypto_compression_mode.crypto_key = FUZZ_POUCH_CRYPTO_KEY;
+  crypto_compression_mode.compression = "zlib";
 
   lifecycle_run_input(data, size, &plaintext_mode);
   lifecycle_run_input(data, size, &crypto_mode);
+  lifecycle_run_input(data, size, &compression_mode);
+  lifecycle_run_input(data, size, &crypto_compression_mode);
   return 0;
 }

@@ -178,6 +178,7 @@ size_t lc_engine_read_bridge(void *context, void *buffer, size_t count,
 int lc_engine_reset_bridge(void *context, lc_engine_error *error);
 int lc_engine_write_bridge(void *context, const void *bytes, size_t count,
                            lc_engine_error *error);
+int lc_sink_memory_reserve(lc_sink *sink, size_t capacity, lc_error *error);
 lc_source *lc_source_from_open_file(FILE *fp, int close_file);
 int lc_stream_pipe_open(size_t capacity, const lc_allocator *allocator,
                         lc_source **out, lc_stream_pipe **pipe,

@@ -58,14 +58,13 @@ int lockdc_pouch_bench_run(const char *scenario, long rows, const char *engine,
 
 int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
                                       long payload_bytes, int crypto_enabled,
+                                      int compression_enabled,
                                       lockdc_pouch_bench_result *out);
 
-int lockdc_pouch_bench_compaction_run(long rows, long updates_per_key,
-                                      long payload_bytes,
-                                      long segment_target_bytes,
-                                      long compaction_min_segment_count,
-                                      long compaction_min_reclaimable_bytes,
-                                      int scheduled, int crypto_enabled,
-                                      lockdc_pouch_bench_result *out);
+int lockdc_pouch_bench_compaction_run(
+    long rows, long updates_per_key, long payload_bytes,
+    long segment_target_bytes, long compaction_min_segment_count,
+    long compaction_min_reclaimable_bytes, int scheduled, int crypto_enabled,
+    int compression_enabled, lockdc_pouch_bench_result *out);
 
 #endif

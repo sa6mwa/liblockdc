@@ -11,10 +11,18 @@
 #include "lc_pouch.h"
 
 #define FUZZ_POUCH_LQL_TMP_PREFIX "/tmp/liblockdc-pouch-lql-fuzz-"
+#define FUZZ_POUCH_LQL_CRYPTO_KEY                                             \
+  "lc-pouch-key-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 typedef struct fuzz_key_count {
   size_t rows;
 } fuzz_key_count;
+
+typedef struct fuzz_storage_mode {
+  const char *name;
+  const char *crypto_key;
+  const char *compression;
+} fuzz_storage_mode;
 
 static int fuzz_key_begin(void *context, lc_error *error) {
   (void)context;
@@ -54,7 +62,8 @@ static lc_source *fuzz_source_from_text(const char *text, lc_error *error) {
   return source;
 }
 
-static int fuzz_open_client(const char *root, int scan_mode, lc_client **out,
+static int fuzz_open_client(const char *root, int scan_mode,
+                            const fuzz_storage_mode *mode, lc_client **out,
                             lc_error *error) {
   char endpoint[512];
   const char *endpoints[1];
@@ -68,6 +77,10 @@ static int fuzz_open_client(const char *root, int scan_mode, lc_client **out,
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   config.default_namespace = "fuzz";
+  if (mode != NULL) {
+    config.pouch_crypto_key = mode->crypto_key;
+    config.pouch_compression = mode->compression;
+  }
   return lc_client_open(&config, out, error);
 }
 
@@ -155,7 +168,8 @@ static int fuzz_seed_store(lc_client *client, lc_error *error) {
   return rc;
 }
 
-static int fuzz_install_snapshot(const char *root, lc_error *error) {
+static int fuzz_install_snapshot(const char *root, const fuzz_storage_mode *mode,
+                                 lc_error *error) {
   lc_pouch *pouch;
   lc_pouch_open_options open_options;
   lc_pouch_maintenance_options maintenance_options;
@@ -166,6 +180,10 @@ static int fuzz_install_snapshot(const char *root, lc_error *error) {
   memset(&open_options, 0, sizeof(open_options));
   memset(&maintenance_options, 0, sizeof(maintenance_options));
   memset(&maintenance_result, 0, sizeof(maintenance_result));
+  if (mode != NULL) {
+    open_options.crypto_key = mode->crypto_key;
+    open_options.compression = mode->compression;
+  }
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
   if (rc == LC_OK) {
     maintenance_options.namespace_name = "fuzz";
@@ -202,6 +220,23 @@ static void fuzz_write_text_file(const char *path, const char *text) {
     return;
   }
   (void)fwrite(text, 1U, strlen(text), fp);
+  (void)fclose(fp);
+}
+
+static void fuzz_write_bytes_file(const char *path, const unsigned char *bytes,
+                                  size_t length) {
+  FILE *fp;
+
+  if (path == NULL || (bytes == NULL && length > 0U)) {
+    return;
+  }
+  fp = fopen(path, "wb");
+  if (fp == NULL) {
+    return;
+  }
+  if (length > 0U) {
+    (void)fwrite(bytes, 1U, length, fp);
+  }
   (void)fclose(fp);
 }
 
@@ -281,8 +316,34 @@ static void fuzz_damage_marker(const char *root, unsigned int mode) {
 static void fuzz_damage_query_index(const char *root, unsigned int mode) {
   char path[768];
   FILE *fp;
+  const char *artifact_leaf;
+  static const unsigned char corrupt_generation[] = {
+      'L', 'P', 'I', 'T', 'G', 'E', 'N', '1', 0xffU, 0x00U, 0x7fU, 0x42U};
+  static const unsigned char corrupt_doc_table[] = {
+      'L', 'P', 'D', 'T', 'G', 'E', 'N', '1', 0x01U, 0x00U, 0x00U, 0x00U};
 
   if (root == NULL || mode == 0U) {
+    return;
+  }
+  if (mode >= 4U) {
+    artifact_leaf = "query.index.lcpttg";
+    if (mode == 5U) {
+      artifact_leaf = "query.index.lcptxg";
+    } else if (mode == 6U) {
+      artifact_leaf = "query.index.lcpt3g";
+    } else if (mode == 7U) {
+      artifact_leaf = "query.index.lcpdtg";
+    }
+    if (!fuzz_newest_query_segment_artifact_path(root, artifact_leaf, path,
+                                                sizeof(path))) {
+      return;
+    }
+    if (mode == 7U) {
+      fuzz_write_bytes_file(path, corrupt_doc_table, sizeof(corrupt_doc_table));
+    } else {
+      fuzz_write_bytes_file(path, corrupt_generation,
+                            sizeof(corrupt_generation));
+    }
     return;
   }
   if (!fuzz_namespace_path(path, sizeof(path), root, "index/query.manifest")) {
@@ -292,9 +353,8 @@ static void fuzz_damage_query_index(const char *root, unsigned int mode) {
     (void)remove(path);
     return;
   }
-  if (mode == 3U &&
-      !fuzz_newest_query_segment_artifact_path(root, "query.index", path,
-                                               sizeof(path))) {
+  if (mode == 3U && !fuzz_newest_query_segment_artifact_path(
+                        root, "query.index", path, sizeof(path))) {
     return;
   }
   fp = fopen(path, "wb");
@@ -340,14 +400,13 @@ static void fuzz_damage_snapshot(const char *root, unsigned int mode) {
     return;
   }
   if (mode == 2U) {
-    static const unsigned char garbage_tail[] = {
-        'L', 'H', 'C', 'P', 1U, 255U, 0U, 0U, 0U, 0U, 0U, 0U};
+    static const unsigned char garbage_tail[] = {'L', 'H', 'C', 'P', 1U, 255U,
+                                                 0U,  0U,  0U,  0U,  0U, 0U};
     (void)fwrite(garbage_tail, 1U, sizeof(garbage_tail), fp);
   } else {
     static const unsigned char corrupt_snapshot[] = {
-        'L', 'H', 'C', 'P', 1U, 1U, 0U, 0U, 0U, 0U, 0U,
-        0U,  0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U,
-        0U,  0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
+        'L', 'H', 'C', 'P', 1U, 1U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U,
+        0U,  0U,  0U,  0U,  0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
     (void)fwrite(corrupt_snapshot, 1U, sizeof(corrupt_snapshot), fp);
   }
   (void)fclose(fp);
@@ -425,11 +484,11 @@ static char *fuzz_selector_from_input(const uint8_t *data, size_t size,
   return selector;
 }
 
-int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+static void fuzz_run_mode(size_t size, const fuzz_storage_mode *mode,
+                          const char *selector, int selector_is_lql) {
   char root_template[] = "/tmp/liblockdc-pouch-lql-fuzz-XXXXXX";
   char root_path[sizeof(root_template)];
   const char *root;
-  char *selector;
   lc_client *index_client;
   lc_client *scan_client;
   lc_error index_error;
@@ -438,17 +497,11 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   size_t scan_rows;
   int index_rc;
   int scan_rc;
-  int selector_is_lql;
   unsigned int damage;
 
-  selector = fuzz_selector_from_input(data, size, &selector_is_lql);
-  if (selector == NULL) {
-    return 0;
-  }
   if (!lc_test_tmp_mkdtemp(root_template, root_path, sizeof(root_path),
                            FUZZ_POUCH_LQL_TMP_PREFIX)) {
-    free(selector);
-    return 0;
+    return;
   }
   root = root_path;
 
@@ -459,24 +512,24 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   lc_error_init(&index_error);
   lc_error_init(&scan_error);
 
-  index_rc = fuzz_open_client(root, 0, &index_client, &index_error);
+  index_rc = fuzz_open_client(root, 0, mode, &index_client, &index_error);
   if (index_rc == LC_OK) {
     index_rc = fuzz_seed_store(index_client, &index_error);
     if (index_rc == LC_OK) {
       index_client->close(index_client);
       index_client = NULL;
-      index_rc = fuzz_install_snapshot(root, &index_error);
+      index_rc = fuzz_install_snapshot(root, mode, &index_error);
     }
     if (index_rc == LC_OK) {
       damage = (unsigned int)size;
       fuzz_damage_snapshot(root, (damage / 64U) % 4U);
       fuzz_damage_namespace_manifest(root, (damage / 4U) % 4U);
       fuzz_damage_marker(root, (damage / 16U) % 4U);
-      fuzz_damage_query_index(root, damage % 4U);
-      index_rc = fuzz_open_client(root, 0, &index_client, &index_error);
+      fuzz_damage_query_index(root, damage % 8U);
+      index_rc = fuzz_open_client(root, 0, mode, &index_client, &index_error);
     }
   }
-  scan_rc = fuzz_open_client(root, 1, &scan_client, &scan_error);
+  scan_rc = fuzz_open_client(root, 1, mode, &scan_client, &scan_error);
   if (index_rc == LC_OK && scan_rc == LC_OK) {
     index_rc = fuzz_query_keys(index_client, selector, selector_is_lql,
                                &index_rows, &index_error);
@@ -495,7 +548,40 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   }
   lc_error_cleanup(&scan_error);
   lc_error_cleanup(&index_error);
-  free(selector);
   fuzz_cleanup_root(root);
+}
+
+int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
+  fuzz_storage_mode plaintext_mode;
+  fuzz_storage_mode crypto_mode;
+  fuzz_storage_mode compression_mode;
+  fuzz_storage_mode crypto_compression_mode;
+  char *selector;
+  int selector_is_lql;
+
+  selector = fuzz_selector_from_input(data, size, &selector_is_lql);
+  if (selector == NULL) {
+    return 0;
+  }
+
+  plaintext_mode.name = "plaintext";
+  plaintext_mode.crypto_key = NULL;
+  plaintext_mode.compression = NULL;
+  crypto_mode.name = "crypto";
+  crypto_mode.crypto_key = FUZZ_POUCH_LQL_CRYPTO_KEY;
+  crypto_mode.compression = NULL;
+  compression_mode.name = "compression";
+  compression_mode.crypto_key = NULL;
+  compression_mode.compression = "zlib";
+  crypto_compression_mode.name = "crypto+compression";
+  crypto_compression_mode.crypto_key = FUZZ_POUCH_LQL_CRYPTO_KEY;
+  crypto_compression_mode.compression = "zlib";
+
+  fuzz_run_mode(size, &plaintext_mode, selector, selector_is_lql);
+  fuzz_run_mode(size, &crypto_mode, selector, selector_is_lql);
+  fuzz_run_mode(size, &compression_mode, selector, selector_is_lql);
+  fuzz_run_mode(size, &crypto_compression_mode, selector, selector_is_lql);
+
+  free(selector);
   return 0;
 }

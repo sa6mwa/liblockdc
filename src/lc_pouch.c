@@ -14,11 +14,296 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 static unsigned long lc_pouch_next_writer_marker_id;
 static pthread_mutex_t lc_pouch_writer_marker_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t lc_pouch_root_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+#define LC_POUCH_FSYNC_BATCH_MAX_OPS 4096U
+#define LC_POUCH_FSYNC_BATCH_DELAY_NS 0L
+
+struct lc_pouch_fsync_request {
+  int fd;
+  int done;
+  int errnum;
+  pthread_cond_t cond;
+  struct lc_pouch_fsync_request *next;
+};
+
+typedef struct lc_pouch_fsync_batch_file {
+  dev_t dev;
+  ino_t ino;
+  int fd;
+} lc_pouch_fsync_batch_file;
+
+static int lc_pouch_sync_fd(int fd) {
+#ifdef __linux__
+  return fdatasync(fd);
+#else
+  return fsync(fd);
+#endif
+}
+
+static void lc_pouch_fsync_deadline(struct timespec *deadline) {
+  if (deadline == NULL) {
+    return;
+  }
+  clock_gettime(CLOCK_REALTIME, deadline);
+  deadline->tv_nsec += LC_POUCH_FSYNC_BATCH_DELAY_NS;
+  if (deadline->tv_nsec >= 1000000000L) {
+    deadline->tv_sec += deadline->tv_nsec / 1000000000L;
+    deadline->tv_nsec %= 1000000000L;
+  }
+}
+
+static int lc_pouch_fsync_batch_seen(lc_pouch_fsync_batch_file *files,
+                                     size_t count, const struct stat *st) {
+  size_t index;
+
+  if (files == NULL || st == NULL) {
+    return 0;
+  }
+  for (index = 0U; index < count; ++index) {
+    if (files[index].dev == st->st_dev && files[index].ino == st->st_ino) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void lc_pouch_fsync_process_batch(lc_pouch *pouch,
+                                         lc_pouch_fsync_request *batch,
+                                         size_t count) {
+  lc_pouch_fsync_batch_file inline_files[64];
+  lc_pouch_fsync_batch_file *files;
+  lc_pouch_fsync_request *request;
+  struct stat st;
+  size_t file_count;
+  int errnum;
+
+  files = inline_files;
+  if (count > sizeof(inline_files) / sizeof(inline_files[0])) {
+    files = (lc_pouch_fsync_batch_file *)lc_calloc_with_allocator(
+        &pouch->allocator, count, sizeof(lc_pouch_fsync_batch_file));
+    if (files == NULL) {
+      errnum = ENOMEM;
+      goto finish;
+    }
+  }
+  file_count = 0U;
+  errnum = 0;
+  for (request = batch; request != NULL; request = request->next) {
+    if (request->fd < 0) {
+      continue;
+    }
+    if (fstat(request->fd, &st) != 0) {
+      if (errnum == 0) {
+        errnum = errno != 0 ? errno : EIO;
+      }
+      continue;
+    }
+    if (lc_pouch_fsync_batch_seen(files, file_count, &st)) {
+      continue;
+    }
+    files[file_count].dev = st.st_dev;
+    files[file_count].ino = st.st_ino;
+    files[file_count].fd = request->fd;
+    ++file_count;
+    if (lc_pouch_sync_fd(request->fd) != 0 && errnum == 0) {
+      errnum = errno != 0 ? errno : EIO;
+    }
+  }
+  if (files != inline_files) {
+    lc_free_with_allocator(&pouch->allocator, files);
+  }
+
+finish:
+  for (request = batch; request != NULL; request = request->next) {
+    request->errnum = errnum;
+  }
+}
+
+static lc_pouch_fsync_request *lc_pouch_fsync_take_batch(lc_pouch *pouch,
+                                                         size_t *out_count) {
+  lc_pouch_fsync_request *batch;
+  lc_pouch_fsync_request *tail;
+  size_t count;
+
+  batch = pouch->fsync_head;
+  tail = NULL;
+  count = 0U;
+  while (pouch->fsync_head != NULL && count < LC_POUCH_FSYNC_BATCH_MAX_OPS) {
+    tail = pouch->fsync_head;
+    pouch->fsync_head = pouch->fsync_head->next;
+    ++count;
+  }
+  if (tail != NULL) {
+    tail->next = NULL;
+  }
+  if (pouch->fsync_head == NULL) {
+    pouch->fsync_tail = NULL;
+  }
+  if (pouch->fsync_queue_count >= count) {
+    pouch->fsync_queue_count -= count;
+  } else {
+    pouch->fsync_queue_count = 0U;
+  }
+  if (out_count != NULL) {
+    *out_count = count;
+  }
+  return batch;
+}
+
+static void *lc_pouch_fsync_worker(void *arg) {
+  lc_pouch *pouch;
+  lc_pouch_fsync_request *batch;
+  lc_pouch_fsync_request *request;
+  struct timespec deadline;
+  size_t batch_count;
+
+  pouch = (lc_pouch *)arg;
+  pthread_mutex_lock(&pouch->fsync_mutex);
+  for (;;) {
+    while (pouch->fsync_head == NULL && !pouch->fsync_stop) {
+      pthread_cond_wait(&pouch->fsync_cond, &pouch->fsync_mutex);
+    }
+    if (pouch->fsync_head == NULL && pouch->fsync_stop) {
+      pthread_mutex_unlock(&pouch->fsync_mutex);
+      return NULL;
+    }
+    if (!pouch->fsync_stop && LC_POUCH_FSYNC_BATCH_DELAY_NS > 0L &&
+        pouch->fsync_queue_count < LC_POUCH_FSYNC_BATCH_MAX_OPS) {
+      lc_pouch_fsync_deadline(&deadline);
+      while (!pouch->fsync_stop &&
+             pouch->fsync_queue_count < LC_POUCH_FSYNC_BATCH_MAX_OPS) {
+        if (pthread_cond_timedwait(&pouch->fsync_cond, &pouch->fsync_mutex,
+                                   &deadline) == ETIMEDOUT) {
+          break;
+        }
+      }
+    }
+    batch = lc_pouch_fsync_take_batch(pouch, &batch_count);
+    pthread_mutex_unlock(&pouch->fsync_mutex);
+    lc_pouch_fsync_process_batch(pouch, batch, batch_count);
+    pthread_mutex_lock(&pouch->fsync_mutex);
+    for (request = batch; request != NULL; request = request->next) {
+      request->done = 1;
+      pthread_cond_signal(&request->cond);
+    }
+  }
+}
+
+static int lc_pouch_fsync_batcher_init(lc_pouch *pouch, lc_error *error) {
+  int pthread_rc;
+
+  if (pouch == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch fsync batcher requires pouch", NULL, NULL,
+                        "pouch");
+  }
+  pthread_rc = pthread_mutex_init(&pouch->fsync_mutex, NULL);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch fsync mutex",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->fsync_mutex_initialized = 1;
+  pthread_rc = pthread_cond_init(&pouch->fsync_cond, NULL);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch fsync condition",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->fsync_cond_initialized = 1;
+  pthread_rc =
+      pthread_create(&pouch->fsync_thread, NULL, lc_pouch_fsync_worker, pouch);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to start pouch fsync worker",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->fsync_thread_started = 1;
+  return LC_OK;
+}
+
+static void lc_pouch_fsync_batcher_close(lc_pouch *pouch) {
+  if (pouch == NULL) {
+    return;
+  }
+  if (pouch->fsync_thread_started) {
+    pthread_mutex_lock(&pouch->fsync_mutex);
+    pouch->fsync_stop = 1;
+    pthread_cond_broadcast(&pouch->fsync_cond);
+    pthread_mutex_unlock(&pouch->fsync_mutex);
+    pthread_join(pouch->fsync_thread, NULL);
+    pouch->fsync_thread_started = 0;
+  }
+  if (pouch->fsync_cond_initialized) {
+    pthread_cond_destroy(&pouch->fsync_cond);
+    pouch->fsync_cond_initialized = 0;
+  }
+  if (pouch->fsync_mutex_initialized) {
+    pthread_mutex_destroy(&pouch->fsync_mutex);
+    pouch->fsync_mutex_initialized = 0;
+  }
+}
+
+int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error) {
+  lc_pouch_fsync_request request;
+  int pthread_rc;
+
+  if (pouch == NULL || fd < 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch fsync commit requires pouch and fd", NULL, NULL,
+                        "pouch");
+  }
+  if (!pouch->fsync_thread_started) {
+    if (lc_pouch_sync_fd(fd) != 0) {
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to sync pouch state segment", strerror(errno),
+                          NULL, "pouch");
+    }
+    return LC_OK;
+  }
+  memset(&request, 0, sizeof(request));
+  request.fd = fd;
+  pthread_rc = pthread_cond_init(&request.cond, NULL);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch fsync request",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pthread_mutex_lock(&pouch->fsync_mutex);
+  if (pouch->fsync_stop) {
+    pthread_mutex_unlock(&pouch->fsync_mutex);
+    pthread_cond_destroy(&request.cond);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch fsync batcher is closed", NULL, NULL, "pouch");
+  }
+  if (pouch->fsync_tail != NULL) {
+    pouch->fsync_tail->next = &request;
+  } else {
+    pouch->fsync_head = &request;
+  }
+  pouch->fsync_tail = &request;
+  ++pouch->fsync_queue_count;
+  pthread_cond_signal(&pouch->fsync_cond);
+  while (!request.done) {
+    pthread_cond_wait(&request.cond, &pouch->fsync_mutex);
+  }
+  pthread_mutex_unlock(&pouch->fsync_mutex);
+  pthread_cond_destroy(&request.cond);
+  if (request.errnum != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to sync pouch state segment",
+                        strerror(request.errnum), NULL, "pouch");
+  }
+  return LC_OK;
+}
 
 static const char *lc_pouch_option_string(const char *value,
                                           const char *fallback) {
@@ -28,7 +313,8 @@ static const char *lc_pouch_option_string(const char *value,
   return fallback;
 }
 
-static const char *lc_pouch_compression_option(const lc_pouch_open_options *options) {
+static const char *
+lc_pouch_compression_option(const lc_pouch_open_options *options) {
   const char *value;
 
   value = options != NULL ? options->compression : NULL;
@@ -106,16 +392,11 @@ static int lc_pouch_write_root_manifest(lc_pouch *pouch, lc_error *error) {
   return rc;
 }
 
-static int lc_pouch_root_manifest_read(lc_pouch *pouch, char *layout,
-                                       size_t layout_size,
-                                       unsigned long *version, char *mode,
-                                       size_t mode_size, char *key_id,
-                                       size_t key_id_size, int *found_manifest,
-                                       int *found_crypto_mode,
-                                       char *compression,
-                                       size_t compression_size,
-                                       int *found_compression,
-                                       lc_error *error) {
+static int lc_pouch_root_manifest_read(
+    lc_pouch *pouch, char *layout, size_t layout_size, unsigned long *version,
+    char *mode, size_t mode_size, char *key_id, size_t key_id_size,
+    int *found_manifest, int *found_crypto_mode, char *compression,
+    size_t compression_size, int *found_compression, lc_error *error) {
   char line[512];
   char *manifest_path;
   FILE *fp;
@@ -243,10 +524,9 @@ static int lc_pouch_root_manifest_read(lc_pouch *pouch, char *layout,
     }
     if (strncmp(line, "compression=", 12U) == 0) {
       if (found_compression_mode) {
-        rc = lc_error_set(
-            error, LC_ERR_INVALID, 0L,
-            "pouch root manifest has duplicate compression mode", NULL, NULL,
-            "pouch");
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch root manifest has duplicate compression mode",
+                          NULL, NULL, "pouch");
         break;
       }
       value = line + 12U;
@@ -350,8 +630,8 @@ static int lc_pouch_root_has_namespace_entries(lc_pouch *pouch, int *out,
       return LC_OK;
     }
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to scan pouch namespaces", strerror(saved_errno),
-                        NULL, "pouch");
+                        "failed to scan pouch namespaces",
+                        strerror(saved_errno), NULL, "pouch");
   }
   errno = 0;
   while ((entry = readdir(dir)) != NULL) {
@@ -368,10 +648,83 @@ static int lc_pouch_root_has_namespace_entries(lc_pouch *pouch, int *out,
   lc_free_with_allocator(&pouch->allocator, namespaces_path);
   if (saved_errno != 0) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to scan pouch namespaces", strerror(saved_errno),
-                        NULL, "pouch");
+                        "failed to scan pouch namespaces",
+                        strerror(saved_errno), NULL, "pouch");
   }
   return LC_OK;
+}
+
+static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
+                                                lc_error *error) {
+  char *namespaces_path;
+  DIR *dir;
+  struct dirent *entry;
+  int saved_errno;
+  int rc;
+
+  if (pouch == NULL ||
+      (!lc_pouch_crypto_enabled(pouch->crypto) &&
+       !lc_pouch_crypto_compression_enabled(pouch->crypto))) {
+    return LC_OK;
+  }
+  namespaces_path =
+      lc_pouch_path_join(&pouch->allocator, pouch->root_path, "namespaces");
+  if (namespaces_path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch namespaces path", NULL, NULL,
+                        NULL);
+  }
+  dir = opendir(namespaces_path);
+  if (dir == NULL) {
+    saved_errno = errno;
+    lc_free_with_allocator(&pouch->allocator, namespaces_path);
+    if (saved_errno == ENOENT) {
+      return LC_OK;
+    }
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to scan pouch namespaces",
+                        strerror(saved_errno), NULL, "pouch");
+  }
+  rc = LC_OK;
+  saved_errno = 0;
+  while (rc == LC_OK) {
+    char *namespace_name;
+    lc_error warm_error;
+
+    errno = 0;
+    entry = readdir(dir);
+    if (entry == NULL) {
+      saved_errno = errno;
+      break;
+    }
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    namespace_name =
+        lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
+    if (namespace_name == NULL) {
+      continue;
+    }
+    lc_error_init(&warm_error);
+    (void)lc_pouch_state_warm_namespace(pouch, namespace_name, &warm_error);
+    lc_error_cleanup(&warm_error);
+    lc_error_init(&warm_error);
+    (void)lc_pouch_query_index_warm_namespace(pouch, namespace_name,
+                                              &warm_error);
+    lc_error_cleanup(&warm_error);
+    lc_free_with_allocator(&pouch->allocator, namespace_name);
+  }
+  if (closedir(dir) != 0 && rc == LC_OK) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to scan pouch namespaces",
+                      strerror(errno != 0 ? errno : EIO), NULL, "pouch");
+  } else if (rc == LC_OK && saved_errno != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to scan pouch namespaces", strerror(saved_errno),
+                      NULL, "pouch");
+  }
+  lc_free_with_allocator(&pouch->allocator, namespaces_path);
+  return rc;
 }
 
 static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
@@ -713,6 +1066,16 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     lc_pouch_close(pouch);
     return rc;
   }
+  rc = lc_pouch_fsync_batcher_init(pouch, error);
+  if (rc != LC_OK) {
+    lc_pouch_close(pouch);
+    return rc;
+  }
+  rc = lc_pouch_warm_transformed_namespaces(pouch, error);
+  if (rc != LC_OK) {
+    lc_pouch_close(pouch);
+    return rc;
+  }
   *out = pouch;
   return LC_OK;
 }
@@ -724,7 +1087,9 @@ void lc_pouch_close(lc_pouch *pouch) {
     return;
   }
   allocator = pouch->allocator;
+  lc_pouch_fsync_batcher_close(pouch);
   lc_pouch_state_cache_cleanup(pouch);
+  lc_pouch_state_source_cache_cleanup(pouch);
   lc_pouch_query_index_cache_cleanup(pouch);
   lc_pouch_crypto_close(pouch->crypto);
   lc_free_with_allocator(&allocator, pouch->crypto_key_file);

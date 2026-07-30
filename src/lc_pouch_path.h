@@ -7,6 +7,8 @@ char *lc_pouch_path_join(const lc_allocator *allocator, const char *root,
                          const char *leaf);
 char *lc_pouch_path_escape_name(const lc_allocator *allocator,
                                 const char *name);
+char *lc_pouch_path_unescape_name(const lc_allocator *allocator,
+                                  const char *name);
 int lc_pouch_path_ensure_directory(const char *path, const char *message,
                                    lc_error *error);
 int lc_pouch_path_fsync_directory(const char *path, const char *message,
