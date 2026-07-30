@@ -7585,6 +7585,68 @@ static int lc_pouch_query_index_trigram_term_find_or_add(
   return rc;
 }
 
+static int lc_pouch_query_index_trigram_generation_append_docid(
+    const lc_allocator *allocator, lc_pouch_index_term_generation *generation,
+    lc_pouch_query_index_exact_generation_accumulator *accumulator,
+    lc_pouch_query_index_field_cache *field_cache,
+    lc_pouch_query_index_trigram_term_cache *term_cache, const char *field_hex,
+    unsigned long trigram_key, unsigned long doc_id, lc_error *error) {
+  unsigned long field_hash;
+  unsigned long field_id;
+  unsigned long term_id;
+  int rc;
+
+  if (field_hex == NULL) {
+    return LC_OK;
+  }
+  field_hash = 0UL;
+  field_id = 0UL;
+  rc = lc_pouch_query_index_field_cache_find_or_add(
+      allocator, field_cache, field_hex, &field_id, &field_hash, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  term_id = 0UL;
+  rc = lc_pouch_query_index_trigram_term_find_or_add(
+      allocator, generation, term_cache, field_hex, field_id, field_hash,
+      trigram_key, &term_id, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_exact_generation_accumulator_append(
+        allocator, accumulator, term_id, doc_id, error);
+  }
+  return rc;
+}
+
+static int lc_pouch_query_index_trigram_generation_remove_docid(
+    const lc_allocator *allocator,
+    lc_pouch_query_index_exact_generation_accumulator *accumulator,
+    lc_pouch_query_index_field_cache *field_cache,
+    lc_pouch_query_index_trigram_term_cache *term_cache, const char *field_hex,
+    unsigned long trigram_key, unsigned long doc_id, lc_error *error) {
+  unsigned long field_hash;
+  unsigned long field_id;
+  unsigned long term_id;
+  int rc;
+
+  if (field_hex == NULL) {
+    return LC_OK;
+  }
+  field_hash = 0UL;
+  field_id = 0UL;
+  rc = lc_pouch_query_index_field_cache_find_or_add(
+      allocator, field_cache, field_hex, &field_id, &field_hash, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  term_id = 0UL;
+  if (lc_pouch_query_index_trigram_term_cache_find(
+          term_cache, field_hex, field_id, field_hash, trigram_key, &term_id)) {
+    lc_pouch_query_index_exact_generation_accumulator_remove(accumulator,
+                                                             term_id, doc_id);
+  }
+  return LC_OK;
+}
+
 static size_t lc_pouch_query_index_token_hex_stride(void) {
   return (LC_POUCH_QUERY_INDEX_MAX_EXACT_TOKEN_BYTES * 2U) + 1U;
 }
@@ -7740,6 +7802,7 @@ static int lc_pouch_query_index_trigram_repeated_space(unsigned char a,
 static int lc_pouch_query_index_trigram_generation_add_value(
     const lc_allocator *allocator, lc_pouch_index_term_generation *generation,
     lc_pouch_query_index_exact_generation_accumulator *accumulator,
+    lc_pouch_query_index_field_cache *field_cache,
     lc_pouch_query_index_trigram_term_cache *term_cache, const char *field_hex,
     const char *value_hex, unsigned long doc_id, lc_error *error) {
   lc_pouch_query_index_trigram_value_set unique_terms;
@@ -7747,10 +7810,9 @@ static int lc_pouch_query_index_trigram_generation_add_value(
   size_t value_hex_len;
   size_t index;
   int rc;
-  unsigned long field_hash;
 
   if (allocator == NULL || generation == NULL || accumulator == NULL ||
-      field_hex == NULL || value_hex == NULL) {
+      field_cache == NULL || field_hex == NULL || value_hex == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch trigram generation requires allocator, "
                         "generation, accumulator, field, and value",
@@ -7813,17 +7875,15 @@ static int lc_pouch_query_index_trigram_generation_add_value(
                                                       folded_key, error);
     }
   }
-  field_hash = lc_pouch_query_index_trigram_field_hash(field_hex);
   for (index = 0U; rc == LC_OK && index < unique_terms.count; ++index) {
-    unsigned long term_id;
-
-    term_id = 0UL;
-    rc = lc_pouch_query_index_trigram_term_find_or_add(
-        allocator, generation, term_cache, field_hex, 0UL, field_hash,
-        unique_terms.items[index], &term_id, error);
+    rc = lc_pouch_query_index_trigram_generation_append_docid(
+        allocator, generation, accumulator, field_cache, term_cache, field_hex,
+        unique_terms.items[index], doc_id, error);
     if (rc == LC_OK) {
-      rc = lc_pouch_query_index_exact_generation_accumulator_append(
-          allocator, accumulator, term_id, doc_id, error);
+      rc = lc_pouch_query_index_trigram_generation_append_docid(
+          allocator, generation, accumulator, field_cache, term_cache,
+          LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX, unique_terms.items[index],
+          doc_id, error);
     }
   }
   lc_pouch_query_index_trigram_value_set_cleanup(allocator, &unique_terms);
@@ -7834,6 +7894,7 @@ static int lc_pouch_query_index_trigram_generation_add_value(
 static int lc_pouch_query_index_trigram_generation_add_raw_value(
     const lc_allocator *allocator, lc_pouch_index_term_generation *generation,
     lc_pouch_query_index_exact_generation_accumulator *accumulator,
+    lc_pouch_query_index_field_cache *field_cache,
     lc_pouch_query_index_trigram_term_cache *term_cache, const char *field_hex,
     const char *value, size_t value_len, unsigned long doc_id,
     lc_error *error) {
@@ -7841,10 +7902,9 @@ static int lc_pouch_query_index_trigram_generation_add_raw_value(
   unsigned char *seen;
   size_t index;
   int rc;
-  unsigned long field_hash;
 
   if (allocator == NULL || generation == NULL || accumulator == NULL ||
-      field_hex == NULL || value == NULL) {
+      field_cache == NULL || field_hex == NULL || value == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch raw trigram generation requires allocator, "
                         "generation, accumulator, field, and value",
@@ -7901,17 +7961,15 @@ static int lc_pouch_query_index_trigram_generation_add_raw_value(
       }
     }
   }
-  field_hash = lc_pouch_query_index_trigram_field_hash(field_hex);
   for (index = 0U; rc == LC_OK && index < unique_terms.count; ++index) {
-    unsigned long term_id;
-
-    term_id = 0UL;
-    rc = lc_pouch_query_index_trigram_term_find_or_add(
-        allocator, generation, term_cache, field_hex, 0UL, field_hash,
-        unique_terms.items[index], &term_id, error);
+    rc = lc_pouch_query_index_trigram_generation_append_docid(
+        allocator, generation, accumulator, field_cache, term_cache, field_hex,
+        unique_terms.items[index], doc_id, error);
     if (rc == LC_OK) {
-      rc = lc_pouch_query_index_exact_generation_accumulator_append(
-          allocator, accumulator, term_id, doc_id, error);
+      rc = lc_pouch_query_index_trigram_generation_append_docid(
+          allocator, generation, accumulator, field_cache, term_cache,
+          LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX, unique_terms.items[index],
+          doc_id, error);
     }
   }
   lc_pouch_query_index_trigram_value_set_cleanup(allocator, &unique_terms);
@@ -8730,48 +8788,16 @@ static int lc_pouch_query_index_pending_segment_append_term(
             doc_id, error);
       }
       if (rc == LC_OK) {
-        unsigned long field_hash;
-        unsigned long field_id;
         size_t derived_index;
 
-        field_hash = 0UL;
-        field_id = 0UL;
-        if (term->trigram_key_count > 0U) {
-          rc = lc_pouch_query_index_field_cache_find_or_add(
-              allocator, &segment->trigram_field_cache, term->field_hex,
-              &field_id, &field_hash, error);
-        }
         for (derived_index = 0U;
              rc == LC_OK && derived_index < term->trigram_key_count;
              ++derived_index) {
-          unsigned long term_id;
-
-          term_id = 0UL;
-          rc = lc_pouch_query_index_trigram_term_find_or_add(
+          rc = lc_pouch_query_index_trigram_generation_append_docid(
               allocator, &segment->trigram_generation,
-              &segment->trigram_term_cache, term->field_hex, field_id,
-              field_hash, term->trigram_keys[derived_index], &term_id, error);
-          if (rc == LC_OK) {
-            rc = lc_pouch_query_index_exact_generation_accumulator_append(
-                allocator, &segment->trigram_accumulator, term_id, doc_id,
-                error);
-          }
-        }
-      }
-      if (rc == LC_OK) {
-        size_t token_index;
-        size_t token_stride;
-
-        token_stride = lc_pouch_query_index_token_hex_stride();
-        for (token_index = 0U;
-             rc == LC_OK && token_index < term->token_value_count;
-             ++token_index) {
-          rc = lc_pouch_query_index_generation_append_docid(
-              allocator, &segment->text_generation, &segment->text_accumulator,
-              &segment->text_term_cache,
-              LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX,
-              term->token_values + (token_index * token_stride),
-              LC_POUCH_QUERY_INDEX_TEXT_TOKEN_TYPE, doc_id, error);
+              &segment->trigram_accumulator, &segment->trigram_field_cache,
+              &segment->trigram_term_cache, term->field_hex,
+              term->trigram_keys[derived_index], doc_id, error);
         }
       }
       if (rc == LC_OK && term->temporal_value_hex != NULL) {
@@ -8874,41 +8900,15 @@ static int lc_pouch_query_index_pending_segment_remove_term(
           doc_id);
     }
     if (term->trigram_key_count > 0U) {
-      unsigned long field_hash;
-      unsigned long field_id;
       size_t derived_index;
 
-      field_hash = 0UL;
-      field_id = 0UL;
-      rc = lc_pouch_query_index_field_cache_find_or_add(
-          allocator, &segment->trigram_field_cache, term->field_hex, &field_id,
-          &field_hash, error);
       for (derived_index = 0U;
            rc == LC_OK && derived_index < term->trigram_key_count;
            ++derived_index) {
-        unsigned long term_id;
-
-        term_id = 0UL;
-        if (lc_pouch_query_index_trigram_term_cache_find(
-                &segment->trigram_term_cache, term->field_hex, field_id,
-                field_hash, term->trigram_keys[derived_index], &term_id)) {
-          lc_pouch_query_index_exact_generation_accumulator_remove(
-              &segment->trigram_accumulator, term_id, doc_id);
-        }
-      }
-    }
-    if (rc == LC_OK) {
-      size_t token_index;
-      size_t token_stride;
-
-      token_stride = lc_pouch_query_index_token_hex_stride();
-      for (token_index = 0U; token_index < term->token_value_count;
-           ++token_index) {
-        lc_pouch_query_index_pending_segment_remove_docid_for_term(
-            &segment->text_generation, &segment->text_accumulator,
-            &segment->text_term_cache, LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX,
-            term->token_values + (token_index * token_stride),
-            LC_POUCH_QUERY_INDEX_TEXT_TOKEN_TYPE, doc_id);
+        rc = lc_pouch_query_index_trigram_generation_remove_docid(
+            allocator, &segment->trigram_accumulator,
+            &segment->trigram_field_cache, &segment->trigram_term_cache,
+            term->field_hex, term->trigram_keys[derived_index], doc_id, error);
       }
     }
     if (term->temporal_value_hex != NULL) {
@@ -8919,6 +8919,118 @@ static int lc_pouch_query_index_pending_segment_remove_term(
     }
   }
   lc_free_with_allocator(allocator, allocated_exact_value_hex);
+  return rc;
+}
+
+static int lc_pouch_query_index_pending_entry_collect_aggregate_terms(
+    const lc_allocator *allocator,
+    const lc_pouch_query_index_pending_entry *entry,
+    lc_pouch_query_index_trigram_value_set *trigrams,
+    lc_pouch_query_index_token_value_set *tokens, lc_error *error) {
+  size_t index;
+  size_t token_stride;
+  int rc;
+
+  if (entry == NULL || entry->deleted) {
+    return LC_OK;
+  }
+  token_stride = lc_pouch_query_index_token_hex_stride();
+  rc = LC_OK;
+  for (index = 0U; rc == LC_OK && index < entry->term_count; ++index) {
+    const lc_pouch_query_index_term *term;
+    size_t derived_index;
+
+    if (index > 0U && lc_pouch_query_index_term_equal(&entry->terms[index - 1U],
+                                                      &entry->terms[index])) {
+      continue;
+    }
+    term = &entry->terms[index];
+    if (term->value_type != 's' || !term->derived_terms_ready) {
+      continue;
+    }
+    for (derived_index = 0U;
+         rc == LC_OK && derived_index < term->trigram_key_count;
+         ++derived_index) {
+      rc = lc_pouch_query_index_trigram_value_set_add(
+          allocator, trigrams, term->trigram_keys[derived_index], error);
+    }
+    for (derived_index = 0U;
+         rc == LC_OK && derived_index < term->token_value_count;
+         ++derived_index) {
+      rc = lc_pouch_query_index_token_value_set_add(
+          allocator, tokens,
+          term->token_values + (derived_index * token_stride), error);
+    }
+  }
+  return rc;
+}
+
+static int lc_pouch_query_index_pending_segment_append_entry_aggregate_terms(
+    const lc_allocator *allocator,
+    lc_pouch_query_index_pending_segment *segment,
+    const lc_pouch_query_index_pending_entry *entry, unsigned long doc_id,
+    lc_error *error) {
+  lc_pouch_query_index_trigram_value_set trigrams;
+  lc_pouch_query_index_token_value_set tokens;
+  size_t index;
+  size_t token_stride;
+  int rc;
+
+  memset(&trigrams, 0, sizeof(trigrams));
+  memset(&tokens, 0, sizeof(tokens));
+  rc = lc_pouch_query_index_pending_entry_collect_aggregate_terms(
+      allocator, entry, &trigrams, &tokens, error);
+  for (index = 0U; rc == LC_OK && index < trigrams.count; ++index) {
+    rc = lc_pouch_query_index_trigram_generation_append_docid(
+        allocator, &segment->trigram_generation, &segment->trigram_accumulator,
+        &segment->trigram_field_cache, &segment->trigram_term_cache,
+        LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX, trigrams.items[index], doc_id,
+        error);
+  }
+  token_stride = lc_pouch_query_index_token_hex_stride();
+  for (index = 0U; rc == LC_OK && index < tokens.count; ++index) {
+    rc = lc_pouch_query_index_generation_append_docid(
+        allocator, &segment->text_generation, &segment->text_accumulator,
+        &segment->text_term_cache, LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX,
+        tokens.items + (index * token_stride),
+        LC_POUCH_QUERY_INDEX_TEXT_TOKEN_TYPE, doc_id, error);
+  }
+  lc_pouch_query_index_trigram_value_set_cleanup(allocator, &trigrams);
+  lc_pouch_query_index_token_value_set_cleanup(allocator, &tokens);
+  return rc;
+}
+
+static int lc_pouch_query_index_pending_segment_remove_entry_aggregate_terms(
+    const lc_allocator *allocator,
+    lc_pouch_query_index_pending_segment *segment,
+    const lc_pouch_query_index_pending_entry *entry, unsigned long doc_id,
+    lc_error *error) {
+  lc_pouch_query_index_trigram_value_set trigrams;
+  lc_pouch_query_index_token_value_set tokens;
+  size_t index;
+  size_t token_stride;
+  int rc;
+
+  memset(&trigrams, 0, sizeof(trigrams));
+  memset(&tokens, 0, sizeof(tokens));
+  rc = lc_pouch_query_index_pending_entry_collect_aggregate_terms(
+      allocator, entry, &trigrams, &tokens, error);
+  for (index = 0U; rc == LC_OK && index < trigrams.count; ++index) {
+    rc = lc_pouch_query_index_trigram_generation_remove_docid(
+        allocator, &segment->trigram_accumulator, &segment->trigram_field_cache,
+        &segment->trigram_term_cache, LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX,
+        trigrams.items[index], doc_id, error);
+  }
+  token_stride = lc_pouch_query_index_token_hex_stride();
+  for (index = 0U; rc == LC_OK && index < tokens.count; ++index) {
+    lc_pouch_query_index_pending_segment_remove_docid_for_term(
+        &segment->text_generation, &segment->text_accumulator,
+        &segment->text_term_cache, LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX,
+        tokens.items + (index * token_stride),
+        LC_POUCH_QUERY_INDEX_TEXT_TOKEN_TYPE, doc_id);
+  }
+  lc_pouch_query_index_trigram_value_set_cleanup(allocator, &trigrams);
+  lc_pouch_query_index_token_value_set_cleanup(allocator, &tokens);
   return rc;
 }
 
@@ -9006,6 +9118,10 @@ static int lc_pouch_query_index_pending_segment_append_entry(
       ++segment->term_count;
     }
   }
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_pending_segment_append_entry_aggregate_terms(
+        allocator, segment, entry, doc_id, error);
+  }
   for (index = 0U; rc == LC_OK && index < entry->presence_count; ++index) {
     unsigned long presence_term_id;
 
@@ -9064,6 +9180,10 @@ static int lc_pouch_query_index_pending_segment_remove_entry_terms(
     if (rc == LC_OK && segment->term_count > 0UL) {
       --segment->term_count;
     }
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_pending_segment_remove_entry_aggregate_terms(
+        allocator, segment, entry, doc_id, error);
   }
   for (index = 0U; rc == LC_OK && index < entry->presence_count; ++index) {
     unsigned long presence_term_id;
@@ -9203,6 +9323,14 @@ static int lc_pouch_query_index_pending_segment_replace_entry(
       }
       ++new_index;
     }
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_pending_segment_remove_entry_aggregate_terms(
+        allocator, segment, old_entry, doc_id, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_pending_segment_append_entry_aggregate_terms(
+        allocator, segment, new_entry, doc_id, error);
   }
   old_index = 0U;
   new_index = 0U;
@@ -9975,29 +10103,22 @@ static int lc_pouch_query_index_build_text(
                 term->doc_id, error);
           }
           if (rc == LC_OK) {
-            unsigned long field_hash;
-            unsigned long field_id;
             size_t derived_index;
 
-            field_hash = 0UL;
-            field_id = 0UL;
-            rc = lc_pouch_query_index_field_cache_find_or_add(
-                summary->allocator, &trigram_field_cache, term->field_hex,
-                &field_id, &field_hash, error);
             for (derived_index = 0U;
                  rc == LC_OK && derived_index < term->trigram_key_count;
                  ++derived_index) {
-              unsigned long term_id;
-
-              term_id = 0UL;
-              rc = lc_pouch_query_index_trigram_term_find_or_add(
-                  summary->allocator, &trigram_generation, &trigram_term_cache,
-                  term->field_hex, field_id, field_hash,
-                  term->trigram_keys[derived_index], &term_id, error);
+              rc = lc_pouch_query_index_trigram_generation_append_docid(
+                  summary->allocator, &trigram_generation, &trigram_accumulator,
+                  &trigram_field_cache, &trigram_term_cache, term->field_hex,
+                  term->trigram_keys[derived_index], term->doc_id, error);
               if (rc == LC_OK) {
-                rc = lc_pouch_query_index_exact_generation_accumulator_append(
-                    summary->allocator, &trigram_accumulator, term_id,
-                    term->doc_id, error);
+                rc = lc_pouch_query_index_trigram_generation_append_docid(
+                    summary->allocator, &trigram_generation,
+                    &trigram_accumulator, &trigram_field_cache,
+                    &trigram_term_cache,
+                    LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX,
+                    term->trigram_keys[derived_index], term->doc_id, error);
               }
             }
           }
@@ -10038,8 +10159,8 @@ static int lc_pouch_query_index_build_text(
           if (rc == LC_OK) {
             rc = lc_pouch_query_index_trigram_generation_add_raw_value(
                 summary->allocator, &trigram_generation, &trigram_accumulator,
-                &trigram_term_cache, term->field_hex, term->long_value,
-                term->long_value_len, term->doc_id, error);
+                &trigram_field_cache, &trigram_term_cache, term->field_hex,
+                term->long_value, term->long_value_len, term->doc_id, error);
           }
           if (rc == LC_OK) {
             rc = lc_pouch_query_index_token_generation_add_raw_value(
@@ -10055,8 +10176,8 @@ static int lc_pouch_query_index_build_text(
           if (rc == LC_OK) {
             rc = lc_pouch_query_index_trigram_generation_add_value(
                 summary->allocator, &trigram_generation, &trigram_accumulator,
-                &trigram_term_cache, term->field_hex, exact_value_hex,
-                term->doc_id, error);
+                &trigram_field_cache, &trigram_term_cache, term->field_hex,
+                exact_value_hex, term->doc_id, error);
           }
           if (rc == LC_OK) {
             rc = lc_pouch_query_index_token_generation_add_value(

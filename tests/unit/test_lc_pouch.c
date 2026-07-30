@@ -11992,6 +11992,7 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   pouch_query_key_capture prefix_page;
   pouch_query_key_capture contains_page;
   pouch_query_key_capture trigram_false_positive_page;
+  pouch_query_key_capture full_text_any_page;
   pouch_query_key_capture iprefix_page;
   pouch_query_key_capture icontains_page;
   pouch_query_key_capture numeric_prefix_page;
@@ -12020,6 +12021,7 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   memset(&prefix_page, 0, sizeof(prefix_page));
   memset(&contains_page, 0, sizeof(contains_page));
   memset(&trigram_false_positive_page, 0, sizeof(trigram_false_positive_page));
+  memset(&full_text_any_page, 0, sizeof(full_text_any_page));
   memset(&iprefix_page, 0, sizeof(iprefix_page));
   memset(&icontains_page, 0, sizeof(icontains_page));
   memset(&numeric_prefix_page, 0, sizeof(numeric_prefix_page));
@@ -12165,6 +12167,8 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
                                       "706c616e6e696e67");
   assert_query_index_segment_contains(namespace_path, "query.index.lcpt3g",
                                       "6e616e");
+  assert_query_index_segment_contains(namespace_path, "query.index.lcpt3g",
+                                      "2f2e2e2e");
 
   snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
   query_req.cursor = cursor;
@@ -12215,6 +12219,26 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(trigram_false_positive_page.count, 0);
   assert_null(query_res.cursor);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_json =
+      "{\"icontains\":{\"field\":\"/...\",\"value\":\"planning\"}}";
+  query_req.limit = 0L;
+  rc = client->query_keys(client, &query_req, &handler, &full_text_any_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(full_text_any_page.count, 1);
+  assert_null(query_res.cursor);
+  assert_true(pouch_query_capture_has(&full_text_any_page, "doc/a"));
+  assert_false(pouch_query_capture_has(&full_text_any_page, "doc/hidden"));
+  assert_false(pouch_query_capture_has(&full_text_any_page, "doc/b"));
+  assert_false(pouch_query_capture_has(&full_text_any_page, "doc/c"));
+  assert_false(pouch_query_capture_has(&full_text_any_page, "doc/deleted"));
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"engine\":\"index\""));

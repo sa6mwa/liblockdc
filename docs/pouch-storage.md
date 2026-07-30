@@ -388,7 +388,10 @@ Indexed query requirements:
 - index flush must be incremental and generation-aware, matching Go disk's
   performance intent rather than rebuilding entire sidecars on each flush;
 - full-text search must cover text in the full JSON document, including nested
-  fields and long text fields, through the selected indexed engine.
+  fields and long text fields, through the selected indexed engine;
+- `/...` full-text token and trigram terms are synthetic aggregate postings.
+  Whole-document `icontains` candidate selection must resolve those aggregate
+  postings directly, not scan concrete field-specific term dictionaries.
 
 ## Staged State
 

@@ -274,6 +274,11 @@ Acceptance:
   including nested fields and long summary/description/body fields.
   Why: benchmarks and production use need realistic document shapes.
 
+- [x] Store aggregate `/...` full-text trigram postings alongside concrete
+  field trigram postings.
+  Why: `icontains` over the whole document must use direct posting lookups for
+  candidate selection instead of scanning all field-specific trigram terms.
+
 - [x] Make index sidecars derived and rebuildable from logstore projections.
   Why: corruption should trigger rebuild, not data loss.
 
