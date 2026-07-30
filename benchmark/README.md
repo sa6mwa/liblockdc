@@ -9,6 +9,22 @@ time as `c-ns/op`, so the cgo bridge is not the metric used for pouch query
 latency. The Go benchmark `ns/op` still includes harness/setup work and is only
 useful as a coarse runner signal.
 
+For pouch-only performance iteration, use the native `bench/lockdc_bench`
+surface through the root `benchmark-pouch-perf*` targets instead of the Go
+comparison matrix. These targets rebuild only `bench/lockdc_bench`, seed a
+bounded public-API pouch fixture, warm the index when needed, then print one
+isolated `metric=...` line for the phase under repair. The default timeout is
+60 seconds including rebuild. The fast cases are:
+
+- `make benchmark-pouch-perf-index-docs`
+- `make benchmark-pouch-perf-full-text-keys`
+- `make benchmark-pouch-perf-scan-keys`
+- `make benchmark-pouch-perf-flush-intermediate`
+- `make benchmark-pouch-perf-flush-reopen`
+
+Set `POUCH_PERF_ROWS`, `POUCH_PERF_PAYLOAD_BYTES`, or `POUCH_PERF_CRYPTO=1` to
+adjust the local fixture without switching to the broad parity suite.
+
 `BenchmarkFastLockdDisk` and `BenchmarkMediumLockdDisk*` launch a real pinned
 `pkt.systems/lockd` binary with a disk backend rooted in an automatically
 removed `/tmp/liblockdc-lockd-disk-bench-*` directory. The disk side uses the

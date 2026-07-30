@@ -223,14 +223,22 @@ func productionDocument(row, generation, payloadBytes int64) []byte {
 		50+(row%300),
 		productionFlag(row),
 	)
-	padLen := int(target) - len(prefix) - 1
-	if padLen < 32 {
-		padLen = 32
+	payloadPrefix := `,"payload":"`
+	payloadSuffix := `"}`
+	payloadLen := int(target) - len(prefix) - len(payloadPrefix) - len(payloadSuffix)
+	if payloadLen < 32 {
+		payloadLen = 32
 	}
-	out := make([]byte, 0, len(prefix)+padLen+1)
+	out := make([]byte, 0, len(prefix)+len(payloadPrefix)+payloadLen+len(payloadSuffix))
 	out = append(out, prefix...)
-	out = append(out, bytes.Repeat([]byte{' '}, padLen)...)
-	out = append(out, '}')
+	out = append(out, payloadPrefix...)
+	for len(out)+len(payloadSuffix)+96 < cap(out) && len(out) < int(target) {
+		out = append(out, []byte(fmt.Sprintf(" audit remediation evidence workflow row %d gen %d;", row, generation))...)
+	}
+	for len(out)+len(payloadSuffix) < cap(out) {
+		out = append(out, ' ')
+	}
+	out = append(out, payloadSuffix...)
 	return out
 }
 

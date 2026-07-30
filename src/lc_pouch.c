@@ -28,6 +28,16 @@ static const char *lc_pouch_option_string(const char *value,
   return fallback;
 }
 
+static const char *lc_pouch_compression_option(const lc_pouch_open_options *options) {
+  const char *value;
+
+  value = options != NULL ? options->compression : NULL;
+  if (value == NULL || value[0] == '\0') {
+    return "none";
+  }
+  return value;
+}
+
 static void lc_pouch_init_options(lc_pouch *pouch,
                                   const lc_pouch_open_options *options) {
   pouch->segment_target_bytes =
@@ -55,6 +65,8 @@ static void lc_pouch_init_options(lc_pouch *pouch,
       &pouch->allocator,
       lc_pouch_option_string(
           options != NULL ? options->query_fallback_engine : NULL, ""));
+  pouch->compression = lc_strdup_with_allocator(
+      &pouch->allocator, lc_pouch_compression_option(options));
 }
 
 static int lc_pouch_write_root_manifest(lc_pouch *pouch, lc_error *error) {
@@ -81,11 +93,11 @@ static int lc_pouch_write_root_manifest(lc_pouch *pouch, lc_error *error) {
   snprintf(manifest, sizeof(manifest),
            "layout=%s\nversion=%lu\nsegment_target_bytes=%lu\n"
            "compaction_min_segment_count=%lu\n"
-           "compaction_min_reclaimable_bytes=%lu\ncrypto=%s\n"
+           "compaction_min_reclaimable_bytes=%lu\ncompression=%s\ncrypto=%s\n"
            "crypto_key_id=%s\n",
            LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION,
            pouch->segment_target_bytes, pouch->compaction_min_segment_count,
-           pouch->compaction_min_reclaimable_bytes,
+           pouch->compaction_min_reclaimable_bytes, pouch->compression,
            lc_pouch_crypto_enabled(pouch->crypto) ? "encrypted" : "plaintext",
            crypto_key_id != NULL ? crypto_key_id : "");
   rc = lc_pouch_path_write_text_file(manifest_path, manifest, error);
@@ -100,6 +112,9 @@ static int lc_pouch_root_manifest_read(lc_pouch *pouch, char *layout,
                                        size_t mode_size, char *key_id,
                                        size_t key_id_size, int *found_manifest,
                                        int *found_crypto_mode,
+                                       char *compression,
+                                       size_t compression_size,
+                                       int *found_compression,
                                        lc_error *error) {
   char line[512];
   char *manifest_path;
@@ -107,12 +122,15 @@ static int lc_pouch_root_manifest_read(lc_pouch *pouch, char *layout,
   int found_key_id;
   int found_layout;
   int found_mode;
+  int found_compression_mode;
   int found_version;
   int rc;
 
   if (layout == NULL || layout_size == 0U || version == NULL || mode == NULL ||
       mode_size == 0U || key_id == NULL || key_id_size == 0U ||
-      found_manifest == NULL || found_crypto_mode == NULL) {
+      found_manifest == NULL || found_crypto_mode == NULL ||
+      compression == NULL || compression_size == 0U ||
+      found_compression == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch root manifest read requires outputs", NULL, NULL,
                         NULL);
@@ -121,8 +139,10 @@ static int lc_pouch_root_manifest_read(lc_pouch *pouch, char *layout,
   *version = 0UL;
   mode[0] = '\0';
   key_id[0] = '\0';
+  compression[0] = '\0';
   *found_manifest = 0;
   *found_crypto_mode = 0;
+  *found_compression = 0;
   manifest_path =
       lc_pouch_path_join(&pouch->allocator, pouch->root_path, "manifest");
   if (manifest_path == NULL) {
@@ -143,6 +163,7 @@ static int lc_pouch_root_manifest_read(lc_pouch *pouch, char *layout,
   found_layout = 0;
   found_version = 0;
   found_mode = 0;
+  found_compression_mode = 0;
   found_key_id = 0;
   rc = LC_OK;
   while (fgets(line, sizeof(line), fp) != NULL) {
@@ -220,6 +241,33 @@ static int lc_pouch_root_manifest_read(lc_pouch *pouch, char *layout,
       found_mode = 1;
       continue;
     }
+    if (strncmp(line, "compression=", 12U) == 0) {
+      if (found_compression_mode) {
+        rc = lc_error_set(
+            error, LC_ERR_INVALID, 0L,
+            "pouch root manifest has duplicate compression mode", NULL, NULL,
+            "pouch");
+        break;
+      }
+      value = line + 12U;
+      len = strcspn(value, "\r\n");
+      value[len] = '\0';
+      if (strcmp(value, "none") != 0 && strcmp(value, "zlib") != 0) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch root manifest has invalid compression mode",
+                          NULL, NULL, "pouch");
+        break;
+      }
+      if (len + 1U > compression_size) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch root manifest compression mode is too long",
+                          NULL, NULL, "pouch");
+        break;
+      }
+      memcpy(compression, value, len + 1U);
+      found_compression_mode = 1;
+      continue;
+    }
     if (strncmp(line, "crypto_key_id=", 14U) == 0) {
       if (found_key_id) {
         rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -264,8 +312,12 @@ static int lc_pouch_root_manifest_read(lc_pouch *pouch, char *layout,
   if (rc == LC_OK && !found_mode) {
     (void)snprintf(mode, mode_size, "plaintext");
   }
+  if (rc == LC_OK && !found_compression_mode) {
+    (void)snprintf(compression, compression_size, "none");
+  }
   if (rc == LC_OK) {
     *found_crypto_mode = found_mode;
+    *found_compression = found_compression_mode;
   }
   return rc;
 }
@@ -327,10 +379,13 @@ static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
   char stored_key_id[128];
   char stored_layout[64];
   char stored_mode[sizeof("encrypted")];
+  char stored_compression[sizeof("zlib")];
   char *requested_key_id;
   const char *requested_mode;
+  const char *requested_compression;
   unsigned long stored_version;
   int found_crypto_mode;
+  int found_compression;
   int found_manifest;
   int has_namespace_entries;
   int rc;
@@ -338,12 +393,18 @@ static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
   requested_key_id = NULL;
   requested_mode =
       lc_pouch_crypto_enabled(pouch->crypto) ? "encrypted" : "plaintext";
+  requested_compression =
+      pouch->compression != NULL && strcmp(pouch->compression, "zlib") == 0
+          ? "zlib"
+          : "none";
   stored_version = 0UL;
   found_crypto_mode = 0;
+  found_compression = 0;
   rc = lc_pouch_root_manifest_read(
       pouch, stored_layout, sizeof(stored_layout), &stored_version, stored_mode,
       sizeof(stored_mode), stored_key_id, sizeof(stored_key_id),
-      &found_manifest, &found_crypto_mode, error);
+      &found_manifest, &found_crypto_mode, stored_compression,
+      sizeof(stored_compression), &found_compression, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -392,11 +453,32 @@ static int lc_pouch_validate_root_crypto_mode(lc_pouch *pouch,
     }
     return LC_OK;
   }
+  if (!found_compression) {
+    has_namespace_entries = 0;
+    rc = lc_pouch_root_has_namespace_entries(pouch, &has_namespace_entries,
+                                             error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    if (has_namespace_entries) {
+      return lc_error_set(
+          error, LC_ERR_INVALID, 0L,
+          "pouch root manifest requires compression mode for populated root",
+          NULL, NULL, "pouch");
+    }
+    return LC_OK;
+  }
   if (strcmp(stored_mode, requested_mode) != 0) {
     return lc_error_set(
         error, LC_ERR_INVALID, 0L,
         "pouch root crypto mode cannot be changed after initialization", NULL,
         NULL, "pouch");
+  }
+  if (strcmp(stored_compression, requested_compression) != 0) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "pouch root compression mode cannot be changed after initialization",
+        NULL, NULL, "pouch");
   }
   if (strcmp(stored_mode, "plaintext") == 0 && stored_key_id[0] != '\0') {
     return lc_error_set(
@@ -578,10 +660,11 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         "failed to copy pouch root path", NULL, NULL, NULL);
   }
   lc_pouch_init_options(pouch, options);
-  if (pouch->query_engine == NULL || pouch->query_fallback_engine == NULL) {
+  if (pouch->query_engine == NULL || pouch->query_fallback_engine == NULL ||
+      pouch->compression == NULL) {
     lc_pouch_close(pouch);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch query options", NULL, NULL,
+                        "failed to allocate pouch open options", NULL, NULL,
                         NULL);
   }
   if (strcmp(pouch->query_engine, "index") != 0 &&
@@ -599,12 +682,21 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         "pouch query_fallback_engine must be index or scan",
                         NULL, NULL, "pouch");
   }
+  if (strcmp(pouch->compression, "none") != 0 &&
+      strcmp(pouch->compression, "zlib") != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch compression must be none or zlib", NULL, NULL,
+                        "pouch");
+  }
   memset(&crypto_options, 0, sizeof(crypto_options));
   if (options != NULL) {
     crypto_options.key_string = options->crypto_key;
     crypto_options.key_file = options->crypto_key_file;
     crypto_options.generate_key_file = options->crypto_generate_key_file;
   }
+  crypto_options.compression_enabled =
+      strcmp(pouch->compression, "zlib") == 0 ? 1 : 0;
   rc = lc_pouch_crypto_open(&pouch->allocator, &crypto_options, &pouch->crypto,
                             &pouch->crypto_key_file, error);
   if (rc != LC_OK) {
@@ -632,11 +724,12 @@ void lc_pouch_close(lc_pouch *pouch) {
     return;
   }
   allocator = pouch->allocator;
-  lc_pouch_query_index_prepared_cache_cleanup(pouch);
   lc_pouch_state_cache_cleanup(pouch);
+  lc_pouch_query_index_cache_cleanup(pouch);
   lc_pouch_crypto_close(pouch->crypto);
   lc_free_with_allocator(&allocator, pouch->crypto_key_file);
   lc_free_with_allocator(&allocator, pouch->writer_marker_leaf);
+  lc_free_with_allocator(&allocator, pouch->compression);
   lc_free_with_allocator(&allocator, pouch->query_fallback_engine);
   lc_free_with_allocator(&allocator, pouch->query_engine);
   lc_free_with_allocator(&allocator, pouch->root_path);
@@ -672,15 +765,19 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
       lc_strdup_with_allocator(&pouch->allocator, pouch->query_engine);
   out->query_fallback_engine =
       lc_strdup_with_allocator(&pouch->allocator, pouch->query_fallback_engine);
+  out->compression =
+      lc_strdup_with_allocator(&pouch->allocator, pouch->compression);
   out->crypto_enabled = lc_pouch_crypto_enabled(pouch->crypto);
   out->crypto_key_file =
       pouch->crypto_key_file != NULL
           ? lc_strdup_with_allocator(&pouch->allocator, pouch->crypto_key_file)
           : NULL;
-  if (out->query_engine == NULL || out->query_fallback_engine == NULL) {
+  if (out->query_engine == NULL || out->query_fallback_engine == NULL ||
+      out->compression == NULL) {
     lc_pouch_status_cleanup(&pouch->allocator, out);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to copy pouch query status", NULL, NULL, NULL);
+                        "failed to copy pouch status options", NULL, NULL,
+                        NULL);
   }
   if (pouch->crypto_key_file != NULL && out->crypto_key_file == NULL) {
     lc_pouch_status_cleanup(&pouch->allocator, out);
@@ -700,6 +797,7 @@ void lc_pouch_status_cleanup(const lc_allocator *allocator,
   lc_free_with_allocator(allocator, status->layout_name);
   lc_free_with_allocator(allocator, status->query_engine);
   lc_free_with_allocator(allocator, status->query_fallback_engine);
+  lc_free_with_allocator(allocator, status->compression);
   lc_free_with_allocator(allocator, status->crypto_key_file);
   memset(status, 0, sizeof(*status));
 }

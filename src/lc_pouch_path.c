@@ -209,17 +209,20 @@ static char *lc_pouch_path_temp_path(const char *path, unsigned int attempt) {
   return out;
 }
 
-int lc_pouch_path_write_text_file(const char *path, const char *text,
-                                  lc_error *error) {
+static int lc_pouch_path_write_bytes_file_impl(const char *path,
+                                               const char *bytes,
+                                               size_t length, int sync_file,
+                                               int sync_directory,
+                                               lc_error *error) {
   char *dir;
   char *tmp_path;
   unsigned int attempt;
   int fd;
   int rc;
 
-  if (path == NULL || text == NULL) {
+  if (path == NULL || (bytes == NULL && length > 0U)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch text write requires path and text", NULL, NULL,
+                        "pouch file write requires path and bytes", NULL, NULL,
                         NULL);
   }
   dir = lc_pouch_path_dirname(path);
@@ -253,10 +256,10 @@ int lc_pouch_path_write_text_file(const char *path, const char *text,
                         NULL);
   }
   rc = LC_OK;
-  if (!lc_pouch_path_write_all(fd, text, strlen(text))) {
+  if (!lc_pouch_path_write_all(fd, bytes != NULL ? bytes : "", length)) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L, "failed to write pouch file",
                       strerror(errno), NULL, NULL);
-  } else if (fsync(fd) != 0) {
+  } else if (sync_file && fsync(fd) != 0) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L, "failed to fsync pouch file",
                       strerror(errno), NULL, NULL);
   }
@@ -269,7 +272,7 @@ int lc_pouch_path_write_text_file(const char *path, const char *text,
                       "failed to replace pouch file", strerror(errno), NULL,
                       NULL);
   }
-  if (rc == LC_OK) {
+  if (rc == LC_OK && sync_directory) {
     rc = lc_pouch_path_fsync_directory(dir, "failed to fsync pouch directory",
                                        error);
   }
@@ -279,4 +282,28 @@ int lc_pouch_path_write_text_file(const char *path, const char *text,
   lc_free_with_allocator(NULL, tmp_path);
   lc_free_with_allocator(NULL, dir);
   return rc;
+}
+
+int lc_pouch_path_write_text_file(const char *path, const char *text,
+                                  lc_error *error) {
+  return lc_pouch_path_write_bytes_file_impl(
+      path, text, text != NULL ? strlen(text) : 0U, 1, 1, error);
+}
+
+int lc_pouch_path_write_text_file_defer_dirsync(const char *path,
+                                                const char *text,
+                                                lc_error *error) {
+  return lc_pouch_path_write_bytes_file_impl(
+      path, text, text != NULL ? strlen(text) : 0U, 1, 0, error);
+}
+
+int lc_pouch_path_write_text_file_relaxed(const char *path, const char *text,
+                                          lc_error *error) {
+  return lc_pouch_path_write_bytes_file_impl(
+      path, text, text != NULL ? strlen(text) : 0U, 0, 0, error);
+}
+
+int lc_pouch_path_write_bytes_file_relaxed(const char *path, const char *bytes,
+                                           size_t length, lc_error *error) {
+  return lc_pouch_path_write_bytes_file_impl(path, bytes, length, 0, 0, error);
 }

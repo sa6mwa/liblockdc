@@ -1,24 +1,20 @@
 # Pouch Storage Technical Specification
 
-> Current status: this specification supersedes the current payload-sidecar
-> Pouch implementation. The active code is known to be the wrong physical
-> design because it stores state/object payload bytes outside the logstore. The
-> next Pouch implementation must be a clean cutover to a proper segmented
-> logstore modeled on Go lockd disk. There is no released compatibility
-> contract for the current Pouch layout.
+> Current status: this specification defines the initial Pouch storage
+> implementation. Pouch has no released compatibility contract and no migration
+> obligation for rejected pre-release layouts.
 
 ## Decision
 
 Pouch must be a real segmented logstore.
 
-The current design, where namespace segments are effectively metadata/history
-records and state/object bytes live in `payloads/` sidecar files, is rejected.
-It is not the Go lockd disk storage shape and it is expected to collapse under
-production pressure. Pouch must store durable payload bytes in log record
+The rejected pre-release design, where namespace segments were effectively
+metadata/history records and state/object bytes lived in `payloads/` files, is
+not a valid Pouch format. Pouch stores durable payload bytes in log record
 payload areas inside segment/snapshot files, with refs expressed as segment
 identity plus payload offset and length.
 
-No compatibility layer is allowed for the rejected layout. The cutover must be
+No compatibility layer is allowed for rejected layouts. Pouch is
 single-representation: no dual readers, no mixed roots, no open-time migration,
 and no branching between old and new Pouch record formats.
 
@@ -42,9 +38,9 @@ interfaces, but its physical behavior must match the proven logstore model.
 Each namespace owns append-only segment files. A mutation appends a typed record
 to the active segment. Records contain:
 
-- fixed header with magic/version/type/lengths/checksum fields;
+- fixed binary header with magic/version/type/lengths/checksum fields;
 - normalized key bytes;
-- compact type-specific metadata;
+- compact binary type-specific metadata;
 - optional payload bytes stored inline in the segment record.
 
 State documents, object payloads, queue payload records, transaction records,
@@ -54,11 +50,12 @@ fully inline, but they are still log records.
 
 In-memory projections are accelerators only. They are rebuilt by replaying
 segments/snapshots and must never be the authoritative source. Query indexes are
-derived sidecars and must be rebuildable from logstore state.
+derived artifacts and must be rebuildable from logstore state.
 
 ## Payload Refs
 
-Live state/object projections must point to payload spans, not sidecar files.
+Live state/object projections must point to payload spans, not external payload
+files.
 A payload ref records:
 
 - segment or snapshot identity;
@@ -68,6 +65,14 @@ A payload ref records:
 - cipher byte count when encrypted;
 - descriptor/material metadata when required;
 - state/object ETag and version metadata.
+
+The fixed record header carries only physical record navigation and integrity:
+magic, format version, record type, flags/reserved bits, key length, metadata
+length, `u64` stored payload length, and stored-payload CRC. Logical storage
+facts such as generation/version, updated time, plaintext byte count, stored
+byte count, ETag, content type, query-hidden state, referenced-span metadata,
+and transform descriptor live in binary metadata so projections can be rebuilt
+without opening JSON or binary payload streams.
 
 Reads open a bounded source over the referenced segment span. Ordinary reads,
 scan validation, and document emission must stream over that source. Full
@@ -129,7 +134,7 @@ Pouch storage encryption is optional and disabled by default.
 When crypto is enabled, encryption belongs at the same storage boundary as Go
 lockd disk: log payload streams/records are encrypted at rest as they are
 written into the logstore. Pouch must not model encryption as separately
-encrypted state-document sidecar files.
+encrypted state-document files outside the logstore.
 
 Crypto requirements:
 
@@ -151,7 +156,7 @@ encrypted at rest when the root is encrypted.
 
 Searchable state is the logical JSON state payload referenced by the live state
 projection. Scan and indexed query code must operate over logstore projections,
-not sidecar payload files.
+not external payload files.
 
 Scan behavior must follow Go disk shape:
 
@@ -189,15 +194,14 @@ root/
   locks/
 ```
 
-There must be no `payloads/` directory for state/object durability in the new
-implementation.
+There must be no `payloads/` directory for state/object durability.
 
 ## Verification Requirements
 
 Tests must prove the physical storage model:
 
 - state/object bytes are present as segment record payload spans;
-- no state/object payload sidecar files are created;
+- no external state/object payload files are created;
 - refs point to valid segment/snapshot offsets and lengths;
 - reopen replay reconstructs live state from segment records;
 - large state/object payloads stream through segment spans;
@@ -234,14 +238,14 @@ unless a specific exception is explicitly accepted.
 
 1. Study and map Go disk logstore semantics to Pouch C module boundaries.
 2. Replace Pouch persistence with true segment record append/read/replay.
-3. Remove payload sidecar state/object durability code.
+3. Remove external payload-file state/object durability code.
 4. Rebuild payload refs, reads, staged links, and compaction around segment
    spans.
 5. Reattach metadata, queues, transactions, attachments/objects, and retention
    to the logstore.
 6. Reattach query/index/scan to logstore projections and segment-span reads.
 7. Rebuild crypto at the log payload boundary.
-8. Delete dead code left by the cutover, including sidecar payload helpers,
+8. Delete dead code left by the cutover, including external payload helpers,
    old metadata-only segment refs, compatibility branches, stale fixtures,
    stale benchmarks, and rejected-design terminology.
 9. Audit Pouch names and boundaries so no `pouch-redesign`, compatibility,
@@ -253,8 +257,8 @@ unless a specific exception is explicitly accepted.
 
 ## Non-Goals
 
-- No compatibility with the current Pouch sidecar payload layout.
+- No compatibility with rejected Pouch payload-file layouts.
 - No migration tool in the first corrected implementation.
 - No parallel old/new Pouch code paths.
-- No optimizing the rejected sidecar design.
+- No optimizing rejected payload-file designs.
 - No hidden fallback from index to scan when the selected engine is indexed.

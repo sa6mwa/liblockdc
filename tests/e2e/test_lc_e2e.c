@@ -4075,7 +4075,7 @@ test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot(void **state) {
   char kind[96];
   char selector_json[192];
   char namespace_path[512];
-  char sidecar_path[640];
+  char header_path[640];
   char marker_path[640];
   size_t rows;
   const size_t doc_count = 36U;
@@ -4097,9 +4097,9 @@ test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot(void **state) {
   written = snprintf(namespace_path, sizeof(namespace_path),
                      "%s/namespaces/repair", root);
   assert_true(written > 0 && (size_t)written < sizeof(namespace_path));
-  written = snprintf(sidecar_path, sizeof(sidecar_path), "%s/index/query.index",
+  written = snprintf(header_path, sizeof(header_path), "%s/index/query.index",
                      namespace_path);
-  assert_true(written > 0 && (size_t)written < sizeof(sidecar_path));
+  assert_true(written > 0 && (size_t)written < sizeof(header_path));
   written = snprintf(marker_path, sizeof(marker_path),
                      "%s/markers/writer-damaged.marker", namespace_path);
   assert_true(written > 0 && (size_t)written < sizeof(marker_path));
@@ -4121,7 +4121,7 @@ test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot(void **state) {
 
   pouch_e2e_force_maintenance_expect_segments(root, "repair", &error);
   pouch_e2e_run_maintenance(root, "repair", 0, 1, 0L, &error);
-  assert_int_equal(unlink(sidecar_path), 0);
+  assert_int_equal(unlink(header_path), 0);
   pouch_e2e_write_text_file(marker_path, "damaged-marker\n");
 
   open_pouch_client(endpoint, &client, &error);

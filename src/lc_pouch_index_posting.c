@@ -6,6 +6,7 @@
 #include <string.h>
 
 #define LC_POUCH_INDEX_DENSE_TRACK_MIN_BYTES 4096U
+#define LC_POUCH_INDEX_DENSE_TRACK_MIN_COUNT 4U
 #define LC_POUCH_INDEX_DENSE_TRACK_SPARSE_MULTIPLIER 2U
 
 void lc_pouch_index_posting_cleanup(const lc_allocator *allocator,
@@ -402,6 +403,39 @@ static int lc_pouch_index_adaptive_should_track_dense(
   return dense_length <= sparse_limit;
 }
 
+static int lc_pouch_index_adaptive_posting_rebuild_dense(
+    lc_pouch_index_adaptive_posting *posting, const lc_allocator *allocator,
+    lc_error *error) {
+  lc_pouch_index_docid_set decoded;
+  size_t index;
+  int added;
+  int rc;
+
+  if (posting == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index adaptive posting rebuild requires "
+                        "posting",
+                        NULL, NULL, NULL);
+  }
+  memset(&decoded, 0, sizeof(decoded));
+  lc_pouch_index_dense_posting_cleanup(allocator, &posting->dense);
+  rc = lc_pouch_index_posting_append_to_set(&posting->sparse, &decoded,
+                                            allocator, error);
+  for (index = 0U; rc == LC_OK && index < decoded.count; ++index) {
+    added = 0;
+    rc = lc_pouch_index_dense_posting_append_sorted_unique(
+        &posting->dense, decoded.items[index], &added, allocator, error);
+    if (rc == LC_OK && !added) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index adaptive posting dense rebuild lost "
+                        "docID",
+                        NULL, NULL, "pouch");
+    }
+  }
+  lc_pouch_index_docid_set_cleanup(allocator, &decoded);
+  return rc;
+}
+
 int lc_pouch_index_adaptive_posting_append_sorted_unique(
     lc_pouch_index_adaptive_posting *posting, unsigned long doc_id, int *added,
     const lc_allocator *allocator, lc_error *error) {
@@ -419,10 +453,17 @@ int lc_pouch_index_adaptive_posting_append_sorted_unique(
   if (rc != LC_OK || !*added) {
     return rc;
   }
+  if (posting->sparse.count < LC_POUCH_INDEX_DENSE_TRACK_MIN_COUNT) {
+    return LC_OK;
+  }
   if (!lc_pouch_index_adaptive_should_track_dense(posting, doc_id)) {
     posting->dense_disabled = 1;
     lc_pouch_index_dense_posting_cleanup(allocator, &posting->dense);
     return LC_OK;
+  }
+  if (posting->dense.count == 0U && !posting->dense.has_last_doc_id) {
+    return lc_pouch_index_adaptive_posting_rebuild_dense(posting, allocator,
+                                                         error);
   }
   dense_added = 0;
   rc = lc_pouch_index_dense_posting_append_sorted_unique(
@@ -434,6 +475,90 @@ int lc_pouch_index_adaptive_posting_append_sorted_unique(
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index adaptive posting dense append lost docID",
                         NULL, NULL, "pouch");
+  }
+  return LC_OK;
+}
+
+int lc_pouch_index_adaptive_posting_build_sorted_unique_trusted(
+    lc_pouch_index_adaptive_posting *posting, const unsigned long *doc_ids,
+    size_t doc_id_count, const lc_allocator *allocator, lc_error *error) {
+  unsigned long last_doc_id;
+  unsigned long slots;
+  unsigned long density_threshold;
+  size_t index;
+  int rc;
+
+  if (posting == NULL || (doc_ids == NULL && doc_id_count > 0U)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index adaptive posting build requires posting "
+                        "and docIDs",
+                        NULL, NULL, NULL);
+  }
+  memset(posting, 0, sizeof(*posting));
+  if (doc_id_count == 0U) {
+    return LC_OK;
+  }
+  last_doc_id = 0UL;
+  for (index = 0U; index < doc_id_count; ++index) {
+    unsigned long doc_id;
+    unsigned long delta;
+
+    doc_id = doc_ids[index];
+    if (index > 0U && doc_id <= last_doc_id) {
+      lc_pouch_index_adaptive_posting_cleanup(allocator, posting);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch index adaptive posting build requires sorted "
+                          "unique docIDs",
+                          NULL, NULL, "pouch");
+    }
+    delta = index == 0U ? doc_id : doc_id - last_doc_id;
+    rc = lc_pouch_index_posting_append_varint(&posting->sparse, delta,
+                                              allocator, error);
+    if (rc != LC_OK) {
+      lc_pouch_index_adaptive_posting_cleanup(allocator, posting);
+      return rc;
+    }
+    last_doc_id = doc_id;
+  }
+  posting->sparse.count = doc_id_count;
+  posting->sparse.last_doc_id = last_doc_id;
+  posting->sparse.has_last_doc_id = 1;
+  if (doc_id_count < LC_POUCH_INDEX_DENSE_TRACK_MIN_COUNT ||
+      !lc_pouch_index_adaptive_should_track_dense(posting, last_doc_id) ||
+      last_doc_id == (unsigned long)-1) {
+    return LC_OK;
+  }
+  slots = last_doc_id + 1UL;
+  density_threshold = slots / 4UL;
+  if (slots % 4UL != 0UL) {
+    ++density_threshold;
+  }
+  if (posting->sparse.count > (size_t)ULONG_MAX ||
+      (unsigned long)posting->sparse.count < density_threshold) {
+    return LC_OK;
+  }
+  rc = lc_pouch_index_dense_posting_reserve(
+      &posting->dense, (size_t)((last_doc_id / CHAR_BIT) + 1UL), allocator,
+      error);
+  if (rc != LC_OK) {
+    lc_pouch_index_adaptive_posting_cleanup(allocator, posting);
+    return rc;
+  }
+  posting->dense.length = (size_t)((last_doc_id / CHAR_BIT) + 1UL);
+  posting->dense.count = doc_id_count;
+  posting->dense.max_doc_id = last_doc_id;
+  posting->dense.last_doc_id = last_doc_id;
+  posting->dense.has_last_doc_id = 1;
+  for (index = 0U; index < doc_id_count; ++index) {
+    unsigned long doc_id;
+    size_t byte_index;
+    unsigned char mask;
+
+    doc_id = doc_ids[index];
+    byte_index = (size_t)(doc_id / CHAR_BIT);
+    mask = (unsigned char)(1U << (unsigned int)(doc_id % CHAR_BIT));
+    posting->dense.bits[byte_index] =
+        (unsigned char)(posting->dense.bits[byte_index] | mask);
   }
   return LC_OK;
 }

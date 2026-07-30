@@ -1451,11 +1451,6 @@ int lc_pouch_namespace_ensure_layout(const lc_allocator *allocator,
   }
   if (rc == LC_OK) {
     rc = lc_pouch_namespace_ensure_child(
-        allocator, namespace_path, "payloads",
-        "failed to create pouch namespace payloads directory", error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_namespace_ensure_child(
         allocator, namespace_path, "snapshots",
         "failed to create pouch namespace snapshots directory", error);
   }

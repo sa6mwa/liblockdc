@@ -995,6 +995,7 @@ typedef struct lc_pouch_endpoint_options {
   char *query_fallback_engine;
   char *crypto_key;
   char *crypto_key_file;
+  char *compression;
   int crypto_generate_key_file;
   int single_writer;
 } lc_pouch_endpoint_options;
@@ -1010,6 +1011,7 @@ lc_pouch_endpoint_options_cleanup(const lc_allocator *allocator,
   lc_free_with_allocator(allocator, options->query_fallback_engine);
   lc_secret_free_string_with_allocator(allocator, options->crypto_key);
   lc_free_with_allocator(allocator, options->crypto_key_file);
+  lc_free_with_allocator(allocator, options->compression);
   memset(options, 0, sizeof(*options));
 }
 
@@ -1215,6 +1217,27 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
                           NULL, NULL, "pouch");
     }
     lc_free_with_allocator(allocator, copy);
+    lc_free_with_allocator(allocator, decoded_key);
+    return LC_OK;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "compression") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_compression")) {
+    copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
+                                              "pouch_compression", error);
+    if (copy == NULL) {
+      lc_free_with_allocator(allocator, decoded_key);
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+    if (strcmp(copy, "none") != 0 && strcmp(copy, "zlib") != 0) {
+      lc_free_with_allocator(allocator, copy);
+      lc_free_with_allocator(allocator, decoded_key);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch endpoint compression must be none or zlib",
+                          NULL, NULL, "pouch");
+    }
+    lc_free_with_allocator(allocator, options->compression);
+    options->compression = copy;
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
@@ -1615,6 +1638,9 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
         config->pouch_crypto_generate_key_file != 0
             ? config->pouch_crypto_generate_key_file
             : pouch_endpoint_options.crypto_generate_key_file;
+    pouch_open_options.compression =
+        config->pouch_compression != NULL ? config->pouch_compression
+                                          : pouch_endpoint_options.compression;
     rc = lc_pouch_open(pouch_endpoint_options.root_path, &config->allocator,
                        &pouch_open_options, &client->pouch, error);
     if (rc != LC_OK) {

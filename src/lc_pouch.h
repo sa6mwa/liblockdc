@@ -19,6 +19,7 @@ typedef struct lc_pouch_open_options {
   const char *crypto_key;
   const char *crypto_key_file;
   int crypto_generate_key_file;
+  const char *compression;
 } lc_pouch_open_options;
 
 typedef struct lc_pouch_status {
@@ -35,6 +36,7 @@ typedef struct lc_pouch_status {
   char *query_fallback_engine;
   int crypto_enabled;
   char *crypto_key_file;
+  char *compression;
 } lc_pouch_status;
 
 typedef struct lc_pouch_maintenance_options {

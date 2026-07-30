@@ -205,6 +205,45 @@ static void fuzz_write_text_file(const char *path, const char *text) {
   (void)fclose(fp);
 }
 
+static int fuzz_newest_query_segment_artifact_path(const char *root,
+                                                   const char *artifact_leaf,
+                                                   char *path,
+                                                   size_t path_size) {
+  char manifest_path[768];
+  char line[256];
+  char segment_id[128];
+  FILE *fp;
+  int written;
+
+  if (path == NULL || path_size == 0U || artifact_leaf == NULL ||
+      !fuzz_namespace_path(manifest_path, sizeof(manifest_path), root,
+                           "index/query.manifest")) {
+    return 0;
+  }
+  fp = fopen(manifest_path, "rb");
+  if (fp == NULL) {
+    return 0;
+  }
+  segment_id[0] = '\0';
+  while (fgets(line, sizeof(line), fp) != NULL) {
+    if (sscanf(line, "segment %127s", segment_id) == 1 &&
+        segment_id[0] != '\0') {
+      break;
+    }
+    segment_id[0] = '\0';
+  }
+  (void)fclose(fp);
+  if (segment_id[0] == '\0') {
+    return 0;
+  }
+  written = snprintf(path, path_size, "%s/namespaces/fuzz/index/query.%s.%s",
+                     root, segment_id, artifact_leaf);
+  if (written < 0 || (size_t)written >= path_size) {
+    return 0;
+  }
+  return 1;
+}
+
 static void fuzz_damage_namespace_manifest(const char *root,
                                            unsigned int mode) {
   char path[768];
@@ -246,11 +285,16 @@ static void fuzz_damage_query_index(const char *root, unsigned int mode) {
   if (root == NULL || mode == 0U) {
     return;
   }
-  if (!fuzz_namespace_path(path, sizeof(path), root, "index/query.index")) {
+  if (!fuzz_namespace_path(path, sizeof(path), root, "index/query.manifest")) {
     return;
   }
   if (mode == 1U) {
     (void)remove(path);
+    return;
+  }
+  if (mode == 3U &&
+      !fuzz_newest_query_segment_artifact_path(root, "query.index", path,
+                                               sizeof(path))) {
     return;
   }
   fp = fopen(path, "wb");
@@ -258,8 +302,9 @@ static void fuzz_damage_query_index(const char *root, unsigned int mode) {
     return;
   }
   if (mode == 2U) {
-    (void)fwrite("not-a-pouch-query-index\nterm broken\n", 1U,
-                 strlen("not-a-pouch-query-index\nterm broken\n"), fp);
+    (void)fwrite("not-a-pouch-query-index-manifest\nsegment broken\n", 1U,
+                 strlen("not-a-pouch-query-index-manifest\nsegment broken\n"),
+                 fp);
   } else {
     static const char future_index[] = "format=pouch-query-index\n"
                                        "version=999999\n"
@@ -295,14 +340,15 @@ static void fuzz_damage_snapshot(const char *root, unsigned int mode) {
     return;
   }
   if (mode == 2U) {
-    static const char garbage_tail[] = "\nnot-a-state-record\n";
-    (void)fwrite(garbage_tail, 1U, sizeof(garbage_tail) - 1U, fp);
+    static const unsigned char garbage_tail[] = {
+        'L', 'H', 'C', 'P', 1U, 255U, 0U, 0U, 0U, 0U, 0U, 0U};
+    (void)fwrite(garbage_tail, 1U, sizeof(garbage_tail), fp);
   } else {
-    static const char corrupt_snapshot[] =
-        "H 999999\n"
-        "S fuzz/doc/broken text/plain pouch-state-999 1 0 0 3\n"
-        "bad\n";
-    (void)fwrite(corrupt_snapshot, 1U, sizeof(corrupt_snapshot) - 1U, fp);
+    static const unsigned char corrupt_snapshot[] = {
+        'L', 'H', 'C', 'P', 1U, 1U, 0U, 0U, 0U, 0U, 0U,
+        0U,  0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U,
+        0U,  0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
+    (void)fwrite(corrupt_snapshot, 1U, sizeof(corrupt_snapshot), fp);
   }
   (void)fclose(fp);
 }

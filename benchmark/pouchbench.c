@@ -808,7 +808,8 @@ static int lockdc_bench_query(lc_client *client, const char *scenario,
 
 static void lockdc_bench_result_set_error(lockdc_pouch_bench_result *out,
                                           const lc_error *error) {
-  if (out != NULL && error != NULL && error->message[0] != '\0') {
+  if (out != NULL && error != NULL && error->message != NULL &&
+      error->message[0] != '\0') {
     snprintf(out->error, sizeof(out->error), "%s", error->message);
   }
 }
@@ -1135,6 +1136,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   if (out->rows <= 0L) {
     rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error),
+             "pouch production RangeHalf index query matched no rows");
     lc_error_cleanup(&error);
     lc_error_init(&error);
     goto done;
@@ -1150,6 +1153,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   if (matched_rows <= 0L) {
     rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error),
+             "pouch production NarrativeSummary index query matched no rows");
     lc_error_cleanup(&error);
     lc_error_init(&error);
     goto done;
@@ -1165,6 +1170,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   if (matched_rows <= 0L) {
     rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error),
+             "pouch production WorkflowEscalated scan query matched no rows");
     lc_error_cleanup(&error);
     lc_error_init(&error);
     goto done;
@@ -1180,6 +1187,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   if (matched_rows <= 0L) {
     rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error),
+             "pouch production NarrativeDescription scan query matched no rows");
     lc_error_cleanup(&error);
     lc_error_init(&error);
     goto done;
@@ -1195,6 +1204,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   if (matched_rows <= 0L) {
     rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error),
+             "pouch production FullTextAny index query matched no rows");
     lc_error_cleanup(&error);
     lc_error_init(&error);
     goto done;
@@ -1210,6 +1221,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   if (matched_rows <= 0L) {
     rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error),
+             "pouch production FullTextAny scan query matched no rows");
     lc_error_cleanup(&error);
     lc_error_init(&error);
     goto done;

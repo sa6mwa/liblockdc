@@ -21,7 +21,6 @@ foreach(required_source
     "src/lc_pouch_query_index.h"
     "src/lc_pouch_query_index.c"
     "src/lc_pouch_state.c"
-    "deprecated/pouch-legacy/src/lc_pouch.c"
 )
     if(NOT EXISTS "${LOCKDC_ROOT}/${required_source}")
         message(FATAL_ERROR "missing pouch source: ${required_source}")
@@ -29,6 +28,7 @@ foreach(required_source
 endforeach()
 
 foreach(retired_source
+    "deprecated/pouch-legacy"
     "src/lc_pouch_store.h"
     "src/lc_pouch_allocator.c"
     "src/lc_pouch_logstore.c"

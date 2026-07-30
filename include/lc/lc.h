@@ -157,6 +157,10 @@ typedef struct lc_client_config {
   const char *pouch_crypto_key_file;
   /** Creates `pouch_crypto_key_file` with a new root key when it is missing. */
   int pouch_crypto_generate_key_file;
+  /** Local pouch at-rest compression mode: NULL/"none" disables it, "zlib"
+   * enables streaming zlib compression before storage/encryption.
+   */
+  const char *pouch_compression;
 } lc_client_config;
 
 /** Public status codes returned by all API entry points. */

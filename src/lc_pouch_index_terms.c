@@ -504,7 +504,8 @@ static int lc_pouch_index_term_value_hex_token_valid(const char *token) {
 
 static int lc_pouch_index_term_value_type_valid(char value_type) {
   return value_type == 's' || value_type == 'n' || value_type == 'b' ||
-         value_type == 'z';
+         value_type == 'z' || value_type == 'h' || value_type == 'p' ||
+         value_type == 'w';
 }
 
 static int lc_pouch_index_term_entry_compare_parts(const char *left_field_hex,
@@ -527,6 +528,18 @@ static int lc_pouch_index_term_entry_compare_parts(const char *left_field_hex,
     return left_value_type < right_value_type ? -1 : 1;
   }
   return 0;
+}
+
+static int lc_pouch_index_term_entry_compare(const void *left,
+                                             const void *right) {
+  const lc_pouch_index_term_entry *a;
+  const lc_pouch_index_term_entry *b;
+
+  a = (const lc_pouch_index_term_entry *)left;
+  b = (const lc_pouch_index_term_entry *)right;
+  return lc_pouch_index_term_entry_compare_parts(
+      a->field_hex, a->value_hex, a->value_type, b->field_hex, b->value_hex,
+      b->value_type);
 }
 
 static int lc_pouch_index_term_table_find_position(
@@ -655,6 +668,32 @@ lc_pouch_index_term_table_contains_id(const lc_pouch_index_term_table *table,
   return 0;
 }
 
+static int lc_pouch_index_term_table_has_dense_ids(
+    const lc_pouch_index_term_table *table) {
+  if (table == NULL) {
+    return 0;
+  }
+  if (table->count == 0U) {
+    return table->next_term_id == 0UL || table->next_term_id == 1UL;
+  }
+  if (table->count > (size_t)((unsigned long)-1 - 1UL)) {
+    return 0;
+  }
+  return table->next_term_id == (unsigned long)table->count + 1UL;
+}
+
+static int lc_pouch_index_term_table_contains_id_for_encode(
+    const lc_pouch_index_term_table *table, int dense_ids,
+    unsigned long term_id) {
+  if (table == NULL || term_id == 0UL) {
+    return 0;
+  }
+  if (dense_ids) {
+    return term_id <= (unsigned long)table->count;
+  }
+  return lc_pouch_index_term_table_contains_id(table, term_id);
+}
+
 static int lc_pouch_index_term_table_add_entry(
     const lc_allocator *allocator, lc_pouch_index_term_table *table,
     const char *field_hex, const char *value_hex, char value_type,
@@ -718,31 +757,150 @@ static int lc_pouch_index_term_table_add_entry(
   return LC_OK;
 }
 
-int lc_pouch_index_term_table_find_or_add(
+static int lc_pouch_index_term_table_find_or_add_impl(
     const lc_allocator *allocator, lc_pouch_index_term_table *table,
     const char *field_hex, const char *value_hex, char value_type,
-    unsigned long *term_id_out, lc_error *error) {
+    unsigned long *term_id_out, int validate_hex, lc_error *error) {
+  lc_pouch_index_term_entry entry;
   unsigned long term_id;
+  size_t position;
+  int rc;
 
   if (term_id_out != NULL) {
     *term_id_out = 0UL;
   }
-  if (lc_pouch_index_term_table_find(table, field_hex, value_hex, value_type,
-                                     term_id_out)) {
-    return LC_OK;
-  }
-  if (table == NULL) {
+  if (table == NULL || field_hex == NULL || value_hex == NULL ||
+      !lc_pouch_index_term_value_type_valid(value_type)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch index term table add requires table", NULL, NULL,
-                        NULL);
+                        "pouch index term table add requires table and typed "
+                        "exact hex term",
+                        NULL, NULL, "pouch");
+  }
+  if (validate_hex &&
+      (!lc_pouch_index_term_hex_token_valid(field_hex) ||
+       !lc_pouch_index_term_value_hex_token_valid(value_hex))) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term table add requires valid hex term",
+                        NULL, NULL, "pouch");
+  }
+  if (lc_pouch_index_term_table_find_position(
+          table, field_hex, value_hex, value_type, &position)) {
+    if (term_id_out != NULL) {
+      *term_id_out = table->items[position].term_id;
+    }
+    return LC_OK;
   }
   if (table->next_term_id == 0UL) {
     table->next_term_id = 1UL;
   }
+  if (table->next_term_id == (unsigned long)-1) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term table id exceeds local limit", NULL,
+                        NULL, "pouch");
+  }
   term_id = table->next_term_id;
-  return lc_pouch_index_term_table_add_entry(allocator, table, field_hex,
-                                             value_hex, value_type, term_id,
-                                             term_id_out, error);
+  memset(&entry, 0, sizeof(entry));
+  entry.field_hex = lc_strdup_with_allocator(allocator, field_hex);
+  entry.value_hex = lc_strdup_with_allocator(allocator, value_hex);
+  if (entry.field_hex == NULL || entry.value_hex == NULL) {
+    lc_free_with_allocator(allocator, entry.field_hex);
+    lc_free_with_allocator(allocator, entry.value_hex);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index term entry", NULL, NULL,
+                        NULL);
+  }
+  entry.value_type = value_type;
+  entry.term_id = term_id;
+  rc = lc_pouch_index_term_table_reserve(allocator, table, table->count + 1U,
+                                         error);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(allocator, entry.field_hex);
+    lc_free_with_allocator(allocator, entry.value_hex);
+    return rc;
+  }
+  if (position < table->count) {
+    memmove(&table->items[position + 1U], &table->items[position],
+            (table->count - position) * sizeof(table->items[0]));
+  }
+  table->items[position] = entry;
+  ++table->count;
+  table->next_term_id = term_id + 1UL;
+  if (term_id_out != NULL) {
+    *term_id_out = term_id;
+  }
+  return LC_OK;
+}
+
+int lc_pouch_index_term_table_find_or_add(
+    const lc_allocator *allocator, lc_pouch_index_term_table *table,
+    const char *field_hex, const char *value_hex, char value_type,
+    unsigned long *term_id_out, lc_error *error) {
+  return lc_pouch_index_term_table_find_or_add_impl(
+      allocator, table, field_hex, value_hex, value_type, term_id_out, 1,
+      error);
+}
+
+int lc_pouch_index_term_table_find_or_add_trusted(
+    const lc_allocator *allocator, lc_pouch_index_term_table *table,
+    const char *field_hex, const char *value_hex, char value_type,
+    unsigned long *term_id_out, lc_error *error) {
+  return lc_pouch_index_term_table_find_or_add_impl(
+      allocator, table, field_hex, value_hex, value_type, term_id_out, 0,
+      error);
+}
+
+int lc_pouch_index_term_table_append_trusted(
+    const lc_allocator *allocator, lc_pouch_index_term_table *table,
+    const char *field_hex, const char *value_hex, char value_type,
+    unsigned long *term_id_out, lc_error *error) {
+  lc_pouch_index_term_entry entry;
+  unsigned long term_id;
+  int rc;
+
+  if (term_id_out != NULL) {
+    *term_id_out = 0UL;
+  }
+  if (table == NULL || field_hex == NULL || value_hex == NULL ||
+      !lc_pouch_index_term_value_type_valid(value_type)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term table append requires table and typed "
+                        "exact hex term",
+                        NULL, NULL, "pouch");
+  }
+  if (table->next_term_id == 0UL) {
+    table->next_term_id = 1UL;
+  }
+  if (table->next_term_id == (unsigned long)-1) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term table id exceeds local limit", NULL,
+                        NULL, "pouch");
+  }
+  term_id = table->next_term_id;
+  memset(&entry, 0, sizeof(entry));
+  entry.field_hex = lc_strdup_with_allocator(allocator, field_hex);
+  entry.value_hex = lc_strdup_with_allocator(allocator, value_hex);
+  if (entry.field_hex == NULL || entry.value_hex == NULL) {
+    lc_free_with_allocator(allocator, entry.field_hex);
+    lc_free_with_allocator(allocator, entry.value_hex);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch index term entry", NULL, NULL,
+                        NULL);
+  }
+  entry.value_type = value_type;
+  entry.term_id = term_id;
+  rc = lc_pouch_index_term_table_reserve(allocator, table, table->count + 1U,
+                                         error);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(allocator, entry.field_hex);
+    lc_free_with_allocator(allocator, entry.value_hex);
+    return rc;
+  }
+  table->items[table->count++] = entry;
+  table->next_term_id = term_id + 1UL;
+  if (term_id_out != NULL) {
+    *term_id_out = term_id;
+  }
+  return LC_OK;
 }
 
 static int lc_pouch_index_term_posting_table_find_position(
@@ -882,6 +1040,89 @@ int lc_pouch_index_term_posting_table_put(
   return LC_OK;
 }
 
+int lc_pouch_index_term_posting_table_put_sorted_unique_trusted(
+    const lc_allocator *allocator, lc_pouch_index_term_posting_table *table,
+    unsigned long term_id, const unsigned long *doc_ids, size_t doc_id_count,
+    lc_error *error) {
+  lc_pouch_index_adaptive_posting posting;
+  size_t position;
+  int rc;
+
+  if (table == NULL || term_id == 0UL ||
+      (doc_ids == NULL && doc_id_count > 0U)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term posting put requires table, term, "
+                        "and docIDs",
+                        NULL, NULL, NULL);
+  }
+  memset(&posting, 0, sizeof(posting));
+  rc = lc_pouch_index_adaptive_posting_build_sorted_unique_trusted(
+      &posting, doc_ids, doc_id_count, allocator, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (lc_pouch_index_term_posting_table_find_position(table, term_id,
+                                                      &position)) {
+    lc_pouch_index_adaptive_posting_cleanup(allocator,
+                                            &table->items[position].posting);
+    table->items[position].posting = posting;
+    return LC_OK;
+  }
+  rc = lc_pouch_index_term_posting_table_reserve(allocator, table,
+                                                 table->count + 1U, error);
+  if (rc != LC_OK) {
+    lc_pouch_index_adaptive_posting_cleanup(allocator, &posting);
+    return rc;
+  }
+  if (position < table->count) {
+    memmove(&table->items[position + 1U], &table->items[position],
+            (table->count - position) * sizeof(table->items[0]));
+  }
+  table->items[position].term_id = term_id;
+  table->items[position].posting = posting;
+  ++table->count;
+  return LC_OK;
+}
+
+int lc_pouch_index_term_posting_table_append_sorted_unique_trusted(
+    const lc_allocator *allocator, lc_pouch_index_term_posting_table *table,
+    unsigned long term_id, const unsigned long *doc_ids, size_t doc_id_count,
+    lc_error *error) {
+  lc_pouch_index_adaptive_posting posting;
+  int rc;
+
+  if (table == NULL || term_id == 0UL ||
+      (doc_ids == NULL && doc_id_count > 0U)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term posting append requires table, term, "
+                        "and docIDs",
+                        NULL, NULL, NULL);
+  }
+  if (table->count > 0U &&
+      term_id <= table->items[table->count - 1U].term_id) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term posting append requires increasing "
+                        "term IDs",
+                        NULL, NULL, "pouch");
+  }
+  memset(&posting, 0, sizeof(posting));
+  rc = lc_pouch_index_adaptive_posting_build_sorted_unique_trusted(
+      &posting, doc_ids, doc_id_count, allocator, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_index_term_posting_table_reserve(allocator, table,
+                                                 table->count + 1U, error);
+  if (rc != LC_OK) {
+    lc_pouch_index_adaptive_posting_cleanup(allocator, &posting);
+    return rc;
+  }
+  table->items[table->count].term_id = term_id;
+  table->items[table->count].posting = posting;
+  ++table->count;
+  return LC_OK;
+}
+
 int lc_pouch_index_term_posting_table_append_to_set(
     const lc_pouch_index_term_posting_table *table, unsigned long term_id,
     lc_pouch_index_docid_set *set, const lc_allocator *allocator,
@@ -992,18 +1233,6 @@ static int lc_pouch_index_term_generation_buffer_append_ulong_line(
                                                       (size_t)written, error);
 }
 
-static char *lc_pouch_index_term_generation_payload_hex(
-    const lc_allocator *allocator,
-    const lc_pouch_index_adaptive_posting *posting,
-    lc_pouch_index_adaptive_posting_kind kind) {
-  if (kind == LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE) {
-    return lc_pouch_index_term_hex_encode_bytes(
-        allocator, (const char *)posting->dense.bits, posting->dense.length);
-  }
-  return lc_pouch_index_term_hex_encode_bytes(
-      allocator, (const char *)posting->sparse.bytes, posting->sparse.length);
-}
-
 void lc_pouch_index_term_generation_cleanup(
     const lc_allocator *allocator, lc_pouch_index_term_generation *generation) {
   if (generation == NULL) {
@@ -1015,13 +1244,76 @@ void lc_pouch_index_term_generation_cleanup(
   memset(generation, 0, sizeof(*generation));
 }
 
+static int lc_pouch_index_term_generation_buffer_append_hex_bytes(
+    const lc_allocator *allocator,
+    lc_pouch_index_term_generation_buffer *buffer, const unsigned char *bytes,
+    size_t length, lc_error *error) {
+  static const char hex[] = "0123456789abcdef";
+  char *next_bytes;
+  size_t needed;
+  size_t index;
+
+  if (buffer == NULL || (bytes == NULL && length > 0U)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term generation hex append requires "
+                        "buffer",
+                        NULL, NULL, NULL);
+  }
+  if (length == 0U) {
+    return lc_pouch_index_term_generation_buffer_append_cstr(
+        allocator, buffer, "-", error);
+  }
+  if (length > (((size_t)-1) - buffer->length - 1U) / 2U) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "pouch index term generation exceeds local limit", NULL,
+                        NULL, NULL);
+  }
+  needed = buffer->length + (length * 2U) + 1U;
+  if (needed > buffer->capacity) {
+    size_t next_capacity;
+
+    next_capacity = buffer->capacity == 0U ? 256U : buffer->capacity;
+    while (next_capacity < needed) {
+      if (next_capacity > ((size_t)-1 / 2U)) {
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "pouch index term generation exceeds local limit",
+                            NULL, NULL, NULL);
+      }
+      next_capacity *= 2U;
+    }
+    next_bytes = (char *)lc_alloc_with_allocator(allocator, next_capacity);
+    if (next_bytes == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch index term generation",
+                          NULL, NULL, NULL);
+    }
+    if (buffer->bytes != NULL) {
+      memcpy(next_bytes, buffer->bytes, buffer->length);
+      lc_free_with_allocator(allocator, buffer->bytes);
+    }
+    buffer->bytes = next_bytes;
+    buffer->capacity = next_capacity;
+  }
+  for (index = 0U; index < length; ++index) {
+    unsigned char byte;
+
+    byte = bytes[index];
+    buffer->bytes[buffer->length++] = hex[byte >> 4];
+    buffer->bytes[buffer->length++] = hex[byte & 0x0fU];
+  }
+  buffer->bytes[buffer->length] = '\0';
+  return LC_OK;
+}
+
 int lc_pouch_index_term_generation_encode(
     const lc_pouch_index_term_generation *generation,
     const lc_allocator *allocator, char **out_bytes, size_t *out_length,
     lc_error *error) {
   lc_pouch_index_term_generation_buffer buffer;
+  lc_pouch_index_term_entry *sorted_terms;
   char *namespace_hex;
   size_t index;
+  int dense_term_ids;
   int rc;
 
   if (out_bytes == NULL || out_length == NULL) {
@@ -1039,6 +1331,7 @@ int lc_pouch_index_term_generation_encode(
                         NULL, NULL, NULL);
   }
   memset(&buffer, 0, sizeof(buffer));
+  sorted_terms = NULL;
   namespace_hex =
       lc_pouch_index_term_hex_encode(allocator, generation->namespace_name);
   if (namespace_hex == NULL) {
@@ -1046,6 +1339,20 @@ int lc_pouch_index_term_generation_encode(
                         "failed to allocate pouch index term generation "
                         "namespace",
                         NULL, NULL, NULL);
+  }
+  if (generation->terms.count > 0U) {
+    sorted_terms = (lc_pouch_index_term_entry *)lc_alloc_with_allocator(
+        allocator, generation->terms.count * sizeof(sorted_terms[0]));
+    if (sorted_terms == NULL) {
+      lc_free_with_allocator(allocator, namespace_hex);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch index term generation sort",
+                          NULL, NULL, NULL);
+    }
+    memcpy(sorted_terms, generation->terms.items,
+           generation->terms.count * sizeof(sorted_terms[0]));
+    qsort(sorted_terms, generation->terms.count, sizeof(sorted_terms[0]),
+          lc_pouch_index_term_entry_compare);
   }
   rc = lc_pouch_index_term_generation_buffer_append_cstr(
       allocator, &buffer, "format=" LC_POUCH_INDEX_TERM_GENERATION_FORMAT "\n",
@@ -1092,7 +1399,7 @@ int lc_pouch_index_term_generation_encode(
     char line[128];
     int written;
 
-    term = &generation->terms.items[index];
+    term = &sorted_terms[index];
     if (term->term_id == 0UL ||
         !lc_pouch_index_term_hex_token_valid(term->field_hex) ||
         !lc_pouch_index_term_value_hex_token_valid(term->value_hex) ||
@@ -1129,12 +1436,15 @@ int lc_pouch_index_term_generation_encode(
                                                              "\n", error);
     }
   }
+  lc_free_with_allocator(allocator, sorted_terms);
+  sorted_terms = NULL;
+  dense_term_ids = lc_pouch_index_term_table_has_dense_ids(&generation->terms);
   for (index = 0U; rc == LC_OK && index < generation->postings.count; ++index) {
     const lc_pouch_index_term_posting_entry *entry;
     lc_pouch_index_adaptive_posting_kind kind;
     const lc_pouch_index_posting *sparse;
     const lc_pouch_index_dense_posting *dense;
-    char *payload_hex;
+    const unsigned char *payload_bytes;
     char line[192];
     unsigned long count;
     unsigned long max_doc_id;
@@ -1142,8 +1452,8 @@ int lc_pouch_index_term_generation_encode(
     int written;
 
     entry = &generation->postings.items[index];
-    if (!lc_pouch_index_term_table_contains_id(&generation->terms,
-                                               entry->term_id)) {
+    if (!lc_pouch_index_term_table_contains_id_for_encode(
+            &generation->terms, dense_term_ids, entry->term_id)) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index term generation posting references "
                         "unknown term",
@@ -1153,30 +1463,22 @@ int lc_pouch_index_term_generation_encode(
     kind = lc_pouch_index_adaptive_posting_selected_kind(&entry->posting);
     sparse = &entry->posting.sparse;
     dense = &entry->posting.dense;
-    payload_hex = lc_pouch_index_term_generation_payload_hex(
-        allocator, &entry->posting, kind);
-    if (payload_hex == NULL) {
-      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch index term generation "
-                        "posting payload",
-                        NULL, NULL, NULL);
-      break;
-    }
     if (kind == LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE) {
       count = (unsigned long)dense->count;
       max_doc_id = dense->max_doc_id;
       payload_length = dense->length;
+      payload_bytes = dense->bits;
     } else {
       count = (unsigned long)sparse->count;
       max_doc_id = sparse->has_last_doc_id ? sparse->last_doc_id : 0UL;
       payload_length = sparse->length;
+      payload_bytes = sparse->bytes;
     }
     written = snprintf(
         line, sizeof(line), "posting %lu %c %lu %lu %lu ", entry->term_id,
         kind == LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE ? 'd' : 's', count,
         max_doc_id, (unsigned long)payload_length);
     if (written < 0 || (size_t)written >= sizeof(line)) {
-      lc_free_with_allocator(allocator, payload_hex);
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "failed to format pouch index term generation "
                         "posting",
@@ -1186,16 +1488,16 @@ int lc_pouch_index_term_generation_encode(
     rc = lc_pouch_index_term_generation_buffer_append(allocator, &buffer, line,
                                                       (size_t)written, error);
     if (rc == LC_OK) {
-      rc = lc_pouch_index_term_generation_buffer_append_cstr(
-          allocator, &buffer, payload_hex, error);
+      rc = lc_pouch_index_term_generation_buffer_append_hex_bytes(
+          allocator, &buffer, payload_bytes, payload_length, error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_index_term_generation_buffer_append_cstr(allocator, &buffer,
                                                              "\n", error);
     }
-    lc_free_with_allocator(allocator, payload_hex);
   }
   lc_free_with_allocator(allocator, namespace_hex);
+  lc_free_with_allocator(allocator, sorted_terms);
   if (rc != LC_OK) {
     lc_pouch_index_term_generation_buffer_cleanup(allocator, &buffer);
     return rc;
@@ -1427,7 +1729,11 @@ int lc_pouch_index_term_generation_decode(
   unsigned long version;
   unsigned long term_count;
   unsigned long posting_count;
+  unsigned long previous_posting_term_id;
   size_t index;
+  char *previous_field_hex;
+  char *previous_value_hex;
+  char previous_value_type;
   int rc;
 
   if (generation == NULL || bytes == NULL) {
@@ -1453,6 +1759,10 @@ int lc_pouch_index_term_generation_decode(
   copy[length] = '\0';
   cursor = copy;
   rc = LC_OK;
+  previous_posting_term_id = 0UL;
+  previous_field_hex = NULL;
+  previous_value_hex = NULL;
+  previous_value_type = '\0';
   line = lc_pouch_index_term_generation_next_line(&cursor);
   if (line == NULL ||
       strcmp(line, "format=" LC_POUCH_INDEX_TERM_GENERATION_FORMAT) != 0) {
@@ -1559,9 +1869,34 @@ int lc_pouch_index_term_generation_decode(
                               NULL, NULL, "pouch");
       break;
     }
+    if (previous_field_hex != NULL) {
+      lc_pouch_index_term_key previous_key;
+      lc_pouch_index_term_key current_key;
+
+      memset(&previous_key, 0, sizeof(previous_key));
+      memset(&current_key, 0, sizeof(current_key));
+      previous_key.field_hex = previous_field_hex;
+      previous_key.value_hex = previous_value_hex;
+      previous_key.value_type = previous_value_type;
+      current_key.field_hex = field_hex;
+      current_key.value_hex = value_hex;
+      current_key.value_type = type_token[0];
+      if (lc_pouch_index_term_key_compare_items(&previous_key, &current_key) >=
+          0) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch index term generation terms are unsorted",
+                          NULL, NULL, "pouch");
+        break;
+      }
+    }
     rc = lc_pouch_index_term_table_add_entry(
         allocator, &decoded.terms, field_hex, value_hex, type_token[0], term_id,
         NULL, error);
+    if (rc == LC_OK) {
+      previous_field_hex = field_hex;
+      previous_value_hex = value_hex;
+      previous_value_type = type_token[0];
+    }
   }
   for (index = 0U; rc == LC_OK && index < posting_count; ++index) {
     char *term_id_token;
@@ -1607,6 +1942,9 @@ int lc_pouch_index_term_generation_decode(
             "pouch index term generation posting has invalid payload length",
             error) != LC_OK ||
         kind_token == NULL || kind_token[0] == '\0' || kind_token[1] != '\0' ||
+        (kind_token[0] != 's' && kind_token[0] != 'd') ||
+        (previous_posting_term_id != 0UL &&
+         previous_posting_term_id >= term_id) ||
         payload_hex == NULL ||
         !lc_pouch_index_term_table_contains_id(&decoded.terms, term_id)) {
       rc = error != NULL && error->code != LC_OK
@@ -1629,6 +1967,9 @@ int lc_pouch_index_term_generation_decode(
     rc = lc_pouch_index_term_generation_decode_posting(
         allocator, &decoded, term_id, kind_token[0], count, max_doc_id,
         payload_hex, error);
+    if (rc == LC_OK) {
+      previous_posting_term_id = term_id;
+    }
   }
   if (rc == LC_OK && cursor != NULL) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -1776,11 +2117,12 @@ int lc_pouch_index_term_generation_validate_file(
     unsigned long expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, int *present, int *valid,
     lc_error *error) {
-  FILE *fp;
-  char line[256];
-  unsigned long value;
+  lc_pouch_index_term_generation generation;
+  char *bytes;
+  size_t length;
+  int local_present;
+  int rc;
 
-  (void)allocator;
   if (valid == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index term generation validation requires "
@@ -1791,74 +2133,23 @@ int lc_pouch_index_term_generation_validate_file(
   if (present != NULL) {
     *present = 0;
   }
-  fp = fopen(path, "rb");
-  if (fp == NULL) {
-    if (errno == ENOENT) {
-      return LC_OK;
-    }
-    return lc_error_set(error, LC_ERR_TRANSPORT, (long)errno,
-                        "failed to open pouch index term generation",
-                        strerror(errno), NULL, NULL);
-  }
+  memset(&generation, 0, sizeof(generation));
+  bytes = NULL;
+  length = 0U;
+  local_present = 0;
+  rc = lc_pouch_index_term_generation_read_file(allocator, path, &bytes,
+                                                &length, &local_present, error);
   if (present != NULL) {
-    *present = 1;
+    *present = local_present;
   }
-  if (fgets(line, sizeof(line), fp) == NULL) {
-    fclose(fp);
-    return LC_OK;
+  if (rc == LC_OK && local_present) {
+    rc = lc_pouch_index_term_generation_load_bytes(
+        allocator, bytes, length, expected_index_seq, expected_row_count,
+        expected_row_hash, &generation, valid, error);
   }
-  line[strcspn(line, "\n")] = '\0';
-  if (strcmp(line, "format=" LC_POUCH_INDEX_TERM_GENERATION_FORMAT) != 0) {
-    fclose(fp);
-    return LC_OK;
-  }
-  if (fgets(line, sizeof(line), fp) == NULL) {
-    fclose(fp);
-    return LC_OK;
-  }
-  line[strcspn(line, "\n")] = '\0';
-  if (!lc_pouch_index_term_generation_header_ulong(line, "version", &value) ||
-      value != LC_POUCH_INDEX_TERM_GENERATION_VERSION) {
-    fclose(fp);
-    return LC_OK;
-  }
-  if (fgets(line, sizeof(line), fp) == NULL) {
-    fclose(fp);
-    return LC_OK;
-  }
-  line[strcspn(line, "\n")] = '\0';
-  if (!lc_pouch_index_term_generation_header_ulong(line, "index_seq", &value) ||
-      value != expected_index_seq) {
-    fclose(fp);
-    return LC_OK;
-  }
-  if (fgets(line, sizeof(line), fp) == NULL) {
-    fclose(fp);
-    return LC_OK;
-  }
-  line[strcspn(line, "\n")] = '\0';
-  if (!lc_pouch_index_term_generation_header_ulong(line, "row_count", &value) ||
-      value != expected_row_count) {
-    fclose(fp);
-    return LC_OK;
-  }
-  if (fgets(line, sizeof(line), fp) == NULL) {
-    fclose(fp);
-    return LC_OK;
-  }
-  line[strcspn(line, "\n")] = '\0';
-  if (!lc_pouch_index_term_generation_header_ulong(line, "row_hash", &value) ||
-      value != expected_row_hash) {
-    fclose(fp);
-    return LC_OK;
-  }
-  if (fclose(fp) != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to close pouch index term generation",
-                        strerror(errno), NULL, NULL);
-  }
-  *valid = 1;
-  return LC_OK;
+  lc_pouch_index_term_generation_cleanup(allocator, &generation);
+  lc_free_with_allocator(allocator, bytes);
+  return rc;
 }
 
 int lc_pouch_index_term_generation_load_file(

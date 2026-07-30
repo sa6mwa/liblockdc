@@ -61,6 +61,11 @@ POUCH_GO_COMPACTION_SEGMENT_TARGET_BYTES ?=
 POUCH_GO_COMPACTION_MIN_SEGMENTS ?=
 POUCH_GO_COMPACTION_MIN_RECLAIMABLE_BYTES ?=
 POUCH_GO_COMPACTION_TIMEOUT ?= 10m
+POUCH_PERF_CASE ?= pouch-perf-index-docs
+POUCH_PERF_ROWS ?= 128
+POUCH_PERF_PAYLOAD_BYTES ?= 4096
+POUCH_PERF_CRYPTO ?= 0
+POUCH_PERF_TIMEOUT ?= 60s
 FUZZ_TIME ?= 30
 POUCH_GO_BENCH_CFLAGS := \
 	-I$(ROOT)/include \
@@ -95,7 +100,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-asan __build-coverage __build-fuzz \
 	__test-debug __test-host __test-cross __test-e2e __test-all __test-asan __test-coverage \
 	__format \
-	__finalize-slice __valgrind __asan __coverage __fuzz __fuzz-smoke __benchmarks __bench-gate __benchmark-pouch-go __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-compaction \
+	__finalize-slice __valgrind __asan __coverage __fuzz __fuzz-smoke __benchmarks __bench-gate __benchmark-pouch-perf __benchmark-pouch-go __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-compaction \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __clean-dist \
 	__lua-rock __lua-test __lua-env \
 	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test \
@@ -104,7 +109,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
 	format \
-	finalize-slice valgrind asan coverage fuzz fuzz-smoke benchmarks bench-gate benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-compaction \
+	finalize-slice valgrind asan coverage fuzz fuzz-smoke benchmarks bench-gate benchmark-pouch-perf benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-compaction \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives clean-dist \
 	lua-rock lua-test lua-env \
 	dev-up dev-down dev-reset cross-build cross-preset-test cross-test \
@@ -142,6 +147,13 @@ help:
 		'make fuzz-smoke         Build fuzz targets and run short bounded corpus passes (FUZZ_TIME=5).' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
 		'make bench-gate         Compatibility alias for benchmarks.' \
+		'make benchmark-pouch-perf Run one sub-minute native pouch perf case (POUCH_PERF_CASE=$(POUCH_PERF_CASE), POUCH_PERF_ROWS=$(POUCH_PERF_ROWS), POUCH_PERF_CRYPTO=$(POUCH_PERF_CRYPTO)).' \
+		'make benchmark-pouch-perf-index-docs Run the isolated public-API indexed narrative document query perf case.' \
+		'make benchmark-pouch-perf-full-text-keys Run the isolated public-API full-text key query perf case.' \
+		'make benchmark-pouch-perf-full-text-reopen-keys Run the isolated public-API reopened full-text key query perf case.' \
+		'make benchmark-pouch-perf-scan-keys Run the isolated public-API scan key query perf case.' \
+		'make benchmark-pouch-perf-flush-intermediate Run the isolated public-API changed-row index flush perf case.' \
+		'make benchmark-pouch-perf-flush-reopen Run the isolated public-API reopen index flush perf case.' \
 		'make benchmark-pouch-go Run opt-in Go e2e lockd-disk vs pouch perf/stress benchmarks outside release gates (POUCH_GO_BENCH=$(POUCH_GO_BENCH), POUCH_GO_BENCHTIME=$(POUCH_GO_BENCHTIME), POUCH_GO_SEED_ROWS=$(POUCH_GO_SEED_ROWS)).' \
 		'make benchmark-pouch-go-fast Run the bounded Go e2e pouch-vs-disk iteration suite (timeout $(POUCH_GO_FAST_TIMEOUT), seed rows $(POUCH_GO_FAST_SEED_ROWS)).' \
 		'make benchmark-pouch-go-medium Run the bounded 3m Go e2e pouch-vs-disk scan/index scale suite (rows $(POUCH_GO_MEDIUM_SCALE_ROWS)).' \
@@ -348,6 +360,36 @@ bench-gate:
 	$(TIMED) bench-gate $(MAKE) __bench-gate
 
 __bench-gate: __benchmarks
+
+benchmark-pouch-perf:
+	$(TIMED) benchmark-pouch-perf timeout --kill-after=5s \
+	  '$(POUCH_PERF_TIMEOUT)' $(MAKE) __benchmark-pouch-perf
+
+__benchmark-pouch-perf:
+	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)
+	$(CMAKE) --build --preset $(X86_64_GNU_RELEASE_PRESET) --target lockdc_bench
+	LOCKDC_POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_PAYLOAD_BYTES)' \
+	  LOCKDC_POUCH_PERF_CRYPTO='$(POUCH_PERF_CRYPTO)' \
+	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
+	    $(POUCH_PERF_ROWS) $(POUCH_PERF_CASE)
+
+benchmark-pouch-perf-index-docs:
+	$(MAKE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-index-docs
+
+benchmark-pouch-perf-full-text-keys:
+	$(MAKE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-full-text-keys
+
+benchmark-pouch-perf-full-text-reopen-keys:
+	$(MAKE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-full-text-reopen-keys
+
+benchmark-pouch-perf-scan-keys:
+	$(MAKE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-scan-keys
+
+benchmark-pouch-perf-flush-intermediate:
+	$(MAKE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-flush-intermediate
+
+benchmark-pouch-perf-flush-reopen:
+	$(MAKE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-flush-reopen
 
 benchmark-pouch-go:
 	$(TIMED) benchmark-pouch-go $(MAKE) __benchmark-pouch-go

@@ -31,6 +31,7 @@ typedef struct lc_pouch_query_index_key_view {
   int has_query_hidden;
   int query_hidden;
   size_t value_index;
+  int candidate_exact;
 } lc_pouch_query_index_key_view;
 
 typedef lc_pouch_index_plain_term lc_pouch_query_index_scalar_term;
@@ -55,11 +56,28 @@ int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
                                unsigned long state_index_seq,
                                lc_pouch_query_index_flush_result *out,
                                lc_error *error);
+int lc_pouch_query_index_flush_validated(
+    lc_pouch *pouch, const char *namespace_name, unsigned long state_index_seq,
+    lc_pouch_query_index_flush_result *out, lc_error *error);
+int lc_pouch_query_index_has_pending(lc_pouch *pouch,
+                                     const char *namespace_name);
+int lc_pouch_query_index_manifest_seq(lc_pouch *pouch,
+                                      const char *namespace_name,
+                                      unsigned long *index_seq,
+                                      lc_error *error);
 int lc_pouch_query_index_ensure_current(lc_pouch *pouch,
                                         const char *namespace_name,
                                         unsigned long state_index_seq,
+                                        int validate_current,
                                         lc_pouch_query_index_flush_result *out,
                                         lc_error *error);
+void lc_pouch_query_index_note_state_write(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *content_type, lc_source *body,
+    const lc_pouch_state_write_result *result);
+void lc_pouch_query_index_note_state_delete(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const lc_pouch_state_write_result *result);
 int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_query_index_row_visit_fn visit,
                                void *context, unsigned long *index_seq,
@@ -68,6 +86,8 @@ int lc_pouch_query_index_visit_scalar(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const char *value, char value_type, lc_pouch_query_index_key_visit_fn visit,
     void *context, unsigned long *index_seq, lc_error *error);
+int lc_pouch_query_index_scalar_candidates_exact(const char *value,
+                                                 char value_type);
 int lc_pouch_query_index_visit_scalar_any(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const char *const *values, const char *value_types, size_t value_count,
@@ -105,6 +125,12 @@ int lc_pouch_query_index_visit_prefix(lc_pouch *pouch,
                                       lc_pouch_query_index_key_visit_fn visit,
                                       void *context, unsigned long *index_seq,
                                       lc_error *error);
+int lc_pouch_query_index_prefix_candidates_exact(const char *prefix);
+int lc_pouch_query_index_visit_prefix_candidates(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const char *prefix, int ignore_case,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_contains(lc_pouch *pouch,
                                         const char *namespace_name,
                                         const char *field, const char *needle,
@@ -112,6 +138,18 @@ int lc_pouch_query_index_visit_contains(lc_pouch *pouch,
                                         lc_pouch_query_index_key_visit_fn visit,
                                         void *context, unsigned long *index_seq,
                                         lc_error *error);
+int lc_pouch_query_index_contains_text_complete(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    int *complete, unsigned long *index_seq, lc_error *error);
+int lc_pouch_query_index_visit_any_text_token(
+    lc_pouch *pouch, const char *namespace_name, const char *needle,
+    int ignore_case, lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error);
+int lc_pouch_query_index_visit_contains_candidates(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const char *needle, int ignore_case,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    unsigned long *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_range(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const lc_pouch_query_index_range_bounds *bounds,
@@ -128,6 +166,5 @@ int lc_pouch_query_index_visit_exists(lc_pouch *pouch,
                                       lc_pouch_query_index_key_visit_fn visit,
                                       void *context, unsigned long *index_seq,
                                       lc_error *error);
-void lc_pouch_query_index_prepared_cache_cleanup(lc_pouch *pouch);
 
 #endif

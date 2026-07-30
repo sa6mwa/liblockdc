@@ -41,6 +41,7 @@ typedef struct lc_pouch_index_doc {
   unsigned long bytes;
   int has_query_hidden;
   int query_hidden;
+  int owns_key_hex;
 } lc_pouch_index_doc;
 
 typedef struct lc_pouch_index_doc_table {
@@ -48,6 +49,7 @@ typedef struct lc_pouch_index_doc_table {
   char *owned_generation_bytes;
   size_t count;
   size_t capacity;
+  int sorted_by_key;
 } lc_pouch_index_doc_table;
 
 typedef struct lc_pouch_index_result_key {
@@ -85,6 +87,8 @@ typedef struct lc_pouch_index_result_row {
   unsigned long bytes;
   int has_query_hidden;
   int query_hidden;
+  int owns_key;
+  int owns_key_hex;
   size_t value_index;
 } lc_pouch_index_result_row;
 
@@ -234,6 +238,14 @@ int lc_pouch_index_docid_set_subtract_sorted(
     lc_error *error);
 void lc_pouch_index_doc_table_cleanup(const lc_allocator *allocator,
                                       lc_pouch_index_doc_table *table);
+int lc_pouch_index_doc_table_append_unique(
+    lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
+    unsigned long bytes, int has_query_hidden, int query_hidden,
+    unsigned long *doc_id, const lc_allocator *allocator, lc_error *error);
+int lc_pouch_index_doc_table_append_owned(
+    lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
+    unsigned long bytes, int has_query_hidden, int query_hidden,
+    unsigned long *doc_id, const lc_allocator *allocator, lc_error *error);
 int lc_pouch_index_doc_table_append_sorted_unique(
     lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
     unsigned long bytes, int has_query_hidden, int query_hidden,
@@ -353,9 +365,25 @@ int lc_pouch_index_term_table_find_or_add(
     const lc_allocator *allocator, lc_pouch_index_term_table *table,
     const char *field_hex, const char *value_hex, char value_type,
     unsigned long *term_id_out, lc_error *error);
+int lc_pouch_index_term_table_find_or_add_trusted(
+    const lc_allocator *allocator, lc_pouch_index_term_table *table,
+    const char *field_hex, const char *value_hex, char value_type,
+    unsigned long *term_id_out, lc_error *error);
+int lc_pouch_index_term_table_append_trusted(
+    const lc_allocator *allocator, lc_pouch_index_term_table *table,
+    const char *field_hex, const char *value_hex, char value_type,
+    unsigned long *term_id_out, lc_error *error);
 void lc_pouch_index_term_posting_table_cleanup(
     const lc_allocator *allocator, lc_pouch_index_term_posting_table *table);
 int lc_pouch_index_term_posting_table_put(
+    const lc_allocator *allocator, lc_pouch_index_term_posting_table *table,
+    unsigned long term_id, const unsigned long *doc_ids, size_t doc_id_count,
+    lc_error *error);
+int lc_pouch_index_term_posting_table_put_sorted_unique_trusted(
+    const lc_allocator *allocator, lc_pouch_index_term_posting_table *table,
+    unsigned long term_id, const unsigned long *doc_ids, size_t doc_id_count,
+    lc_error *error);
+int lc_pouch_index_term_posting_table_append_sorted_unique_trusted(
     const lc_allocator *allocator, lc_pouch_index_term_posting_table *table,
     unsigned long term_id, const unsigned long *doc_ids, size_t doc_id_count,
     lc_error *error);
@@ -429,6 +457,9 @@ void lc_pouch_index_adaptive_posting_cleanup(
 int lc_pouch_index_adaptive_posting_append_sorted_unique(
     lc_pouch_index_adaptive_posting *posting, unsigned long doc_id, int *added,
     const lc_allocator *allocator, lc_error *error);
+int lc_pouch_index_adaptive_posting_build_sorted_unique_trusted(
+    lc_pouch_index_adaptive_posting *posting, const unsigned long *doc_ids,
+    size_t doc_id_count, const lc_allocator *allocator, lc_error *error);
 lc_pouch_index_adaptive_posting_kind
 lc_pouch_index_adaptive_posting_selected_kind(
     const lc_pouch_index_adaptive_posting *posting);

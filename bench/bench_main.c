@@ -27,6 +27,12 @@ typedef struct bench_pouch_query_case {
   int documents;
 } bench_pouch_query_case;
 
+typedef struct bench_pouch_perf_fixture {
+  lc_client *client;
+  char *crypto_key;
+  char root[512];
+} bench_pouch_perf_fixture;
+
 static double bench_now_seconds(void) {
   struct timespec ts;
 
@@ -131,6 +137,415 @@ static int bench_pouch_client_open(const char *root, lc_client **out,
   config.endpoint_count = 1U;
   config.default_namespace = "bench";
   return lc_client_open(&config, out, error);
+}
+
+static int bench_env_enabled(const char *name) {
+  const char *value;
+
+  value = getenv(name);
+  return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0 &&
+         strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0;
+}
+
+static int bench_pouch_client_open_crypto(const char *root,
+                                          const char *crypto_key,
+                                          lc_client **out, lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+  char endpoint[640];
+
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  config.pouch_crypto_key = crypto_key;
+  return lc_client_open(&config, out, error);
+}
+
+static int bench_pouch_perf_fixture_open(bench_pouch_perf_fixture *fixture,
+                                         lc_error *error) {
+  int rc;
+
+  if (fixture == NULL) {
+    return 1;
+  }
+  memset(fixture, 0, sizeof(*fixture));
+  if (bench_pouch_root_path(fixture->root, sizeof(fixture->root), "perf") !=
+      0) {
+    return 1;
+  }
+  if (bench_env_enabled("LOCKDC_POUCH_PERF_CRYPTO")) {
+    rc = lc_pouch_crypto_generate_key_string(&fixture->crypto_key, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  return bench_pouch_client_open_crypto(fixture->root, fixture->crypto_key,
+                                        &fixture->client, error);
+}
+
+static void bench_pouch_perf_fixture_close(bench_pouch_perf_fixture *fixture) {
+  if (fixture == NULL) {
+    return;
+  }
+  if (fixture->client != NULL) {
+    fixture->client->close(fixture->client);
+  }
+  lc_pouch_crypto_key_string_free(fixture->crypto_key);
+  bench_pouch_cleanup_root(fixture->root);
+  memset(fixture, 0, sizeof(*fixture));
+}
+
+static char *bench_pouch_perf_document(long row, long generation,
+                                       long payload_bytes) {
+  const char *summary;
+  const char *description;
+  const char *stage;
+  const char *tier;
+  const char *risk;
+  size_t capacity;
+  size_t used;
+  char *json;
+  int written;
+
+  if (payload_bytes < 1024L) {
+    payload_bytes = 1024L;
+  }
+  capacity = (size_t)payload_bytes + 2048U;
+  json = (char *)malloc(capacity);
+  if (json == NULL) {
+    return NULL;
+  }
+  summary = row % 2L == 0L ? "remediation audit workflow timeout risk narrative"
+                           : "ordinary audit workflow context narrative";
+  description = row % 3L == 0L
+                    ? "audit evidence remediation plan with timeout handling"
+                    : "audit evidence review plan with normal handling";
+  stage = row % 5L == 0L ? "escalated" : "review";
+  tier = row % 4L == 0L ? "enterprise" : "standard";
+  risk = row % 7L == 0L ? "timeout pressure" : "routine pressure";
+  written =
+      snprintf(json, capacity,
+               "{\"tenant\":{\"id\":\"tenant-%03ld\",\"tier\":\"%s\"},"
+               "\"workflow\":{\"id\":\"wf-%03ld\",\"stage\":\"%s\","
+               "\"owner\":{\"team\":\"ops\",\"region\":\"%s\"}},"
+               "\"metrics\":{\"amount_usd\":%ld,\"risk_score\":%ld},"
+               "\"risk\":{\"summary\":\"%s\"},"
+               "\"narrative\":{\"summary\":\"%s row %ld generation %ld\","
+               "\"description\":\"%s row %ld generation %ld\"},"
+               "\"tags\":[\"audit\",\"finance\",\"planning\"],"
+               "\"created_at\":\"2026-01-01T00:00:00Z\",\"payload\":\"",
+               row % 17L, tier, row % 23L, stage, row % 3L == 0L ? "us" : "eu",
+               1000L + (row * 37L), row % 100L, risk, summary, row, generation,
+               description, row, generation);
+  if (written <= 0 || (size_t)written >= capacity) {
+    free(json);
+    return NULL;
+  }
+  used = (size_t)written;
+  while (used + 96U < capacity && (long)used < payload_bytes) {
+    written = snprintf(json + used, capacity - used,
+                       " audit remediation evidence workflow row %ld gen %ld;",
+                       row, generation);
+    if (written <= 0 || (size_t)written >= capacity - used) {
+      free(json);
+      return NULL;
+    }
+    used += (size_t)written;
+  }
+  if (used + 3U >= capacity) {
+    free(json);
+    return NULL;
+  }
+  json[used++] = '"';
+  json[used++] = '}';
+  json[used] = '\0';
+  return json;
+}
+
+static int bench_pouch_seed_perf_docs(lc_client *client, long rows,
+                                      long generation, long payload_bytes,
+                                      lc_error *error) {
+  long row;
+
+  for (row = 0L; row < rows; ++row) {
+    lc_update_req req;
+    lc_update_res res;
+    lc_source *source;
+    char key[64];
+    char *json;
+    int rc;
+
+    json = bench_pouch_perf_document(row, generation, payload_bytes);
+    if (json == NULL) {
+      return 1;
+    }
+    source = NULL;
+    rc = lc_source_from_memory(json, strlen(json), &source, error);
+    if (rc == LC_OK) {
+      snprintf(key, sizeof(key), "doc/%08ld", row);
+      lc_update_req_init(&req);
+      memset(&res, 0, sizeof(res));
+      req.lease.namespace_name = "bench";
+      req.lease.key = key;
+      req.content_type = "application/json";
+      rc = client->update(client, &req, source, &res, error);
+      lc_update_res_cleanup(&res);
+    }
+    if (source != NULL) {
+      lc_source_close(source);
+    }
+    free(json);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  return LC_OK;
+}
+
+static int bench_pouch_perf_flush(lc_client *client, lc_error *error) {
+  lc_index_flush_req req;
+  lc_index_flush_res res;
+  int rc;
+
+  lc_index_flush_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.namespace_name = "bench";
+  req.mode = "wait";
+  rc = client->flush_index(client, &req, &res, error);
+  lc_index_flush_res_cleanup(&res);
+  return rc;
+}
+
+static int bench_pouch_perf_query(lc_client *client, const char *selector_lql,
+                                  const char *engine, int documents, long limit,
+                                  lc_error *error) {
+  lc_query_req req;
+  lc_query_res res;
+  int rc;
+
+  lc_query_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.namespace_name = "bench";
+  req.selector_lql = selector_lql;
+  req.engine = engine;
+  req.limit = limit > 0L ? limit : 1L;
+  if (documents) {
+    lc_sink *sink;
+
+    sink = NULL;
+    rc = lc_sink_to_discard(&sink, error);
+    if (rc == LC_OK) {
+      rc = client->query(client, &req, sink, &res, error);
+    }
+    if (sink != NULL) {
+      lc_sink_close(sink);
+    }
+  } else {
+    lc_query_key_handler handler;
+    bench_query_key_count key_count;
+
+    memset(&handler, 0, sizeof(handler));
+    memset(&key_count, 0, sizeof(key_count));
+    handler.begin = bench_query_key_begin;
+    handler.chunk = bench_query_key_chunk;
+    handler.end = bench_query_key_end;
+    rc = client->query_keys(client, &req, &handler, &key_count, &res, error);
+  }
+  lc_query_res_cleanup(&res);
+  return rc;
+}
+
+static long bench_pouch_perf_rows(long iterations) {
+  return iterations > 0L ? iterations : 128L;
+}
+
+static long bench_pouch_perf_payload_bytes(void) {
+  const char *value;
+  long parsed;
+
+  value = getenv("LOCKDC_POUCH_PERF_PAYLOAD_BYTES");
+  if (value == NULL || value[0] == '\0') {
+    return 4096L;
+  }
+  parsed = strtol(value, NULL, 10);
+  return parsed > 0L ? parsed : 4096L;
+}
+
+static int bench_pouch_perf_prepare(bench_pouch_perf_fixture *fixture,
+                                    long rows, long payload_bytes,
+                                    lc_error *error) {
+  int rc;
+
+  rc = bench_pouch_perf_fixture_open(fixture, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = bench_pouch_seed_perf_docs(fixture->client, rows, 0L, payload_bytes,
+                                  error);
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_flush(fixture->client, error);
+  }
+  return rc;
+}
+
+static int bench_pouch_perf_query_case(long iterations, const char *name,
+                                       const char *selector_lql,
+                                       const char *engine, int documents) {
+  bench_pouch_perf_fixture fixture;
+  lc_error error;
+  double start;
+  double elapsed;
+  long rows;
+  int rc;
+
+  lc_error_init(&error);
+  rows = bench_pouch_perf_rows(iterations);
+  memset(&fixture, 0, sizeof(fixture));
+  rc = bench_pouch_perf_prepare(&fixture, rows,
+                                bench_pouch_perf_payload_bytes(), &error);
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_query(fixture.client, selector_lql, engine, documents,
+                                rows, &error);
+  }
+  start = bench_now_seconds();
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_query(fixture.client, selector_lql, engine, documents,
+                                rows, &error);
+  }
+  elapsed = bench_now_seconds() - start;
+  printf("metric=%s rows=%ld crypto=%d seconds=%.6f per_row_us=%.3f rc=%d\n",
+         name, rows, bench_env_enabled("LOCKDC_POUCH_PERF_CRYPTO"), elapsed,
+         rows > 0L ? (elapsed * 1000000.0) / (double)rows : 0.0, rc);
+  bench_pouch_perf_fixture_close(&fixture);
+  lc_error_cleanup(&error);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_perf_index_docs(long iterations) {
+  return bench_pouch_perf_query_case(
+      iterations, "pouch-perf-index-docs",
+      "icontains{field=/narrative/summary,value=remediation}", "index", 1);
+}
+
+static int bench_pouch_perf_full_text_keys(long iterations) {
+  return bench_pouch_perf_query_case(iterations, "pouch-perf-full-text-keys",
+                                     "icontains{field=/...,value=audit}",
+                                     "index", 0);
+}
+
+static int bench_pouch_perf_full_text_reopen_keys(long iterations) {
+  bench_pouch_perf_fixture fixture;
+  lc_error error;
+  double start;
+  double elapsed;
+  long rows;
+  int rc;
+
+  lc_error_init(&error);
+  rows = bench_pouch_perf_rows(iterations);
+  memset(&fixture, 0, sizeof(fixture));
+  rc = bench_pouch_perf_prepare(&fixture, rows,
+                                bench_pouch_perf_payload_bytes(), &error);
+  if (fixture.client != NULL) {
+    fixture.client->close(fixture.client);
+    fixture.client = NULL;
+  }
+  if (rc == LC_OK) {
+    rc = bench_pouch_client_open_crypto(fixture.root, fixture.crypto_key,
+                                        &fixture.client, &error);
+  }
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_flush(fixture.client, &error);
+  }
+  start = bench_now_seconds();
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_query(fixture.client,
+                                "icontains{field=/...,value=audit}", "index",
+                                0, rows, &error);
+  }
+  elapsed = bench_now_seconds() - start;
+  printf("metric=pouch-perf-full-text-reopen-keys rows=%ld crypto=%d "
+         "seconds=%.6f per_row_us=%.3f rc=%d\n",
+         rows, bench_env_enabled("LOCKDC_POUCH_PERF_CRYPTO"), elapsed,
+         rows > 0L ? (elapsed * 1000000.0) / (double)rows : 0.0, rc);
+  bench_pouch_perf_fixture_close(&fixture);
+  lc_error_cleanup(&error);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_perf_scan_keys(long iterations) {
+  return bench_pouch_perf_query_case(
+      iterations, "pouch-perf-scan-keys",
+      "in{field=/workflow/stage,any=review|escalated}", "scan", 0);
+}
+
+static int bench_pouch_perf_flush_intermediate(long iterations) {
+  bench_pouch_perf_fixture fixture;
+  lc_error error;
+  double start;
+  double elapsed;
+  long rows;
+  int rc;
+
+  lc_error_init(&error);
+  rows = bench_pouch_perf_rows(iterations);
+  memset(&fixture, 0, sizeof(fixture));
+  rc = bench_pouch_perf_prepare(&fixture, rows,
+                                bench_pouch_perf_payload_bytes(), &error);
+  if (rc == LC_OK) {
+    rc = bench_pouch_seed_perf_docs(fixture.client, rows, 1L,
+                                    bench_pouch_perf_payload_bytes(), &error);
+  }
+  start = bench_now_seconds();
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_flush(fixture.client, &error);
+  }
+  elapsed = bench_now_seconds() - start;
+  printf("metric=pouch-perf-flush-intermediate rows=%ld crypto=%d "
+         "seconds=%.6f per_row_us=%.3f rc=%d\n",
+         rows, bench_env_enabled("LOCKDC_POUCH_PERF_CRYPTO"), elapsed,
+         rows > 0L ? (elapsed * 1000000.0) / (double)rows : 0.0, rc);
+  bench_pouch_perf_fixture_close(&fixture);
+  lc_error_cleanup(&error);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_perf_flush_reopen(long iterations) {
+  bench_pouch_perf_fixture fixture;
+  lc_error error;
+  double start;
+  double elapsed;
+  long rows;
+  int rc;
+
+  lc_error_init(&error);
+  rows = bench_pouch_perf_rows(iterations);
+  memset(&fixture, 0, sizeof(fixture));
+  rc = bench_pouch_perf_prepare(&fixture, rows,
+                                bench_pouch_perf_payload_bytes(), &error);
+  if (fixture.client != NULL) {
+    fixture.client->close(fixture.client);
+    fixture.client = NULL;
+  }
+  if (rc == LC_OK) {
+    rc = bench_pouch_client_open_crypto(fixture.root, fixture.crypto_key,
+                                        &fixture.client, &error);
+  }
+  start = bench_now_seconds();
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_flush(fixture.client, &error);
+  }
+  elapsed = bench_now_seconds() - start;
+  printf("metric=pouch-perf-flush-reopen rows=%ld crypto=%d seconds=%.6f "
+         "per_row_us=%.3f rc=%d\n",
+         rows, bench_env_enabled("LOCKDC_POUCH_PERF_CRYPTO"), elapsed,
+         rows > 0L ? (elapsed * 1000000.0) / (double)rows : 0.0, rc);
+  bench_pouch_perf_fixture_close(&fixture);
+  lc_error_cleanup(&error);
+  return rc == LC_OK ? 0 : 1;
 }
 
 static int bench_pouch_seed_query_docs(lc_client *client, long count,
@@ -543,6 +958,14 @@ static const bench_case *bench_cases(void) {
       {"stream-copy", 1000L, bench_stream_copy},
       {"pouch-open", 1000L, bench_pouch_open},
       {"pouch-namespace", 1000L, bench_pouch_namespace},
+      {"pouch-perf-index-docs", 128L, bench_pouch_perf_index_docs},
+      {"pouch-perf-full-text-keys", 128L, bench_pouch_perf_full_text_keys},
+      {"pouch-perf-full-text-reopen-keys", 128L,
+       bench_pouch_perf_full_text_reopen_keys},
+      {"pouch-perf-scan-keys", 128L, bench_pouch_perf_scan_keys},
+      {"pouch-perf-flush-intermediate", 128L,
+       bench_pouch_perf_flush_intermediate},
+      {"pouch-perf-flush-reopen", 128L, bench_pouch_perf_flush_reopen},
       {"pouch-query-eq-sparse-index-keys", 1024L,
        bench_pouch_query_eq_sparse_index_keys},
       {"pouch-query-eq-sparse-scan-keys", 1024L,

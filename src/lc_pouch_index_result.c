@@ -261,6 +261,7 @@ int lc_pouch_index_result_docid_list_sort_compact(
     lc_error *error) {
   size_t index;
   size_t write_index;
+  int sorted_unique;
 
   (void)allocator;
   if (list == NULL) {
@@ -269,6 +270,16 @@ int lc_pouch_index_result_docid_list_sort_compact(
                         NULL, NULL, NULL);
   }
   if (list->count <= 1U) {
+    return LC_OK;
+  }
+  sorted_unique = 1;
+  for (index = 1U; index < list->count; ++index) {
+    if (list->items[index - 1U].doc_id >= list->items[index].doc_id) {
+      sorted_unique = 0;
+      break;
+    }
+  }
+  if (sorted_unique) {
     return LC_OK;
   }
   qsort(list->items, list->count, sizeof(list->items[0]),
@@ -351,8 +362,12 @@ void lc_pouch_index_result_row_list_cleanup(
     return;
   }
   for (index = 0U; index < list->count; ++index) {
-    lc_free_with_allocator(allocator, list->items[index].key);
-    lc_free_with_allocator(allocator, list->items[index].key_hex);
+    if (list->items[index].owns_key) {
+      lc_free_with_allocator(allocator, list->items[index].key);
+    }
+    if (list->items[index].owns_key_hex) {
+      lc_free_with_allocator(allocator, list->items[index].key_hex);
+    }
   }
   lc_free_with_allocator(allocator, list->items);
   memset(list, 0, sizeof(*list));
@@ -424,6 +439,7 @@ int lc_pouch_index_result_row_list_add(
                         "failed to allocate pouch index result row key", NULL,
                         NULL, NULL);
   }
+  item->owns_key = 1;
   if (key_hex != NULL) {
     item->key_hex = lc_strdup_with_allocator(allocator, key_hex);
     if (item->key_hex == NULL) {
@@ -433,6 +449,7 @@ int lc_pouch_index_result_row_list_add(
                           "failed to allocate pouch index result row key hex",
                           NULL, NULL, NULL);
     }
+    item->owns_key_hex = 1;
   }
   item->doc_id = doc_id;
   item->version = version;

@@ -277,8 +277,15 @@ int lc_pouch_index_docid_set_subtract_sorted(
 
 void lc_pouch_index_doc_table_cleanup(const lc_allocator *allocator,
                                       lc_pouch_index_doc_table *table) {
+  size_t index;
+
   if (table == NULL) {
     return;
+  }
+  for (index = 0U; index < table->count; ++index) {
+    if (table->items[index].owns_key_hex) {
+      lc_free_with_allocator(allocator, (char *)table->items[index].key_hex);
+    }
   }
   lc_free_with_allocator(allocator, table->items);
   lc_free_with_allocator(allocator, table->owned_generation_bytes);
@@ -363,17 +370,86 @@ int lc_pouch_index_doc_table_append_sorted_unique(
   doc->bytes = bytes;
   doc->has_query_hidden = has_query_hidden ? 1 : 0;
   doc->query_hidden = query_hidden ? 1 : 0;
+  doc->owns_key_hex = 0;
+  table->sorted_by_key = 1;
   return LC_OK;
+}
+
+static int lc_pouch_index_doc_table_append_unique_impl(
+    lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
+    unsigned long bytes, int has_query_hidden, int query_hidden,
+    int copy_key_hex, int check_unique, unsigned long *doc_id,
+    const lc_allocator *allocator, lc_error *error) {
+  lc_pouch_index_doc *doc;
+  char *owned_key_hex;
+  size_t index;
+  int rc;
+
+  if (table == NULL || key_hex == NULL || key_hex[0] == '\0' ||
+      doc_id == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index doc table append requires table, key, and "
+                        "docID output",
+                        NULL, NULL, NULL);
+  }
+  if (check_unique) {
+    for (index = 0U; index < table->count; ++index) {
+      if (strcmp(table->items[index].key_hex, key_hex) == 0) {
+        return lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch index doc table rejects duplicate keys",
+                            NULL, NULL, "pouch");
+      }
+    }
+  }
+  rc = lc_pouch_index_doc_table_reserve(table, table->count + 1U, allocator,
+                                        error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  owned_key_hex = NULL;
+  if (copy_key_hex) {
+    owned_key_hex = lc_strdup_with_allocator(allocator, key_hex);
+    if (owned_key_hex == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch index doc table key", NULL,
+                          NULL, NULL);
+    }
+  }
+  *doc_id = (unsigned long)table->count;
+  doc = &table->items[table->count++];
+  doc->key_hex = copy_key_hex ? owned_key_hex : key_hex;
+  doc->version = version;
+  doc->bytes = bytes;
+  doc->has_query_hidden = has_query_hidden ? 1 : 0;
+  doc->query_hidden = query_hidden ? 1 : 0;
+  doc->owns_key_hex = copy_key_hex ? 1 : 0;
+  table->sorted_by_key = 0;
+  return LC_OK;
+}
+
+int lc_pouch_index_doc_table_append_unique(
+    lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
+    unsigned long bytes, int has_query_hidden, int query_hidden,
+    unsigned long *doc_id, const lc_allocator *allocator, lc_error *error) {
+  return lc_pouch_index_doc_table_append_unique_impl(
+      table, key_hex, version, bytes, has_query_hidden, query_hidden, 1, 1,
+      doc_id, allocator, error);
+}
+
+int lc_pouch_index_doc_table_append_owned(
+    lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
+    unsigned long bytes, int has_query_hidden, int query_hidden,
+    unsigned long *doc_id, const lc_allocator *allocator, lc_error *error) {
+  return lc_pouch_index_doc_table_append_unique_impl(
+      table, key_hex, version, bytes, has_query_hidden, query_hidden, 1, 0,
+      doc_id, allocator, error);
 }
 
 int lc_pouch_index_doc_table_find_key_hex(const lc_pouch_index_doc_table *table,
                                           const char *key_hex,
                                           unsigned long *doc_id, int *found,
                                           lc_error *error) {
-  size_t low;
-  size_t high;
-  size_t mid;
-  int cmp;
+  size_t index;
 
   if (table == NULL || key_hex == NULL || key_hex[0] == '\0' ||
       doc_id == NULL || found == NULL) {
@@ -383,20 +459,35 @@ int lc_pouch_index_doc_table_find_key_hex(const lc_pouch_index_doc_table *table,
                         NULL, NULL, NULL);
   }
   *found = 0;
-  low = 0U;
-  high = table->count;
-  while (low < high) {
-    mid = low + ((high - low) / 2U);
-    cmp = strcmp(key_hex, table->items[mid].key_hex);
-    if (cmp == 0) {
-      *doc_id = (unsigned long)mid;
-      *found = 1;
-      return LC_OK;
+  if (table->sorted_by_key) {
+    size_t low;
+    size_t high;
+    size_t mid;
+    int cmp;
+
+    low = 0U;
+    high = table->count;
+    while (low < high) {
+      mid = low + ((high - low) / 2U);
+      cmp = strcmp(key_hex, table->items[mid].key_hex);
+      if (cmp == 0) {
+        *doc_id = (unsigned long)mid;
+        *found = 1;
+        return LC_OK;
+      }
+      if (cmp < 0) {
+        high = mid;
+      } else {
+        low = mid + 1U;
+      }
     }
-    if (cmp < 0) {
-      high = mid;
-    } else {
-      low = mid + 1U;
+    return LC_OK;
+  }
+  for (index = 0U; index < table->count; ++index) {
+    if (strcmp(key_hex, table->items[index].key_hex) == 0) {
+      *doc_id = (unsigned long)index;
+      *found = 1;
+      break;
     }
   }
   return LC_OK;
@@ -677,7 +768,6 @@ static int lc_pouch_index_doc_generation_parse_bytes(
     int *valid, lc_error *error) {
   char *cursor;
   char *line;
-  char *previous_key;
   unsigned long version;
   unsigned long row_count;
   unsigned long row_hash;
@@ -729,7 +819,6 @@ static int lc_pouch_index_doc_generation_parse_bytes(
       row_hash != expected_row_hash) {
     goto done;
   }
-  previous_key = NULL;
   actual_count = 0UL;
   while ((line = lc_pouch_index_doc_generation_next_line(&cursor)) != NULL) {
     char *key;
@@ -747,8 +836,7 @@ static int lc_pouch_index_doc_generation_parse_bytes(
       goto done;
     }
     *rest++ = '\0';
-    if (!lc_pouch_index_doc_generation_hex_token_valid(key) ||
-        (previous_key != NULL && strcmp(previous_key, key) >= 0)) {
+    if (!lc_pouch_index_doc_generation_hex_token_valid(key)) {
       goto done;
     }
     consumed = 0;
@@ -759,14 +847,13 @@ static int lc_pouch_index_doc_generation_parse_bytes(
       goto done;
     }
     if (table != NULL) {
-      rc = lc_pouch_index_doc_table_append_sorted_unique(
-          table, key, version, doc_bytes, has_hidden, hidden, &doc_id,
+      rc = lc_pouch_index_doc_table_append_unique_impl(
+          table, key, version, doc_bytes, has_hidden, hidden, 0, 1, &doc_id,
           allocator, error);
       if (rc != LC_OK) {
         return rc;
       }
     }
-    previous_key = key;
     ++actual_count;
   }
   *valid = actual_count == row_count;
