@@ -16,6 +16,31 @@ durable logstore state.
 - [ ] Confirm there are no live compatibility readers, version-lineage decoders,
   old payload-file durability paths, or parallel old/new pouch implementations.
 
+## Go Disk Divergence Review
+
+- [ ] Decide whether Pouch replay should tolerate crash-truncated/corrupt segment
+  tails like Go disk, or whether fail-closed replay is the intended Pouch
+  behavior before release.
+- [ ] Decide whether Pouch needs first-class log record families for metadata and
+  objects, matching Go disk `Meta*` and `Object*` records, or whether current
+  internal-state namespace layering is the accepted Pouch boundary.
+- [ ] Confirm queue, lease, transaction, and attachment metadata may remain
+  text/binary payload formats inside state log records, or move their hot
+  metadata into binary record metadata if query/list/replay paths need Go-disk
+  style projection speed.
+- [ ] Evaluate whether Pouch needs Go disk-style fsync commit groups, pending
+  refs, and batch append visibility semantics, or whether synchronous
+  per-mutation fsync is accepted for the first Pouch release.
+- [ ] Validate Pouch compaction does not need Go disk's protected live-link
+  candidate filtering because Pouch rewrites all live refs into the installed
+  snapshot.
+- [ ] Audit payload ref parsing for local integer overflow and manifest
+  membership checks before accepting `container@offset:length` refs as the
+  Pouch-native equivalent of Go disk in-memory `recordRef`/`recordLink`.
+- [ ] Confirm Pouch's crypto AAD/context, based on namespace plus physical
+  payload ref, is the intended C-local equivalent of Go disk's logical
+  namespace/key object context.
+
 ## Implemented Initial Shape To Verify
 
 - [x] State payload bytes are stored as bounded spans inside segment/snapshot
