@@ -1,264 +1,531 @@
-# Pouch Storage Technical Specification
+# Pouch Storage Implementation Specification
 
-> Current status: this specification defines the initial Pouch storage
-> implementation. Pouch has no released compatibility contract and no migration
-> obligation for rejected pre-release layouts.
+This document is the implementation authority for the initial Pouch storage
+engine. Pouch has not shipped, so there is no compatibility obligation for any
+pre-release layout, record format, sidecar format, crypto descriptor, benchmark
+fixture, or transition name.
 
-## Decision
+The implementation target is a real segmented logstore. The current partial
+Pouch implementation is useful only as source material where it already matches
+this specification. It must not be preserved through compatibility layers,
+dual readers, legacy version branches, or "redesign" terminology.
 
-Pouch must be a real segmented logstore.
+## Reference Principle
 
-The rejected pre-release design, where namespace segments were effectively
-metadata/history records and state/object bytes lived in `payloads/` files, is
-not a valid Pouch format. Pouch stores durable payload bytes in log record
-payload areas inside segment/snapshot files, with refs expressed as segment
-identity plus payload offset and length.
+Go lockd disk is the reference for storage semantics because it has already
+solved the hard operational problems: append-only segment lifecycle, replay,
+manifest state, staged state promotion, payload refs, fsync grouping, scan
+summaries, compaction, and encryption placement.
 
-No compatibility layer is allowed for rejected layouts. Pouch is
-single-representation: no dual readers, no mixed roots, no open-time migration,
-and no branching between old and new Pouch record formats.
+Pouch is not Go lockd disk. It must remain a C storage engine with Pouch names,
+C-native structs, C error handling, and the dependencies available in
+liblockdc. It does not use protobuf and does not need byte-compatible `LOGD`
+records. Divergence is acceptable only when it preserves the same storage
+feature, durability property, and performance intent, and is a better local C
+implementation.
 
-## Reference
+Relevant Go disk files:
 
-Go lockd disk is the reference implementation for physical storage shape,
-durability semantics, replay, compaction, scan summaries, staged state links,
-and encryption placement. The relevant reference files are:
-
-- `../lockd/internal/storage/disk/logstore.go`
 - `../lockd/internal/storage/disk/logstore_record.go`
+- `../lockd/internal/storage/disk/logstore.go`
+- `../lockd/internal/storage/disk/logstore_support.go`
 - `../lockd/internal/storage/disk/logstore_compaction.go`
 - `../lockd/internal/storage/disk/staging.go`
 - `../lockd/internal/storage/disk/disk.go`
 
-Pouch remains a C storage engine and should use Pouch module names and C-local
-interfaces, but its physical behavior must match the proven logstore model.
+## Non-Negotiable Model
 
-## Storage Model
+Pouch stores production data inside namespace log records. It is not a
+metadata-only log with separate durable payload files.
 
-Each namespace owns append-only segment files. A mutation appends a typed record
-to the active segment. Records contain:
+Each namespace owns append-only segment files and installed snapshot files.
+Every durable mutation appends a typed binary record to the active segment or
+to a compaction snapshot. Records contain:
 
-- fixed binary header with magic/version/type/lengths/checksum fields;
-- normalized key bytes;
+- a fixed binary header for physical navigation and integrity;
+- a normalized key;
 - compact binary type-specific metadata;
-- optional payload bytes stored inline in the segment record.
+- an optional payload span stored in the same segment or snapshot file.
 
-State documents, object payloads, queue payload records, transaction records,
-and attachment/object data are all represented as log records or object records
-with payload spans in segment/snapshot files. Metadata records may be small and
-fully inline, but they are still log records.
+In-memory projections and query indexes are derived accelerators. They are
+rebuilt from the durable logstore. They must never become the authoritative
+storage format.
 
-In-memory projections are accelerators only. They are rebuilt by replaying
-segments/snapshots and must never be the authoritative source. Query indexes are
-derived artifacts and must be rebuildable from logstore state.
+There must be no `payloads/` directory for state or object durability. Any
+remaining payload-file implementation is rejected code, not an alternate Pouch
+format.
 
-## Payload Refs
+## Module Boundaries
 
-Live state/object projections must point to payload spans, not external payload
-files.
-A payload ref records:
+The implementation should introduce a private logstore core and make the
+existing public Pouch API a receiver shell over that core.
 
-- segment or snapshot identity;
-- payload offset;
-- payload length;
-- plaintext byte count;
-- cipher byte count when encrypted;
-- descriptor/material metadata when required;
-- state/object ETag and version metadata.
+Expected private boundaries:
 
-The fixed record header carries only physical record navigation and integrity:
-magic, format version, record type, flags/reserved bits, key length, metadata
-length, `u64` stored payload length, and stored-payload CRC. Logical storage
-facts such as generation/version, updated time, plaintext byte count, stored
-byte count, ETag, content type, query-hidden state, referenced-span metadata,
-and transform descriptor live in binary metadata so projections can be rebuilt
-without opening JSON or binary payload streams.
+- `lc_pouch_logstore.[ch]`: namespace lifecycle, segment/snapshot management,
+  append coordinator, replay, projections, refs, and read sources.
+- `lc_pouch_record.[ch]`: binary record header, binary metadata encoders,
+  decoders, validation, CRC, and fuzzable decode helpers.
+- `lc_pouch_manifest.[ch]`: append-only namespace manifest, incremental
+  refresh offsets, marker files, open/seal/snapshot/obsolete operations.
+- `lc_pouch_compaction.[h]`: candidate capture, protected link filtering,
+  snapshot build/install, obsolete cleanup, IO throttling.
+- `lc_pouch_transform.[h]` or equivalent: streaming crypto and compression
+  wrappers plus descriptor encode/decode.
+- Existing `lc_pouch_state.c`, query, queue, attachment, lease, and transaction
+  modules must call the core through explicit storage operations. They must not
+  parse log files directly or create alternate durable formats.
 
-Reads open a bounded source over the referenced segment span. Ordinary reads,
-scan validation, and document emission must stream over that source. Full
-payload materialization is allowed only for explicitly bounded inline helper
-cases.
+If the final file names differ, the same separation must still exist.
 
-## Record Families
+## Storage Layout
 
-Initial record families:
-
-- metadata put/delete;
-- state put/delete;
-- state link;
-- object put/delete;
-- queue records;
-- transaction decision/participant records;
-- retention/tombstone records as needed by the public API.
-
-State link records are required for staged promotion and compaction cases where
-a live state head must refer to a payload span protected in another segment or
-snapshot. Links must validate segment identity, offset, length, and checksum.
-They must not accept absolute paths, traversal, or unmanifested targets.
-
-## Segments And Replay
-
-Segments are append-only. Writers append to an active segment and roll over to a
-new segment when size thresholds require it. Sealed historical segments are not
-mutated by foreground writes.
-
-Replay must:
-
-- tolerate a crash-truncated tail according to Go disk semantics;
-- reject invalid record headers, impossible lengths, bad CRC/checksum, and bad
-  link targets;
-- apply generation/version rules so stale records cannot resurrect older state;
-- rebuild metadata, state, object, queue, transaction, retention, and query
-  projections from durable records;
-- keep reserved/internal namespaces isolated from public operations.
-
-## Compaction
-
-Compaction rewrites live records into a new compacted segment/snapshot and then
-installs it through the namespace lifecycle/manifest. Old segments become
-obsolete only after safe install.
-
-Compaction must preserve payload bytes and metadata, including descriptors,
-plaintext/cipher byte counts, ETags, versions, content types, query-hidden
-state, queue state, and transaction state. It must abort on validation drift
-instead of installing a snapshot built from stale segment inputs.
-
-Compaction cleanup is retryable and idempotent. Cleanup removes obsolete segment
-or snapshot files only after they are no longer referenced by the installed
-manifest/projection.
-
-## Crypto
-
-Pouch storage encryption is optional and disabled by default.
-
-When crypto is enabled, encryption belongs at the same storage boundary as Go
-lockd disk: log payload streams/records are encrypted at rest as they are
-written into the logstore. Pouch must not model encryption as separately
-encrypted state-document files outside the logstore.
-
-Crypto requirements:
-
-- plaintext and encrypted roots cannot mix;
-- opening an encrypted root without the correct key fails;
-- opening a plaintext root with crypto enabled fails unless an explicit future
-  migration tool exists;
-- plaintext byte counts, cipher byte counts, descriptors/material, and ETags
-  are preserved;
-- record context is authenticated as AAD/material in the same spirit as Go disk;
-- queue payloads, transaction payloads, attachment/object payloads, and state
-  payloads are covered according to their log record/object semantics.
-
-Queue message payloads and attachments are arbitrary binary data. They are not
-searchable JSON state documents, but they are still production data and must be
-encrypted at rest when the root is encrypted.
-
-## Query And Scan
-
-Searchable state is the logical JSON state payload referenced by the live state
-projection. Scan and indexed query code must operate over logstore projections,
-not external payload files.
-
-Scan behavior must follow Go disk shape:
-
-- page sorted metadata summaries;
-- filter hidden/staged/reserved rows from metadata before opening payloads;
-- open one payload span only when selector validation or document emission
-  requires it;
-- stream selector evaluation through `liblql`;
-- never materialize all candidate payloads;
-- preserve cursor semantics by proving whether another matching row exists.
-
-Indexed query behavior must remain indexed. If the selected engine is index,
-indexable selectors use postings/summary rows and must not silently fall back to
-scan. Derived index artifacts are rebuildable from logstore segments/snapshots.
-
-## Layout
-
-The exact C layout may differ from Go disk names, but it must reflect a real
-logstore. A representative layout is:
+Representative root layout:
 
 ```text
 root/
-  manifest
+  pouch.meta
   namespaces/
     <escaped-namespace>/
-      manifest
+      manifest.log
       markers/
+        writers/
       segments/
-        seg-00000000000000000001.log
-        seg-00000000000000000002.log
+        seg-<writer>-<monotonic-or-uuid>.log
       snapshots/
-        snapshot-00000000000000000002.log
+        snap-<writer>-<monotonic-or-uuid>.log
       index/
       queue-notify/
   locks/
 ```
 
-There must be no `payloads/` directory for state/object durability.
+`pouch.meta` records the root mode: plaintext, crypto, compression, and
+crypto+compression. Plaintext and transformed roots cannot mix. Opening a root
+with a different mode must fail. A future migration tool may deliberately
+rewrite a root, but the initial release does not contain that path.
 
-## Verification Requirements
+## Binary Record Header
 
-Tests must prove the physical storage model:
+Pouch uses a C-native binary header. It is not `LOGD`, not protobuf, and not a
+version lineage for rejected layouts.
 
-- state/object bytes are present as segment record payload spans;
-- no external state/object payload files are created;
-- refs point to valid segment/snapshot offsets and lengths;
-- reopen replay reconstructs live state from segment records;
-- large state/object payloads stream through segment spans;
-- multiple default-sized segments are produced under production-like load;
-- compaction preserves live payloads and removes only obsolete history;
-- crypto roots do not expose plaintext payload bytes in segment files;
-- corruption and truncation failures are detected.
+Required fields:
 
-Public API coverage must remain end-to-end through Pouch public APIs: acquire,
-get, get public, update, mutate, attachments, queues, transactions,
-query-keys, query-documents, flush-index, maintenance, reopen, scan, and indexed
-queries.
+- `magic`: fixed Pouch log magic, for example `PCHL`;
+- `format`: initial Pouch log format discriminator;
+- `type`: record family enum;
+- `flags`: record-local flags, currently reserved except for documented
+  transform or link bits if needed;
+- `key_len`: `uint32_t`;
+- `meta_len`: `uint32_t`;
+- `stored_payload_len`: `uint64_t`;
+- `payload_crc32`: CRC of stored payload bytes after compression/encryption;
+- `header_crc32` or reserved `uint32_t`: choose one deliberately and document
+  it in `lc_pouch_record.[ch]`.
 
-Fuzzing must cover record decode, replay, state links, scan/query paths,
-compaction metadata, and crypto descriptors/material.
+The header is for physical traversal and corruption detection. Logical facts
+belong in record metadata, where replay can inspect them without opening the
+payload.
 
-## Benchmark Requirements
+Record decoding must reject impossible lengths, overflow, unknown record
+types, short reads, bad CRC, invalid metadata length, invalid descriptor length,
+and invalid link payloads. Crash-tail handling is defined in the replay
+section.
 
-Production benchmarks must compare:
+## Record Families
+
+Pouch must support the same core durable families as Go disk:
+
+- metadata put/delete;
+- state put/delete;
+- state link;
+- object put/delete.
+
+Higher-level Pouch features map onto those families:
+
+- attachments are object records with object metadata;
+- queue message payloads are object or state-backed records with binary queue
+  metadata sufficient for replay/list/claim without parsing user payloads;
+- leases, transaction decisions, participants, retention markers, tombstones,
+  and namespace control records use metadata/state/object records as
+  appropriate, but their hot operational metadata must be binary and
+  projection-visible.
+
+Do not create text pseudo-records for hot storage facts. Human-readable strings
+are allowed for content type, key names, and diagnostics, not as the primary
+format for generation, byte counts, refs, queue state, transaction state, or
+crypto/compression descriptors.
+
+## Binary Metadata
+
+Metadata is type-specific and binary. Pouch does not use protobuf.
+
+All metadata that affects replay, scan, query, list, CAS, compaction, crypto,
+or cleanup must be available without reading or parsing the payload.
+
+Required metadata fields by family:
+
+- metadata put/delete: generation `uint64_t`, modified timestamp, metadata
+  etag/id, visibility bits as required by public state.
+- state put/link: generation `uint64_t`, modified timestamp, state etag,
+  content type or state kind if needed, plaintext byte count `uint64_t`,
+  stored byte count `uint64_t`, transform descriptor length and bytes,
+  query-hidden flag, staged/internal flag, and any summary fields needed to
+  scan without opening hidden rows.
+- state delete: generation `uint64_t`, modified timestamp, tombstone marker.
+- object put: generation `uint64_t`, modified timestamp, object etag, content
+  type, plaintext byte count `uint64_t`, stored byte count `uint64_t`,
+  transform descriptor length and bytes, object class bits for attachment,
+  queue payload, or internal object.
+- object delete: generation `uint64_t`, modified timestamp, tombstone marker.
+- state link: the state put metadata above plus a binary link payload or link
+  metadata containing segment/snapshot identity, payload offset `uint64_t`,
+  payload length `uint64_t`, and stored-payload CRC or equivalent validation.
+
+Go disk keeps plaintext/cipher sizes, descriptor bytes, generation, modified
+time, etag, and content type in metadata because those values are needed by hot
+paths. Pouch must preserve that property.
+
+## Payload Refs
+
+Live projections store typed refs, not strings.
+
+A ref contains:
+
+- record family and key;
+- segment or snapshot identity;
+- record offset `uint64_t`;
+- payload offset `uint64_t`;
+- stored payload length `uint64_t`;
+- plaintext byte count `uint64_t`;
+- stored byte count `uint64_t`;
+- payload CRC;
+- generation, modified timestamp, etag, content type, flags, and descriptor;
+- optional link target, represented as a validated structured ref.
+
+String forms such as `container@offset:length` are allowed only for diagnostics
+or tests. Durable refs and in-memory refs must be structured and overflow-safe.
+
+Link targets must be restricted to manifested segment/snapshot names. Absolute
+paths, traversal, unknown files, stale obsolete files, negative values, and
+integer overflow must fail.
+
+## Append And Commit Pipeline
+
+Pouch writes through a namespace append coordinator, not per-mutation ad hoc
+file writes.
+
+Required behavior:
+
+- hold the namespace writer lock while selecting the active segment and
+  allocating record offsets;
+- roll the active segment at the configured target size;
+- append small records inline in batches;
+- stream large payload records directly from the caller-provided reader through
+  transforms, hash/etag, and CRC into the segment without full materialization;
+- rewrite the header and metadata prefix only after final stored lengths,
+  descriptor, hash/etag, and CRC are known;
+- fsync in commit groups, deduplicating the same file within a group;
+- make refs visible in projections only after the commit group succeeds, except
+  for explicit no-sync modes with documented durability semantics;
+- make pending refs visible to the same logical commit group when needed for
+  CAS and staged promotion, matching Go disk's pending visibility semantics;
+- propagate fsync/write failure to every operation in the group.
+
+Go disk batches appends and fsync requests because per-write fsync dominates
+core lockd workloads. Pouch must implement the same performance intent in C.
+If the chosen C design uses a condition variable and append queue, it must have
+bounded memory and deterministic shutdown. If it uses synchronous opportunistic
+batching instead, benchmarks must prove it achieves the same class of behavior.
+
+Initial constants should mirror Go disk unless profiling proves a C-local
+change is better:
+
+- inline payload threshold: 1 MiB;
+- payload streaming buffer: 128 KiB;
+- append batch buffer cap: 1 MiB;
+- read file cache: 64 open segment/snapshot files;
+- fsync batch delay: approximately 2 ms;
+- commit max operations: configurable.
+
+## Streaming Requirement
+
+Streaming means real producer-to-consumer flow. Pouch must not serialize,
+encrypt, compress, or concatenate a complete large document into memory behind
+a streaming-looking API.
+
+Bounded chunk buffers are acceptable. Full-message buffering, temporary files
+as an implicit staging substitute, and whole-payload materialization are not.
+
+This applies to:
+
+- state writes;
+- object/attachment writes;
+- queue payload writes;
+- reads;
+- scan/query document emission;
+- compaction;
+- crypto;
+- compression.
+
+## Replay And Refresh
+
+Replay rebuilds projections from installed snapshots and non-obsolete segments.
+
+Required behavior:
+
+- read namespace manifest incrementally using a persisted in-memory offset;
+- use marker files to detect other writers where multi-writer refresh is
+  supported;
+- allow single-writer mode to skip unnecessary marker scans;
+- order installed snapshot first, then live non-obsolete segments;
+- apply records by generation so stale writes cannot resurrect older state;
+- track each segment's last good read offset and avoid reading incomplete
+  active segment tails;
+- tolerate crash-truncated tails by stopping at the last complete valid record;
+- never apply a partial record or bad-CRC payload;
+- validate link targets against manifested segment/snapshot state before
+  installing linked refs;
+- rebuild metadata, state, object, queue, transaction, lease, retention, and
+  query-visible projections from log records.
+
+Open/corrupt-tail semantics must be explicit in tests. The implementation
+should follow Go disk's operational intent: a crash tail must not make the
+whole namespace unreadable, but corrupt data must not be silently applied.
+
+## Manifest And Markers
+
+Each namespace has an append-only manifest. It records at least:
+
+- active segment open;
+- active segment seal;
+- snapshot install;
+- obsolete segment;
+- obsolete snapshot.
+
+Manifest refresh consumes only new entries where possible. Snapshot install or
+obsolete changes reset the affected replay state so projections cannot keep
+stale refs.
+
+Malformed manifest entries are ignored only where Go disk intentionally treats
+them as non-authoritative append noise. Any behavior here must be tested and
+documented in code comments because manifest policy is a durability decision.
+
+Writer marker files must be scoped under the namespace and must not leak
+storage-engine terminology from Go disk into the public Pouch API.
+
+## Read Path
+
+Reads open bounded sources over segment/snapshot payload spans. The read path
+must use an LRU cache for open segment/snapshot files and `pread`-style bounded
+reads where available.
+
+Required behavior:
+
+- read by structured ref, not by reparsing a string path;
+- verify span bounds against the known segment/snapshot size;
+- expose payload readers that stream transforms in the correct order;
+- return metadata from projections without opening payload bytes;
+- avoid opening hidden/staged/reserved rows for scan summaries;
+- keep public state, private state, attachment/object, queue, and transaction
+  reads on the same logstore primitives.
+
+## Scan And Query
+
+Scan and indexed query operate over logstore projections and payload spans.
+
+Scan requirements:
+
+- walk sorted metadata summaries;
+- skip hidden, staged, reserved, and deleted rows before opening payloads;
+- open a payload span only when selector evaluation or document emission
+  requires it;
+- stream selector evaluation through `liblql`;
+- prove `has_more` cursor state by checking whether another matching row exists;
+- never materialize all candidate documents.
+
+Indexed query requirements:
+
+- indexable selectors use indexes when the selected engine is index;
+- indexed execution must not silently fall back to scan;
+- index sidecars are derived artifacts rebuilt from logstore projections;
+- index flush must be incremental and generation-aware, matching Go disk's
+  performance intent rather than rebuilding entire sidecars on each flush;
+- full-text search must cover text in the full JSON document, including nested
+  fields and long text fields, through the selected indexed engine.
+
+## Staged State
+
+Staged state uses logstore records, not separate payload files.
+
+Promotion must follow Go disk's solved shape:
+
+- staged payload writes create normal state records under a staging key;
+- promotion CAS-checks the destination and staged keys;
+- promotion appends a state link at the destination pointing at the staged
+  payload span;
+- promotion appends a delete/tombstone for the staging key;
+- compaction treats live links as protected until they are rewritten safely;
+- link refs preserve etag, descriptor, plaintext byte count, stored byte count,
+  and transform state.
+
+This avoids copying staged payload bytes during promotion and preserves
+large-payload performance.
+
+## Crypto And Compression
+
+Crypto is optional and disabled by default. Compression is optional and disabled
+by default. A transformed root cannot be reopened in plaintext mode, and a
+plaintext root cannot be reopened as transformed without a future explicit
+migration tool.
+
+Transforms belong at the log payload storage boundary. They are streaming
+wrappers around payload bytes written into segment/snapshot records.
+
+Required behavior:
+
+- derive per-record material from the root key and a stable logical context;
+- do not include physical segment offset in the authenticated context unless
+  compaction deliberately remints descriptors;
+- preserve plaintext byte count, stored byte count, descriptor bytes, etag, and
+  payload CRC;
+- authenticate record class, namespace, key, generation, and transform metadata
+  as associated data where the provider supports it;
+- fail closed on descriptor corruption, wrong key, tampered ciphertext, or
+  invalid transform ordering;
+- encrypt production data at rest: state payloads, attachment/object payloads,
+  queue message payloads, and transaction payloads where they contain user or
+  production data;
+- keep searchable metadata and query artifacts free of plaintext user payloads
+  unless the root mode explicitly defines and accepts that leakage.
+
+Compression runs before encryption on writes and after decryption on reads.
+zlib may be used. Compression must be streaming and bounded. Small payloads may
+skip compression when the descriptor records that no compression was applied.
+
+Compaction must copy stored payload bytes when the descriptor remains valid.
+It must not decrypt/re-encrypt or decompress/recompress every live record merely
+because its physical segment changes. If a future transform requires reminting
+descriptors during compaction, that is a deliberate new behavior with its own
+benchmarks and tests.
+
+## Compaction
+
+Compaction is a namespace lifecycle operation. It is not a full-cache dump.
+
+Required behavior:
+
+- load manifest, snapshots, and segments before capture;
+- choose candidates from installed snapshot plus sealed non-obsolete segments;
+- exclude the active segment;
+- compute reclaimable bytes;
+- enforce configurable `min_segments`, `min_reclaimable_bytes`, interval,
+  delete grace, and optional IO throttle;
+- detect live state links that point into candidate files and protect those
+  files until the links can be rewritten safely;
+- capture current refs from meta, state, and object projections in deterministic
+  key order;
+- build a temp snapshot from captured refs using streaming payload readers;
+- copy stored payload bytes where transform descriptors remain valid;
+- fsync the snapshot file;
+- validate that captured refs are still current before install;
+- rename temp snapshot into place;
+- append manifest entries for snapshot install and obsolete files;
+- update projections to new refs only after manifest install succeeds;
+- delete obsolete files only after delete grace and only if no live refs or
+  protected links remain.
+
+Validation drift must abandon the snapshot without installing it. Cleanup must
+be retryable and idempotent.
+
+## Public API Coverage
+
+Every Pouch behavior is exercised through the public Pouch API or public
+storage API boundary, matching how Go lockd disk is benchmarked and tested.
+Tests and benchmarks must not use background magic or private mutation helpers
+to make Pouch look faster or more correct than the public engine.
+
+Coverage must include:
+
+- acquire, release, update, mutate, get, and get public;
+- state write/read/reopen/delete;
+- staged state promote/discard;
+- attachments and object payloads;
+- queue publish/claim/ack/retry/dead-letter where supported by liblockdc;
+- transaction prepare/commit/discard paths;
+- query keys, query documents, scan, indexed query, full-text query, and index
+  flush;
+- maintenance and compaction;
+- crypto, compression, and crypto+compression roots;
+- multi-segment production-size datasets using default segment size.
+
+## Benchmarks
+
+Production benchmarks compare:
 
 - Pouch plaintext;
 - Pouch crypto;
+- Pouch compression where relevant;
+- Pouch crypto+compression where relevant;
 - Go lockd disk without crypto.
 
-Benchmarks must exercise repeated writes, reads, acquire/release/update, queue
-roundtrips, attachment/object operations, scan queries, indexed queries,
-full-text queries, compaction, reopen, multi-segment replay, and abusive
-production-like overcapacity scenarios.
+Benchmarks must include realistic and abusive workloads:
 
-Acceptance requires Pouch to beat Go lockd disk on every production metric
-unless a specific exception is explicitly accepted.
+- deep nested JSON documents;
+- long summary/description/body text fields;
+- mixed small, medium, and large state payloads;
+- repeated acquire/release/update loops;
+- get/get-public/read-many;
+- scan selectors;
+- indexed selectors;
+- full-text search over entire documents;
+- queue roundtrips;
+- attachment/object writes and reads;
+- staged state promotion;
+- compaction over many default-sized segments;
+- reopen and multi-segment replay;
+- overcapacity patterns with churn, deletes, updates, and stale history.
 
-## Implementation Order
+Acceptance target: Pouch plaintext and Pouch crypto beat Go lockd disk without
+crypto on every production metric unless a specific exception is explicitly
+accepted with evidence. Crypto overhead within Pouch should stay near the
+plaintext baseline for indexed and metadata-heavy operations.
 
-1. Study and map Go disk logstore semantics to Pouch C module boundaries.
-2. Replace Pouch persistence with true segment record append/read/replay.
-3. Remove external payload-file state/object durability code.
-4. Rebuild payload refs, reads, staged links, and compaction around segment
-   spans.
-5. Reattach metadata, queues, transactions, attachments/objects, and retention
-   to the logstore.
-6. Reattach query/index/scan to logstore projections and segment-span reads.
-7. Rebuild crypto at the log payload boundary.
-8. Delete dead code left by the cutover, including external payload helpers,
-   old metadata-only segment refs, compatibility branches, stale fixtures,
-   stale benchmarks, and rejected-design terminology.
-9. Audit Pouch names and boundaries so no `pouch-redesign`, compatibility,
-   company-layer, disk-conflated, or temporary transition terminology remains.
-10. Run focused tests and benchmarks only after the full representation cutover
-   is implemented.
-11. Run full tests, fuzzing, benchmarks, review, and parity gates after the
-   clean cutover is complete.
+## Fuzzing And Failure Modes
 
-## Non-Goals
+Fuzzing and failure tests must cover:
 
-- No compatibility with rejected Pouch payload-file layouts.
-- No migration tool in the first corrected implementation.
-- No parallel old/new Pouch code paths.
-- No optimizing rejected payload-file designs.
-- No hidden fallback from index to scan when the selected engine is indexed.
+- record header decode;
+- metadata decode for every family;
+- state link decode and target validation;
+- manifest replay;
+- crash-truncated segment tails;
+- bad CRC and malformed lengths;
+- replay generation ordering;
+- compaction capture/install/cleanup metadata;
+- transform descriptor decode;
+- crypto authentication failure;
+- compression corruption;
+- scan/query selector paths;
+- index sidecar corruption and rebuild.
+
+Fuzzing must run with plaintext and transformed roots.
+
+## Cleanup Requirements
+
+The implementation cutover must remove rejected-code paths in the same slice:
+
+- external state/object payload durability helpers;
+- text hot-metadata parsers for storage facts;
+- string payload refs as durable/in-memory authority;
+- full-cache compaction dump logic;
+- per-mutation fsync-only append paths where batching is required;
+- hidden scan materialization paths;
+- index rebuild-on-every-flush paths;
+- compatibility branches for unreleased Pouch layouts;
+- stale tests, fixtures, benchmarks, docs, and names such as
+  `pouch-redesign`, compatibility layers, company layers, and disk-conflated
+  terminology.
+
+Pouch may mention Go disk in docs and comments only as a reference. Public API,
+file names, errors, and durable Pouch metadata must use Pouch terminology.
