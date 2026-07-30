@@ -31,6 +31,247 @@ struct lockdc_pouch_bench_fixture {
 static char *lockdc_bench_document(long row, long generation,
                                    long payload_bytes, size_t *out_len);
 
+static const char *lockdc_bench_tenant_tier(long row) {
+  if ((row % 11L) == 0L) {
+    return "enterprise";
+  }
+  if ((row % 3L) == 0L) {
+    return "business";
+  }
+  return "standard";
+}
+
+static const char *lockdc_bench_region(long row) {
+  return (row % 3L) == 0L ? "us" : (row % 3L) == 1L ? "eu" : "apac";
+}
+
+static const char *lockdc_bench_workflow_stage(long row) {
+  return (row % 6L) == 0L   ? "ingest"
+         : (row % 6L) == 1L ? "review"
+         : (row % 6L) == 2L ? "approve"
+         : (row % 6L) == 3L ? "escalated"
+         : (row % 6L) == 4L ? "settled"
+                            : "archive";
+}
+
+static const char *lockdc_bench_team(long row) {
+  return (row % 5L) == 0L ? "risk" : (row % 2L) == 0L ? "platform" : "ops";
+}
+
+static const char *lockdc_bench_priority(long row) {
+  return (row % 13L) == 0L ? "critical" : (row % 4L) == 0L ? "high"
+                                                            : "normal";
+}
+
+static const char *lockdc_bench_source(long row) {
+  return (row % 3L) == 0L ? "api" : (row % 3L) == 1L ? "batch" : "worker";
+}
+
+static const char *lockdc_bench_message(long row) {
+  return (row % 8L) == 0L ? "timeout" : "ordinary";
+}
+
+static const char *lockdc_bench_narrative_summary(long row) {
+  return (row % 8L) == 0L
+             ? "timeout remediation required for customer escalation with "
+               "repeated queue delivery delays, partial worker retries, owner "
+               "handoff notes, and operational impact across billing, "
+               "provisioning, audit trail, and downstream reconciliation "
+               "services"
+             : "standard production summary with customer context, processing "
+               "history, operator observations, reconciliation status, retry "
+               "notes, audit trail references, and downstream service health "
+               "annotations";
+}
+
+static const char *lockdc_bench_narrative_description(void) {
+  return "long production description capturing the full audit trail, workflow "
+         "transitions, validation notes, customer-visible symptoms, previous "
+         "remediation attempts, backoffice comments, service ownership history, "
+         "deployment context, business priority, compliance review markers, and "
+         "expected follow-up actions for operators and automated reconciliation "
+         "jobs";
+}
+
+static const char *lockdc_bench_operator_notes(long row) {
+  return (row % 13L) == 0L
+             ? "operator notes include critical escalation context, manual "
+               "override history, cross-team review comments, incident "
+               "timeline, retry budget exhaustion notes, and final remediation "
+               "checklist for the current production workflow"
+             : "operator notes include routine triage comments, observed state "
+               "transitions, queue consumer handoff details, attachment review "
+               "status, replay expectations, and post-processing verification "
+               "notes";
+}
+
+static int lockdc_bench_bytes_contains(const void *bytes, size_t length,
+                                       const char *needle) {
+  const unsigned char *haystack;
+  size_t needle_len;
+  size_t index;
+
+  if (bytes == NULL || needle == NULL) {
+    return 0;
+  }
+  needle_len = strlen(needle);
+  if (needle_len == 0U || needle_len > length) {
+    return 0;
+  }
+  haystack = (const unsigned char *)bytes;
+  for (index = 0U; index + needle_len <= length; ++index) {
+    if (memcmp(haystack + index, needle, needle_len) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int lockdc_bench_expect_contains(const void *bytes, size_t length,
+                                        const char *snippet,
+                                        const char *label, lc_error *error) {
+  (void)label;
+  (void)error;
+  if (lockdc_bench_bytes_contains(bytes, length, snippet)) {
+    return LC_OK;
+  }
+  return LC_ERR_INVALID;
+}
+
+static int lockdc_bench_validate_document_fields(const void *bytes,
+                                                 size_t length, long row,
+                                                 long generation,
+                                                 lc_error *error) {
+  char snippet[2048];
+  int written;
+  int rc;
+
+  if (bytes == NULL || length == 0U) {
+    (void)error;
+    return LC_ERR_INVALID;
+  }
+  written = snprintf(snippet, sizeof(snippet), "\"value\":%ld", row);
+  if (written <= 0 || (size_t)written >= sizeof(snippet)) {
+    return LC_ERR_INVALID;
+  }
+  rc = lockdc_bench_expect_contains(bytes, length, snippet, "value", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  written =
+      snprintf(snippet, sizeof(snippet), "\"generation\":%ld", generation);
+  if (written <= 0 || (size_t)written >= sizeof(snippet)) {
+    return LC_ERR_INVALID;
+  }
+  rc = lockdc_bench_expect_contains(bytes, length, snippet, "generation",
+                                    error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  written = snprintf(
+      snippet, sizeof(snippet),
+      "\"tenant\":{\"id\":\"tenant-%03ld\",\"tier\":\"%s\","
+      "\"region\":\"%s\"}",
+      row % 47L, lockdc_bench_tenant_tier(row), lockdc_bench_region(row));
+  if (written <= 0 || (size_t)written >= sizeof(snippet)) {
+    return LC_ERR_INVALID;
+  }
+  rc = lockdc_bench_expect_contains(bytes, length, snippet, "tenant", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  written = snprintf(
+      snippet, sizeof(snippet),
+      "\"workflow\":{\"stage\":\"%s\",\"attempt\":%ld,"
+      "\"owner\":{\"team\":\"%s\",\"user\":\"user-%05ld\"}}",
+      lockdc_bench_workflow_stage(row), generation + 1L,
+      lockdc_bench_team(row), row % 10000L);
+  if (written <= 0 || (size_t)written >= sizeof(snippet)) {
+    return LC_ERR_INVALID;
+  }
+  rc = lockdc_bench_expect_contains(bytes, length, snippet, "workflow", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  written = snprintf(
+      snippet, sizeof(snippet),
+      "\"risk\":{\"score\":%ld,\"summary\":\"%s risk signal for production "
+      "timeout workflow %ld\"}",
+      (row * 37L) % 100L, lockdc_bench_message(row), row);
+  if (written <= 0 || (size_t)written >= sizeof(snippet)) {
+    return LC_ERR_INVALID;
+  }
+  rc = lockdc_bench_expect_contains(bytes, length, snippet, "risk", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  written = snprintf(
+      snippet, sizeof(snippet),
+      "\"narrative\":{\"summary\":\"%s\",\"description\":\"%s\","
+      "\"operator_notes\":\"%s\"}",
+      lockdc_bench_narrative_summary(row),
+      lockdc_bench_narrative_description(), lockdc_bench_operator_notes(row));
+  if (written <= 0 || (size_t)written >= sizeof(snippet)) {
+    return LC_ERR_INVALID;
+  }
+  rc = lockdc_bench_expect_contains(bytes, length, snippet, "narrative",
+                                    error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  written = snprintf(
+      snippet, sizeof(snippet),
+      "\"details\":{\"message\":\"%s production benchmark document %ld\","
+      "\"attributes\":{\"priority\":\"%s\",\"source\":\"%s\","
+      "\"schema_version\":3}}",
+      lockdc_bench_message(row), row, lockdc_bench_priority(row),
+      lockdc_bench_source(row));
+  if (written <= 0 || (size_t)written >= sizeof(snippet)) {
+    return LC_ERR_INVALID;
+  }
+  rc = lockdc_bench_expect_contains(bytes, length, snippet, "details", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  written =
+      snprintf(snippet, sizeof(snippet),
+               "\"payload\":\" audit remediation evidence workflow row %ld gen "
+               "%ld;",
+               row, generation);
+  if (written <= 0 || (size_t)written >= sizeof(snippet)) {
+    return LC_ERR_INVALID;
+  }
+  return lockdc_bench_expect_contains(bytes, length, snippet, "payload", error);
+}
+
+static long lockdc_bench_expected_query_matches(const char *scenario,
+                                                long rows) {
+  long row;
+  long count;
+
+  if (rows <= 0L) {
+    return 0L;
+  }
+  if (scenario == NULL || strcmp(scenario, "RangeHalf") == 0 ||
+      strcmp(scenario, "NarrativeDescription") == 0 ||
+      strcmp(scenario, "FullTextAny") == 0) {
+    return rows;
+  }
+  count = 0L;
+  for (row = 0L; row < rows; ++row) {
+    if (strcmp(scenario, "NarrativeSummary") == 0) {
+      if ((row % 8L) == 0L) {
+        ++count;
+      }
+    } else if (strcmp(scenario, "WorkflowEscalated") == 0) {
+      if ((row % 6L) == 1L || (row % 6L) == 3L) {
+        ++count;
+      }
+    }
+  }
+  return count;
+}
+
 static uint64_t lockdc_bench_now_ns(void) {
   struct timespec ts;
 
@@ -314,10 +555,18 @@ static char *lockdc_bench_document(long row, long generation,
   const char *narrative_summary;
   const char *narrative_description;
   const char *operator_notes;
+  const char payload_prefix[] = ",\"payload\":\"";
+  const char payload_suffix[] = "\"}";
   char prefix[4096];
+  char chunk[128];
   size_t target;
   size_t prefix_len;
-  size_t pad_len;
+  size_t payload_len;
+  size_t payload_end;
+  size_t payload_prefix_len;
+  size_t payload_suffix_len;
+  size_t json_len;
+  size_t chunk_len;
   char *json;
   int written;
 
@@ -407,17 +656,48 @@ static char *lockdc_bench_document(long row, long generation,
     return NULL;
   }
   prefix_len = (size_t)written;
-  pad_len = target > prefix_len + 1U ? target - prefix_len - 1U : 32U;
-  json = (char *)malloc(prefix_len + pad_len + 2U);
+  payload_prefix_len = strlen(payload_prefix);
+  payload_suffix_len = strlen(payload_suffix);
+  if (target > prefix_len + payload_prefix_len + payload_suffix_len) {
+    payload_len = target - prefix_len - payload_prefix_len - payload_suffix_len;
+  } else {
+    payload_len = 32U;
+  }
+  if (payload_len < 32U) {
+    payload_len = 32U;
+  }
+  json = (char *)malloc(prefix_len + payload_prefix_len + payload_len +
+                        payload_suffix_len + 1U);
   if (json == NULL) {
     return NULL;
   }
-  memcpy(json, prefix, prefix_len);
-  memset(json + prefix_len, ' ', pad_len);
-  json[prefix_len + pad_len] = '}';
-  json[prefix_len + pad_len + 1U] = '\0';
+  json_len = 0U;
+  memcpy(json + json_len, prefix, prefix_len);
+  json_len += prefix_len;
+  memcpy(json + json_len, payload_prefix, payload_prefix_len);
+  json_len += payload_prefix_len;
+  payload_end = json_len + payload_len;
+  written = snprintf(chunk, sizeof(chunk),
+                     " audit remediation evidence workflow row %ld gen %ld;",
+                     row, generation);
+  if (written <= 0 || (size_t)written >= sizeof(chunk)) {
+    free(json);
+    return NULL;
+  }
+  chunk_len = (size_t)written;
+  while (json_len + chunk_len <= payload_end) {
+    memcpy(json + json_len, chunk, chunk_len);
+    json_len += chunk_len;
+  }
+  if (json_len < payload_end) {
+    memset(json + json_len, ' ', payload_end - json_len);
+    json_len = payload_end;
+  }
+  memcpy(json + json_len, payload_suffix, payload_suffix_len);
+  json_len += payload_suffix_len;
+  json[json_len] = '\0';
   if (out_len != NULL) {
-    *out_len = prefix_len + pad_len + 1U;
+    *out_len = json_len;
   }
   return json;
 }
@@ -454,20 +734,31 @@ static int lockdc_bench_update_lease(lc_lease *lease, const char *json,
   return rc;
 }
 
-static int lockdc_bench_read_key(lc_client *client, const char *key,
-                                 lc_error *error) {
+static int lockdc_bench_read_key(lc_client *client, const char *key, long row,
+                                 long generation, lc_error *error) {
   lc_get_opts opts;
   lc_get_res res;
   lc_sink *sink;
+  const void *bytes;
+  size_t length;
   int rc;
 
   memset(&opts, 0, sizeof(opts));
   memset(&res, 0, sizeof(res));
   opts.public_read = 1;
   sink = NULL;
+  bytes = NULL;
+  length = 0U;
   rc = lc_sink_to_memory(&sink, error);
   if (rc == LC_OK) {
     rc = client->get(client, key, &opts, sink, &res, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+  }
+  if (rc == LC_OK) {
+    rc = lockdc_bench_validate_document_fields(bytes, length, row, generation,
+                                               error);
   }
   if (sink != NULL) {
     lc_sink_close(sink);
@@ -476,10 +767,13 @@ static int lockdc_bench_read_key(lc_client *client, const char *key,
   return rc;
 }
 
-static int lockdc_bench_read_lease(lc_lease *lease, lc_error *error) {
+static int lockdc_bench_read_lease(lc_lease *lease, long row, long generation,
+                                   lc_error *error) {
   lc_get_opts opts;
   lc_get_res res;
   lc_sink *sink;
+  const void *bytes;
+  size_t length;
   int rc;
 
   if (lease == NULL) {
@@ -488,9 +782,18 @@ static int lockdc_bench_read_lease(lc_lease *lease, lc_error *error) {
   lc_get_opts_init(&opts);
   memset(&res, 0, sizeof(res));
   sink = NULL;
+  bytes = NULL;
+  length = 0U;
   rc = lc_sink_to_memory(&sink, error);
   if (rc == LC_OK) {
     rc = lease->get(lease, sink, &opts, &res, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+  }
+  if (rc == LC_OK) {
+    rc = lockdc_bench_validate_document_fields(bytes, length, row, generation,
+                                               error);
   }
   if (sink != NULL) {
     lc_sink_close(sink);
@@ -509,6 +812,8 @@ static int lockdc_bench_attach_and_read(lc_lease *lease, long row,
   lc_attachment_get_res get_res;
   lc_source *source;
   lc_sink *sink;
+  const void *bytes;
+  size_t length;
   int rc;
 
   memset(payload, (int)('A' + (row % 26L)), sizeof(payload));
@@ -534,9 +839,19 @@ static int lockdc_bench_attach_and_read(lc_lease *lease, long row,
   memset(&get_res, 0, sizeof(get_res));
   get_req.selector.name = name;
   sink = NULL;
+  bytes = NULL;
+  length = 0U;
   rc = lc_sink_to_memory(&sink, error);
   if (rc == LC_OK) {
     rc = lease->get_attachment(lease, &get_req, sink, &get_res, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+  }
+  if (rc == LC_OK &&
+      (length != sizeof(payload) || memcmp(bytes, payload, sizeof(payload)) != 0)) {
+    (void)error;
+    rc = LC_ERR_INVALID;
   }
   if (sink != NULL) {
     lc_sink_close(sink);
@@ -548,8 +863,10 @@ static int lockdc_bench_attach_and_read(lc_lease *lease, long row,
 static int lockdc_bench_queue_roundtrip(lc_client *client, long messages,
                                         lockdc_pouch_bench_result *out,
                                         lc_error *error) {
+  long dequeued;
   long i;
 
+  dequeued = 0L;
   for (i = 0; i < messages; ++i) {
     char payload[128];
     lc_enqueue_req enqueue_req;
@@ -591,6 +908,7 @@ static int lockdc_bench_queue_roundtrip(lc_client *client, long messages,
     lc_dequeue_batch_res batch;
     size_t index;
     int rc;
+    int saw_message;
 
     lc_dequeue_req_init(&dequeue_req);
     memset(&batch, 0, sizeof(batch));
@@ -609,16 +927,67 @@ static int lockdc_bench_queue_roundtrip(lc_client *client, long messages,
       lc_dequeue_batch_cleanup(&batch);
       break;
     }
+    saw_message = 0;
     for (index = 0U; index < batch.count; ++index) {
-      if (batch.messages[index] != NULL &&
-          batch.messages[index]->ack(batch.messages[index], error) != LC_OK) {
+      lc_message *message;
+      char expected[128];
+      lc_sink *sink;
+      const void *bytes;
+      size_t length;
+      int written;
+
+      message = batch.messages[index];
+      if (message == NULL) {
+        continue;
+      }
+      saw_message = 1;
+      written = snprintf(expected, sizeof(expected),
+                         "{\"message\":%ld,\"kind\":\"production\"}",
+                         dequeued);
+      if (written <= 0 || (size_t)written >= sizeof(expected)) {
+        lc_dequeue_batch_cleanup(&batch);
+        return LC_ERR_INVALID;
+      }
+      sink = NULL;
+      bytes = NULL;
+      length = 0U;
+      rc = lc_sink_to_memory(&sink, error);
+      if (rc == LC_OK) {
+        rc = message->write_payload(message, sink, NULL, error);
+      }
+      if (rc == LC_OK) {
+        rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+      }
+      if (rc == LC_OK && (length != strlen(expected) ||
+                          memcmp(bytes, expected, length) != 0)) {
+        (void)error;
+        rc = LC_ERR_INVALID;
+      }
+      if (sink != NULL) {
+        lc_sink_close(sink);
+      }
+      if (rc != LC_OK) {
+        lc_dequeue_batch_cleanup(&batch);
+        return rc;
+      }
+      if (message->ack(message, error) != LC_OK) {
         lc_dequeue_batch_cleanup(&batch);
         return error != NULL && error->code != LC_OK ? error->code
                                                      : LC_ERR_INVALID;
       }
+      ++dequeued;
       batch.messages[index] = NULL;
     }
+    if (!saw_message) {
+      lc_dequeue_batch_cleanup(&batch);
+      (void)error;
+      return LC_ERR_INVALID;
+    }
     lc_dequeue_batch_cleanup(&batch);
+  }
+  if (dequeued != messages) {
+    (void)error;
+    return LC_ERR_INVALID;
   }
   return LC_OK;
 }
@@ -1070,7 +1439,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
     }
     if ((row % 32L) == 0L) {
       phase_start = lockdc_bench_now_ns();
-      rc = lockdc_bench_read_lease(lease, &error);
+      rc = lockdc_bench_read_lease(lease, row, updates_per_key - 1L, &error);
       if (rc != LC_OK) {
         lease->close(lease);
         goto done;
@@ -1136,10 +1505,10 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   if (rc != LC_OK) {
     goto done;
   }
-  if (out->rows <= 0L) {
+  if (out->rows != lockdc_bench_expected_query_matches("RangeHalf", rows)) {
     rc = LC_ERR_INVALID;
     snprintf(out->error, sizeof(out->error),
-             "pouch production RangeHalf index query matched no rows");
+             "pouch production RangeHalf index query matched %ld rows", out->rows);
     lc_error_cleanup(&error);
     lc_error_init(&error);
     goto done;
@@ -1153,10 +1522,12 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   if (rc != LC_OK) {
     goto done;
   }
-  if (matched_rows <= 0L) {
+  if (matched_rows !=
+      lockdc_bench_expected_query_matches("NarrativeSummary", rows)) {
     rc = LC_ERR_INVALID;
     snprintf(out->error, sizeof(out->error),
-             "pouch production NarrativeSummary index query matched no rows");
+             "pouch production NarrativeSummary index query matched %ld rows",
+             matched_rows);
     lc_error_cleanup(&error);
     lc_error_init(&error);
     goto done;
@@ -1170,10 +1541,12 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   if (rc != LC_OK) {
     goto done;
   }
-  if (matched_rows <= 0L) {
+  if (matched_rows !=
+      lockdc_bench_expected_query_matches("WorkflowEscalated", rows)) {
     rc = LC_ERR_INVALID;
     snprintf(out->error, sizeof(out->error),
-             "pouch production WorkflowEscalated scan query matched no rows");
+             "pouch production WorkflowEscalated scan query matched %ld rows",
+             matched_rows);
     lc_error_cleanup(&error);
     lc_error_init(&error);
     goto done;
@@ -1187,11 +1560,13 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   if (rc != LC_OK) {
     goto done;
   }
-  if (matched_rows <= 0L) {
+  if (matched_rows !=
+      lockdc_bench_expected_query_matches("NarrativeDescription", rows)) {
     rc = LC_ERR_INVALID;
     snprintf(
         out->error, sizeof(out->error),
-        "pouch production NarrativeDescription scan query matched no rows");
+        "pouch production NarrativeDescription scan query matched %ld rows",
+        matched_rows);
     lc_error_cleanup(&error);
     lc_error_init(&error);
     goto done;
@@ -1205,10 +1580,11 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   if (rc != LC_OK) {
     goto done;
   }
-  if (matched_rows <= 0L) {
+  if (matched_rows != lockdc_bench_expected_query_matches("FullTextAny", rows)) {
     rc = LC_ERR_INVALID;
     snprintf(out->error, sizeof(out->error),
-             "pouch production FullTextAny index query matched no rows");
+             "pouch production FullTextAny index query matched %ld rows",
+             matched_rows);
     lc_error_cleanup(&error);
     lc_error_init(&error);
     goto done;
@@ -1222,10 +1598,11 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   if (rc != LC_OK) {
     goto done;
   }
-  if (matched_rows <= 0L) {
+  if (matched_rows != lockdc_bench_expected_query_matches("FullTextAny", rows)) {
     rc = LC_ERR_INVALID;
     snprintf(out->error, sizeof(out->error),
-             "pouch production FullTextAny scan query matched no rows");
+             "pouch production FullTextAny scan query matched %ld rows",
+             matched_rows);
     lc_error_cleanup(&error);
     lc_error_init(&error);
     goto done;
@@ -1237,7 +1614,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
 
     snprintf(key, sizeof(key), "doc/%08ld", row);
     phase_start = lockdc_bench_now_ns();
-    rc = lockdc_bench_read_key(client, key, &error);
+    rc = lockdc_bench_read_key(client, key, row, updates_per_key - 1L, &error);
     if (rc != LC_OK) {
       goto done;
     }

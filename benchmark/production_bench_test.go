@@ -3,6 +3,7 @@ package benchmark
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -389,6 +390,106 @@ func productionOperatorNotes(row int64) string {
 	return "operator notes include routine triage comments, observed state transitions, queue consumer handoff details, attachment review status, replay expectations, and post-processing verification notes"
 }
 
+func productionExpectedQueryMatches(scenario string, rows int64) int64 {
+	if rows <= 0 {
+		return 0
+	}
+	switch scenario {
+	case "RangeHalf", "NarrativeDescription", "FullTextAny":
+		return rows
+	case "NarrativeSummary":
+		return ((rows - 1) / 8) + 1
+	case "WorkflowEscalated":
+		var count int64
+		for row := int64(0); row < rows; row++ {
+			if row%6 == 1 || row%6 == 3 {
+				count++
+			}
+		}
+		return count
+	default:
+		return 0
+	}
+}
+
+func validateProductionDocumentFields(tb testing.TB, body []byte, row, generation int64) {
+	tb.Helper()
+
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		tb.Fatalf("production document row %d gen %d is invalid JSON: %v", row, generation, err)
+	}
+	expectString := func(path, got, want string) {
+		tb.Helper()
+		if got != want {
+			tb.Fatalf("production document %s mismatch for row %d gen %d: got %q want %q", path, row, generation, got, want)
+		}
+	}
+	expectNumber := func(path string, got any, want int64) {
+		tb.Helper()
+		value, ok := got.(float64)
+		if !ok || int64(value) != want || value != float64(want) {
+			tb.Fatalf("production document %s mismatch for row %d gen %d: got %#v want %d", path, row, generation, got, want)
+		}
+	}
+	object := func(path string, value any) map[string]any {
+		tb.Helper()
+		obj, ok := value.(map[string]any)
+		if !ok {
+			tb.Fatalf("production document %s is not an object for row %d gen %d: %#v", path, row, generation, value)
+		}
+		return obj
+	}
+	stringValue := func(path string, value any) string {
+		tb.Helper()
+		text, ok := value.(string)
+		if !ok {
+			tb.Fatalf("production document %s is not a string for row %d gen %d: %#v", path, row, generation, value)
+		}
+		return text
+	}
+
+	expectString("/bucket", stringValue("/bucket", doc["bucket"]), productionBucket(row))
+	expectString("/group", stringValue("/group", doc["group"]), productionGroup(row))
+	expectString("/region", stringValue("/region", doc["region"]), productionRegion(row))
+	expectNumber("/value", doc["value"], row)
+	expectNumber("/generation", doc["generation"], generation)
+
+	tenant := object("/tenant", doc["tenant"])
+	expectString("/tenant/id", stringValue("/tenant/id", tenant["id"]), fmt.Sprintf("tenant-%03d", row%47))
+	expectString("/tenant/tier", stringValue("/tenant/tier", tenant["tier"]), productionTenantTier(row))
+	expectString("/tenant/region", stringValue("/tenant/region", tenant["region"]), productionRegion(row))
+
+	workflow := object("/workflow", doc["workflow"])
+	expectString("/workflow/stage", stringValue("/workflow/stage", workflow["stage"]), productionWorkflowStage(row))
+	expectNumber("/workflow/attempt", workflow["attempt"], generation+1)
+	owner := object("/workflow/owner", workflow["owner"])
+	expectString("/workflow/owner/team", stringValue("/workflow/owner/team", owner["team"]), productionTeam(row))
+	expectString("/workflow/owner/user", stringValue("/workflow/owner/user", owner["user"]), fmt.Sprintf("user-%05d", row%10000))
+
+	risk := object("/risk", doc["risk"])
+	expectNumber("/risk/score", risk["score"], productionRiskScore(row))
+	expectString("/risk/summary", stringValue("/risk/summary", risk["summary"]), fmt.Sprintf("%s risk signal for production timeout workflow %d", productionMessage(row), row))
+
+	narrative := object("/narrative", doc["narrative"])
+	expectString("/narrative/summary", stringValue("/narrative/summary", narrative["summary"]), productionNarrativeSummary(row))
+	expectString("/narrative/description", stringValue("/narrative/description", narrative["description"]), productionNarrativeDescription(row))
+	expectString("/narrative/operator_notes", stringValue("/narrative/operator_notes", narrative["operator_notes"]), productionOperatorNotes(row))
+
+	details := object("/details", doc["details"])
+	expectString("/details/message", stringValue("/details/message", details["message"]), fmt.Sprintf("%s production benchmark document %d", productionMessage(row), row))
+	attributes := object("/details/attributes", details["attributes"])
+	expectString("/details/attributes/priority", stringValue("/details/attributes/priority", attributes["priority"]), productionPriority(row))
+	expectString("/details/attributes/source", stringValue("/details/attributes/source", attributes["source"]), productionSource(row))
+	expectNumber("/details/attributes/schema_version", attributes["schema_version"], 3)
+
+	payload := stringValue("/payload", doc["payload"])
+	expectedPayloadSnippet := fmt.Sprintf(" audit remediation evidence workflow row %d gen %d;", row, generation)
+	if !bytes.Contains([]byte(payload), []byte(expectedPayloadSnippet)) {
+		tb.Fatalf("production document /payload missing expected content for row %d gen %d", row, generation)
+	}
+}
+
 type productionMetrics struct {
 	rows          int64
 	writes        int64
@@ -510,8 +611,9 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 			}
 			ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 			attachment, err := session.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: fmt.Sprintf("blob-%08d.bin", row)})
+			var readPayload []byte
 			if err == nil {
-				_, err = io.Copy(io.Discard, attachment)
+				readPayload, err = io.ReadAll(attachment)
 				closeErr := attachment.Close()
 				if err == nil {
 					err = closeErr
@@ -522,6 +624,10 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 				_ = session.Release(context.Background())
 				b.Fatalf("lockd disk production attachment read row %d: %v\n%s", row, err, h.logs.String())
 			}
+			if !bytes.Equal(readPayload, payload) {
+				_ = session.Release(context.Background())
+				b.Fatalf("lockd disk production attachment payload mismatch row %d", row)
+			}
 			addMetricDuration(&metrics.attachmentNS, phaseStart)
 			metrics.attachments++
 			metrics.reads++
@@ -530,8 +636,9 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 			phaseStart = time.Now()
 			ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 			snapshot, err := session.Get(ctx)
+			var body []byte
 			if err == nil && snapshot != nil {
-				_, err = snapshot.Bytes()
+				body, err = snapshot.Bytes()
 				closeErr := snapshot.Close()
 				if err == nil {
 					err = closeErr
@@ -542,6 +649,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 				_ = session.Release(context.Background())
 				b.Fatalf("lockd disk production lease get row %d: %v\n%s", row, err, h.logs.String())
 			}
+			validateProductionDocumentFields(b, body, row, updatesPerKey-1)
 			addMetricDuration(&metrics.getLeaseNS, phaseStart)
 			metrics.reads++
 		}
@@ -593,6 +701,22 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 			b.Fatalf("lockd disk production dequeue returned no messages after %d/%d acked\n%s", ackedMessages, queueMessages, h.logs.String())
 		}
 		for _, msg := range messages {
+			reader, err := msg.PayloadReader()
+			if err != nil {
+				b.Fatalf("lockd disk production queue payload open: %v\n%s", err, h.logs.String())
+			}
+			payload, err := io.ReadAll(reader)
+			closeErr := reader.Close()
+			if err == nil {
+				err = closeErr
+			}
+			if err != nil {
+				b.Fatalf("lockd disk production queue payload read: %v\n%s", err, h.logs.String())
+			}
+			expected := []byte(fmt.Sprintf(`{"message":%d,"kind":"production"}`, ackedMessages))
+			if !bytes.Equal(payload, expected) {
+				b.Fatalf("lockd disk production queue payload mismatch: got %q want %q", payload, expected)
+			}
 			ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
 			err = msg.Ack(ctx)
 			cancel()
@@ -634,47 +758,48 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 	phaseStart = time.Now()
 	matched := runLockdDiskQuery(b, h, rows, "index", "RangeHalf", false)
 	addMetricDuration(&metrics.indexQueryKeysNS, phaseStart)
-	if matched <= 0 {
-		b.Fatalf("lockd disk production RangeHalf index query matched %d rows, want >0", matched)
+	if int64(matched) != productionExpectedQueryMatches("RangeHalf", rows) {
+		b.Fatalf("lockd disk production RangeHalf index query matched %d rows, want %d", matched, productionExpectedQueryMatches("RangeHalf", rows))
 	}
 	metrics.rows = int64(matched)
 	phaseStart = time.Now()
 	matched = runLockdDiskQuery(b, h, rows, "index", "NarrativeSummary", true)
 	addMetricDuration(&metrics.indexQueryDocsNS, phaseStart)
-	if matched <= 0 {
-		b.Fatalf("lockd disk production NarrativeSummary index query matched %d rows, want >0", matched)
+	if int64(matched) != productionExpectedQueryMatches("NarrativeSummary", rows) {
+		b.Fatalf("lockd disk production NarrativeSummary index query matched %d rows, want %d", matched, productionExpectedQueryMatches("NarrativeSummary", rows))
 	}
 	phaseStart = time.Now()
 	matched = runLockdDiskQuery(b, h, rows, "scan", "WorkflowEscalated", false)
 	addMetricDuration(&metrics.scanQueryKeysNS, phaseStart)
-	if matched <= 0 {
-		b.Fatalf("lockd disk production WorkflowEscalated scan query matched %d rows, want >0", matched)
+	if int64(matched) != productionExpectedQueryMatches("WorkflowEscalated", rows) {
+		b.Fatalf("lockd disk production WorkflowEscalated scan query matched %d rows, want %d", matched, productionExpectedQueryMatches("WorkflowEscalated", rows))
 	}
 	phaseStart = time.Now()
 	matched = runLockdDiskQuery(b, h, rows, "scan", "NarrativeDescription", true)
 	addMetricDuration(&metrics.scanQueryDocsNS, phaseStart)
-	if matched <= 0 {
-		b.Fatalf("lockd disk production NarrativeDescription scan query matched %d rows, want >0", matched)
+	if int64(matched) != productionExpectedQueryMatches("NarrativeDescription", rows) {
+		b.Fatalf("lockd disk production NarrativeDescription scan query matched %d rows, want %d", matched, productionExpectedQueryMatches("NarrativeDescription", rows))
 	}
 	phaseStart = time.Now()
 	matched = runLockdDiskQuery(b, h, rows, "index", "FullTextAny", false)
 	addMetricDuration(&metrics.fullTextIndexKeysNS, phaseStart)
-	if matched <= 0 {
-		b.Fatalf("lockd disk production FullTextAny index query matched %d rows, want >0", matched)
+	if int64(matched) != productionExpectedQueryMatches("FullTextAny", rows) {
+		b.Fatalf("lockd disk production FullTextAny index query matched %d rows, want %d", matched, productionExpectedQueryMatches("FullTextAny", rows))
 	}
 	phaseStart = time.Now()
 	matched = runLockdDiskQuery(b, h, rows, "scan", "FullTextAny", true)
 	addMetricDuration(&metrics.fullTextScanDocsNS, phaseStart)
-	if matched <= 0 {
-		b.Fatalf("lockd disk production FullTextAny scan query matched %d rows, want >0", matched)
+	if int64(matched) != productionExpectedQueryMatches("FullTextAny", rows) {
+		b.Fatalf("lockd disk production FullTextAny scan query matched %d rows, want %d", matched, productionExpectedQueryMatches("FullTextAny", rows))
 	}
 
 	for row := int64(0); row < rows; {
 		phaseStart = time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		resp, err := h.client.Get(ctx, fmt.Sprintf("doc/%08d", row), lockdclient.WithGetNamespace(lockdDiskBenchNamespace))
+		var body []byte
 		if err == nil {
-			_, err = io.Copy(io.Discard, resp.Reader())
+			body, err = io.ReadAll(resp.Reader())
 			closeErr := resp.Close()
 			if err == nil {
 				err = closeErr
@@ -684,6 +809,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 		if err != nil {
 			b.Fatalf("lockd disk production get row %d: %v\n%s", row, err, h.logs.String())
 		}
+		validateProductionDocumentFields(b, body, row, updatesPerKey-1)
 		addMetricDuration(&metrics.getPublicNS, phaseStart)
 		metrics.reads++
 		step := rows / 8
