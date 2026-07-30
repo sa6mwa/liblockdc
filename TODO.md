@@ -26,13 +26,13 @@ The current global `.lockd/queue`, `.lockd/attachments`, `.lockd/leases`, and
 
 ## Work Rules For This Correction
 
-- [ ] Update the spec before implementation whenever Go disk behavior is
+- [x] Update the spec before implementation whenever Go disk behavior is
   discovered that changes the plan.
-- [ ] Implement the storage/keyspace correction as one coherent cutover, not
+- [x] Implement the storage/keyspace correction as one coherent cutover, not
   as compatibility-preserving micro-fixes.
-- [ ] Do not run benchmarks before the full representation is aligned.
-- [ ] Do not run review before the full representation is aligned.
-- [ ] Run `test-all` only after all alignment items in this TODO are
+- [x] Do not run benchmarks before the full representation is aligned.
+- [x] Do not run review before the full representation is aligned.
+- [x] Run `test-all` only after all alignment items in this TODO are
   implemented.
 - [ ] After implementation and `test-all`, re-analyze pouch against Go disk and
   document every remaining divergence with a reason.
@@ -136,7 +136,7 @@ Pouch before editing the corresponding C code.
 The first implementation slice removes the rejected global side namespaces.
 This is the highest-priority correctness issue.
 
-- [ ] Delete the `.lockd/queue` durable model.
+- [x] Delete the `.lockd/queue` durable model.
   - Queue message metadata object key: `q/<queue>/msg/<id>.meta`.
   - Queue payload object key: `q/<queue>/msg/<id>.bin`.
   - Queue workflow state object key: `q/<queue>/state/<id>.json`.
@@ -151,7 +151,7 @@ This is the highest-priority correctness issue.
   - Queue rows are internal/query-hidden and excluded from state scans,
     indexed document queries, full-text indexing, and get-public.
 
-- [ ] Delete the `.lockd/attachments` durable model.
+- [x] Delete the `.lockd/attachments` durable model.
   - Committed attachment key: `state/<key>/attachments/<id>`.
   - Staged attachment key:
     `state/<key>/.staging/<txn>/attachments/<id>`.
@@ -161,14 +161,14 @@ This is the highest-priority correctness issue.
     deletes in staged metadata.
   - Direct public state reads must not expose internal attachment rows.
 
-- [ ] Delete the `.lockd/namespace-config` durable model.
+- [x] Delete the `.lockd/namespace-config` durable model.
   - Config key is namespace-local: `config/namespace`.
   - If a C suffix is chosen, it must be documented and consistently hidden.
   - Config rows are query-hidden and excluded from public scans/indexes.
   - Config cache behavior must match Go intent: default fallback on missing
     config, short cache TTL if present, CAS on update.
 
-- [ ] Delete the `.lockd/leases` durable model.
+- [x] Delete the `.lockd/leases` durable model.
   - Active lease state belongs to the target key's metadata in the target
     namespace.
   - Pouch metadata must store at least lease id, owner, expiry, fencing token,
@@ -180,7 +180,7 @@ This is the highest-priority correctness issue.
   - Message/state lease pairing for transaction marker application must follow
     Go `queue.ParseMessageLeaseKey` / `ParseStateLeaseKey` semantics.
 
-- [ ] Keep only true control namespaces.
+- [x] Keep only true control namespaces.
   - Transaction records and decision markers may use reserved control
     namespaces when the Go reference does so.
   - Reserved namespaces must not contain user namespace queue records,
@@ -188,18 +188,18 @@ This is the highest-priority correctness issue.
 
 Acceptance:
 
-- [ ] `rg` finds no durable uses of `.lockd/queue`,
+- [x] `rg` finds no durable uses of `.lockd/queue`,
   `.lockd/attachments`, `.lockd/leases`, or `.lockd/namespace-config`.
-- [ ] Public APIs cannot create user state keys that collide with internal
+- [x] Public APIs cannot create user state keys that collide with internal
   queue/config/attachment/staging/lease key families.
-- [ ] Public scans, indexed queries, full-text queries, and get-public exclude
+- [x] Public scans, indexed queries, full-text queries, and get-public exclude
   every internal row by metadata and key policy.
-- [ ] Reopen rebuilds queue, attachment, config, and lease projections from the
+- [x] Reopen rebuilds queue, attachment, config, and lease projections from the
   caller namespace logstore records.
 
 ## Slice 2: Metadata Model Alignment
 
-- [ ] Replace separate lease records with target-key metadata fields.
+- [x] Replace separate lease records with target-key metadata fields.
   - Persist lease fields in binary metadata or in a metadata payload attached
     to the target key record.
   - Cache hot lease fields in projections so acquire/release does not parse a
@@ -207,7 +207,7 @@ Acceptance:
   - CAS metadata by etag/generation with the same observable conflict behavior
     as Go disk.
 
-- [ ] Preserve Go `storage.Meta` logical fields in Pouch metadata.
+- [x] Preserve Go `storage.Meta` logical fields in Pouch metadata.
   - `Version`, `PublishedVersion`, `StateETag`, `UpdatedAtUnix`,
     `FencingToken`, `StateDescriptor`, `StatePlaintextBytes`, attributes,
     attachments, staged txn id, staged version, staged state etag, staged
@@ -215,27 +215,27 @@ Acceptance:
     staged attachments, staged attachment deletes, staged clear flag.
   - Pouch may encode them as C-native binary fields instead of protobuf/JSON.
 
-- [ ] Preserve hot summary behavior.
+- [x] Preserve hot summary behavior.
   - Query summaries must expose effective version, state etag, descriptor,
     plaintext byte count, and query exclusion without opening payloads.
   - Hidden/internal rows must be query-excluded independently of user metadata.
 
-- [ ] Preserve byte accounting.
+- [x] Preserve byte accounting.
   - Plaintext bytes, stored bytes, cipher/transformed bytes, descriptor length,
     and payload CRC must be available from refs/metadata.
   - Use `uint64_t` for payload and file-size fields.
 
 Acceptance:
 
-- [ ] Acquire, keepalive, release, update, staged commit, rollback, get-public,
+- [x] Acquire, keepalive, release, update, staged commit, rollback, get-public,
   list, scan, and query all read required metadata without parsing state JSON.
-- [ ] Lease and staged metadata survive reopen.
-- [ ] Metadata CAS behavior matches Go disk outcomes for missing, existing,
+- [x] Lease and staged metadata survive reopen.
+- [x] Metadata CAS behavior matches Go disk outcomes for missing, existing,
   stale etag, same-group pending, and different-group pending cases.
 
 ## Slice 3: State/Object/Attachment/Queue Record Family Alignment
 
-- [ ] Keep logical meta/state/object distinctions even if Pouch stores them in
+- [x] Keep logical meta/state/object distinctions even if Pouch stores them in
   one C-native segment record container.
   - State records hold JSON state payloads.
   - Object records hold attachments, queue payloads, namespace config, queue
@@ -243,7 +243,7 @@ Acceptance:
   - Metadata records hold key metadata and hot fields.
   - State link records promote staged state without copying payload bytes.
 
-- [ ] Queue enqueue must match Go semantics.
+- [x] Queue enqueue must match Go semantics.
   - Normalize namespace and queue name.
   - Generate message id.
   - Write payload object in caller namespace first.
@@ -253,7 +253,7 @@ Acceptance:
   - Ready-cache/update-notify behavior must be preserved or documented as a
     C-local equivalent.
 
-- [ ] Queue delivery and stateful workflow must match Go semantics.
+- [x] Queue delivery and stateful workflow must match Go semantics.
   - Dequeue observes visibility, TTL, max attempts, attempts, failure attempts,
     and FIFO ordering.
   - Ack/nack/extend validate active message lease id, fencing token, txn id,
@@ -262,7 +262,7 @@ Acceptance:
     `q/<queue>/msg/<id>` and `q/<queue>/state/<id>`.
   - Transaction decision markers apply to both paired lease keys.
 
-- [ ] Attachment operations must match Go semantics.
+- [x] Attachment operations must match Go semantics.
   - Put/list/get/delete attachment APIs operate through object records under
     the state key attachment prefix.
   - Staged attachments are attached to the target key's staged metadata and
@@ -271,149 +271,149 @@ Acceptance:
 
 Acceptance:
 
-- [ ] Queue, attachment, and object payloads stream through the logstore; no
+- [x] Queue, attachment, and object payloads stream through the logstore; no
   full payload materialization is hidden behind streaming APIs.
-- [ ] Public queue and attachment tests use public pouch APIs only.
-- [ ] Multi-segment reopen preserves queue, attachment, and object behavior.
+- [x] Public queue and attachment tests use public pouch APIs only.
+- [x] Multi-segment reopen preserves queue, attachment, and object behavior.
 
 ## Slice 4: Staging, Transactions, And Decision Markers
 
-- [ ] Preserve Go staged state key shape `<key>/.staging/<txn>` for state.
-- [ ] Preserve Go staged attachment key shape
+- [x] Preserve Go staged state key shape `<key>/.staging/<txn>` for state.
+- [x] Preserve Go staged attachment key shape
   `state/<key>/.staging/<txn>/attachments/<id>`.
-- [ ] Promote staged state by state link to the staged payload span.
-- [ ] Tombstone staged state after successful promotion.
-- [ ] Discard staged state by delete/tombstone.
-- [ ] Use ordered multi-key locking for destination and staged keys.
-- [ ] Transaction decision records remain in true control namespaces only.
-- [ ] Transaction participant application commits or rolls back staged state,
+- [x] Promote staged state by state link to the staged payload span.
+- [x] Tombstone staged state after successful promotion.
+- [x] Discard staged state by delete/tombstone.
+- [x] Use ordered multi-key locking for destination and staged keys.
+- [x] Transaction decision records remain in true control namespaces only.
+- [x] Transaction participant application commits or rolls back staged state,
   staged removes, staged attachments, attachment deletes, queue ack/nack
   effects, and metadata changes consistently.
-- [ ] Queue message/state paired marker application follows Go disk.
+- [x] Queue message/state paired marker application follows Go disk.
 
 Acceptance:
 
-- [ ] No staged promotion copies large payload bytes.
-- [ ] Live links protect source segment/snapshot spans from compaction cleanup.
-- [ ] Transaction commit/rollback behavior matches Go disk for state,
+- [x] No staged promotion copies large payload bytes.
+- [x] Live links protect source segment/snapshot spans from compaction cleanup.
+- [x] Transaction commit/rollback behavior matches Go disk for state,
   attachments, queue message leases, and queue state leases.
 
 ## Slice 5: Logstore Lifecycle And Performance-Critical Mechanics
 
-- [ ] Keep per-namespace segment/snapshot/manifest ownership.
-- [ ] Keep active segment rolling at configured default segment size.
-- [ ] Replay installed snapshot first, then non-obsolete segments in order.
-- [ ] Track last good offsets and repair crash-truncated active tails.
-- [ ] Use writer markers and single-writer refresh optimization.
-- [ ] Use bounded read-file LRU for segment/snapshot readers.
-- [ ] Use append batching and cross-operation commit groups.
-- [ ] Publish refs only after grouped sync succeeds, except documented
+- [x] Keep per-namespace segment/snapshot/manifest ownership.
+- [x] Keep active segment rolling at configured default segment size.
+- [x] Replay installed snapshot first, then non-obsolete segments in order.
+- [x] Track last good offsets and repair crash-truncated active tails.
+- [x] Use writer markers and single-writer refresh optimization.
+- [x] Use bounded read-file LRU for segment/snapshot readers.
+- [x] Use append batching and cross-operation commit groups.
+- [x] Publish refs only after grouped sync succeeds, except documented
   same-operation pending visibility.
-- [ ] Propagate group fsync failure to every affected operation.
+- [x] Propagate group fsync failure to every affected operation.
 
 Acceptance:
 
-- [ ] No user-data surface bypasses the namespace logstore lifecycle.
-- [ ] The implementation has no per-mutation fsync-only hot path where a Go
+- [x] No user-data surface bypasses the namespace logstore lifecycle.
+- [x] The implementation has no per-mutation fsync-only hot path where a Go
   disk equivalent batches syncs.
-- [ ] Reopen after crash-tail scenarios either recovers to last good record or
+- [x] Reopen after crash-tail scenarios either recovers to last good record or
   fails closed according to spec.
 
 ## Slice 6: Crypto And Compression Placement
 
-- [ ] Crypto and compression apply at the log payload boundary.
-- [ ] Compression runs before encryption; decompression runs after decryption.
-- [ ] Root mode cannot switch between plaintext, crypto, compression, and
+- [x] Crypto and compression apply at the log payload boundary.
+- [x] Compression runs before encryption; decompression runs after decryption.
+- [x] Root mode cannot switch between plaintext, crypto, compression, and
   crypto+compression without an explicit future migration feature.
-- [ ] Encrypt production data at rest: state payloads, object/attachment
+- [x] Encrypt production data at rest: state payloads, object/attachment
   payloads, queue payloads, queue metadata, namespace config, and transaction
   payloads containing production data.
-- [ ] Preserve plaintext byte count, stored byte count, descriptor, etag, and
+- [x] Preserve plaintext byte count, stored byte count, descriptor, etag, and
   CRC in metadata/refs.
-- [ ] Compaction copies stored transformed bytes when descriptors remain valid.
-- [ ] Tiny hot metadata records may skip compression, but must still be
+- [x] Compaction copies stored transformed bytes when descriptors remain valid.
+- [x] Tiny hot metadata records may skip compression, but must still be
   encrypted on crypto roots if they contain production data.
 
 Acceptance:
 
-- [ ] Wrong key, tampered descriptor, bad ciphertext, bad compression stream,
+- [x] Wrong key, tampered descriptor, bad ciphertext, bad compression stream,
   and mixed root mode all fail closed.
-- [ ] No plaintext production payload bytes appear in segment/snapshot files on
+- [x] No plaintext production payload bytes appear in segment/snapshot files on
   crypto roots.
 
 ## Slice 7: Scan, Query, Full Text, And Derived Indexes
 
-- [ ] Scans walk namespace-local metadata summaries and skip deleted, hidden,
+- [x] Scans walk namespace-local metadata summaries and skip deleted, hidden,
   staged, reserved, and internal-prefix rows before opening payloads.
-- [ ] Scans stream selector evaluation and document emission; no full corpus
+- [x] Scans stream selector evaluation and document emission; no full corpus
   materialization.
-- [ ] Indexed query never silently falls back to scan when the selected engine
+- [x] Indexed query never silently falls back to scan when the selected engine
   is index.
-- [ ] Index flush is incremental and generation-aware.
-- [ ] Query artifacts are derived, rebuildable, and never authoritative.
-- [ ] Full-text indexes nested fields and whole-document aggregate text,
+- [x] Index flush is incremental and generation-aware.
+- [x] Query artifacts are derived, rebuildable, and never authoritative.
+- [x] Full-text indexes nested fields and whole-document aggregate text,
   including long summary/description/body fields.
-- [ ] Internal queue/config/attachment/staging rows are excluded from exact,
+- [x] Internal queue/config/attachment/staging rows are excluded from exact,
   range, presence, text, trigram, temporal, and full-text indexes.
 
 Acceptance:
 
-- [ ] Query keys, query documents, scan, indexed selectors, and full-text
+- [x] Query keys, query documents, scan, indexed selectors, and full-text
   selectors use public APIs.
-- [ ] Indexed flush work scales with changed generations, not total corpus
+- [x] Indexed flush work scales with changed generations, not total corpus
   size.
-- [ ] Query results match Go lockd disk by fields/content, while payload bytes
+- [x] Query results match Go lockd disk by fields/content, while payload bytes
   for attachments and queue payloads match exactly.
 
 ## Slice 8: Compaction
 
-- [ ] Candidate files are installed snapshot plus sealed non-obsolete segments.
-- [ ] Active segment is excluded.
-- [ ] Candidate refs are captured in deterministic key order from meta, state,
+- [x] Candidate files are installed snapshot plus sealed non-obsolete segments.
+- [x] Active segment is excluded.
+- [x] Candidate refs are captured in deterministic key order from meta, state,
   object, queue, transaction, lease/metadata, and query-visible projections.
-- [ ] Live state links into candidate files protect those files.
-- [ ] Snapshot build streams stored spans; it does not materialize payloads.
-- [ ] Captured refs are revalidated before install.
-- [ ] Snapshot install is rename plus manifest update.
-- [ ] Obsolete files are deleted only after grace and live-ref checks.
+- [x] Live state links into candidate files protect those files.
+- [x] Snapshot build streams stored spans; it does not materialize payloads.
+- [x] Captured refs are revalidated before install.
+- [x] Snapshot install is rename plus manifest update.
+- [x] Obsolete files are deleted only after grace and live-ref checks.
 
 Acceptance:
 
-- [ ] Compaction preserves state, metadata, leases, staged links, attachments,
+- [x] Compaction preserves state, metadata, leases, staged links, attachments,
   queue records, transaction records, byte counts, etags, descriptors, and
   query visibility.
-- [ ] Validation drift abandons the temp snapshot.
+- [x] Validation drift abandons the temp snapshot.
 
 ## Slice 9: Dead Code And Terminology Cleanup
 
-- [ ] Remove global side namespace helpers and call sites for queue,
+- [x] Remove global side namespace helpers and call sites for queue,
   attachments, leases, and namespace config.
-- [ ] Remove compatibility readers and old-layout branches for unreleased
+- [x] Remove compatibility readers and old-layout branches for unreleased
   pouch formats.
-- [ ] Remove external payload durability helpers.
-- [ ] Remove string refs as durable or in-memory authority.
-- [ ] Remove text hot-metadata parsers for storage facts.
-- [ ] Remove full-cache compaction dump logic.
-- [ ] Remove index rebuild-on-every-flush paths.
-- [ ] Remove stale tests/fixtures/benchmarks that validate the rejected layout.
-- [ ] Audit for `pouch-redesign`, `compat`, `company`, and disk-conflated
+- [x] Remove external payload durability helpers.
+- [x] Remove string refs as durable or in-memory authority.
+- [x] Remove text hot-metadata parsers for storage facts.
+- [x] Remove full-cache compaction dump logic.
+- [x] Remove index rebuild-on-every-flush paths.
+- [x] Remove stale tests/fixtures/benchmarks that validate the rejected layout.
+- [x] Audit for `pouch-redesign`, `compat`, `company`, and disk-conflated
   terminology.
 
 Acceptance:
 
-- [ ] `rg` confirms rejected terminology and rejected `.lockd/*` globals are
+- [x] `rg` confirms rejected terminology and rejected `.lockd/*` globals are
   absent except in docs that explicitly name them as rejected.
-- [ ] Pouch has one durable representation.
+- [x] Pouch has one durable representation.
 
 ## Slice 10: Verification After Full Alignment
 
 Run only after Slices 1-9 are implemented.
 
-- [ ] Run `test-all`.
-- [ ] If `test-all` fails, fix failures without weakening the storage
+- [x] Run `test-all`.
+- [x] If `test-all` fails, fix failures without weakening the storage
   invariants above.
-- [ ] Re-run `test-all` until it passes.
-- [ ] Re-analyze pouch against Go disk and update `docs/pouch-storage.md` with
+- [x] Re-run `test-all` until it passes.
+- [x] Re-analyze pouch against Go disk and update `docs/pouch-storage.md` with
   every accepted divergence.
 - [ ] Only after passing functional verification, run benchmarks and parity
   gates in a later performance phase.

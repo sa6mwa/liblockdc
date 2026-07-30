@@ -3259,24 +3259,6 @@ static char *pouch_test_hex_encode(const char *text) {
   return out;
 }
 
-static char *pouch_test_lease_storage_key(const char *namespace_name,
-                                          const char *key) {
-  char *namespace_hex;
-  char *key_hex;
-  char *storage_key;
-  size_t length;
-
-  namespace_hex = pouch_test_hex_encode(namespace_name);
-  key_hex = pouch_test_hex_encode(key);
-  length = strlen("lease//") + strlen(namespace_hex) + strlen(key_hex) + 1U;
-  storage_key = (char *)lc_alloc_with_allocator(NULL, length);
-  assert_non_null(storage_key);
-  snprintf(storage_key, length, "lease/%s/%s", namespace_hex, key_hex);
-  lc_free_with_allocator(NULL, namespace_hex);
-  lc_free_with_allocator(NULL, key_hex);
-  return storage_key;
-}
-
 static void write_client_state(lc_client *client, const char *key,
                                const char *json, const char *expected_etag,
                                long expected_version, int has_expected_version,
@@ -4750,17 +4732,13 @@ static void test_pouch_crypto_compression_leases_skip_zlib(void **state) {
   lc_acquire_req acquire_req;
   lc_error error;
   char *crypto_key;
-  char *lease_key;
   char root[512];
-  int descriptor_compressed;
   int rc;
 
   (void)state;
   client = NULL;
   lease = NULL;
   crypto_key = NULL;
-  lease_key = NULL;
-  descriptor_compressed = 1;
   memset(&read_result, 0, sizeof(read_result));
   lc_acquire_req_init(&acquire_req);
   lc_error_init(&error);
@@ -4779,21 +4757,20 @@ static void test_pouch_crypto_compression_leases_skip_zlib(void **state) {
   assert_non_null(lease);
 
   handle = (lc_client_handle *)client;
-  lease_key = pouch_test_lease_storage_key("default", acquire_req.key);
-  rc = lc_pouch_state_read_metadata(handle->pouch, ".lockd/leases", lease_key,
+  rc = lc_pouch_state_read_metadata(handle->pouch, "default", acquire_req.key,
                                     &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
-  assert_non_null(read_result.descriptor);
-  rc = lc_pouch_crypto_test_descriptor_compressed(
-      read_result.descriptor, &descriptor_compressed, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_false(descriptor_compressed);
-  assert_true(read_result.cipher_bytes > read_result.bytes);
+  assert_non_null(read_result.metadata);
+  assert_true(read_result.metadata_length > 0U);
+  assert_null(read_result.descriptor);
+  assert_int_equal(read_result.bytes, 0UL);
+  assert_int_equal(read_result.cipher_bytes, 0UL);
+  assert_true(read_result.has_query_hidden);
+  assert_true(read_result.query_hidden);
 
   lease->close(lease);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  lc_free_with_allocator(NULL, lease_key);
   lc_client_close(client);
   lc_pouch_crypto_key_string_free(crypto_key);
   lc_error_cleanup(&error);
@@ -4808,14 +4785,12 @@ static void test_pouch_compression_leases_skip_zlib(void **state) {
   lc_acquire_req acquire_req;
   lc_release_req release_req;
   lc_error error;
-  char *lease_key;
   char root[512];
   int rc;
 
   (void)state;
   client = NULL;
   lease = NULL;
-  lease_key = NULL;
   memset(&read_result, 0, sizeof(read_result));
   lc_acquire_req_init(&acquire_req);
   lc_release_req_init(&release_req);
@@ -4832,12 +4807,14 @@ static void test_pouch_compression_leases_skip_zlib(void **state) {
   assert_non_null(lease);
 
   handle = (lc_client_handle *)client;
-  lease_key = pouch_test_lease_storage_key("default", acquire_req.key);
-  rc = lc_pouch_state_read_metadata(handle->pouch, ".lockd/leases", lease_key,
+  rc = lc_pouch_state_read_metadata(handle->pouch, "default", acquire_req.key,
                                     &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
+  assert_non_null(read_result.metadata);
+  assert_true(read_result.metadata_length > 0U);
   assert_null(read_result.descriptor);
+  assert_int_equal(read_result.bytes, 0UL);
   assert_int_equal(read_result.cipher_bytes, read_result.bytes);
 
   rc = lease->release(lease, &release_req, &error);
@@ -4845,7 +4822,6 @@ static void test_pouch_compression_leases_skip_zlib(void **state) {
   lease = NULL;
 
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  lc_free_with_allocator(NULL, lease_key);
   lc_client_close(client);
   lc_error_cleanup(&error);
   cleanup_root(root);
@@ -6260,7 +6236,7 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
                                       &metadata_options, &metadata_result,
                                       &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(metadata_result.version, 2UL);
+  assert_int_equal(metadata_result.version, 1UL);
   assert_sha256_text_etag(metadata_result.etag, "visible");
   assert_true(metadata_result.has_query_hidden);
   assert_true(metadata_result.query_hidden);
@@ -6280,7 +6256,7 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
                            &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
-  assert_int_equal(read_result.version, 2UL);
+  assert_int_equal(read_result.version, 1UL);
   assert_sha256_text_etag(read_result.etag, "visible");
   assert_true(read_result.has_query_hidden);
   assert_true(read_result.query_hidden);
@@ -7150,6 +7126,9 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   lc_message *message;
   lc_extend_req extend_req;
   lc_nack_req nack_req;
+  lc_nack_req invalid_nack_req;
+  lc_ack_op stale_ack_op;
+  lc_ack_res stale_ack_res;
   lc_ack_res ack_res;
   lc_error error;
   const void *bytes;
@@ -7171,6 +7150,9 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   lc_dequeue_req_init(&dequeue_req);
   lc_extend_req_init(&extend_req);
   lc_nack_req_init(&nack_req);
+  lc_nack_req_init(&invalid_nack_req);
+  memset(&stale_ack_op, 0, sizeof(stale_ack_op));
+  memset(&stale_ack_res, 0, sizeof(stale_ack_res));
   memset(&ack_res, 0, sizeof(ack_res));
   lc_error_init(&error);
   make_root("client-queue", root, sizeof(root));
@@ -7190,6 +7172,16 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   assert_string_equal(enqueue_res.queue, "jobs");
   assert_non_null(enqueue_res.message_id);
   assert_int_equal(enqueue_res.payload_bytes, 5L);
+
+  stale_ack_op.message.namespace_name = "default";
+  stale_ack_op.message.queue = "jobs";
+  stale_ack_op.message.message_id = enqueue_res.message_id;
+  rc = client->queue_ack(client, &stale_ack_op, &stale_ack_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "lease_id"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_ack_res_cleanup(&stale_ack_res);
 
   stats_req.queue = "jobs";
   rc = client->queue_stats(client, &stats_req, &stats_res, &error);
@@ -7230,6 +7222,14 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(message->visibility_timeout_seconds, 90L);
 
+  invalid_nack_req.delay_seconds = 0L;
+  invalid_nack_req.intent = (lc_nack_intent)99;
+  rc = message->nack(message, &invalid_nack_req, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "intent"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
   nack_req.delay_seconds = 0L;
   nack_req.intent = LC_NACK_INTENT_DEFER;
   rc = message->nack(message, &nack_req, &error);
@@ -7269,6 +7269,7 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   assert_int_equal(stats_res.pending_candidates, 0);
 
   lc_ack_res_cleanup(&ack_res);
+  lc_ack_res_cleanup(&stale_ack_res);
   lc_queue_stats_res_cleanup(&stats_res);
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_client_close(client);
@@ -9138,6 +9139,9 @@ test_client_queue_dequeue_with_state_uses_pouch_lease(void **state) {
   lc_dequeue_req dequeue_req;
   lc_message *message;
   lc_lease *state_lease;
+  lc_lease *fresh_lease;
+  lc_extend_req extend_req;
+  lc_acquire_req acquire_req;
   lc_get_res get_res;
   lc_error error;
   const void *bytes;
@@ -9152,11 +9156,14 @@ test_client_queue_dequeue_with_state_uses_pouch_lease(void **state) {
   sink = NULL;
   message = NULL;
   state_lease = NULL;
+  fresh_lease = NULL;
   bytes = NULL;
   length = 0U;
   lc_enqueue_req_init(&enqueue_req);
   memset(&enqueue_res, 0, sizeof(enqueue_res));
   lc_dequeue_req_init(&dequeue_req);
+  lc_extend_req_init(&extend_req);
+  lc_acquire_req_init(&acquire_req);
   memset(&get_res, 0, sizeof(get_res));
   lc_error_init(&error);
   make_root("client-queue-state", root, sizeof(root));
@@ -9191,6 +9198,13 @@ test_client_queue_dequeue_with_state_uses_pouch_lease(void **state) {
   assert_int_equal(state_lease->lease_expires_at_unix,
                    message->not_visible_until_unix);
 
+  extend_req.extend_by_seconds = 90L;
+  rc = message->extend(message, &extend_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(message->visibility_timeout_seconds, 90L);
+  assert_int_equal(state_lease->lease_expires_at_unix,
+                   message->lease_expires_at_unix);
+
   rc = lc_source_from_memory("{\"handled\":true}", strlen("{\"handled\":true}"),
                              &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -9219,7 +9233,80 @@ test_client_queue_dequeue_with_state_uses_pouch_lease(void **state) {
   assert_int_equal(rc, LC_OK);
   message = NULL;
 
+  acquire_req.key = expected_key;
+  acquire_req.owner = "worker-after-ack";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &fresh_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(fresh_lease);
+  fresh_lease->close(fresh_lease);
+  fresh_lease = NULL;
+
   lc_get_res_cleanup(&get_res);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_client_queue_dequeue_with_state_nack_releases_state_lease(
+    void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_nack_req nack_req;
+  lc_message *message;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  message = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_nack_req_init(&nack_req);
+  lc_error_init(&error);
+  make_root("client-queue-state-nack", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "jobs";
+  rc = lc_source_from_memory("{\"job\":2}", strlen("{\"job\":2}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-state";
+  dequeue_req.visibility_timeout_seconds = 45L;
+  rc = client->dequeue_with_state(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_non_null(message->state(message));
+
+  nack_req.delay_seconds = 0L;
+  nack_req.intent = LC_NACK_INTENT_DEFER;
+  rc = message->nack(message, &nack_req, &error);
+  assert_int_equal(rc, LC_OK);
+  message = NULL;
+
+  rc = client->dequeue_with_state(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+  assert_int_equal(message->attempts, 2);
+  assert_non_null(message->state(message));
+  message->close(message);
+  message = NULL;
+
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_client_close(client);
   cleanup_root(root);
@@ -11152,7 +11239,7 @@ static void test_lease_metadata_persists_query_hidden(void **state) {
   metadata_req.query_hidden = 1;
   rc = lease->metadata(lease, &metadata_req, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(lease->version, 2L);
+  assert_int_equal(lease->version, 1L);
   assert_sha256_text_etag(lease->state_etag, "{\"value\":15}");
   assert_true(lease->has_query_hidden);
   assert_true(lease->query_hidden);
@@ -11164,7 +11251,7 @@ static void test_lease_metadata_persists_query_hidden(void **state) {
   source->close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(lease->version, 3L);
+  assert_int_equal(lease->version, 2L);
   assert_sha256_text_etag(lease->state_etag, "{\"value\":16}");
   assert_true(lease->has_query_hidden);
   assert_true(lease->query_hidden);
@@ -11178,7 +11265,7 @@ static void test_lease_metadata_persists_query_hidden(void **state) {
   assert_int_equal(describe_res.fencing_token, lease->fencing_token);
   assert_int_equal(describe_res.lease_expires_at_unix,
                    lease->lease_expires_at_unix);
-  assert_int_equal(describe_res.version, 3L);
+  assert_int_equal(describe_res.version, 2L);
   assert_sha256_text_etag(describe_res.state_etag, "{\"value\":16}");
   lc_describe_res_cleanup(&describe_res);
 
@@ -11192,7 +11279,7 @@ static void test_lease_metadata_persists_query_hidden(void **state) {
   describe_req.key = key;
   rc = reader->describe(reader, &describe_req, &describe_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(describe_res.version, 3L);
+  assert_int_equal(describe_res.version, 2L);
   assert_sha256_text_etag(describe_res.state_etag, "{\"value\":16}");
   assert_true(describe_res.has_query_hidden);
   assert_true(describe_res.query_hidden);
@@ -11204,7 +11291,7 @@ static void test_lease_metadata_persists_query_hidden(void **state) {
   acquire_req.ttl_seconds = 30L;
   rc = reader->acquire(reader, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(lease->version, 3L);
+  assert_int_equal(lease->version, 2L);
   assert_true(lease->has_query_hidden);
   assert_true(lease->query_hidden);
 
@@ -11213,7 +11300,7 @@ static void test_lease_metadata_persists_query_hidden(void **state) {
   metadata_req.query_hidden = 0;
   rc = lease->metadata(lease, &metadata_req, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(lease->version, 4L);
+  assert_int_equal(lease->version, 2L);
   assert_true(lease->has_query_hidden);
   assert_false(lease->query_hidden);
 
@@ -11982,7 +12069,7 @@ static void test_query_index_pending_flush_uses_public_writes(void **state) {
   flush_req.mode = "sync";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(flush_res.index_seq, remove_res.new_version);
+  assert_true(flush_res.index_seq >= (unsigned long)remove_res.new_version);
   lc_index_flush_res_cleanup(&flush_res);
 
   namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
@@ -16401,6 +16488,8 @@ int main(void) {
       cmocka_unit_test(
           test_client_queue_dequeue_cursor_resumes_after_consumed_message),
       cmocka_unit_test(test_client_queue_dequeue_with_state_uses_pouch_lease),
+      cmocka_unit_test(
+          test_client_queue_dequeue_with_state_nack_releases_state_lease),
       cmocka_unit_test(test_client_queue_ttl_and_retry_terminal_states),
       cmocka_unit_test(test_client_queue_rejects_overflowing_timestamps),
       cmocka_unit_test(test_client_queue_subscribe_polling_paths),

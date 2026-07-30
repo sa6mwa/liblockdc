@@ -1409,7 +1409,12 @@ struct lc_message {
   lc_source *(*payload_reader)(lc_message *self);
   /** Rewinds the payload stream when the underlying source supports it. */
   int (*rewind_payload)(lc_message *self, lc_error *error);
-  /** Copies the payload stream into `dst`. */
+  /**
+   * Copies the payload stream into `dst`.
+   *
+   * Resettable payloads are rewound before copying. Single-pass payloads that
+   * do not expose `reset()` are copied from their current position.
+   */
   int (*write_payload)(lc_message *self, lc_sink *dst, size_t *written,
                        lc_error *error);
   /**
@@ -2183,7 +2188,12 @@ lc_lease *lc_message_state(lc_message *message);
 lc_source *lc_message_payload(lc_message *message);
 /** Rewinds a bound message payload so it can be consumed again. */
 int lc_message_rewind_payload(lc_message *message, lc_error *error);
-/** Copies a bound message payload into `dst`. */
+/**
+ * Copies a bound message payload into `dst`.
+ *
+ * Resettable payloads are rewound before copying. Single-pass payloads that do
+ * not expose `reset()` are copied from their current position.
+ */
 int lc_message_write_payload(lc_message *message, lc_sink *dst, size_t *written,
                              lc_error *error);
 /** Starts all managed consumer loops and blocks until they stop. */

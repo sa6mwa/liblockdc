@@ -308,6 +308,14 @@ int lc_message_write_payload_method(lc_message *self, lc_sink *dst,
     }
     return LC_OK;
   }
+  if (message->payload->reset != NULL) {
+    int rc;
+
+    rc = message->payload->reset(message->payload, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
   return lc_copy(message->payload, dst, written, error);
 }
 

@@ -69,6 +69,9 @@ typedef int (*lc_pouch_state_precondition_fn)(void *context, lc_error *error);
 typedef struct lc_pouch_state_write_options {
   const char *content_type;
   const char *expected_etag;
+  const unsigned char *metadata;
+  size_t metadata_length;
+  int has_metadata;
   lc_pouch_state_precondition_fn precondition;
   void *precondition_context;
   unsigned long expected_version;
@@ -81,10 +84,13 @@ typedef struct lc_pouch_state_write_options {
 
 typedef struct lc_pouch_state_write_result {
   char *etag;
+  unsigned long index_seq;
   unsigned long version;
   unsigned long bytes;
   unsigned long cipher_bytes;
   char *descriptor;
+  unsigned char *metadata;
+  size_t metadata_length;
   long updated_at_unix;
   int has_query_hidden;
   int query_hidden;
@@ -94,13 +100,17 @@ typedef struct lc_pouch_state_read_result {
   int found;
   char *content_type;
   char *etag;
+  unsigned long index_seq;
   unsigned long version;
   unsigned long bytes;
   unsigned long cipher_bytes;
   char *descriptor;
+  unsigned char *metadata;
+  size_t metadata_length;
   long updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  int has_body;
   lc_source *body;
 } lc_pouch_state_read_result;
 
@@ -112,6 +122,8 @@ typedef struct lc_pouch_state_visit_entry {
   unsigned long bytes;
   unsigned long cipher_bytes;
   const char *descriptor;
+  const unsigned char *metadata;
+  size_t metadata_length;
   long updated_at_unix;
   int has_query_hidden;
   int query_hidden;

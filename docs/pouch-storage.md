@@ -153,6 +153,28 @@ If a C helper struct internally separates hot lease fields from other metadata,
 that is an in-memory organization detail only. It must replay from target-key
 metadata records and must not be a separate durable namespace.
 
+Pouch encodes active lease fields as a C-native side-metadata blob attached to
+the target key metadata record. A target with no state payload may still have a
+metadata-only record so acquire, keepalive, and release can preserve fencing
+and expiry without creating a public document. Body reads treat metadata-only
+records as no-content; metadata reads return the lease metadata.
+
+Metadata-only rows do not consume the public state generation for the key. A
+live body write after a missing/tombstoned/metadata-only row starts at public
+generation `1`, and subsequent live body writes/deletes advance from the
+current live body generation. Lease metadata CAS is lease-record scoped: the
+first lease write for a target with no lease metadata observes expected lease
+version `0` even when the target already has a body, while keepalive/release
+validate the stored lease metadata version.
+
+Pouch also keeps a namespace log high-water sequence separate from public
+per-key generations. Every appended namespace log record advances the
+high-water sequence used by query-index incremental flush, transaction
+correlation ids, projection refresh, and compaction validation. Derived indexes
+must filter changed records by this log/index sequence, not by public state
+generation, because metadata-only records and independent keys may share public
+generation values.
+
 ### State Records
 
 Go disk stores JSON state payloads as state records under the caller namespace
@@ -235,6 +257,12 @@ use protobuf, the C-native queue metadata object key is
 keys stay Go-shaped: `q/<queue>/msg/<id>.bin` and
 `q/<queue>/state/<id>.json`. Message and state lease metadata keys remain
 extensionless: `q/<queue>/msg/<id>` and `q/<queue>/state/<id>`.
+
+The queue payload object is written as its own logstore object before the
+metadata object. The `.meta` record contains the C-native queue header and the
+counted payload length; it does not concatenate queue payload bytes. Reads
+derive the payload object key from the `.meta` key by replacing `.meta` with
+`.bin`.
 
 Queue enqueue obligations:
 
