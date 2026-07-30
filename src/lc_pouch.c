@@ -707,7 +707,7 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
       pslog_field fields[1];
 
       fields[0] = lc_log_str_field("reason", "namespaces-missing");
-      lc_log_debug(pouch->logger, "warm.skip", fields, 1U);
+      lc_log_debug(pouch->logger, "cache.load.skip", fields, 1U);
       return LC_OK;
     }
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -724,7 +724,7 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
         lc_log_bool_field("crypto", lc_pouch_crypto_enabled(pouch->crypto));
     fields[1] = lc_log_bool_field(
         "compression", lc_pouch_crypto_compression_enabled(pouch->crypto));
-    lc_log_debug(pouch->logger, "warm.start", fields, 2U);
+    lc_log_debug(pouch->logger, "cache.load.start", fields, 2U);
   }
   while (rc == LC_OK) {
     char *namespace_name;
@@ -755,7 +755,7 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
       fields[0] = lc_log_str_field("ns", namespace_name);
       fields[1] = lc_log_error_field("error", &warm_error);
       fields[2] = lc_log_code_field(&warm_error);
-      lc_log_warn(pouch->logger, "warm.state.error", fields, 3U);
+      lc_log_warn(pouch->logger, "cache.load.state.error", fields, 3U);
     }
     lc_error_cleanup(&warm_error);
     lc_error_init(&warm_error);
@@ -767,7 +767,7 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
       fields[0] = lc_log_str_field("ns", namespace_name);
       fields[1] = lc_log_error_field("error", &warm_error);
       fields[2] = lc_log_code_field(&warm_error);
-      lc_log_warn(pouch->logger, "warm.index.error", fields, 3U);
+      lc_log_warn(pouch->logger, "cache.load.index.error", fields, 3U);
     }
     lc_error_cleanup(&warm_error);
     {
@@ -776,7 +776,7 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
       fields[0] = lc_log_str_field("ns", namespace_name);
       fields[1] = lc_log_bool_field("state_ok", state_rc == LC_OK);
       fields[2] = lc_log_bool_field("index_ok", index_rc == LC_OK);
-      lc_log_debug(pouch->logger, "warm.namespace", fields, 3U);
+      lc_log_debug(pouch->logger, "cache.load.namespace", fields, 3U);
     }
     namespace_count++;
     lc_free_with_allocator(&pouch->allocator, namespace_name);
@@ -795,7 +795,7 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
     pslog_field fields[1];
 
     fields[0] = lc_log_u64_field("count", namespace_count);
-    lc_log_debug(pouch->logger, "warm.complete", fields, 1U);
+    lc_log_debug(pouch->logger, "cache.load.complete", fields, 1U);
   }
   return rc;
 }

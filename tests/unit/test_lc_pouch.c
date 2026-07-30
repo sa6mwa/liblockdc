@@ -3655,8 +3655,8 @@ static void test_pouch_logs_use_storage_pouch_subsystem(void **state) {
   assert_non_null(logs);
   assert_non_null(strstr(logs, "\"sys\":\"storage.pouch\""));
   assert_non_null(strstr(logs, "\"message\":\"open\""));
-  assert_non_null(strstr(logs, "\"message\":\"warm.start\""));
-  assert_non_null(strstr(logs, "\"message\":\"warm.complete\""));
+  assert_non_null(strstr(logs, "\"message\":\"cache.load.start\""));
+  assert_non_null(strstr(logs, "\"message\":\"cache.load.complete\""));
   assert_non_null(strstr(logs, "\"message\":\"status.read\""));
   assert_non_null(strstr(logs, "\"message\":\"manifest.ensure_namespace\""));
   assert_non_null(strstr(logs, "\"ns\":\"logging-ns\""));
