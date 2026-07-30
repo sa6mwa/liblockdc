@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-set -eu
-
-script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-repo_root="$(CDPATH= cd -- "$script_dir/.." && pwd)"
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+repo_root="$(CDPATH= cd -- "$script_dir/.." && pwd -P)"
 make_bin="${MAKE:-make}"
 dry_run="${LOCKDC_RELEASE_DRY_RUN:-0}"
 
@@ -22,10 +21,4 @@ cd "$repo_root"
 
 run_step __lifecycle-version-contract
 run_step __clean
-run_step __format
-run_step __test-debug
-run_step __test-host
-run_step __cross-test
-run_step __fuzz
-run_step __benchmarks
-run_step __release-package-only
+run_step __release-pipeline

@@ -153,12 +153,11 @@ scripts/package-verify.sh
 ```
 
 `make release` is the clean-slate release gate. It removes generated state,
-runs the release version contract, formatting, debug sanitizer tests, host and
-cross release suites, fuzzing, benchmarks, and release package
-generation/verification. Deterministic lockd e2e is part of `make prerelease`
-so it is not rerun by `make release`. The primary Makefile release flow
-provisions the dependency roots it needs; direct lower-level packaging scripts
-still assume those roots already exist.
+runs the release version contract, then executes the same proof graph as
+`make prerelease`: formatting, debug sanitizer tests, Valgrind, fuzz smoke,
+lockd e2e, Lua tests, benchmark gates, and the release matrix. The primary
+Makefile release flow provisions the dependency roots it needs; direct
+lower-level packaging scripts still assume those roots already exist.
 
 By default `scripts/package.sh` now builds the full release matrix:
 

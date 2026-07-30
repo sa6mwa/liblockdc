@@ -106,7 +106,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__package __package-source __package-source-smoke __package-checksums __package-verify __clean-dist \
 	__lua-rock __lua-test __lua-env \
 	__dev-up __dev-down __dev-reset __cross-build __cross-preset-test __cross-test \
-	__prerelease __prerelease-live __prerelease-hardening __lifecycle-version-contract __release __release-matrix __release-package-only __clean \
+	__prerelease __prerelease-live __prerelease-hardening __lifecycle-version-contract __release __release-pipeline __release-matrix __release-package-only __clean \
 	deps-debug deps-release deps-cross \
 	build build-debug build-release build-e2e build-asan build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-asan test-coverage \
@@ -115,7 +115,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives clean-dist \
 	lua-rock lua-test lua-env \
 	dev-up dev-down dev-reset cross-build cross-preset-test cross-test \
-	prerelease prerelease-live prerelease-hardening lifecycle-version-contract release release-matrix clean
+	prerelease prerelease-live prerelease-hardening lifecycle-version-contract print-release-version release release-matrix clean
 
 help:
 	@printf '%s\n' \
@@ -176,11 +176,12 @@ help:
 		'make cross-build        Build all non-host cross release presets.' \
 		'make cross-preset-test  Run the host ASan/UBSan debug cross-preset packaging-isolation check.' \
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
-		'make prerelease         Run deterministic local prerelease confidence: finalize-slice, Valgrind, fuzz smoke, e2e, and Lua tests.' \
+		'make prerelease         Run the release proof graph without the initial clean.' \
 		'make prerelease-live    Refuse without LOCKDC_PRERELEASE_LIVE=1; no live-provider checks are currently defined.' \
-		'make prerelease-hardening  Run prerelease plus benchmark gates and the release matrix.' \
+		'make prerelease-hardening  Run prerelease plus full fuzzing and the Pouch Go parity gate.' \
 		'make lifecycle-version-contract  Verify exact release tag semantics before clean release work.' \
-		'make release            Run the clean-slate final release workflow: tests, AFL++ fuzzing, benchmarks, package generation, and final release verification.' \
+		'make print-release-version  Print the release version resolved by the Make-owned release surface.' \
+		'make release            Run the clean-slate final release workflow: version contract, clean, then the shared release proof graph.' \
 		'make release-matrix     Rebuild, test, package, and verify the release matrix while reusing existing build and dependency caches.' \
 		'make clean              Remove generated build, cache, dist, and devenv state.'
 
@@ -593,7 +594,7 @@ release:
 prerelease:
 	$(TIMED) prerelease $(MAKE) __prerelease
 
-__prerelease: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test
+__prerelease: __release-pipeline
 
 prerelease-live:
 	$(TIMED) prerelease-live $(MAKE) __prerelease-live
@@ -617,7 +618,7 @@ __prerelease-live:
 prerelease-hardening:
 	$(TIMED) prerelease-hardening $(MAKE) __prerelease-hardening
 
-__prerelease-hardening: __prerelease __bench-gate __benchmark-pouch-go-parity-gate __release-matrix
+__prerelease-hardening: __prerelease __fuzz __benchmark-pouch-go-parity-gate
 
 lifecycle-version-contract:
 	$(TIMED) lifecycle-version-contract $(MAKE) __lifecycle-version-contract
@@ -625,8 +626,13 @@ lifecycle-version-contract:
 __lifecycle-version-contract:
 	bash ./scripts/lifecycle-version-contract.sh
 
+print-release-version:
+	@bash ./scripts/print-release-version.sh
+
 __release:
 	bash ./scripts/release.sh
+
+__release-pipeline: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test __bench-gate __release-matrix
 
 release-matrix:
 	$(TIMED) release-matrix $(MAKE) __release-matrix

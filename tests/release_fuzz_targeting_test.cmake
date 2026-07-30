@@ -22,12 +22,7 @@ endif()
 foreach(expected
     "[release] __lifecycle-version-contract"
     "[release] __clean"
-    "[release] __test-debug"
-    "[release] __test-host"
-    "[release] __cross-test"
-    "[release] __fuzz"
-    "[release] __benchmarks"
-    "[release] __release-package-only"
+    "[release] __release-pipeline"
 )
     string(FIND "${release_stdout}" "${expected}" match_index)
     if(match_index EQUAL -1)
@@ -38,10 +33,27 @@ foreach(expected
     endif()
 endforeach()
 
-string(FIND "${release_stdout}" "[release] __test-e2e" e2e_match_index)
-if(NOT e2e_match_index EQUAL -1)
+foreach(unexpected
+    "[release] __test-debug"
+    "[release] __test-host"
+    "[release] __cross-test"
+    "[release] __test-e2e"
+    "[release] __benchmarks"
+    "[release] __release-package-only"
+)
+    string(FIND "${release_stdout}" "${unexpected}" unexpected_match_index)
+    if(NOT unexpected_match_index EQUAL -1)
+        message(FATAL_ERROR
+            "Did not expect release.sh to duplicate release-pipeline step '${unexpected}'\n"
+            "stdout:\n${release_stdout}\n"
+            "stderr:\n${release_stderr}")
+    endif()
+endforeach()
+
+string(FIND "${release_stdout}" "[release] __lifecycle-version-contract\n[release] __clean\n[release] __release-pipeline" release_order_match)
+if(release_order_match EQUAL -1)
     message(FATAL_ERROR
-        "Did not expect release to rerun e2e; e2e belongs to prerelease\n"
+        "Expected release dry-run to run lifecycle-version-contract, clean, then release-pipeline\n"
         "stdout:\n${release_stdout}\n"
         "stderr:\n${release_stderr}")
 endif()

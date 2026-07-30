@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-set -eu
+set -euo pipefail
 
-script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
-cmake_bin=${CMAKE:-cmake}
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
+make_bin=${MAKE:-make}
 reserved_tag=v99.99.99
 dry_run=${LOCKDC_LIFECYCLE_VERSION_CONTRACT_DRY_RUN:-0}
 
@@ -17,13 +17,8 @@ cleanup_reserved_tag() {
   git -C "$repo_root" tag -d "$reserved_tag" >/dev/null 2>&1 || true
 }
 
-version_probe() {
-  output_file=$1
-  "$cmake_bin" \
-    -DLOCKDC_ROOT="$repo_root" \
-    -DLOCKDC_VERSION_SOURCE_DIR="$repo_root" \
-    -DLOCKDC_VERSION_PROBE_OUTPUT="$output_file" \
-    -P "$repo_root/tests/version_resolution_probe.cmake"
+print_release_version() {
+  "$make_bin" -s -C "$repo_root" print-release-version
 }
 
 cleanup_reserved_tag
@@ -62,11 +57,8 @@ if [ "$exact_lightweight_count" -gt 1 ]; then
 fi
 
 if [ "$exact_lightweight_count" -eq 1 ]; then
-  version_file=$(mktemp)
-  trap 'rm -f "$version_file"' EXIT
-  version_probe "$version_file"
   expected_version=${exact_lightweight_tag#v}
-  actual_version=$(cut -d '|' -f 1 <"$version_file")
+  actual_version=$(print_release_version)
   if [ "$actual_version" != "$expected_version" ]; then
     printf 'lifecycle-version-contract: version probe resolved %s, expected %s\n' "$actual_version" "$expected_version" >&2
     exit 1
@@ -82,10 +74,7 @@ if [ "$tag_type" != "commit" ]; then
   exit 1
 fi
 
-version_file=$(mktemp)
-trap 'rm -f "$version_file"; cleanup_reserved_tag' EXIT HUP INT TERM
-version_probe "$version_file"
-actual_version=$(cut -d '|' -f 1 <"$version_file")
+actual_version=$(print_release_version)
 if [ "$actual_version" != "99.99.99" ]; then
   printf 'lifecycle-version-contract: reserved tag probe resolved %s, expected 99.99.99\n' "$actual_version" >&2
   exit 1

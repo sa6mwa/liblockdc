@@ -24,6 +24,7 @@ foreach(target
         prerelease-live
         prerelease-hardening
         lifecycle-version-contract
+        print-release-version
         release-matrix)
     assert_contains(root_makefile "make ${target}" "make help entry for ${target}")
     assert_contains(root_makefile "${target}:" "make target ${target}")
@@ -33,11 +34,14 @@ assert_contains(root_makefile "bash ./scripts/valgrind.sh" "Valgrind runner wiri
 assert_contains(root_makefile "LOCKDC_PRERELEASE_LIVE=1" "live prerelease opt-in diagnostic")
 assert_contains(root_makefile "__finalize-slice: __format __test-debug" "ordinary slice gate graph")
 assert_contains(root_makefile "__test-all: __test-debug __test-host" "bounded test-all graph")
-assert_contains(root_makefile "__prerelease: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test" "deterministic prerelease graph")
-assert_contains(root_makefile "__prerelease-hardening: __prerelease __bench-gate __benchmark-pouch-go-parity-gate __release-matrix" "hardening prerelease graph")
+assert_contains(root_makefile "__prerelease: __release-pipeline" "deterministic prerelease graph")
+assert_contains(root_makefile "__prerelease-hardening: __prerelease __fuzz __benchmark-pouch-go-parity-gate" "hardening prerelease graph")
 assert_contains(root_makefile "__lifecycle-version-contract:" "lifecycle version contract target")
 assert_contains(root_makefile "bash ./scripts/lifecycle-version-contract.sh" "lifecycle version contract runner")
-assert_contains(release_script "run_step __lifecycle-version-contract\nrun_step __clean" "release version contract before clean")
+assert_contains(root_makefile "print-release-version:" "Make-owned release version surface")
+assert_contains(root_makefile "bash ./scripts/print-release-version.sh" "release version printer runner")
+assert_contains(root_makefile "__release-pipeline: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test __bench-gate __release-matrix" "shared release pipeline graph")
+assert_contains(release_script "run_step __lifecycle-version-contract\nrun_step __clean\nrun_step __release-pipeline" "release version contract, clean, shared pipeline order")
 
 execute_process(
     COMMAND
@@ -80,6 +84,7 @@ foreach(target
         prerelease-live
         prerelease-hardening
         lifecycle-version-contract
+        print-release-version
         release-matrix)
     string(FIND "${help_stdout}" "make ${target}" help_match)
     if(help_match EQUAL -1)

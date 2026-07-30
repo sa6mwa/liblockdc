@@ -154,11 +154,10 @@ Create the complete release set:
 make release
 ```
 
-`make release` is the final clean-slate release workflow. It removes generated
-state, verifies release tag semantics, formats the C tree, runs the debug
-sanitizer, host, cross, fuzz, and benchmark layers, then generates and verifies
-the release archive set. Deterministic lockd e2e is part of `make prerelease`.
-Use
+`make release` is the final clean-slate release workflow. It verifies release
+tag semantics, removes generated state, then runs the same proof graph as
+`make prerelease`: formatting, debug sanitizer tests, Valgrind, fuzz smoke,
+lockd e2e, Lua tests, benchmark gates, and the release matrix. Use
 `make release-matrix` when you explicitly want to reuse existing build and
 dependency caches for a faster release matrix/package rerun.
 
