@@ -3739,6 +3739,18 @@ static int lc_pouch_state_read_next_record(
   return rc;
 }
 
+static void lc_pouch_state_log_tail_repair(lc_pouch *pouch,
+                                           const char *reason,
+                                           const char *segment,
+                                           unsigned long offset) {
+  pslog_field fields[3];
+
+  fields[0] = lc_log_str_field("reason", reason);
+  fields[1] = lc_log_str_field("segment", segment);
+  fields[2] = lc_log_u64_field("offset", offset);
+  lc_log_warn(pouch->logger, "logstore.tail.repair", fields, 3U);
+}
+
 static int lc_pouch_state_scan_file(lc_pouch *pouch, const char *segment_path,
                                     const char *container_leaf,
                                     int allow_truncated_tail, const char *key,
@@ -3824,6 +3836,8 @@ static int lc_pouch_state_scan_file(lc_pouch *pouch, const char *segment_path,
   }
   if (rc == LC_OK && repair_tail) {
     lc_pouch_state_truncate_path_best_effort(segment_path, repair_offset);
+    lc_pouch_state_log_tail_repair(pouch, "scan", container_leaf,
+                                   repair_offset);
   }
   return rc;
 }
@@ -4256,6 +4270,8 @@ static int lc_pouch_state_collect_decisions_file(
   }
   if (rc == LC_OK && repair_tail) {
     lc_pouch_state_truncate_path_best_effort(segment_path, repair_offset);
+    lc_pouch_state_log_tail_repair(pouch, "decisions", container_leaf,
+                                   repair_offset);
   }
   return rc;
 }
@@ -4374,6 +4390,8 @@ static int lc_pouch_state_cache_replay_file(
   }
   if (rc == LC_OK && repair_tail) {
     lc_pouch_state_truncate_path_best_effort(segment_path, repair_offset);
+    lc_pouch_state_log_tail_repair(pouch, "replay", container_leaf,
+                                   repair_offset);
   }
   return rc;
 }
@@ -5721,6 +5739,14 @@ static int lc_pouch_state_compact_namespace_if_needed(
     fields[4] = lc_log_u64_field("pending", cleanup_pending_count);
     lc_log_debug(pouch->logger, "compaction.complete", fields, 5U);
   }
+  if (cleanup_pending_count != 0UL) {
+    pslog_field fields[3];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_u64_field("pending", cleanup_pending_count);
+    fields[2] = lc_log_str_field("reason", "cleanup-pending");
+    lc_log_warn(pouch->logger, "compaction.cleanup.pending", fields, 3U);
+  }
   return lc_pouch_maintenance_set_diagnostic(pouch, out, "compacted", error);
 }
 
@@ -5875,7 +5901,14 @@ lc_pouch_state_maybe_compact(lc_pouch *pouch, const char *namespace_name,
   lc_error_init(&ignored);
   rc = lc_pouch_state_compact_namespace_if_needed(pouch, namespace_name,
                                                   manifest, 0, NULL, &ignored);
-  (void)rc;
+  if (rc != LC_OK) {
+    pslog_field fields[3];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_error_field("error", &ignored);
+    fields[2] = lc_log_code_field(&ignored);
+    lc_log_warn(pouch->logger, "compaction.background.error", fields, 3U);
+  }
   lc_error_cleanup(&ignored);
 }
 
@@ -5964,6 +5997,16 @@ static int lc_pouch_maintenance_run_locked(
     fields[4] = lc_log_u64_field(
         "reclaim_bytes", out != NULL ? out->candidate_bytes : 0UL);
     lc_log_debug(pouch->logger, "maintenance.complete", fields, 5U);
+    if (out != NULL && out->cleanup_pending_count != 0UL) {
+      pslog_field warn_fields[3];
+
+      warn_fields[0] = lc_log_str_field("ns", namespace_name);
+      warn_fields[1] =
+          lc_log_u64_field("pending", out->cleanup_pending_count);
+      warn_fields[2] = lc_log_str_field("reason", out->diagnostic);
+      lc_log_warn(pouch->logger, "maintenance.cleanup.pending", warn_fields,
+                  3U);
+    }
   } else {
     pslog_field fields[3];
 
@@ -6271,6 +6314,7 @@ static int lc_pouch_state_recover_staged_decisions_locked(
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_decision *decisions;
   lc_pouch_state_decision *decision;
+  unsigned long recovered_count;
   int recovered;
   int rc;
 
@@ -6295,6 +6339,7 @@ static int lc_pouch_state_recover_staged_decisions_locked(
     return rc;
   }
   decisions = NULL;
+  recovered_count = 0UL;
   recovered = 0;
   rc = lc_pouch_state_collect_decisions(pouch, &manifest, &decisions, error);
   for (decision = decisions; rc == LC_OK && decision != NULL;
@@ -6326,6 +6371,7 @@ static int lc_pouch_state_recover_staged_decisions_locked(
           decision->etag, NULL, NULL, tombstone_version, 0UL, 0UL, NULL,
           updated_at_unix, 0, 0, 0);
       recovered = 1;
+      recovered_count++;
     }
     lc_pouch_state_entry_cleanup(&pouch->allocator, &staged);
   }
@@ -6337,6 +6383,13 @@ static int lc_pouch_state_recover_staged_decisions_locked(
   }
   if (rc == LC_OK) {
     cache->decision_recovery_checked = 1;
+    if (recovered_count != 0UL) {
+      pslog_field fields[2];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_u64_field("count", recovered_count);
+      lc_log_debug(pouch->logger, "recovery.staged.complete", fields, 2U);
+    }
   }
   lc_pouch_state_decisions_cleanup(&pouch->allocator, decisions);
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
@@ -8039,7 +8092,7 @@ cleanup_unlocked:
     fields[1] = lc_log_u64_field("count", key_count);
     fields[2] = lc_log_error_field("error", error);
     fields[3] = lc_log_code_field(error);
-    lc_log_error(pouch->logger, "logstore.read_many.error", fields, 4U);
+    lc_log_error(pouch->logger, "logstore.read.many.error", fields, 4U);
   }
   return rc;
 }

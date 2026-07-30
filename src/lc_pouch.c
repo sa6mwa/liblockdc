@@ -684,6 +684,7 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
   char *namespaces_path;
   DIR *dir;
   struct dirent *entry;
+  unsigned long namespace_count;
   int saved_errno;
   int rc;
 
@@ -703,6 +704,10 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
     saved_errno = errno;
     lc_free_with_allocator(&pouch->allocator, namespaces_path);
     if (saved_errno == ENOENT) {
+      pslog_field fields[1];
+
+      fields[0] = lc_log_str_field("reason", "namespaces-missing");
+      lc_log_debug(pouch->logger, "warm.skip", fields, 1U);
       return LC_OK;
     }
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -711,9 +716,21 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
   }
   rc = LC_OK;
   saved_errno = 0;
+  namespace_count = 0UL;
+  {
+    pslog_field fields[2];
+
+    fields[0] =
+        lc_log_bool_field("crypto", lc_pouch_crypto_enabled(pouch->crypto));
+    fields[1] = lc_log_bool_field(
+        "compression", lc_pouch_crypto_compression_enabled(pouch->crypto));
+    lc_log_debug(pouch->logger, "warm.start", fields, 2U);
+  }
   while (rc == LC_OK) {
     char *namespace_name;
     lc_error warm_error;
+    int index_rc;
+    int state_rc;
 
     errno = 0;
     entry = readdir(dir);
@@ -730,12 +747,38 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
       continue;
     }
     lc_error_init(&warm_error);
-    (void)lc_pouch_state_warm_namespace(pouch, namespace_name, &warm_error);
+    state_rc =
+        lc_pouch_state_warm_namespace(pouch, namespace_name, &warm_error);
+    if (state_rc != LC_OK) {
+      pslog_field fields[3];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_error_field("error", &warm_error);
+      fields[2] = lc_log_code_field(&warm_error);
+      lc_log_warn(pouch->logger, "warm.state.error", fields, 3U);
+    }
     lc_error_cleanup(&warm_error);
     lc_error_init(&warm_error);
-    (void)lc_pouch_query_index_warm_namespace(pouch, namespace_name,
-                                              &warm_error);
+    index_rc = lc_pouch_query_index_warm_namespace(pouch, namespace_name,
+                                                   &warm_error);
+    if (index_rc != LC_OK) {
+      pslog_field fields[3];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_error_field("error", &warm_error);
+      fields[2] = lc_log_code_field(&warm_error);
+      lc_log_warn(pouch->logger, "warm.index.error", fields, 3U);
+    }
     lc_error_cleanup(&warm_error);
+    {
+      pslog_field fields[3];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_bool_field("state_ok", state_rc == LC_OK);
+      fields[2] = lc_log_bool_field("index_ok", index_rc == LC_OK);
+      lc_log_debug(pouch->logger, "warm.namespace", fields, 3U);
+    }
+    namespace_count++;
     lc_free_with_allocator(&pouch->allocator, namespace_name);
   }
   if (closedir(dir) != 0 && rc == LC_OK) {
@@ -748,6 +791,12 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
                       NULL, "pouch");
   }
   lc_free_with_allocator(&pouch->allocator, namespaces_path);
+  if (rc == LC_OK) {
+    pslog_field fields[1];
+
+    fields[0] = lc_log_u64_field("count", namespace_count);
+    lc_log_debug(pouch->logger, "warm.complete", fields, 1U);
+  }
   return rc;
 }
 

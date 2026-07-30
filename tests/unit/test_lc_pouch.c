@@ -3638,6 +3638,7 @@ static void test_pouch_logs_use_storage_pouch_subsystem(void **state) {
   logger = open_pouch_test_logger(&log_fp);
   assert_non_null(logger);
   options.logger = logger;
+  options.compression = "zlib";
   rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(pouch);
@@ -3654,6 +3655,8 @@ static void test_pouch_logs_use_storage_pouch_subsystem(void **state) {
   assert_non_null(logs);
   assert_non_null(strstr(logs, "\"sys\":\"storage.pouch\""));
   assert_non_null(strstr(logs, "\"message\":\"open\""));
+  assert_non_null(strstr(logs, "\"message\":\"warm.start\""));
+  assert_non_null(strstr(logs, "\"message\":\"warm.complete\""));
   assert_non_null(strstr(logs, "\"message\":\"status.read\""));
   assert_non_null(strstr(logs, "\"message\":\"manifest.ensure_namespace\""));
   assert_non_null(strstr(logs, "\"ns\":\"logging-ns\""));
