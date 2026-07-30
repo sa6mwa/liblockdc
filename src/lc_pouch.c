@@ -1,6 +1,7 @@
 #include "lc_pouch.h"
 
 #include "lc_api_internal.h"
+#include "lc_log.h"
 #include "lc_pouch_format.h"
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
@@ -263,9 +264,21 @@ int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error) {
   }
   if (!pouch->fsync_thread_started) {
     if (lc_pouch_sync_fd(fd) != 0) {
+      pslog_field fields[2];
+
+      fields[0] = lc_log_i64_field("fd", fd);
+      fields[1] = lc_log_str_field("error", strerror(errno));
+      lc_log_error(pouch->logger, "logstore.fsync.error", fields, 2U);
       return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                           "failed to sync pouch state segment", strerror(errno),
                           NULL, "pouch");
+    }
+    {
+      pslog_field fields[2];
+
+      fields[0] = lc_log_i64_field("fd", fd);
+      fields[1] = lc_log_bool_field("batched", 0);
+      lc_log_trace(pouch->logger, "logstore.fsync", fields, 2U);
     }
     return LC_OK;
   }
@@ -298,9 +311,21 @@ int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error) {
   pthread_mutex_unlock(&pouch->fsync_mutex);
   pthread_cond_destroy(&request.cond);
   if (request.errnum != 0) {
+    pslog_field fields[2];
+
+    fields[0] = lc_log_i64_field("fd", fd);
+    fields[1] = lc_log_str_field("error", strerror(request.errnum));
+    lc_log_error(pouch->logger, "logstore.fsync.error", fields, 2U);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to sync pouch state segment",
                         strerror(request.errnum), NULL, "pouch");
+  }
+  {
+    pslog_field fields[2];
+
+    fields[0] = lc_log_i64_field("fd", fd);
+    fields[1] = lc_log_bool_field("batched", 1);
+    lc_log_trace(pouch->logger, "logstore.fsync", fields, 2U);
   }
   return LC_OK;
 }
@@ -1012,6 +1037,20 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         "failed to copy pouch root path", NULL, NULL, NULL);
   }
   lc_pouch_init_options(pouch, options);
+  pouch->base_logger = options != NULL && options->logger != NULL
+                           ? options->logger
+                           : lc_log_noop_logger();
+  pouch->logger = lc_log_pouch_logger(pouch->base_logger);
+  if (pouch->logger == NULL) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to initialize pouch logger", NULL, NULL,
+                        "pouch");
+  }
+  pouch->owns_logger = (pouch->logger != pouch->base_logger &&
+                        pouch->logger != lc_log_noop_logger())
+                           ? 1
+                           : 0;
   if (pouch->query_engine == NULL || pouch->query_fallback_engine == NULL ||
       pouch->compression == NULL) {
     lc_pouch_close(pouch);
@@ -1076,6 +1115,23 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     return rc;
   }
   *out = pouch;
+  {
+    pslog_field fields[8];
+
+    fields[0] = lc_log_str_field("path", pouch->root_path);
+    fields[1] = lc_log_str_field("query_engine", pouch->query_engine);
+    fields[2] =
+        lc_log_str_field("query_fallback_engine", pouch->query_fallback_engine);
+    fields[3] = lc_log_str_field("compression", pouch->compression);
+    fields[4] =
+        lc_log_bool_field("crypto", lc_pouch_crypto_enabled(pouch->crypto));
+    fields[5] =
+        lc_log_u64_field("segment_target_bytes", pouch->segment_target_bytes);
+    fields[6] = lc_log_bool_field("single_writer", pouch->single_writer);
+    fields[7] = lc_log_bool_field("background_compaction",
+                                  pouch->background_compaction_enabled);
+    lc_log_info(pouch->logger, "open", fields, 8U);
+  }
   return LC_OK;
 }
 
@@ -1086,6 +1142,12 @@ void lc_pouch_close(lc_pouch *pouch) {
     return;
   }
   allocator = pouch->allocator;
+  if (pouch->logger != NULL) {
+    pslog_field fields[1];
+
+    fields[0] = lc_log_str_field("path", pouch->root_path);
+    lc_log_debug(pouch->logger, "close", fields, 1U);
+  }
   lc_pouch_fsync_batcher_close(pouch);
   lc_pouch_state_cache_cleanup(pouch);
   lc_pouch_state_source_cache_cleanup(pouch);
@@ -1097,6 +1159,10 @@ void lc_pouch_close(lc_pouch *pouch) {
   lc_free_with_allocator(&allocator, pouch->query_fallback_engine);
   lc_free_with_allocator(&allocator, pouch->query_engine);
   lc_free_with_allocator(&allocator, pouch->root_path);
+  if (pouch->owns_logger && pouch->logger != NULL &&
+      pouch->logger != lc_log_noop_logger()) {
+    pouch->logger->destroy(pouch->logger);
+  }
   lc_free_with_allocator(&allocator, pouch);
 }
 
@@ -1149,6 +1215,16 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
                         "failed to copy pouch crypto key file status", NULL,
                         NULL, NULL);
   }
+  {
+    pslog_field fields[5];
+
+    fields[0] = lc_log_str_field("path", out->root_path);
+    fields[1] = lc_log_str_field("layout", out->layout_name);
+    fields[2] = lc_log_u64_field("version", out->layout_version);
+    fields[3] = lc_log_bool_field("crypto", out->crypto_enabled);
+    fields[4] = lc_log_str_field("compression", out->compression);
+    lc_log_trace(pouch->logger, "status.read", fields, 5U);
+  }
   return LC_OK;
 }
 
@@ -1178,7 +1254,27 @@ int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *namespace_name,
   rc = lc_pouch_namespace_ensure(&pouch->allocator, pouch->root_path,
                                  namespace_name, error);
   if (rc != LC_OK) {
+    pslog_field fields[3];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_error_field("error", error);
+    fields[2] = lc_log_code_field(error);
+    lc_log_error(pouch->logger, "manifest.ensure_namespace.error", fields, 3U);
     return rc;
   }
-  return lc_pouch_state_recover_staged_decisions(pouch, namespace_name, error);
+  rc = lc_pouch_state_recover_staged_decisions(pouch, namespace_name, error);
+  if (rc == LC_OK) {
+    pslog_field fields[1];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    lc_log_trace(pouch->logger, "manifest.ensure_namespace", fields, 1U);
+  } else {
+    pslog_field fields[3];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_error_field("error", error);
+    fields[2] = lc_log_code_field(error);
+    lc_log_error(pouch->logger, "manifest.recover_staged.error", fields, 3U);
+  }
+  return rc;
 }

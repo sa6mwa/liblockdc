@@ -744,7 +744,7 @@ lc_consumer_log_subscribe_event(lc_consumer_service_handle *service,
 
   fields[0] = lc_log_str_field("consumer", config->name);
   fields[1] = lc_log_str_field("queue", config->request.queue);
-  fields[2] = lc_log_str_field("namespace", config->request.namespace_name);
+  fields[2] = lc_log_str_field("ns", config->request.namespace_name);
   fields[3] = lc_log_str_field("owner", config->request.owner);
   fields[4] = lc_log_bool_field("with_state", config->with_state);
   lc_log_info(service->logger, message, fields, 5U);
@@ -758,13 +758,13 @@ lc_consumer_log_subscribe_error(lc_consumer_service_handle *service,
 
   fields[0] = lc_log_str_field("consumer", config->name);
   fields[1] = lc_log_str_field("queue", config->request.queue);
-  fields[2] = lc_log_str_field("namespace", config->request.namespace_name);
+  fields[2] = lc_log_str_field("ns", config->request.namespace_name);
   fields[3] = lc_log_str_field("owner", config->request.owner);
   fields[4] = lc_log_bool_field("with_state", config->with_state);
   fields[5] = lc_log_code_field(error);
   fields[6] = lc_log_http_status_field(error);
   fields[7] = lc_log_error_field("error", error);
-  lc_log_warn(service->logger, "client.queue.subscribe.error", fields, 8U);
+  lc_log_warn(service->logger, "queue.subscribe.error", fields, 8U);
 }
 
 static long
@@ -1205,7 +1205,7 @@ static int lc_consumer_handle_failure(lc_consumer_service_handle *service,
     fields[2] = lc_log_bool_field("stateful", config->with_state);
     fields[3] = pslog_i64("attempt", (pslog_int64)*failures);
     fields[4] = lc_log_error_field("error", cause);
-    lc_log_error(service->logger, "client.consumer.stop", fields, 5U);
+    lc_log_error(service->logger, "consumer.stop", fields, 5U);
   } else {
     pslog_field fields[6];
 
@@ -1213,9 +1213,9 @@ static int lc_consumer_handle_failure(lc_consumer_service_handle *service,
     fields[1] = lc_log_str_field("queue", config->request.queue);
     fields[2] = lc_log_bool_field("stateful", config->with_state);
     fields[3] = pslog_i64("attempt", (pslog_int64)*failures);
-    fields[4] = pslog_i64("restart_in_ms", (pslog_int64)delay_ms);
+    fields[4] = pslog_i64("restart_ms", (pslog_int64)delay_ms);
     fields[5] = lc_log_error_field("error", cause);
-    lc_log_warn(service->logger, "client.consumer.restart", fields, 6U);
+    lc_log_warn(service->logger, "consumer.restart", fields, 6U);
   }
   if (lc_consumer_is_non_retryable(cause)) {
     return lc_consumer_copy_error(error, cause, LC_ERR_TRANSPORT,
@@ -1258,7 +1258,7 @@ lc_consumer_report_service_fatal(lc_consumer_service_handle *service,
     fields[2] = lc_log_bool_field("stateful", config->with_state);
     fields[3] = pslog_i64("attempt", (pslog_int64)1);
     fields[4] = lc_log_error_field("error", cause);
-    lc_log_error(service->logger, "client.consumer.stop", fields, 5U);
+    lc_log_error(service->logger, "consumer.stop", fields, 5U);
   }
   return LC_OK;
 }
@@ -1297,7 +1297,7 @@ lc_consumer_report_delivery_failure(lc_consumer_service_handle *service,
     fields[2] = lc_log_bool_field("stateful", config->with_state);
     fields[3] = pslog_i64("attempt", (pslog_int64)0);
     fields[4] = lc_log_error_field("error", cause);
-    lc_log_warn(service->logger, "client.consumer.delivery.error", fields, 5U);
+    lc_log_warn(service->logger, "consumer.delivery.error", fields, 5U);
   }
   return LC_OK;
 }
@@ -1349,16 +1349,16 @@ lc_consumer_delivery_begin(void *context,
 
     fields[0] = lc_log_str_field("consumer", bridge->worker->config.name);
     fields[1] = lc_log_str_field("queue", bridge->worker->config.request.queue);
-    fields[2] = lc_log_str_field("namespace",
+    fields[2] = lc_log_str_field("ns",
                                  bridge->worker->config.request.namespace_name);
-    fields[3] = lc_log_str_field("message_id", delivery->message_id);
+    fields[3] = lc_log_str_field("msg_id", delivery->message_id);
     fields[4] = pslog_i64("attempts", (pslog_int64)delivery->attempts);
     fields[5] =
-        pslog_i64("failure_attempts", (pslog_int64)delivery->failure_attempts);
+        pslog_i64("failures", (pslog_int64)delivery->failure_attempts);
     fields[6] =
         lc_log_bool_field("with_state", bridge->worker->config.with_state);
     fields[7] = lc_log_str_field("cid", delivery->correlation_id);
-    lc_log_debug(bridge->worker->service->logger, "client.queue.delivery.begin",
+    lc_log_debug(bridge->worker->service->logger, "queue.delivery.begin",
                  fields, 8U);
   }
   bridge->state = LC_CONSUMER_DELIVERY_STATE_OPEN;
@@ -1588,7 +1588,7 @@ static int lc_consumer_delivery_end(void *context,
 
     fields[0] = lc_log_str_field("consumer", bridge->worker->config.name);
     fields[1] = lc_log_str_field("queue", bridge->worker->config.request.queue);
-    fields[2] = lc_log_str_field("namespace",
+    fields[2] = lc_log_str_field("ns",
                                  bridge->worker->config.request.namespace_name);
     fields[3] = lc_log_str_field(
         "message_id", delivery != NULL ? delivery->message_id : NULL);
@@ -1598,8 +1598,8 @@ static int lc_consumer_delivery_end(void *context,
     fields[6] = lc_log_str_field(
         "cid", delivery != NULL ? delivery->correlation_id : NULL);
     lc_log_debug(bridge->worker->service->logger,
-                 rc == LC_OK ? "client.queue.delivery.complete"
-                             : "client.queue.delivery.handler_error",
+                 rc == LC_OK ? "queue.delivery.complete"
+                             : "queue.delivery.handler_error",
                  fields, 7U);
   }
   return rc == LC_OK;
@@ -1618,16 +1618,16 @@ lc_consumer_delivery_begin_message(lc_consumer_delivery_bridge *bridge,
 
     fields[0] = lc_log_str_field("consumer", bridge->worker->config.name);
     fields[1] = lc_log_str_field("queue", bridge->worker->config.request.queue);
-    fields[2] = lc_log_str_field("namespace",
+    fields[2] = lc_log_str_field("ns",
                                  bridge->worker->config.request.namespace_name);
-    fields[3] = lc_log_str_field("message_id", inner->message_id);
+    fields[3] = lc_log_str_field("msg_id", inner->message_id);
     fields[4] = pslog_i64("attempts", (pslog_int64)inner->attempts);
     fields[5] =
-        pslog_i64("failure_attempts", (pslog_int64)inner->failure_attempts);
+        pslog_i64("failures", (pslog_int64)inner->failure_attempts);
     fields[6] =
         lc_log_bool_field("with_state", bridge->worker->config.with_state);
     fields[7] = lc_log_str_field("cid", inner->correlation_id);
-    lc_log_debug(bridge->worker->service->logger, "client.queue.delivery.begin",
+    lc_log_debug(bridge->worker->service->logger, "queue.delivery.begin",
                  fields, 8U);
   }
   bridge->state = LC_CONSUMER_DELIVERY_STATE_OPEN;
@@ -1766,15 +1766,15 @@ static int lc_consumer_process_pouch_message(lc_consumer_worker_state *worker,
     fields[0] = lc_log_str_field("consumer", worker->config.name);
     fields[1] = lc_log_str_field("queue", worker->config.request.queue);
     fields[2] =
-        lc_log_str_field("namespace", worker->config.request.namespace_name);
-    fields[3] = lc_log_str_field("message_id", NULL);
+        lc_log_str_field("ns", worker->config.request.namespace_name);
+    fields[3] = lc_log_str_field("msg_id", NULL);
     fields[4] = lc_log_bool_field(
         "terminal", lc_consumer_delivery_state_is_terminal(bridge.state));
     fields[5] = lc_log_i64_field("handler_rc", rc);
     fields[6] = lc_log_str_field("cid", NULL);
     lc_log_debug(worker->service->logger,
-                 rc == LC_OK ? "client.queue.delivery.complete"
-                             : "client.queue.delivery.handler_error",
+                 rc == LC_OK ? "queue.delivery.complete"
+                             : "queue.delivery.handler_error",
                  fields, 7U);
   }
   lc_consumer_delivery_cleanup(&bridge);
@@ -1800,14 +1800,14 @@ static int lc_consumer_worker_run_pouch(lc_consumer_worker_state *worker,
     attempt += 1;
     lc_consumer_invoke_start(&worker->config, attempt);
     lc_consumer_log_subscribe_event(service, &worker->config,
-                                    "client.queue.subscribe.begin");
+                                    "queue.subscribe.begin");
     lc_error_cleanup(error);
     lc_error_init(error);
     message = NULL;
     rc = lc_consumer_worker_dequeue_pouch(worker, client, &message, error);
     if (rc == LC_OK && message == NULL) {
       lc_consumer_log_subscribe_event(service, &worker->config,
-                                      "client.queue.subscribe.complete");
+                                      "queue.subscribe.complete");
       lc_consumer_invoke_stop(&worker->config, attempt, NULL);
       failures = 0;
       if (lc_consumer_wait_delay(service, poll_delay_ms)) {
@@ -1822,7 +1822,7 @@ static int lc_consumer_worker_run_pouch(lc_consumer_worker_state *worker,
                                              message, &delivery_error);
       if (rc == LC_OK && delivery_error.code == LC_OK) {
         lc_consumer_log_subscribe_event(service, &worker->config,
-                                        "client.queue.subscribe.complete");
+                                        "queue.subscribe.complete");
         lc_consumer_invoke_stop(&worker->config, attempt, NULL);
         failures = 0;
         continue;
@@ -2135,7 +2135,7 @@ static void *lc_consumer_worker_main(void *context) {
     attempt += 1;
     lc_consumer_invoke_start(&worker->config, attempt);
     lc_consumer_log_subscribe_event(service, &worker->config,
-                                    "client.queue.subscribe.begin");
+                                    "queue.subscribe.begin");
     lc_error_cleanup(&error);
     lc_error_init(&error);
     lc_engine_error_cleanup(&engine_error);
@@ -2162,7 +2162,7 @@ static void *lc_consumer_worker_main(void *context) {
     if (rc == LC_ENGINE_OK && bridge.handler_rc == LC_OK &&
         error.code == LC_OK) {
       lc_consumer_log_subscribe_event(service, &worker->config,
-                                      "client.queue.subscribe.complete");
+                                      "queue.subscribe.complete");
       if (lc_consumer_is_stop_requested(service)) {
         lc_consumer_invoke_stop(&worker->config, attempt, NULL);
         break;

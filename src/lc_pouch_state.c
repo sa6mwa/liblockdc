@@ -1,6 +1,7 @@
 #include "lc_pouch.h"
 
 #include "lc_api_internal.h"
+#include "lc_log.h"
 #include "lc_pouch_crypto.h"
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
@@ -5580,6 +5581,13 @@ static int lc_pouch_state_compact_namespace_if_needed(
     if (out != NULL) {
       out->skipped = 1;
     }
+    {
+      pslog_field fields[2];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_str_field("reason", "disabled");
+      lc_log_trace(pouch->logger, "compaction.skip", fields, 2U);
+    }
     return lc_pouch_maintenance_set_diagnostic(pouch, out, "disabled", error);
   }
   candidate_count =
@@ -5592,6 +5600,13 @@ static int lc_pouch_state_compact_namespace_if_needed(
   if (candidate_count == 0UL) {
     if (out != NULL) {
       out->skipped = 1;
+    }
+    {
+      pslog_field fields[2];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_str_field("reason", "no-candidates");
+      lc_log_trace(pouch->logger, "compaction.skip", fields, 2U);
     }
     return lc_pouch_maintenance_set_diagnostic(pouch, out, "no-candidates",
                                                error);
@@ -5609,12 +5624,28 @@ static int lc_pouch_state_compact_namespace_if_needed(
     if (out != NULL) {
       out->skipped = 1;
     }
+    {
+      pslog_field fields[3];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_str_field("reason", "below-segment-threshold");
+      fields[2] = lc_log_u64_field("count", candidate_count);
+      lc_log_trace(pouch->logger, "compaction.skip", fields, 3U);
+    }
     return lc_pouch_maintenance_set_diagnostic(
         pouch, out, "below-segment-threshold", error);
   }
   if (!force && candidate_bytes < pouch->compaction_min_reclaimable_bytes) {
     if (out != NULL) {
       out->skipped = 1;
+    }
+    {
+      pslog_field fields[3];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_str_field("reason", "below-reclaimable-threshold");
+      fields[2] = lc_log_u64_field("reclaim_bytes", candidate_bytes);
+      lc_log_trace(pouch->logger, "compaction.skip", fields, 3U);
     }
     return lc_pouch_maintenance_set_diagnostic(
         pouch, out, "below-reclaimable-threshold", error);
@@ -5628,6 +5659,13 @@ static int lc_pouch_state_compact_namespace_if_needed(
     if (out != NULL) {
       out->skipped = 1;
     }
+    {
+      pslog_field fields[2];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_str_field("reason", "interval-not-elapsed");
+      lc_log_trace(pouch->logger, "compaction.skip", fields, 2U);
+    }
     return lc_pouch_maintenance_set_diagnostic(pouch, out,
                                                "interval-not-elapsed", error);
   }
@@ -5638,6 +5676,15 @@ static int lc_pouch_state_compact_namespace_if_needed(
     pouch->last_compaction_check_seconds = now_seconds;
   }
   {
+    pslog_field fields[4];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_u64_field("count", candidate_count);
+    fields[2] = lc_log_u64_field("reclaim_bytes", candidate_bytes);
+    fields[3] = lc_log_bool_field("force", force);
+    lc_log_debug(pouch->logger, "compaction.start", fields, 4U);
+  }
+  {
     const char *abort_diagnostic;
 
     abort_diagnostic = NULL;
@@ -5646,6 +5693,15 @@ static int lc_pouch_state_compact_namespace_if_needed(
         &cleanup_pending_count, &abort_diagnostic, error);
     if (rc != LC_OK) {
       lc_pouch_maintenance_mark_aborted(pouch, out, abort_diagnostic);
+      {
+        pslog_field fields[4];
+
+        fields[0] = lc_log_str_field("ns", namespace_name);
+        fields[1] = lc_log_str_field("reason", abort_diagnostic);
+        fields[2] = lc_log_error_field("error", error);
+        fields[3] = lc_log_code_field(error);
+        lc_log_error(pouch->logger, "compaction.error", fields, 4U);
+      }
       return rc;
     }
   }
@@ -5654,6 +5710,16 @@ static int lc_pouch_state_compact_namespace_if_needed(
     out->compacted_segment_id = compacted_segment_id;
     out->cleanup_deleted_count = cleanup_deleted_count;
     out->cleanup_pending_count = cleanup_pending_count;
+  }
+  {
+    pslog_field fields[5];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_u64_field("segment", compacted_segment_id);
+    fields[2] = lc_log_u64_field("reclaim_bytes", candidate_bytes);
+    fields[3] = lc_log_u64_field("records", cleanup_deleted_count);
+    fields[4] = lc_log_u64_field("pending", cleanup_pending_count);
+    lc_log_debug(pouch->logger, "compaction.complete", fields, 5U);
   }
   return lc_pouch_maintenance_set_diagnostic(pouch, out, "compacted", error);
 }
@@ -5836,6 +5902,14 @@ static int lc_pouch_maintenance_run_locked(
   force = options->force ? 1 : 0;
   cleanup_deleted_count = 0UL;
   cleanup_pending_count = 0UL;
+  {
+    pslog_field fields[3];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_bool_field("force", force);
+    fields[2] = lc_log_bool_field("cleanup_only", options->cleanup_only);
+    lc_log_debug(pouch->logger, "maintenance.start", fields, 3U);
+  }
   rc = lc_pouch_namespace_ensure_layout(&pouch->allocator, pouch->root_path,
                                         namespace_name, error);
   if (rc != LC_OK) {
@@ -5878,6 +5952,26 @@ static int lc_pouch_maintenance_run_locked(
     }
   }
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  if (rc == LC_OK) {
+    pslog_field fields[5];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_bool_field("compacted",
+                                  out != NULL ? out->compacted : 0);
+    fields[2] =
+        lc_log_bool_field("skipped", out != NULL ? out->skipped : 0);
+    fields[3] = lc_log_str_field("reason", out != NULL ? out->diagnostic : NULL);
+    fields[4] = lc_log_u64_field(
+        "reclaim_bytes", out != NULL ? out->candidate_bytes : 0UL);
+    lc_log_debug(pouch->logger, "maintenance.complete", fields, 5U);
+  } else {
+    pslog_field fields[3];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_error_field("error", error);
+    fields[2] = lc_log_code_field(error);
+    lc_log_error(pouch->logger, "maintenance.error", fields, 3U);
+  }
   return rc;
 }
 
@@ -6685,12 +6779,36 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   }
   lc_pouch_state_namespace_lock_release(&lock);
   if (rc == LC_OK) {
+    pslog_field fields[7];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_str_field("key", key);
+    fields[2] = lc_log_u64_field("generation", out != NULL ? out->version : 0UL);
+    fields[3] = lc_log_u64_field("payload_len", out != NULL ? out->bytes : 0UL);
+    fields[4] =
+        lc_log_u64_field("stored_bytes", out != NULL ? out->cipher_bytes : 0UL);
+    fields[5] = lc_log_str_field("content_type",
+                                  options != NULL ? options->content_type
+                                                  : "application/octet-stream");
+    fields[6] = lc_log_bool_field(
+        "query_hidden",
+        options != NULL && options->has_query_hidden ? options->query_hidden
+                                                     : 0);
+    lc_log_trace(pouch->logger, "logstore.write", fields, 7U);
     lc_pouch_query_index_note_state_write(pouch, namespace_name, key,
                                           options != NULL &&
                                                   options->content_type != NULL
                                               ? options->content_type
                                               : "application/octet-stream",
                                           body, out);
+  } else {
+    pslog_field fields[4];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_str_field("key", key);
+    fields[2] = lc_log_error_field("error", error);
+    fields[3] = lc_log_code_field(error);
+    lc_log_error(pouch->logger, "logstore.write.error", fields, 4U);
   }
   return rc;
 }
@@ -7005,7 +7123,23 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
     lc_pouch_state_cache_cleanup(pouch);
   }
   lc_pouch_state_namespace_lock_release(&lock);
-  if (rc == LC_OK && out->version > 0UL) {
+  if (rc == LC_OK) {
+    pslog_field fields[3];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_str_field("key", key);
+    fields[2] = lc_log_u64_field("generation", out != NULL ? out->version : 0UL);
+    lc_log_trace(pouch->logger, "logstore.delete", fields, 3U);
+  } else {
+    pslog_field fields[4];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_str_field("key", key);
+    fields[2] = lc_log_error_field("error", error);
+    fields[3] = lc_log_code_field(error);
+    lc_log_error(pouch->logger, "logstore.delete.error", fields, 4U);
+  }
+  if (rc == LC_OK && out != NULL && out->version > 0UL) {
     lc_pouch_query_index_note_state_delete(pouch, namespace_name, key, out);
   }
   return rc;
@@ -7570,6 +7704,29 @@ static int lc_pouch_state_read_internal(lc_pouch *pouch,
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
 cleanup_unlocked:
   lc_pouch_state_process_namespace_mutex_unlock(&process_mutex);
+  if (rc == LC_OK) {
+    pslog_field fields[6];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_str_field("key", key);
+    fields[2] = lc_log_bool_field("with_state", include_body);
+    fields[3] = lc_log_bool_field("found", out != NULL ? out->found : 0);
+    fields[4] = lc_log_u64_field("payload_len", out != NULL ? out->bytes : 0UL);
+    fields[5] =
+        lc_log_u64_field("stored_bytes", out != NULL ? out->cipher_bytes : 0UL);
+    lc_log_trace(pouch->logger, include_body ? "logstore.read"
+                                             : "logstore.read.meta",
+                 fields, 6U);
+  } else {
+    pslog_field fields[5];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_str_field("key", key);
+    fields[2] = lc_log_bool_field("with_state", include_body);
+    fields[3] = lc_log_error_field("error", error);
+    fields[4] = lc_log_code_field(error);
+    lc_log_error(pouch->logger, "logstore.read.error", fields, 5U);
+  }
   return rc;
 }
 
@@ -7867,6 +8024,23 @@ cleanup_unlocked:
   }
   lc_pouch_state_read_many_snapshots_cleanup(&pouch->allocator, snapshots,
                                              snapshot_count);
+  if (rc == LC_OK) {
+    pslog_field fields[4];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_u64_field("count", key_count);
+    fields[2] = lc_log_bool_field("with_state", include_body);
+    fields[3] = lc_log_bool_field("copy_cached_body", copy_cached_body);
+    lc_log_trace(pouch->logger, "logstore.read.many", fields, 4U);
+  } else {
+    pslog_field fields[4];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_u64_field("count", key_count);
+    fields[2] = lc_log_error_field("error", error);
+    fields[3] = lc_log_code_field(error);
+    lc_log_error(pouch->logger, "logstore.read_many.error", fields, 4U);
+  }
   return rc;
 }
 
@@ -8060,6 +8234,24 @@ cleanup_unlocked:
   if (rc != LC_OK) {
     lc_pouch_state_scan_summaries_result_cleanup(&pouch->allocator, out);
   }
+  if (rc == LC_OK) {
+    pslog_field fields[5];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_str_field("cursor", start_after);
+    fields[2] = lc_log_u64_field("limit", limit);
+    fields[3] = lc_log_u64_field("count", snapshot_count);
+    fields[4] = lc_log_bool_field("truncated", out != NULL ? out->truncated : 0);
+    lc_log_trace(pouch->logger, "scan.summaries", fields, 5U);
+  } else {
+    pslog_field fields[4];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_u64_field("limit", limit);
+    fields[2] = lc_log_error_field("error", error);
+    fields[3] = lc_log_code_field(error);
+    lc_log_error(pouch->logger, "scan.summaries.error", fields, 4U);
+  }
   return rc;
 }
 
@@ -8169,6 +8361,20 @@ static int lc_pouch_state_visit_internal(lc_pouch *pouch,
                                          snapshot_count);
 cleanup_unlocked:
   lc_pouch_state_process_namespace_mutex_unlock(&process_mutex);
+  if (rc == LC_OK) {
+    pslog_field fields[2];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_u64_field("count", snapshot_count);
+    lc_log_trace(pouch->logger, "scan.visit", fields, 2U);
+  } else {
+    pslog_field fields[3];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_error_field("error", error);
+    fields[2] = lc_log_code_field(error);
+    lc_log_error(pouch->logger, "scan.visit.error", fields, 3U);
+  }
   return rc;
 }
 

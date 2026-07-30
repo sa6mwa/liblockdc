@@ -52,6 +52,7 @@ struct lc_client_handle {
   int disable_logger_sys_field;
   pslog_logger *base_logger;
   pslog_logger *logger;
+  int owns_logger;
   lc_allocator allocator;
 };
 

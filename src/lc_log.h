@@ -8,6 +8,7 @@
 
 pslog_logger *lc_log_client_logger(pslog_logger *base_logger,
                                    int disable_sys_field);
+pslog_logger *lc_log_pouch_logger(pslog_logger *base_logger);
 pslog_logger *lc_log_noop_logger(void);
 
 void lc_log_trace(pslog_logger *logger, const char *msg,

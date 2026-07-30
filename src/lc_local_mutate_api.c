@@ -63,7 +63,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
     fields[3] = lc_log_i64_field("mutation_count", (long)req->mutation_count);
-    lc_log_trace(lease->client->logger, "client.mutate_local.start", fields,
+    lc_log_trace(lease->client->logger, "mutate_local.start", fields,
                  4U);
   }
   memset(&get_req, 0, sizeof(get_req));
@@ -91,7 +91,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
     fields[3] = lc_log_i64_field("mutation_count", (long)req->mutation_count);
     fields[4] = lc_log_error_field("error", error);
-    lc_log_warn(lease->client->logger, "client.mutate_local.error", fields, 5U);
+    lc_log_warn(lease->client->logger, "mutate_local.error", fields, 5U);
     return rc;
   }
 
@@ -106,7 +106,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
       fields[2] = lc_log_str_field("txn_id", lease->txn_id);
       fields[3] = lc_log_i64_field("mutation_count", (long)req->mutation_count);
       fields[4] = lc_log_str_field("step", "tmpfile");
-      lc_log_error(lease->client->logger, "client.mutate_local.error", fields,
+      lc_log_error(lease->client->logger, "mutate_local.error", fields,
                    5U);
     }
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -135,7 +135,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
       fields[3] = lc_log_i64_field("mutation_count", (long)req->mutation_count);
       fields[4] = lc_log_str_field("step", "get");
       fields[5] = lc_log_error_field("error", error);
-      lc_log_warn(lease->client->logger, "client.mutate_local.error", fields,
+      lc_log_warn(lease->client->logger, "mutate_local.error", fields,
                   6U);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -154,7 +154,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
       fields[2] = lc_log_str_field("txn_id", lease->txn_id);
       fields[3] = lc_log_i64_field("mutation_count", (long)req->mutation_count);
       fields[4] = lc_log_str_field("step", "flush_input");
-      lc_log_error(lease->client->logger, "client.mutate_local.error", fields,
+      lc_log_error(lease->client->logger, "mutate_local.error", fields,
                    5U);
     }
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -178,7 +178,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
         fields[3] =
             lc_log_i64_field("mutation_count", (long)req->mutation_count);
         fields[4] = lc_log_str_field("step", "seed_empty");
-        lc_log_error(lease->client->logger, "client.mutate_local.error", fields,
+        lc_log_error(lease->client->logger, "mutate_local.error", fields,
                      5U);
       }
       return LC_ERR_TRANSPORT;
@@ -200,7 +200,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
       fields[3] = lc_log_i64_field("mutation_count", (long)req->mutation_count);
       fields[4] = lc_log_str_field("step", "apply");
       fields[5] = lc_log_error_field("error", error);
-      lc_log_warn(lease->client->logger, "client.mutate_local.error", fields,
+      lc_log_warn(lease->client->logger, "mutate_local.error", fields,
                   6U);
     }
     return rc;
@@ -235,7 +235,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
       fields[2] = lc_log_str_field("txn_id", lease->txn_id);
       fields[3] = lc_log_i64_field("mutation_count", (long)req->mutation_count);
       fields[4] = lc_log_str_field("step", "source_wrap");
-      lc_log_error(lease->client->logger, "client.mutate_local.error", fields,
+      lc_log_error(lease->client->logger, "mutate_local.error", fields,
                    5U);
     }
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -257,7 +257,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
     fields[3] = lc_log_i64_field("mutation_count", (long)req->mutation_count);
     fields[4] = lc_log_str_field("step", "update");
     fields[5] = lc_log_error_field("error", error);
-    lc_log_warn(lease->client->logger, "client.mutate_local.error", fields, 6U);
+    lc_log_warn(lease->client->logger, "mutate_local.error", fields, 6U);
     return rc;
   }
   {
@@ -269,7 +269,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
     fields[3] = lc_log_i64_field("mutation_count", (long)req->mutation_count);
     fields[4] = lc_log_i64_field("new_version", lease->version);
     fields[5] = lc_log_str_field("new_etag", lease->state_etag);
-    lc_log_trace(lease->client->logger, "client.mutate_local.success", fields,
+    lc_log_trace(lease->client->logger, "mutate_local.success", fields,
                  6U);
   }
   return rc;

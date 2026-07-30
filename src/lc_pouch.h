@@ -20,6 +20,7 @@ typedef struct lc_pouch_open_options {
   const char *crypto_key_file;
   int crypto_generate_key_file;
   const char *compression;
+  pslog_logger *logger;
 } lc_pouch_open_options;
 
 typedef struct lc_pouch_status {

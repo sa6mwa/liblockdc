@@ -107,6 +107,47 @@ static void cleanup_all_roots(void) {
                             POUCH_UNIT_TMP_PREFIX);
 }
 
+static pslog_logger *open_pouch_test_logger(FILE **out_fp) {
+  FILE *fp;
+  pslog_config config;
+
+  fp = tmpfile();
+  if (fp == NULL) {
+    return NULL;
+  }
+  pslog_default_config(&config);
+  config.mode = PSLOG_MODE_JSON;
+  config.min_level = PSLOG_LEVEL_TRACE;
+  config.timestamps = 0;
+  config.verbose_fields = 1;
+  config.output = pslog_output_from_fp(fp, 0);
+  *out_fp = fp;
+  return pslog_new(&config);
+}
+
+static char *read_pouch_log_stream(FILE *fp) {
+  long length;
+  char *buffer;
+
+  if (fp == NULL || fflush(fp) != 0 || fseek(fp, 0L, SEEK_END) != 0) {
+    return NULL;
+  }
+  length = ftell(fp);
+  if (length < 0L || fseek(fp, 0L, SEEK_SET) != 0) {
+    return NULL;
+  }
+  buffer = (char *)calloc((size_t)length + 1U, 1U);
+  if (buffer == NULL) {
+    return NULL;
+  }
+  if (length > 0L && fread(buffer, 1U, (size_t)length, fp) != (size_t)length) {
+    free(buffer);
+    return NULL;
+  }
+  buffer[length] = '\0';
+  return buffer;
+}
+
 static void sha256_hex_bytes(const void *bytes, size_t length, char out[65]) {
   static const char hex[] = "0123456789abcdef";
   EVP_MD_CTX *ctx;
@@ -3568,6 +3609,61 @@ static void test_open_creates_segmented_root_layout(void **state) {
 
   lc_pouch_status_cleanup(NULL, &status);
   lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_logs_use_storage_pouch_subsystem(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_status status;
+  lc_pouch_open_options options;
+  lc_error error;
+  pslog_logger *logger;
+  FILE *log_fp;
+  char *logs;
+  char root[512];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  logger = NULL;
+  log_fp = NULL;
+  logs = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&status, 0, sizeof(status));
+  lc_error_init(&error);
+  make_root("logging", root, sizeof(root));
+  cleanup_root(root);
+
+  logger = open_pouch_test_logger(&log_fp);
+  assert_non_null(logger);
+  options.logger = logger;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(pouch);
+
+  rc = lc_pouch_status_read(pouch, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_ensure_namespace(pouch, "logging-ns", &error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_pouch_status_cleanup(NULL, &status);
+  lc_pouch_close(pouch);
+  logger->destroy(logger);
+  logs = read_pouch_log_stream(log_fp);
+  assert_non_null(logs);
+  assert_non_null(strstr(logs, "\"sys\":\"storage.pouch\""));
+  assert_non_null(strstr(logs, "\"message\":\"open\""));
+  assert_non_null(strstr(logs, "\"message\":\"status.read\""));
+  assert_non_null(strstr(logs, "\"message\":\"manifest.ensure_namespace\""));
+  assert_non_null(strstr(logs, "\"ns\":\"logging-ns\""));
+  assert_null(strstr(logs, "\"sys\":\"client.lockd\""));
+  assert_null(strstr(logs, "\"message\":\"pouch."));
+  assert_null(strstr(logs, "\"component\":"));
+  assert_null(strstr(logs, "\"subsystem\":"));
+
+  free(logs);
+  fclose(log_fp);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -15911,6 +16007,7 @@ int main(void) {
       cmocka_unit_test(test_index_posting_roundtrips_dense_docids),
       cmocka_unit_test(test_index_posting_selects_adaptive_encoding),
       cmocka_unit_test(test_open_creates_segmented_root_layout),
+      cmocka_unit_test(test_pouch_logs_use_storage_pouch_subsystem),
       cmocka_unit_test(test_open_rejects_unsupported_root_manifest),
       cmocka_unit_test(test_ensure_namespace_creates_per_namespace_layout),
       cmocka_unit_test(

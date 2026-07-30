@@ -1,6 +1,7 @@
 #include "lc_pouch_query_index.h"
 
 #include "lc_api_internal.h"
+#include "lc_log.h"
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
@@ -10848,6 +10849,14 @@ static int lc_pouch_query_index_flush_segmented(
                         "namespace, and out",
                         NULL, NULL, NULL);
   }
+  {
+    pslog_field fields[3];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_u64_field("index_seq", state_index_seq);
+    fields[2] = lc_log_bool_field("validate", validate_existing_segments);
+    lc_log_trace(pouch->logger, "index.flush.start", fields, 3U);
+  }
   memset(out, 0, sizeof(*out));
   memset(&manifest, 0, sizeof(manifest));
   memset(&retired_manifest, 0, sizeof(retired_manifest));
@@ -10888,6 +10897,9 @@ static int lc_pouch_query_index_flush_segmented(
   segment_row_count = 0UL;
   delete_hash = lc_pouch_query_index_hash_init();
   segment_base_index_seq = 0UL;
+  full_rebuild = 0;
+  use_pending_entries = 0;
+  use_pending_segment = 0;
   summary.allocator = &pouch->allocator;
   summary.pouch = pouch;
   summary.namespace_name = namespace_name;
@@ -10932,8 +10944,6 @@ static int lc_pouch_query_index_flush_segmented(
                  manifest.segment_count >= LC_POUCH_QUERY_INDEX_MAX_SEGMENTS;
   pending_fast_path_allowed =
       pouch->single_writer && !pouch->query_pending_index_incomplete;
-  use_pending_entries = 0;
-  use_pending_segment = 0;
   if (full_rebuild) {
     retired_manifest = manifest;
     memset(&manifest, 0, sizeof(manifest));
@@ -11230,6 +11240,26 @@ static int lc_pouch_query_index_flush_segmented(
   }
 
 cleanup:
+  if (rc == LC_OK) {
+    pslog_field fields[7];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_u64_field("index_seq", out->index_seq);
+    fields[2] = lc_log_bool_field("repaired", out->repaired);
+    fields[3] = lc_log_bool_field("full_rebuild", full_rebuild);
+    fields[4] = lc_log_bool_field("pending_entries", use_pending_entries);
+    fields[5] = lc_log_bool_field("pending_segment", use_pending_segment);
+    fields[6] = lc_log_u64_field("records", segment_row_count);
+    lc_log_debug(pouch->logger, "index.flush", fields, 7U);
+  } else {
+    pslog_field fields[4];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_u64_field("index_seq", state_index_seq);
+    fields[2] = lc_log_error_field("error", error);
+    fields[3] = lc_log_code_field(error);
+    lc_log_error(pouch->logger, "index.flush.error", fields, 4U);
+  }
   lc_free_with_allocator(&pouch->allocator, temporal_term_generation);
   lc_free_with_allocator(&pouch->allocator, trigram_term_generation);
   lc_free_with_allocator(&pouch->allocator, text_term_generation);

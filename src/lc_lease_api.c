@@ -167,7 +167,7 @@ int lc_lease_describe_method(lc_lease *self, lc_error *error) {
     fields[0] = lc_log_str_field("key", lease->key);
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
-    lc_log_trace(lease->client->logger, "client.describe.start", fields, 3U);
+    lc_log_trace(lease->client->logger, "describe.start", fields, 3U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -189,8 +189,8 @@ int lc_lease_describe_method(lc_lease *self, lc_error *error) {
                              ? PSLOG_LEVEL_ERROR
                              : PSLOG_LEVEL_WARN,
                          error != NULL && error->code == LC_ERR_TRANSPORT
-                             ? "client.describe.transport_error"
-                             : "client.describe.error",
+                             ? "describe.transport_error"
+                             : "describe.error",
                          fields, 3U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -218,7 +218,7 @@ int lc_lease_describe_method(lc_lease *self, lc_error *error) {
     fields[2] = lc_log_i64_field("version", lease->version);
     fields[3] = lc_log_str_field("state_etag", lease->state_etag);
     fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.describe.success", fields, 5U);
+    lc_log_trace(lease->client->logger, "describe.success", fields, 5U);
   }
   lc_engine_describe_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -248,7 +248,7 @@ int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
     fields[3] =
         lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
-    lc_log_trace(lease->client->logger, "client.get.start", fields, 4U);
+    lc_log_trace(lease->client->logger, "get.start", fields, 4U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -277,8 +277,8 @@ int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
                              ? PSLOG_LEVEL_ERROR
                              : PSLOG_LEVEL_WARN,
                          error != NULL && error->code == LC_ERR_TRANSPORT
-                             ? "client.get.transport_error"
-                             : "client.get.error",
+                             ? "get.transport_error"
+                             : "get.error",
                          fields, 4U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -315,7 +315,7 @@ int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
     fields[2] =
         lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
     fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_debug(lease->client->logger, "client.get.empty", fields, 4U);
+    lc_log_debug(lease->client->logger, "get.empty", fields, 4U);
   } else {
     pslog_field fields[6];
 
@@ -326,7 +326,7 @@ int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
         lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
     fields[4] = lc_log_str_field("etag", engine_res.etag);
     fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.get.success", fields, 6U);
+    lc_log_trace(lease->client->logger, "get.success", fields, 6U);
   }
   lc_engine_get_stream_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -364,7 +364,7 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
     fields[3] =
         lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
-    lc_log_trace(lease->client->logger, "client.get.start", fields, 4U);
+    lc_log_trace(lease->client->logger, "get.start", fields, 4U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -404,8 +404,8 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
                              ? PSLOG_LEVEL_ERROR
                              : PSLOG_LEVEL_WARN,
                          error != NULL && error->code == LC_ERR_TRANSPORT
-                             ? "client.get.transport_error"
-                             : "client.get.error",
+                             ? "get.transport_error"
+                             : "get.error",
                          fields, 4U, error);
     }
     lc_engine_get_stream_response_cleanup(&engine_res);
@@ -421,7 +421,7 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
     fields[2] =
         lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
     fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_debug(lease->client->logger, "client.get.empty", fields, 4U);
+    lc_log_debug(lease->client->logger, "get.empty", fields, 4U);
   }
   no_content = engine_res.no_content;
   version = engine_res.version;
@@ -459,7 +459,7 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
           lc_log_bool_field("public", opts != NULL ? opts->public_read : 0);
       fields[3] = lc_log_str_field("etag", engine_res.etag);
       fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
-      lc_log_trace(lease->client->logger, "client.get.success", fields, 5U);
+      lc_log_trace(lease->client->logger, "get.success", fields, 5U);
     }
   }
   lc_lonejson_curl_parse_cleanup(&load_state.parse);
@@ -533,8 +533,8 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
                              ? PSLOG_LEVEL_ERROR
                              : PSLOG_LEVEL_WARN,
                          error != NULL && error->code == LC_ERR_TRANSPORT
-                             ? "client.update.transport_error"
-                             : "client.update.error",
+                             ? "update.transport_error"
+                             : "update.error",
                          fields, 4U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -556,7 +556,7 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
     fields[3] = lc_log_str_field("state_etag", lease->state_etag);
     fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
     fields[5] = lc_log_str_field("content_type", update_opts.content_type);
-    lc_log_trace(lease->client->logger, "client.update.success", fields, 6U);
+    lc_log_trace(lease->client->logger, "update.success", fields, 6U);
   }
   lc_engine_update_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -585,7 +585,7 @@ int lc_lease_update_method(lc_lease *self, lc_source *src,
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
     fields[3] = lc_log_str_field("content_type",
                                  opts != NULL ? opts->content_type : NULL);
-    lc_log_trace(lease->client->logger, "client.update.start", fields, 4U);
+    lc_log_trace(lease->client->logger, "update.start", fields, 4U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -621,7 +621,7 @@ int lc_lease_update_method(lc_lease *self, lc_source *src,
       fields[4] = lc_log_code_field(error);
       fields[5] = lc_log_http_status_field(error);
       fields[6] = lc_log_error_field("error", error);
-      lc_log_warn(lease->client->logger, "client.update.error", fields, 7U);
+      lc_log_warn(lease->client->logger, "update.error", fields, 7U);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -642,7 +642,7 @@ int lc_lease_update_method(lc_lease *self, lc_source *src,
     fields[3] = lc_log_str_field("new_etag", engine_res.new_state_etag);
     fields[4] = lc_log_i64_field("version", engine_res.new_version);
     fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.update.success", fields, 6U);
+    lc_log_trace(lease->client->logger, "update.success", fields, 6U);
   }
   lc_engine_update_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -669,7 +669,7 @@ int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
     fields[3] = lc_log_i64_field("mutation_count", (long)req->mutation_count);
-    lc_log_trace(lease->client->logger, "client.mutate.start", fields, 4U);
+    lc_log_trace(lease->client->logger, "mutate.start", fields, 4U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -704,8 +704,8 @@ int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,
                              ? PSLOG_LEVEL_ERROR
                              : PSLOG_LEVEL_WARN,
                          error != NULL && error->code == LC_ERR_TRANSPORT
-                             ? "client.mutate.transport_error"
-                             : "client.mutate.error",
+                             ? "mutate.transport_error"
+                             : "mutate.error",
                          fields, 4U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -727,7 +727,7 @@ int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,
     fields[3] = lc_log_i64_field("new_version", engine_res.new_version);
     fields[4] = lc_log_str_field("new_etag", engine_res.new_state_etag);
     fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.mutate.success", fields, 6U);
+    lc_log_trace(lease->client->logger, "mutate.success", fields, 6U);
   }
   lc_engine_mutate_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -753,7 +753,7 @@ int lc_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
     fields[0] = lc_log_str_field("key", lease->key);
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
-    lc_log_trace(lease->client->logger, "client.metadata.start", fields, 3U);
+    lc_log_trace(lease->client->logger, "metadata.start", fields, 3U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -788,8 +788,8 @@ int lc_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
                              ? PSLOG_LEVEL_ERROR
                              : PSLOG_LEVEL_WARN,
                          error != NULL && error->code == LC_ERR_TRANSPORT
-                             ? "client.metadata.transport_error"
-                             : "client.metadata.error",
+                             ? "metadata.transport_error"
+                             : "metadata.error",
                          fields, 3U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -809,7 +809,7 @@ int lc_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
     fields[2] = lc_log_i64_field("version", engine_res.version);
     fields[3] = lc_log_bool_field("query_hidden", engine_res.query_hidden);
     fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.metadata.success", fields, 5U);
+    lc_log_trace(lease->client->logger, "metadata.success", fields, 5U);
   }
   lc_engine_metadata_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -835,7 +835,7 @@ int lc_lease_remove_method(lc_lease *self, const lc_remove_req *req,
     fields[0] = lc_log_str_field("key", lease->key);
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
-    lc_log_trace(lease->client->logger, "client.remove.start", fields, 3U);
+    lc_log_trace(lease->client->logger, "remove.start", fields, 3U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -867,8 +867,8 @@ int lc_lease_remove_method(lc_lease *self, const lc_remove_req *req,
                              ? PSLOG_LEVEL_ERROR
                              : PSLOG_LEVEL_WARN,
                          error != NULL && error->code == LC_ERR_TRANSPORT
-                             ? "client.remove.transport_error"
-                             : "client.remove.error",
+                             ? "remove.transport_error"
+                             : "remove.error",
                          fields, 3U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -889,7 +889,7 @@ int lc_lease_remove_method(lc_lease *self, const lc_remove_req *req,
     fields[2] = lc_log_bool_field("removed", engine_res.removed);
     fields[3] = lc_log_i64_field("new_version", engine_res.new_version);
     fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.remove.success", fields, 5U);
+    lc_log_trace(lease->client->logger, "remove.success", fields, 5U);
   }
   lc_engine_remove_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -916,8 +916,8 @@ int lc_lease_keepalive_method(lc_lease *self, const lc_keepalive_req *req,
     fields[0] = lc_log_str_field("key", lease->key);
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
-    fields[3] = lc_log_i64_field("ttl_seconds", req->ttl_seconds);
-    lc_log_trace(lease->client->logger, "client.keepalive.start", fields, 4U);
+    fields[3] = lc_log_i64_field("ttl_s", req->ttl_seconds);
+    lc_log_trace(lease->client->logger, "keepalive.start", fields, 4U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -938,8 +938,8 @@ int lc_lease_keepalive_method(lc_lease *self, const lc_keepalive_req *req,
       fields[0] = lc_log_str_field("key", lease->key);
       fields[1] = lc_log_str_field("lease_id", lease->lease_id);
       fields[2] = lc_log_str_field("txn_id", lease->txn_id);
-      fields[3] = lc_log_i64_field("ttl_seconds", req->ttl_seconds);
-      lc_lease_log_error(lease, PSLOG_LEVEL_ERROR, "client.keepalive.error",
+      fields[3] = lc_log_i64_field("ttl_s", req->ttl_seconds);
+      lc_lease_log_error(lease, PSLOG_LEVEL_ERROR, "keepalive.error",
                          fields, 4U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -963,7 +963,7 @@ int lc_lease_keepalive_method(lc_lease *self, const lc_keepalive_req *req,
     fields[4] =
         lc_log_i64_field("expires_at", engine_res.lease_expires_at_unix);
     fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.keepalive.success", fields, 6U);
+    lc_log_trace(lease->client->logger, "keepalive.success", fields, 6U);
   }
   lc_engine_keepalive_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -990,7 +990,7 @@ int lc_lease_release_method(lc_lease *self, const lc_release_req *req,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
     fields[3] = lc_log_bool_field("rollback", req != NULL ? req->rollback : 0);
-    lc_log_trace(lease->client->logger, "client.release.start", fields, 4U);
+    lc_log_trace(lease->client->logger, "release.start", fields, 4U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -1013,7 +1013,7 @@ int lc_lease_release_method(lc_lease *self, const lc_release_req *req,
       fields[2] = lc_log_str_field("txn_id", lease->txn_id);
       fields[3] =
           lc_log_bool_field("rollback", req != NULL ? req->rollback : 0);
-      lc_lease_log_error(lease, PSLOG_LEVEL_ERROR, "client.release.error",
+      lc_lease_log_error(lease, PSLOG_LEVEL_ERROR, "release.error",
                          fields, 4U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -1027,7 +1027,7 @@ int lc_lease_release_method(lc_lease *self, const lc_release_req *req,
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
     fields[3] = lc_log_bool_field("released", engine_res.released);
     fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.release.success", fields, 5U);
+    lc_log_trace(lease->client->logger, "release.success", fields, 5U);
   }
   lc_engine_release_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -1058,7 +1058,7 @@ int lc_lease_attach_method(lc_lease *self, const lc_attach_req *req,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
     fields[3] = lc_log_str_field("name", req->name);
-    lc_log_trace(lease->client->logger, "client.attachment.put.start", fields,
+    lc_log_trace(lease->client->logger, "attachment.put.start", fields,
                  4U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
@@ -1092,8 +1092,8 @@ int lc_lease_attach_method(lc_lease *self, const lc_attach_req *req,
                              ? PSLOG_LEVEL_ERROR
                              : PSLOG_LEVEL_WARN,
                          error != NULL && error->code == LC_ERR_TRANSPORT
-                             ? "client.attachment.put.transport_error"
-                             : "client.attachment.put.error",
+                             ? "attachment.put.transport_error"
+                             : "attachment.put.error",
                          fields, 4U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -1112,7 +1112,7 @@ int lc_lease_attach_method(lc_lease *self, const lc_attach_req *req,
     fields[3] = lc_log_str_field("attachment_id", engine_res.attachment.id);
     fields[4] = lc_log_bool_field("noop", engine_res.noop);
     fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.attachment.put.success", fields,
+    lc_log_trace(lease->client->logger, "attachment.put.success", fields,
                  6U);
   }
   lc_engine_attach_response_cleanup(&engine_res);
@@ -1140,7 +1140,7 @@ int lc_lease_list_attachments_method(lc_lease *self, lc_attachment_list *out,
 
     fields[0] = lc_log_str_field("key", lease->key);
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
-    lc_log_trace(lease->client->logger, "client.attachment.list.start", fields,
+    lc_log_trace(lease->client->logger, "attachment.list.start", fields,
                  2U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
@@ -1165,8 +1165,8 @@ int lc_lease_list_attachments_method(lc_lease *self, lc_attachment_list *out,
                              ? PSLOG_LEVEL_ERROR
                              : PSLOG_LEVEL_WARN,
                          error != NULL && error->code == LC_ERR_TRANSPORT
-                             ? "client.attachment.list.transport_error"
-                             : "client.attachment.list.error",
+                             ? "attachment.list.transport_error"
+                             : "attachment.list.error",
                          fields, 2U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -1196,7 +1196,7 @@ int lc_lease_list_attachments_method(lc_lease *self, lc_attachment_list *out,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_u64_field("count", out->count);
     fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.attachment.list.success",
+    lc_log_trace(lease->client->logger, "attachment.list.success",
                  fields, 4U);
   }
   lc_engine_list_attachments_response_cleanup(&engine_res);
@@ -1228,7 +1228,7 @@ int lc_lease_get_attachment_method(lc_lease *self,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("attachment_id", req->selector.id);
     fields[3] = lc_log_str_field("name", req->selector.name);
-    lc_log_trace(lease->client->logger, "client.attachment.get.start", fields,
+    lc_log_trace(lease->client->logger, "attachment.get.start", fields,
                  4U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
@@ -1260,8 +1260,8 @@ int lc_lease_get_attachment_method(lc_lease *self,
                              ? PSLOG_LEVEL_ERROR
                              : PSLOG_LEVEL_WARN,
                          error != NULL && error->code == LC_ERR_TRANSPORT
-                             ? "client.attachment.get.transport_error"
-                             : "client.attachment.get.error",
+                             ? "attachment.get.transport_error"
+                             : "attachment.get.error",
                          fields, 4U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -1277,7 +1277,7 @@ int lc_lease_get_attachment_method(lc_lease *self,
     fields[2] = lc_log_str_field("attachment_id", engine_res.attachment.id);
     fields[3] = lc_log_str_field("name", engine_res.attachment.name);
     fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.attachment.get.success", fields,
+    lc_log_trace(lease->client->logger, "attachment.get.success", fields,
                  5U);
   }
   lc_engine_get_attachment_response_cleanup(&engine_res);
@@ -1308,7 +1308,7 @@ int lc_lease_delete_attachment_method(lc_lease *self,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("attachment_id", selector->id);
     fields[3] = lc_log_str_field("name", selector->name);
-    lc_log_trace(lease->client->logger, "client.attachment.delete.start",
+    lc_log_trace(lease->client->logger, "attachment.delete.start",
                  fields, 4U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
@@ -1337,8 +1337,8 @@ int lc_lease_delete_attachment_method(lc_lease *self,
                              ? PSLOG_LEVEL_ERROR
                              : PSLOG_LEVEL_WARN,
                          error != NULL && error->code == LC_ERR_TRANSPORT
-                             ? "client.attachment.delete.transport_error"
-                             : "client.attachment.delete.error",
+                             ? "attachment.delete.transport_error"
+                             : "attachment.delete.error",
                          fields, 4U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -1353,7 +1353,7 @@ int lc_lease_delete_attachment_method(lc_lease *self,
     fields[2] = lc_log_str_field("attachment_id", selector->id);
     fields[3] = lc_log_bool_field("deleted", engine_res.deleted);
     fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.attachment.delete.success",
+    lc_log_trace(lease->client->logger, "attachment.delete.success",
                  fields, 5U);
   }
   lc_engine_delete_attachment_response_cleanup(&engine_res);
@@ -1381,7 +1381,7 @@ int lc_lease_delete_all_attachments_method(lc_lease *self, int *deleted_count,
 
     fields[0] = lc_log_str_field("key", lease->key);
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
-    lc_log_trace(lease->client->logger, "client.attachment.delete_all.start",
+    lc_log_trace(lease->client->logger, "attachment.delete_all.start",
                  fields, 2U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
@@ -1406,8 +1406,8 @@ int lc_lease_delete_all_attachments_method(lc_lease *self, int *deleted_count,
                              ? PSLOG_LEVEL_ERROR
                              : PSLOG_LEVEL_WARN,
                          error != NULL && error->code == LC_ERR_TRANSPORT
-                             ? "client.attachment.delete_all.transport_error"
-                             : "client.attachment.delete_all.error",
+                             ? "attachment.delete_all.transport_error"
+                             : "attachment.delete_all.error",
                          fields, 2U, error);
     }
     lc_engine_error_cleanup(&engine_error);
@@ -1421,7 +1421,7 @@ int lc_lease_delete_all_attachments_method(lc_lease *self, int *deleted_count,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_i64_field("deleted", engine_res.deleted);
     fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "client.attachment.delete_all.success",
+    lc_log_trace(lease->client->logger, "attachment.delete_all.success",
                  fields, 4U);
   }
   lc_engine_delete_all_attachments_response_cleanup(&engine_res);

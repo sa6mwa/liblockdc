@@ -3771,11 +3771,14 @@ static void test_public_client_emits_pslog_messages(void **state) {
   logger->destroy(logger);
   logs = read_stream_text(log_fp);
   assert_non_null(logs);
-  assert_non_null(strstr(logs, "\"message\":\"client.init\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.http.attempt\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.http.success\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.acquire.success\""));
+  assert_non_null(strstr(logs, "\"message\":\"init\""));
+  assert_non_null(strstr(logs, "\"message\":\"http.attempt\""));
+  assert_non_null(strstr(logs, "\"message\":\"http.success\""));
+  assert_non_null(strstr(logs, "\"message\":\"acquire.success\""));
   assert_non_null(strstr(logs, "\"sys\":\"client.lockd\""));
+  assert_null(strstr(logs, "\"message\":\"client."));
+  assert_null(strstr(logs, "\"component\":"));
+  assert_null(strstr(logs, "\"subsystem\":"));
   assert_non_null(strstr(logs, "\"key\":\"resource/1\""));
   assert_non_null(strstr(logs, "\"lease_id\":\"lease-1\""));
   assert_non_null(strstr(logs, "\"cid\":\"corr-acquire\""));
@@ -3852,8 +3855,8 @@ static void test_public_client_can_disable_sdk_sys_field(void **state) {
   logger->destroy(logger);
   logs = read_stream_text(log_fp);
   assert_non_null(logs);
-  assert_non_null(strstr(logs, "\"message\":\"client.init\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.acquire.success\""));
+  assert_non_null(strstr(logs, "\"message\":\"init\""));
+  assert_non_null(strstr(logs, "\"message\":\"acquire.success\""));
   assert_null(strstr(logs, "\"sys\":\"client.lockd\""));
   assert_null(strstr(logs, "\"sys\":\"client.sdk\""));
 
@@ -3970,10 +3973,10 @@ static void test_public_bound_lease_methods_emit_logs(void **state) {
   logger->destroy(logger);
   logs = read_stream_text(log_fp);
   assert_non_null(logs);
-  assert_non_null(strstr(logs, "\"message\":\"client.keepalive.start\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.keepalive.success\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.release.start\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.release.success\""));
+  assert_non_null(strstr(logs, "\"message\":\"keepalive.start\""));
+  assert_non_null(strstr(logs, "\"message\":\"keepalive.success\""));
+  assert_non_null(strstr(logs, "\"message\":\"release.start\""));
+  assert_non_null(strstr(logs, "\"message\":\"release.success\""));
   assert_non_null(strstr(logs, "\"lease_id\":\"lease-1\""));
   assert_non_null(strstr(logs, "\"cid\":\"corr-keepalive\""));
   assert_non_null(strstr(logs, "\"cid\":\"corr-release\""));
@@ -4860,14 +4863,14 @@ static void test_public_management_methods_emit_logs(void **state) {
   logger->destroy(logger);
   logs = read_stream_text(log_fp);
   assert_non_null(logs);
-  assert_non_null(strstr(logs, "\"message\":\"client.namespace.get.start\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.namespace.get.success\""));
+  assert_non_null(strstr(logs, "\"message\":\"namespace.get.start\""));
+  assert_non_null(strstr(logs, "\"message\":\"namespace.get.success\""));
   assert_non_null(
-      strstr(logs, "\"message\":\"client.tc.lease.acquire.start\""));
+      strstr(logs, "\"message\":\"tc.lease.acquire.start\""));
   assert_non_null(
-      strstr(logs, "\"message\":\"client.tc.lease.acquire.success\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.rm.list.start\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.rm.list.success\""));
+      strstr(logs, "\"message\":\"tc.lease.acquire.success\""));
+  assert_non_null(strstr(logs, "\"message\":\"rm.list.start\""));
+  assert_non_null(strstr(logs, "\"message\":\"rm.list.success\""));
   assert_non_null(strstr(logs, "\"cid\":\"corr-rm-list\""));
 
   free(logs);
@@ -5026,9 +5029,9 @@ static void test_public_enqueue_emits_logs(void **state) {
   logger->destroy(logger);
   logs = read_stream_text(log_fp);
   assert_non_null(logs);
-  assert_non_null(strstr(logs, "\"message\":\"client.queue.enqueue.begin\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.queue.enqueue.success\""));
-  assert_non_null(strstr(logs, "\"message_id\":\"msg-enqueue\""));
+  assert_non_null(strstr(logs, "\"message\":\"queue.enqueue.begin\""));
+  assert_non_null(strstr(logs, "\"message\":\"queue.enqueue.success\""));
+  assert_non_null(strstr(logs, "\"msg_id\":\"msg-enqueue\""));
   assert_non_null(strstr(logs, "\"cid\":\"corr-enqueue\""));
 
   free(logs);
@@ -5236,13 +5239,13 @@ static void test_public_dequeue_emits_stream_transport_logs(void **state) {
   logger->destroy(logger);
   logs = read_stream_text(log_fp);
   assert_non_null(logs);
-  assert_non_null(strstr(logs, "\"message\":\"client.queue.dequeue.begin\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.http.attempt\""));
+  assert_non_null(strstr(logs, "\"message\":\"queue.dequeue.begin\""));
+  assert_non_null(strstr(logs, "\"message\":\"http.attempt\""));
   assert_non_null(strstr(logs, "\"path\":\"/v1/queue/dequeue\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.http.success\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.queue.dequeue.success\""));
-  assert_non_null(strstr(logs, "\"message\":\"client.queue.ack.success\""));
-  assert_non_null(strstr(logs, "\"message_id\":\"msg-1\""));
+  assert_non_null(strstr(logs, "\"message\":\"http.success\""));
+  assert_non_null(strstr(logs, "\"message\":\"queue.dequeue.success\""));
+  assert_non_null(strstr(logs, "\"message\":\"queue.ack.success\""));
+  assert_non_null(strstr(logs, "\"msg_id\":\"msg-1\""));
 
   free(logs);
   fclose(log_fp);
@@ -6869,8 +6872,8 @@ test_public_lease_load_parse_failure_does_not_refresh_state_view(void **state) {
   logger->destroy(logger);
   logs = read_stream_text(log_fp);
   assert_non_null(logs);
-  assert_non_null(strstr(logs, "\"message\":\"client.get.start\""));
-  assert_null(strstr(logs, "\"message\":\"client.get.success\""));
+  assert_non_null(strstr(logs, "\"message\":\"get.start\""));
+  assert_null(strstr(logs, "\"message\":\"get.success\""));
 
   free(logs);
   fclose(log_fp);
@@ -7282,8 +7285,8 @@ test_public_client_load_parse_failure_does_not_log_success(void **state) {
   logger->destroy(logger);
   logs = read_stream_text(log_fp);
   assert_non_null(logs);
-  assert_non_null(strstr(logs, "\"message\":\"client.get.start\""));
-  assert_null(strstr(logs, "\"message\":\"client.get.success\""));
+  assert_non_null(strstr(logs, "\"message\":\"get.start\""));
+  assert_null(strstr(logs, "\"message\":\"get.success\""));
 
   free(logs);
   fclose(log_fp);

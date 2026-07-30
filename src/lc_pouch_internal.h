@@ -78,6 +78,9 @@ struct lc_pouch {
   char *compression;
   lc_pouch_crypto *crypto;
   char *crypto_key_file;
+  pslog_logger *base_logger;
+  pslog_logger *logger;
+  int owns_logger;
   char *writer_marker_leaf;
   pthread_mutex_t fsync_mutex;
   pthread_cond_t fsync_cond;

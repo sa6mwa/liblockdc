@@ -1600,6 +1600,25 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   }
   client->allocator = config->allocator;
   client->is_pouch = is_pouch;
+  client->disable_logger_sys_field = config->disable_logger_sys_field;
+  client->base_logger =
+      config->logger != NULL ? config->logger : lc_log_noop_logger();
+  if (is_pouch) {
+    client->logger = lc_log_client_logger(client->base_logger,
+                                          client->disable_logger_sys_field);
+    if (client->logger == NULL) {
+      lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
+      lc_engine_error_cleanup(&engine_error);
+      lc_free_with_allocator(&config->allocator, client);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to initialize client logger", NULL, NULL,
+                          NULL);
+    }
+    client->owns_logger = (client->logger != client->base_logger &&
+                           client->logger != lc_log_noop_logger())
+                              ? 1
+                              : 0;
+  }
   if (!is_pouch) {
     rc = lc_engine_client_open(&engine_config, &client->engine, &engine_error);
     if (rc != LC_ENGINE_OK) {
@@ -1641,6 +1660,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     pouch_open_options.compression = config->pouch_compression != NULL
                                          ? config->pouch_compression
                                          : pouch_endpoint_options.compression;
+    pouch_open_options.logger = client->base_logger;
     rc = lc_pouch_open(pouch_endpoint_options.root_path, &config->allocator,
                        &pouch_open_options, &client->pouch, error);
     if (rc != LC_OK) {
@@ -1737,12 +1757,9 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->disable_mtls = is_pouch ? 1 : config->disable_mtls;
   client->insecure_skip_verify = config->insecure_skip_verify;
   client->prefer_http_2 = config->prefer_http_2;
-  client->disable_logger_sys_field = config->disable_logger_sys_field;
-  client->base_logger =
-      config->logger != NULL ? config->logger : lc_log_noop_logger();
-  client->logger = client->engine != NULL
-                       ? lc_engine_client_logger(client->engine)
-                       : client->base_logger;
+  if (client->engine != NULL) {
+    client->logger = lc_engine_client_logger(client->engine);
+  }
   client->http_json_response_limit_bytes =
       config->http_json_response_limit_bytes;
   client->pub.acquire = lc_client_acquire_method;
