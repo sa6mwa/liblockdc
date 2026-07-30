@@ -534,9 +534,8 @@ int lc_client_txn_replay_method(lc_client *self, const lc_txn_replay_req *req,
       pslog_field fields[1];
 
       fields[0] = lc_log_str_field("txn_id", req->txn_id);
-      lc_client_log_management_failure(
-          client, "txn.replay.transport_error",
-          "txn.replay.error", fields, 1U, error);
+      lc_client_log_management_failure(client, "txn.replay.transport_error",
+                                       "txn.replay.error", fields, 1U, error);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -603,9 +602,8 @@ int lc_client_txn_prepare_method(lc_client *self,
       fields[0] = lc_log_str_field("txn_id", req->txn_id);
       fields[1] = lc_log_u64_field("participants", req->participant_count);
       fields[2] = lc_log_u64_field("tc_term", req->tc_term);
-      lc_client_log_management_failure(
-          client, "txn.prepare.transport_error",
-          "txn.prepare.error", fields, 3U, error);
+      lc_client_log_management_failure(client, "txn.prepare.transport_error",
+                                       "txn.prepare.error", fields, 3U, error);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -669,9 +667,8 @@ int lc_client_txn_commit_method(lc_client *self, const lc_txn_decision_req *req,
 
       fields[0] = lc_log_str_field("txn_id", req->txn_id);
       fields[1] = lc_log_u64_field("participants", req->participant_count);
-      lc_client_log_management_failure(
-          client, "txn.commit.transport_error",
-          "txn.commit.error", fields, 2U, error);
+      lc_client_log_management_failure(client, "txn.commit.transport_error",
+                                       "txn.commit.error", fields, 2U, error);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -736,9 +733,8 @@ int lc_client_txn_rollback_method(lc_client *self,
 
       fields[0] = lc_log_str_field("txn_id", req->txn_id);
       fields[1] = lc_log_u64_field("participants", req->participant_count);
-      lc_client_log_management_failure(
-          client, "txn.rollback.transport_error",
-          "txn.rollback.error", fields, 2U, error);
+      lc_client_log_management_failure(client, "txn.rollback.transport_error",
+                                       "txn.rollback.error", fields, 2U, error);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -806,8 +802,8 @@ int lc_client_tc_lease_acquire_method(lc_client *self,
           lc_log_str_field("candidate_endpoint", req->candidate_endpoint);
       fields[2] = lc_log_u64_field("term", req->term);
       lc_client_log_management_failure(
-          client, "tc.lease.acquire.transport_error",
-          "tc.lease.acquire.error", fields, 3U, error);
+          client, "tc.lease.acquire.transport_error", "tc.lease.acquire.error",
+          fields, 3U, error);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -872,9 +868,9 @@ int lc_client_tc_lease_renew_method(lc_client *self,
 
       fields[0] = lc_log_str_field("leader_id", req->leader_id);
       fields[1] = lc_log_u64_field("term", req->term);
-      lc_client_log_management_failure(
-          client, "tc.lease.renew.transport_error",
-          "tc.lease.renew.error", fields, 2U, error);
+      lc_client_log_management_failure(client, "tc.lease.renew.transport_error",
+                                       "tc.lease.renew.error", fields, 2U,
+                                       error);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -939,8 +935,8 @@ int lc_client_tc_lease_release_method(lc_client *self,
       fields[0] = lc_log_str_field("leader_id", req->leader_id);
       fields[1] = lc_log_u64_field("term", req->term);
       lc_client_log_management_failure(
-          client, "tc.lease.release.transport_error",
-          "tc.lease.release.error", fields, 2U, error);
+          client, "tc.lease.release.transport_error", "tc.lease.release.error",
+          fields, 2U, error);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -1029,8 +1025,7 @@ int lc_client_tc_cluster_announce_method(lc_client *self,
     pslog_field fields[1];
 
     fields[0] = lc_log_str_field("self_endpoint", req->self_endpoint);
-    lc_log_trace(client->logger, "tc.cluster.announce.start", fields,
-                 1U);
+    lc_log_trace(client->logger, "tc.cluster.announce.start", fields, 1U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -1064,8 +1059,7 @@ int lc_client_tc_cluster_announce_method(lc_client *self,
     fields[0] = lc_log_u64_field("count", out->endpoints.count);
     fields[1] = lc_log_i64_field("expires_at", out->expires_at_unix);
     fields[2] = lc_log_str_field("cid", out->correlation_id);
-    lc_log_trace(client->logger, "tc.cluster.announce.success", fields,
-                 3U);
+    lc_log_trace(client->logger, "tc.cluster.announce.success", fields, 3U);
   }
   lc_engine_tc_cluster_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -1092,9 +1086,8 @@ int lc_client_tc_cluster_leave_method(lc_client *self, lc_tc_cluster_res *out,
                                          &engine_error);
   if (rc != LC_ENGINE_OK) {
     rc = lc_error_from_engine(error, &engine_error);
-    lc_client_log_management_failure(
-        client, "tc.cluster.leave.transport_error",
-        "tc.cluster.leave.error", NULL, 0U, error);
+    lc_client_log_management_failure(client, "tc.cluster.leave.transport_error",
+                                     "tc.cluster.leave.error", NULL, 0U, error);
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
@@ -1138,9 +1131,8 @@ int lc_client_tc_cluster_list_method(lc_client *self, lc_tc_cluster_res *out,
                                         &engine_error);
   if (rc != LC_ENGINE_OK) {
     rc = lc_error_from_engine(error, &engine_error);
-    lc_client_log_management_failure(
-        client, "tc.cluster.list.transport_error",
-        "tc.cluster.list.error", NULL, 0U, error);
+    lc_client_log_management_failure(client, "tc.cluster.list.transport_error",
+                                     "tc.cluster.list.error", NULL, 0U, error);
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
@@ -1200,9 +1192,8 @@ int lc_client_tc_rm_register_method(lc_client *self,
 
       fields[0] = lc_log_str_field("backend_hash", req->backend_hash);
       fields[1] = lc_log_str_field("endpoint", req->endpoint);
-      lc_client_log_management_failure(
-          client, "rm.register.transport_error",
-          "rm.register.error", fields, 2U, error);
+      lc_client_log_management_failure(client, "rm.register.transport_error",
+                                       "rm.register.error", fields, 2U, error);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -1264,9 +1255,9 @@ int lc_client_tc_rm_unregister_method(lc_client *self,
 
       fields[0] = lc_log_str_field("backend_hash", req->backend_hash);
       fields[1] = lc_log_str_field("endpoint", req->endpoint);
-      lc_client_log_management_failure(
-          client, "rm.unregister.transport_error",
-          "rm.unregister.error", fields, 2U, error);
+      lc_client_log_management_failure(client, "rm.unregister.transport_error",
+                                       "rm.unregister.error", fields, 2U,
+                                       error);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;

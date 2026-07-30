@@ -759,8 +759,8 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
     }
     lc_error_cleanup(&warm_error);
     lc_error_init(&warm_error);
-    index_rc = lc_pouch_query_index_warm_namespace(pouch, namespace_name,
-                                                   &warm_error);
+    index_rc =
+        lc_pouch_query_index_warm_namespace(pouch, namespace_name, &warm_error);
     if (index_rc != LC_OK) {
       pslog_field fields[3];
 

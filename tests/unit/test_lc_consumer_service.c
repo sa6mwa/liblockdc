@@ -1602,10 +1602,12 @@ test_consumer_service_logs_restart_with_configured_logger(void **state) {
   logger->destroy(logger);
   logs = read_stream_text(runtime_state.log_fp);
   assert_non_null(logs);
-  assert_non_null(strstr(logs, "\"message\":\"client.consumer.restart\""));
+  assert_non_null(strstr(logs, "\"message\":\"consumer.restart\""));
   assert_non_null(strstr(logs, "\"consumer\":\"worker-test\""));
   assert_non_null(strstr(logs, "\"queue\":\"jobs\""));
   assert_non_null(strstr(logs, "\"sys\":\"client.lockd\""));
+  assert_null(strstr(logs, "\"component\""));
+  assert_null(strstr(logs, "\"subsystem\""));
 
   free(logs);
   fclose(runtime_state.log_fp);
@@ -1686,11 +1688,13 @@ static void test_consumer_service_logs_subscribe_lifecycle(void **state) {
   logger->destroy(logger);
   logs = read_stream_text(runtime_state.log_fp);
   assert_non_null(logs);
-  assert_non_null(strstr(logs, "\"message\":\"client.queue.subscribe.begin\""));
+  assert_non_null(strstr(logs, "\"message\":\"queue.subscribe.begin\""));
   assert_non_null(strstr(logs, "\"consumer\":\"worker-test\""));
   assert_non_null(strstr(logs, "\"queue\":\"jobs\""));
   assert_non_null(strstr(logs, "\"owner\":\"worker-owner\""));
   assert_non_null(strstr(logs, "\"sys\":\"client.lockd\""));
+  assert_null(strstr(logs, "\"component\""));
+  assert_null(strstr(logs, "\"subsystem\""));
 
   free(logs);
   fclose(runtime_state.log_fp);

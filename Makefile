@@ -631,7 +631,7 @@ release:
 prerelease:
 	$(TIMED) prerelease $(MAKE) __prerelease
 
-__prerelease: __release-pipeline
+__prerelease: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test __bench-gate
 
 prerelease-live:
 	$(TIMED) prerelease-live $(MAKE) __prerelease-live
@@ -655,7 +655,7 @@ __prerelease-live:
 prerelease-hardening:
 	$(TIMED) prerelease-hardening $(MAKE) __prerelease-hardening
 
-__prerelease-hardening: __prerelease __fuzz __benchmark-pouch-go-parity-gate
+__prerelease-hardening: __prerelease __fuzz __benchmark-pouch-go-parity-gate __release-matrix
 
 lifecycle-version-contract:
 	$(TIMED) lifecycle-version-contract $(MAKE) __lifecycle-version-contract
@@ -669,7 +669,7 @@ print-release-version:
 __release:
 	bash ./scripts/release.sh
 
-__release-pipeline: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test __bench-gate __release-matrix
+__release-pipeline: __prerelease __release-matrix
 
 release-matrix:
 	$(TIMED) release-matrix $(MAKE) __release-matrix

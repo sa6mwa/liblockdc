@@ -2,7 +2,7 @@
 
 This document is the implementation authority for the initial Pouch storage
 engine. Pouch has not shipped, so there is no compatibility obligation for any
-pre-release layout, record format, sidecar format, crypto descriptor, benchmark
+pre-release layout, record format, manifest, transform descriptor, benchmark
 fixture, or transition name.
 
 The implementation target is a real segmented logstore. The current partial
@@ -71,7 +71,7 @@ boundaries. The current C boundaries are:
 - `lc_pouch_crypto.[ch]`: streaming transform wrappers plus descriptor
   encode/decode for crypto and compression.
 - `lc_pouch_query_index.[ch]` and index helpers: derived query/full-text
-  sidecars rebuilt from state projections.
+  artifacts rebuilt from state projections.
 
 Queue, attachment, lease, and transaction modules call this storage core
 through state operations and reserved namespaces. They must not parse log files
@@ -179,6 +179,11 @@ Pouch has one segment/snapshot record representation and uses reserved
 namespaces for object-like surfaces. Production payload bytes are still stored
 inside segment/snapshot records and flow through the same transform, replay,
 compaction, and bounded-read paths.
+
+Queue records persist enqueue seconds, enqueue nanoseconds, and an enqueue
+sequence in binary metadata. Dequeue and stats ordering is FIFO by that tuple,
+then message id as a deterministic final tie-breaker. Queue scans must not sort
+same-second bursts by variable-width textual ids or by payload content.
 
 Do not create text pseudo-records for hot storage facts. Human-readable strings
 are allowed for content type, key names, and diagnostics, not as the primary
@@ -384,9 +389,51 @@ Indexed query requirements:
 
 - indexable selectors use indexes when the selected engine is index;
 - indexed execution must not silently fall back to scan;
-- index sidecars are derived artifacts rebuilt from logstore projections;
+- query-index artifacts are derived from logstore projections and are
+  rebuildable after corruption or loss;
+- query-index segment headers are plaintext metadata. They contain format,
+  sequence, row counts, and hashes only;
+- every non-header query-index segment component is stored in one packed binary
+  artifact named `query.<segment>.query.index.lcpseg`. The packed artifact
+  contains the document table, exact/presence/range/text/trigram/temporal term
+  generations, and the delete set. The logical component paths remain
+  in-memory identifiers for manifest signatures and parser routing only;
+- encrypted packed query-index artifacts store ciphertext followed by
+  descriptor bytes and a fixed binary footer. Pouch reads the footer, bounds
+  decryption to the ciphertext span, and does not create separate descriptor
+  companion files for derived query-index artifacts;
+- an empty delete set is represented by a zero-length delete component inside
+  the packed artifact. The manifest's `delete_count=0` and empty-set hash are
+  the authoritative empty value; non-empty delete components must match the
+  manifest count and hash;
+- query-index segment artifacts and their manifest may be written directly
+  without fsync because they are derived files. Recovery validates the manifest,
+  header, and packed artifact signatures and rebuilds from the logstore if any
+  derived write was interrupted or torn;
+- normal append flushes do not sweep the index directory for orphaned derived
+  artifacts. Full rebuild, repair/validated flush, and retired-segment cleanup
+  paths perform orphan cleanup, so foreground append flush latency is not tied
+  to directory size;
+- indexed queries may reuse per-client artifact-cache trust for segment headers
+  after the current manifest has validated the same path, signature, sequence,
+  row count, and row hash. If the signature changes, pouch rereads the header
+  and validates it normally;
+- a successful manifest sequence read records per-client manifest trust for
+  that namespace/index sequence. A later non-validating ensure-current call may
+  skip rereading the manifest when the state index sequence is unchanged;
+- indexed document queries with a discard sink may bulk-count exact candidates
+  only when there is no input cursor and all matches fit below the requested
+  limit, so cursor behavior and candidate verification semantics remain
+  unchanged;
+- packed query-index artifacts are cached per client by file signature so one
+  physical read/decrypt can serve document table, delete set, and term
+  generation components for the same segment;
+- field-specific `contains` lookups report whether all text generations for
+  the field are complete while collecting indexed candidates. The planner must
+  not perform a second completeness-only artifact walk after a successful
+  field-specific contains lookup;
 - index flush must be incremental and generation-aware, matching Go disk's
-  performance intent rather than rebuilding entire sidecars on each flush;
+  performance intent rather than rebuilding the full corpus on each flush;
 - full-text search must cover text in the full JSON document, including nested
   fields and long text fields, through the selected indexed engine;
 - `/...` full-text token and trigram terms are synthetic aggregate postings.
@@ -435,11 +482,18 @@ Required behavior:
   queue message payloads, and transaction payloads where they contain user or
   production data;
 - keep searchable metadata and query artifacts free of plaintext user payloads
-  unless the root mode explicitly defines and accepts that leakage.
+  unless the root mode explicitly defines and accepts that leakage. Query-index
+  segment headers may be plaintext because they contain only non-secret format,
+  sequence, count, and hash metadata.
 
 Compression runs before encryption on writes and after decryption on reads.
 zlib may be used. Compression must be streaming and bounded. Small payloads may
-skip compression when the descriptor records that no compression was applied.
+skip compression when the descriptor records that no compression was applied,
+or may omit the descriptor only when no transform was applied. Encrypted records
+are always descriptor-required. Tiny control records, including lease records,
+are compression-ineligible on compression-enabled roots because zlib overhead
+dominates those hot paths; on crypto roots they are still encrypted and still
+preserve plaintext and stored byte counts.
 
 Compaction must copy stored payload bytes when the descriptor remains valid.
 It must not decrypt/re-encrypt or decompress/recompress every live record merely
@@ -522,6 +576,12 @@ Benchmarks must include realistic and abusive workloads:
 - reopen and multi-segment replay;
 - overcapacity patterns with churn, deletes, updates, and stale history.
 
+Document-returning production query metrics measure steady-state public API
+throughput. The benchmark first runs the same document query once outside the
+timed region and verifies the exact match count for both Pouch and Go lockd
+disk, then records the timed query. Key-only query metrics are not warmed this
+way because they do not exercise document streaming.
+
 Acceptance target: Pouch plaintext and Pouch crypto beat Go lockd disk without
 crypto on every production metric unless a specific exception is explicitly
 accepted with evidence. Crypto overhead within Pouch should stay near the
@@ -546,7 +606,7 @@ Fuzzing and failure tests must cover:
 - crypto authentication failure;
 - compression corruption;
 - scan/query selector paths;
-- index sidecar corruption and rebuild.
+- query-index artifact corruption and rebuild.
 
 Fuzzing must run with plaintext and transformed roots.
 

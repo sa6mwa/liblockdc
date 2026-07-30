@@ -939,8 +939,8 @@ int lc_lease_keepalive_method(lc_lease *self, const lc_keepalive_req *req,
       fields[1] = lc_log_str_field("lease_id", lease->lease_id);
       fields[2] = lc_log_str_field("txn_id", lease->txn_id);
       fields[3] = lc_log_i64_field("ttl_s", req->ttl_seconds);
-      lc_lease_log_error(lease, PSLOG_LEVEL_ERROR, "keepalive.error",
-                         fields, 4U, error);
+      lc_lease_log_error(lease, PSLOG_LEVEL_ERROR, "keepalive.error", fields,
+                         4U, error);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -1013,8 +1013,8 @@ int lc_lease_release_method(lc_lease *self, const lc_release_req *req,
       fields[2] = lc_log_str_field("txn_id", lease->txn_id);
       fields[3] =
           lc_log_bool_field("rollback", req != NULL ? req->rollback : 0);
-      lc_lease_log_error(lease, PSLOG_LEVEL_ERROR, "release.error",
-                         fields, 4U, error);
+      lc_lease_log_error(lease, PSLOG_LEVEL_ERROR, "release.error", fields, 4U,
+                         error);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -1058,8 +1058,7 @@ int lc_lease_attach_method(lc_lease *self, const lc_attach_req *req,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("txn_id", lease->txn_id);
     fields[3] = lc_log_str_field("name", req->name);
-    lc_log_trace(lease->client->logger, "attachment.put.start", fields,
-                 4U);
+    lc_log_trace(lease->client->logger, "attachment.put.start", fields, 4U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -1112,8 +1111,7 @@ int lc_lease_attach_method(lc_lease *self, const lc_attach_req *req,
     fields[3] = lc_log_str_field("attachment_id", engine_res.attachment.id);
     fields[4] = lc_log_bool_field("noop", engine_res.noop);
     fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "attachment.put.success", fields,
-                 6U);
+    lc_log_trace(lease->client->logger, "attachment.put.success", fields, 6U);
   }
   lc_engine_attach_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -1140,8 +1138,7 @@ int lc_lease_list_attachments_method(lc_lease *self, lc_attachment_list *out,
 
     fields[0] = lc_log_str_field("key", lease->key);
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
-    lc_log_trace(lease->client->logger, "attachment.list.start", fields,
-                 2U);
+    lc_log_trace(lease->client->logger, "attachment.list.start", fields, 2U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -1196,8 +1193,7 @@ int lc_lease_list_attachments_method(lc_lease *self, lc_attachment_list *out,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_u64_field("count", out->count);
     fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "attachment.list.success",
-                 fields, 4U);
+    lc_log_trace(lease->client->logger, "attachment.list.success", fields, 4U);
   }
   lc_engine_list_attachments_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -1228,8 +1224,7 @@ int lc_lease_get_attachment_method(lc_lease *self,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("attachment_id", req->selector.id);
     fields[3] = lc_log_str_field("name", req->selector.name);
-    lc_log_trace(lease->client->logger, "attachment.get.start", fields,
-                 4U);
+    lc_log_trace(lease->client->logger, "attachment.get.start", fields, 4U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -1277,8 +1272,7 @@ int lc_lease_get_attachment_method(lc_lease *self,
     fields[2] = lc_log_str_field("attachment_id", engine_res.attachment.id);
     fields[3] = lc_log_str_field("name", engine_res.attachment.name);
     fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "attachment.get.success", fields,
-                 5U);
+    lc_log_trace(lease->client->logger, "attachment.get.success", fields, 5U);
   }
   lc_engine_get_attachment_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -1308,8 +1302,7 @@ int lc_lease_delete_attachment_method(lc_lease *self,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_str_field("attachment_id", selector->id);
     fields[3] = lc_log_str_field("name", selector->name);
-    lc_log_trace(lease->client->logger, "attachment.delete.start",
-                 fields, 4U);
+    lc_log_trace(lease->client->logger, "attachment.delete.start", fields, 4U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -1353,8 +1346,8 @@ int lc_lease_delete_attachment_method(lc_lease *self,
     fields[2] = lc_log_str_field("attachment_id", selector->id);
     fields[3] = lc_log_bool_field("deleted", engine_res.deleted);
     fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "attachment.delete.success",
-                 fields, 5U);
+    lc_log_trace(lease->client->logger, "attachment.delete.success", fields,
+                 5U);
   }
   lc_engine_delete_attachment_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -1381,8 +1374,8 @@ int lc_lease_delete_all_attachments_method(lc_lease *self, int *deleted_count,
 
     fields[0] = lc_log_str_field("key", lease->key);
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
-    lc_log_trace(lease->client->logger, "attachment.delete_all.start",
-                 fields, 2U);
+    lc_log_trace(lease->client->logger, "attachment.delete_all.start", fields,
+                 2U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -1421,8 +1414,8 @@ int lc_lease_delete_all_attachments_method(lc_lease *self, int *deleted_count,
     fields[1] = lc_log_str_field("lease_id", lease->lease_id);
     fields[2] = lc_log_i64_field("deleted", engine_res.deleted);
     fields[3] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(lease->client->logger, "attachment.delete_all.success",
-                 fields, 4U);
+    lc_log_trace(lease->client->logger, "attachment.delete_all.success", fields,
+                 4U);
   }
   lc_engine_delete_all_attachments_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);

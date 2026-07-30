@@ -1349,12 +1349,11 @@ lc_consumer_delivery_begin(void *context,
 
     fields[0] = lc_log_str_field("consumer", bridge->worker->config.name);
     fields[1] = lc_log_str_field("queue", bridge->worker->config.request.queue);
-    fields[2] = lc_log_str_field("ns",
-                                 bridge->worker->config.request.namespace_name);
+    fields[2] =
+        lc_log_str_field("ns", bridge->worker->config.request.namespace_name);
     fields[3] = lc_log_str_field("msg_id", delivery->message_id);
     fields[4] = pslog_i64("attempts", (pslog_int64)delivery->attempts);
-    fields[5] =
-        pslog_i64("failures", (pslog_int64)delivery->failure_attempts);
+    fields[5] = pslog_i64("failures", (pslog_int64)delivery->failure_attempts);
     fields[6] =
         lc_log_bool_field("with_state", bridge->worker->config.with_state);
     fields[7] = lc_log_str_field("cid", delivery->correlation_id);
@@ -1588,8 +1587,8 @@ static int lc_consumer_delivery_end(void *context,
 
     fields[0] = lc_log_str_field("consumer", bridge->worker->config.name);
     fields[1] = lc_log_str_field("queue", bridge->worker->config.request.queue);
-    fields[2] = lc_log_str_field("ns",
-                                 bridge->worker->config.request.namespace_name);
+    fields[2] =
+        lc_log_str_field("ns", bridge->worker->config.request.namespace_name);
     fields[3] = lc_log_str_field(
         "message_id", delivery != NULL ? delivery->message_id : NULL);
     fields[4] = lc_log_bool_field(
@@ -1618,12 +1617,11 @@ lc_consumer_delivery_begin_message(lc_consumer_delivery_bridge *bridge,
 
     fields[0] = lc_log_str_field("consumer", bridge->worker->config.name);
     fields[1] = lc_log_str_field("queue", bridge->worker->config.request.queue);
-    fields[2] = lc_log_str_field("ns",
-                                 bridge->worker->config.request.namespace_name);
+    fields[2] =
+        lc_log_str_field("ns", bridge->worker->config.request.namespace_name);
     fields[3] = lc_log_str_field("msg_id", inner->message_id);
     fields[4] = pslog_i64("attempts", (pslog_int64)inner->attempts);
-    fields[5] =
-        pslog_i64("failures", (pslog_int64)inner->failure_attempts);
+    fields[5] = pslog_i64("failures", (pslog_int64)inner->failure_attempts);
     fields[6] =
         lc_log_bool_field("with_state", bridge->worker->config.with_state);
     fields[7] = lc_log_str_field("cid", inner->correlation_id);
@@ -1765,8 +1763,7 @@ static int lc_consumer_process_pouch_message(lc_consumer_worker_state *worker,
 
     fields[0] = lc_log_str_field("consumer", worker->config.name);
     fields[1] = lc_log_str_field("queue", worker->config.request.queue);
-    fields[2] =
-        lc_log_str_field("ns", worker->config.request.namespace_name);
+    fields[2] = lc_log_str_field("ns", worker->config.request.namespace_name);
     fields[3] = lc_log_str_field("msg_id", NULL);
     fields[4] = lc_log_bool_field(
         "terminal", lc_consumer_delivery_state_is_terminal(bridge.state));

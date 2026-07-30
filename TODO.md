@@ -176,7 +176,7 @@ Acceptance:
 - [x] Write/update/acquire/release paths share the state/logstore append path.
 - [x] A failed write/fsync fails every affected operation without publishing
   committed refs.
-- [ ] Fast targeted benchmarks prove core write/acquire/update loops are not
+- [x] Fast targeted benchmarks prove core write/acquire/update loops are not
   dominated by per-mutation fsync and are faster than Go disk.
 
 ## Slice 6: State, Metadata, Object, Attachment, Queue, Lease, And Transaction Cutover
@@ -195,6 +195,10 @@ Acceptance:
   with binary queue metadata.
   Why: queue claim/list/retry/dead-letter paths must not parse arbitrary
   payload bytes and must be encrypted at rest when the root is encrypted.
+
+- [x] Persist queue FIFO ordering metadata and assert burst dequeue order.
+  Why: same-second production bursts must order by binary enqueue time and
+  sequence, not by variable-width textual message ids.
 
 - [x] Reattach lease and transaction metadata to binary metadata/state/object
   records.
@@ -239,6 +243,10 @@ Acceptance:
   Why: this is the only order that can both compress plaintext effectively and
   encrypt stored bytes.
 
+- [x] Keep tiny control records such as leases compression-ineligible while
+  preserving encryption and byte accounting on crypto roots.
+  Why: compression overhead must not dominate core lock hot paths.
+
 - [x] Make compaction copy stored transformed bytes when descriptors remain
   valid.
   Why: compaction must not scale with crypto/decompression cost for every live
@@ -267,7 +275,7 @@ Acceptance:
   bugs.
 
 - [x] Implement generation-aware incremental index flush.
-  Why: rebuilding whole sidecars on every flush is the exact failure mode Go
+  Why: rebuilding whole derived artifacts on every flush is the exact failure mode Go
   disk avoided.
 
 - [x] Ensure full-text search indexes text across the entire JSON document,
@@ -279,7 +287,64 @@ Acceptance:
   Why: `icontains` over the whole document must use direct posting lookups for
   candidate selection instead of scanning all field-specific trigram terms.
 
-- [x] Make index sidecars derived and rebuildable from logstore projections.
+- [x] Keep query-index segment headers as plaintext metadata while encrypting
+  document tables, delete sets, and term generations on crypto roots.
+  Why: headers carry only format, sequence, count, and hash metadata; encrypting
+  them adds fixed flush overhead without protecting production data.
+
+- [x] Pack the query-index segment data into one binary artifact containing the
+  document table, delete set, and exact/presence/range/text/trigram/temporal
+  term generations.
+  Why: the unreleased per-family artifact shape caused repeated filesystem and
+  crypto overhead; one packed segment artifact matches the logstore model more
+  closely while keeping derived data rebuildable.
+
+- [x] Pack encrypted query-index descriptors into the packed artifact footer.
+  Why: query-index artifacts are derived; creating a separate crypto descriptor
+  file adds fixed flush overhead without improving data protection.
+
+- [x] Store empty query-index delete sets as a zero-length packed component and
+  treat `delete_count=0` plus the empty-set hash as authoritative.
+  Why: the delete set is part of the packed segment artifact; the manifest
+  remains the source of truth for delete count/hash validation.
+
+- [x] Write query-index segment artifacts and manifest through the derived
+  relaxed path.
+  Why: the logstore is authoritative; a torn query-index manifest or artifact
+  is repaired from the logstore, so fsyncing derived files adds fixed flush
+  overhead without adding production-data durability.
+
+- [x] Defer query-index orphan artifact sweeps off the normal append-flush path.
+  Why: orphan cleanup is recovery hygiene, not foreground work; repair/full
+  rebuild/validated flush paths can clean derived leftovers without making every
+  production flush scale with directory size.
+
+- [x] Reuse artifact-cache trust for query-index segment headers during indexed
+  reads.
+  Why: repeated queries in the same client should not reread headers that the
+  current manifest and filesystem signature cache have already validated.
+
+- [x] Reuse manifest trust after successful manifest sequence reads.
+  Why: no-op flush followed by indexed query should not reread and reparse the
+  same manifest when the state index sequence has not changed.
+
+- [x] Bulk-count exact indexed document results when the caller uses a discard
+  sink and no cursor can be affected.
+  Why: benchmark and production callers often need document-query counts without
+  materialized bodies; exact index results should not pay per-row emission
+  overhead when there is no output and no cursor boundary.
+
+- [x] Report field-specific contains completeness during candidate collection.
+  Why: indexed contains document queries should not do one artifact pass to
+  collect candidates and a second artifact pass only to discover whether the
+  text generation is complete.
+
+- [x] Cache packed query-index artifacts per client by file signature.
+  Why: one physical read/decrypt should serve every logical component in the
+  same segment instead of repeatedly decrypting the packed artifact during a
+  single indexed query.
+
+- [x] Make index artifacts derived and rebuildable from logstore projections.
   Why: corruption should trigger rebuild, not data loss.
 
 Acceptance:
@@ -288,7 +353,7 @@ Acceptance:
   selectors all use public APIs.
 - [x] Index flush work is proportional to changed generations, not total corpus
   size.
-- [ ] Benchmarks show indexed query/flush faster than Go disk on equivalent
+- [x] Benchmarks show indexed query/flush faster than Go disk on equivalent
   workloads, including crypto roots.
 
 ## Slice 9: Compaction
@@ -373,13 +438,13 @@ Why: this phase proves the full storage cutover before broader iteration.
 
 ## Slice 12: Fuzzing
 
-- [ ] Build fuzz corpora for record headers, metadata, refs, state links,
-  manifests, transform descriptors, scan/query selectors, sidecar rebuild, and
-  lifecycle operations.
-- [ ] Run fuzzing for plaintext roots.
-- [ ] Run fuzzing for crypto roots.
-- [ ] Run fuzzing for compression and crypto+compression roots where enabled.
-- [ ] Run at least 30 seconds per fuzz unit before claiming coverage, and
+- [x] Build fuzz corpora for record headers, metadata, refs, state links,
+  manifests, transform descriptors, scan/query selectors, query-index artifact
+  rebuild, and lifecycle operations.
+- [x] Run fuzzing for plaintext roots.
+- [x] Run fuzzing for crypto roots.
+- [x] Run fuzzing for compression and crypto+compression roots where enabled.
+- [x] Run at least 30 seconds per fuzz unit before claiming coverage, and
   longer campaign runs before release.
 
 Why: the new binary surface is a parser and storage trust boundary.
@@ -405,24 +470,24 @@ selected read-only query cases.
 
 Acceptance:
 
-- [ ] Pouch plaintext beats Go disk without crypto on every production metric,
+- [x] Pouch plaintext beats Go disk without crypto on every production metric,
   unless an exception is explicitly accepted.
-- [ ] Pouch crypto beats Go disk without crypto on every production metric,
+- [x] Pouch crypto beats Go disk without crypto on every production metric,
   unless an exception is explicitly accepted.
-- [ ] Pouch crypto stays near Pouch plaintext for metadata/index-heavy paths.
-- [ ] Any slower metric has a root-cause analysis and an accepted fix or
+- [x] Pouch crypto stays near Pouch plaintext for metadata/index-heavy paths.
+- [x] Any slower metric has a root-cause analysis and an accepted fix or
   explicit exception.
 
 ## Slice 14: Full Verification, Review, Commit
 
-- [ ] Run the full relevant liblockdc test suite.
-- [ ] Run the full Pouch benchmark comparison.
-- [ ] Run fuzz campaigns for the required minimum.
-- [ ] Run the same review command used by the lc lifecycle skill.
-- [ ] Resolve relevant review findings without weakening storage invariants.
-- [ ] Run final benchmark parity gates.
-- [ ] Inspect the worktree and classify dirty changes.
-- [ ] Commit the coherent cutover with a Conventional Commit message.
+- [x] Run the full relevant liblockdc test suite.
+- [x] Run the full Pouch benchmark comparison.
+- [x] Run fuzz campaigns for the required minimum.
+- [x] Run the same review command used by the lc lifecycle skill.
+- [x] Resolve relevant review findings without weakening storage invariants.
+- [x] Run final benchmark parity gates.
+- [x] Inspect the worktree and classify dirty changes.
+- [x] Commit the coherent cutover with a Conventional Commit message.
 
 Why: completion requires evidence: implementation, verification, benchmark
 comparison, review, and clean commit discipline.

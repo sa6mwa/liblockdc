@@ -3739,8 +3739,7 @@ static int lc_pouch_state_read_next_record(
   return rc;
 }
 
-static void lc_pouch_state_log_tail_repair(lc_pouch *pouch,
-                                           const char *reason,
+static void lc_pouch_state_log_tail_repair(lc_pouch *pouch, const char *reason,
                                            const char *segment,
                                            unsigned long offset) {
   pslog_field fields[3];
@@ -5989,20 +5988,19 @@ static int lc_pouch_maintenance_run_locked(
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("ns", namespace_name);
-    fields[1] = lc_log_bool_field("compacted",
-                                  out != NULL ? out->compacted : 0);
-    fields[2] =
-        lc_log_bool_field("skipped", out != NULL ? out->skipped : 0);
-    fields[3] = lc_log_str_field("reason", out != NULL ? out->diagnostic : NULL);
-    fields[4] = lc_log_u64_field(
-        "reclaim_bytes", out != NULL ? out->candidate_bytes : 0UL);
+    fields[1] =
+        lc_log_bool_field("compacted", out != NULL ? out->compacted : 0);
+    fields[2] = lc_log_bool_field("skipped", out != NULL ? out->skipped : 0);
+    fields[3] =
+        lc_log_str_field("reason", out != NULL ? out->diagnostic : NULL);
+    fields[4] = lc_log_u64_field("reclaim_bytes",
+                                 out != NULL ? out->candidate_bytes : 0UL);
     lc_log_debug(pouch->logger, "maintenance.complete", fields, 5U);
     if (out != NULL && out->cleanup_pending_count != 0UL) {
       pslog_field warn_fields[3];
 
       warn_fields[0] = lc_log_str_field("ns", namespace_name);
-      warn_fields[1] =
-          lc_log_u64_field("pending", out->cleanup_pending_count);
+      warn_fields[1] = lc_log_u64_field("pending", out->cleanup_pending_count);
       warn_fields[2] = lc_log_str_field("reason", out->diagnostic);
       lc_log_warn(pouch->logger, "maintenance.cleanup.pending", warn_fields,
                   3U);
@@ -6676,9 +6674,10 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
                         "failed to allocate pouch state crypto context", NULL,
                         NULL, NULL);
   }
-  rc = lc_pouch_crypto_stream_to_fd_crc(pouch->crypto, crypto_context, fd,
-                                        &hash_source.pub, &bytes, &cipher_bytes,
-                                        &stored_crc, &descriptor, error);
+  rc = lc_pouch_crypto_stream_to_fd_crc_with_compression(
+      pouch->crypto, crypto_context, fd, &hash_source.pub, &bytes,
+      &cipher_bytes, &stored_crc, &descriptor,
+      options == NULL || !options->disable_compression, error);
   lc_free_with_allocator(&pouch->allocator, crypto_context);
   if (rc == LC_OK && hash_source.failed) {
     rc =
@@ -6836,17 +6835,18 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
 
     fields[0] = lc_log_str_field("ns", namespace_name);
     fields[1] = lc_log_str_field("key", key);
-    fields[2] = lc_log_u64_field("generation", out != NULL ? out->version : 0UL);
+    fields[2] =
+        lc_log_u64_field("generation", out != NULL ? out->version : 0UL);
     fields[3] = lc_log_u64_field("payload_len", out != NULL ? out->bytes : 0UL);
     fields[4] =
         lc_log_u64_field("stored_bytes", out != NULL ? out->cipher_bytes : 0UL);
     fields[5] = lc_log_str_field("content_type",
-                                  options != NULL ? options->content_type
-                                                  : "application/octet-stream");
-    fields[6] = lc_log_bool_field(
-        "query_hidden",
-        options != NULL && options->has_query_hidden ? options->query_hidden
-                                                     : 0);
+                                 options != NULL ? options->content_type
+                                                 : "application/octet-stream");
+    fields[6] = lc_log_bool_field("query_hidden",
+                                  options != NULL && options->has_query_hidden
+                                      ? options->query_hidden
+                                      : 0);
     lc_log_trace(pouch->logger, "logstore.write", fields, 7U);
     lc_pouch_query_index_note_state_write(pouch, namespace_name, key,
                                           options != NULL &&
@@ -7181,7 +7181,8 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
 
     fields[0] = lc_log_str_field("ns", namespace_name);
     fields[1] = lc_log_str_field("key", key);
-    fields[2] = lc_log_u64_field("generation", out != NULL ? out->version : 0UL);
+    fields[2] =
+        lc_log_u64_field("generation", out != NULL ? out->version : 0UL);
     lc_log_trace(pouch->logger, "logstore.delete", fields, 3U);
   } else {
     pslog_field fields[4];
@@ -7767,9 +7768,9 @@ cleanup_unlocked:
     fields[4] = lc_log_u64_field("payload_len", out != NULL ? out->bytes : 0UL);
     fields[5] =
         lc_log_u64_field("stored_bytes", out != NULL ? out->cipher_bytes : 0UL);
-    lc_log_trace(pouch->logger, include_body ? "logstore.read"
-                                             : "logstore.read.meta",
-                 fields, 6U);
+    lc_log_trace(pouch->logger,
+                 include_body ? "logstore.read" : "logstore.read.meta", fields,
+                 6U);
   } else {
     pslog_field fields[5];
 
@@ -8294,7 +8295,8 @@ cleanup_unlocked:
     fields[1] = lc_log_str_field("cursor", start_after);
     fields[2] = lc_log_u64_field("limit", limit);
     fields[3] = lc_log_u64_field("count", snapshot_count);
-    fields[4] = lc_log_bool_field("truncated", out != NULL ? out->truncated : 0);
+    fields[4] =
+        lc_log_bool_field("truncated", out != NULL ? out->truncated : 0);
     lc_log_trace(pouch->logger, "scan.summaries", fields, 5U);
   } else {
     pslog_field fields[4];

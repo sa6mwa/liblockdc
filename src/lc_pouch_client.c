@@ -187,6 +187,8 @@ typedef struct lc_pouch_queue_record {
   int max_attempts;
   int failure_attempts;
   long enqueued_at_unix;
+  long enqueued_at_nsec;
+  unsigned long enqueue_sequence;
   long expires_at_unix;
   long not_visible_until_unix;
   long visibility_timeout_seconds;
@@ -4442,6 +4444,7 @@ lc_pouch_query_index_process_keys(lc_pouch_query_scan_context *context,
   size_t index;
   size_t write_index;
   int has_candidate_exact;
+  int all_candidate_exact;
   int rc;
 
   if (context == NULL || keys == NULL) {
@@ -4483,11 +4486,26 @@ lc_pouch_query_index_process_keys(lc_pouch_query_scan_context *context,
     return LC_OK;
   }
   has_candidate_exact = 0;
+  all_candidate_exact = 1;
   for (index = 0U; index < keys->count; ++index) {
     if (keys->keys[index].candidate_exact) {
       has_candidate_exact = 1;
-      break;
+    } else {
+      all_candidate_exact = 0;
     }
+  }
+  if (context->emit_documents && lc_sink_is_discard(context->sink) &&
+      (context->indexed_candidates_exact || all_candidate_exact) &&
+      context->start_after_key == NULL && keys->count > 0U &&
+      context->emitted <= context->limit &&
+      keys->count < context->limit - context->emitted) {
+    for (index = 0U; index < keys->count; ++index) {
+      lc_pouch_query_track_index_seq(context, keys->keys[index].version);
+    }
+    context->seen += keys->count;
+    context->matched += keys->count;
+    context->emitted += keys->count;
+    return LC_OK;
   }
   if (context->emit_documents && context->indexed_candidates_exact &&
       lc_sink_is_discard(context->sink)) {
@@ -4780,6 +4798,7 @@ run_index_query:
         unsigned long complete_seq;
         unsigned long exact_seq;
         size_t needle_len;
+        int text_complete_known;
         int text_complete;
         int used_token_exact;
 
@@ -4787,6 +4806,7 @@ run_index_query:
         collect_context.keys = &keys;
         collect_context.candidate_exact = 1;
         needle_len = strlen(plan.values[value_index]);
+        text_complete_known = 0;
         used_token_exact = 0;
         exact_seq = 0UL;
         if (strcmp(plan.field, "/...") == 0 && needle_len >= 4U &&
@@ -4799,18 +4819,19 @@ run_index_query:
           text_complete = 0;
           used_token_exact = 1;
         } else {
-          rc = lc_pouch_query_index_visit_contains(
+          rc = lc_pouch_query_index_visit_contains_complete(
               scan->client->pouch, scan->namespace_name, plan.field,
               plan.values[value_index], plan.ignore_case,
               lc_pouch_query_index_key_collect_marked, &collect_context,
-              &exact_seq, error);
-          text_complete = 0;
+              &exact_seq, &text_complete, error);
+          text_complete_known = 1;
         }
         if (rc == LC_OK && exact_seq > value_seq) {
           value_seq = exact_seq;
         }
         complete_seq = 0UL;
-        if (rc == LC_OK && !text_complete && !used_token_exact) {
+        if (rc == LC_OK && !text_complete && !used_token_exact &&
+            !text_complete_known) {
           rc = lc_pouch_query_index_contains_text_complete(
               scan->client->pouch, scan->namespace_name, plan.field,
               &text_complete, &complete_seq, error);
@@ -6314,12 +6335,20 @@ static char *lc_pouch_queue_state_key(const char *queue, const char *message_id,
   return key;
 }
 
-static char *lc_pouch_queue_message_id(lc_error *error) {
+static char *lc_pouch_queue_message_id(long *seconds_out, long *nanos_out,
+                                       unsigned long *sequence_out,
+                                       lc_error *error) {
   static unsigned long counter;
   struct timespec now;
   char text[128];
   unsigned long sequence;
 
+  if (seconds_out == NULL || nanos_out == NULL || sequence_out == NULL) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch queue message id requires timestamp outputs",
+                       NULL, NULL, NULL);
+    return NULL;
+  }
   if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
     (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                        "failed to read pouch queue clock", strerror(errno),
@@ -6329,8 +6358,11 @@ static char *lc_pouch_queue_message_id(lc_error *error) {
   pthread_mutex_lock(&lc_pouch_queue_message_id_mutex);
   sequence = ++counter;
   pthread_mutex_unlock(&lc_pouch_queue_message_id_mutex);
-  snprintf(text, sizeof(text), "pouch-msg-%ld-%ld-%ld-%lu", (long)getpid(),
-           (long)now.tv_sec, (long)now.tv_nsec, sequence);
+  *seconds_out = (long)now.tv_sec;
+  *nanos_out = (long)now.tv_nsec;
+  *sequence_out = sequence;
+  snprintf(text, sizeof(text), "pouch-msg-%ld-%020ld-%09ld-%020lu",
+           (long)getpid(), (long)now.tv_sec, (long)now.tv_nsec, sequence);
   return lc_strdup_local(text);
 }
 
@@ -6404,6 +6436,14 @@ static int lc_pouch_queue_record_header(const lc_pouch_queue_record *record,
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_i64(
         &buffer, (int64_t)record->enqueued_at_unix, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_i64(
+        &buffer, (int64_t)record->enqueued_at_nsec, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_u64(
+        &buffer, (uint64_t)record->enqueue_sequence, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_i64(
@@ -6814,6 +6854,7 @@ static int lc_pouch_write_lease_record_with_lock_state(
     options.content_type = LC_POUCH_LEASE_CONTENT_TYPE;
     options.has_expected_version = 1;
     options.expected_version = expected_version;
+    options.disable_compression = 1;
     memset(&lock_context, 0, sizeof(lock_context));
     lock_context.client = client;
     lock_context.storage_key = storage_key;
@@ -7116,6 +7157,16 @@ static int lc_pouch_queue_record_parse(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
+    record->enqueued_at_nsec = (long)signed_value;
+    header_length += 8U;
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_source_u64(read_result->body, &payload_bytes, error);
+    record->enqueue_sequence = (unsigned long)payload_bytes;
+    header_length += 8U;
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
     record->expires_at_unix = (long)signed_value;
     header_length += 8U;
   }
@@ -7227,6 +7278,18 @@ static int lc_pouch_queue_record_compare(const void *left, const void *right) {
     return -1;
   }
   if (a->enqueued_at_unix > b->enqueued_at_unix) {
+    return 1;
+  }
+  if (a->enqueued_at_nsec < b->enqueued_at_nsec) {
+    return -1;
+  }
+  if (a->enqueued_at_nsec > b->enqueued_at_nsec) {
+    return 1;
+  }
+  if (a->enqueue_sequence < b->enqueue_sequence) {
+    return -1;
+  }
+  if (a->enqueue_sequence > b->enqueue_sequence) {
     return 1;
   }
   return strcmp(a->message_id, b->message_id);
@@ -10189,7 +10252,6 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
   const char *namespace_name = NULL;
-  long now;
   unsigned int attempt;
   int rc;
 
@@ -10208,7 +10270,6 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
                         "pouch enqueue timing values must be non-negative",
                         NULL, NULL, NULL);
   }
-  now = 0L;
   client = (lc_client_handle *)self;
   rc = lc_pouch_client_public_namespace(client, req->namespace_name,
                                         &namespace_name, error);
@@ -10221,7 +10282,6 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
   memset(&result, 0, sizeof(result));
   stream_context = NULL;
   record_source = NULL;
-  rc = lc_pouch_now_unix(&now, error);
   if (rc == LC_OK) {
     record.namespace_name = lc_strdup_local(namespace_name);
     record.queue = lc_strdup_local(req->queue);
@@ -10235,16 +10295,7 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
     record.attempts = 0;
     record.max_attempts = req->max_attempts;
     record.failure_attempts = 0;
-    record.enqueued_at_unix = now;
     record.expires_at_unix = 0L;
-    if (req->ttl_seconds > 0L) {
-      rc = lc_pouch_timestamp_add(now, req->ttl_seconds, "ttl_seconds",
-                                  &record.expires_at_unix, error);
-    }
-    if (rc == LC_OK) {
-      rc = lc_pouch_timestamp_add(now, req->delay_seconds, "delay_seconds",
-                                  &record.not_visible_until_unix, error);
-    }
     record.visibility_timeout_seconds = req->visibility_timeout_seconds;
     if (rc == LC_OK &&
         (record.namespace_name == NULL || record.queue == NULL ||
@@ -10262,7 +10313,9 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
     lc_free_with_allocator(NULL, record.storage_key);
     record.message_id = NULL;
     record.storage_key = NULL;
-    record.message_id = lc_pouch_queue_message_id(error);
+    record.message_id = lc_pouch_queue_message_id(
+        &record.enqueued_at_unix, &record.enqueued_at_nsec,
+        &record.enqueue_sequence, error);
     record.storage_key = record.message_id != NULL
                              ? lc_pouch_queue_key(namespace_name, req->queue,
                                                   record.message_id, error)
@@ -10271,8 +10324,21 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
       break;
     }
-    rc = lc_pouch_queue_stream_source(&record, src, &stream_context,
-                                      &record_source, error);
+    record.expires_at_unix = 0L;
+    if (req->ttl_seconds > 0L) {
+      rc =
+          lc_pouch_timestamp_add(record.enqueued_at_unix, req->ttl_seconds,
+                                 "ttl_seconds", &record.expires_at_unix, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_timestamp_add(record.enqueued_at_unix, req->delay_seconds,
+                                  "delay_seconds",
+                                  &record.not_visible_until_unix, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_queue_stream_source(&record, src, &stream_context,
+                                        &record_source, error);
+    }
     if (rc == LC_OK) {
       rc = lc_pouch_state_write(client->pouch, ".lockd/queue",
                                 record.storage_key, record_source, &options,

@@ -4865,10 +4865,8 @@ static void test_public_management_methods_emit_logs(void **state) {
   assert_non_null(logs);
   assert_non_null(strstr(logs, "\"message\":\"namespace.get.start\""));
   assert_non_null(strstr(logs, "\"message\":\"namespace.get.success\""));
-  assert_non_null(
-      strstr(logs, "\"message\":\"tc.lease.acquire.start\""));
-  assert_non_null(
-      strstr(logs, "\"message\":\"tc.lease.acquire.success\""));
+  assert_non_null(strstr(logs, "\"message\":\"tc.lease.acquire.start\""));
+  assert_non_null(strstr(logs, "\"message\":\"tc.lease.acquire.success\""));
   assert_non_null(strstr(logs, "\"message\":\"rm.list.start\""));
   assert_non_null(strstr(logs, "\"message\":\"rm.list.success\""));
   assert_non_null(strstr(logs, "\"cid\":\"corr-rm-list\""));

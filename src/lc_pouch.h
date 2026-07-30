@@ -76,6 +76,7 @@ typedef struct lc_pouch_state_write_options {
   int create_if_absent;
   int has_query_hidden;
   int query_hidden;
+  int disable_compression;
 } lc_pouch_state_write_options;
 
 typedef struct lc_pouch_state_write_result {

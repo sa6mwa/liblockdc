@@ -533,6 +533,14 @@ func addMetricPhaseDuration(phase *int64, total *int64, start time.Time) {
 	*total += *phase - before
 }
 
+func warmLockdDiskProductionQuery(b *testing.B, h *lockdDiskHarness, rows int64, engine, scenario string, documents bool) {
+	b.Helper()
+	matched := runLockdDiskQuery(b, h, rows, engine, scenario, documents)
+	if int64(matched) != productionExpectedQueryMatches(scenario, rows) {
+		b.Fatalf("lockd disk production warm %s %s query matched %d rows, want %d", scenario, engine, matched, productionExpectedQueryMatches(scenario, rows))
+	}
+}
+
 func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int64) productionMetrics {
 	b.Helper()
 
@@ -762,6 +770,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 		b.Fatalf("lockd disk production RangeHalf index query matched %d rows, want %d", matched, productionExpectedQueryMatches("RangeHalf", rows))
 	}
 	metrics.rows = int64(matched)
+	warmLockdDiskProductionQuery(b, h, rows, "index", "NarrativeSummary", true)
 	phaseStart = time.Now()
 	matched = runLockdDiskQuery(b, h, rows, "index", "NarrativeSummary", true)
 	addMetricDuration(&metrics.indexQueryDocsNS, phaseStart)
@@ -774,6 +783,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 	if int64(matched) != productionExpectedQueryMatches("WorkflowEscalated", rows) {
 		b.Fatalf("lockd disk production WorkflowEscalated scan query matched %d rows, want %d", matched, productionExpectedQueryMatches("WorkflowEscalated", rows))
 	}
+	warmLockdDiskProductionQuery(b, h, rows, "scan", "NarrativeDescription", true)
 	phaseStart = time.Now()
 	matched = runLockdDiskQuery(b, h, rows, "scan", "NarrativeDescription", true)
 	addMetricDuration(&metrics.scanQueryDocsNS, phaseStart)
@@ -786,6 +796,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 	if int64(matched) != productionExpectedQueryMatches("FullTextAny", rows) {
 		b.Fatalf("lockd disk production FullTextAny index query matched %d rows, want %d", matched, productionExpectedQueryMatches("FullTextAny", rows))
 	}
+	warmLockdDiskProductionQuery(b, h, rows, "scan", "FullTextAny", true)
 	phaseStart = time.Now()
 	matched = runLockdDiskQuery(b, h, rows, "scan", "FullTextAny", true)
 	addMetricDuration(&metrics.fullTextScanDocsNS, phaseStart)

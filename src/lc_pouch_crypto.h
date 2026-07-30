@@ -51,6 +51,11 @@ int lc_pouch_crypto_stream_to_fd_crc(
     lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
     unsigned long *plain_bytes, unsigned long *cipher_bytes,
     unsigned long *stored_crc, char **descriptor_out, lc_error *error);
+int lc_pouch_crypto_stream_to_fd_crc_with_compression(
+    lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
+    unsigned long *plain_bytes, unsigned long *cipher_bytes,
+    unsigned long *stored_crc, char **descriptor_out, int allow_compression,
+    lc_error *error);
 int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
                                      const char *context, const char *path,
                                      const char *descriptor, lc_source **out,
@@ -74,6 +79,8 @@ int lc_pouch_crypto_test_check_byte_counter(unsigned long total, size_t delta,
 int lc_pouch_crypto_test_generate_key_file_status(const char *path,
                                                   int *already_exists,
                                                   lc_error *error);
+int lc_pouch_crypto_test_descriptor_compressed(const char *descriptor, int *out,
+                                               lc_error *error);
 #endif
 
 #endif

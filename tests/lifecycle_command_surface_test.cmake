@@ -59,12 +59,23 @@ foreach(target
     assert_contains(root_makefile "${target}:" "make target ${target}")
 endforeach()
 
+foreach(script
+        scripts/dev-logs.sh
+        scripts/dev-ps.sh
+        scripts/dev-reset.sh
+        scripts/dev-up.sh
+        scripts/dev-down.sh)
+    if(NOT EXISTS "${LOCKDC_ROOT}/${script}")
+        message(FATAL_ERROR "missing lifecycle runner: ${script}")
+    endif()
+endforeach()
+
 assert_contains(root_makefile "bash ./scripts/valgrind.sh" "Valgrind runner wiring")
 assert_contains(root_makefile "LOCKDC_PRERELEASE_LIVE=1" "live prerelease opt-in diagnostic")
 assert_contains(root_makefile "__finalize-slice: __format __test-debug" "ordinary slice gate graph")
 assert_contains(root_makefile "__test-all: __test-debug __test-host" "bounded test-all graph")
-assert_contains(root_makefile "__prerelease: __release-pipeline" "deterministic prerelease graph")
-assert_contains(root_makefile "__prerelease-hardening: __prerelease __fuzz __benchmark-pouch-go-parity-gate" "hardening prerelease graph")
+assert_contains(root_makefile "__prerelease: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test __bench-gate" "deterministic prerelease graph")
+assert_contains(root_makefile "__prerelease-hardening: __prerelease __fuzz __benchmark-pouch-go-parity-gate __release-matrix" "hardening prerelease graph")
 assert_contains(root_makefile "__lifecycle-version-contract:" "lifecycle version contract target")
 assert_contains(root_makefile "bash ./scripts/lifecycle-version-contract.sh" "lifecycle version contract runner")
 assert_contains(root_makefile "print-release-version:" "Make-owned release version surface")
@@ -77,7 +88,7 @@ assert_not_contains(root_makefile "build-asan:" "non-standard build-asan compati
 assert_not_contains(root_makefile "test-asan:" "non-standard test-asan compatibility target")
 assert_not_contains(root_makefile "asan:" "non-standard asan compatibility target")
 assert_not_contains(root_makefile "__release-package-only" "obsolete release package-only internal target")
-assert_contains(root_makefile "__release-pipeline: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test __bench-gate __release-matrix" "shared release pipeline graph")
+assert_contains(root_makefile "__release-pipeline: __prerelease __release-matrix" "shared release pipeline graph")
 assert_contains(release_script "run_step __lifecycle-version-contract\nrun_step __clean\nrun_step __release-pipeline" "release version contract, clean, shared pipeline order")
 assert_contains(release_matrix_script "\"$make_bin\" __build-release" "standard release matrix build step")
 assert_contains(release_matrix_script "\"$make_bin\" __test-host" "standard release matrix host test step")

@@ -1107,6 +1107,28 @@ static int lc_pouch_crypto_descriptor_decode(const char *descriptor,
   return LC_OK;
 }
 
+#ifdef LOCKDC_TEST_BUILD
+int lc_pouch_crypto_test_descriptor_compressed(const char *descriptor, int *out,
+                                               lc_error *error) {
+  lc_pouch_crypto_desc desc;
+  int rc;
+
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch crypto descriptor test requires output", NULL,
+                        NULL, "pouch");
+  }
+  *out = 0;
+  memset(&desc, 0, sizeof(desc));
+  rc = lc_pouch_crypto_descriptor_decode(descriptor, &desc, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  *out = desc.compressed;
+  return LC_OK;
+}
+#endif
+
 static void lc_pouch_crypto_nonce(const unsigned char prefix[8],
                                   unsigned long counter,
                                   unsigned char nonce[12]) {
@@ -1690,9 +1712,19 @@ int lc_pouch_crypto_stream_to_fd_crc(
     lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
     unsigned long *plain_bytes, unsigned long *cipher_bytes,
     unsigned long *stored_crc, char **descriptor_out, lc_error *error) {
-  return lc_pouch_crypto_stream_to_fd_crc_impl(
+  return lc_pouch_crypto_stream_to_fd_crc_with_compression(
       crypto, context, fd, body, plain_bytes, cipher_bytes, stored_crc,
       descriptor_out, 1, error);
+}
+
+int lc_pouch_crypto_stream_to_fd_crc_with_compression(
+    lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
+    unsigned long *plain_bytes, unsigned long *cipher_bytes,
+    unsigned long *stored_crc, char **descriptor_out, int allow_compression,
+    lc_error *error) {
+  return lc_pouch_crypto_stream_to_fd_crc_impl(
+      crypto, context, fd, body, plain_bytes, cipher_bytes, stored_crc,
+      descriptor_out, allow_compression, error);
 }
 
 static size_t lc_pouch_crypto_source_read(lc_source *self, void *buffer,
@@ -1721,8 +1753,7 @@ int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
   }
   *out = NULL;
   if (descriptor == NULL || descriptor[0] == '\0') {
-    if (crypto != NULL &&
-        (crypto->encryption_enabled || crypto->compression_enabled)) {
+    if (crypto != NULL && crypto->encryption_enabled) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "transformed pouch payload is missing descriptor",
                           NULL, NULL, "pouch");
@@ -1868,8 +1899,7 @@ int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
   }
   *out = NULL;
   if (descriptor == NULL || descriptor[0] == '\0') {
-    if (crypto != NULL &&
-        (crypto->encryption_enabled || crypto->compression_enabled)) {
+    if (crypto != NULL && crypto->encryption_enabled) {
       close(fd);
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "transformed pouch payload is missing descriptor",
