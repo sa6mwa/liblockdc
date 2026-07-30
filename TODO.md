@@ -421,3 +421,44 @@ Acceptance:
 
 Why: completion requires evidence: implementation, verification, benchmark
 comparison, review, and clean commit discipline.
+
+## Slice 15: pslog Logging Contract Alignment
+
+- [ ] Treat `docs/logging.md` as the liblockdc pslog event and field contract.
+  Why: logging must be stable enough for operators and tests to rely on.
+
+- [ ] Align public liblockdc client logging to `sys=client.lockd`.
+  Why: liblockdc is not the Go SDK and should not emit SDK subsystem identity.
+
+- [ ] Align all Pouch logging to `sys=storage.pouch`.
+  Why: logstore, manifest, scan, index, crypto, compression, compaction,
+  queue-backed storage, attachment/object storage, and maintenance internals
+  are internal areas of one Pouch storage engine.
+
+- [ ] Remove `component` and `subsystem` fields from liblockdc-managed logs.
+  Why: `sys` is the subsystem field and duplicate subsystem dimensions make
+  log queries inconsistent.
+
+- [ ] Remove redundant event prefixes that duplicate `sys`.
+  Why: events should be scoped below the subsystem, for example
+  `acquire.start` under `sys=client.lockd` and `compaction.start` under
+  `sys=storage.pouch`.
+
+- [ ] Standardize field names to the approved short-readable layout:
+  `ns`, `msg_id`, `cur_*`, `lease_id`, `txn_id`, `attachment_id`,
+  `fencing_token`, `payload_bytes`, `stored_bytes`, `plaintext_bytes`,
+  `elapsed_ms`, and explicit unit suffixes such as `_bytes`, `_s`, and `_ms`.
+  Why: fields should be compact but understandable without a legend.
+
+- [ ] Add or update logging tests that assert subsystem fields, event names,
+  field names, and production-data redaction.
+  Why: the logging contract is observable behavior and should not drift.
+
+Acceptance:
+
+- [ ] All liblockdc-managed client logs use `sys=client.lockd`.
+- [ ] All Pouch logs use `sys=storage.pouch`.
+- [ ] No liblockdc-managed log emits `component` or `subsystem`.
+- [ ] No liblockdc-managed log event repeats its `sys` identity.
+- [ ] No logs contain state JSON, queue payloads, attachment/object bodies,
+  full document text, crypto key material, transform secrets, or credentials.
