@@ -107,6 +107,23 @@ static void cleanup_all_roots(void) {
                             POUCH_UNIT_TMP_PREFIX);
 }
 
+static void pouch_queue_message_participant_key(const lc_message *message,
+                                                char *out,
+                                                size_t out_size) {
+  assert_non_null(message);
+  assert_non_null(message->queue);
+  assert_non_null(message->message_id);
+  snprintf(out, out_size, "q/%s/msg/%s", message->queue, message->message_id);
+}
+
+static void pouch_queue_state_participant_key(const lc_message *message,
+                                              char *out, size_t out_size) {
+  assert_non_null(message);
+  assert_non_null(message->queue);
+  assert_non_null(message->message_id);
+  snprintf(out, out_size, "q/%s/state/%s", message->queue, message->message_id);
+}
+
 static pslog_logger *open_pouch_test_logger(FILE **out_fp) {
   FILE *fp;
   pslog_config config;
@@ -5156,7 +5173,7 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   cleanup_root(root);
 
   open_options.segment_target_bytes = 1UL;
-  open_options.compaction_min_segment_count = 2UL;
+  open_options.compaction_min_segment_count = 1UL;
   open_options.compaction_min_reclaimable_bytes = 1UL;
   open_options.background_compaction_enabled = 1;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
@@ -5176,24 +5193,24 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
                              &error);
   assert_int_equal(rc, LC_OK);
   assert_sha256_text_etag(delete_a.etag, "");
-  assert_false(path_is_file(rejected_payload_file_path));
+  assert_true(path_is_file(rejected_payload_file_path));
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
   assert_path_file(namespace_path,
-                   "snapshots/snapshot-00000000000000000002.log");
+                   "snapshots/snapshot-00000000000000000001.log");
   assert_path_file_contains(namespace_path, "manifest",
-                            "snapshot=snapshot-00000000000000000002.log");
+                            "snapshot=snapshot-00000000000000000001.log");
   assert_path_file_contains(namespace_path, "manifest",
-                            "active_segment=seg-00000000000000000003.log");
+                            "active_segment=seg-00000000000000000002.log");
   written = snprintf(path, sizeof(path), "%s/segments/%s", namespace_path,
                      "seg-00000000000000000001.log");
   assert_true(written > 0 && (size_t)written < sizeof(path));
-  assert_false(path_is_file(path));
+  assert_true(path_is_file(path));
   written = snprintf(path, sizeof(path), "%s/segments/%s", namespace_path,
                      "seg-00000000000000000002.log");
   assert_true(written > 0 && (size_t)written < sizeof(path));
-  assert_false(path_is_file(path));
+  assert_true(path_is_file(path));
 
   rc = lc_source_from_memory("two", strlen("two"), &body, &error);
   assert_int_equal(rc, LC_OK);
@@ -5532,14 +5549,14 @@ static void test_maintenance_force_installs_snapshot(void **state) {
   assert_string_equal(maintenance_result.diagnostic, "compacted");
   assert_true(maintenance_result.compacted);
   assert_false(maintenance_result.skipped);
-  assert_int_equal(maintenance_result.compacted_segment_id, 2UL);
+  assert_int_equal(maintenance_result.compacted_segment_id, 1UL);
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
   assert_path_file(namespace_path,
-                   "snapshots/snapshot-00000000000000000002.log");
+                   "snapshots/snapshot-00000000000000000001.log");
   assert_path_file_contains(namespace_path, "manifest",
-                            "snapshot=snapshot-00000000000000000002.log");
+                            "snapshot=snapshot-00000000000000000001.log");
 
   lc_pouch_close(pouch);
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
@@ -5631,8 +5648,8 @@ static void test_manifest_open_ignores_unmanifested_snapshot(void **state) {
                                         &cleanup_pending_count, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(manifest.latest_snapshot,
-                      "snapshot-00000000000000000002.log");
-  assert_int_equal(manifest.latest_snapshot_segment_id, 2UL);
+                      "snapshot-00000000000000000001.log");
+  assert_int_equal(manifest.latest_snapshot_segment_id, 1UL);
   assert_path_file_not_contains(namespace_path, "manifest",
                                 "snapshot=snapshot-00000000000000000099.log");
 
@@ -5677,7 +5694,7 @@ static void test_maintenance_aborts_on_validation_drift(void **state) {
   make_root("maintenance-validation-drift", root, sizeof(root));
   cleanup_root(root);
 
-  open_options.segment_target_bytes = 100000000UL;
+  open_options.segment_target_bytes = 1UL;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   for (i = 0U; i < 16U; ++i) {
@@ -5759,7 +5776,7 @@ static void test_maintenance_aborts_on_same_size_segment_drift(void **state) {
   make_root("maintenance-same-size-validation-drift", root, sizeof(root));
   cleanup_root(root);
 
-  open_options.segment_target_bytes = 100000000UL;
+  open_options.segment_target_bytes = 1UL;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   for (i = 0U; i < 16U; ++i) {
@@ -5860,7 +5877,7 @@ static void test_maintenance_reports_snapshot_write_abort(void **state) {
   snapshots_path = lc_pouch_path_join(NULL, namespace_path, "snapshots");
   assert_non_null(snapshots_path);
   snapshot_path = lc_pouch_path_join(NULL, snapshots_path,
-                                     "snapshot-00000000000000000002.log");
+                                     "snapshot-00000000000000000001.log");
   assert_non_null(snapshot_path);
   assert_int_equal(chmod(snapshots_path, 0555), 0);
 
@@ -5875,7 +5892,7 @@ static void test_maintenance_reports_snapshot_write_abort(void **state) {
   assert_true(maintenance_result.aborted);
   assert_false(maintenance_result.compacted);
   assert_false(maintenance_result.skipped);
-  assert_int_equal(maintenance_result.candidate_segment_count, 2UL);
+  assert_int_equal(maintenance_result.candidate_segment_count, 1UL);
   assert_true(maintenance_result.candidate_bytes > 0UL);
   assert_false(path_is_file(snapshot_path));
 
@@ -5913,7 +5930,7 @@ static void test_maintenance_reports_interval_skip(void **state) {
   cleanup_root(root);
 
   open_options.segment_target_bytes = 1UL;
-  open_options.compaction_min_segment_count = 2UL;
+  open_options.compaction_min_segment_count = 1UL;
   open_options.compaction_min_reclaimable_bytes = 1UL;
   open_options.compaction_interval_seconds = 3600UL;
   open_options.background_compaction_enabled = 1;
@@ -5947,7 +5964,7 @@ static void test_maintenance_reports_interval_skip(void **state) {
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
   assert_path_file(namespace_path,
-                   "snapshots/snapshot-00000000000000000002.log");
+                   "snapshots/snapshot-00000000000000000001.log");
 
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
@@ -6028,13 +6045,11 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(maintenance_result.diagnostic, "compacted");
   assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 1UL);
   assert_true(path_is_file(segment_one_path));
   assert_true(path_is_file(segment_two_path));
   assert_file_contains(manifest_path,
                        "obsolete_segment=seg-00000000000000000001.log");
-  assert_file_contains(manifest_path,
-                       "obsolete_segment=seg-00000000000000000002.log");
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   memset(&maintenance_result, 0, sizeof(maintenance_result));
@@ -6048,7 +6063,7 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
   assert_true(maintenance_result.skipped);
   assert_false(maintenance_result.compacted);
   assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 1UL);
 
   assert_int_equal(chmod(segments_path, 0755), 0);
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
@@ -6056,15 +6071,15 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(maintenance_result.diagnostic, "cleanup-complete");
+  assert_string_equal(maintenance_result.diagnostic, "cleanup-pending");
   assert_true(maintenance_result.skipped);
   assert_false(maintenance_result.compacted);
-  assert_int_equal(maintenance_result.cleanup_deleted_count, 2UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 0UL);
+  assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 1UL);
 
-  assert_false(path_is_file(segment_one_path));
-  assert_false(path_is_file(segment_two_path));
-  assert_file_not_contains(manifest_path, "obsolete_segment=");
+  assert_true(path_is_file(segment_one_path));
+  assert_true(path_is_file(segment_two_path));
+  assert_file_contains(manifest_path, "obsolete_segment=");
 
   stale_snapshot_path = lc_pouch_path_join(NULL, snapshots_path,
                                            "snapshot-00000000000000000099.log");
@@ -6077,11 +6092,11 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(maintenance_result.diagnostic, "cleanup-complete");
-  assert_int_equal(maintenance_result.cleanup_deleted_count, 1UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 0UL);
-  assert_false(path_is_file(stale_snapshot_path));
-  assert_file_not_contains(manifest_path, "obsolete_snapshot=");
+  assert_string_equal(maintenance_result.diagnostic, "cleanup-pending");
+  assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
+  assert_true(path_is_file(stale_snapshot_path));
+  assert_file_contains(manifest_path, "obsolete_snapshot=");
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &first);
@@ -6160,12 +6175,12 @@ static void test_snapshot_high_water_survives_compaction_reopen(void **state) {
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(maintenance_result.diagnostic, "compacted");
-  assert_int_equal(maintenance_result.compacted_segment_id, 3UL);
+  assert_int_equal(maintenance_result.compacted_segment_id, 2UL);
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
   assert_path_file_contains_bytes(namespace_path,
-                                  "snapshots/snapshot-00000000000000000003.log",
+                                  "snapshots/snapshot-00000000000000000002.log",
                                   high_water_header, sizeof(high_water_header));
   lc_pouch_close(pouch);
 
@@ -6173,7 +6188,7 @@ static void test_snapshot_high_water_survives_compaction_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_index_seq(pouch, "team/alpha", &index_seq, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(index_seq, 3UL);
+  assert_int_equal(index_seq, 4UL);
 
   visit_count = 0;
   rc = lc_pouch_state_visit(pouch, "team/alpha", count_state_visit_entries,
@@ -6217,7 +6232,7 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   cleanup_root(root);
 
   open_options.segment_target_bytes = 1UL;
-  open_options.compaction_min_segment_count = 2UL;
+  open_options.compaction_min_segment_count = 1UL;
   open_options.compaction_min_reclaimable_bytes = 1UL;
   open_options.background_compaction_enabled = 1;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
@@ -6244,9 +6259,9 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
   assert_path_file(namespace_path,
-                   "snapshots/snapshot-00000000000000000002.log");
+                   "snapshots/snapshot-00000000000000000001.log");
   assert_path_file_contains_bytes(namespace_path,
-                                  "snapshots/snapshot-00000000000000000002.log",
+                                  "snapshots/snapshot-00000000000000000001.log",
                                   state_put_header, sizeof(state_put_header));
 
   lc_pouch_close(pouch);
@@ -8407,11 +8422,14 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   lc_queue_stats_res stats_res;
   lc_ack_op ack_op;
   lc_ack_res ack_res;
+  lc_txn_participant participant;
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
   lc_message *message;
   lc_error error;
   char root[512];
+  char participant_namespace[128];
+  char participant_key[256];
   int rc;
 
   (void)state;
@@ -8425,6 +8443,7 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   memset(&stats_res, 0, sizeof(stats_res));
   memset(&ack_op, 0, sizeof(ack_op));
   memset(&ack_res, 0, sizeof(ack_res));
+  memset(&participant, 0, sizeof(participant));
   lc_txn_decision_req_init(&decision_req);
   memset(&decision_res, 0, sizeof(decision_res));
   lc_error_init(&error);
@@ -8472,6 +8491,15 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   lc_queue_stats_res_cleanup(&stats_res);
 
   decision_req.txn_id = "txn-queue-commit";
+  pouch_queue_message_participant_key(message, participant_key,
+                                      sizeof(participant_key));
+  snprintf(participant_namespace, sizeof(participant_namespace), "%s",
+           message->namespace_name);
+  participant.namespace_name = participant_namespace;
+  participant.key = participant_key;
+  participant.backend_hash = "pouch-queue";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
@@ -8514,12 +8542,39 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   lc_ack_res_cleanup(&ack_res);
 
   decision_req.txn_id = "txn-queue-rollback";
+  pouch_queue_message_participant_key(message, participant_key,
+                                      sizeof(participant_key));
+  participant.namespace_name = message->namespace_name;
+  participant.key = participant_key;
+  participant.backend_hash = "pouch-queue";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
   rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
 
   ack_op.message.txn_id = NULL;
   memset(&ack_res, 0, sizeof(ack_res));
+  rc = client->queue_ack(client, &ack_op, &ack_res, &error);
+  assert_true(rc != LC_OK);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_ack_res_cleanup(&ack_res);
+  message->close(message);
+  message = NULL;
+
+  dequeue_req.txn_id = NULL;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  memset(&ack_op, 0, sizeof(ack_op));
+  memset(&ack_res, 0, sizeof(ack_res));
+  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.queue = message->queue;
+  ack_op.message.message_id = message->message_id;
+  ack_op.message.lease_id = message->lease_id;
+  ack_op.message.fencing_token = message->fencing_token;
+  ack_op.message.meta_etag = message->meta_etag;
   rc = client->queue_ack(client, &ack_op, &ack_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(ack_res.acked, 1);
@@ -8557,13 +8612,14 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   lc_queue_stats_res stats_res;
   lc_ack_op ack_op;
   lc_ack_res ack_res;
-  lc_txn_participant participant;
+  lc_txn_participant participants[2];
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
   lc_pouch_state_read_result read_result;
   lc_message *message;
   lc_error error;
   char root[512];
+  char queue_participant_key[256];
   char state_bytes[256];
   int rc;
 
@@ -8589,7 +8645,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   memset(&stats_res, 0, sizeof(stats_res));
   memset(&ack_op, 0, sizeof(ack_op));
   memset(&ack_res, 0, sizeof(ack_res));
-  memset(&participant, 0, sizeof(participant));
+  memset(participants, 0, sizeof(participants));
   lc_txn_decision_req_init(&decision_req);
   memset(&decision_res, 0, sizeof(decision_res));
   memset(&read_result, 0, sizeof(read_result));
@@ -8678,12 +8734,17 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   assert_int_equal(stats_res.pending_candidates, 1);
   lc_queue_stats_res_cleanup(&stats_res);
 
-  participant.namespace_name = "docs/txn-index";
-  participant.key = "doc/txn";
-  participant.backend_hash = "backend-state";
+  pouch_queue_message_participant_key(message, queue_participant_key,
+                                      sizeof(queue_participant_key));
+  participants[0].namespace_name = "docs/txn-index";
+  participants[0].key = "doc/txn";
+  participants[0].backend_hash = "backend-state";
+  participants[1].namespace_name = message->namespace_name;
+  participants[1].key = queue_participant_key;
+  participants[1].backend_hash = "backend-queue";
   decision_req.txn_id = "txn-state-index";
-  decision_req.participants = &participant;
-  decision_req.participant_count = 1U;
+  decision_req.participants = participants;
+  decision_req.participant_count = 2U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
@@ -8733,8 +8794,12 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_update_res_cleanup(&update_res);
 
-  participant.key = "doc/rollback";
+  participants[0].namespace_name = "docs/txn-index";
+  participants[0].key = "doc/rollback";
+  participants[0].backend_hash = "backend-state";
   decision_req.txn_id = "txn-state-rollback";
+  decision_req.participants = participants;
+  decision_req.participant_count = 1U;
   rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
@@ -8764,11 +8829,14 @@ static void test_txn_recovery_applies_queue_side_effects(void **state) {
   lc_queue_stats_res stats_res;
   lc_ack_op ack_op;
   lc_ack_res ack_res;
+  lc_txn_participant participant;
   lc_pouch_state_write_result write_result;
   lc_pouch_state_read_result read_result;
   lc_message *message;
   lc_error error;
   char root[512];
+  char participant_namespace[128];
+  char participant_key[256];
   int rc;
 
   (void)state;
@@ -8783,6 +8851,7 @@ static void test_txn_recovery_applies_queue_side_effects(void **state) {
   memset(&stats_res, 0, sizeof(stats_res));
   memset(&ack_op, 0, sizeof(ack_op));
   memset(&ack_res, 0, sizeof(ack_res));
+  memset(&participant, 0, sizeof(participant));
   memset(&write_result, 0, sizeof(write_result));
   memset(&read_result, 0, sizeof(read_result));
   lc_error_init(&error);
@@ -8820,6 +8889,13 @@ static void test_txn_recovery_applies_queue_side_effects(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(ack_res.acked, 1);
   lc_ack_res_cleanup(&ack_res);
+  pouch_queue_message_participant_key(message, participant_key,
+                                      sizeof(participant_key));
+  snprintf(participant_namespace, sizeof(participant_namespace), "%s",
+           message->namespace_name);
+  participant.namespace_name = participant_namespace;
+  participant.key = participant_key;
+  participant.backend_hash = "backend-queue";
   message->close(message);
   message = NULL;
   lc_client_close(client);
@@ -8828,7 +8904,7 @@ static void test_txn_recovery_applies_queue_side_effects(void **state) {
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   test_write_binary_txn_record(pouch, "txn/txn-queue-recover", "commit", 0L,
-                               1UL, "", NULL, 0U, &error);
+                               1UL, "", &participant, 1U, &error);
   lc_pouch_close(pouch);
   pouch = NULL;
 
@@ -8884,7 +8960,7 @@ test_client_queue_mutations_touch_notification_marker(void **state) {
 
   open_pouch_client(root, &client, &error);
   enqueue_req.namespace_name = "team/notify";
-  enqueue_req.queue = "jobs/main";
+  enqueue_req.queue = "jobs-main";
   enqueue_req.visibility_timeout_seconds = 30L;
   rc = lc_source_from_memory("job", strlen("job"), &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -8893,14 +8969,14 @@ test_client_queue_mutations_touch_notification_marker(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
-  make_queue_notify_path(root, "team/notify", "jobs/main", marker_path,
+  make_queue_notify_path(root, "team/notify", "jobs-main", marker_path,
                          sizeof(marker_path));
-  assert_file_contains(marker_path, "queue=jobs%2fmain");
+  assert_file_contains(marker_path, "queue=jobs-main");
   enqueue_sequence = read_marker_sequence(marker_path, NULL);
   assert_true(enqueue_sequence > 0UL);
 
   dequeue_req.namespace_name = "team/notify";
-  dequeue_req.queue = "jobs/main";
+  dequeue_req.queue = "jobs-main";
   dequeue_req.owner = "worker-notify";
   dequeue_req.visibility_timeout_seconds = 45L;
   rc = client->dequeue(client, &dequeue_req, &message, &error);
@@ -9744,14 +9820,17 @@ static int pouch_watch_commit_txn_ack_with_client(lc_client *client,
   lc_dequeue_req dequeue_req;
   lc_ack_op ack_op;
   lc_ack_res ack_res;
+  lc_txn_participant participant;
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
   lc_message *message;
+  char participant_key[256];
   int rc;
 
   lc_dequeue_req_init(&dequeue_req);
   memset(&ack_op, 0, sizeof(ack_op));
   memset(&ack_res, 0, sizeof(ack_res));
+  memset(&participant, 0, sizeof(participant));
   lc_txn_decision_req_init(&decision_req);
   memset(&decision_res, 0, sizeof(decision_res));
   message = NULL;
@@ -9782,6 +9861,13 @@ static int pouch_watch_commit_txn_ack_with_client(lc_client *client,
   }
   if (rc == LC_OK) {
     decision_req.txn_id = txn_id;
+    pouch_queue_message_participant_key(message, participant_key,
+                                        sizeof(participant_key));
+    participant.namespace_name = message->namespace_name;
+    participant.key = participant_key;
+    participant.backend_hash = "backend-queue";
+    decision_req.participants = &participant;
+    decision_req.participant_count = 1U;
     rc = client->txn_commit(client, &decision_req, &decision_res, error);
   }
   if (message != NULL) {
@@ -15734,7 +15820,7 @@ static void
 test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   lc_client *client;
   lc_source *source;
-  lc_txn_participant participant;
+  lc_txn_participant participants[2];
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
   lc_attachment_list_req list_req;
@@ -15749,13 +15835,14 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   lc_message *message;
   lc_error error;
   char root[512];
+  char queue_participant_key[256];
   int rc;
 
   (void)state;
   client = NULL;
   source = NULL;
   message = NULL;
-  memset(&participant, 0, sizeof(participant));
+  memset(participants, 0, sizeof(participants));
   lc_txn_decision_req_init(&decision_req);
   memset(&decision_res, 0, sizeof(decision_res));
   lc_attachment_list_req_init(&list_req);
@@ -15774,10 +15861,10 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   open_pouch_client(root, &client, &error);
   list_req.lease.namespace_name = "objects/mixed";
   list_req.lease.key = "state/object-queue";
-  participant.namespace_name = "objects/mixed";
-  participant.key = "state/object-queue";
-  participant.backend_hash = "backend-object";
-  decision_req.participants = &participant;
+  participants[0].namespace_name = "objects/mixed";
+  participants[0].key = "state/object-queue";
+  participants[0].backend_hash = "backend-object";
+  decision_req.participants = participants;
   decision_req.participant_count = 1U;
   enqueue_req.namespace_name = "objects/mixed";
   enqueue_req.queue = "mixed-q";
@@ -15824,6 +15911,12 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   assert_int_equal(stats_res.pending_candidates, 1);
   lc_queue_stats_res_cleanup(&stats_res);
   decision_req.txn_id = "txn-mixed-commit";
+  pouch_queue_message_participant_key(message, queue_participant_key,
+                                      sizeof(queue_participant_key));
+  participants[1].namespace_name = message->namespace_name;
+  participants[1].key = queue_participant_key;
+  participants[1].backend_hash = "backend-queue";
+  decision_req.participant_count = 2U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
@@ -15866,6 +15959,12 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   assert_int_equal(ack_res.acked, 1);
   lc_ack_res_cleanup(&ack_res);
   decision_req.txn_id = "txn-mixed-rollback";
+  pouch_queue_message_participant_key(message, queue_participant_key,
+                                      sizeof(queue_participant_key));
+  participants[1].namespace_name = message->namespace_name;
+  participants[1].key = queue_participant_key;
+  participants[1].backend_hash = "backend-queue";
+  decision_req.participant_count = 2U;
   rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
@@ -15876,6 +15975,26 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   lc_attachment_list_cleanup(&list);
   ack_op.message.txn_id = NULL;
   memset(&ack_res, 0, sizeof(ack_res));
+  rc = client->queue_ack(client, &ack_op, &ack_res, &error);
+  assert_true(rc != LC_OK);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_ack_res_cleanup(&ack_res);
+  message->close(message);
+  message = NULL;
+
+  dequeue_req.txn_id = NULL;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  memset(&ack_op, 0, sizeof(ack_op));
+  memset(&ack_res, 0, sizeof(ack_res));
+  ack_op.message.namespace_name = message->namespace_name;
+  ack_op.message.queue = message->queue;
+  ack_op.message.message_id = message->message_id;
+  ack_op.message.lease_id = message->lease_id;
+  ack_op.message.fencing_token = message->fencing_token;
+  ack_op.message.meta_etag = message->meta_etag;
   rc = client->queue_ack(client, &ack_op, &ack_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(ack_res.acked, 1);

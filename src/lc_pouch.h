@@ -80,6 +80,7 @@ typedef struct lc_pouch_state_write_options {
   int has_query_hidden;
   int query_hidden;
   int disable_compression;
+  int object_record;
 } lc_pouch_state_write_options;
 
 typedef struct lc_pouch_state_write_result {

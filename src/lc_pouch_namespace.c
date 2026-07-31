@@ -1046,57 +1046,25 @@ int lc_pouch_namespace_manifest_save(const lc_allocator *allocator,
                                            error);
 }
 
-static int lc_pouch_namespace_unlink_obsolete(const lc_allocator *allocator,
-                                              const char *namespace_path,
-                                              const char *directory,
-                                              const char *leaf, int *gone) {
-  char *directory_path;
-  char *path;
-
-  *gone = 0;
-  directory_path = lc_pouch_path_join(allocator, namespace_path, directory);
-  path = directory_path != NULL
-             ? lc_pouch_path_join(allocator, directory_path, leaf)
-             : NULL;
-  lc_free_with_allocator(allocator, directory_path);
-  if (path == NULL) {
-    return 0;
-  }
-  if (unlink(path) == 0 || errno == ENOENT) {
-    *gone = 1;
-  }
-  lc_free_with_allocator(allocator, path);
-  return 1;
-}
-
 static int lc_pouch_namespace_manifest_prune_obsolete_list(
     const lc_allocator *allocator, char ***items, unsigned long *count,
     const char *namespace_path, const char *directory, int *changed,
     unsigned long *deleted_count, unsigned long *pending_count) {
-  unsigned long read_index;
-  unsigned long write_index;
+  unsigned long index;
 
-  write_index = 0UL;
-  for (read_index = 0UL; read_index < *count; ++read_index) {
-    int gone;
-
-    gone = 0;
-    if (lc_pouch_namespace_unlink_obsolete(allocator, namespace_path, directory,
-                                           (*items)[read_index], &gone) &&
-        gone) {
-      lc_free_with_allocator(allocator, (*items)[read_index]);
-      *changed = 1;
-      if (deleted_count != NULL) {
-        ++*deleted_count;
-      }
-      continue;
-    }
+  (void)allocator;
+  (void)items;
+  (void)namespace_path;
+  (void)directory;
+  (void)changed;
+  if (deleted_count != NULL) {
+    *deleted_count += 0UL;
+  }
+  for (index = 0UL; index < *count; ++index) {
     if (pending_count != NULL) {
       ++*pending_count;
     }
-    (*items)[write_index++] = (*items)[read_index];
   }
-  *count = write_index;
   return LC_OK;
 }
 

@@ -45,6 +45,16 @@ Relevant Go disk files:
 
 This section is a mandatory implementation checklist. Every item is either
 copied from Go disk semantics or is an explicitly accepted Pouch divergence.
+Broad implementation resemblance is not alignment. Pouch is aligned only when
+the same storage semantics, failure behavior, metadata authority, transaction
+participant model, compaction safety properties, and performance intent are
+preserved. C-native representation choices are allowed only when this document
+names them and explains why the Go disk property is still preserved.
+
+Pouch has no shipped compatibility contract. The implementation must not keep
+compatibility readers, old/new dispatch, version-bump migrations, or legacy
+branches for rejected pre-release layouts. The correct response to a divergent
+pre-release representation is a clean cutover and dead-code removal.
 
 ### Storage API Boundary
 
@@ -91,6 +101,13 @@ Pouch may use different C enum values and a different binary header, but it
 must preserve those logical families. Flattening all features into ordinary
 state rows is not accepted when it loses object/meta/state distinction,
 metadata hot-path behavior, or compaction semantics.
+
+Object records are mandatory. Queue message payloads, queue message metadata
+objects, attachments, staged attachments, and every Pouch operation that maps to
+Go disk `PutObject`/`GetObject`/`DeleteObject` semantics must replay and compact
+as object put/delete records, not as ordinary state put/delete records hidden by
+key policy. This keeps state and object generation, metadata, visibility, and
+compaction behavior separate in the same way Go disk does.
 
 Go disk record metadata carries:
 
@@ -258,6 +275,29 @@ keys stay Go-shaped: `q/<queue>/msg/<id>.bin` and
 `q/<queue>/state/<id>.json`. Message and state lease metadata keys remain
 extensionless: `q/<queue>/msg/<id>` and `q/<queue>/state/<id>`.
 
+Queue key material must remain parseable by the same logical rules as Go
+`queue.ParseMessageLeaseKey` and `queue.ParseStateLeaseKey`. A Pouch-internal
+encoding that prevents transaction participant code from pairing
+`q/<queue>/msg/<id>` and `q/<queue>/state/<id>` is not an accepted divergence.
+If Pouch sanitizes user-provided queue names, the stored key still has to be
+the normalized logical queue name and message id, not an unrelated hex encoding
+that changes participant semantics.
+
+Queue message leases are target-key metadata. The message document may carry
+delivery fields for API responses and CAS validation, but the authoritative
+lease, fencing token, transaction id, and lease expiry are stored and mutated on
+metadata key `q/<queue>/msg/<id>`. Workflow state leases use metadata key
+`q/<queue>/state/<id>`. Transaction commit/rollback must validate and clear
+those metadata leases the way Go disk does; scanning staged queue rows is not a
+substitute for participant semantics.
+
+Pouch transaction application routes queue participants by exact lease-key
+shape. `q/<queue>/msg/<id>` applies the staged `.meta` queue message decision
+and clears message lease metadata. `q/<queue>/state/<id>` applies workflow
+state cleanup against `q/<queue>/state/<id>.json` and clears state lease
+metadata. A `.meta`, `.bin`, `.json`, staging, or scan-discovered key is not a
+queue transaction participant.
+
 The queue payload object is written as its own logstore object before the
 metadata object. The `.meta` record contains the C-native queue header and the
 counted payload length; it does not concatenate queue payload bytes. Reads
@@ -355,6 +395,12 @@ Pouch must compact with the same lifecycle. It must not compact by dumping an
 entire cache, reparsing payload JSON, or materializing large values. Object,
 state, metadata, queue, attachment, transaction, and lease metadata refs must
 all be represented in capture/validation.
+
+Until Pouch persists delete-grace metadata with obsolete entries, obsolete
+cleanup is conservative: maintenance reports obsolete segment/snapshot leaves as
+pending and does not unlink them. Immediate deletion is forbidden because it
+does not prove grace expiry or absence of live refs. The eventual cleanup
+implementation must add persisted grace/live-ref evidence before unlinking.
 
 ### Query And Scan Visibility
 
@@ -975,6 +1021,12 @@ Required behavior:
 - update projections to new refs only after manifest install succeeds;
 - delete obsolete files only after delete grace and only if no live refs or
   protected links remain.
+
+The active segment exclusion is semantic, not merely an implementation detail.
+Compaction must not snapshot through the current active tail and immediately
+unlink every segment through `max_segment_id`. Pouch may use a C-native
+manifest and snapshot format, but it must preserve Go disk's candidate
+selection, drift validation, live-link protection, and obsolete cleanup timing.
 
 Validation drift must abandon the snapshot without installing it. Cleanup must
 be retryable and idempotent.

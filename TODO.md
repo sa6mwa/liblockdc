@@ -24,6 +24,84 @@ Everything else must be treated as suspect until compared against Go disk.
 The current global `.lockd/queue`, `.lockd/attachments`, `.lockd/leases`, and
 `.lockd/namespace-config` model is rejected.
 
+## Hard Alignment Contract
+
+This section is the production contract for the rest of this cutover.
+
+- [ ] Do not claim Pouch is aligned because the broad file layout or API shape
+  resembles Go disk. Alignment means the same storage semantics, failure
+  behavior, metadata authority, transaction participant model, and compaction
+  safety properties.
+- [ ] Do not keep compatibility readers, old/new dispatch, legacy record
+  variants, migration paths, or rejected pre-release representations. Pouch has
+  not shipped.
+- [ ] Implement remaining representation corrections as one coherent cutover
+  across the full storage surface. Do not land partial compatibility layers or
+  small semantic stopgaps.
+- [ ] Treat Go disk as the default behavior. Any C-native divergence must be
+  documented before or in the same implementation change and must explain why
+  correctness, durability, and performance intent are preserved.
+- [ ] A TODO item may be checked only when the implementation, spec, and
+  verification evidence all agree. Code shape alone is not proof.
+- [ ] Do not benchmark or run review loops until the full semantic cutover is in
+  place. Functional verification happens after the whole implementation pass.
+
+## Blocking Divergences From The Latest Audit
+
+These items invalidate a claim of full Go-disk alignment until fixed.
+
+- [ ] Add distinct Pouch object record families.
+  - Go disk has meta put/delete, state put/delete, object put/delete, and state
+    link records.
+  - Pouch currently represents object-like rows through state records.
+  - Queue payloads, queue metadata objects, attachments, staged attachments, and
+    namespace/config objects that map to Go `PutObject`/`DeleteObject`
+    semantics must use object put/delete records.
+  - Object metadata must preserve generation, modified time, etag, content type,
+    transform descriptor, plaintext bytes, stored bytes, payload span, and CRC.
+
+- [ ] Align queue key and lease semantics exactly with Go disk.
+  - Message metadata object: `q/<queue>/msg/<id>.meta`.
+  - Message payload object: `q/<queue>/msg/<id>.bin`.
+  - Message lease metadata target key: `q/<queue>/msg/<id>`.
+  - Workflow state object: `q/<queue>/state/<id>.json`.
+  - Workflow state lease metadata target key: `q/<queue>/state/<id>`.
+  - Do not hex-encode queue names or message IDs unless the same logical key can
+    still be parsed and paired exactly like Go `queue.ParseMessageLeaseKey` and
+    `ParseStateLeaseKey`.
+  - Queue message delivery must acquire and validate target-key lease metadata,
+    not only fields embedded in the queue message document.
+  - Fencing tokens must advance and validate through the target-key metadata
+    model, not by assuming a constant token.
+
+- [ ] Align queue transaction participant application with Go disk.
+  - Transaction decision application must interpret participant keys as queue
+    message/state lease keys and apply commit/rollback with the same pairing and
+    validation model as Go disk.
+  - Message commit/rollback must validate and clear message lease metadata.
+  - State commit/rollback must validate and clear state lease metadata.
+  - Do not scan staged queue bases as a substitute for participant semantics.
+
+- [ ] Align compaction with Go disk safety semantics.
+  - Candidate files are installed snapshots plus sealed non-obsolete segments.
+  - The active segment is excluded.
+  - Live links into candidate files protect those files.
+  - Snapshot build streams stored spans and records the same hot metadata facts.
+  - Validation drift aborts install.
+  - Obsolete files are deleted only after grace/live-ref checks.
+  - Immediate unlink of all segments through `max_segment_id` is rejected.
+  - Current implementation is conservative pending-only cleanup: obsolete files
+    are reported as pending and are not unlinked until persisted delete-grace
+    and live-ref evidence is implemented.
+
+- [ ] Align commit grouping/fsync batching with Go disk intent.
+  - Public mutating operations that write multiple records must run inside a
+    namespace commit group.
+  - A commit group must avoid redundant fsyncs for the same physical file.
+  - Queue enqueue, queue delivery, transaction decision application, attachment
+    mutation, metadata mutation, and staged promotion must not regress to
+    per-record sync behavior when they are one logical storage operation.
+
 ## Work Rules For This Correction
 
 - [x] Update the spec before implementation whenever Go disk behavior is
