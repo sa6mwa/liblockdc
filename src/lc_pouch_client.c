@@ -7982,6 +7982,9 @@ static void lc_pouch_queue_touch_notification(lc_client_handle *client,
       namespace_name[0] == '\0' || queue == NULL || queue[0] == '\0') {
     return;
   }
+  if (!client->pouch->queue_watch_enabled) {
+    return;
+  }
   lc_error_init(&ignored);
   namespace_path = NULL;
   notify_dir = NULL;
@@ -12480,8 +12483,15 @@ int lc_pouch_client_subscribe_with_state_method(lc_client *self,
   return lc_pouch_client_subscribe_common(self, req, consumer, error, 1);
 }
 
-static void lc_pouch_queue_watch_poll_delay(void) {
+static void lc_pouch_queue_watch_poll_delay(lc_client_handle *client,
+                                            const lc_watch_queue_req *req) {
   struct timespec delay;
+
+  if (client != NULL && client->pouch != NULL && req != NULL &&
+      lc_pouch_queue_watch_wait(client->pouch, req->namespace_name, req->queue,
+                                100U) >= 0) {
+    return;
+  }
 
   delay.tv_sec = 0;
   delay.tv_nsec = 100L * 1000L * 1000L;
@@ -12584,7 +12594,7 @@ int lc_pouch_client_watch_queue_method(lc_client *self,
     }
     lc_queue_stats_res_cleanup(&stats);
     if (rc == LC_OK) {
-      lc_pouch_queue_watch_poll_delay();
+      lc_pouch_queue_watch_poll_delay((lc_client_handle *)self, req);
     }
   }
   lc_free_with_allocator(NULL, last_head_message_id);

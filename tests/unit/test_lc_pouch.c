@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -89,10 +90,28 @@ typedef struct pouch_fail_allocator_state {
   size_t fail_at;
 } pouch_fail_allocator_state;
 
+typedef struct pouch_queue_notification_write {
+  const char *path;
+  struct timespec delay;
+  int rc;
+} pouch_queue_notification_write;
+
 static const lonejson_field pouch_value_fields[] = {
     LONEJSON_FIELD_I64(pouch_value_doc, value, "value")};
 
 LONEJSON_MAP_DEFINE(pouch_value_map, pouch_value_doc, pouch_value_fields);
+
+static void open_pouch_client_endpoint(const char *endpoint, lc_client **out,
+                                       lc_error *error);
+
+static void *pouch_write_queue_notification(void *context) {
+  pouch_queue_notification_write *write;
+
+  write = (pouch_queue_notification_write *)context;
+  (void)nanosleep(&write->delay, NULL);
+  write->rc = lc_pouch_path_write_text_file(write->path, "sequence=1\n", NULL);
+  return NULL;
+}
 
 static void make_root(const char *suffix, char *root, size_t root_size) {
   char template_path[512];
@@ -3206,6 +3225,198 @@ static void test_single_writer_runtime_control_and_ha_probe(void **state) {
 
   lc_pouch_close(peer);
   lc_pouch_close(writer);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_disk_runtime_controls(void **state) {
+  lc_pouch *writer;
+  lc_pouch *peer;
+  lc_pouch_open_options options;
+  lc_pouch_status status;
+  lc_pouch_fsync_stats fsync_stats;
+  lc_pouch_exclusive_writer_presence presence;
+  lc_pouch_state_write_result write_result;
+  lc_source *source;
+  lc_error error;
+  char root[512];
+  char backend_hash[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
+  char repeated_backend_hash[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
+  int queue_watch_enabled;
+  int rc;
+
+  (void)state;
+  writer = NULL;
+  peer = NULL;
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&status, 0, sizeof(status));
+  memset(&fsync_stats, 0, sizeof(fsync_stats));
+  memset(&presence, 0, sizeof(presence));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_error_init(&error);
+  make_root("disk-runtime-controls", root, sizeof(root));
+  cleanup_root(root);
+
+  options.single_writer = 1;
+  options.fsync_batch_max_ops = 1U;
+  options.queue_watch = 1;
+  rc = lc_pouch_open(root, NULL, &options, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(lc_pouch_supports_concurrent_writes(writer));
+
+  rc = lc_pouch_status_read(writer, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(status.single_writer);
+  assert_true(status.supports_concurrent_writes);
+  assert_int_equal(status.fsync_batch_max_ops, 1U);
+  queue_watch_enabled = status.queue_watch_enabled;
+  assert_non_null(status.queue_watch_mode);
+  assert_non_null(status.queue_watch_reason);
+  if (status.queue_watch_enabled) {
+    assert_string_equal(status.queue_watch_mode, "fsnotify");
+    assert_string_equal(status.queue_watch_reason, "filesystem_watch_enabled");
+  } else {
+    assert_string_equal(status.queue_watch_mode, "polling");
+  }
+  lc_pouch_status_cleanup(NULL, &status);
+
+#if defined(__linux__)
+  if (queue_watch_enabled) {
+    char *namespace_path;
+    char *notify_dir;
+    char *notify_path;
+    pouch_queue_notification_write write;
+    pthread_t writer_thread;
+
+    rc = lc_pouch_namespace_ensure_layout(NULL, root, "default", &error);
+    assert_int_equal(rc, LC_OK);
+    namespace_path = lc_pouch_namespace_path(NULL, root, "default");
+    assert_non_null(namespace_path);
+    notify_dir = lc_pouch_path_join(NULL, namespace_path, "queue-notify");
+    notify_path = lc_pouch_path_join(NULL, notify_dir, "jobs.notify");
+    assert_non_null(notify_dir);
+    assert_non_null(notify_path);
+    memset(&write, 0, sizeof(write));
+    write.path = notify_path;
+    write.delay.tv_sec = 0;
+    write.delay.tv_nsec = 20L * 1000L * 1000L;
+    assert_int_equal(pthread_create(&writer_thread, NULL,
+                                    pouch_write_queue_notification, &write),
+                     0);
+    assert_int_equal(lc_pouch_queue_watch_wait(writer, "default", "jobs",
+                                                1000U),
+                     1);
+    assert_int_equal(pthread_join(writer_thread, NULL), 0);
+    assert_int_equal(write.rc, LC_OK);
+    lc_free_with_allocator(NULL, notify_path);
+    lc_free_with_allocator(NULL, notify_dir);
+    lc_free_with_allocator(NULL, namespace_path);
+  }
+#else
+  (void)queue_watch_enabled;
+#endif
+
+  rc = lc_pouch_backend_hash(writer, backend_hash, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_backend_hash(writer, repeated_backend_hash, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(strlen(backend_hash), LC_POUCH_BACKEND_HASH_HEX_BYTES);
+  assert_string_equal(backend_hash, repeated_backend_hash);
+
+  rc = lc_source_from_memory("runtime-controls", strlen("runtime-controls"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(writer, "default", "runtime-controls/key",
+                            source, NULL, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  rc = lc_pouch_fsync_stats_read(writer, &fsync_stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(fsync_stats.total_batches > 0U);
+  assert_true(fsync_stats.total_requests > 0U);
+  assert_int_equal(fsync_stats.max_batch_size, 1U);
+  assert_int_equal(fsync_stats.bounds[0], 1U);
+  assert_int_equal(fsync_stats.bounds[LC_POUCH_FSYNC_BATCH_BOUND_COUNT - 1U],
+                   4096U);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_pouch_open(root, NULL, NULL, &peer, &error);
+  assert_int_equal(rc, LC_OK);
+  memset(repeated_backend_hash, 0, sizeof(repeated_backend_hash));
+  rc = lc_pouch_backend_hash(peer, repeated_backend_hash, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(backend_hash, repeated_backend_hash);
+  rc = lc_pouch_probe_exclusive_writer(peer, &presence, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(presence.present);
+
+  rc = lc_pouch_abort(writer, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_source_from_memory("after-abort", strlen("after-abort"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(writer, "default", "runtime-controls/after-abort",
+                            source, NULL, &write_result, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_source_close(source);
+  source = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_pouch_status_read(writer, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(status.aborted);
+  lc_pouch_status_cleanup(NULL, &status);
+  memset(&presence, 0, sizeof(presence));
+  rc = lc_pouch_probe_exclusive_writer(peer, &presence, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(presence.present);
+
+  lc_pouch_close(writer);
+  writer = NULL;
+  memset(&presence, 0, sizeof(presence));
+  rc = lc_pouch_probe_exclusive_writer(peer, &presence, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(presence.present);
+
+  lc_pouch_close(peer);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_pouch_status status;
+  lc_error error;
+  char root[512];
+  char endpoint[640];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&status, 0, sizeof(status));
+  lc_error_init(&error);
+  make_root("endpoint-runtime-controls", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?fsync_batch_max_ops=0&queue_watch=true",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  assert_non_null(handle->pouch);
+  rc = lc_pouch_status_read(handle->pouch, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(status.fsync_batch_max_ops, 0U);
+  assert_non_null(status.queue_watch_mode);
+  assert_non_null(status.queue_watch_reason);
+  lc_pouch_status_cleanup(NULL, &status);
+
+  lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -17107,6 +17318,8 @@ int main(void) {
       cmocka_unit_test(test_marker_refresh_uses_directory_fast_path_and_force),
       cmocka_unit_test(test_single_writer_state_read_uses_projection_cache),
       cmocka_unit_test(test_single_writer_runtime_control_and_ha_probe),
+      cmocka_unit_test(test_pouch_disk_runtime_controls),
+      cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),
       cmocka_unit_test(test_exclusive_writer_probe_heartbeat_precedence),
       cmocka_unit_test(
           test_single_writer_transition_invalidates_query_index_trust),

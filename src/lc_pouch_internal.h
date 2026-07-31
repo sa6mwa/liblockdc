@@ -68,6 +68,7 @@ struct lc_pouch {
   lc_allocator allocator;
   char *root_path;
   uint64_t segment_target_bytes;
+  uint64_t fsync_batch_max_ops;
   unsigned long compaction_min_segment_count;
   uint64_t compaction_min_reclaimable_bytes;
   uint64_t compaction_interval_seconds;
@@ -76,6 +77,12 @@ struct lc_pouch {
   unsigned long marker_sequence;
   int background_compaction_enabled;
   int single_writer;
+  int aborted;
+  int queue_watch_enabled;
+  int filesystem_capabilities_known;
+  int filesystem_is_nfs;
+  const char *queue_watch_mode;
+  const char *queue_watch_reason;
   uint64_t single_writer_epoch;
   pthread_mutex_t single_writer_mutex;
   int single_writer_mutex_initialized;
@@ -104,6 +111,7 @@ struct lc_pouch {
   lc_pouch_fsync_request *fsync_head;
   lc_pouch_fsync_request *fsync_tail;
   size_t fsync_queue_count;
+  lc_pouch_fsync_stats fsync_stats;
   int fsync_mutex_initialized;
   int fsync_cond_initialized;
   int fsync_thread_started;
@@ -181,6 +189,8 @@ void lc_pouch_state_scan_summaries_result_cleanup(
     const lc_allocator *allocator,
     lc_pouch_state_scan_summaries_result *result);
 int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error);
+int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
+                              const char *queue, uint64_t timeout_ms);
 int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
                                         const char *namespace_name,
                                         lc_error *error);

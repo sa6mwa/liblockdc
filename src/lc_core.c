@@ -2,11 +2,14 @@
 #include "lc_engine_api.h"
 #include "lc_log.h"
 
+#include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <unistd.h>
 
 #include "lc_api_internal.h"
@@ -998,6 +1001,8 @@ typedef struct lc_pouch_endpoint_options {
   char *compression;
   int crypto_generate_key_file;
   int single_writer;
+  uint64_t fsync_batch_max_ops;
+  int queue_watch;
 } lc_pouch_endpoint_options;
 
 static void
@@ -1129,6 +1134,58 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
                           "pouch endpoint single_writer must be true or false",
                           NULL, NULL, NULL);
     }
+    lc_free_with_allocator(allocator, copy);
+    lc_free_with_allocator(allocator, decoded_key);
+    return LC_OK;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "queue_watch") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_queue_watch")) {
+    copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
+                                              "queue_watch", error);
+    if (copy == NULL) {
+      lc_free_with_allocator(allocator, decoded_key);
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+    if (strcmp(copy, "true") == 0 || strcmp(copy, "1") == 0) {
+      options->queue_watch = 1;
+    } else if (strcmp(copy, "false") == 0 || strcmp(copy, "0") == 0) {
+      options->queue_watch = 0;
+    } else {
+      lc_free_with_allocator(allocator, copy);
+      lc_free_with_allocator(allocator, decoded_key);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch endpoint queue_watch must be true or false",
+                          NULL, NULL, "pouch");
+    }
+    lc_free_with_allocator(allocator, copy);
+    lc_free_with_allocator(allocator, decoded_key);
+    return LC_OK;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "fsync_batch_max_ops") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_fsync_batch_max_ops")) {
+    uintmax_t parsed;
+    char *end;
+
+    copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
+                                              "fsync_batch_max_ops", error);
+    if (copy == NULL) {
+      lc_free_with_allocator(allocator, decoded_key);
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+    errno = 0;
+    parsed = strtoumax(copy, &end, 10);
+    if (errno == ERANGE || end == copy || *end != '\0' ||
+        parsed > (uintmax_t)UINT64_MAX) {
+      lc_free_with_allocator(allocator, copy);
+      lc_free_with_allocator(allocator, decoded_key);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch endpoint fsync_batch_max_ops must be a u64",
+                          NULL, NULL, "pouch");
+    }
+    options->fsync_batch_max_ops = (uint64_t)parsed;
     lc_free_with_allocator(allocator, copy);
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
@@ -1643,6 +1700,9 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     }
     memset(&pouch_open_options, 0, sizeof(pouch_open_options));
     pouch_open_options.single_writer = pouch_endpoint_options.single_writer;
+    pouch_open_options.fsync_batch_max_ops =
+        pouch_endpoint_options.fsync_batch_max_ops;
+    pouch_open_options.queue_watch = pouch_endpoint_options.queue_watch;
     pouch_open_options.query_engine = pouch_endpoint_options.query_engine;
     pouch_open_options.query_fallback_engine =
         pouch_endpoint_options.query_fallback_engine;

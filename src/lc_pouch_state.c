@@ -112,6 +112,11 @@ static int lc_pouch_state_commit_group_begin(lc_pouch *pouch,
                         "pouch commit group requires pouch and outputs", NULL,
                         NULL, "pouch");
   }
+  if (pouch->aborted) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch mutations are closed after abort", NULL, NULL,
+                        "pouch");
+  }
   current = lc_pouch_state_commit_group_current();
   if (current != NULL && current->pouch == pouch) {
     *out = current;

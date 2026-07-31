@@ -43,12 +43,12 @@ Relevant Go disk files:
 
 ### Audit Baseline
 
-This register was re-read against Pouch commit `96e26eb` and lockd commit
-`b6ddbde` on 2026-07-31. The current lockd head is `2d6fb1e`; it has no later
-changes in the disk storage paths named above. This pass also inspected disk
-locking, fsync support, queue-watch, NFS capability, copy, verification, and
-staging paths. The audit is a source-level comparison; it does not claim that
-Pouch files can be opened by Go disk or that their public storage APIs are
+This register was re-read against the current Pouch implementation and lockd
+commit `b6ddbde` on 2026-07-31. The current lockd head is `2d6fb1e`; it has no
+later changes in the disk storage paths named above. This pass also inspected
+disk locking, fsync support, queue-watch, NFS capability, copy, verification,
+and staging paths. The audit is a source-level comparison; it does not claim
+that Pouch files can be opened by Go disk or that their public storage APIs are
 interchangeable.
 
 No unresolved durable-logstore semantic gap was found in the audited surface:
@@ -569,7 +569,51 @@ divergence.
   Pouch uses Pouch terminology in files, errors, events, and durable metadata.
   Reason: Pouch is not disk and must not expose Go disk identity.
 
-### Operational And Public API Differences
+### Aligned Runtime Controls
+
+- Writer coordination and HA fencing:
+  `lc_pouch_set_single_writer` toggles the mode at runtime, invalidates the
+  local mode-sensitive refresh path, and starts or stops a root-scoped
+  `exclusive-writers/` heartbeat. `lc_pouch_abort` stops Pouch-owned workers
+  without removing that marker, providing the same in-process crash simulation
+  lifecycle as Go disk's test-only `Abort`.
+
+- Shared-writer capability:
+  `lc_pouch_supports_concurrent_writes` and `lc_pouch_status` explicitly
+  report Pouch's supported shared-writer mode. Normal Pouch opens use
+  `single_writer=0`, and multiple liblockdc clients or processes may share a
+  root because the namespace `fcntl` lock serializes mutations and namespace
+  markers refresh peers. Go disk reports `SupportsConcurrentWrites=false`
+  because its logstore has a single append owner. The different reported value
+  is deliberate: Pouch reports its actual HA/shared-writer contract rather
+  than inheriting Go's cache-oriented capability advertisement.
+
+- Fsync batching and diagnostics:
+  `fsync_batch_max_ops` is a `uint64_t` Pouch open option and a
+  `pouch://...?fsync_batch_max_ops=<u64>` endpoint option. Zero is unbounded,
+  matching Go's `LogstoreCommitMaxOps`; the two-millisecond group delay remains
+  fixed. `lc_pouch_fsync_stats_read` reports fixed-width aggregate batch,
+  request, latency, bound, and bucket counters using Go's 1 through 4096
+  histogram boundaries.
+
+- Filesystem capability policy and queue wake-up:
+  Pouch detects NFS on Linux and BSD-family targets and exposes both detection
+  state and queue-watch status through `lc_pouch_status`. Pouch already closes
+  every append descriptor, satisfying Go's NFS close-after-drained-commit
+  requirement without a retained active segment. The `queue_watch` option and
+  `pouch://...?queue_watch=true` enable Linux inotify wake-ups only on a known
+  non-NFS filesystem; unsupported or unknown filesystems report polling and
+  retain the 100 ms polling fallback.
+
+- Backend lifecycle and identity:
+  `lc_pouch_backend_hash` derives a SHA-256 identity from the absolute Pouch
+  root, then stores it with create-or-read semantics in the Pouch
+  `.lockd/backend-id` control record. The persisted marker keeps the identity
+  stable across later root-path changes. Its `pouch|` descriptor intentionally
+  differs from Go disk's `disk|` descriptor because the two file formats are
+  not interoperable.
+
+### Remaining Operational And Public API Differences
 
 - Background compaction defaults:
   The resolved Go lockd configuration enables background compaction every 30
@@ -587,66 +631,11 @@ divergence.
   with `retention_updated_before_unix`. The same deletion path is available,
   but scheduling and the retention policy live above Pouch.
 
-- Writer coordination and HA fencing:
-  Pouch now matches the Go disk control semantics. `lc_pouch_set_single_writer`
-  toggles the mode at runtime, invalidates the local mode-sensitive refresh
-  path, and starts or stops a root-scoped `exclusive-writers/` heartbeat.
-  Heartbeats carry signed 64-bit Unix nanoseconds, refresh every second, and
-  expire after three seconds. `lc_pouch_probe_exclusive_writer` ignores the
-  caller's own marker, prefers a valid heartbeat payload over file mtime, and
-  falls back to mtime for legacy or malformed markers. HA auto mode can use the
-  returned presence/expiry to remain passive while another exclusive writer is
-  live. Namespace markers continue to publish every durable commit even while
-  single-writer mode is active, so shared readers refresh promptly.
-
 - Writer lock granularity:
   Pouch still serializes mutations with a namespace `fcntl` lock rather than
   Go's per-key lock-file cache. This preserves correctness and HA fencing but
   has lower unrelated-key write concurrency. It is a remaining throughput
   divergence, not a single-writer or HA semantic gap.
-
-- Shared-writer capability contract:
-  Go disk reports `SupportsConcurrentWrites=false` to its caller because its
-  logstore has a single append owner, even though its verification path opens
-  two stores against one root and its per-key locks preserve concurrent CAS
-  outcomes. Pouch has no comparable capability flag. Normal Pouch opens use
-  `single_writer=0`, and multiple liblockdc clients or processes may share one
-  root; the namespace `fcntl` lock serializes their mutations and namespace
-  markers refresh peer projections. This is supported shared-writer behavior,
-  not an HA gap. It requires a filesystem with coherent POSIX advisory locks,
-  rename, and sync semantics.
-
-- Fsync batch tuning and telemetry:
-  Go accepts `LogstoreCommitMaxOps` (with zero meaning no batch-size cap) and
-  exposes aggregate `FsyncStats`, including batch-size and sync-latency
-  histograms. Pouch uses a fixed 4096-request cap and two-millisecond delay,
-  and exposes no equivalent configuration or statistics API. Both paths
-  deduplicate syncs per file and wait for sync before publication; this is an
-  operational tuning and observability divergence.
-
-- Filesystem capability policy:
-  Go detects NFS, closes an active segment after a drained commit on NFS, and
-  enables fsnotify queue wakeups only where supported. Pouch does not detect or
-  report filesystem capabilities. It opens and closes append descriptors per
-  Pouch mutation and always uses polling for queue wakeups, but does not offer
-  an NFS-specific mode. Deployments using shared-writer or HA roots must ensure
-  the filesystem provides coherent POSIX locking, atomic rename, and durable
-  sync semantics.
-
-- Backend lifecycle and identity hooks:
-  Go exposes a stable `BackendHash` and a test-only `Abort` lifecycle that
-  stops workers while leaving an exclusive-writer marker for crash simulation.
-  Pouch has graceful `lc_pouch_close` only; it removes its own marker. Pouch's
-  transaction and RM calls accept caller-provided backend hashes, but the
-  direct Pouch API has no root-derived identity or abort equivalent. A real
-  process crash naturally leaves the marker until its heartbeat TTL expires.
-
-- Queue wake-up transport:
-  Go optionally consumes filesystem notifications and reports whether fsnotify
-  is active, with polling as its fallback. Pouch writes namespace/queue
-  notification files but its dequeue wait path polls at 100 ms; it has no
-  fsnotify configuration or status API. Delivery and timeout semantics remain
-  the same, while wake-up latency and filesystem-watch observability differ.
 
 - Raw storage surface and empty staged key:
   Go exposes a generic backend with raw object list/get/put/delete operations
@@ -958,10 +947,12 @@ deduplicated per file within a batch, and shutdown drains or fails outstanding
 commit requests deterministically. On Linux, hot segment commits use
 `fdatasync`, matching Go disk's Linux sync path.
 
-Pouch's local batch policy is fixed at a two-millisecond delay and 4096
-requests. The durable group-commit property is mandatory, but Go disk's
-configurable batch limit and detailed batch telemetry are intentionally not
-part of the current Pouch API; the operational divergence is recorded below.
+Pouch's local batch delay is fixed at two milliseconds. Its
+`fsync_batch_max_ops` setting is a `uint64_t`, defaults to zero for an
+unbounded group, and is available on the direct Pouch open options and the
+`pouch://` endpoint. `lc_pouch_fsync_stats_read` exposes the same aggregate
+batch-size and sync-latency diagnostic shape as Go disk with fixed-width
+counters on every supported C ABI.
 
 Initial constants should mirror Go disk unless profiling proves a C-local
 change is better:

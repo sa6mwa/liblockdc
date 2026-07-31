@@ -8,6 +8,9 @@
 #include "lc_pouch_path.h"
 #include "lc_pouch_query_index.h"
 
+#include <openssl/crypto.h>
+#include <openssl/evp.h>
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -22,16 +25,31 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(__linux__)
+#include <poll.h>
+#include <sys/inotify.h>
+#include <sys/vfs.h>
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
+    defined(__OpenBSD__) || defined(__DragonFly__)
+#include <sys/mount.h>
+#include <strings.h>
+#endif
+
 static unsigned long lc_pouch_next_writer_marker_id;
 static pthread_mutex_t lc_pouch_writer_marker_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t lc_pouch_root_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-#define LC_POUCH_FSYNC_BATCH_MAX_OPS 4096U
 #define LC_POUCH_FSYNC_BATCH_DELAY_NS (2L * 1000L * 1000L)
 #define LC_POUCH_EXCLUSIVE_WRITER_TOUCH_NS 1000000000L
 #define LC_POUCH_EXCLUSIVE_WRITER_TTL_NS \
   ((int64_t)3 * (int64_t)1000000000)
 #define LC_POUCH_WRITER_PRESENCE_MISSING (-1001)
+
+static const uint64_t lc_pouch_fsync_batch_bounds
+    [LC_POUCH_FSYNC_BATCH_BOUND_COUNT] = {
+        1U,    2U,    4U,    8U,   16U,  32U,  64U,
+        128U, 256U, 512U, 1024U, 2048U, 4096U,
+};
 
 struct lc_pouch_fsync_request {
   int fd;
@@ -67,6 +85,68 @@ static void lc_pouch_fsync_deadline(struct timespec *deadline) {
   }
 }
 
+static uint64_t lc_pouch_fsync_elapsed_ns(const struct timespec *started,
+                                          const struct timespec *finished) {
+  uint64_t seconds;
+  uint64_t nanos;
+
+  if (started == NULL || finished == NULL ||
+      finished->tv_sec < started->tv_sec ||
+      (finished->tv_sec == started->tv_sec &&
+       finished->tv_nsec < started->tv_nsec)) {
+    return 0U;
+  }
+  seconds = (uint64_t)(finished->tv_sec - started->tv_sec);
+  if (finished->tv_nsec < started->tv_nsec) {
+    --seconds;
+    nanos = (uint64_t)(1000000000L + finished->tv_nsec - started->tv_nsec);
+  } else {
+    nanos = (uint64_t)(finished->tv_nsec - started->tv_nsec);
+  }
+  if (seconds > UINT64_MAX / 1000000000U) {
+    return UINT64_MAX;
+  }
+  seconds *= 1000000000U;
+  if (nanos > UINT64_MAX - seconds) {
+    return UINT64_MAX;
+  }
+  return seconds + nanos;
+}
+
+static void lc_pouch_fsync_record_batch_locked(lc_pouch *pouch, size_t count,
+                                               uint64_t sync_ns) {
+  size_t bucket;
+  size_t index;
+
+  if (pouch == NULL || count == 0U) {
+    return;
+  }
+  ++pouch->fsync_stats.total_batches;
+  pouch->fsync_stats.total_requests += (uint64_t)count;
+  if ((uint64_t)count > pouch->fsync_stats.max_batch_size) {
+    pouch->fsync_stats.max_batch_size = (uint64_t)count;
+  }
+  pouch->fsync_stats.total_sync_ns += sync_ns;
+  if (sync_ns > pouch->fsync_stats.max_sync_ns) {
+    pouch->fsync_stats.max_sync_ns = sync_ns;
+  }
+  bucket = LC_POUCH_FSYNC_BATCH_BOUND_COUNT;
+  for (index = 0U; index < LC_POUCH_FSYNC_BATCH_BOUND_COUNT; ++index) {
+    if ((uint64_t)count <= lc_pouch_fsync_batch_bounds[index]) {
+      bucket = index;
+      break;
+    }
+  }
+  ++pouch->fsync_stats.counts[bucket];
+}
+
+static int lc_pouch_fsync_batch_limit_reached(const lc_pouch *pouch) {
+  if (pouch == NULL || pouch->fsync_batch_max_ops == 0U) {
+    return 0;
+  }
+  return (uint64_t)pouch->fsync_queue_count >= pouch->fsync_batch_max_ops;
+}
+
 static int lc_pouch_fsync_batch_seen(lc_pouch_fsync_batch_file *files,
                                      size_t count, const struct stat *st) {
   size_t index;
@@ -84,13 +164,22 @@ static int lc_pouch_fsync_batch_seen(lc_pouch_fsync_batch_file *files,
 
 static void lc_pouch_fsync_process_batch(lc_pouch *pouch,
                                          lc_pouch_fsync_request *batch,
-                                         size_t count) {
+                                         size_t count,
+                                         uint64_t *sync_ns_out) {
   lc_pouch_fsync_batch_file inline_files[64];
   lc_pouch_fsync_batch_file *files;
   lc_pouch_fsync_request *request;
   struct stat st;
   size_t file_count;
   int errnum;
+  struct timespec started;
+  struct timespec finished;
+  int clock_started;
+
+  if (sync_ns_out != NULL) {
+    *sync_ns_out = 0U;
+  }
+  clock_started = clock_gettime(CLOCK_MONOTONIC, &started) == 0;
 
   files = inline_files;
   if (count > sizeof(inline_files) / sizeof(inline_files[0])) {
@@ -129,6 +218,10 @@ static void lc_pouch_fsync_process_batch(lc_pouch *pouch,
   }
 
 finish:
+  if (clock_started && clock_gettime(CLOCK_MONOTONIC, &finished) == 0 &&
+      sync_ns_out != NULL) {
+    *sync_ns_out = lc_pouch_fsync_elapsed_ns(&started, &finished);
+  }
   for (request = batch; request != NULL; request = request->next) {
     request->errnum = errnum;
   }
@@ -143,7 +236,9 @@ static lc_pouch_fsync_request *lc_pouch_fsync_take_batch(lc_pouch *pouch,
   batch = pouch->fsync_head;
   tail = NULL;
   count = 0U;
-  while (pouch->fsync_head != NULL && count < LC_POUCH_FSYNC_BATCH_MAX_OPS) {
+  while (pouch->fsync_head != NULL &&
+         (pouch->fsync_batch_max_ops == 0U ||
+          (uint64_t)count < pouch->fsync_batch_max_ops)) {
     tail = pouch->fsync_head;
     pouch->fsync_head = pouch->fsync_head->next;
     ++count;
@@ -171,6 +266,7 @@ static void *lc_pouch_fsync_worker(void *arg) {
   lc_pouch_fsync_request *request;
   struct timespec deadline;
   size_t batch_count;
+  uint64_t sync_ns;
 
   pouch = (lc_pouch *)arg;
   pthread_mutex_lock(&pouch->fsync_mutex);
@@ -183,10 +279,9 @@ static void *lc_pouch_fsync_worker(void *arg) {
       return NULL;
     }
     if (!pouch->fsync_stop && LC_POUCH_FSYNC_BATCH_DELAY_NS > 0L &&
-        pouch->fsync_queue_count < LC_POUCH_FSYNC_BATCH_MAX_OPS) {
+        !lc_pouch_fsync_batch_limit_reached(pouch)) {
       lc_pouch_fsync_deadline(&deadline);
-      while (!pouch->fsync_stop &&
-             pouch->fsync_queue_count < LC_POUCH_FSYNC_BATCH_MAX_OPS) {
+      while (!pouch->fsync_stop && !lc_pouch_fsync_batch_limit_reached(pouch)) {
         if (pthread_cond_timedwait(&pouch->fsync_cond, &pouch->fsync_mutex,
                                    &deadline) == ETIMEDOUT) {
           break;
@@ -195,8 +290,10 @@ static void *lc_pouch_fsync_worker(void *arg) {
     }
     batch = lc_pouch_fsync_take_batch(pouch, &batch_count);
     pthread_mutex_unlock(&pouch->fsync_mutex);
-    lc_pouch_fsync_process_batch(pouch, batch, batch_count);
+    sync_ns = 0U;
+    lc_pouch_fsync_process_batch(pouch, batch, batch_count, &sync_ns);
     pthread_mutex_lock(&pouch->fsync_mutex);
+    lc_pouch_fsync_record_batch_locked(pouch, batch_count, sync_ns);
     for (request = batch; request != NULL; request = request->next) {
       request->done = 1;
       pthread_cond_signal(&request->cond);
@@ -525,15 +622,36 @@ static void lc_pouch_compaction_worker_close(lc_pouch *pouch) {
 
 int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error) {
   lc_pouch_fsync_request request;
+  struct timespec started;
+  struct timespec finished;
+  uint64_t sync_ns;
+  int clock_started;
   int pthread_rc;
+  int sync_failed;
 
   if (pouch == NULL || fd < 0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch fsync commit requires pouch and fd", NULL, NULL,
                         "pouch");
   }
+  if (pouch->aborted) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch fsync batcher is closed after abort", NULL,
+                        NULL, "pouch");
+  }
   if (!pouch->fsync_thread_started) {
-    if (lc_pouch_sync_fd(fd) != 0) {
+    sync_ns = 0U;
+    clock_started = clock_gettime(CLOCK_MONOTONIC, &started) == 0;
+    sync_failed = lc_pouch_sync_fd(fd) != 0;
+    if (clock_started && clock_gettime(CLOCK_MONOTONIC, &finished) == 0) {
+      sync_ns = lc_pouch_fsync_elapsed_ns(&started, &finished);
+    }
+    if (pouch->fsync_mutex_initialized) {
+      pthread_mutex_lock(&pouch->fsync_mutex);
+      lc_pouch_fsync_record_batch_locked(pouch, 1U, sync_ns);
+      pthread_mutex_unlock(&pouch->fsync_mutex);
+    }
+    if (sync_failed) {
       pslog_field fields[2];
 
       fields[0] = lc_log_i64_field("fd", fd);
@@ -600,6 +718,109 @@ int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error) {
   return LC_OK;
 }
 
+int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
+                              const char *queue, uint64_t timeout_ms) {
+#if defined(__linux__)
+  char *namespace_path;
+  char *notify_dir;
+  char *escaped_queue;
+  char *notify_leaf;
+  struct pollfd pollfd;
+  union {
+    unsigned char bytes[4096];
+    struct inotify_event alignment;
+  } events;
+  size_t leaf_len;
+  size_t offset;
+  ssize_t bytes_read;
+  int fd;
+  int watch;
+  int timeout;
+  int ready;
+  int result;
+
+  if (pouch == NULL || !pouch->queue_watch_enabled || pouch->aborted ||
+      namespace_name == NULL || namespace_name[0] == '\0' || queue == NULL ||
+      queue[0] == '\0') {
+    return -1;
+  }
+  namespace_path = lc_pouch_namespace_path(&pouch->allocator, pouch->root_path,
+                                            namespace_name);
+  notify_dir = namespace_path != NULL
+                   ? lc_pouch_path_join(&pouch->allocator, namespace_path,
+                                        "queue-notify")
+                   : NULL;
+  escaped_queue = lc_pouch_path_escape_name(&pouch->allocator, queue);
+  notify_leaf = NULL;
+  result = -1;
+  if (notify_dir == NULL || escaped_queue == NULL ||
+      strlen(escaped_queue) > SIZE_MAX - strlen(".notify") - 1U) {
+    goto cleanup;
+  }
+  leaf_len = strlen(escaped_queue) + strlen(".notify") + 1U;
+  notify_leaf = (char *)lc_alloc_with_allocator(&pouch->allocator, leaf_len);
+  if (notify_leaf == NULL) {
+    goto cleanup;
+  }
+  snprintf(notify_leaf, leaf_len, "%s.notify", escaped_queue);
+  fd = inotify_init();
+  if (fd < 0) {
+    goto cleanup;
+  }
+  watch = inotify_add_watch(fd, notify_dir,
+                            IN_MOVED_TO | IN_CREATE | IN_CLOSE_WRITE |
+                                IN_ATTRIB | IN_DELETE_SELF | IN_MOVE_SELF);
+  if (watch < 0) {
+    (void)close(fd);
+    goto cleanup;
+  }
+  result = 0;
+  timeout = timeout_ms > (uint64_t)INT_MAX ? INT_MAX : (int)timeout_ms;
+  memset(&pollfd, 0, sizeof(pollfd));
+  pollfd.fd = fd;
+  pollfd.events = POLLIN;
+  ready = poll(&pollfd, 1U, timeout);
+  if (ready > 0 && (pollfd.revents & POLLIN) != 0) {
+    bytes_read = read(fd, events.bytes, sizeof(events.bytes));
+    if (bytes_read > 0) {
+      offset = 0U;
+      while (offset + sizeof(struct inotify_event) <= (size_t)bytes_read) {
+        const struct inotify_event *event;
+        size_t event_size;
+
+        event = (const struct inotify_event *)(events.bytes + offset);
+        event_size = sizeof(*event) + event->len;
+        if (event_size > (size_t)bytes_read - offset) {
+          break;
+        }
+        if ((event->mask & (IN_Q_OVERFLOW | IN_DELETE_SELF | IN_MOVE_SELF)) !=
+                0U ||
+            (event->len > 0U && strcmp(event->name, notify_leaf) == 0)) {
+          result = 1;
+          break;
+        }
+        offset += event_size;
+      }
+    }
+  }
+  (void)inotify_rm_watch(fd, watch);
+  (void)close(fd);
+
+cleanup:
+  lc_free_with_allocator(&pouch->allocator, notify_leaf);
+  lc_free_with_allocator(&pouch->allocator, escaped_queue);
+  lc_free_with_allocator(&pouch->allocator, notify_dir);
+  lc_free_with_allocator(&pouch->allocator, namespace_path);
+  return result;
+#else
+  (void)pouch;
+  (void)namespace_name;
+  (void)queue;
+  (void)timeout_ms;
+  return -1;
+#endif
+}
+
 static const char *lc_pouch_option_string(const char *value,
                                           const char *fallback) {
   if (value != NULL && value[0] != '\0') {
@@ -625,6 +846,8 @@ static void lc_pouch_init_options(lc_pouch *pouch,
       options != NULL && options->segment_target_bytes != 0U
           ? options->segment_target_bytes
           : LC_POUCH_DEFAULT_SEGMENT_TARGET_BYTES;
+  pouch->fsync_batch_max_ops =
+      options != NULL ? options->fsync_batch_max_ops : 0U;
   pouch->compaction_min_segment_count =
       options != NULL && options->compaction_min_segment_count != 0UL
           ? options->compaction_min_segment_count
@@ -644,6 +867,9 @@ static void lc_pouch_init_options(lc_pouch *pouch,
   pouch->background_compaction_enabled =
       options != NULL ? options->background_compaction_enabled : 0;
   pouch->single_writer = options != NULL ? options->single_writer : 0;
+  pouch->queue_watch_enabled = options != NULL ? options->queue_watch : 0;
+  pouch->queue_watch_mode = "polling";
+  pouch->queue_watch_reason = "config_disabled";
   pouch->query_engine = lc_strdup_with_allocator(
       &pouch->allocator,
       lc_pouch_option_string(options != NULL ? options->query_engine : NULL,
@@ -654,6 +880,65 @@ static void lc_pouch_init_options(lc_pouch *pouch,
           options != NULL ? options->query_fallback_engine : NULL, ""));
   pouch->compression = lc_strdup_with_allocator(
       &pouch->allocator, lc_pouch_compression_option(options));
+}
+
+static void lc_pouch_detect_filesystem_capabilities(lc_pouch *pouch) {
+#if defined(__linux__)
+  struct statfs st;
+
+  if (pouch != NULL && pouch->root_path != NULL &&
+      statfs(pouch->root_path, &st) == 0) {
+    pouch->filesystem_capabilities_known = 1;
+    pouch->filesystem_is_nfs = st.f_type == 0x6969;
+  }
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
+    defined(__OpenBSD__) || defined(__DragonFly__)
+  struct statfs st;
+
+  if (pouch != NULL && pouch->root_path != NULL &&
+      statfs(pouch->root_path, &st) == 0) {
+    pouch->filesystem_capabilities_known = 1;
+    pouch->filesystem_is_nfs =
+        strcasecmp(st.f_fstypename, "nfs") == 0 ||
+        strcasecmp(st.f_fstypename, "nfs4") == 0;
+  }
+#else
+  (void)pouch;
+#endif
+}
+
+static int lc_pouch_queue_watch_supported(const lc_pouch *pouch) {
+#if defined(__linux__)
+  return pouch != NULL && pouch->filesystem_capabilities_known &&
+         !pouch->filesystem_is_nfs;
+#else
+  (void)pouch;
+  return 0;
+#endif
+}
+
+static void lc_pouch_configure_filesystem_capabilities(lc_pouch *pouch) {
+  int requested;
+
+  if (pouch == NULL) {
+    return;
+  }
+  pouch->filesystem_capabilities_known = 0;
+  pouch->filesystem_is_nfs = 0;
+  lc_pouch_detect_filesystem_capabilities(pouch);
+  requested = pouch->queue_watch_enabled;
+  pouch->queue_watch_enabled = 0;
+  pouch->queue_watch_mode = "polling";
+  pouch->queue_watch_reason = "config_disabled";
+  if (requested) {
+    if (lc_pouch_queue_watch_supported(pouch)) {
+      pouch->queue_watch_enabled = 1;
+      pouch->queue_watch_mode = "fsnotify";
+      pouch->queue_watch_reason = "filesystem_watch_enabled";
+    } else {
+      pouch->queue_watch_reason = "filesystem_not_supported";
+    }
+  }
 }
 
 static int lc_pouch_write_root_manifest(lc_pouch *pouch, lc_error *error) {
@@ -1497,7 +1782,8 @@ static int lc_pouch_writer_presence_start(lc_pouch *pouch, lc_error *error) {
   return LC_OK;
 }
 
-static void lc_pouch_writer_presence_stop(lc_pouch *pouch) {
+static void lc_pouch_writer_presence_stop_internal(lc_pouch *pouch,
+                                                    int remove_marker) {
   int join_thread;
 
   if (pouch == NULL || !pouch->writer_presence_mutex_initialized) {
@@ -1517,9 +1803,17 @@ static void lc_pouch_writer_presence_stop(lc_pouch *pouch) {
     pouch->writer_presence_stop = 0;
     pthread_mutex_unlock(&pouch->writer_presence_mutex);
   }
-  if (pouch->writer_presence_path != NULL) {
+  if (remove_marker && pouch->writer_presence_path != NULL) {
     (void)unlink(pouch->writer_presence_path);
   }
+}
+
+static void lc_pouch_writer_presence_stop(lc_pouch *pouch) {
+  lc_pouch_writer_presence_stop_internal(pouch, 1);
+}
+
+static void lc_pouch_writer_presence_stop_abrupt(lc_pouch *pouch) {
+  lc_pouch_writer_presence_stop_internal(pouch, 0);
 }
 
 int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
@@ -1648,6 +1942,7 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     lc_pouch_close(pouch);
     return rc;
   }
+  lc_pouch_configure_filesystem_capabilities(pouch);
   rc = lc_pouch_fsync_batcher_init(pouch, error);
   if (rc != LC_OK) {
     lc_pouch_close(pouch);
@@ -1703,7 +1998,11 @@ void lc_pouch_close(lc_pouch *pouch) {
     fields[0] = lc_log_str_field("path", pouch->root_path);
     lc_log_debug(pouch->logger, "close", fields, 1U);
   }
-  lc_pouch_writer_presence_stop(pouch);
+  if (pouch->aborted) {
+    lc_pouch_writer_presence_stop_abrupt(pouch);
+  } else {
+    lc_pouch_writer_presence_stop(pouch);
+  }
   lc_pouch_compaction_worker_close(pouch);
   lc_pouch_fsync_batcher_close(pouch);
   lc_pouch_state_cache_cleanup(pouch);
@@ -1735,6 +2034,272 @@ void lc_pouch_close(lc_pouch *pouch) {
   lc_free_with_allocator(&allocator, pouch);
 }
 
+int lc_pouch_abort(lc_pouch *pouch, lc_error *error) {
+  if (pouch == NULL || !pouch->single_writer_mutex_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch abort requires an open pouch", NULL, NULL,
+                        "pouch");
+  }
+  pthread_mutex_lock(&pouch->single_writer_mutex);
+  if (pouch->aborted) {
+    pthread_mutex_unlock(&pouch->single_writer_mutex);
+    return LC_OK;
+  }
+  pouch->aborted = 1;
+  pthread_mutex_unlock(&pouch->single_writer_mutex);
+  lc_pouch_writer_presence_stop_abrupt(pouch);
+  lc_pouch_compaction_worker_close(pouch);
+  lc_pouch_fsync_batcher_close(pouch);
+  {
+    pslog_field fields[1];
+
+    fields[0] = lc_log_str_field("path", pouch->root_path);
+    lc_log_info(pouch->logger, "abort", fields, 1U);
+  }
+  return LC_OK;
+}
+
+int lc_pouch_supports_concurrent_writes(const lc_pouch *pouch) {
+  return pouch != NULL ? 1 : 0;
+}
+
+int lc_pouch_fsync_stats_read(lc_pouch *pouch, lc_pouch_fsync_stats *out,
+                              lc_error *error) {
+  size_t index;
+
+  if (pouch == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch fsync stats requires pouch and output", NULL,
+                        NULL, "pouch");
+  }
+  memset(out, 0, sizeof(*out));
+  if (pouch->fsync_mutex_initialized) {
+    pthread_mutex_lock(&pouch->fsync_mutex);
+    *out = pouch->fsync_stats;
+    pthread_mutex_unlock(&pouch->fsync_mutex);
+  } else {
+    *out = pouch->fsync_stats;
+  }
+  for (index = 0U; index < LC_POUCH_FSYNC_BATCH_BOUND_COUNT; ++index) {
+    out->bounds[index] = lc_pouch_fsync_batch_bounds[index];
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_backend_hash_derived(
+    lc_pouch *pouch, char out[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U],
+    lc_error *error) {
+  static const char hex[] = "0123456789abcdef";
+  const char *root;
+  char current_directory[PATH_MAX];
+  char *descriptor;
+  EVP_MD_CTX *ctx;
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int digest_len;
+  size_t descriptor_len;
+  size_t index;
+  size_t root_len;
+  size_t current_directory_len;
+  int rc;
+
+  if (pouch == NULL || out == NULL || pouch->root_path == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch backend hash requires pouch and output", NULL,
+                        NULL, "pouch");
+  }
+  out[0] = '\0';
+  root = pouch->root_path;
+  root_len = strlen(root);
+  if (root[0] != '/' && getcwd(current_directory, sizeof(current_directory)) !=
+                            NULL) {
+    current_directory_len = strlen(current_directory);
+    if (current_directory_len > SIZE_MAX - sizeof("pouch|/") ||
+        root_len > SIZE_MAX - current_directory_len - sizeof("pouch|/")) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch backend hash descriptor exceeds limit", NULL,
+                          NULL, "pouch");
+    }
+    descriptor_len = current_directory_len + root_len + sizeof("pouch|/");
+    descriptor = (char *)lc_alloc_with_allocator(&pouch->allocator,
+                                                  descriptor_len);
+    if (descriptor == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch backend hash descriptor",
+                          NULL, NULL, "pouch");
+    }
+    snprintf(descriptor, descriptor_len, "pouch|%s/%s", current_directory,
+             root);
+  } else {
+    if (root_len > SIZE_MAX - sizeof("pouch|")) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch backend hash descriptor exceeds limit", NULL,
+                          NULL, "pouch");
+    }
+    descriptor_len = root_len + sizeof("pouch|");
+    descriptor = (char *)lc_alloc_with_allocator(&pouch->allocator,
+                                                  descriptor_len);
+    if (descriptor == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch backend hash descriptor",
+                          NULL, NULL, "pouch");
+    }
+    snprintf(descriptor, descriptor_len, "pouch|%s", root);
+  }
+  ctx = EVP_MD_CTX_new();
+  digest_len = 0U;
+  rc = LC_OK;
+  if (ctx == NULL || EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1 ||
+      EVP_DigestUpdate(ctx, descriptor, strlen(descriptor)) != 1 ||
+      EVP_DigestFinal_ex(ctx, digest, &digest_len) != 1 || digest_len != 32U) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to calculate pouch backend hash", NULL, NULL,
+                      "pouch");
+  }
+  if (rc == LC_OK) {
+    for (index = 0U; index < digest_len; ++index) {
+      out[index * 2U] = hex[(digest[index] >> 4U) & 0x0fU];
+      out[index * 2U + 1U] = hex[digest[index] & 0x0fU];
+    }
+    out[digest_len * 2U] = '\0';
+  }
+  OPENSSL_cleanse(digest, sizeof(digest));
+  EVP_MD_CTX_free(ctx);
+  lc_free_with_allocator(&pouch->allocator, descriptor);
+  return rc;
+}
+
+static int lc_pouch_backend_hash_marker_read(
+    lc_pouch *pouch, char out[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U],
+    int *found, lc_error *error) {
+  lc_pouch_state_read_result read_result;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  size_t index;
+  int rc;
+
+  if (pouch == NULL || out == NULL || found == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch backend hash marker requires inputs", NULL,
+                        NULL, "pouch");
+  }
+  out[0] = '\0';
+  *found = 0;
+  memset(&read_result, 0, sizeof(read_result));
+  sink = NULL;
+  rc = lc_pouch_state_read(pouch, ".lockd", "backend-id", &read_result,
+                           error);
+  if (rc == LC_OK && read_result.found) {
+    rc = lc_sink_to_memory(&sink, error);
+  }
+  if (rc == LC_OK && read_result.found) {
+    rc = lc_copy(read_result.body, sink, NULL, error);
+  }
+  if (rc == LC_OK && read_result.found) {
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+  }
+  if (rc == LC_OK && read_result.found) {
+    if (length != LC_POUCH_BACKEND_HASH_HEX_BYTES) {
+      rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "pouch backend hash marker has invalid length", NULL,
+                        NULL, "pouch");
+    }
+    for (index = 0U; rc == LC_OK && index < length; ++index) {
+      unsigned char value;
+
+      value = ((const unsigned char *)bytes)[index];
+      if (!((value >= '0' && value <= '9') ||
+            (value >= 'a' && value <= 'f'))) {
+        rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "pouch backend hash marker is not lowercase hex",
+                          NULL, NULL, "pouch");
+      }
+    }
+    if (rc == LC_OK) {
+      memcpy(out, bytes, length);
+      out[length] = '\0';
+      *found = 1;
+    }
+  }
+  if (sink != NULL) {
+    lc_sink_close(sink);
+  }
+  lc_pouch_state_read_result_cleanup(&pouch->allocator, &read_result);
+  return rc;
+}
+
+static int lc_pouch_backend_hash_marker_write(
+    lc_pouch *pouch,
+    const char value[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U], lc_error *error) {
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  lc_source *source;
+  int rc;
+
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  source = NULL;
+  rc = lc_source_from_memory(value, LC_POUCH_BACKEND_HASH_HEX_BYTES, &source,
+                             error);
+  if (rc == LC_OK) {
+    options.content_type = "text/plain";
+    options.create_if_absent = 1;
+    options.object_record = 1;
+    rc = lc_pouch_state_write(pouch, ".lockd", "backend-id", source,
+                              &options, &result, error);
+  }
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  lc_pouch_state_write_result_cleanup(&pouch->allocator, &result);
+  return rc;
+}
+
+static int lc_pouch_backend_hash_create_collision(const lc_error *error) {
+  return error != NULL && error->code == LC_ERR_INVALID &&
+         error->message != NULL &&
+         strstr(error->message, "create-if-absent precondition failed") != NULL;
+}
+
+int lc_pouch_backend_hash(
+    lc_pouch *pouch, char out[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U],
+    lc_error *error) {
+  char derived[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
+  int found;
+  int rc;
+
+  if (pouch == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch backend hash requires pouch and output", NULL,
+                        NULL, "pouch");
+  }
+  rc = lc_pouch_backend_hash_derived(pouch, derived, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_backend_hash_marker_read(pouch, out, &found, error);
+  if (rc != LC_OK || found) {
+    return rc;
+  }
+  rc = lc_pouch_backend_hash_marker_write(pouch, derived, error);
+  if (rc == LC_OK) {
+    memcpy(out, derived, sizeof(derived));
+    return LC_OK;
+  }
+  if (!lc_pouch_backend_hash_create_collision(error)) {
+    return rc;
+  }
+  lc_error_cleanup(error);
+  lc_error_init(error);
+  rc = lc_pouch_backend_hash_marker_read(pouch, out, &found, error);
+  if (rc != LC_OK || found) {
+    return rc;
+  }
+  return lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch backend hash marker disappeared after collision",
+                      NULL, NULL, "pouch");
+}
+
 int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
   int normalized;
   int rc;
@@ -1746,6 +2311,12 @@ int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
   }
   normalized = enabled != 0 ? 1 : 0;
   pthread_mutex_lock(&pouch->single_writer_mutex);
+  if (pouch->aborted) {
+    pthread_mutex_unlock(&pouch->single_writer_mutex);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch single-writer control is closed after abort",
+                        NULL, NULL, "pouch");
+  }
   if (pouch->single_writer == normalized) {
     pthread_mutex_unlock(&pouch->single_writer_mutex);
     return LC_OK;
@@ -1993,6 +2564,16 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
       pouch->compaction_max_io_bytes_per_sec;
   out->background_compaction_enabled = pouch->background_compaction_enabled;
   out->single_writer = lc_pouch_single_writer_enabled(pouch);
+  out->supports_concurrent_writes = lc_pouch_supports_concurrent_writes(pouch);
+  out->aborted = pouch->aborted;
+  out->fsync_batch_max_ops = pouch->fsync_batch_max_ops;
+  out->queue_watch_enabled = pouch->queue_watch_enabled;
+  out->filesystem_capabilities_known = pouch->filesystem_capabilities_known;
+  out->filesystem_is_nfs = pouch->filesystem_is_nfs;
+  out->queue_watch_mode =
+      lc_strdup_with_allocator(&pouch->allocator, pouch->queue_watch_mode);
+  out->queue_watch_reason =
+      lc_strdup_with_allocator(&pouch->allocator, pouch->queue_watch_reason);
   out->query_engine =
       lc_strdup_with_allocator(&pouch->allocator, pouch->query_engine);
   out->query_fallback_engine =
@@ -2004,7 +2585,8 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
       pouch->crypto_key_file != NULL
           ? lc_strdup_with_allocator(&pouch->allocator, pouch->crypto_key_file)
           : NULL;
-  if (out->query_engine == NULL || out->query_fallback_engine == NULL ||
+  if (out->queue_watch_mode == NULL || out->queue_watch_reason == NULL ||
+      out->query_engine == NULL || out->query_fallback_engine == NULL ||
       out->compression == NULL) {
     lc_pouch_status_cleanup(&pouch->allocator, out);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -2037,6 +2619,8 @@ void lc_pouch_status_cleanup(const lc_allocator *allocator,
   }
   lc_free_with_allocator(allocator, status->root_path);
   lc_free_with_allocator(allocator, status->layout_name);
+  lc_free_with_allocator(allocator, status->queue_watch_mode);
+  lc_free_with_allocator(allocator, status->queue_watch_reason);
   lc_free_with_allocator(allocator, status->query_engine);
   lc_free_with_allocator(allocator, status->query_fallback_engine);
   lc_free_with_allocator(allocator, status->compression);

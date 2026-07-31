@@ -28,7 +28,27 @@ typedef struct lc_pouch_open_options {
   int crypto_generate_key_file;
   const char *compression;
   pslog_logger *logger;
+  /** Maximum fsync requests per group commit. Zero leaves the batch unbounded. */
+  uint64_t fsync_batch_max_ops;
+  /** Enables filesystem queue notifications where the root supports them. */
+  int queue_watch;
 } lc_pouch_open_options;
+
+#define LC_POUCH_FSYNC_BATCH_BOUND_COUNT 13U
+#define LC_POUCH_FSYNC_BATCH_BUCKET_COUNT \
+  (LC_POUCH_FSYNC_BATCH_BOUND_COUNT + 1U)
+#define LC_POUCH_BACKEND_HASH_HEX_BYTES 64U
+
+/** Aggregate group-commit diagnostics, using fixed-width counters on all targets. */
+typedef struct lc_pouch_fsync_stats {
+  uint64_t total_batches;
+  uint64_t total_requests;
+  uint64_t max_batch_size;
+  uint64_t total_sync_ns;
+  uint64_t max_sync_ns;
+  uint64_t bounds[LC_POUCH_FSYNC_BATCH_BOUND_COUNT];
+  uint64_t counts[LC_POUCH_FSYNC_BATCH_BUCKET_COUNT];
+} lc_pouch_fsync_stats;
 
 typedef struct lc_pouch_status {
   char *root_path;
@@ -42,6 +62,14 @@ typedef struct lc_pouch_status {
   uint64_t compaction_max_io_bytes_per_sec;
   int background_compaction_enabled;
   int single_writer;
+  int supports_concurrent_writes;
+  int aborted;
+  uint64_t fsync_batch_max_ops;
+  int queue_watch_enabled;
+  int filesystem_capabilities_known;
+  int filesystem_is_nfs;
+  char *queue_watch_mode;
+  char *queue_watch_reason;
   char *query_engine;
   char *query_fallback_engine;
   int crypto_enabled;
@@ -156,6 +184,17 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                   const lc_pouch_open_options *options, lc_pouch **out,
                   lc_error *error);
 void lc_pouch_close(lc_pouch *pouch);
+/** Stops worker loops without removing exclusive-writer crash fencing state. */
+int lc_pouch_abort(lc_pouch *pouch, lc_error *error);
+/** Returns whether independent handles may share this root for mutations. */
+int lc_pouch_supports_concurrent_writes(const lc_pouch *pouch);
+/** Copies aggregate group-commit diagnostics into `out`. */
+int lc_pouch_fsync_stats_read(lc_pouch *pouch, lc_pouch_fsync_stats *out,
+                              lc_error *error);
+/** Writes the stable SHA-256 root identity as 64 lowercase hex characters. */
+int lc_pouch_backend_hash(lc_pouch *pouch,
+                          char out[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U],
+                          lc_error *error);
 int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
                          lc_error *error);
 void lc_pouch_status_cleanup(const lc_allocator *allocator,
