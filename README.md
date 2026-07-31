@@ -31,6 +31,14 @@ The library itself is delivered as:
 - managed consumer support with blocking and explicit start/stop/wait service modes
 - integrated SDK logging through `libpslog`
 
+## Pouch storage
+
+Pouch is liblockdc's C-native local storage engine. It follows Go lockd disk
+storage semantics while intentionally using its own binary records, manifests,
+and `uint64_t` payload/file-size accounting. The current semantic alignment
+scope and every remaining format, operational, API, and portability divergence
+are recorded in [the Pouch storage specification](docs/pouch-storage.md).
+
 ## Build system
 
 The repository (<https://github.com/sa6mwa/liblockdc>) uses a Makefile-first workflow with CMake as the build backend:

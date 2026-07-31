@@ -20,6 +20,10 @@ better C-native implementation. Accepted standing Pouch divergences:
 - Query-index artifacts may remain C-native derived artifacts as long as they
   are rebuildable from the authoritative namespace logstore.
 
+The current divergence register, including operational/API and portability
+differences that do not change the durable logstore model, is maintained in
+`docs/pouch-storage.md#divergence-register`.
+
 Everything else must be treated as suspect until compared against Go disk.
 The current global `.lockd/queue`, `.lockd/attachments`, `.lockd/leases`, and
 `.lockd/namespace-config` model is rejected.
@@ -119,8 +123,15 @@ These items invalidate a claim of full Go-disk alignment until fixed.
 - [x] Do not run review before the full representation is aligned.
 - [x] Run `test-all` only after all alignment items in this TODO are
   implemented.
-- [ ] After implementation and `test-all`, re-analyze pouch against Go disk and
-  document every remaining divergence with a reason.
+- [x] Re-analyze Pouch against Go disk and document every remaining divergence
+  with a reason.
+  - 2026-07-31 source audit: Pouch `74eb7ea` versus lockd `b6ddbde` found no
+    new durable-logstore semantic gap on 64-bit C `long` targets. The
+    divergence register now records the remaining format, scheduler,
+    coordination, queue-wake-up, raw-API, snapshot-only-compaction, and ILP32
+    counter/timestamp differences.
+  - Broad verification remains deliberately deferred to the later functional
+    verification phase; this audit did not run `test-all` or benchmarks.
 
 ## Reference Files To Walk Before Coding
 

@@ -41,6 +41,21 @@ Relevant Go disk files:
 - `../lockd/internal/core/txn_marker_apply.go`
 - `../lockd/namespaces/config_store.go`
 
+### Audit Baseline
+
+This register was re-read against Pouch commit `74eb7ea` and lockd commit
+`b6ddbde` on 2026-07-31. The latter has no later changes in the disk storage
+paths named above. The audit is a source-level comparison; it does not claim
+that Pouch files can be opened by Go disk or that their public storage APIs are
+interchangeable.
+
+Within a 64-bit C `long` runtime, no unresolved durable-logstore semantic gap
+was found in the audited surface: namespace locality, record families, streamed
+payload spans, replay/tail repair, staged links, grouped sync, and
+capture/validate/install compaction all preserve the Go disk property. The
+divergences below remain material for configuration, operations, portability,
+or raw-backend users and must not be described as byte or API compatibility.
+
 ## Go Disk Alignment Contract
 
 This section is a mandatory implementation checklist. Every item is either
@@ -474,9 +489,11 @@ has an explicit visibility preference, matching Go's `ForceQueryHidden` path.
 
 ## Divergence Register
 
-Every divergence from Go disk belongs in one of these two buckets.
+Each difference from Go disk is classified below as representation/local
+implementation, operational/public API behavior, or a removed/rejected
+divergence.
 
-### Accepted Pouch Divergences
+### Representation And Local Implementation
 
 - Physical record bytes:
   Go disk uses `LOGD` records. Pouch uses Pouch-specific binary record magic,
@@ -490,8 +507,19 @@ Every divergence from Go disk belongs in one of these two buckets.
 
 - Payload length width:
   Go disk's physical record header uses a smaller payload length field. Pouch
-  uses `uint64_t` stored payload length, plaintext length, stored length, and
-  offsets. Reason: Pouch must preserve large-payload and large-file invariants.
+  uses `uint64_t` stored payload length, plaintext length, stored length,
+  record offset, payload offset, and compaction byte accounting. Local `off_t`
+  conversions are range-checked. Reason: Pouch must preserve large-payload and
+  large-file invariants.
+
+- Physical layout and manifest protocol:
+  Go keeps a namespace at `<root>/<namespace>/logstore/` with an append-only
+  manifest log and writer/UUID-derived segment and snapshot names. Pouch keeps
+  escaped namespace directories below `namespaces/`, uses a root and per-
+  namespace text manifest, and uses monotonic segment/snapshot ids. Reason:
+  Pouch owns its recovery format and does not promise cross-engine file
+  interoperability. The manifest still names the active segment, installed
+  snapshot, and obsolete files authoritatively.
 
 - Query-index artifact format:
   Go disk query/index internals are Go-native. Pouch uses C-native packed
@@ -527,40 +555,75 @@ Every divergence from Go disk belongs in one of these two buckets.
   Pouch uses Pouch terminology in files, errors, events, and durable metadata.
   Reason: Pouch is not disk and must not expose Go disk identity.
 
-### Unaccepted Current Pouch Gaps To Remove
+### Operational And Public API Differences
 
-- Global queue namespace:
-  Any durable use of `.lockd/queue` is rejected. Queue records must move to the
-  caller namespace under `q/<queue>/...`.
+- Background compaction defaults:
+  The resolved Go lockd configuration enables background compaction every 30
+  minutes with an 8 MiB/s throttle. A zeroed Pouch open-options struct instead
+  leaves background compaction disabled, has no interval, and treats a zero
+  throttle as unlimited. Pouch runs the same lifecycle when callers enable it,
+  and `lc_pouch_maintenance_run(... force=1 ...)` remains immediate. Reason:
+  the current C options have no separate "was set" fields, so zero cannot mean
+  both an explicit disable and an omitted setting. This does not alter durable
+  record semantics, but deployments must configure the scheduler explicitly.
 
-- Global attachment namespace:
-  Any durable use of `.lockd/attachments` is rejected. Attachment records must
-  move to the caller namespace under `state/<key>/attachments/...` and
-  `state/<key>/.staging/<txn>/attachments/...`.
+- Retention scheduling:
+  Go starts a janitor when its retention configuration is non-zero. Pouch has
+  no root retention scheduler; callers request a namespace maintenance pass
+  with `retention_updated_before_unix`. The same deletion path is available,
+  but scheduling and the retention policy live above Pouch.
 
-- Global namespace-config namespace:
-  Any durable use of `.lockd/namespace-config` is rejected. Namespace config
-  must move to the configured namespace under `config/namespace` or a
-  documented C-native key with the same locality.
+- Writer coordination and lock granularity:
+  Go can toggle single-writer mode at runtime and exposes root-level exclusive
+  writer presence probing for HA coordination. Pouch accepts `single_writer`
+  only at open, has namespace writer markers for refresh, and serializes
+  mutations with a namespace `fcntl` lock rather than Go's per-key lock-file
+  cache. Pouch therefore has lower unrelated-key write concurrency and no
+  Go-style exclusive-writer probe. `single_writer` is valid only when the
+  caller already knows the root is exclusively owned.
 
-- Global lease namespace:
-  Any durable use of `.lockd/leases` is rejected. Active lease state must move
-  into target-key metadata in the target namespace.
+- Queue wake-up transport:
+  Go optionally consumes filesystem notifications and reports whether fsnotify
+  is active, with polling as its fallback. Pouch writes namespace/queue
+  notification files but its dequeue wait path polls at 100 ms; it has no
+  fsnotify configuration or status API. Delivery and timeout semantics remain
+  the same, while wake-up latency and filesystem-watch observability differ.
 
-- Namespace-encoded side keys:
-  Any key helper that encodes namespace into a global key is rejected for
-  queue, attachment, namespace config, and lease data. Namespace is a storage
-  argument, not part of those durable keys.
+- Raw storage surface and empty staged key:
+  Go exposes a generic backend with raw object list/get/put/delete operations
+  and permits staging the empty key as `.staging/<txn>`. Pouch exposes
+  state-oriented C primitives; object typing is an internal option used by the
+  liblockdc queue, attachment, transaction, and configuration paths. Pouch
+  requires non-empty state keys, including staged keys. These are public API
+  differences, not a change to the namespace-local object semantics used by
+  supported client operations.
 
-- State-backed object flattening:
-  Any implementation that treats attachments, queue payloads, queue metadata,
-  or namespace config as public state documents is rejected. They are
-  object/internal records with query-hidden visibility.
+- Snapshot-only rewrite:
+  Go may compact an installed snapshot even when no later sealed segment
+  exists, producing a new snapshot identity. Pouch compacts only when at least
+  one sealed segment follows the installed snapshot and retains the coverage
+  segment id as snapshot identity. Rewriting a snapshot alone has no data or
+  durability effect, so Pouch deliberately skips that physical churn.
 
-- Lease hot path parsing:
-  Any acquire/release/keepalive path that must parse user state JSON or a
-  separate global lease payload to determine target-key lease state is
-  rejected. Lease facts are metadata hot fields.
+- Counter and timestamp ABI limits:
+  Durable Pouch metadata encodes generations, high-water values, and timestamps
+  in 64-bit fields, but the current C API/cache/manifest exposes generations
+  and high-water values as `unsigned long` and timestamps as `long`. Pouch
+  rejects a decoded generation or high-water value above `ULONG_MAX`; timestamp
+  range follows the target C ABI. Consequently, the audited storage semantics
+  are fully aligned on 64-bit `long` targets, while ILP32 builds do not provide
+  Go's full `uint64` generation or `int64` timestamp range. This limitation is
+  separate from file sizes and offsets, which remain `uint64_t` on every
+  target.
+
+### Removed Rejected Divergences
+
+The source sweep found no durable use of `.lockd/queue`, `.lockd/attachments`,
+`.lockd/leases`, or `.lockd/namespace-config`. Queue, attachment, lease, and
+namespace-config data are namespace-local; object rows retain object record
+families and query-hidden visibility; and lease hot paths use target-key
+metadata rather than parsing user JSON. Reintroducing any of those layouts is
+an unaccepted divergence.
 
 ## Non-Negotiable Model
 
@@ -668,7 +731,7 @@ root/
   locks/
 ```
 
-`pouch.meta` records the root mode: plaintext, crypto, compression, and
+The root `manifest` records the root mode: plaintext, crypto, compression, and
 crypto+compression. Plaintext and transformed roots cannot mix. Opening a root
 with a different mode must fail. The initial release does not contain a
 plaintext/transformed migration path.
