@@ -521,6 +521,7 @@ type productionMetrics struct {
 	flushNoopNS         int64
 	flushReopenNS       int64
 	reopenNS            int64
+	restartRecoveryNS   int64
 	getPublicNS         int64
 	getLeaseNS          int64
 	indexQueryKeysNS    int64
@@ -759,7 +760,8 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes, seg
 		b.Fatalf("lockd disk production no-op flush index: %v\n%s", err, h.logs.String())
 	}
 	addMetricPhaseDuration(&metrics.flushNoopNS, &metrics.flushNS, phaseStart)
-	phaseStart = time.Now()
+	restartRecoveryStart := time.Now()
+	phaseStart = restartRecoveryStart
 	h.restart(b)
 	addMetricDuration(&metrics.reopenNS, phaseStart)
 	phaseStart = time.Now()
@@ -770,6 +772,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes, seg
 		b.Fatalf("lockd disk production post-restart flush index: %v\n%s", err, h.logs.String())
 	}
 	addMetricPhaseDuration(&metrics.flushReopenNS, &metrics.flushNS, phaseStart)
+	addMetricDuration(&metrics.restartRecoveryNS, restartRecoveryStart)
 
 	phaseStart = time.Now()
 	matched := runLockdDiskQuery(b, h, rows, "index", "RangeHalf", false)
@@ -927,6 +930,7 @@ func BenchmarkProductionLockdDiskNoCrypto(b *testing.B) {
 			b.ReportMetric(float64(metrics.flushNoopNS), "flush-noop-ns/op")
 			b.ReportMetric(float64(metrics.flushReopenNS), "flush-reopen-ns/op")
 			b.ReportMetric(float64(metrics.reopenNS), "reopen-ns/op")
+			b.ReportMetric(float64(metrics.restartRecoveryNS), "restart-recovery-ns/op")
 			b.ReportMetric(float64(metrics.getPublicNS), "get-public-ns/op")
 			b.ReportMetric(float64(metrics.getLeaseNS), "get-lease-ns/op")
 			b.ReportMetric(float64(metrics.indexQueryKeysNS), "index-query-keys-ns/op")

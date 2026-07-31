@@ -143,6 +143,7 @@ func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes, segmen
 	b.ReportMetric(float64(result.flush_noop_ns), "flush-noop-ns/op")
 	b.ReportMetric(float64(result.flush_reopen_ns), "flush-reopen-ns/op")
 	b.ReportMetric(float64(result.reopen_ns), "reopen-ns/op")
+	b.ReportMetric(float64(result.restart_recovery_ns), "restart-recovery-ns/op")
 	b.ReportMetric(float64(result.get_public_ns), "get-public-ns/op")
 	b.ReportMetric(float64(result.get_lease_ns), "get-lease-ns/op")
 	b.ReportMetric(float64(result.index_query_keys_ns), "index-query-keys-ns/op")

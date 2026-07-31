@@ -32,6 +32,7 @@ typedef struct lockdc_pouch_bench_result {
   uint64_t flush_reopen_ns;
   uint64_t compaction_ns;
   uint64_t reopen_ns;
+  uint64_t restart_recovery_ns;
   uint64_t get_public_ns;
   uint64_t get_lease_ns;
   uint64_t index_query_keys_ns;

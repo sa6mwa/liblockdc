@@ -1797,6 +1797,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   uint64_t start;
   uint64_t end;
   uint64_t phase_start;
+  uint64_t restart_recovery_start;
   char *crypto_key;
   const char *phase;
   long row;
@@ -2013,7 +2014,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   lockdc_bench_add_phase_ns(&out->flush_noop_ns, &out->flush_ns, phase_start,
                             lockdc_bench_now_ns());
-  phase_start = lockdc_bench_now_ns();
+  restart_recovery_start = lockdc_bench_now_ns();
+  phase_start = restart_recovery_start;
   lc_client_close(client);
   client = NULL;
   phase = "reopen client";
@@ -2032,6 +2034,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   lockdc_bench_add_phase_ns(&out->flush_reopen_ns, &out->flush_ns, phase_start,
                             lockdc_bench_now_ns());
+  lockdc_bench_add_ns(&out->restart_recovery_ns, restart_recovery_start,
+                      lockdc_bench_now_ns());
   phase_start = lockdc_bench_now_ns();
   phase = "RangeHalf index keys";
   rc = lockdc_bench_query(client, "RangeHalf", "index", 0, rows, &out->rows,

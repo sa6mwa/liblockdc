@@ -25,6 +25,15 @@ isolated `metric=...` line for the phase under repair. The default timeout is
 Set `POUCH_PERF_ROWS`, `POUCH_PERF_PAYLOAD_BYTES`, or `POUCH_PERF_CRYPTO=1` to
 adjust the local fixture without switching to the broad parity suite.
 
+`make benchmark-pouch-routine` is the bounded development suite. It runs the
+six native phase probes at 12 rows and 128 KiB payloads, the 12-row segmented
+production matrix, and the two-writer/eight-write shared-root concurrency
+matrix. A single 90-second outer timeout covers the complete command;
+`POUCH_GO_ROUTINE_TIMEOUT`, `POUCH_PERF_ROUTINE_ROWS`,
+`POUCH_PERF_ROUTINE_PAYLOAD_BYTES`, and the
+`POUCH_GO_ROUTINE_CONCURRENCY_*` variables adjust its profile. The broader
+medium, acceptance, compaction, and parity-gate commands remain opt-in.
+
 `BenchmarkFastLockdDisk` and `BenchmarkMediumLockdDisk*` launch a real pinned
 `pkt.systems/lockd` binary with a disk backend rooted in an automatically
 removed `/tmp/liblockdc-lockd-disk-bench-*` directory. The disk side uses the
@@ -52,6 +61,13 @@ compression changes stored bytes and therefore rollover frequency. Override
 the bounded values with the `POUCH_GO_BOUNDED_PRODUCTION_*` variables, or use
 the corresponding `POUCH_GO_PRODUCTION_*` variables for a custom production
 profile.
+
+Production output reports `restart-recovery-ns/op`, the complete close/reopen
+plus first post-reopen index-flush path. This is the cross-engine recovery
+metric: lockd disk eagerly restores state during server startup, while Pouch
+loads the namespace lazily when the first operation needs it. The existing
+`reopen-ns/op` and `flush-reopen-ns/op` metrics remain diagnostic sub-phases and
+must not be compared independently across the two implementations.
 
 `make benchmark-pouch-go-concurrency` is the bounded lock and shared-root
 comparison matrix. It runs Pouch and Go lockd disk with crypto disabled and
