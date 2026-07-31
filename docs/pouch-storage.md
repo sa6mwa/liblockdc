@@ -627,6 +627,13 @@ divergence.
   request, latency, bound, and bucket counters using Go's 1 through 4096
   histogram boundaries; they remain zero when durable sync is disabled.
 
+- Segment sizing:
+  `segment_target_bytes` is a fixed-width `uint64_t` direct Pouch open option
+  and a `pouch://...?segment_target_bytes=<u64>` endpoint option. Zero selects
+  the 64 MiB resolved default. It is a stored-record rolling threshold, so
+  compression and encryption can change the segment count for the same input
+  document workload.
+
 - Filesystem capability policy and queue wake-up:
   Pouch detects NFS on Linux and BSD-family targets and exposes both detection
   state and queue-watch status through `lc_pouch_status`. Pouch closes each
@@ -1014,6 +1021,10 @@ unbounded group, and is available on the direct Pouch open options and the
 `lc_pouch_fsync_stats_read` exposes the same aggregate batch-size and
 sync-latency diagnostic shape as Go disk with fixed-width counters on every
 supported C ABI.
+
+`segment_target_bytes` is a `uint64_t` direct open option and an endpoint
+option (`pouch://...?segment_target_bytes=<u64>`). Zero resolves to the 64 MiB
+default. It applies to stored record bytes, not source payload bytes.
 
 Initial constants should mirror Go disk unless profiling proves a C-local
 change is better:

@@ -8892,6 +8892,11 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   if (options != NULL && options->has_query_hidden) {
     has_query_hidden = 1;
     query_hidden = options->query_hidden;
+  } else if (current.record_type == LC_POUCH_STATE_RECORD_STATE_META &&
+             !current.payload_span.present) {
+    /* A first lease claim is metadata-only and must not hide its first body. */
+    has_query_hidden = 0;
+    query_hidden = 0;
   }
   metadata = current.metadata;
   metadata_length = current.metadata_length;

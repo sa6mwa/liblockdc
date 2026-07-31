@@ -57,7 +57,9 @@ int lockdc_pouch_bench_run(const char *scenario, long rows, const char *engine,
                            int documents, lockdc_pouch_bench_result *out);
 
 int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
-                                      long payload_bytes, int crypto_enabled,
+                                      long payload_bytes,
+                                      uint64_t segment_target_bytes,
+                                      int crypto_enabled,
                                       int compression_enabled,
                                       lockdc_pouch_bench_result *out);
 

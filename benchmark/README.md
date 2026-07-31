@@ -32,13 +32,26 @@ exported Go client and full-form LQL expressions. The pouch side measures the
 C query path directly through `selector_lql` and reports C-side query time so
 the cgo bridge is excluded from pouch latency metrics.
 
-`make benchmark-pouch-go-production` runs the production workload for three
-explicit variants by default: `ProductionPouchPT`, `ProductionPouchCrypto`, and
+`make benchmark-pouch-go-production` runs the production workload for five
+explicit variants by default: `ProductionPouchPT`, `ProductionPouchCrypto`,
+`ProductionPouchCompression`, `ProductionPouchCryptoCompression`, and
 `ProductionLockdDiskNoCrypto`. Pouch crypto is enabled through the public
 `pouch_crypto_key` endpoint option; the Go lockd disk server is started with
 `--disable-storage-encryption`. The production target reports split flush
 metrics so index flush work can be attributed to intermediate write-churn
 flushes, final flush, no-op flush, and post-reopen flush.
+
+`make benchmark-pouch-go-production-bounded` is the routine full-matrix
+coverage target. It uses one iteration of 12 rows, two updates per key, a
+128 KiB historical payload, and a shared 16 KiB segment target. The target
+forces rolling and still validates stale ETag rejection, attachments, queue
+round trips, replay, indexed and scan queries, full-text queries, and public
+reads. The common target is passed to Pouch through `segment_target_bytes` and
+to Go disk through `--logstore-segment-size`; this is necessary because Pouch
+compression changes stored bytes and therefore rollover frequency. Override
+the bounded values with the `POUCH_GO_BOUNDED_PRODUCTION_*` variables, or use
+the corresponding `POUCH_GO_PRODUCTION_*` variables for a custom production
+profile.
 
 `make benchmark-pouch-go-concurrency` is the bounded lock and shared-root
 comparison matrix. It runs Pouch and Go lockd disk with crypto disabled and

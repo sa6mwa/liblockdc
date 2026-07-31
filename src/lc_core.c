@@ -1002,6 +1002,7 @@ typedef struct lc_pouch_endpoint_options {
   int crypto_generate_key_file;
   int single_writer;
   int durable_sync;
+  uint64_t segment_target_bytes;
   uint64_t fsync_batch_max_ops;
   int queue_watch;
   int background_compaction_enabled;
@@ -1268,6 +1269,16 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     rc = lc_pouch_endpoint_parse_boolean(allocator, value, value_len,
                                          "durable_sync",
                                          &options->durable_sync, error);
+    lc_free_with_allocator(allocator, decoded_key);
+    return rc;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "segment_target_bytes") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_segment_target_bytes")) {
+    rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
+                                     "segment_target_bytes",
+                                     &options->segment_target_bytes, error);
     lc_free_with_allocator(allocator, decoded_key);
     return rc;
   }
@@ -1826,6 +1837,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     memset(&pouch_open_options, 0, sizeof(pouch_open_options));
     pouch_open_options.single_writer = pouch_endpoint_options.single_writer;
     pouch_open_options.durable_sync = pouch_endpoint_options.durable_sync;
+    pouch_open_options.segment_target_bytes =
+        pouch_endpoint_options.segment_target_bytes;
     pouch_open_options.fsync_batch_max_ops =
         pouch_endpoint_options.fsync_batch_max_ops;
     pouch_open_options.queue_watch = pouch_endpoint_options.queue_watch;

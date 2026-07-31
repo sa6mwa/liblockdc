@@ -7,6 +7,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -367,16 +368,24 @@ static void lockdc_bench_cleanup_root(const char *path) {
 }
 
 static int lockdc_bench_open_client(const char *root, const char *crypto_key,
-                                    const char *compression, lc_client **out,
-                                    lc_error *error) {
+                                    const char *compression,
+                                    uint64_t segment_target_bytes,
+                                    lc_client **out, lc_error *error) {
   lc_client_config config;
   const char *endpoints[1];
   char endpoint[1200];
   int written;
   int rc;
 
-  written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_single_writer=true", root);
+  if (segment_target_bytes != 0U) {
+    written = snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?pouch_single_writer=true&"
+                       "segment_target_bytes=%" PRIu64,
+                       root, segment_target_bytes);
+  } else {
+    written = snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?pouch_single_writer=true", root);
+  }
   if (written <= 0 || (size_t)written >= sizeof(endpoint)) {
     return LC_ERR_INVALID;
   }
@@ -1714,7 +1723,7 @@ int lockdc_pouch_bench_fixture_open(long rows, lockdc_pouch_bench_fixture **out,
   }
   snprintf(fixture->root, sizeof(fixture->root), "%s", root_template);
   fixture->rows = rows;
-  rc = lockdc_bench_open_client(fixture->root, NULL, NULL, &fixture->client,
+  rc = lockdc_bench_open_client(fixture->root, NULL, NULL, 0U, &fixture->client,
                                 &error);
   if (rc == LC_OK) {
     rc = lockdc_bench_seed(fixture->client, rows, &error);
@@ -1776,7 +1785,9 @@ void lockdc_pouch_bench_fixture_close(lockdc_pouch_bench_fixture *fixture) {
 }
 
 int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
-                                      long payload_bytes, int crypto_enabled,
+                                      long payload_bytes,
+                                      uint64_t segment_target_bytes,
+                                      int crypto_enabled,
                                       int compression_enabled,
                                       lockdc_pouch_bench_result *out) {
   char root_template[] = LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX";
@@ -1828,7 +1839,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   phase = "open client";
   rc = lockdc_bench_open_client(root, crypto_key,
                                 compression_enabled != 0 ? "zlib" : NULL,
-                                &client, &error);
+                                segment_target_bytes, &client, &error);
   if (rc != LC_OK) {
     goto done;
   }
@@ -2008,7 +2019,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   phase = "reopen client";
   rc = lockdc_bench_open_client(root, crypto_key,
                                 compression_enabled != 0 ? "zlib" : NULL,
-                                &client, &error);
+                                segment_target_bytes, &client, &error);
   if (rc != LC_OK) {
     goto done;
   }
@@ -2180,8 +2191,10 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
     rc = LC_ERR_INVALID;
     snprintf(out->error, sizeof(out->error),
              "production pouch benchmark produced %ld segment(s), expected "
-             "multiple segments with default segment target",
-             out->segments);
+             "multiple segments with %" PRIu64 "-byte segment target",
+             out->segments,
+             segment_target_bytes != 0U ? segment_target_bytes
+                                        : (uint64_t)(64U * 1024U * 1024U));
     goto done_without_error_message;
   }
 

@@ -87,7 +87,7 @@ func runPouchFixtureC(b *testing.B, fixture *pouchFixture, engine, scenario stri
 	}
 }
 
-func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes int64, cryptoEnabled, compressionEnabled bool) {
+func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes, segmentTargetBytes int64, cryptoEnabled, compressionEnabled bool) {
 	var totalCNS uint64
 	var result C.lockdc_pouch_bench_result
 
@@ -97,12 +97,13 @@ func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes int64, 
 			C.long(rows),
 			C.long(updatesPerKey),
 			C.long(payloadBytes),
+			C.uint64_t(segmentTargetBytes),
 			C.int(boolToInt(cryptoEnabled)),
 			C.int(boolToInt(compressionEnabled)),
 			&result,
 		)
 		if rc != 0 {
-			b.Fatalf("pouch production benchmark failed: rc=%d rows=%d updates=%d payload=%d error=%q", int(rc), rows, updatesPerKey, payloadBytes, C.GoString(&result.error[0]))
+			b.Fatalf("pouch production benchmark failed: rc=%d rows=%d updates=%d payload=%d segment_target=%d error=%q", int(rc), rows, updatesPerKey, payloadBytes, segmentTargetBytes, C.GoString(&result.error[0]))
 		}
 		totalCNS += uint64(result.c_ns)
 	}
@@ -116,6 +117,7 @@ func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes int64, 
 	b.ReportMetric(float64(result.queue_messages), "queue-msgs/op")
 	b.ReportMetric(float64(result.stale_failures), "stale-failures/op")
 	b.ReportMetric(float64(result.segments), "segments/op")
+	b.ReportMetric(float64(segmentTargetBytes), "segment-target-bytes/op")
 	b.ReportMetric(float64(result.bytes), "bytes/op")
 	b.ReportMetric(float64(result.acquire_ns), "acquire-ns/op")
 	if result.rows > 0 {

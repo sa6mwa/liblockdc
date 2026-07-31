@@ -77,24 +77,36 @@ func lockdBenchDocument(i int64) []byte {
 }
 
 type lockdDiskHarness struct {
-	client        *lockdclient.Client
-	logs          *bytes.Buffer
-	bin           string
-	root          string
-	authRoot      string
-	dataRoot      string
-	addr          string
-	cryptoEnabled bool
-	cancel        context.CancelFunc
-	cmd           *exec.Cmd
+	client             *lockdclient.Client
+	logs               *bytes.Buffer
+	bin                string
+	root               string
+	authRoot           string
+	dataRoot           string
+	addr               string
+	cryptoEnabled      bool
+	segmentTargetBytes int64
+	cancel             context.CancelFunc
+	cmd                *exec.Cmd
 }
 
 func startLockdDiskHarness(tb testing.TB) *lockdDiskHarness {
-	return startLockdDiskHarnessWithCrypto(tb, false)
+	return startLockdDiskHarnessWithOptions(tb, false, lockdDiskDefaultLogstoreSegmentSize)
 }
 
 func startLockdDiskHarnessWithCrypto(tb testing.TB, cryptoEnabled bool) *lockdDiskHarness {
+	return startLockdDiskHarnessWithOptions(tb, cryptoEnabled, lockdDiskDefaultLogstoreSegmentSize)
+}
+
+func startLockdDiskHarnessWithSegmentTarget(tb testing.TB, segmentTargetBytes int64) *lockdDiskHarness {
+	return startLockdDiskHarnessWithOptions(tb, false, segmentTargetBytes)
+}
+
+func startLockdDiskHarnessWithOptions(tb testing.TB, cryptoEnabled bool, segmentTargetBytes int64) *lockdDiskHarness {
 	tb.Helper()
+	if segmentTargetBytes <= 0 {
+		segmentTargetBytes = lockdDiskDefaultLogstoreSegmentSize
+	}
 
 	bin := lockdDiskBenchBinary()
 	if st, err := os.Stat(bin); err != nil || st.IsDir() {
@@ -126,13 +138,14 @@ func startLockdDiskHarnessWithCrypto(tb testing.TB, cryptoEnabled bool) *lockdDi
 	}
 
 	h := &lockdDiskHarness{
-		bin:           bin,
-		root:          root,
-		authRoot:      authRoot,
-		dataRoot:      dataRoot,
-		addr:          addr,
-		cryptoEnabled: cryptoEnabled,
-		logs:          &bytes.Buffer{},
+		bin:                bin,
+		root:               root,
+		authRoot:           authRoot,
+		dataRoot:           dataRoot,
+		addr:               addr,
+		cryptoEnabled:      cryptoEnabled,
+		segmentTargetBytes: segmentTargetBytes,
+		logs:               &bytes.Buffer{},
 	}
 	h.start(tb)
 	tb.Cleanup(func() {
@@ -156,6 +169,7 @@ func (h *lockdDiskHarness) start(tb testing.TB) {
 		"--disk-retention", "0",
 		"--indexer-flush-docs", "64",
 		"--indexer-flush-interval", "1s",
+		"--logstore-segment-size", strconv.FormatInt(h.segmentTargetBytes, 10),
 	}
 	if !h.cryptoEnabled {
 		args = append(args, "--disable-storage-encryption")

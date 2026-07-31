@@ -51,7 +51,13 @@ POUCH_GO_PARITY_COUNT ?= 3
 POUCH_GO_PRODUCTION_ROWS ?=
 POUCH_GO_PRODUCTION_UPDATES ?=
 POUCH_GO_PRODUCTION_PAYLOAD_BYTES ?=
+POUCH_GO_PRODUCTION_SEGMENT_TARGET_BYTES ?=
 POUCH_GO_PRODUCTION_TIMEOUT ?= 10m
+POUCH_GO_BOUNDED_PRODUCTION_ROWS ?= 12
+POUCH_GO_BOUNDED_PRODUCTION_UPDATES ?= 2
+POUCH_GO_BOUNDED_PRODUCTION_PAYLOAD_BYTES ?= 131072
+POUCH_GO_BOUNDED_PRODUCTION_SEGMENT_TARGET_BYTES ?= 16384
+POUCH_GO_BOUNDED_PRODUCTION_TIMEOUT ?= 90s
 POUCH_GO_COMPACTION_BENCH ?= CompactionPouch
 POUCH_GO_COMPACTION_BENCHTIME ?= 1x
 POUCH_GO_COMPACTION_ROWS ?=
@@ -169,7 +175,8 @@ help:
 		'make benchmark-pouch-go-fast Run the bounded Go e2e pouch-vs-disk iteration suite (timeout $(POUCH_GO_FAST_TIMEOUT), seed rows $(POUCH_GO_FAST_SEED_ROWS)).' \
 		'make benchmark-pouch-go-medium Run the bounded 3m Go e2e pouch-vs-disk scan/index scale suite (rows $(POUCH_GO_MEDIUM_SCALE_ROWS)).' \
 		'make benchmark-pouch-go-acceptance Run the bounded 4096-doc pouch-vs-disk acceptance matrix (timeout $(POUCH_GO_ACCEPTANCE_TIMEOUT)).' \
-		'make benchmark-pouch-go-production Run production-like pouch-vs-disk segmented write/read/replay/queue/attachment benchmark matrix; set POUCH_GO_PRODUCTION_ROWS/UPDATES/PAYLOAD_BYTES for one custom profile.' \
+		'make benchmark-pouch-go-production Run production-like pouch-vs-disk segmented write/read/replay/queue/attachment benchmark matrix; set POUCH_GO_PRODUCTION_ROWS/UPDATES/PAYLOAD_BYTES/SEGMENT_TARGET_BYTES for one custom profile.' \
+		'make benchmark-pouch-go-production-bounded Run the bounded full production matrix with a shared small segment target.' \
 		'make benchmark-pouch-go-compaction Run opt-in pouch forced/scheduled compaction benchmarks; set POUCH_GO_COMPACTION_* to tune early compaction.' \
 		'make benchmark-pouch-go-concurrency Run bounded pouch-vs-disk key-lock contention and shared-root concurrency matrix with crypto off/on.' \
 		'make benchmark-pouch-go-parity-gate Run production pouch-vs-disk benchmarks and fail if any Pouch performance metric is slower than Go disk.' \
@@ -445,6 +452,7 @@ __benchmark-pouch-go: __build-x86_64-linux-gnu-release
 	  LOCKDC_BENCH_PRODUCTION_ROWS="$(LOCKDC_BENCH_PRODUCTION_ROWS)" \
 	  LOCKDC_BENCH_PRODUCTION_UPDATES="$(LOCKDC_BENCH_PRODUCTION_UPDATES)" \
 	  LOCKDC_BENCH_PRODUCTION_PAYLOAD_BYTES="$(LOCKDC_BENCH_PRODUCTION_PAYLOAD_BYTES)" \
+	  LOCKDC_BENCH_PRODUCTION_SEGMENT_TARGET_BYTES="$(LOCKDC_BENCH_PRODUCTION_SEGMENT_TARGET_BYTES)" \
 	  LOCKDC_BENCH_COMPACTION_ROWS="$(LOCKDC_BENCH_COMPACTION_ROWS)" \
 	  LOCKDC_BENCH_COMPACTION_UPDATES="$(LOCKDC_BENCH_COMPACTION_UPDATES)" \
 	  LOCKDC_BENCH_COMPACTION_PAYLOAD_BYTES="$(LOCKDC_BENCH_COMPACTION_PAYLOAD_BYTES)" \
@@ -508,7 +516,21 @@ __benchmark-pouch-go-production:
 	  POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_PRODUCTION_TIMEOUT)' \
 	  LOCKDC_BENCH_PRODUCTION_ROWS='$(POUCH_GO_PRODUCTION_ROWS)' \
 	  LOCKDC_BENCH_PRODUCTION_UPDATES='$(POUCH_GO_PRODUCTION_UPDATES)' \
-	  LOCKDC_BENCH_PRODUCTION_PAYLOAD_BYTES='$(POUCH_GO_PRODUCTION_PAYLOAD_BYTES)'
+	  LOCKDC_BENCH_PRODUCTION_PAYLOAD_BYTES='$(POUCH_GO_PRODUCTION_PAYLOAD_BYTES)' \
+	  LOCKDC_BENCH_PRODUCTION_SEGMENT_TARGET_BYTES='$(POUCH_GO_PRODUCTION_SEGMENT_TARGET_BYTES)'
+
+benchmark-pouch-go-production-bounded:
+	$(TIMED) benchmark-pouch-go-production-bounded timeout --kill-after=5s \
+	  '$(POUCH_GO_BOUNDED_PRODUCTION_TIMEOUT)' $(MAKE) __benchmark-pouch-go-production-bounded
+
+__benchmark-pouch-go-production-bounded:
+	$(MAKE) __benchmark-pouch-go-production \
+	  POUCH_GO_PRODUCTION_BENCHTIME='1x' \
+	  POUCH_GO_PRODUCTION_ROWS='$(POUCH_GO_BOUNDED_PRODUCTION_ROWS)' \
+	  POUCH_GO_PRODUCTION_UPDATES='$(POUCH_GO_BOUNDED_PRODUCTION_UPDATES)' \
+	  POUCH_GO_PRODUCTION_PAYLOAD_BYTES='$(POUCH_GO_BOUNDED_PRODUCTION_PAYLOAD_BYTES)' \
+	  POUCH_GO_PRODUCTION_SEGMENT_TARGET_BYTES='$(POUCH_GO_BOUNDED_PRODUCTION_SEGMENT_TARGET_BYTES)' \
+	  POUCH_GO_PRODUCTION_TIMEOUT='$(POUCH_GO_BOUNDED_PRODUCTION_TIMEOUT)'
 
 benchmark-pouch-go-compaction:
 	$(TIMED) benchmark-pouch-go-compaction timeout --kill-after=5s \

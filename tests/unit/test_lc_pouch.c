@@ -3546,7 +3546,8 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   make_root("endpoint-runtime-controls", root, sizeof(root));
   cleanup_root(root);
   assert_true(snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?durable_sync=true&fsync_batch_max_ops=0&"
+                       "pouch://%s?durable_sync=true&segment_target_bytes=4096&"
+                       "fsync_batch_max_ops=0&"
                        "queue_watch=true&"
                        "background_compaction=false&"
                        "disable_compaction_throttling=true&retention_seconds=5&"
@@ -3559,6 +3560,7 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   rc = lc_pouch_status_read(handle->pouch, &status, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(status.durable_sync);
+  assert_int_equal(status.segment_target_bytes, 4096U);
   assert_int_equal(status.fsync_batch_max_ops, 0U);
   assert_false(status.background_compaction_enabled);
   assert_true(status.compaction_throttling_disabled);
@@ -11808,6 +11810,10 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
   lc_acquire_req acquire_req;
   lc_release_req release_req;
   lc_get_res get_res;
+  lc_query_key_handler query_handler;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  pouch_query_key_capture query_capture;
   lc_error error;
   const void *bytes;
   size_t length;
@@ -11823,6 +11829,10 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
   sink = NULL;
   bytes = NULL;
   length = 0U;
+  memset(&query_handler, 0, sizeof(query_handler));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&query_capture, 0, sizeof(query_capture));
   lc_error_init(&error);
   lc_acquire_req_init(&acquire_req);
   lc_release_req_init(&release_req);
@@ -11897,8 +11907,23 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
   assert_false(get_res.no_content);
   assert_int_equal(get_res.version, 1L);
   sink->close(sink);
+  sink = NULL;
+
+  query_handler.begin = pouch_query_key_begin;
+  query_handler.chunk = pouch_query_key_chunk;
+  query_handler.end = pouch_query_key_end;
+  query_req.namespace_name = "default";
+  query_req.engine = "index";
+  query_req.selector_lql = "range{field=/value,gte=0}";
+  query_req.limit = 1L;
+  rc = reader->query_keys(reader, &query_req, &query_handler, &query_capture,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(query_capture.count, 1);
+  assert_true(pouch_query_capture_has(&query_capture, key));
 
   lc_get_res_cleanup(&get_res);
+  lc_query_res_cleanup(&query_res);
   lc_client_close(reader);
   cleanup_root(root);
   lc_error_cleanup(&error);

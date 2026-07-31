@@ -20,10 +20,11 @@ import (
 const lockdDiskDefaultLogstoreSegmentSize = int64(64 << 20)
 
 type productionScenario struct {
-	name          string
-	rows          int64
-	updatesPerKey int64
-	payloadBytes  int64
+	name               string
+	rows               int64
+	updatesPerKey      int64
+	payloadBytes       int64
+	segmentTargetBytes int64
 }
 
 type compactionScenario struct {
@@ -48,21 +49,27 @@ func productionPayloadBytes() int64 {
 	return envInt64("LOCKDC_BENCH_PRODUCTION_PAYLOAD_BYTES", 256*1024)
 }
 
+func productionSegmentTargetBytes() int64 {
+	return envInt64("LOCKDC_BENCH_PRODUCTION_SEGMENT_TARGET_BYTES", lockdDiskDefaultLogstoreSegmentSize)
+}
+
 func productionScenarios() []productionScenario {
 	if os.Getenv("LOCKDC_BENCH_PRODUCTION_ROWS") != "" ||
 		os.Getenv("LOCKDC_BENCH_PRODUCTION_UPDATES") != "" ||
-		os.Getenv("LOCKDC_BENCH_PRODUCTION_PAYLOAD_BYTES") != "" {
+		os.Getenv("LOCKDC_BENCH_PRODUCTION_PAYLOAD_BYTES") != "" ||
+		os.Getenv("LOCKDC_BENCH_PRODUCTION_SEGMENT_TARGET_BYTES") != "" {
 		return []productionScenario{{
-			name:          "Env",
-			rows:          productionRows(),
-			updatesPerKey: productionUpdatesPerKey(),
-			payloadBytes:  productionPayloadBytes(),
+			name:               "Env",
+			rows:               productionRows(),
+			updatesPerKey:      productionUpdatesPerKey(),
+			payloadBytes:       productionPayloadBytes(),
+			segmentTargetBytes: productionSegmentTargetBytes(),
 		}}
 	}
 	return []productionScenario{
-		{name: "WideLarge", rows: 128, updatesPerKey: 3, payloadBytes: 256 * 1024},
-		{name: "DeepNested", rows: 384, updatesPerKey: 2, payloadBytes: 192 * 1024},
-		{name: "HotChurn", rows: 112, updatesPerKey: 6, payloadBytes: 128 * 1024},
+		{name: "WideLarge", rows: 128, updatesPerKey: 3, payloadBytes: 256 * 1024, segmentTargetBytes: lockdDiskDefaultLogstoreSegmentSize},
+		{name: "DeepNested", rows: 384, updatesPerKey: 2, payloadBytes: 192 * 1024, segmentTargetBytes: lockdDiskDefaultLogstoreSegmentSize},
+		{name: "HotChurn", rows: 112, updatesPerKey: 6, payloadBytes: 128 * 1024, segmentTargetBytes: lockdDiskDefaultLogstoreSegmentSize},
 	}
 }
 
@@ -157,7 +164,8 @@ func scheduledCompactionScenarios() []compactionScenario {
 func productionBenchName(s productionScenario) string {
 	return s.name + "/Rows" + strconv.FormatInt(s.rows, 10) +
 		"/Updates" + strconv.FormatInt(s.updatesPerKey, 10) +
-		"/Payload" + strconv.FormatInt(s.payloadBytes, 10)
+		"/Payload" + strconv.FormatInt(s.payloadBytes, 10) +
+		"/SegmentTarget" + strconv.FormatInt(s.segmentTargetBytes, 10)
 }
 
 func compactionBenchName(s compactionScenario) string {
@@ -541,10 +549,10 @@ func warmLockdDiskProductionQuery(b *testing.B, h *lockdDiskHarness, rows int64,
 	}
 }
 
-func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int64) productionMetrics {
+func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes, segmentTargetBytes int64) productionMetrics {
 	b.Helper()
 
-	h := startLockdDiskHarness(b)
+	h := startLockdDiskHarnessWithSegmentTarget(b, segmentTargetBytes)
 	metrics := productionMetrics{}
 	for row := int64(0); row < rows; row++ {
 		phaseStart := time.Now()
@@ -830,10 +838,10 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes int6
 		row += step
 	}
 	metrics.segments = countLockdDiskLogstoreSegments(b, h)
-	metrics.segmentBytes = lockdDiskDefaultLogstoreSegmentSize
+	metrics.segmentBytes = h.segmentTargetBytes
 	if metrics.segments <= 1 {
 		b.Fatalf(
-			"lockd disk production benchmark produced %d logstore segment(s), want >1 with default %d-byte segment target",
+			"lockd disk production benchmark produced %d logstore segment(s), want >1 with %d-byte segment target",
 			metrics.segments,
 			metrics.segmentBytes,
 		)
@@ -845,7 +853,7 @@ func BenchmarkProductionPouchPT(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
-			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, false, false)
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, false, false)
 		})
 	}
 }
@@ -854,7 +862,7 @@ func BenchmarkProductionPouchCrypto(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
-			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, true, false)
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, true, false)
 		})
 	}
 }
@@ -863,7 +871,7 @@ func BenchmarkProductionPouchCompression(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
-			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, false, true)
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, false, true)
 		})
 	}
 }
@@ -872,7 +880,7 @@ func BenchmarkProductionPouchCryptoCompression(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
-			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, true, true)
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, true, true)
 		})
 	}
 }
@@ -883,7 +891,7 @@ func BenchmarkProductionLockdDiskNoCrypto(b *testing.B) {
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
 			var metrics productionMetrics
 			for i := 0; i < b.N; i++ {
-				metrics = runLockdDiskProduction(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes)
+				metrics = runLockdDiskProduction(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes)
 			}
 			b.ReportMetric(float64(metrics.rows), "rows/op")
 			b.ReportMetric(float64(metrics.writes), "writes/op")
