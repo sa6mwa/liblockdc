@@ -20,16 +20,18 @@ typedef struct lc_pouch_namespace_manifest {
   char *namespace_path;
   char *active_segment;
   char *latest_snapshot;
+  char **segment_leaves;
   char **obsolete_segments;
   char **obsolete_snapshots;
   uint64_t *obsolete_segment_marked_at;
   uint64_t *obsolete_snapshot_marked_at;
-  unsigned long active_segment_id;
-  unsigned long max_segment_id;
-  unsigned long latest_snapshot_segment_id;
+  uint64_t active_segment_id;
+  uint64_t max_segment_id;
+  uint64_t latest_snapshot_segment_id;
   lc_pouch_generation state_max_version;
   unsigned long obsolete_segment_count;
   unsigned long obsolete_snapshot_count;
+  unsigned long segment_count;
   int repaired;
 } lc_pouch_namespace_manifest;
 
@@ -59,9 +61,14 @@ typedef struct lc_pouch_namespace_marker_refresh_state {
 } lc_pouch_namespace_marker_refresh_state;
 
 char *lc_pouch_namespace_segment_leaf(const lc_allocator *allocator,
-                                      unsigned long segment_id);
+                                      uint64_t segment_id);
+char *lc_pouch_namespace_writer_segment_leaf(const lc_allocator *allocator,
+                                             const char *writer_id,
+                                             uint64_t sequence);
 char *lc_pouch_namespace_snapshot_leaf(const lc_allocator *allocator,
-                                       unsigned long segment_id);
+                                       uint64_t segment_id);
+int lc_pouch_namespace_segment_is_legacy(const char *leaf,
+                                         uint64_t *segment_id);
 int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
                                      const char *root_path,
                                      const char *namespace_name,
@@ -72,12 +79,12 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
 int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
                                        const char *namespace_name,
                                        lc_pouch_namespace_manifest *manifest,
-                                       unsigned long segment_id,
+                                       uint64_t segment_id,
                                        lc_error *error);
 int lc_pouch_namespace_manifest_install_snapshot(
     const lc_allocator *allocator, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, const char *snapshot_leaf,
-    unsigned long snapshot_segment_id, unsigned long next_segment_id,
+    uint64_t snapshot_segment_id, uint64_t next_segment_id,
     lc_error *error);
 int lc_pouch_namespace_manifest_mark_obsolete_segment(
     const lc_allocator *allocator, lc_pouch_namespace_manifest *manifest,
@@ -97,7 +104,7 @@ int lc_pouch_namespace_manifest_cleanup_obsolete(
 int lc_pouch_namespace_touch_marker(const lc_allocator *allocator,
                                     const char *namespace_path,
                                     const char *writer_marker_leaf,
-                                    unsigned long sequence, lc_error *error);
+                                    uint64_t sequence, lc_error *error);
 int lc_pouch_namespace_marker_snapshot_read(
     const lc_allocator *allocator, const char *namespace_path,
     const char *self_marker_leaf, lc_pouch_namespace_marker_snapshot *out,

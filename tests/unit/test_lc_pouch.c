@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <setjmp.h>
@@ -96,6 +97,16 @@ typedef struct pouch_queue_notification_write {
   int rc;
 } pouch_queue_notification_write;
 
+typedef struct pouch_parallel_state_write {
+  lc_pouch *pouch;
+  pthread_barrier_t *start;
+  const char *key;
+  const char *value;
+  lc_pouch_state_write_result result;
+  lc_error error;
+  int rc;
+} pouch_parallel_state_write;
+
 static const lonejson_field pouch_value_fields[] = {
     LONEJSON_FIELD_I64(pouch_value_doc, value, "value")};
 
@@ -103,6 +114,12 @@ LONEJSON_MAP_DEFINE(pouch_value_map, pouch_value_doc, pouch_value_fields);
 
 static void open_pouch_client_endpoint(const char *endpoint, lc_client **out,
                                        lc_error *error);
+static void pouch_state_segment_path(const char *root,
+                                     const char *namespace_name,
+                                     unsigned long segment_id, char *out,
+                                     size_t out_size);
+static unsigned long pouch_state_writer_segment_count(
+    const char *root, const char *namespace_name);
 
 static void *pouch_write_queue_notification(void *context) {
   pouch_queue_notification_write *write;
@@ -110,6 +127,34 @@ static void *pouch_write_queue_notification(void *context) {
   write = (pouch_queue_notification_write *)context;
   (void)nanosleep(&write->delay, NULL);
   write->rc = lc_pouch_path_write_text_file(write->path, "sequence=1\n", NULL);
+  return NULL;
+}
+
+static void *pouch_write_state_in_parallel(void *context) {
+  pouch_parallel_state_write *write;
+  lc_source *source;
+  int barrier_rc;
+
+  write = (pouch_parallel_state_write *)context;
+  source = NULL;
+  lc_error_init(&write->error);
+  barrier_rc = pthread_barrier_wait(write->start);
+  if (barrier_rc != 0 && barrier_rc != PTHREAD_BARRIER_SERIAL_THREAD) {
+    write->rc = lc_error_set(&write->error, LC_ERR_TRANSPORT, 0L,
+                             "parallel pouch writer barrier failed", NULL,
+                             NULL, "pouch");
+    return NULL;
+  }
+  write->rc = lc_source_from_memory(write->value, strlen(write->value),
+                                    &source, &write->error);
+  if (write->rc == LC_OK) {
+    write->rc = lc_pouch_state_write(write->pouch, "default", write->key,
+                                     source, NULL, &write->result,
+                                     &write->error);
+  }
+  if (source != NULL) {
+    lc_source_close(source);
+  }
   return NULL;
 }
 
@@ -2751,11 +2796,11 @@ static void make_queue_notify_path(const char *root, const char *namespace_name,
   lc_free_with_allocator(NULL, namespace_path);
 }
 
-static unsigned long read_marker_sequence(const char *path, size_t *size) {
+static uint64_t read_marker_sequence(const char *path, size_t *size) {
   FILE *fp;
   struct stat st;
   char line[256];
-  unsigned long sequence;
+  uint64_t sequence;
   int found;
 
   assert_int_equal(stat(path, &st), 0);
@@ -2765,12 +2810,12 @@ static unsigned long read_marker_sequence(const char *path, size_t *size) {
   }
   fp = fopen(path, "rb");
   assert_non_null(fp);
-  sequence = 0UL;
+  sequence = UINT64_C(0);
   found = 0;
   while (fgets(line, sizeof(line), fp) != NULL) {
-    unsigned long parsed;
+    uint64_t parsed;
 
-    if (sscanf(line, "sequence=%lu", &parsed) == 1) {
+    if (sscanf(line, "sequence=%" SCNu64, &parsed) == 1) {
       sequence = parsed;
       found = 1;
       break;
@@ -3108,18 +3153,13 @@ static void test_single_writer_state_read_uses_projection_cache(void **state) {
   lc_pouch_state_read_result read_res;
   lc_error error;
   char root[512];
-  char *namespace_path;
-  char *segment_leaf;
   char segment_path[1024];
   char buffer[64];
-  int written;
   int rc;
 
   (void)state;
   pouch = NULL;
   source = NULL;
-  namespace_path = NULL;
-  segment_leaf = NULL;
   memset(&options, 0, sizeof(options));
   memset(&write_res, 0, sizeof(write_res));
   memset(&read_res, 0, sizeof(read_res));
@@ -3146,13 +3186,8 @@ static void test_single_writer_state_read_uses_projection_cache(void **state) {
   assert_string_equal(buffer, "{\"value\":1}");
   lc_pouch_state_read_result_cleanup(NULL, &read_res);
 
-  namespace_path = lc_pouch_namespace_path(NULL, root, "default");
-  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, 1UL);
-  assert_non_null(namespace_path);
-  assert_non_null(segment_leaf);
-  written = snprintf(segment_path, sizeof(segment_path), "%s/segments/%s",
-                     namespace_path, segment_leaf);
-  assert_true(written > 0 && (size_t)written < sizeof(segment_path));
+  pouch_state_segment_path(root, "default", 1UL, segment_path,
+                           sizeof(segment_path));
   assert_int_equal(unlink(segment_path), 0);
 
   rc = lc_pouch_state_read(pouch, "default", "cache/key", &read_res, &error);
@@ -3164,8 +3199,6 @@ static void test_single_writer_state_read_uses_projection_cache(void **state) {
 
   lc_pouch_state_read_result_cleanup(NULL, &read_res);
   lc_pouch_state_write_result_cleanup(NULL, &write_res);
-  lc_free_with_allocator(NULL, segment_leaf);
-  lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -3732,6 +3765,245 @@ test_shared_state_projection_cache_refreshes_peer_markers(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_shared_writers_publish_distinct_segments(void **state) {
+  lc_pouch *first_writer;
+  lc_pouch *second_writer;
+  lc_source *source;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result first_write;
+  lc_pouch_state_write_result second_write;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char first_segment_path[1024];
+  char second_segment_path[1024];
+  char body[64];
+  const char *first_leaf;
+  const char *second_leaf;
+  int rc;
+
+  (void)state;
+  first_writer = NULL;
+  second_writer = NULL;
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&first_write, 0, sizeof(first_write));
+  memset(&second_write, 0, sizeof(second_write));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("shared-writer-segments", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &first_writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_open(root, NULL, NULL, &second_writer, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(lc_pouch_supports_concurrent_writes(first_writer));
+  assert_true(lc_pouch_supports_concurrent_writes(second_writer));
+
+  rc = lc_source_from_memory("one", strlen("one"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(first_writer, "default", "state/shared", source,
+                            NULL, &first_write, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+
+  options.expected_etag = first_write.etag;
+  rc = lc_source_from_memory("two", strlen("two"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(second_writer, "default", "state/shared",
+                            source, &options, &second_write, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  assert_true(second_write.index_seq > first_write.index_seq);
+  assert_int_equal(second_write.version, 2UL);
+
+  pouch_state_segment_path(root, "default", 1UL, first_segment_path,
+                           sizeof(first_segment_path));
+  pouch_state_segment_path(root, "default", 2UL, second_segment_path,
+                           sizeof(second_segment_path));
+  first_leaf = strrchr(first_segment_path, '/');
+  second_leaf = strrchr(second_segment_path, '/');
+  assert_non_null(first_leaf);
+  assert_non_null(second_leaf);
+  ++first_leaf;
+  ++second_leaf;
+  assert_int_not_equal(strncmp(first_leaf + 4U, second_leaf + 4U, 32U), 0);
+
+  rc = lc_pouch_state_read(first_writer, "default", "state/shared",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_int_equal(read_result.version, 2UL);
+  read_source_to_string(read_result.body, body, sizeof(body));
+  assert_string_equal(body, "two");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &second_write);
+  lc_pouch_state_write_result_cleanup(NULL, &first_write);
+  lc_pouch_close(second_writer);
+  lc_pouch_close(first_writer);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_shared_writer_replay_orders_same_version_metadata_by_index(void **state) {
+  lc_pouch *first_writer;
+  lc_pouch *second_writer;
+  lc_pouch *reader;
+  lc_source *source;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result first_write;
+  lc_pouch_state_write_result second_write;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char body[64];
+  int rc;
+
+  (void)state;
+  first_writer = NULL;
+  second_writer = NULL;
+  reader = NULL;
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&first_write, 0, sizeof(first_write));
+  memset(&second_write, 0, sizeof(second_write));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("shared-writer-index-replay", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &first_writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_open(root, NULL, NULL, &second_writer, &error);
+  assert_int_equal(rc, LC_OK);
+  memset(first_writer->writer_id, 'f', 32U);
+  first_writer->writer_id[32] = '\0';
+  memset(second_writer->writer_id, '0', 32U);
+  second_writer->writer_id[32] = '\0';
+
+  rc = lc_source_from_memory("body", strlen("body"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(first_writer, "default", "state/replay", source,
+                            NULL, &first_write, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+
+  options.has_metadata = 1;
+  options.metadata = (const unsigned char *)"latest-metadata";
+  options.metadata_length = strlen("latest-metadata");
+  rc = lc_pouch_state_update_metadata(second_writer, "default", "state/replay",
+                                      &options, &second_write, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(second_write.index_seq > first_write.index_seq);
+  assert_int_equal(second_write.version, first_write.version);
+
+  lc_pouch_state_write_result_cleanup(NULL, &second_write);
+  lc_pouch_state_write_result_cleanup(NULL, &first_write);
+  lc_pouch_close(second_writer);
+  second_writer = NULL;
+  lc_pouch_close(first_writer);
+  first_writer = NULL;
+
+  rc = lc_pouch_open(root, NULL, NULL, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(reader, "default", "state/replay", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_int_equal(read_result.version, 1UL);
+  assert_int_equal(read_result.metadata_length, strlen("latest-metadata"));
+  assert_memory_equal(read_result.metadata, "latest-metadata",
+                      read_result.metadata_length);
+  read_source_to_string(read_result.body, body, sizeof(body));
+  assert_string_equal(body, "body");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_shared_writers_reserve_unique_indexes_in_parallel(
+    void **state) {
+  lc_pouch *first_writer;
+  lc_pouch *second_writer;
+  lc_pouch_state_read_result read_result;
+  pouch_parallel_state_write first_write;
+  pouch_parallel_state_write second_write;
+  pthread_barrier_t start;
+  pthread_t first_thread;
+  pthread_t second_thread;
+  lc_error error;
+  char root[512];
+  char body[64];
+  int rc;
+
+  (void)state;
+  first_writer = NULL;
+  second_writer = NULL;
+  memset(&first_write, 0, sizeof(first_write));
+  memset(&second_write, 0, sizeof(second_write));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("shared-writer-indexes", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &first_writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_open(root, NULL, NULL, &second_writer, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(pthread_barrier_init(&start, NULL, 2U), 0);
+  first_write.pouch = first_writer;
+  first_write.start = &start;
+  first_write.key = "state/parallel-a";
+  first_write.value = "alpha";
+  second_write.pouch = second_writer;
+  second_write.start = &start;
+  second_write.key = "state/parallel-b";
+  second_write.value = "bravo";
+  assert_int_equal(pthread_create(&first_thread, NULL,
+                                  pouch_write_state_in_parallel,
+                                  &first_write), 0);
+  assert_int_equal(pthread_create(&second_thread, NULL,
+                                  pouch_write_state_in_parallel,
+                                  &second_write), 0);
+  assert_int_equal(pthread_join(first_thread, NULL), 0);
+  assert_int_equal(pthread_join(second_thread, NULL), 0);
+  assert_int_equal(pthread_barrier_destroy(&start), 0);
+  assert_int_equal(first_write.rc, LC_OK);
+  assert_int_equal(second_write.rc, LC_OK);
+  assert_int_not_equal(first_write.result.index_seq,
+                       second_write.result.index_seq);
+
+  rc = lc_pouch_state_read(first_writer, "default", first_write.key,
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  read_source_to_string(read_result.body, body, sizeof(body));
+  assert_string_equal(body, "alpha");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(first_writer, "default", second_write.key,
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  read_source_to_string(read_result.body, body, sizeof(body));
+  assert_string_equal(body, "bravo");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &second_write.result);
+  lc_pouch_state_write_result_cleanup(NULL, &first_write.result);
+  lc_error_cleanup(&second_write.error);
+  lc_error_cleanup(&first_write.error);
+  lc_pouch_close(second_writer);
+  lc_pouch_close(first_writer);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void open_pouch_client(const char *root, lc_client **out,
                               lc_error *error) {
   lc_client_config config;
@@ -4035,19 +4307,95 @@ static void pouch_state_segment_path(const char *root,
                                      unsigned long segment_id, char *out,
                                      size_t out_size) {
   char *namespace_path;
-  char *segment_leaf;
+  char *segments_path;
+  char **leaves;
+  DIR *dir;
+  struct dirent *entry;
+  size_t count;
+  size_t capacity;
+  size_t index;
   int written;
 
   namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
-  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, segment_id);
   assert_non_null(namespace_path);
-  assert_non_null(segment_leaf);
+  segments_path = lc_pouch_path_join(NULL, namespace_path, "segments");
+  assert_non_null(segments_path);
+  leaves = NULL;
+  count = 0U;
+  capacity = 0U;
+  dir = opendir(segments_path);
+  assert_non_null(dir);
+  while ((entry = readdir(dir)) != NULL) {
+    if (strncmp(entry->d_name, "seg-", 4U) != 0 ||
+        strlen(entry->d_name) != 61U ||
+        strcmp(entry->d_name + strlen(entry->d_name) - 4U, ".log") != 0) {
+      continue;
+    }
+    if (count == capacity) {
+      size_t next_capacity = capacity == 0U ? 4U : capacity * 2U;
+      char **grown = (char **)realloc(leaves, next_capacity * sizeof(*leaves));
+
+      assert_non_null(grown);
+      leaves = grown;
+      capacity = next_capacity;
+    }
+    leaves[count] = strdup(entry->d_name);
+    assert_non_null(leaves[count]);
+    ++count;
+  }
+  assert_int_equal(closedir(dir), 0);
+  assert_true(segment_id > 0UL && segment_id <= count);
+  for (index = 0U; index < count; ++index) {
+    size_t compare_index;
+
+    for (compare_index = index + 1U; compare_index < count; ++compare_index) {
+      if (strcmp(leaves[compare_index], leaves[index]) < 0) {
+        char *swap = leaves[index];
+
+        leaves[index] = leaves[compare_index];
+        leaves[compare_index] = swap;
+      }
+    }
+  }
   written =
-      snprintf(out, out_size, "%s/segments/%s", namespace_path, segment_leaf);
+      snprintf(out, out_size, "%s/segments/%s", namespace_path,
+               leaves[segment_id - 1UL]);
   assert_true(written > 0 && (size_t)written < out_size);
-  lc_free_with_allocator(NULL, segment_leaf);
+  for (index = 0U; index < count; ++index) {
+    free(leaves[index]);
+  }
+  free(leaves);
+  lc_free_with_allocator(NULL, segments_path);
   lc_free_with_allocator(NULL, namespace_path);
   assert_true(path_is_file(out));
+}
+
+static unsigned long pouch_state_writer_segment_count(
+    const char *root, const char *namespace_name) {
+  char *namespace_path;
+  char *segments_path;
+  DIR *dir;
+  struct dirent *entry;
+  unsigned long count;
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
+  assert_non_null(namespace_path);
+  segments_path = lc_pouch_path_join(NULL, namespace_path, "segments");
+  assert_non_null(segments_path);
+  dir = opendir(segments_path);
+  assert_non_null(dir);
+  count = 0UL;
+  while ((entry = readdir(dir)) != NULL) {
+    if (strncmp(entry->d_name, "seg-", 4U) == 0 &&
+        strlen(entry->d_name) == 61U &&
+        strcmp(entry->d_name + 57U, ".log") == 0) {
+      ++count;
+    }
+  }
+  assert_int_equal(closedir(dir), 0);
+  lc_free_with_allocator(NULL, segments_path);
+  lc_free_with_allocator(NULL, namespace_path);
+  return count;
 }
 
 static void flip_file_byte(const char *path, long offset) {
@@ -4387,6 +4735,71 @@ static void test_ensure_namespace_creates_per_namespace_layout(void **state) {
   lc_free_with_allocator(NULL, dot_path);
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_namespace_manifest_uses_u64_snapshot_ids(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_namespace_manifest manifest;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char *manifest_path;
+  char *snapshots_path;
+  char *snapshot_leaf;
+  char *snapshot_path;
+  int fd;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  namespace_path = NULL;
+  manifest_path = NULL;
+  snapshots_path = NULL;
+  snapshot_leaf = NULL;
+  snapshot_path = NULL;
+  memset(&manifest, 0, sizeof(manifest));
+  lc_error_init(&error);
+  make_root("manifest-u64-snapshot", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_ensure_namespace(pouch, "team/alpha", &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  manifest_path = lc_pouch_path_join(NULL, namespace_path, "manifest");
+  assert_non_null(manifest_path);
+  snapshots_path = lc_pouch_path_join(NULL, namespace_path, "snapshots");
+  assert_non_null(snapshots_path);
+  snapshot_leaf = lc_pouch_namespace_snapshot_leaf(NULL, UINT64_C(4294967296));
+  assert_non_null(snapshot_leaf);
+  assert_string_equal(snapshot_leaf, "snapshot-00000000004294967296.log");
+  snapshot_path = lc_pouch_path_join(NULL, snapshots_path, snapshot_leaf);
+  assert_non_null(snapshot_path);
+  fd = open(snapshot_path, O_WRONLY | O_CREAT | O_EXCL, 0666);
+  assert_true(fd >= 0);
+  assert_int_equal(close(fd), 0);
+  write_text_file(manifest_path, "broken=true\nactive_segment=bad\n");
+
+  rc = lc_pouch_namespace_manifest_open(NULL, root, "team/alpha", &manifest,
+                                        NULL, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest.latest_snapshot_segment_id, UINT64_C(4294967296));
+  assert_int_equal(manifest.active_segment_id, UINT64_C(4294967297));
+  assert_int_equal(manifest.max_segment_id, UINT64_C(4294967297));
+
+  lc_pouch_namespace_manifest_cleanup(NULL, &manifest);
+  lc_free_with_allocator(NULL, snapshot_path);
+  lc_free_with_allocator(NULL, snapshot_leaf);
+  lc_free_with_allocator(NULL, snapshots_path);
+  lc_free_with_allocator(NULL, manifest_path);
+  lc_free_with_allocator(NULL, namespace_path);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -5462,17 +5875,12 @@ static void test_state_replay_rejects_corrupt_binary_header(void **state) {
   lc_pouch_state_read_result read_result;
   lc_error error;
   char root[512];
-  char *namespace_path;
-  char *segment_leaf;
   char segment_path[1024];
-  int written;
   int rc;
 
   (void)state;
   pouch = NULL;
   body = NULL;
-  namespace_path = NULL;
-  segment_leaf = NULL;
   memset(&write_result, 0, sizeof(write_result));
   memset(&read_result, 0, sizeof(read_result));
   lc_error_init(&error);
@@ -5492,13 +5900,8 @@ static void test_state_replay_rejects_corrupt_binary_header(void **state) {
   lc_pouch_close(pouch);
   pouch = NULL;
 
-  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
-  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, 1UL);
-  assert_non_null(namespace_path);
-  assert_non_null(segment_leaf);
-  written = snprintf(segment_path, sizeof(segment_path), "%s/segments/%s",
-                     namespace_path, segment_leaf);
-  assert_true(written > 0 && (size_t)written < sizeof(segment_path));
+  pouch_state_segment_path(root, "team/alpha", 1UL, segment_path,
+                           sizeof(segment_path));
   flip_file_byte(segment_path, 0L);
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
@@ -5512,22 +5915,17 @@ static void test_state_replay_rejects_corrupt_binary_header(void **state) {
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   lc_pouch_close(pouch);
-  lc_free_with_allocator(NULL, segment_leaf);
-  lc_free_with_allocator(NULL, namespace_path);
   cleanup_root(root);
 }
 
-static void test_state_replay_repairs_truncated_active_tail(void **state) {
+static void test_state_replay_rejects_truncated_writer_segment(void **state) {
   lc_pouch *pouch;
   lc_source *body;
   lc_pouch_state_write_result write_result;
   lc_pouch_state_read_result read_result;
   lc_error error;
-  struct stat before;
-  struct stat after;
   char root[512];
   char segment_path[1024];
-  char readback[64];
   int rc;
 
   (void)state;
@@ -5554,19 +5952,13 @@ static void test_state_replay_repairs_truncated_active_tail(void **state) {
 
   pouch_state_segment_path(root, "team/alpha", 1UL, segment_path,
                            sizeof(segment_path));
-  assert_int_equal(stat(segment_path, &before), 0);
   append_text_file(segment_path, "partial-record-tail");
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_read(pouch, "team/alpha", "state/current", &read_result,
                            &error);
-  assert_int_equal(rc, LC_OK);
-  assert_true(read_result.found);
-  read_source_to_string(read_result.body, readback, sizeof(readback));
-  assert_string_equal(readback, "tail-survives");
-  assert_int_equal(stat(segment_path, &after), 0);
-  assert_int_equal(after.st_size, before.st_size);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
 
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
@@ -5690,7 +6082,7 @@ static void test_state_write_enforces_create_if_absent(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_state_writes_roll_active_manifest_segment(void **state) {
+static void test_state_writes_publish_writer_segments(void **state) {
   lc_pouch *pouch;
   lc_source *body;
   lc_pouch_open_options open_options;
@@ -5731,10 +6123,17 @@ static void test_state_writes_roll_active_manifest_segment(void **state) {
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
-  assert_path_file(namespace_path, "segments/seg-00000000000000000001.log");
-  assert_path_file(namespace_path, "segments/seg-00000000000000000002.log");
-  assert_path_file_contains(namespace_path, "manifest",
-                            "active_segment=seg-00000000000000000002.log");
+  {
+    char first_segment_path[1024];
+    char second_segment_path[1024];
+
+    pouch_state_segment_path(root, "team/alpha", 1UL, first_segment_path,
+                             sizeof(first_segment_path));
+    pouch_state_segment_path(root, "team/alpha", 2UL, second_segment_path,
+                             sizeof(second_segment_path));
+    assert_true(path_is_file(first_segment_path));
+    assert_true(path_is_file(second_segment_path));
+  }
 
   lc_pouch_close(pouch);
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
@@ -5787,9 +6186,10 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   cleanup_root(root);
 
   open_options.segment_target_bytes = 1UL;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 1;
   open_options.compaction_min_segment_count = 1UL;
   open_options.compaction_min_reclaimable_bytes = 1UL;
-  open_options.background_compaction_enabled = 1;
   open_options.compaction_interval_seconds = 1UL;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
@@ -5813,7 +6213,7 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
   written = snprintf(snapshot_path, sizeof(snapshot_path), "%s/snapshots/%s",
-                     namespace_path, "snapshot-00000000000000000001.log");
+                     namespace_path, "snapshot-00000000000000000002.log");
   assert_true(written > 0 && (size_t)written < sizeof(snapshot_path));
   delay.tv_sec = 0;
   delay.tv_nsec = 100L * 1000L * 1000L;
@@ -5823,18 +6223,12 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   }
   assert_true(path_is_file(snapshot_path));
   assert_path_file(namespace_path,
-                   "snapshots/snapshot-00000000000000000001.log");
+                   "snapshots/snapshot-00000000000000000002.log");
   assert_path_file_contains(namespace_path, "manifest",
-                            "snapshot=snapshot-00000000000000000001.log");
-  assert_path_file_contains(namespace_path, "manifest",
-                            "active_segment=seg-00000000000000000002.log");
-  written = snprintf(path, sizeof(path), "%s/segments/%s", namespace_path,
-                     "seg-00000000000000000001.log");
-  assert_true(written > 0 && (size_t)written < sizeof(path));
+                            "snapshot=snapshot-00000000000000000002.log");
+  pouch_state_segment_path(root, "team/alpha", 1UL, path, sizeof(path));
   assert_true(path_is_file(path));
-  written = snprintf(path, sizeof(path), "%s/segments/%s", namespace_path,
-                     "seg-00000000000000000002.log");
-  assert_true(written > 0 && (size_t)written < sizeof(path));
+  pouch_state_segment_path(root, "team/alpha", 2UL, path, sizeof(path));
   assert_true(path_is_file(path));
 
   rc = lc_source_from_memory("two", strlen("two"), &body, &error);
@@ -5953,6 +6347,8 @@ static void test_maintenance_reports_disabled_without_force(void **state) {
   cleanup_root(root);
 
   open_options.segment_target_bytes = 1UL;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 0;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -6235,14 +6631,14 @@ static void test_maintenance_force_installs_snapshot(void **state) {
   assert_string_equal(maintenance_result.diagnostic, "compacted");
   assert_true(maintenance_result.compacted);
   assert_false(maintenance_result.skipped);
-  assert_int_equal(maintenance_result.compacted_segment_id, 1UL);
+  assert_int_equal(maintenance_result.compacted_segment_id, 2UL);
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
   assert_path_file(namespace_path,
-                   "snapshots/snapshot-00000000000000000001.log");
+                   "snapshots/snapshot-00000000000000000002.log");
   assert_path_file_contains(namespace_path, "manifest",
-                            "snapshot=snapshot-00000000000000000001.log");
+                            "snapshot=snapshot-00000000000000000002.log");
 
   lc_pouch_close(pouch);
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
@@ -6334,8 +6730,8 @@ static void test_manifest_open_ignores_unmanifested_snapshot(void **state) {
                                         &cleanup_pending_count, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(manifest.latest_snapshot,
-                      "snapshot-00000000000000000001.log");
-  assert_int_equal(manifest.latest_snapshot_segment_id, 1UL);
+                      "snapshot-00000000000000000002.log");
+  assert_int_equal(manifest.latest_snapshot_segment_id, 2UL);
   assert_path_file_not_contains(namespace_path, "manifest",
                                 "snapshot=snapshot-00000000000000000099.log");
 
@@ -6362,15 +6758,12 @@ static void test_maintenance_aborts_on_validation_drift(void **state) {
   char key[128];
   char segment_path[1024];
   char *namespace_path;
-  char *segment_leaf;
-  int written;
   int rc;
   unsigned int i;
 
   (void)state;
   pouch = NULL;
   namespace_path = NULL;
-  segment_leaf = NULL;
   lc_error_init(&error);
   memset(&open_options, 0, sizeof(open_options));
   memset(&maintenance_options, 0, sizeof(maintenance_options));
@@ -6396,12 +6789,9 @@ static void test_maintenance_aborts_on_validation_drift(void **state) {
   }
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
-  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, 1UL);
   assert_non_null(namespace_path);
-  assert_non_null(segment_leaf);
-  written = snprintf(segment_path, sizeof(segment_path), "%s/segments/%s",
-                     namespace_path, segment_leaf);
-  assert_true(written > 0 && (size_t)written < sizeof(segment_path));
+  pouch_state_segment_path(root, "team/alpha", 1UL, segment_path,
+                           sizeof(segment_path));
   hook_state.segment_path = segment_path;
   lc_pouch_test_after_snapshot_write_context = &hook_state;
   lc_pouch_test_after_snapshot_write_hook = pouch_compaction_drift_hook;
@@ -6420,11 +6810,10 @@ static void test_maintenance_aborts_on_validation_drift(void **state) {
   assert_false(maintenance_result.compacted);
   assert_false(maintenance_result.skipped);
   assert_path_file_not_contains(namespace_path, "manifest",
-                                "snapshot=snapshot-00000000000000000001.log");
+                                "snapshot=snapshot-00000000000000000002.log");
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
-  lc_free_with_allocator(NULL, segment_leaf);
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
@@ -6444,15 +6833,12 @@ static void test_maintenance_aborts_on_same_size_segment_drift(void **state) {
   char key[128];
   char segment_path[1024];
   char *namespace_path;
-  char *segment_leaf;
-  int written;
   int rc;
   unsigned int i;
 
   (void)state;
   pouch = NULL;
   namespace_path = NULL;
-  segment_leaf = NULL;
   lc_error_init(&error);
   memset(&open_options, 0, sizeof(open_options));
   memset(&maintenance_options, 0, sizeof(maintenance_options));
@@ -6478,12 +6864,9 @@ static void test_maintenance_aborts_on_same_size_segment_drift(void **state) {
   }
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
-  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, 1UL);
   assert_non_null(namespace_path);
-  assert_non_null(segment_leaf);
-  written = snprintf(segment_path, sizeof(segment_path), "%s/segments/%s",
-                     namespace_path, segment_leaf);
-  assert_true(written > 0 && (size_t)written < sizeof(segment_path));
+  pouch_state_segment_path(root, "team/alpha", 1UL, segment_path,
+                           sizeof(segment_path));
   hook_state.segment_path = segment_path;
   lc_pouch_test_after_snapshot_write_context = &hook_state;
   lc_pouch_test_after_snapshot_write_hook = pouch_compaction_drift_hook;
@@ -6502,11 +6885,10 @@ static void test_maintenance_aborts_on_same_size_segment_drift(void **state) {
   assert_false(maintenance_result.compacted);
   assert_false(maintenance_result.skipped);
   assert_path_file_not_contains(namespace_path, "manifest",
-                                "snapshot=snapshot-00000000000000000001.log");
+                                "snapshot=snapshot-00000000000000000002.log");
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
-  lc_free_with_allocator(NULL, segment_leaf);
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
@@ -6563,7 +6945,7 @@ static void test_maintenance_reports_snapshot_write_abort(void **state) {
   snapshots_path = lc_pouch_path_join(NULL, namespace_path, "snapshots");
   assert_non_null(snapshots_path);
   snapshot_path = lc_pouch_path_join(NULL, snapshots_path,
-                                     "snapshot-00000000000000000001.log");
+                                     "snapshot-00000000000000000002.log");
   assert_non_null(snapshot_path);
   assert_int_equal(chmod(snapshots_path, 0555), 0);
 
@@ -6578,7 +6960,7 @@ static void test_maintenance_reports_snapshot_write_abort(void **state) {
   assert_true(maintenance_result.aborted);
   assert_false(maintenance_result.compacted);
   assert_false(maintenance_result.skipped);
-  assert_int_equal(maintenance_result.candidate_segment_count, 1UL);
+  assert_int_equal(maintenance_result.candidate_segment_count, 2UL);
   assert_true(maintenance_result.candidate_bytes > 0UL);
   assert_false(path_is_file(snapshot_path));
 
@@ -6671,8 +7053,9 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   char root[512];
   char *namespace_path;
   char manifest_path[2048];
-  char segments_path[2048];
   char snapshots_path[2048];
+  char segment_path[2048];
+  char obsolete_line[2112];
   char *segment_one_path;
   char *segment_two_path;
   char *stale_snapshot_path;
@@ -6711,13 +7094,14 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
   snprintf(manifest_path, sizeof(manifest_path), "%s/manifest", namespace_path);
-  snprintf(segments_path, sizeof(segments_path), "%s/segments", namespace_path);
   snprintf(snapshots_path, sizeof(snapshots_path), "%s/snapshots",
            namespace_path);
-  segment_one_path =
-      lc_pouch_path_join(NULL, segments_path, "seg-00000000000000000001.log");
-  segment_two_path =
-      lc_pouch_path_join(NULL, segments_path, "seg-00000000000000000002.log");
+  pouch_state_segment_path(root, "team/alpha", 1UL, segment_path,
+                           sizeof(segment_path));
+  segment_one_path = strdup(segment_path);
+  pouch_state_segment_path(root, "team/alpha", 2UL, segment_path,
+                           sizeof(segment_path));
+  segment_two_path = strdup(segment_path);
   assert_non_null(segment_one_path);
   assert_non_null(segment_two_path);
   assert_true(path_is_file(segment_one_path));
@@ -6729,11 +7113,12 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(maintenance_result.diagnostic, "compacted");
   assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 1UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
   assert_true(path_is_file(segment_one_path));
   assert_true(path_is_file(segment_two_path));
-  assert_file_contains(manifest_path,
-                       "obsolete_segment=seg-00000000000000000001.log");
+  snprintf(obsolete_line, sizeof(obsolete_line), "obsolete_segment=%s",
+           strrchr(segment_one_path, '/') + 1U);
+  assert_file_contains(manifest_path, obsolete_line);
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   memset(&maintenance_result, 0, sizeof(maintenance_result));
@@ -6747,7 +7132,7 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   assert_true(maintenance_result.skipped);
   assert_false(maintenance_result.compacted);
   assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 1UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   memset(&maintenance_result, 0, sizeof(maintenance_result));
@@ -6758,7 +7143,7 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   assert_true(maintenance_result.skipped);
   assert_false(maintenance_result.compacted);
   assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 1UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
 
   assert_true(path_is_file(segment_one_path));
   assert_true(path_is_file(segment_two_path));
@@ -6778,7 +7163,7 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(maintenance_result.diagnostic, "cleanup-pending");
   assert_int_equal(maintenance_result.cleanup_deleted_count, 1UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 1UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
   assert_false(path_is_file(stale_snapshot_path));
   assert_file_not_contains(manifest_path, "obsolete_snapshot=");
 
@@ -7056,18 +7441,17 @@ static void test_staged_state_writes_durable_decision_records(void **state) {
   lc_error error;
   char root[512];
   char *namespace_path;
-  char *segment_leaf;
   char segment_path[1024];
   const unsigned char decision_header[] = {'L', 'H', 'C', 'P', 1U, 5U};
   int discarded;
-  int written;
+  int found_decision;
   int rc;
+  unsigned long segment_index;
 
   (void)state;
   pouch = NULL;
   source = NULL;
   namespace_path = NULL;
-  segment_leaf = NULL;
   memset(&committed, 0, sizeof(committed));
   memset(&staged_commit, 0, sizeof(staged_commit));
   memset(&promoted, 0, sizeof(promoted));
@@ -7117,16 +7501,21 @@ static void test_staged_state_writes_durable_decision_records(void **state) {
   assert_int_equal(discarded, 1);
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
-  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, 1UL);
   assert_non_null(namespace_path);
-  assert_non_null(segment_leaf);
-  written = snprintf(segment_path, sizeof(segment_path), "%s/segments/%s",
-                     namespace_path, segment_leaf);
-  assert_true(written > 0 && (size_t)written < sizeof(segment_path));
-  assert_true(pouch_file_contains_bytes(segment_path, decision_header,
-                                        sizeof(decision_header)));
+  found_decision = 0;
+  for (segment_index = 1UL;
+       segment_index <= pouch_state_writer_segment_count(root, "team/alpha");
+       ++segment_index) {
+    pouch_state_segment_path(root, "team/alpha", segment_index, segment_path,
+                             sizeof(segment_path));
+    if (pouch_file_contains_bytes(segment_path, decision_header,
+                                  sizeof(decision_header))) {
+      found_decision = 1;
+      break;
+    }
+  }
+  assert_true(found_decision);
 
-  lc_free_with_allocator(NULL, segment_leaf);
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_state_write_result_cleanup(NULL, &staged_discard);
   lc_pouch_state_write_result_cleanup(NULL, &promoted);
@@ -7147,7 +7536,6 @@ test_staged_decision_recovery_tombstones_interrupted_discard(void **state) {
   char root[512];
   char staged_key[256];
   char *namespace_path;
-  char *segment_leaf;
   char segment_path[1024];
   int written;
   int rc;
@@ -7156,7 +7544,6 @@ test_staged_decision_recovery_tombstones_interrupted_discard(void **state) {
   pouch = NULL;
   source = NULL;
   namespace_path = NULL;
-  segment_leaf = NULL;
   memset(&staged, 0, sizeof(staged));
   memset(&read_result, 0, sizeof(read_result));
   lc_error_init(&error);
@@ -7177,12 +7564,9 @@ test_staged_decision_recovery_tombstones_interrupted_discard(void **state) {
   pouch = NULL;
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
-  segment_leaf = lc_pouch_namespace_segment_leaf(NULL, 1UL);
   assert_non_null(namespace_path);
-  assert_non_null(segment_leaf);
-  written = snprintf(segment_path, sizeof(segment_path), "%s/segments/%s",
-                     namespace_path, segment_leaf);
-  assert_true(written > 0 && (size_t)written < sizeof(segment_path));
+  pouch_state_segment_path(root, "team/alpha", 1UL, segment_path,
+                           sizeof(segment_path));
   written = snprintf(staged_key, sizeof(staged_key),
                      "state/recover/.staging/txn-recover");
   assert_true(written > 0 && (size_t)written < sizeof(staged_key));
@@ -7197,7 +7581,6 @@ test_staged_decision_recovery_tombstones_interrupted_discard(void **state) {
   assert_int_equal(read_result.found, 0);
 
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  lc_free_with_allocator(NULL, segment_leaf);
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_state_write_result_cleanup(NULL, &staged);
   lc_pouch_close(pouch);
@@ -9689,9 +10072,10 @@ test_client_queue_mutations_touch_notification_marker(void **state) {
   lc_message *message;
   lc_error error;
   char root[512];
+  char endpoint[560];
   char marker_path[1024];
-  unsigned long enqueue_sequence;
-  unsigned long dequeue_sequence;
+  uint64_t enqueue_sequence;
+  uint64_t dequeue_sequence;
   int rc;
 
   (void)state;
@@ -9705,7 +10089,9 @@ test_client_queue_mutations_touch_notification_marker(void **state) {
   make_root("client-queue-notify", root, sizeof(root));
   cleanup_root(root);
 
-  open_pouch_client(root, &client, &error);
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s?queue_watch=true",
+                       root) > 0);
+  open_pouch_client_endpoint(endpoint, &client, &error);
   enqueue_req.namespace_name = "team/notify";
   enqueue_req.queue = "jobs-main";
   enqueue_req.visibility_timeout_seconds = 30L;
@@ -9720,7 +10106,7 @@ test_client_queue_mutations_touch_notification_marker(void **state) {
                          sizeof(marker_path));
   assert_file_contains(marker_path, "queue=jobs-main");
   enqueue_sequence = read_marker_sequence(marker_path, NULL);
-  assert_true(enqueue_sequence > 0UL);
+  assert_true(enqueue_sequence > UINT64_C(0));
 
   dequeue_req.namespace_name = "team/notify";
   dequeue_req.queue = "jobs-main";
@@ -17325,6 +17711,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_logs_use_storage_pouch_subsystem),
       cmocka_unit_test(test_open_rejects_unsupported_root_manifest),
       cmocka_unit_test(test_ensure_namespace_creates_per_namespace_layout),
+      cmocka_unit_test(test_namespace_manifest_uses_u64_snapshot_ids),
       cmocka_unit_test(
           test_pouch_endpoint_opens_new_backend_without_http_engine),
       cmocka_unit_test(test_pouch_endpoint_rejects_unix_socket_mix),
@@ -17342,10 +17729,10 @@ int main(void) {
       cmocka_unit_test(test_pouch_crypto_compression_leases_skip_zlib),
       cmocka_unit_test(test_pouch_compression_leases_skip_zlib),
       cmocka_unit_test(test_state_replay_rejects_corrupt_binary_header),
-      cmocka_unit_test(test_state_replay_repairs_truncated_active_tail),
+      cmocka_unit_test(test_state_replay_rejects_truncated_writer_segment),
       cmocka_unit_test(test_state_write_enforces_expected_etag),
       cmocka_unit_test(test_state_write_enforces_create_if_absent),
-      cmocka_unit_test(test_state_writes_roll_active_manifest_segment),
+      cmocka_unit_test(test_state_writes_publish_writer_segments),
       cmocka_unit_test(test_state_scheduled_compaction_installs_snapshot),
       cmocka_unit_test(test_state_replay_ignores_stale_generation),
       cmocka_unit_test(test_pouch_root_path_aliases_share_store_identity),
@@ -17432,6 +17819,10 @@ int main(void) {
           test_single_writer_transition_invalidates_query_index_trust),
       cmocka_unit_test(
           test_shared_state_projection_cache_refreshes_peer_markers),
+      cmocka_unit_test(test_shared_writers_publish_distinct_segments),
+      cmocka_unit_test(
+          test_shared_writer_replay_orders_same_version_metadata_by_index),
+      cmocka_unit_test(test_shared_writers_reserve_unique_indexes_in_parallel),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(test_lease_private_reads_reject_stale_handle),
       cmocka_unit_test(test_pouch_lease_claim_and_credentials_are_durable),

@@ -35,7 +35,9 @@
 #include <strings.h>
 #endif
 
-static unsigned long lc_pouch_next_writer_marker_id;
+#include <openssl/rand.h>
+
+static uint64_t lc_pouch_next_writer_marker_id;
 static pthread_mutex_t lc_pouch_writer_marker_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t lc_pouch_root_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -1848,18 +1850,31 @@ static int lc_pouch_ensure_root(lc_pouch *pouch, lc_error *error) {
 }
 
 static int lc_pouch_init_writer_marker(lc_pouch *pouch, lc_error *error) {
+  unsigned char writer_random[16];
   char marker_leaf[128];
   char presence_leaf[128];
-  unsigned long writer_id;
+  char writer_hex[33];
+  uint64_t writer_marker_id;
+  size_t index;
 
+  if (RAND_bytes(writer_random, (int)sizeof(writer_random)) != 1) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to generate pouch writer identity", NULL,
+                        NULL, "pouch");
+  }
+  for (index = 0U; index < sizeof(writer_random); ++index) {
+    (void)snprintf(writer_hex + (index * 2U), 3U, "%02x", writer_random[index]);
+  }
+  writer_hex[sizeof(writer_hex) - 1U] = '\0';
   pthread_mutex_lock(&lc_pouch_writer_marker_mutex);
-  writer_id = ++lc_pouch_next_writer_marker_id;
+  writer_marker_id = ++lc_pouch_next_writer_marker_id;
   pthread_mutex_unlock(&lc_pouch_writer_marker_mutex);
-  snprintf(marker_leaf, sizeof(marker_leaf), "writer-%ld-%020lu.marker",
-           (long)getpid(),
-           writer_id);
-  snprintf(presence_leaf, sizeof(presence_leaf), "writer-%ld-%020lu.presence",
-           (long)getpid(), writer_id);
+  snprintf(marker_leaf, sizeof(marker_leaf), "writer-%s-%020" PRIu64 ".marker",
+           writer_hex, writer_marker_id);
+  snprintf(presence_leaf, sizeof(presence_leaf),
+           "writer-%s-%020" PRIu64 ".presence",
+           writer_hex, writer_marker_id);
+  pouch->writer_id = lc_strdup_with_allocator(&pouch->allocator, writer_hex);
   pouch->writer_marker_leaf =
       lc_strdup_with_allocator(&pouch->allocator, marker_leaf);
   pouch->writer_presence_leaf =
@@ -1871,7 +1886,8 @@ static int lc_pouch_init_writer_marker(lc_pouch *pouch, lc_error *error) {
                                                          pouch->writer_presence_dir,
                                                          presence_leaf)
                                     : NULL;
-  if (pouch->writer_marker_leaf == NULL || pouch->writer_presence_leaf == NULL ||
+  if (pouch->writer_id == NULL || pouch->writer_marker_leaf == NULL ||
+      pouch->writer_presence_leaf == NULL ||
       pouch->writer_presence_dir == NULL || pouch->writer_presence_path == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch writer marker paths", NULL,
@@ -2109,6 +2125,22 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         strerror(pthread_rc), NULL, "pouch");
   }
   pouch->writer_presence_mutex_initialized = 1;
+  pthread_rc = pthread_mutex_init(&pouch->writer_append_mutex, NULL);
+  if (pthread_rc != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch writer append mutex",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->writer_append_mutex_initialized = 1;
+  pthread_rc = pthread_mutex_init(&pouch->state_mutation_mutex, NULL);
+  if (pthread_rc != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch state mutation mutex",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->state_mutation_mutex_initialized = 1;
   pthread_rc = pthread_cond_init(&pouch->writer_presence_cond, NULL);
   if (pthread_rc != 0) {
     lc_pouch_close(pouch);
@@ -2272,6 +2304,7 @@ void lc_pouch_close(lc_pouch *pouch) {
   lc_free_with_allocator(&allocator, pouch->writer_presence_leaf);
   lc_free_with_allocator(&allocator, pouch->writer_presence_dir);
   lc_free_with_allocator(&allocator, pouch->writer_marker_leaf);
+  lc_free_with_allocator(&allocator, pouch->writer_id);
   lc_free_with_allocator(&allocator, pouch->compression);
   lc_free_with_allocator(&allocator, pouch->query_fallback_engine);
   lc_free_with_allocator(&allocator, pouch->query_engine);
@@ -2285,6 +2318,12 @@ void lc_pouch_close(lc_pouch *pouch) {
   }
   if (pouch->writer_presence_mutex_initialized) {
     pthread_mutex_destroy(&pouch->writer_presence_mutex);
+  }
+  if (pouch->writer_append_mutex_initialized) {
+    pthread_mutex_destroy(&pouch->writer_append_mutex);
+  }
+  if (pouch->state_mutation_mutex_initialized) {
+    pthread_mutex_destroy(&pouch->state_mutation_mutex);
   }
   if (pouch->single_writer_mutex_initialized) {
     pthread_mutex_destroy(&pouch->single_writer_mutex);

@@ -107,7 +107,7 @@ typedef struct lc_pouch_maintenance_result {
   char *diagnostic;
   unsigned long candidate_segment_count;
   uint64_t candidate_bytes;
-  unsigned long compacted_segment_id;
+  uint64_t compacted_segment_id;
   unsigned long cleanup_deleted_count;
   unsigned long cleanup_pending_count;
   unsigned long retention_scanned_count;

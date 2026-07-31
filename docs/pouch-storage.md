@@ -5,10 +5,12 @@ engine. Pouch has not shipped, so there is no compatibility obligation for any
 pre-release layout, record format, manifest, transform descriptor, benchmark
 fixture, or transition name.
 
-The implementation target is a real segmented logstore. The current partial
-Pouch implementation is useful only as source material where it already matches
-this specification. It must not be preserved through compatibility layers,
-dual readers, legacy version branches, or "redesign" terminology.
+The implementation target is a real segmented logstore. New Pouch writers use
+the writer-scoped layout specified below. The reader also recognizes the prior
+numeric Pouch segment names so an existing local root can be reopened and
+compacted into the current layout; new writes never emit those names. This is
+a one-way Pouch layout migration, not Go-disk interoperability or a parallel
+runtime format.
 
 ## Reference Principle
 
@@ -51,13 +53,15 @@ and staging paths. The audit is a source-level comparison; it does not claim
 that Pouch files can be opened by Go disk or that their public storage APIs are
 interchangeable.
 
-No unresolved durable-logstore semantic gap was found in the audited surface:
-namespace locality, record families, fixed-width durable scalars, streamed
-payload spans, replay/tail repair, staged links, grouped sync, and
-capture/validate/install compaction all preserve the Go disk property on every
-supported C ABI. The divergences below remain material for configuration,
-operations, portability, or raw-backend users and must not be described as byte
-or API compatibility.
+No unresolved correctness gap was found in the audited durable-logstore
+surface: namespace locality, record families, fixed-width durable scalars,
+streamed payload spans, staged links, grouped sync, and
+capture/validate/install compaction preserve the relevant Go disk property on
+every supported C ABI. Pouch deliberately exceeds Go disk's public
+single-writer capability with a shared-writer contract. Its current immutable
+commit-segment lifetime is a material throughput tradeoff relative to Go's
+rolling active segments and remains documented below. None of this implies byte
+or public-API compatibility.
 
 ## Go Disk Alignment Contract
 
@@ -69,10 +73,10 @@ participant model, compaction safety properties, and performance intent are
 preserved. C-native representation choices are allowed only when this document
 names them and explains why the Go disk property is still preserved.
 
-Pouch has no shipped compatibility contract. The implementation must not keep
-compatibility readers, old/new dispatch, version-bump migrations, or legacy
-branches for rejected pre-release layouts. The correct response to a divergent
-pre-release representation is a clean cutover and dead-code removal.
+Pouch has no Go-disk compatibility contract. It must not keep Go record
+readers, Go/C format dispatch, or byte-compatibility migrations. The limited
+numeric-Pouch segment reader is retained only until those existing local files
+are compacted or retired; it does not create a second writer path.
 
 ### Storage API Boundary
 
@@ -169,6 +173,12 @@ Pouch additionally uses `uint64_t` payload lengths and offsets. This is an
 accepted divergence from Go's 32-bit physical payload length because Pouch's
 large-payload/file-size invariant is stronger.
 
+All authoritative Pouch storage identities that may outlive a process are
+also fixed-width: writer-segment sequences, legacy numeric segment and
+snapshot identities, writer-marker and queue-notification sequences, and
+namespace index high-water values are `uint64_t`. A 20-digit decimal filename
+or marker field is therefore never a machine-word counter.
+
 Pouch must not use protobuf for durable metadata. Pouch must not use Go's
 `LOGD` byte format. Those are accepted divergences; the semantic payload of the
 metadata is not optional.
@@ -235,6 +245,13 @@ correlation ids, projection refresh, and compaction validation. Derived indexes
 must filter changed records by this log/index sequence, not by public state
 generation, because metadata-only records and independent keys may share public
 generation values.
+
+New Pouch record metadata ends with a fixed binary index trailer containing a
+magic and the `uint64_t` sequence. The sequence allocator is durable and
+namespace-scoped, and serializes the short reservation path across processes
+and separate Pouch handles in one process. Older numeric Pouch records without
+that trailer replay through the legacy sequential fallback only; newly written
+records never depend on that fallback.
 
 ### State Records
 
@@ -452,10 +469,12 @@ Pouch obligations:
 ### Compaction
 
 Go disk compaction captures live refs from per-namespace projections, excludes
-the active segment, protects live links into candidate files, streams payload
+its active segment, protects live links into candidate files, streams payload
 spans into a temp snapshot, validates captured refs before install, renames the
 snapshot, updates manifest state, and deletes obsolete files only after grace
-and live-ref checks.
+and live-ref checks. Pouch applies that exclusion only to a legacy numeric
+active file: a published writer-scoped segment is immutable and therefore a
+sealed candidate.
 
 Pouch must compact with the same lifecycle. It must not compact by dumping an
 entire cache, reparsing payload JSON, or materializing large values. Object,
@@ -530,10 +549,15 @@ divergence.
   Go keeps a namespace at `<root>/<namespace>/logstore/` with an append-only
   manifest log and writer/UUID-derived segment and snapshot names. Pouch keeps
   escaped namespace directories below `namespaces/`, uses a root and per-
-  namespace text manifest, and uses monotonic segment/snapshot ids. Reason:
-  Pouch owns its recovery format and does not promise cross-engine file
-  interoperability. The manifest still names the active segment, installed
-  snapshot, and obsolete files authoritatively.
+  namespace text manifest, and publishes immutable
+  `seg-<32-hex-writer-id>-<20-digit-u64-sequence>.log` files. The writer id
+  is random per Pouch handle and the sequence is `uint64_t`. The manifest
+  authoritatively records installed snapshots and obsolete files; visible
+  writer segments are discovered by their validated names so concurrent
+  writers never rewrite the manifest for a hot append. Numeric
+  `seg-<20-digit-id>.log` files remain replay-compatible migration input.
+  Reason: Pouch owns its recovery format and does not promise cross-engine
+  file interoperability.
 
 - Query-index artifact format:
   Go disk query/index internals are Go-native. Pouch uses C-native packed
@@ -582,11 +606,17 @@ divergence.
   `lc_pouch_supports_concurrent_writes` and `lc_pouch_status` explicitly
   report Pouch's supported shared-writer mode. Normal Pouch opens use
   `single_writer=0`, and multiple liblockdc clients or processes may share a
-  root because the namespace `fcntl` lock serializes mutations and namespace
-  markers refresh peers. Go disk reports `SupportsConcurrentWrites=false`
-  because its logstore has a single append owner. The different reported value
-  is deliberate: Pouch reports its actual HA/shared-writer contract rather
-  than inheriting Go's cache-oriented capability advertisement.
+  root. A mutation holds an exact logical-key lock; independent keys may
+  append concurrently. A short namespace sequence reservation assigns unique
+  durable index values, and a shared namespace maintenance barrier prevents a
+  compaction or retention pass from racing a publication. The lock set has
+  process-local guards as well as `fcntl` files, because POSIX process locks
+  alone do not serialize separate descriptors in one process. Namespace
+  markers refresh peer projections after publication. Go disk reports
+  `SupportsConcurrentWrites=false` because its public disk backend has a
+  single append owner. The different reported value is deliberate: Pouch
+  reports its actual HA/shared-writer contract rather than inheriting Go's
+  cache-oriented capability advertisement.
 
 - Fsync batching and diagnostics:
   `fsync_batch_max_ops` is a `uint64_t` Pouch open option and a
@@ -632,11 +662,15 @@ divergence.
 
 ### Remaining Operational And Public API Differences
 
-- Writer lock granularity:
-  Pouch still serializes mutations with a namespace `fcntl` lock rather than
-  Go's per-key lock-file cache. This preserves correctness and HA fencing but
-  has lower unrelated-key write concurrency. It is a remaining throughput
-  divergence, not a single-writer or HA semantic gap.
+- Immutable commit-segment lifetime:
+  Go disk keeps a writer-local active segment and rolls it at its configured
+  target size. Pouch currently publishes one immutable writer-scoped segment
+  for each streamed mutation or small-record batch, then relies on compaction
+  to merge them. This avoids a root-wide append owner and makes an incomplete
+  writer file invisible, but it means `segment_target_bytes` does not bound new
+  shared-writer segments. It is a deliberate correctness-first HA design and
+  the remaining physical throughput gap versus Go's rolling writer segments;
+  it must not be described as a faster equivalent yet.
 
 - Raw storage surface and empty staged key:
   Go exposes a generic backend with raw object list/get/put/delete operations
@@ -665,11 +699,14 @@ an unaccepted divergence.
 
 Architecture-dependent durable scalar widths are also removed: Pouch no longer
 uses `unsigned long` or `long` for persisted generations, index high-water
-values, Unix timestamps, TC terms, or queue enqueue ordering tokens, and no
-longer rejects valid 64-bit generations at an `ULONG_MAX` boundary. The Pouch
-direct API, namespace manifests, projection cache, query-index artifacts,
-queue/TC binary records, and generic client boundary use the fixed-width types
-stated above.
+values, Unix timestamps, TC terms, queue enqueue ordering tokens, writer
+identities, or marker/notification sequences, and no longer rejects valid
+64-bit generations at an `ULONG_MAX` boundary. The Pouch direct API,
+authoritative namespace manifests and records, projection cache, queue/TC
+binary records, and generic client boundary use the fixed-width types stated
+above. Query-index artifacts remain derived and rebuildable; their in-memory
+row counts are bounded by the host's address space rather than defining an
+authoritative storage counter.
 
 ## Non-Negotiable Model
 
@@ -677,8 +714,8 @@ Pouch stores production data inside namespace log records. It is not a
 metadata-only log with separate durable payload files.
 
 Each namespace owns append-only segment files and installed snapshot files.
-Every durable mutation appends a typed binary record to the active segment or
-to a compaction snapshot. Records contain:
+Every durable mutation publishes a typed binary record in an immutable
+writer-scoped segment or in a compaction snapshot. Records contain:
 
 - a fixed binary header for physical navigation and integrity;
 - a normalized key;
@@ -699,8 +736,9 @@ The implementation keeps Pouch as a receiver shell over private storage
 boundaries. The current C boundaries are:
 
 - `lc_pouch_namespace.[ch]`: namespace lifecycle, root/namespace manifest
-  handling, marker files, active segment selection, snapshot install, obsolete
-  cleanup, and repair from discovered segments/snapshots.
+  handling, marker files, writer-segment discovery, legacy active-segment
+  migration support, snapshot install, obsolete cleanup, and repair from
+  discovered segments/snapshots.
 - `lc_pouch_record.[ch]`: binary record header, validation, CRC, and fuzzable
   decode helpers.
 - `lc_pouch_state.c`: the namespace logstore writer/replay/projection core for
@@ -767,11 +805,16 @@ root/
     <escaped-namespace>/
       manifest
       markers/
-        <writer-marker>
+        writer-<writer-id>-<20-digit-u64-sequence>.marker
       segments/
-        seg-<monotonic>.log
+        seg-<32-hex-writer-id>-<20-digit-u64-sequence>.log
+        seg-<20-digit-id>.log             # legacy replay/migration only
       snapshots/
-        snapshot-<monotonic>.log
+        snapshot-<20-digit-u64-id>.log
+      sequence
+      sequence.lock
+      write.lock
+      locks/
       index/
       queue-notify/
   locks/
@@ -804,12 +847,13 @@ The header is for physical traversal and corruption detection. Logical facts
 belong in record metadata, where replay can inspect them without opening the
 payload.
 
-`flags` currently defines `LC_POUCH_RECORD_FLAG_PENDING`. Payload writes first
-append a pending prefix, stream the payload, then rewrite the prefix with final
-metadata and flags cleared. Replay never applies pending records. A pending
-record at the active segment tail is treated as crash residue and repaired by
-truncating to the last good offset; a pending record in a snapshot or sealed
-segment is corruption.
+`flags` currently defines `LC_POUCH_RECORD_FLAG_PENDING`. Payload writes build
+the record in a private temporary writer file, stream the payload, then rewrite
+the prefix with final metadata and flags cleared before the file is published.
+Replay never applies pending records. A published writer segment or snapshot
+containing a pending or truncated record is corruption. Tail repair remains
+only for the former numeric active segment format, where an interrupted append
+could have been visible before the current writer-scoped publication protocol.
 
 Record decoding must reject impossible lengths, overflow, unknown record
 types, short reads, bad CRC, invalid metadata length, invalid descriptor length,
@@ -913,28 +957,34 @@ integer overflow must fail.
 
 ## Append And Commit Pipeline
 
-Pouch writes through the namespace state/logstore writer. The current C
-implementation has a single-writer namespace lock, segment rolling, batched
-small control appends, streaming payload appends, final prefix rewrite, and a
-required cross-operation commit-group/fsync-delay batching layer.
+Pouch writes through a writer-scoped state/logstore path. The current C
+implementation has exact-key locking, short global index reservation, immutable
+writer segments, batched small control appends, streaming payload appends,
+final prefix rewrite, and a required cross-operation commit-group/fsync-delay
+batching layer.
 
 Required behavior:
 
-- hold the namespace writer lock while selecting the active segment and
-  allocating record offsets;
-- roll the active segment at the configured target size;
-- append small records inline in batches;
+- lock the canonical logical key for its full CAS/read/append/publication
+  window; staged and destination keys for the same logical key share that
+  lock;
+- take the shared maintenance barrier while a mutation is in progress;
+- reserve one or more `uint64_t` namespace index sequences under the short
+  sequence lock before final record headers are written;
+- allocate a writer-local segment name without scanning or rewriting a shared
+  active-segment manifest entry;
+- append small records to one private writer file batch;
 - stream large payload records directly from the caller-provided reader through
-  transforms, hash/etag, and CRC into the segment without full materialization;
+  transforms, hash/etag, and CRC into a private writer file without full
+  materialization;
 - rewrite the header and metadata prefix only after final stored lengths,
   descriptor, hash/etag, and CRC are known;
-- group independent commit requests through a bounded fsync-delay batcher so
-  the same segment file is synced once per batch, mirroring Go disk's durable
-  group commit model;
-- defer hot segment syncs through duplicate segment fds held by the current
-  state commit group, then drain the group at the public mutation boundary;
+- group independent commit requests through a bounded fsync-delay batcher;
+- defer private-file syncs through duplicate fds held by the current state
+  commit group, drain them at the public mutation boundary, atomically rename
+  each synced file into `segments/`, then fsync that directory;
 - publish writer markers only after the grouped segment sync succeeds, so
-  shared readers are not signaled to refresh from unsynced segment data;
+  shared readers are not signaled to refresh from incomplete or unsynced data;
 - make refs visible in projections only after the commit group succeeds at the
   public boundary, except for explicit same-operation staged visibility;
 - make staged/pending refs visible only through explicit same-operation
@@ -942,11 +992,11 @@ Required behavior:
 - propagate fsync/write failure to every operation in the group.
 
 Go disk batches appends and fsync requests because per-write fsync can dominate
-core lockd workloads. Pouch must carry the same performance invariant: append
-ordering is deterministic, commit publication waits for durable sync, syncs are
-deduplicated per file within a batch, and shutdown drains or fails outstanding
-commit requests deterministically. On Linux, hot segment commits use
-`fdatasync`, matching Go disk's Linux sync path.
+core lockd workloads. Pouch preserves deterministic append order, durable
+publication, per-file sync deduplication inside a commit group, and
+deterministic shutdown handling. The current immutable-file layout has the
+throughput tradeoff listed in the divergence register. On Linux, hot segment
+commits use `fdatasync`, matching Go disk's Linux sync path.
 
 Pouch's local batch delay is fixed at two milliseconds. Its
 `fsync_batch_max_ops` setting is a `uint64_t`, defaults to zero for an
@@ -994,10 +1044,16 @@ Required behavior:
   supported;
 - allow single-writer mode to skip unnecessary marker scans;
 - order installed snapshot first, then live non-obsolete segments;
-- apply records by generation so stale writes cannot resurrect older state;
-- track each segment's last good read offset and avoid reading incomplete
-  active segment tails;
-- tolerate crash-truncated tails by stopping at the last complete valid record;
+- apply records by public generation so stale writes cannot resurrect older
+  state; when records for the same logical key have the same public generation,
+  use the durable namespace index sequence as the tie-breaker. Writer filename
+  order is never commit order;
+- use the durable per-record index sequence when present, with sequential
+  replay only for numeric legacy records that predate the trailer;
+- treat writer-scoped segments as immutable: incomplete, pending, or
+  truncated published content is corruption, not a repair candidate;
+- repair a crash-truncated tail only in the legacy numeric manifest active
+  segment;
 - never apply a partial record or bad-CRC payload;
 - validate link targets against manifested segment/snapshot state before
   installing linked refs;
@@ -1013,17 +1069,18 @@ whole namespace unreadable, but corrupt data must not be silently applied.
 
 Each namespace has a manifest recording at least:
 
-- active segment open;
-- active segment seal;
 - snapshot install;
 - obsolete segment;
 - obsolete snapshot.
 
-The current C manifest is a small rewritten text file with active segment,
-latest snapshot, and obsolete file sets. Snapshot install or obsolete changes
-reset the affected replay state so projections cannot keep stale refs. The
-manifest is namespace lifecycle metadata; hot state/object/queue/lease facts
-remain binary log records.
+The current C manifest is a small rewritten text file with the installed
+snapshot, obsolete file sets, and the legacy numeric active-segment field.
+Validated writer-scoped segment names are discovered from `segments/`; they
+are immutable after publication and are deliberately not appended to the
+manifest on each hot write. This avoids a shared manifest mutation race.
+Snapshot install or obsolete changes reset the affected replay state so
+projections cannot keep stale refs. The manifest is namespace lifecycle
+metadata; hot state/object/queue/lease facts remain binary log records.
 
 Malformed manifest entries are ignored only where Go disk intentionally treats
 them as non-authoritative append noise. Any behavior here must be tested and
@@ -1192,7 +1249,8 @@ Required behavior:
 
 - load manifest, snapshots, and segments before capture;
 - choose candidates from installed snapshot plus sealed non-obsolete segments;
-- exclude the active segment;
+- treat every published writer-scoped segment as sealed; exclude only the
+  legacy numeric active segment while it remains migration input;
 - compute reclaimable bytes;
 - enforce configurable `min_segments`, `min_reclaimable_bytes`, interval,
   delete grace, and optional IO throttle;
@@ -1216,10 +1274,11 @@ Required behavior:
 - delete obsolete files only after delete grace and only if no live refs or
   protected links remain.
 
-The active segment exclusion is semantic, not merely an implementation detail.
-Compaction must not snapshot through the current active tail and immediately
-unlink every segment through `max_segment_id`. Pouch may use a C-native
-manifest and snapshot format, but it must preserve Go disk's candidate
+Compaction takes the exclusive namespace maintenance barrier before capture,
+validation, install, or retention deletion. Normal writers hold the shared
+side, so an installed snapshot cannot obsolete a file that a writer will later
+append. Pouch must not range-unlink files through a maximum id. It may use a
+C-native manifest and snapshot format, but it must preserve Go disk's candidate
 selection, drift validation, live-link protection, and obsolete cleanup timing.
 
 Validation drift must abandon the snapshot without installing it. Cleanup must
@@ -1295,9 +1354,11 @@ Fuzzing and failure tests must cover:
 - metadata decode for every family;
 - state link decode and target validation;
 - manifest replay;
-- crash-truncated segment tails;
+- crash-truncated legacy active tails and rejected truncated published writer
+  segments;
 - bad CRC and malformed lengths;
-- replay generation ordering;
+- replay generation ordering and equal-generation index-sequence ordering
+  across writer-scoped files;
 - compaction capture/install/cleanup metadata;
 - transform descriptor decode;
 - crypto authentication failure;

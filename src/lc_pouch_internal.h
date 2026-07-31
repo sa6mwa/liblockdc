@@ -76,7 +76,7 @@ struct lc_pouch {
   uint64_t compaction_max_io_bytes_per_sec;
   uint64_t retention_seconds;
   uint64_t janitor_interval_seconds;
-  unsigned long marker_sequence;
+  uint64_t marker_sequence;
   int background_compaction_enabled;
   int compaction_throttling_disabled;
   int single_writer;
@@ -97,6 +97,7 @@ struct lc_pouch {
   pslog_logger *base_logger;
   pslog_logger *logger;
   int owns_logger;
+  char *writer_id;
   char *writer_marker_leaf;
   char *writer_presence_dir;
   char *writer_presence_leaf;
@@ -108,6 +109,11 @@ struct lc_pouch {
   int writer_presence_cond_initialized;
   int writer_presence_thread_started;
   int writer_presence_stop;
+  pthread_mutex_t writer_append_mutex;
+  int writer_append_mutex_initialized;
+  uint64_t writer_segment_sequence;
+  pthread_mutex_t state_mutation_mutex;
+  int state_mutation_mutex_initialized;
   pthread_mutex_t fsync_mutex;
   pthread_cond_t fsync_cond;
   pthread_t fsync_thread;

@@ -52,7 +52,7 @@
 static pthread_mutex_t lc_pouch_queue_message_id_mutex =
     PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t lc_pouch_lease_id_mutex = PTHREAD_MUTEX_INITIALIZER;
-static unsigned long lc_pouch_lease_id_counter = 0UL;
+static uint64_t lc_pouch_lease_id_counter = UINT64_C(0);
 
 typedef struct lc_pouch_acquire_for_update_file {
   FILE *fp;
@@ -7087,7 +7087,7 @@ static void lc_pouch_lease_record_cleanup(lc_pouch_lease_record *record) {
 }
 
 static void lc_pouch_generate_lease_id(char *buffer, size_t buffer_size) {
-  unsigned long sequence;
+  uint64_t sequence;
   lc_pouch_unix_seconds now_seconds;
 
   pthread_mutex_lock(&lc_pouch_lease_id_mutex);
@@ -7097,8 +7097,8 @@ static void lc_pouch_generate_lease_id(char *buffer, size_t buffer_size) {
   if (lc_pouch_now_unix(&now_seconds, NULL) != LC_OK) {
     now_seconds = 0;
   }
-  snprintf(buffer, buffer_size, "pouch-lease-%" PRId64 "-%lu", now_seconds,
-           sequence);
+  snprintf(buffer, buffer_size, "pouch-lease-%" PRId64 "-%" PRIu64,
+           now_seconds, sequence);
 }
 
 static int
@@ -7976,7 +7976,7 @@ static void lc_pouch_queue_touch_notification(lc_client_handle *client,
   char *notify_leaf;
   char *notify_path;
   size_t leaf_len;
-  unsigned long sequence;
+  uint64_t sequence;
 
   if (client == NULL || client->pouch == NULL || namespace_name == NULL ||
       namespace_name[0] == '\0' || queue == NULL || queue[0] == '\0') {
@@ -8016,8 +8016,9 @@ static void lc_pouch_queue_touch_notification(lc_client_handle *client,
     goto cleanup;
   }
   sequence = ++client->pouch->marker_sequence;
-  snprintf(text, sizeof(text), "queue=%s\nsequence=%020lu\n%s", escaped_queue,
-           sequence, (sequence % 2UL) == 0UL ? "pad=x\n" : "");
+  snprintf(text, sizeof(text), "queue=%s\nsequence=%020" PRIu64 "\n%s",
+           escaped_queue, sequence,
+           (sequence % UINT64_C(2)) == UINT64_C(0) ? "pad=x\n" : "");
   (void)lc_pouch_path_write_text_file(notify_path, text, NULL);
 
 cleanup:
@@ -9094,7 +9095,8 @@ static int lc_pouch_txn_decision_response(lc_txn_decision_res *out,
   char correlation[96];
 
   memset(out, 0, sizeof(*out));
-  snprintf(correlation, sizeof(correlation), "pouch-txn-%020lu", version);
+  snprintf(correlation, sizeof(correlation), "pouch-txn-%020" PRIu64,
+           version);
   out->txn_id = lc_strdup_local(txn_id);
   out->state = lc_strdup_local(state);
   out->correlation_id = lc_strdup_local(correlation);
@@ -9115,7 +9117,8 @@ static int lc_pouch_txn_replay_response(lc_txn_replay_res *out,
   char correlation[96];
 
   memset(out, 0, sizeof(*out));
-  snprintf(correlation, sizeof(correlation), "pouch-txn-%020lu", version);
+  snprintf(correlation, sizeof(correlation), "pouch-txn-%020" PRIu64,
+           version);
   out->txn_id = lc_strdup_local(txn_id);
   out->state = lc_strdup_local(state);
   out->correlation_id = lc_strdup_local(correlation);
