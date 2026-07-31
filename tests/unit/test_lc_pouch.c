@@ -9040,6 +9040,12 @@ static void test_client_queue_dequeue_batch_returns_page(void **state) {
   assert_non_null(batch.messages[1]);
   assert_string_equal(batch.messages[0]->queue, "batch");
   assert_string_equal(batch.messages[1]->queue, "batch");
+  assert_true(batch.messages[0]->fencing_token > 0L);
+  assert_true(batch.messages[1]->fencing_token > 0L);
+  rc = batch.messages[0]->ack(batch.messages[0], &error);
+  assert_int_equal(rc, LC_OK);
+  rc = batch.messages[1]->ack(batch.messages[1], &error);
+  assert_int_equal(rc, LC_OK);
 
   lc_dequeue_batch_cleanup(&batch);
   lc_enqueue_res_cleanup(&enqueue_res);

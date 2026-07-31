@@ -291,6 +291,11 @@ metadata key `q/<queue>/msg/<id>`. Workflow state leases use metadata key
 those metadata leases the way Go disk does; scanning staged queue rows is not a
 substitute for participant semantics.
 
+Single-message and batch dequeue use the same target-key lease acquisition
+semantics. A delivered message is not valid unless the lease metadata write has
+advanced the fencing token on `q/<queue>/msg/<id>` and the returned message
+carries that token for ack, nack, extend, and transaction validation.
+
 Pouch transaction application routes queue participants by exact lease-key
 shape. `q/<queue>/msg/<id>` applies the staged `.meta` queue message decision
 and clears message lease metadata. `q/<queue>/state/<id>` applies workflow
@@ -396,11 +401,14 @@ entire cache, reparsing payload JSON, or materializing large values. Object,
 state, metadata, queue, attachment, transaction, and lease metadata refs must
 all be represented in capture/validation.
 
-Until Pouch persists delete-grace metadata with obsolete entries, obsolete
-cleanup is conservative: maintenance reports obsolete segment/snapshot leaves as
-pending and does not unlink them. Immediate deletion is forbidden because it
-does not prove grace expiry or absence of live refs. The eventual cleanup
-implementation must add persisted grace/live-ref evidence before unlinking.
+Pouch cache entries retain the current log record container and record offset
+separately from payload spans. Compaction candidate selection uses the installed
+snapshot plus sealed non-obsolete segments, then filters protected live-link
+targets before applying thresholds. Snapshot emission is limited to captured
+current refs whose record location is inside the filtered candidate set, and
+validation rechecks those exact refs before install. Whole-cache snapshot dumps,
+file fingerprints as the only validation authority, and range-obsoleting all
+segments through a maximum id are rejected.
 
 ### Query And Scan Visibility
 

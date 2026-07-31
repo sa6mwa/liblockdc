@@ -11470,9 +11470,15 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
     after_cursor = req->start_after == NULL || req->start_after[0] == '\0';
     for (i = 0U; rc == LC_OK && i < scan.count && (int)count < limit; ++i) {
       lc_pouch_queue_record *record;
+      char *message_lease_key;
       lc_message *message;
       char lease_id[160];
+      long message_fencing_token;
+      int lease_acquired;
 
+      message_lease_key = NULL;
+      message_fencing_token = 0L;
+      lease_acquired = 0;
       record = &scan.records[i];
       if (!after_cursor) {
         if (strcmp(record->message_id, req->start_after) == 0) {
@@ -11483,31 +11489,61 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
       if (!lc_pouch_queue_record_available(record, now)) {
         continue;
       }
+      snprintf(lease_id, sizeof(lease_id), "pouch-qlease-%s-%d",
+               record->message_id, record->attempts + 1);
+      message_lease_key =
+          lc_pouch_queue_message_lease_key_from_meta(record->storage_key, error);
+      if (message_lease_key == NULL) {
+        rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+        break;
+      }
+      rc = lc_pouch_timestamp_add(now, visibility_timeout,
+                                  "visibility_timeout_seconds",
+                                  &record->not_visible_until_unix, error);
+      if (rc == LC_OK) {
+        rc = lc_pouch_queue_acquire_message_lease(
+            client, namespace_name, req, message_lease_key, lease_id,
+            record->not_visible_until_unix, now, &message_fencing_token,
+            &lease_acquired, error);
+      }
+      if (rc != LC_OK) {
+        lc_free_with_allocator(NULL, message_lease_key);
+        break;
+      }
+      if (!lease_acquired) {
+        lc_free_with_allocator(NULL, message_lease_key);
+        continue;
+      }
       record->attempts += 1;
       lc_free_with_allocator(NULL, record->status);
       lc_free_with_allocator(NULL, record->lease_id);
       lc_free_with_allocator(NULL, record->lease_txn_id);
       record->status = lc_strdup_local("inflight");
-      snprintf(lease_id, sizeof(lease_id), "pouch-qlease-%s-%d",
-               record->message_id, record->attempts);
       record->lease_id = lc_strdup_local(lease_id);
       record->lease_txn_id =
           lc_strdup_local(req->txn_id != NULL ? req->txn_id : "");
-      rc = lc_pouch_timestamp_add(now, visibility_timeout,
-                                  "visibility_timeout_seconds",
-                                  &record->not_visible_until_unix, error);
-      if (rc == LC_OK) {
-        record->visibility_timeout_seconds = visibility_timeout;
-        if (record->status == NULL || record->lease_id == NULL ||
-            record->lease_txn_id == NULL) {
-          rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                            "failed to allocate pouch queue delivery state",
-                            NULL, NULL, NULL);
-        }
+      record->lease_fencing_token = message_fencing_token;
+      record->visibility_timeout_seconds = visibility_timeout;
+      if (record->status == NULL || record->lease_id == NULL ||
+          record->lease_txn_id == NULL) {
+        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch queue delivery state", NULL,
+                          NULL, NULL);
       }
       if (rc == LC_OK) {
         rc = lc_pouch_queue_write_record(client, record, error);
       }
+      if (rc != LC_OK) {
+        lc_error rollback_error;
+
+        lc_error_init(&rollback_error);
+        (void)lc_pouch_write_lease_tombstone(
+            client, namespace_name, message_lease_key,
+            req->owner != NULL && req->owner[0] != '\0' ? req->owner : "pouch",
+            message_fencing_token, 0UL, &rollback_error);
+        lc_error_cleanup(&rollback_error);
+      }
+      lc_free_with_allocator(NULL, message_lease_key);
       if (rc != LC_OK && lc_pouch_queue_retryable_version_conflict(error)) {
         lc_error_cleanup(error);
         lc_error_init(error);

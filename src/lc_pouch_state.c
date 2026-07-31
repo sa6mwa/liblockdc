@@ -505,6 +505,8 @@ typedef struct lc_pouch_state_entry {
   char *content_type;
   char *etag;
   lc_pouch_state_payload_span payload_span;
+  char *record_container_leaf;
+  unsigned long record_offset;
   char *payload_context;
   char *descriptor;
   unsigned char *metadata;
@@ -520,6 +522,7 @@ typedef struct lc_pouch_state_entry {
   int seen;
   int found;
   int control;
+  int has_record_ref;
   unsigned char record_type;
 } lc_pouch_state_entry;
 
@@ -570,6 +573,8 @@ typedef struct lc_pouch_state_cache_record {
   char *content_type;
   char *etag;
   lc_pouch_state_payload_span payload_span;
+  char *record_container_leaf;
+  unsigned long record_offset;
   char *payload_context;
   char *descriptor;
   unsigned char *metadata;
@@ -583,6 +588,7 @@ typedef struct lc_pouch_state_cache_record {
   int has_query_hidden;
   int query_hidden;
   int found;
+  int has_record_ref;
   unsigned char record_type;
   struct lc_pouch_state_cache_record *next;
   struct lc_pouch_state_cache_record *bucket_next;
@@ -594,6 +600,9 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
 static lc_pouch_state_cache_record *
 lc_pouch_state_cache_record_find(lc_pouch_state_cache_namespace *ns,
                                  const char *key);
+static int lc_pouch_state_compaction_record_ref_matches(
+    const lc_pouch_state_cache_record *record, const char *container,
+    unsigned long offset);
 static int lc_pouch_state_read_many_snapshot_body_from_cache(
     lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
     lc_pouch_state_cache_record *record, const char *crypto_context,
@@ -1177,11 +1186,88 @@ static int lc_pouch_state_payload_span_copy(
       src->payload_offset, src->payload_length, src->payload_crc, error);
 }
 
+static void lc_pouch_state_record_ref_cleanup(const lc_allocator *allocator,
+                                              char **container_leaf,
+                                              unsigned long *record_offset,
+                                              int *present) {
+  if (container_leaf != NULL) {
+    lc_free_with_allocator(allocator, *container_leaf);
+    *container_leaf = NULL;
+  }
+  if (record_offset != NULL) {
+    *record_offset = 0UL;
+  }
+  if (present != NULL) {
+    *present = 0;
+  }
+}
+
+static int lc_pouch_state_record_ref_set(const lc_allocator *allocator,
+                                         char **container_leaf,
+                                         unsigned long *record_offset,
+                                         int *present, const char *leaf,
+                                         unsigned long offset,
+                                         lc_error *error) {
+  char *copy;
+
+  if (container_leaf == NULL || record_offset == NULL || present == NULL ||
+      !lc_pouch_state_payload_container_is_valid(leaf)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch record ref requires a valid container", NULL,
+                        NULL, "pouch");
+  }
+  copy = lc_strdup_with_allocator(allocator, leaf);
+  if (copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch record ref container", NULL, NULL,
+                        NULL);
+  }
+  lc_pouch_state_record_ref_cleanup(allocator, container_leaf, record_offset,
+                                    present);
+  *container_leaf = copy;
+  *record_offset = offset;
+  *present = 1;
+  return LC_OK;
+}
+
+static int lc_pouch_state_record_ref_copy(const lc_allocator *allocator,
+                                          const char *src_container_leaf,
+                                          unsigned long src_record_offset,
+                                          int src_present,
+                                          char **dst_container_leaf,
+                                          unsigned long *dst_record_offset,
+                                          int *dst_present,
+                                          lc_error *error) {
+  if (dst_container_leaf == NULL || dst_record_offset == NULL ||
+      dst_present == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch record ref copy requires outputs", NULL, NULL,
+                        "pouch");
+  }
+  *dst_container_leaf = NULL;
+  *dst_record_offset = 0UL;
+  *dst_present = 0;
+  if (!src_present) {
+    return LC_OK;
+  }
+  return lc_pouch_state_record_ref_set(
+      allocator, dst_container_leaf, dst_record_offset, dst_present,
+      src_container_leaf, src_record_offset, error);
+}
+
 typedef struct lc_pouch_state_compaction_capture {
   char *manifest_text;
+  char **candidate_leaves;
+  int *candidate_snapshots;
+  unsigned long *candidate_sizes;
+  size_t candidate_count;
+  size_t candidate_capacity;
+  char **captured_keys;
+  char **captured_record_containers;
+  unsigned long *captured_record_offsets;
+  size_t captured_count;
+  size_t captured_capacity;
   unsigned long candidate_bytes;
-  unsigned long candidate_hash_a;
-  unsigned long candidate_hash_b;
 } lc_pouch_state_compaction_capture;
 
 struct lc_pouch_state_cache_namespace {
@@ -1208,6 +1294,9 @@ static void lc_pouch_state_entry_cleanup(const lc_allocator *allocator,
   lc_free_with_allocator(allocator, entry->content_type);
   lc_free_with_allocator(allocator, entry->etag);
   lc_pouch_state_payload_span_cleanup(allocator, &entry->payload_span);
+  lc_pouch_state_record_ref_cleanup(allocator, &entry->record_container_leaf,
+                                    &entry->record_offset,
+                                    &entry->has_record_ref);
   lc_free_with_allocator(allocator, entry->payload_context);
   lc_free_with_allocator(allocator, entry->descriptor);
   lc_free_with_allocator(allocator, entry->metadata);
@@ -1303,6 +1392,9 @@ lc_pouch_state_cache_record_cleanup(const lc_allocator *allocator,
   lc_free_with_allocator(allocator, record->content_type);
   lc_free_with_allocator(allocator, record->etag);
   lc_pouch_state_payload_span_cleanup(allocator, &record->payload_span);
+  lc_pouch_state_record_ref_cleanup(allocator, &record->record_container_leaf,
+                                    &record->record_offset,
+                                    &record->has_record_ref);
   lc_free_with_allocator(allocator, record->payload_context);
   lc_free_with_allocator(allocator, record->descriptor);
   lc_free_with_allocator(allocator, record->metadata);
@@ -2518,12 +2610,18 @@ static int lc_pouch_state_cache_apply_entry(lc_pouch *pouch,
   char *content_type;
   char *etag;
   lc_pouch_state_payload_span payload_span;
+  char *record_container_leaf;
+  unsigned long record_offset;
+  int has_record_ref;
   char *payload_context;
   char *descriptor;
   unsigned char *metadata;
   int rc;
 
   memset(&payload_span, 0, sizeof(payload_span));
+  record_container_leaf = NULL;
+  record_offset = 0UL;
+  has_record_ref = 0;
   metadata = NULL;
   if (entry == NULL || !entry->seen || entry->key == NULL) {
     return LC_OK;
@@ -2587,6 +2685,16 @@ static int lc_pouch_state_cache_apply_entry(lc_pouch *pouch,
     lc_free_with_allocator(&pouch->allocator, etag);
     return rc;
   }
+  rc = lc_pouch_state_record_ref_copy(
+      &pouch->allocator, entry->record_container_leaf, entry->record_offset,
+      entry->has_record_ref, &record_container_leaf, &record_offset,
+      &has_record_ref, error);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, content_type);
+    lc_free_with_allocator(&pouch->allocator, etag);
+    lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
+    return rc;
+  }
   payload_context =
       entry->payload_context != NULL
           ? lc_strdup_with_allocator(&pouch->allocator, entry->payload_context)
@@ -2605,12 +2713,15 @@ static int lc_pouch_state_cache_apply_entry(lc_pouch *pouch,
   if ((entry->content_type != NULL && content_type == NULL) ||
       (entry->etag != NULL && etag == NULL) ||
       (entry->payload_span.present && !payload_span.present) ||
+      (entry->has_record_ref && !has_record_ref) ||
       (entry->payload_context != NULL && payload_context == NULL) ||
       (entry->descriptor != NULL && descriptor == NULL) ||
       (entry->metadata_length > 0U && metadata == NULL)) {
     lc_free_with_allocator(&pouch->allocator, content_type);
     lc_free_with_allocator(&pouch->allocator, etag);
     lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
+    lc_pouch_state_record_ref_cleanup(&pouch->allocator, &record_container_leaf,
+                                      &record_offset, &has_record_ref);
     lc_free_with_allocator(&pouch->allocator, payload_context);
     lc_free_with_allocator(&pouch->allocator, descriptor);
     lc_free_with_allocator(&pouch->allocator, metadata);
@@ -2635,6 +2746,11 @@ static int lc_pouch_state_cache_apply_entry(lc_pouch *pouch,
              entry->payload_span.payload_length ||
          record->payload_span.payload_crc !=
              entry->payload_span.payload_crc)) ||
+       record->has_record_ref != entry->has_record_ref ||
+       (record->has_record_ref &&
+        (strcmp(record->record_container_leaf, entry->record_container_leaf) !=
+             0 ||
+         record->record_offset != entry->record_offset)) ||
        !lc_pouch_state_string_equal(record->payload_context,
                                     entry->payload_context) ||
        !lc_pouch_state_string_equal(record->descriptor, entry->descriptor) ||
@@ -2647,6 +2763,10 @@ static int lc_pouch_state_cache_apply_entry(lc_pouch *pouch,
   lc_free_with_allocator(&pouch->allocator, record->content_type);
   lc_free_with_allocator(&pouch->allocator, record->etag);
   lc_pouch_state_payload_span_cleanup(&pouch->allocator, &record->payload_span);
+  lc_pouch_state_record_ref_cleanup(&pouch->allocator,
+                                    &record->record_container_leaf,
+                                    &record->record_offset,
+                                    &record->has_record_ref);
   lc_free_with_allocator(&pouch->allocator, record->payload_context);
   lc_free_with_allocator(&pouch->allocator, record->descriptor);
   lc_free_with_allocator(&pouch->allocator, record->metadata);
@@ -2655,6 +2775,12 @@ static int lc_pouch_state_cache_apply_entry(lc_pouch *pouch,
   record->etag = etag;
   record->payload_span = payload_span;
   memset(&payload_span, 0, sizeof(payload_span));
+  record->record_container_leaf = record_container_leaf;
+  record->record_offset = record_offset;
+  record->has_record_ref = has_record_ref;
+  record_container_leaf = NULL;
+  record_offset = 0UL;
+  has_record_ref = 0;
   record->payload_context = payload_context;
   record->descriptor = descriptor;
   record->metadata = metadata;
@@ -2703,6 +2829,14 @@ static int lc_pouch_state_entry_from_cache_record(
     lc_pouch_state_entry_cleanup(&pouch->allocator, out);
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
+  if (lc_pouch_state_record_ref_copy(
+          &pouch->allocator, record->record_container_leaf,
+          record->record_offset, record->has_record_ref,
+          &out->record_container_leaf, &out->record_offset,
+          &out->has_record_ref, error) != LC_OK) {
+    lc_pouch_state_entry_cleanup(&pouch->allocator, out);
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
   out->payload_context =
       record->payload_context != NULL
           ? lc_strdup_with_allocator(&pouch->allocator, record->payload_context)
@@ -2723,6 +2857,7 @@ static int lc_pouch_state_entry_from_cache_record(
       (record->content_type != NULL && out->content_type == NULL) ||
       (record->etag != NULL && out->etag == NULL) ||
       (record->payload_span.present && !out->payload_span.present) ||
+      (record->has_record_ref && !out->has_record_ref) ||
       (record->payload_context != NULL && out->payload_context == NULL) ||
       (record->descriptor != NULL && out->descriptor == NULL) ||
       (record->metadata_length > 0U && out->metadata == NULL)) {
@@ -3664,12 +3799,20 @@ payload_ref_decoded:
   entry->seen = 1;
   entry->found = 1;
   entry->record_type = record_type;
+  rc = lc_pouch_state_record_ref_set(
+      allocator, &entry->record_container_leaf, &entry->record_offset,
+      &entry->has_record_ref, container_leaf, record_offset, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_entry_cleanup(allocator, entry);
+    return rc;
+  }
   return LC_OK;
 }
 
 static int lc_pouch_state_decode_delete_meta(
     const lc_allocator *allocator, const unsigned char *key, size_t key_len,
     const unsigned char *meta, size_t meta_len, unsigned char record_type,
+    const char *container_leaf, unsigned long record_offset,
     lc_pouch_state_entry *entry, lc_error *error) {
   unsigned long version;
   unsigned long etag_len;
@@ -3707,6 +3850,13 @@ static int lc_pouch_state_decode_delete_meta(
   entry->seen = 1;
   entry->found = 0;
   entry->record_type = record_type;
+  rc = lc_pouch_state_record_ref_set(
+      allocator, &entry->record_container_leaf, &entry->record_offset,
+      &entry->has_record_ref, container_leaf, record_offset, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_entry_cleanup(allocator, entry);
+    return rc;
+  }
   return LC_OK;
 }
 
@@ -3820,7 +3970,7 @@ static int lc_pouch_state_decode_record(
   case LC_POUCH_STATE_RECORD_OBJECT_DELETE:
     return lc_pouch_state_decode_delete_meta(
         allocator, key, header->key_len, meta, header->meta_len, header->type,
-        entry, error);
+        container_leaf, record_offset, entry, error);
   case LC_POUCH_STATE_RECORD_DECISION:
     return lc_pouch_state_decode_decision_meta(
         allocator, key, header->key_len, meta, header->meta_len, entry, error);
@@ -5251,11 +5401,14 @@ static int lc_pouch_state_snapshot_write_high_water(
 static int lc_pouch_state_write_snapshot(
     lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
     const char *snapshot_leaf, lc_pouch_state_cache_namespace *cache,
+    const lc_pouch_state_compaction_capture *capture,
     lc_error *error) {
-  lc_pouch_state_cache_record *record;
+  lc_pouch_state_cache_record **records;
   char tmp_leaf[128];
   char *snapshot_path;
   char *tmp_path;
+  size_t record_count;
+  size_t index;
   int fd;
   int rc;
   int len;
@@ -5289,8 +5442,33 @@ static int lc_pouch_state_write_snapshot(
                         strerror(errno), NULL, NULL);
   }
   rc = LC_OK;
+  records = NULL;
+  record_count = 0U;
+  rc = lc_pouch_state_cache_record_index_build(pouch, cache, &records,
+                                               &record_count, error);
+  if (rc != LC_OK) {
+    (void)close(fd);
+    unlink(tmp_path);
+    lc_free_with_allocator(&pouch->allocator, snapshot_path);
+    lc_free_with_allocator(&pouch->allocator, tmp_path);
+    return rc;
+  }
   rc = lc_pouch_state_snapshot_write_high_water(fd, cache->max_version, error);
-  for (record = cache->records; record != NULL; record = record->next) {
+  for (index = 0U; rc == LC_OK && capture != NULL &&
+                   index < capture->captured_count;
+       ++index) {
+    lc_pouch_state_cache_record *record;
+
+    record = lc_pouch_state_cache_record_index_find(
+        records, record_count, capture->captured_keys[index]);
+    if (!lc_pouch_state_compaction_record_ref_matches(
+            record, capture->captured_record_containers[index],
+            capture->captured_record_offsets[index])) {
+      rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "pouch compaction captured ref drifted", NULL, NULL,
+                        "pouch");
+      break;
+    }
     if (rc != LC_OK) {
       break;
     }
@@ -5298,6 +5476,7 @@ static int lc_pouch_state_write_snapshot(
                                               manifest, snapshot_leaf, fd,
                                               record, error);
   }
+  lc_free_with_allocator(&pouch->allocator, records);
   if (rc == LC_OK && fsync(fd) != 0) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                       "failed to fsync pouch state snapshot", strerror(errno),
@@ -5319,168 +5498,6 @@ static int lc_pouch_state_write_snapshot(
   lc_free_with_allocator(&pouch->allocator, snapshot_path);
   lc_free_with_allocator(&pouch->allocator, tmp_path);
   return rc;
-}
-
-static void lc_pouch_state_compaction_hash_byte(unsigned long *hash_a,
-                                                unsigned long *hash_b,
-                                                unsigned char byte) {
-  *hash_a ^= (unsigned long)byte;
-  *hash_a *= 16777619UL;
-  *hash_b = (*hash_b * 65599UL) + (unsigned long)byte + 1UL;
-}
-
-static void lc_pouch_state_compaction_hash_string(unsigned long *hash_a,
-                                                  unsigned long *hash_b,
-                                                  const char *value) {
-  const unsigned char *cursor;
-
-  cursor = (const unsigned char *)value;
-  while (*cursor != '\0') {
-    lc_pouch_state_compaction_hash_byte(hash_a, hash_b, *cursor);
-    ++cursor;
-  }
-  lc_pouch_state_compaction_hash_byte(hash_a, hash_b, 0U);
-}
-
-static int lc_pouch_state_compaction_hash_segment(const char *segment_path,
-                                                  unsigned long *bytes,
-                                                  unsigned long *hash_a,
-                                                  unsigned long *hash_b,
-                                                  lc_error *error) {
-  unsigned char buffer[4096];
-  FILE *fp;
-  int rc;
-
-  fp = fopen(segment_path, "rb");
-  if (fp == NULL) {
-    if (errno == ENOENT) {
-      lc_pouch_state_compaction_hash_byte(hash_a, hash_b, 0U);
-      return LC_OK;
-    }
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to open pouch state segment", strerror(errno),
-                        segment_path, NULL);
-  }
-  lc_pouch_state_compaction_hash_byte(hash_a, hash_b, 1U);
-  rc = LC_OK;
-  while (!feof(fp)) {
-    size_t got;
-    size_t index;
-
-    got = fread(buffer, 1U, sizeof(buffer), fp);
-    if (got != 0U) {
-      *bytes += (unsigned long)got;
-      for (index = 0U; index < got; ++index) {
-        lc_pouch_state_compaction_hash_byte(hash_a, hash_b, buffer[index]);
-      }
-    }
-    if (ferror(fp)) {
-      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to read pouch state segment", strerror(errno),
-                        segment_path, NULL);
-      break;
-    }
-  }
-  if (fclose(fp) != 0 && rc == LC_OK) {
-    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to close pouch state segment", strerror(errno),
-                      segment_path, NULL);
-  }
-  return rc;
-}
-
-static int lc_pouch_state_compaction_candidate_fingerprint(
-    lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
-    unsigned long *bytes, unsigned long *hash_a, unsigned long *hash_b,
-    lc_error *error) {
-  unsigned long segment_id;
-  unsigned long last_sealed_segment_id;
-
-  *bytes = 0UL;
-  *hash_a = 2166136261UL;
-  *hash_b = 0UL;
-  last_sealed_segment_id =
-      manifest->active_segment_id > 0UL ? manifest->active_segment_id - 1UL
-                                        : 0UL;
-  for (segment_id = manifest->latest_snapshot_segment_id + 1UL;
-       segment_id <= last_sealed_segment_id; ++segment_id) {
-    char *segment_leaf;
-    char *segment_path;
-    int rc;
-
-    segment_leaf =
-        lc_pouch_namespace_segment_leaf(&pouch->allocator, segment_id);
-    segment_path = segment_leaf != NULL
-                       ? lc_pouch_state_child_path(&pouch->allocator,
-                                                   manifest->namespace_path,
-                                                   "segments", segment_leaf)
-                       : NULL;
-    if (segment_leaf == NULL || segment_path == NULL) {
-      lc_free_with_allocator(&pouch->allocator, segment_leaf);
-      lc_free_with_allocator(&pouch->allocator, segment_path);
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch state segment path", NULL,
-                          NULL, NULL);
-    }
-    lc_pouch_state_compaction_hash_string(hash_a, hash_b, segment_leaf);
-    lc_free_with_allocator(&pouch->allocator, segment_leaf);
-    rc = lc_pouch_state_compaction_hash_segment(segment_path, bytes, hash_a,
-                                                hash_b, error);
-    lc_free_with_allocator(&pouch->allocator, segment_path);
-    if (rc != LC_OK) {
-      return rc;
-    }
-  }
-  return LC_OK;
-}
-
-static int lc_pouch_state_compaction_candidate_bytes(
-    lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
-    unsigned long *bytes, lc_error *error) {
-  unsigned long segment_id;
-  unsigned long last_sealed_segment_id;
-
-  *bytes = 0UL;
-  last_sealed_segment_id =
-      manifest->active_segment_id > 0UL ? manifest->active_segment_id - 1UL
-                                        : 0UL;
-  for (segment_id = manifest->latest_snapshot_segment_id + 1UL;
-       segment_id <= last_sealed_segment_id; ++segment_id) {
-    char *segment_leaf;
-    char *segment_path;
-    unsigned long size;
-    int rc;
-
-    segment_leaf =
-        lc_pouch_namespace_segment_leaf(&pouch->allocator, segment_id);
-    segment_path = segment_leaf != NULL
-                       ? lc_pouch_state_child_path(&pouch->allocator,
-                                                   manifest->namespace_path,
-                                                   "segments", segment_leaf)
-                       : NULL;
-    lc_free_with_allocator(&pouch->allocator, segment_leaf);
-    if (segment_path == NULL) {
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch state segment path", NULL,
-                          NULL, NULL);
-    }
-    rc = lc_pouch_state_file_size(segment_path, &size, error);
-    lc_free_with_allocator(&pouch->allocator, segment_path);
-    if (rc != LC_OK) {
-      return rc;
-    }
-    *bytes += size;
-  }
-  return LC_OK;
-}
-
-static void lc_pouch_state_compaction_capture_cleanup(
-    lc_pouch *pouch, lc_pouch_state_compaction_capture *capture) {
-  if (capture == NULL) {
-    return;
-  }
-  lc_free_with_allocator(&pouch->allocator, capture->manifest_text);
-  memset(capture, 0, sizeof(*capture));
 }
 
 static int lc_pouch_state_read_text_file(lc_pouch *pouch, const char *path,
@@ -5579,6 +5596,376 @@ static int lc_pouch_state_read_text_file(lc_pouch *pouch, const char *path,
   return LC_OK;
 }
 
+static void lc_pouch_state_compaction_capture_cleanup(
+    lc_pouch *pouch, lc_pouch_state_compaction_capture *capture) {
+  size_t index;
+
+  if (capture == NULL) {
+    return;
+  }
+  lc_free_with_allocator(&pouch->allocator, capture->manifest_text);
+  for (index = 0U; index < capture->candidate_count; ++index) {
+    lc_free_with_allocator(&pouch->allocator, capture->candidate_leaves[index]);
+  }
+  lc_free_with_allocator(&pouch->allocator, capture->candidate_leaves);
+  lc_free_with_allocator(&pouch->allocator, capture->candidate_snapshots);
+  lc_free_with_allocator(&pouch->allocator, capture->candidate_sizes);
+  for (index = 0U; index < capture->captured_count; ++index) {
+    lc_free_with_allocator(&pouch->allocator, capture->captured_keys[index]);
+    lc_free_with_allocator(&pouch->allocator,
+                           capture->captured_record_containers[index]);
+  }
+  lc_free_with_allocator(&pouch->allocator, capture->captured_keys);
+  lc_free_with_allocator(&pouch->allocator,
+                         capture->captured_record_containers);
+  lc_free_with_allocator(&pouch->allocator, capture->captured_record_offsets);
+  memset(capture, 0, sizeof(*capture));
+}
+
+static int lc_pouch_state_manifest_leaf_obsolete(
+    const lc_pouch_namespace_manifest *manifest, const char *leaf,
+    int snapshot) {
+  char **items;
+  unsigned long count;
+  unsigned long index;
+
+  if (manifest == NULL || leaf == NULL) {
+    return 0;
+  }
+  items = snapshot ? manifest->obsolete_snapshots : manifest->obsolete_segments;
+  count = snapshot ? manifest->obsolete_snapshot_count
+                   : manifest->obsolete_segment_count;
+  for (index = 0UL; index < count; ++index) {
+    if (items[index] != NULL && strcmp(items[index], leaf) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int lc_pouch_state_compaction_candidate_index(
+    const lc_pouch_state_compaction_capture *capture, const char *leaf) {
+  size_t index;
+
+  if (capture == NULL || leaf == NULL) {
+    return -1;
+  }
+  for (index = 0U; index < capture->candidate_count; ++index) {
+    if (capture->candidate_leaves[index] != NULL &&
+        strcmp(capture->candidate_leaves[index], leaf) == 0) {
+      return (int)index;
+    }
+  }
+  return -1;
+}
+
+static int lc_pouch_state_compaction_candidate_contains(
+    const lc_pouch_state_compaction_capture *capture, const char *leaf) {
+  return lc_pouch_state_compaction_candidate_index(capture, leaf) >= 0;
+}
+
+static int lc_pouch_state_compaction_candidate_add(
+    lc_pouch *pouch, lc_pouch_state_compaction_capture *capture,
+    const lc_pouch_namespace_manifest *manifest, const char *leaf,
+    int snapshot, lc_error *error) {
+  char *path;
+  char *leaf_copy;
+  unsigned long size;
+  int rc;
+
+  if (capture == NULL || leaf == NULL || leaf[0] == '\0') {
+    return LC_OK;
+  }
+  if (lc_pouch_state_compaction_candidate_contains(capture, leaf)) {
+    return LC_OK;
+  }
+  if (capture->candidate_count >= capture->candidate_capacity) {
+    char **next_leaves;
+    int *next_snapshots;
+    unsigned long *next_sizes;
+    size_t next_capacity;
+
+    next_capacity =
+        capture->candidate_capacity == 0U ? 8U : capture->candidate_capacity * 2U;
+    if (next_capacity <= capture->candidate_capacity) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch compaction candidate list exceeds local limit",
+                          NULL, NULL, NULL);
+    }
+    next_leaves = (char **)lc_realloc_with_allocator(
+        &pouch->allocator, capture->candidate_leaves,
+        next_capacity * sizeof(capture->candidate_leaves[0]));
+    if (next_leaves == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch compaction candidates",
+                          NULL, NULL, NULL);
+    }
+    capture->candidate_leaves = next_leaves;
+    next_snapshots = (int *)lc_realloc_with_allocator(
+        &pouch->allocator, capture->candidate_snapshots,
+        next_capacity * sizeof(capture->candidate_snapshots[0]));
+    if (next_snapshots == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch compaction candidate "
+                          "types",
+                          NULL, NULL, NULL);
+    }
+    capture->candidate_snapshots = next_snapshots;
+    next_sizes = (unsigned long *)lc_realloc_with_allocator(
+        &pouch->allocator, capture->candidate_sizes,
+        next_capacity * sizeof(capture->candidate_sizes[0]));
+    if (next_sizes == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch compaction candidate "
+                          "sizes",
+                          NULL, NULL, NULL);
+    }
+    capture->candidate_sizes = next_sizes;
+    capture->candidate_capacity = next_capacity;
+  }
+  leaf_copy = lc_strdup_with_allocator(&pouch->allocator, leaf);
+  if (leaf_copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch compaction candidate", NULL, NULL,
+                        NULL);
+  }
+  path = lc_pouch_state_child_path(&pouch->allocator, manifest->namespace_path,
+                                   snapshot ? "snapshots" : "segments", leaf);
+  if (path == NULL) {
+    lc_free_with_allocator(&pouch->allocator, leaf_copy);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch compaction candidate path",
+                        NULL, NULL, NULL);
+  }
+  rc = lc_pouch_state_file_size(path, &size, error);
+  lc_free_with_allocator(&pouch->allocator, path);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, leaf_copy);
+    return rc;
+  }
+  capture->candidate_leaves[capture->candidate_count] = leaf_copy;
+  capture->candidate_snapshots[capture->candidate_count] = snapshot ? 1 : 0;
+  capture->candidate_sizes[capture->candidate_count] = size;
+  ++capture->candidate_count;
+  capture->candidate_bytes += size;
+  return LC_OK;
+}
+
+static int lc_pouch_state_compaction_build_candidates(
+    lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
+    lc_pouch_state_compaction_capture *capture, lc_error *error) {
+  unsigned long segment_id;
+  unsigned long last_sealed_segment_id;
+  int rc;
+
+  if (manifest->latest_snapshot != NULL &&
+      !lc_pouch_state_manifest_leaf_obsolete(manifest,
+                                             manifest->latest_snapshot, 1)) {
+    rc = lc_pouch_state_compaction_candidate_add(
+        pouch, capture, manifest, manifest->latest_snapshot, 1, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  last_sealed_segment_id =
+      manifest->active_segment_id > 0UL ? manifest->active_segment_id - 1UL
+                                        : 0UL;
+  for (segment_id = manifest->latest_snapshot_segment_id + 1UL;
+       segment_id <= last_sealed_segment_id; ++segment_id) {
+    char *segment_leaf;
+
+    segment_leaf =
+        lc_pouch_namespace_segment_leaf(&pouch->allocator, segment_id);
+    if (segment_leaf == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch compaction segment leaf",
+                          NULL, NULL, NULL);
+    }
+    if (!lc_pouch_state_manifest_leaf_obsolete(manifest, segment_leaf, 0)) {
+      rc = lc_pouch_state_compaction_candidate_add(
+          pouch, capture, manifest, segment_leaf, 0, error);
+      if (rc != LC_OK) {
+        lc_free_with_allocator(&pouch->allocator, segment_leaf);
+        return rc;
+      }
+    }
+    lc_free_with_allocator(&pouch->allocator, segment_leaf);
+  }
+  return LC_OK;
+}
+
+static void lc_pouch_state_compaction_candidate_remove_at(
+    lc_pouch *pouch, lc_pouch_state_compaction_capture *capture, size_t index) {
+  if (capture == NULL || index >= capture->candidate_count) {
+    return;
+  }
+  lc_free_with_allocator(&pouch->allocator, capture->candidate_leaves[index]);
+  if (capture->candidate_bytes >= capture->candidate_sizes[index]) {
+    capture->candidate_bytes -= capture->candidate_sizes[index];
+  } else {
+    capture->candidate_bytes = 0UL;
+  }
+  if (index + 1U < capture->candidate_count) {
+    memmove(capture->candidate_leaves + index,
+            capture->candidate_leaves + index + 1U,
+            (capture->candidate_count - index - 1U) *
+                sizeof(capture->candidate_leaves[0]));
+    memmove(capture->candidate_snapshots + index,
+            capture->candidate_snapshots + index + 1U,
+            (capture->candidate_count - index - 1U) *
+                sizeof(capture->candidate_snapshots[0]));
+    memmove(capture->candidate_sizes + index,
+            capture->candidate_sizes + index + 1U,
+            (capture->candidate_count - index - 1U) *
+                sizeof(capture->candidate_sizes[0]));
+  }
+  --capture->candidate_count;
+}
+
+static int lc_pouch_state_compaction_protect_live_links(
+    lc_pouch *pouch, lc_pouch_state_compaction_capture *capture,
+    lc_pouch_state_cache_namespace *cache, int *blocked, lc_error *error) {
+  lc_pouch_state_cache_record *record;
+
+  (void)error;
+  if (blocked != NULL) {
+    *blocked = 0;
+  }
+  for (record = cache->records; record != NULL; record = record->next) {
+    int payload_candidate;
+    int record_candidate;
+
+    if (!record->payload_span.present ||
+        !lc_pouch_state_compaction_candidate_contains(
+            capture, record->payload_span.container_leaf)) {
+      continue;
+    }
+    record_candidate =
+        record->has_record_ref &&
+        lc_pouch_state_compaction_candidate_contains(
+            capture, record->record_container_leaf);
+    if (record_candidate) {
+      continue;
+    }
+    payload_candidate =
+        lc_pouch_state_compaction_candidate_index(
+            capture, record->payload_span.container_leaf);
+    if (payload_candidate < 0) {
+      continue;
+    }
+    if (capture->candidate_snapshots[payload_candidate]) {
+      if (blocked != NULL) {
+        *blocked = 1;
+      }
+      return LC_OK;
+    }
+    lc_pouch_state_compaction_candidate_remove_at(
+        pouch, capture, (size_t)payload_candidate);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_state_compaction_capture_record_add(
+    lc_pouch *pouch, lc_pouch_state_compaction_capture *capture,
+    const lc_pouch_state_cache_record *record, lc_error *error) {
+  char *key_copy;
+  char *container_copy;
+
+  if (capture->captured_count >= capture->captured_capacity) {
+    char **next_keys;
+    char **next_containers;
+    unsigned long *next_offsets;
+    size_t next_capacity;
+
+    next_capacity =
+        capture->captured_capacity == 0U ? 32U : capture->captured_capacity * 2U;
+    if (next_capacity <= capture->captured_capacity) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch compaction captured refs exceed local limit",
+                          NULL, NULL, NULL);
+    }
+    next_keys = (char **)lc_realloc_with_allocator(
+        &pouch->allocator, capture->captured_keys,
+        next_capacity * sizeof(capture->captured_keys[0]));
+    if (next_keys == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch compaction captured keys",
+                          NULL, NULL, NULL);
+    }
+    capture->captured_keys = next_keys;
+    next_containers = (char **)lc_realloc_with_allocator(
+        &pouch->allocator, capture->captured_record_containers,
+        next_capacity * sizeof(capture->captured_record_containers[0]));
+    if (next_containers == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch compaction captured "
+                          "containers",
+                          NULL, NULL, NULL);
+    }
+    capture->captured_record_containers = next_containers;
+    next_offsets = (unsigned long *)lc_realloc_with_allocator(
+        &pouch->allocator, capture->captured_record_offsets,
+        next_capacity * sizeof(capture->captured_record_offsets[0]));
+    if (next_offsets == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch compaction captured "
+                          "offsets",
+                          NULL, NULL, NULL);
+    }
+    capture->captured_record_offsets = next_offsets;
+    capture->captured_capacity = next_capacity;
+  }
+  key_copy = lc_strdup_with_allocator(&pouch->allocator, record->key);
+  container_copy =
+      lc_strdup_with_allocator(&pouch->allocator, record->record_container_leaf);
+  if (key_copy == NULL || container_copy == NULL) {
+    lc_free_with_allocator(&pouch->allocator, key_copy);
+    lc_free_with_allocator(&pouch->allocator, container_copy);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch compaction captured ref", NULL,
+                        NULL, NULL);
+  }
+  capture->captured_keys[capture->captured_count] = key_copy;
+  capture->captured_record_containers[capture->captured_count] =
+      container_copy;
+  capture->captured_record_offsets[capture->captured_count] =
+      record->record_offset;
+  ++capture->captured_count;
+  return LC_OK;
+}
+
+static int lc_pouch_state_compaction_capture_records(
+    lc_pouch *pouch, lc_pouch_state_compaction_capture *capture,
+    lc_pouch_state_cache_namespace *cache, lc_error *error) {
+  lc_pouch_state_cache_record *record;
+  int rc;
+
+  for (record = cache->records; record != NULL; record = record->next) {
+    if (!record->has_record_ref) {
+      continue;
+    }
+    if (!lc_pouch_state_compaction_candidate_contains(
+            capture, record->record_container_leaf)) {
+      continue;
+    }
+    rc = lc_pouch_state_compaction_capture_record_add(pouch, capture, record,
+                                                      error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_state_compaction_record_ref_matches(
+    const lc_pouch_state_cache_record *record, const char *container,
+    unsigned long offset) {
+  return record != NULL && record->has_record_ref &&
+         record->record_container_leaf != NULL &&
+         strcmp(record->record_container_leaf, container) == 0 &&
+         record->record_offset == offset;
+}
+
 static int lc_pouch_state_compaction_capture_now(
     lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
     lc_pouch_state_compaction_capture *capture, lc_error *error) {
@@ -5599,9 +5986,8 @@ static int lc_pouch_state_compaction_capture_now(
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_state_compaction_candidate_fingerprint(
-      pouch, manifest, &capture->candidate_bytes, &capture->candidate_hash_a,
-      &capture->candidate_hash_b, error);
+  rc = lc_pouch_state_compaction_build_candidates(pouch, manifest, capture,
+                                                  error);
   if (rc != LC_OK) {
     lc_pouch_state_compaction_capture_cleanup(pouch, capture);
   }
@@ -5610,27 +5996,59 @@ static int lc_pouch_state_compaction_capture_now(
 
 static int lc_pouch_state_compaction_validate_capture(
     lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
-    const lc_pouch_state_compaction_capture *before, lc_error *error) {
-  lc_pouch_state_compaction_capture after;
-  int matched;
+    const lc_pouch_state_compaction_capture *before,
+    lc_pouch_state_cache_namespace *cache, lc_error *error) {
+  lc_pouch_state_cache_record **records;
+  char *manifest_path;
+  char *manifest_text;
+  size_t record_count;
+  size_t index;
   int rc;
 
-  memset(&after, 0, sizeof(after));
-  rc = lc_pouch_state_compaction_capture_now(pouch, manifest, &after, error);
+  records = NULL;
+  record_count = 0U;
+  manifest_text = NULL;
+  manifest_path = lc_pouch_path_join(&pouch->allocator,
+                                     manifest->namespace_path, "manifest");
+  if (manifest_path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch namespace manifest path",
+                        NULL, NULL, NULL);
+  }
+  rc = lc_pouch_state_read_text_file(pouch, manifest_path, &manifest_text, NULL,
+                                     error);
+  lc_free_with_allocator(&pouch->allocator, manifest_path);
   if (rc != LC_OK) {
     return rc;
   }
-  matched = before->candidate_bytes == after.candidate_bytes &&
-            before->candidate_hash_a == after.candidate_hash_a &&
-            before->candidate_hash_b == after.candidate_hash_b &&
-            before->manifest_text != NULL && after.manifest_text != NULL &&
-            strcmp(before->manifest_text, after.manifest_text) == 0;
-  lc_pouch_state_compaction_capture_cleanup(pouch, &after);
-  if (!matched) {
+  if (before->manifest_text == NULL || manifest_text == NULL ||
+      strcmp(before->manifest_text, manifest_text) != 0) {
+    lc_free_with_allocator(&pouch->allocator, manifest_text);
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "pouch compaction validation drift", NULL, NULL,
                         "pouch");
   }
+  lc_free_with_allocator(&pouch->allocator, manifest_text);
+  rc = lc_pouch_state_cache_record_index_build(pouch, cache, &records,
+                                               &record_count, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  for (index = 0U; index < before->captured_count; ++index) {
+    lc_pouch_state_cache_record *record;
+
+    record = lc_pouch_state_cache_record_index_find(
+        records, record_count, before->captured_keys[index]);
+    if (!lc_pouch_state_compaction_record_ref_matches(
+            record, before->captured_record_containers[index],
+            before->captured_record_offsets[index])) {
+      lc_free_with_allocator(&pouch->allocator, records);
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "pouch compaction validation drift", NULL, NULL,
+                          "pouch");
+    }
+  }
+  lc_free_with_allocator(&pouch->allocator, records);
   return LC_OK;
 }
 
@@ -5855,12 +6273,12 @@ static int lc_pouch_state_compact_namespace(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, unsigned long *cleanup_deleted_count,
     unsigned long *cleanup_pending_count, const char **abort_diagnostic,
-    lc_error *error);
+    int *compacted_out, lc_error *error);
 
 static int lc_pouch_state_queue_compacted_files(
     lc_pouch *pouch, lc_pouch_namespace_manifest *manifest,
-    const char *namespace_name, unsigned long compacted_segment_id,
-    const char *old_snapshot, const lc_pouch_state_cache_namespace *live_cache,
+    const char *namespace_name,
+    const lc_pouch_state_compaction_capture *capture,
     unsigned long *cleanup_deleted_count, unsigned long *cleanup_pending_count,
     lc_error *error);
 
@@ -5895,38 +6313,29 @@ static int lc_pouch_state_payload_container_is_valid(const char *leaf) {
 
 static int lc_pouch_state_queue_compacted_files(
     lc_pouch *pouch, lc_pouch_namespace_manifest *manifest,
-    const char *namespace_name, unsigned long compacted_segment_id,
-    const char *old_snapshot, const lc_pouch_state_cache_namespace *live_cache,
+    const char *namespace_name,
+    const lc_pouch_state_compaction_capture *capture,
     unsigned long *cleanup_deleted_count, unsigned long *cleanup_pending_count,
     lc_error *error) {
-  unsigned long segment_id;
+  size_t index;
   int rc;
 
-  (void)live_cache;
-  for (segment_id = 1UL; segment_id <= compacted_segment_id; ++segment_id) {
-    char *segment_leaf;
-
-    segment_leaf =
-        lc_pouch_namespace_segment_leaf(&pouch->allocator, segment_id);
-    if (segment_leaf == NULL) {
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch obsolete segment name",
-                          NULL, NULL, NULL);
-    }
-    rc = lc_pouch_namespace_manifest_mark_obsolete_segment(
-        &pouch->allocator, manifest, segment_leaf, error);
-    lc_free_with_allocator(&pouch->allocator, segment_leaf);
-    if (rc != LC_OK) {
-      return rc;
-    }
+  if (capture == NULL) {
+    return LC_OK;
   }
-  if (old_snapshot != NULL &&
-      (manifest->latest_snapshot == NULL ||
-       strcmp(old_snapshot, manifest->latest_snapshot) != 0)) {
-    rc = lc_pouch_namespace_manifest_mark_obsolete_snapshot(
-        &pouch->allocator, manifest, old_snapshot, error);
-    if (rc != LC_OK) {
-      return rc;
+  for (index = 0U; index < capture->candidate_count; ++index) {
+    if (capture->candidate_snapshots[index]) {
+      rc = lc_pouch_namespace_manifest_mark_obsolete_snapshot(
+          &pouch->allocator, manifest, capture->candidate_leaves[index], error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+    } else {
+      rc = lc_pouch_namespace_manifest_mark_obsolete_segment(
+          &pouch->allocator, manifest, capture->candidate_leaves[index], error);
+      if (rc != LC_OK) {
+        return rc;
+      }
     }
   }
   rc = lc_pouch_namespace_manifest_save(&pouch->allocator, namespace_name,
@@ -5951,6 +6360,9 @@ static int lc_pouch_state_compact_namespace_if_needed(
   unsigned long compacted_segment_id;
   unsigned long last_sealed_segment_id;
   unsigned long now_seconds;
+  lc_pouch_state_compaction_capture capture;
+  lc_pouch_state_cache_namespace candidate_cache;
+  int protected_snapshot_blocked;
   int rc;
 
   if (out != NULL) {
@@ -5998,14 +6410,71 @@ static int lc_pouch_state_compact_namespace_if_needed(
     return lc_pouch_maintenance_set_diagnostic(pouch, out, "no-candidates",
                                                error);
   }
-  rc = lc_pouch_state_compaction_candidate_bytes(pouch, manifest,
-                                                 &candidate_bytes, error);
+  memset(&capture, 0, sizeof(capture));
+  memset(&candidate_cache, 0, sizeof(candidate_cache));
+  protected_snapshot_blocked = 0;
+  rc = lc_pouch_state_compaction_capture_now(pouch, manifest, &capture, error);
   if (rc != LC_OK) {
     lc_pouch_maintenance_mark_aborted(pouch, out, "candidate-read-aborted");
     return rc;
   }
+  candidate_cache.namespace_name =
+      lc_strdup_with_allocator(&pouch->allocator, namespace_name);
+  if (candidate_cache.namespace_name == NULL) {
+    lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch compaction namespace name",
+                        NULL, NULL, NULL);
+  }
+  rc = lc_pouch_state_cache_refresh(pouch, &candidate_cache, manifest, 1,
+                                    error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_compaction_protect_live_links(
+        pouch, &capture, &candidate_cache, &protected_snapshot_blocked, error);
+  }
+  lc_free_with_allocator(&pouch->allocator, candidate_cache.namespace_name);
+  candidate_cache.namespace_name = NULL;
+  lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
+                                               &candidate_cache);
+  if (rc != LC_OK) {
+    lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
+    lc_pouch_maintenance_mark_aborted(pouch, out, "candidate-read-aborted");
+    return rc;
+  }
+  candidate_bytes = capture.candidate_bytes;
+  candidate_count = (unsigned long)capture.candidate_count;
+  lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
   if (out != NULL) {
+    out->candidate_segment_count = candidate_count;
     out->candidate_bytes = candidate_bytes;
+  }
+  if (protected_snapshot_blocked) {
+    if (out != NULL) {
+      out->skipped = 1;
+    }
+    {
+      pslog_field fields[2];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_str_field("reason", "protected-live-links");
+      lc_log_trace(pouch->logger, "compaction.skip", fields, 2U);
+    }
+    return lc_pouch_maintenance_set_diagnostic(
+        pouch, out, "protected-live-links", error);
+  }
+  if (candidate_count == 0UL) {
+    if (out != NULL) {
+      out->skipped = 1;
+    }
+    {
+      pslog_field fields[2];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_str_field("reason", "no-candidates");
+      lc_log_trace(pouch->logger, "compaction.skip", fields, 2U);
+    }
+    return lc_pouch_maintenance_set_diagnostic(pouch, out, "no-candidates",
+                                               error);
   }
   if (!force && candidate_count < pouch->compaction_min_segment_count) {
     if (out != NULL) {
@@ -6077,7 +6546,8 @@ static int lc_pouch_state_compact_namespace_if_needed(
     abort_diagnostic = NULL;
     rc = lc_pouch_state_compact_namespace(
         pouch, namespace_name, manifest, &cleanup_deleted_count,
-        &cleanup_pending_count, &abort_diagnostic, error);
+        &cleanup_pending_count, &abort_diagnostic,
+        out != NULL ? &out->compacted : NULL, error);
     if (rc != LC_OK) {
       lc_pouch_maintenance_mark_aborted(pouch, out, abort_diagnostic);
       {
@@ -6090,6 +6560,13 @@ static int lc_pouch_state_compact_namespace_if_needed(
         lc_log_error(pouch->logger, "compaction.error", fields, 4U);
       }
       return rc;
+    }
+    if (out != NULL && !out->compacted) {
+      out->skipped = 1;
+      return lc_pouch_maintenance_set_diagnostic(
+          pouch, out,
+          abort_diagnostic != NULL ? abort_diagnostic : "no-candidates",
+          error);
     }
   }
   if (out != NULL) {
@@ -6123,17 +6600,21 @@ static int lc_pouch_state_compact_namespace(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, unsigned long *cleanup_deleted_count,
     unsigned long *cleanup_pending_count, const char **abort_diagnostic,
-    lc_error *error) {
+    int *compacted_out, lc_error *error) {
   lc_pouch_state_cache_namespace snapshot_cache;
   lc_pouch_state_compaction_capture capture;
   char *snapshot_leaf;
-  char *old_snapshot;
   unsigned long compacted_segment_id;
   unsigned long last_sealed_segment_id;
   int snapshot_installed;
+  int protected_snapshot_blocked;
   int rc;
 
   snapshot_installed = 0;
+  protected_snapshot_blocked = 0;
+  if (compacted_out != NULL) {
+    *compacted_out = 0;
+  }
   if (abort_diagnostic != NULL) {
     *abort_diagnostic = NULL;
   }
@@ -6171,17 +6652,46 @@ static int lc_pouch_state_compact_namespace(
                                                  &snapshot_cache);
     return rc;
   }
+  rc = lc_pouch_state_compaction_protect_live_links(
+      pouch, &capture, &snapshot_cache, &protected_snapshot_blocked, error);
+  if (rc != LC_OK) {
+    if (abort_diagnostic != NULL) {
+      *abort_diagnostic = "candidate-protection-aborted";
+    }
+    lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
+    lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
+    lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
+                                                 &snapshot_cache);
+    return rc;
+  }
+  if (protected_snapshot_blocked || capture.candidate_count == 0U) {
+    if (abort_diagnostic != NULL) {
+      *abort_diagnostic =
+          protected_snapshot_blocked ? "protected-live-links" : "no-candidates";
+    }
+    lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
+    lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
+    lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
+                                                 &snapshot_cache);
+    return LC_OK;
+  }
+  rc = lc_pouch_state_compaction_capture_records(pouch, &capture,
+                                                 &snapshot_cache, error);
+  if (rc != LC_OK) {
+    if (abort_diagnostic != NULL) {
+      *abort_diagnostic = "capture-records-aborted";
+    }
+    lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
+    lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
+    lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
+                                                 &snapshot_cache);
+    return rc;
+  }
   compacted_segment_id = last_sealed_segment_id;
   snapshot_leaf =
       lc_pouch_namespace_snapshot_leaf(&pouch->allocator, compacted_segment_id);
-  old_snapshot = manifest->latest_snapshot != NULL
-                     ? lc_strdup_with_allocator(&pouch->allocator,
-                                                manifest->latest_snapshot)
-                     : NULL;
-  if (snapshot_leaf == NULL ||
-      (manifest->latest_snapshot != NULL && old_snapshot == NULL)) {
+  if (snapshot_leaf == NULL) {
     lc_free_with_allocator(&pouch->allocator, snapshot_leaf);
-    lc_free_with_allocator(&pouch->allocator, old_snapshot);
     lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
     lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
     lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
@@ -6194,7 +6704,7 @@ static int lc_pouch_state_compact_namespace(
                         NULL, NULL);
   }
   rc = lc_pouch_state_write_snapshot(pouch, manifest, snapshot_leaf,
-                                     &snapshot_cache, error);
+                                     &snapshot_cache, &capture, error);
   if (rc == LC_OK) {
 #ifdef LOCKDC_TEST_BUILD
     if (lc_pouch_test_after_snapshot_write_hook != NULL) {
@@ -6204,8 +6714,12 @@ static int lc_pouch_state_compact_namespace(
 #endif
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_state_compaction_validate_capture(pouch, manifest, &capture,
-                                                    error);
+    rc = lc_pouch_state_cache_refresh(pouch, &snapshot_cache, manifest, 1,
+                                      error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_compaction_validate_capture(
+          pouch, manifest, &capture, &snapshot_cache, error);
+    }
     if (rc == LC_OK) {
       rc = lc_pouch_namespace_manifest_install_snapshot(
           &pouch->allocator, namespace_name, manifest, snapshot_leaf,
@@ -6223,8 +6737,8 @@ static int lc_pouch_state_compact_namespace(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_state_queue_compacted_files(
-        pouch, manifest, namespace_name, compacted_segment_id, old_snapshot,
-        &snapshot_cache, cleanup_deleted_count, cleanup_pending_count, error);
+        pouch, manifest, namespace_name, &capture, cleanup_deleted_count,
+        cleanup_pending_count, error);
     if (rc != LC_OK && abort_diagnostic != NULL) {
       *abort_diagnostic = "obsolete-cleanup-aborted";
     }
@@ -6243,6 +6757,9 @@ static int lc_pouch_state_compact_namespace(
     }
   }
   if (rc == LC_OK) {
+    if (compacted_out != NULL) {
+      *compacted_out = 1;
+    }
     (void)lc_pouch_state_touch_marker(pouch, manifest, error);
   } else if (!snapshot_installed) {
     char *snapshot_path;
@@ -6256,7 +6773,6 @@ static int lc_pouch_state_compact_namespace(
     }
   }
   lc_free_with_allocator(&pouch->allocator, snapshot_leaf);
-  lc_free_with_allocator(&pouch->allocator, old_snapshot);
   lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
   lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
   snapshot_cache.namespace_name = NULL;
