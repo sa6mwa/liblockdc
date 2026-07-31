@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -252,6 +253,270 @@ static void lc_pouch_fsync_batcher_close(lc_pouch *pouch) {
     pthread_mutex_destroy(&pouch->fsync_mutex);
     pouch->fsync_mutex_initialized = 0;
   }
+}
+
+static void lc_pouch_compaction_deadline(lc_pouch *pouch,
+                                         struct timespec *deadline) {
+  uint64_t seconds;
+
+  if (deadline == NULL) {
+    return;
+  }
+  clock_gettime(CLOCK_REALTIME, deadline);
+  seconds = pouch->compaction_interval_seconds;
+  if (seconds > (uint64_t)(LONG_MAX - deadline->tv_sec)) {
+    deadline->tv_sec = LONG_MAX;
+  } else {
+    deadline->tv_sec += (time_t)seconds;
+  }
+}
+
+int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
+                                        const char *namespace_name,
+                                        lc_error *error) {
+  char **next_namespaces;
+  char *name_copy;
+  size_t index;
+  size_t next_capacity;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch compaction namespace requires inputs", NULL,
+                        NULL, "pouch");
+  }
+  if (!pouch->compaction_mutex_initialized) {
+    return LC_OK;
+  }
+  pthread_mutex_lock(&pouch->compaction_mutex);
+  for (index = 0U; index < pouch->compaction_namespace_count; ++index) {
+    if (strcmp(pouch->compaction_namespaces[index], namespace_name) == 0) {
+      pthread_mutex_unlock(&pouch->compaction_mutex);
+      return LC_OK;
+    }
+  }
+  if (pouch->compaction_namespace_count >= pouch->compaction_namespace_capacity) {
+    next_capacity = pouch->compaction_namespace_capacity == 0U
+                        ? 8U
+                        : pouch->compaction_namespace_capacity * 2U;
+    if (next_capacity <= pouch->compaction_namespace_capacity ||
+        next_capacity > (size_t)-1 / sizeof(*next_namespaces)) {
+      pthread_mutex_unlock(&pouch->compaction_mutex);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch compaction namespace count exceeds limit",
+                          NULL, NULL, NULL);
+    }
+    next_namespaces = (char **)lc_realloc_with_allocator(
+        &pouch->allocator, pouch->compaction_namespaces,
+        next_capacity * sizeof(*next_namespaces));
+    if (next_namespaces == NULL) {
+      pthread_mutex_unlock(&pouch->compaction_mutex);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to grow pouch compaction namespaces", NULL,
+                          NULL, NULL);
+    }
+    pouch->compaction_namespaces = next_namespaces;
+    pouch->compaction_namespace_capacity = next_capacity;
+  }
+  name_copy = lc_strdup_with_allocator(&pouch->allocator, namespace_name);
+  if (name_copy == NULL) {
+    pthread_mutex_unlock(&pouch->compaction_mutex);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch compaction namespace", NULL,
+                        NULL, NULL);
+  }
+  pouch->compaction_namespaces[pouch->compaction_namespace_count++] =
+      name_copy;
+  pthread_mutex_unlock(&pouch->compaction_mutex);
+  return LC_OK;
+}
+
+static int lc_pouch_compaction_copy_namespaces(lc_pouch *pouch,
+                                               char ***out_namespaces,
+                                               size_t *out_count,
+                                               lc_error *error) {
+  char **namespaces;
+  size_t count;
+  size_t index;
+
+  *out_namespaces = NULL;
+  *out_count = 0U;
+  pthread_mutex_lock(&pouch->compaction_mutex);
+  count = pouch->compaction_namespace_count;
+  namespaces = count > 0U ? (char **)lc_calloc_with_allocator(
+                              &pouch->allocator, count, sizeof(*namespaces))
+                         : NULL;
+  if (count > 0U && namespaces == NULL) {
+    pthread_mutex_unlock(&pouch->compaction_mutex);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch compaction namespaces", NULL,
+                        NULL, NULL);
+  }
+  for (index = 0U; index < count; ++index) {
+    namespaces[index] = lc_strdup_with_allocator(
+        &pouch->allocator, pouch->compaction_namespaces[index]);
+    if (namespaces[index] == NULL) {
+      while (index > 0U) {
+        lc_free_with_allocator(&pouch->allocator, namespaces[--index]);
+      }
+      lc_free_with_allocator(&pouch->allocator, namespaces);
+      pthread_mutex_unlock(&pouch->compaction_mutex);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to copy pouch compaction namespace", NULL,
+                          NULL, NULL);
+    }
+  }
+  pthread_mutex_unlock(&pouch->compaction_mutex);
+  *out_namespaces = namespaces;
+  *out_count = count;
+  return LC_OK;
+}
+
+static void lc_pouch_compaction_namespaces_cleanup(lc_pouch *pouch,
+                                                   char **namespaces,
+                                                   size_t count) {
+  size_t index;
+
+  for (index = 0U; index < count; ++index) {
+    lc_free_with_allocator(&pouch->allocator, namespaces[index]);
+  }
+  lc_free_with_allocator(&pouch->allocator, namespaces);
+}
+
+static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
+  char **namespaces;
+  size_t namespace_count;
+  size_t index;
+  lc_error error;
+  int rc;
+
+  if (pouch == NULL || !pouch->background_compaction_enabled ||
+      pouch->compaction_interval_seconds == 0U) {
+    return;
+  }
+  lc_error_init(&error);
+  rc = lc_pouch_compaction_copy_namespaces(pouch, &namespaces,
+                                           &namespace_count, &error);
+  if (rc != LC_OK) {
+    pslog_field fields[2];
+
+    fields[0] = lc_log_error_field("error", &error);
+    fields[1] = lc_log_code_field(&error);
+    lc_log_warn(pouch->logger, "compaction.background.namespaces.error",
+                fields, 2U);
+    lc_error_cleanup(&error);
+    return;
+  }
+  lc_error_cleanup(&error);
+  for (index = 0U; index < namespace_count; ++index) {
+    lc_pouch_maintenance_options options;
+    lc_error maintenance_error;
+
+    memset(&options, 0, sizeof(options));
+    options.namespace_name = namespaces[index];
+    lc_error_init(&maintenance_error);
+    rc = lc_pouch_maintenance_run(pouch, &options, NULL, &maintenance_error);
+    if (rc != LC_OK) {
+      pslog_field fields[3];
+
+      fields[0] = lc_log_str_field("ns", namespaces[index]);
+      fields[1] = lc_log_error_field("error", &maintenance_error);
+      fields[2] = lc_log_code_field(&maintenance_error);
+      lc_log_warn(pouch->logger, "compaction.background.error", fields, 3U);
+    }
+    lc_error_cleanup(&maintenance_error);
+  }
+  lc_pouch_compaction_namespaces_cleanup(pouch, namespaces, namespace_count);
+}
+
+static void *lc_pouch_compaction_worker(void *arg) {
+  lc_pouch *pouch;
+
+  pouch = (lc_pouch *)arg;
+  lc_pouch_compaction_run_pass(pouch);
+  pthread_mutex_lock(&pouch->compaction_mutex);
+  while (!pouch->compaction_stop) {
+    struct timespec deadline;
+    int wait_rc;
+
+    lc_pouch_compaction_deadline(pouch, &deadline);
+    wait_rc = 0;
+    while (!pouch->compaction_stop && wait_rc != ETIMEDOUT) {
+      wait_rc = pthread_cond_timedwait(&pouch->compaction_cond,
+                                       &pouch->compaction_mutex, &deadline);
+    }
+    if (pouch->compaction_stop) {
+      break;
+    }
+    pthread_mutex_unlock(&pouch->compaction_mutex);
+    lc_pouch_compaction_run_pass(pouch);
+    pthread_mutex_lock(&pouch->compaction_mutex);
+  }
+  pthread_mutex_unlock(&pouch->compaction_mutex);
+  return NULL;
+}
+
+static int lc_pouch_compaction_worker_init(lc_pouch *pouch, lc_error *error) {
+  int pthread_rc;
+  int rc;
+
+  if (pouch == NULL || !pouch->background_compaction_enabled ||
+      pouch->compaction_interval_seconds == 0U) {
+    return LC_OK;
+  }
+  pthread_rc = pthread_mutex_init(&pouch->compaction_mutex, NULL);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch compaction mutex",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->compaction_mutex_initialized = 1;
+  pthread_rc = pthread_cond_init(&pouch->compaction_cond, NULL);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch compaction condition",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->compaction_cond_initialized = 1;
+  rc = lc_pouch_state_compaction_track_cached_namespaces(pouch, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  pthread_rc = pthread_create(&pouch->compaction_thread, NULL,
+                              lc_pouch_compaction_worker, pouch);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to start pouch compaction worker",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->compaction_thread_started = 1;
+  return LC_OK;
+}
+
+static void lc_pouch_compaction_worker_close(lc_pouch *pouch) {
+  if (pouch == NULL) {
+    return;
+  }
+  if (pouch->compaction_thread_started) {
+    pthread_mutex_lock(&pouch->compaction_mutex);
+    pouch->compaction_stop = 1;
+    pthread_cond_broadcast(&pouch->compaction_cond);
+    pthread_mutex_unlock(&pouch->compaction_mutex);
+    pthread_join(pouch->compaction_thread, NULL);
+    pouch->compaction_thread_started = 0;
+  }
+  if (pouch->compaction_cond_initialized) {
+    pthread_cond_destroy(&pouch->compaction_cond);
+    pouch->compaction_cond_initialized = 0;
+  }
+  if (pouch->compaction_mutex_initialized) {
+    pthread_mutex_destroy(&pouch->compaction_mutex);
+    pouch->compaction_mutex_initialized = 0;
+  }
+  lc_pouch_compaction_namespaces_cleanup(
+      pouch, pouch->compaction_namespaces, pouch->compaction_namespace_count);
+  pouch->compaction_namespaces = NULL;
+  pouch->compaction_namespace_count = 0U;
+  pouch->compaction_namespace_capacity = 0U;
 }
 
 int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error) {
@@ -1171,6 +1436,11 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     lc_pouch_close(pouch);
     return rc;
   }
+  rc = lc_pouch_compaction_worker_init(pouch, error);
+  if (rc != LC_OK) {
+    lc_pouch_close(pouch);
+    return rc;
+  }
   *out = pouch;
   {
     pslog_field fields[8];
@@ -1205,6 +1475,7 @@ void lc_pouch_close(lc_pouch *pouch) {
     fields[0] = lc_log_str_field("path", pouch->root_path);
     lc_log_debug(pouch->logger, "close", fields, 1U);
   }
+  lc_pouch_compaction_worker_close(pouch);
   lc_pouch_fsync_batcher_close(pouch);
   lc_pouch_state_cache_cleanup(pouch);
   lc_pouch_state_source_cache_cleanup(pouch);

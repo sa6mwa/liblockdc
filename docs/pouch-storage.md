@@ -1080,6 +1080,10 @@ Required behavior:
 - compute reclaimable bytes;
 - enforce configurable `min_segments`, `min_reclaimable_bytes`, interval,
   delete grace, and optional IO throttle;
+- when background compaction is enabled with a non-zero interval, run a pass at
+  open and once per interval without making mutations perform compaction;
+- run explicit namespace maintenance immediately rather than delaying it for
+  the background interval;
 - detect live state links that point into candidate files and protect those
   files until the links can be rewritten safely;
 - capture current refs from meta, state, and object projections in deterministic

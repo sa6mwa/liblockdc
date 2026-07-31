@@ -179,7 +179,8 @@ static int lc_pouch_crypto_read_all_file(const lc_allocator *allocator,
                                          lc_error *error) {
   FILE *fp;
   char *buffer;
-  long size;
+  struct stat st;
+  uint64_t size;
   size_t got;
 
   if (path == NULL || out == NULL) {
@@ -194,24 +195,18 @@ static int lc_pouch_crypto_read_all_file(const lc_allocator *allocator,
                         "failed to open pouch crypto key file", strerror(errno),
                         NULL, "pouch");
   }
-  if (fseek(fp, 0L, SEEK_END) != 0) {
+  if (fstat(fileno(fp), &st) != 0 || st.st_size < 0) {
     fclose(fp);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to seek pouch crypto key file", strerror(errno),
+                        "failed to stat pouch crypto key file", strerror(errno),
                         NULL, "pouch");
   }
-  size = ftell(fp);
-  if (size < 0L || size > 8192L) {
+  size = (uint64_t)st.st_size;
+  if (size > 8192U) {
     fclose(fp);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch crypto key file is invalid", NULL, NULL,
                         "pouch");
-  }
-  if (fseek(fp, 0L, SEEK_SET) != 0) {
-    fclose(fp);
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to rewind pouch crypto key file",
-                        strerror(errno), NULL, "pouch");
   }
   buffer = (char *)lc_alloc_with_allocator(allocator, (size_t)size + 1U);
   if (buffer == NULL) {

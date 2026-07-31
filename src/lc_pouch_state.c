@@ -2349,6 +2349,7 @@ static lc_pouch_state_cache_namespace *
 lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
                                     int create, lc_error *error) {
   lc_pouch_state_cache_namespace *ns;
+  int rc;
 
   for (ns = pouch->state_cache_namespaces; ns != NULL; ns = ns->next) {
     if (strcmp(ns->namespace_name, namespace_name) == 0) {
@@ -2377,7 +2378,34 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
   }
   ns->next = pouch->state_cache_namespaces;
   pouch->state_cache_namespaces = ns;
+  rc = lc_pouch_compaction_track_namespace(pouch, ns->namespace_name, error);
+  if (rc != LC_OK) {
+    pouch->state_cache_namespaces = ns->next;
+    lc_free_with_allocator(&pouch->allocator, ns->namespace_name);
+    lc_free_with_allocator(&pouch->allocator, ns);
+    return NULL;
+  }
   return ns;
+}
+
+int lc_pouch_state_compaction_track_cached_namespaces(lc_pouch *pouch,
+                                                      lc_error *error) {
+  lc_pouch_state_cache_namespace *ns;
+  int rc;
+
+  if (pouch == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch compaction cache tracking requires pouch", NULL,
+                        NULL, "pouch");
+  }
+  for (ns = pouch->state_cache_namespaces; ns != NULL; ns = ns->next) {
+    rc = lc_pouch_compaction_track_namespace(pouch, ns->namespace_name,
+                                             error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  return LC_OK;
 }
 
 static unsigned long lc_pouch_state_cache_key_hash(const char *key) {
@@ -2639,6 +2667,9 @@ static int lc_pouch_state_cache_apply_entry(lc_pouch *pouch,
     return LC_OK;
   }
   record = lc_pouch_state_cache_record_find(ns, entry->key);
+  if (record != NULL && entry->version < record->version) {
+    return LC_OK;
+  }
   if (record == NULL) {
     rc = lc_pouch_state_cache_record_index_ensure(pouch, ns,
                                                   ns->record_count + 1U, error);
@@ -4349,9 +4380,13 @@ static int lc_pouch_state_scan_file(lc_pouch *pouch, const char *segment_path,
       *max_version = entry.version;
     }
     if (!entry.control && key != NULL && strcmp(entry.key, key) == 0) {
-      lc_pouch_state_entry_cleanup(&pouch->allocator, current);
-      *current = entry;
-      memset(&entry, 0, sizeof(entry));
+      if (!current->seen || entry.version >= current->version) {
+        lc_pouch_state_entry_cleanup(&pouch->allocator, current);
+        *current = entry;
+        memset(&entry, 0, sizeof(entry));
+      } else {
+        lc_pouch_state_entry_cleanup(&pouch->allocator, &entry);
+      }
     }
   }
   lc_pouch_state_entry_cleanup(&pouch->allocator, &entry);
@@ -6003,7 +6038,7 @@ static int lc_pouch_state_compaction_capture_record_add(
   if (capture->captured_count >= capture->captured_capacity) {
     char **next_keys;
     char **next_containers;
-    unsigned long *next_offsets;
+    uint64_t *next_offsets;
     size_t next_capacity;
 
     next_capacity =
@@ -6032,7 +6067,7 @@ static int lc_pouch_state_compaction_capture_record_add(
                           NULL, NULL, NULL);
     }
     capture->captured_record_containers = next_containers;
-    next_offsets = (unsigned long *)lc_realloc_with_allocator(
+    next_offsets = (uint64_t *)lc_realloc_with_allocator(
         &pouch->allocator, capture->captured_record_offsets,
         next_capacity * sizeof(capture->captured_record_offsets[0]));
     if (next_offsets == NULL) {
@@ -6070,7 +6105,7 @@ static int lc_pouch_state_compaction_capture_records(
   int rc;
 
   for (record = cache->records; record != NULL; record = record->next) {
-    if (!record->has_record_ref) {
+    if (!record->found || !record->has_record_ref) {
       continue;
     }
     if (!lc_pouch_state_compaction_candidate_contains(
@@ -6705,29 +6740,7 @@ static int lc_pouch_state_compact_namespace_if_needed(
     return lc_pouch_maintenance_set_diagnostic(
         pouch, out, "below-reclaimable-threshold", error);
   }
-  now_seconds = (uint64_t)lc_pouch_maintenance_now_seconds();
-  if (!force && pouch->compaction_interval_seconds != 0UL &&
-      pouch->last_compaction_check_seconds != 0UL &&
-      now_seconds >= pouch->last_compaction_check_seconds &&
-      now_seconds - pouch->last_compaction_check_seconds <
-          pouch->compaction_interval_seconds) {
-    if (out != NULL) {
-      out->skipped = 1;
-    }
-    {
-      pslog_field fields[2];
-
-      fields[0] = lc_log_str_field("ns", namespace_name);
-      fields[1] = lc_log_str_field("reason", "interval-not-elapsed");
-      lc_log_trace(pouch->logger, "compaction.skip", fields, 2U);
-    }
-    return lc_pouch_maintenance_set_diagnostic(pouch, out,
-                                               "interval-not-elapsed", error);
-  }
   compacted_segment_id = last_sealed_segment_id;
-  if (!force && now_seconds != 0UL) {
-    pouch->last_compaction_check_seconds = now_seconds;
-  }
   {
     pslog_field fields[4];
 
@@ -6976,26 +6989,6 @@ static int lc_pouch_state_compact_namespace(
   lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
                                                &snapshot_cache);
   return rc;
-}
-
-static void
-lc_pouch_state_maybe_compact(lc_pouch *pouch, const char *namespace_name,
-                             lc_pouch_namespace_manifest *manifest) {
-  lc_error ignored;
-  int rc;
-
-  lc_error_init(&ignored);
-  rc = lc_pouch_state_compact_namespace_if_needed(pouch, namespace_name,
-                                                  manifest, 0, NULL, &ignored);
-  if (rc != LC_OK) {
-    pslog_field fields[3];
-
-    fields[0] = lc_log_str_field("ns", namespace_name);
-    fields[1] = lc_log_error_field("error", &ignored);
-    fields[2] = lc_log_code_field(&ignored);
-    lc_log_warn(pouch->logger, "compaction.background.error", fields, 3U);
-  }
-  lc_error_cleanup(&ignored);
 }
 
 static int lc_pouch_maintenance_run_locked(
@@ -7493,9 +7486,6 @@ static int lc_pouch_state_recover_staged_decisions_locked(
   if (rc == LC_OK && recovered) {
     rc = lc_pouch_state_touch_marker(pouch, &manifest, error);
   }
-  if (rc == LC_OK && recovered) {
-    lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
-  }
   if (rc == LC_OK) {
     cache->decision_recovery_checked = 1;
     if (recovered_count != 0UL) {
@@ -7940,7 +7930,6 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
       }
       lc_error_cleanup(&cache_error);
     }
-    lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
   }
   if (rc == LC_OK) {
     out->etag = etag;
@@ -8164,7 +8153,6 @@ static int lc_pouch_state_update_metadata_locked(
         version, current.bytes, current.cipher_bytes, current.descriptor,
         updated_at_unix, has_query_hidden, query_hidden, 1,
         LC_POUCH_STATE_RECORD_STATE_META);
-    lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
   }
   if (rc == LC_OK) {
     out->etag = lc_strdup_with_allocator(
@@ -8358,7 +8346,6 @@ static int lc_pouch_state_delete_locked(
         options != NULL && options->object_record
             ? LC_POUCH_STATE_RECORD_OBJECT_DELETE
             : current.record_type);
-    lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
   }
   if (rc == LC_OK) {
     out->etag = etag;
@@ -8601,8 +8588,6 @@ static int lc_pouch_state_promote_staged_locked(
 	      pouch, namespace_name, key,
 	      staged.content_type != NULL ? staged.content_type : "application/json",
 	      NULL, out);
-	  lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
-
 cleanup:
   lc_pouch_state_entry_cleanup(&pouch->allocator, &staged);
   lc_pouch_state_entry_cleanup(&pouch->allocator, &committed);
@@ -8774,8 +8759,6 @@ static int lc_pouch_state_commit_staged_locked(
 	      pouch, namespace_name, key,
 	      staged.content_type != NULL ? staged.content_type : "application/json",
 	      NULL, out);
-	  lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
-
 cleanup:
   lc_pouch_state_entry_cleanup(&pouch->allocator, &staged);
   lc_pouch_state_entry_cleanup(&pouch->allocator, &committed);
@@ -8887,7 +8870,6 @@ static int lc_pouch_state_discard_staged_locked(
             pouch, namespace_name, &manifest, staged_key, NULL, etag, NULL,
             NULL, NULL, 0U, tombstone_version, 0UL, 0UL, NULL, updated_at_unix,
             0, 0, 0, LC_POUCH_STATE_RECORD_STATE_DELETE);
-        lc_pouch_state_maybe_compact(pouch, namespace_name, &manifest);
       }
       if (rc == LC_OK && discarded != NULL) {
         *discarded = 1;

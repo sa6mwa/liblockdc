@@ -72,7 +72,6 @@ struct lc_pouch {
   uint64_t compaction_min_reclaimable_bytes;
   uint64_t compaction_interval_seconds;
   uint64_t compaction_delete_grace_seconds;
-  uint64_t last_compaction_check_seconds;
   unsigned long marker_sequence;
   int background_compaction_enabled;
   int single_writer;
@@ -95,6 +94,16 @@ struct lc_pouch {
   int fsync_cond_initialized;
   int fsync_thread_started;
   int fsync_stop;
+  pthread_mutex_t compaction_mutex;
+  pthread_cond_t compaction_cond;
+  pthread_t compaction_thread;
+  int compaction_mutex_initialized;
+  int compaction_cond_initialized;
+  int compaction_thread_started;
+  int compaction_stop;
+  char **compaction_namespaces;
+  size_t compaction_namespace_count;
+  size_t compaction_namespace_capacity;
   lc_pouch_state_cache_namespace *state_cache_namespaces;
   lc_pouch_source_cache_entry *source_cache_entries;
   size_t source_cache_count;
@@ -140,6 +149,8 @@ int lc_pouch_state_visible_count(lc_pouch *pouch, const char *namespace_name,
                                  size_t *count, lc_error *error);
 int lc_pouch_state_warm_namespace(lc_pouch *pouch, const char *namespace_name,
                                   lc_error *error);
+int lc_pouch_state_compaction_track_cached_namespaces(lc_pouch *pouch,
+                                                      lc_error *error);
 int lc_pouch_state_scan_summaries(lc_pouch *pouch, const char *namespace_name,
                                   const char *start_after, size_t limit,
                                   lc_pouch_state_scan_summary_visit_fn visitor,
@@ -154,5 +165,8 @@ void lc_pouch_state_scan_summaries_result_cleanup(
     const lc_allocator *allocator,
     lc_pouch_state_scan_summaries_result *result);
 int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error);
+int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
+                                        const char *namespace_name,
+                                        lc_error *error);
 
 #endif

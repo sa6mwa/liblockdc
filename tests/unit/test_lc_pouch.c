@@ -1926,6 +1926,45 @@ static void append_state_decision_record(const char *path,
   assert_int_equal(fclose(fp), 0);
 }
 
+static void append_first_state_record(const char *path) {
+  lc_pouch_record_header header;
+  unsigned char encoded[LC_POUCH_RECORD_HEADER_BYTES];
+  unsigned char *record;
+  uint64_t record_length;
+  FILE *fp;
+  lc_error error;
+  int rc;
+
+  lc_error_init(&error);
+  fp = fopen(path, "rb");
+  assert_non_null(fp);
+  assert_int_equal(fread(encoded, 1U, sizeof(encoded), fp), sizeof(encoded));
+  rc = lc_pouch_record_header_decode(encoded, &header, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(header.type, 1U);
+  record_length = LC_POUCH_RECORD_HEADER_BYTES + (uint64_t)header.key_len +
+                  (uint64_t)header.meta_len + header.payload_len;
+  assert_true(record_length <= SIZE_MAX);
+  record = (unsigned char *)malloc((size_t)record_length);
+  assert_non_null(record);
+  assert_int_equal(fseek(fp, 0L, SEEK_SET), 0);
+  assert_int_equal(fread(record, 1U, (size_t)record_length, fp),
+                   (size_t)record_length);
+  assert_int_equal(fclose(fp), 0);
+
+  /* A link can retain the original payload span at a later record offset. */
+  header.type = 3U;
+  lc_pouch_record_header_encode(&header, record);
+
+  fp = fopen(path, "ab");
+  assert_non_null(fp);
+  assert_int_equal(fwrite(record, 1U, (size_t)record_length, fp),
+                   (size_t)record_length);
+  assert_int_equal(fclose(fp), 0);
+  free(record);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_index_doc_table_generation_loads_identity_matched_file(void **state) {
   lc_allocator allocator;
@@ -5213,6 +5252,9 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   char *namespace_path;
   char rejected_payload_file_path[1024];
   char path[1024];
+  char snapshot_path[1024];
+  struct timespec delay;
+  int attempts;
   int written;
   int rc;
 
@@ -5230,6 +5272,7 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   open_options.compaction_min_segment_count = 1UL;
   open_options.compaction_min_reclaimable_bytes = 1UL;
   open_options.background_compaction_enabled = 1;
+  open_options.compaction_interval_seconds = 1UL;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -5251,6 +5294,16 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
+  written = snprintf(snapshot_path, sizeof(snapshot_path), "%s/snapshots/%s",
+                     namespace_path, "snapshot-00000000000000000001.log");
+  assert_true(written > 0 && (size_t)written < sizeof(snapshot_path));
+  delay.tv_sec = 0;
+  delay.tv_nsec = 100L * 1000L * 1000L;
+  for (attempts = 0; attempts < 30 && !path_is_file(snapshot_path);
+       ++attempts) {
+    assert_int_equal(nanosleep(&delay, NULL), 0);
+  }
+  assert_true(path_is_file(snapshot_path));
   assert_path_file(namespace_path,
                    "snapshots/snapshot-00000000000000000001.log");
   assert_path_file_contains(namespace_path, "manifest",
@@ -5295,6 +5348,67 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &delete_a);
   lc_pouch_state_write_result_cleanup(NULL, &write_b);
   lc_free_with_allocator(NULL, namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_state_replay_ignores_stale_generation(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result first;
+  lc_pouch_state_write_result second;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char segment_path[1024];
+  char bytes[64];
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&read_result, 0, sizeof(read_result));
+  make_root("state-stale-generation", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1U << 20;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("first", strlen("first"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/value", body, NULL,
+                            &first, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  rc = lc_source_from_memory("second", strlen("second"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/value", body, NULL,
+                            &second, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  lc_pouch_close(pouch);
+
+  pouch_state_segment_path(root, "team/alpha", 1UL, segment_path,
+                           sizeof(segment_path));
+  append_first_state_record(segment_path);
+
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/value", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_int_equal(read_result.version, second.version);
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_string_equal(bytes, "second");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &first);
+  lc_pouch_state_write_result_cleanup(NULL, &second);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -5961,7 +6075,7 @@ static void test_maintenance_reports_snapshot_write_abort(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_maintenance_reports_interval_skip(void **state) {
+static void test_maintenance_runs_immediately_despite_interval(void **state) {
   lc_pouch *pouch;
   lc_source *body;
   lc_pouch_open_options open_options;
@@ -6010,15 +6124,15 @@ static void test_maintenance_reports_interval_skip(void **state) {
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(maintenance_result.diagnostic, "interval-not-elapsed");
-  assert_true(maintenance_result.skipped);
-  assert_false(maintenance_result.compacted);
+  assert_string_equal(maintenance_result.diagnostic, "compacted");
+  assert_false(maintenance_result.skipped);
+  assert_true(maintenance_result.compacted);
   assert_int_equal(maintenance_result.candidate_segment_count, 3UL);
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
   assert_path_file(namespace_path,
-                   "snapshots/snapshot-00000000000000000001.log");
+                   "snapshots/snapshot-00000000000000000003.log");
 
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
@@ -6267,6 +6381,8 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   lc_pouch_state_write_result metadata_result;
   lc_pouch_state_read_result read_result;
   lc_pouch_state_write_options metadata_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
   lc_error error;
   char root[512];
   char bytes[64];
@@ -6282,6 +6398,8 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   memset(&metadata_result, 0, sizeof(metadata_result));
   memset(&read_result, 0, sizeof(read_result));
   memset(&metadata_options, 0, sizeof(metadata_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
   make_root("state-metadata-compact", root, sizeof(root));
   cleanup_root(root);
 
@@ -6317,12 +6435,18 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   assert_true(metadata_result.has_query_hidden);
   assert_true(metadata_result.query_hidden);
 
+  maintenance_options.namespace_name = "team/alpha";
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.compacted);
+
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
   assert_path_file(namespace_path,
-                   "snapshots/snapshot-00000000000000000001.log");
+                   "snapshots/snapshot-00000000000000000002.log");
   assert_path_file_contains_bytes(namespace_path,
-                                  "snapshots/snapshot-00000000000000000001.log",
+                                  "snapshots/snapshot-00000000000000000002.log",
                                   state_put_header, sizeof(state_put_header));
 
   lc_pouch_close(pouch);
@@ -6343,6 +6467,7 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   lc_pouch_state_write_result_cleanup(NULL, &roll_result);
   lc_pouch_state_write_result_cleanup(NULL, &metadata_result);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
   cleanup_root(root);
@@ -16704,6 +16829,7 @@ int main(void) {
       cmocka_unit_test(test_state_write_enforces_create_if_absent),
       cmocka_unit_test(test_state_writes_roll_active_manifest_segment),
       cmocka_unit_test(test_state_scheduled_compaction_installs_snapshot),
+      cmocka_unit_test(test_state_replay_ignores_stale_generation),
       cmocka_unit_test(test_pouch_root_path_aliases_share_store_identity),
       cmocka_unit_test(test_maintenance_reports_disabled_without_force),
       cmocka_unit_test(test_maintenance_retention_sweep_deletes_expired_state),
@@ -16714,7 +16840,7 @@ int main(void) {
       cmocka_unit_test(test_maintenance_aborts_on_validation_drift),
       cmocka_unit_test(test_maintenance_aborts_on_same_size_segment_drift),
       cmocka_unit_test(test_maintenance_reports_snapshot_write_abort),
-      cmocka_unit_test(test_maintenance_reports_interval_skip),
+      cmocka_unit_test(test_maintenance_runs_immediately_despite_interval),
       cmocka_unit_test(test_compaction_reclaims_expired_obsolete_files),
       cmocka_unit_test(test_snapshot_high_water_survives_compaction_reopen),
       cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),
