@@ -3,6 +3,7 @@
 #include "lc_api_internal.h"
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -334,7 +335,7 @@ static int lc_pouch_index_doc_table_reserve(lc_pouch_index_doc_table *table,
 
 int lc_pouch_index_doc_table_append_sorted_unique(
     lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
-    unsigned long bytes, int has_query_hidden, int query_hidden,
+    uint64_t bytes, int has_query_hidden, int query_hidden,
     unsigned long *doc_id, const lc_allocator *allocator, lc_error *error) {
   lc_pouch_index_doc *doc;
   int cmp;
@@ -377,7 +378,7 @@ int lc_pouch_index_doc_table_append_sorted_unique(
 
 static int lc_pouch_index_doc_table_append_unique_impl(
     lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
-    unsigned long bytes, int has_query_hidden, int query_hidden,
+    uint64_t bytes, int has_query_hidden, int query_hidden,
     int copy_key_hex, int check_unique, unsigned long *doc_id,
     const lc_allocator *allocator, lc_error *error) {
   lc_pouch_index_doc *doc;
@@ -429,7 +430,7 @@ static int lc_pouch_index_doc_table_append_unique_impl(
 
 int lc_pouch_index_doc_table_append_unique(
     lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
-    unsigned long bytes, int has_query_hidden, int query_hidden,
+    uint64_t bytes, int has_query_hidden, int query_hidden,
     unsigned long *doc_id, const lc_allocator *allocator, lc_error *error) {
   return lc_pouch_index_doc_table_append_unique_impl(
       table, key_hex, version, bytes, has_query_hidden, query_hidden, 1, 1,
@@ -438,7 +439,7 @@ int lc_pouch_index_doc_table_append_unique(
 
 int lc_pouch_index_doc_table_append_owned(
     lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
-    unsigned long bytes, int has_query_hidden, int query_hidden,
+    uint64_t bytes, int has_query_hidden, int query_hidden,
     unsigned long *doc_id, const lc_allocator *allocator, lc_error *error) {
   return lc_pouch_index_doc_table_append_unique_impl(
       table, key_hex, version, bytes, has_query_hidden, query_hidden, 1, 0,
@@ -674,8 +675,9 @@ int lc_pouch_index_doc_table_generation_encode(
           allocator, &bytes, &length, &capacity, doc->key_hex, error);
     }
     if (rc == LC_OK) {
-      written = snprintf(line, sizeof(line), " %lu %lu %d %d\n", doc->version,
-                         doc->bytes, doc->has_query_hidden ? 1 : 0,
+      written = snprintf(line, sizeof(line), " %lu %" PRIu64 " %d %d\n",
+                         doc->version, doc->bytes,
+                         doc->has_query_hidden ? 1 : 0,
                          doc->query_hidden ? 1 : 0);
       rc = written >= 0 && (size_t)written < sizeof(line)
                ? lc_pouch_index_doc_generation_append(allocator, &bytes,
@@ -772,7 +774,7 @@ static int lc_pouch_index_doc_generation_parse_bytes(
   unsigned long row_count;
   unsigned long row_hash;
   unsigned long actual_count;
-  unsigned long doc_bytes;
+  uint64_t doc_bytes;
   int has_hidden;
   int hidden;
   int consumed;
@@ -840,8 +842,8 @@ static int lc_pouch_index_doc_generation_parse_bytes(
       goto done;
     }
     consumed = 0;
-    if (sscanf(rest, "%lu %lu %d %d %n", &version, &doc_bytes, &has_hidden,
-               &hidden, &consumed) != 4 ||
+    if (sscanf(rest, "%lu %" SCNu64 " %d %d %n", &version, &doc_bytes,
+               &has_hidden, &hidden, &consumed) != 4 ||
         consumed <= 0 || rest[consumed] != '\0' ||
         (has_hidden != 0 && has_hidden != 1) || (hidden != 0 && hidden != 1)) {
       goto done;

@@ -79,6 +79,25 @@ static int lc_pouch_index_term_parse_ulong_token(const char *token,
   return LC_OK;
 }
 
+static int lc_pouch_index_term_parse_u64_token(const char *token,
+                                               uint64_t *out,
+                                               const char *message,
+                                               lc_error *error) {
+  char *end;
+  uint64_t parsed;
+
+  if (token == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
+  }
+  errno = 0;
+  parsed = strtoull(token, &end, 10);
+  if (errno != 0 || end == token || *end != '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
+  }
+  *out = parsed;
+  return LC_OK;
+}
+
 static char *lc_pouch_index_term_hex_encode_bytes(const lc_allocator *allocator,
                                                   const char *value,
                                                   size_t length) {
@@ -2111,8 +2130,8 @@ int lc_pouch_index_term_field_parse_line(char *line,
   char *byte_count_token;
   unsigned long first_line;
   unsigned long line_count;
-  unsigned long first_byte;
-  unsigned long byte_count;
+  uint64_t first_byte;
+  uint64_t byte_count;
   int rc;
 
   if (line == NULL || field == NULL) {
@@ -2151,13 +2170,13 @@ int lc_pouch_index_term_field_parse_line(char *line,
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_index_term_parse_ulong_token(
+  rc = lc_pouch_index_term_parse_u64_token(
       first_byte_token, &first_byte,
       "pouch index term field has invalid first byte", error);
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_index_term_parse_ulong_token(
+  rc = lc_pouch_index_term_parse_u64_token(
       byte_count_token, &byte_count,
       "pouch index term field has invalid byte count", error);
   if (rc != LC_OK) {
@@ -2189,8 +2208,8 @@ int lc_pouch_index_term_value_parse_line(char *line,
   char *byte_count_token;
   unsigned long first_line;
   unsigned long line_count;
-  unsigned long first_byte;
-  unsigned long byte_count;
+  uint64_t first_byte;
+  uint64_t byte_count;
   int rc;
 
   if (line == NULL || value == NULL) {
@@ -2231,13 +2250,13 @@ int lc_pouch_index_term_value_parse_line(char *line,
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_index_term_parse_ulong_token(
+  rc = lc_pouch_index_term_parse_u64_token(
       first_byte_token, &first_byte,
       "pouch index term value has invalid first byte", error);
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_index_term_parse_ulong_token(
+  rc = lc_pouch_index_term_parse_u64_token(
       byte_count_token, &byte_count,
       "pouch index term value has invalid byte count", error);
   if (rc != LC_OK) {
@@ -2269,17 +2288,16 @@ int lc_pouch_index_term_fields_select_range(
     const lc_pouch_index_term_field *fields, size_t field_count,
     const char *field_hex, const lc_pouch_index_term_key *terms,
     size_t term_count, unsigned long term_line_count,
-    unsigned long term_byte_count, unsigned long *first_line,
-    unsigned long *line_count, unsigned long *first_byte,
-    unsigned long *byte_count) {
+    uint64_t term_byte_count, unsigned long *first_line,
+    unsigned long *line_count, uint64_t *first_byte, uint64_t *byte_count) {
   unsigned long first;
   unsigned long count;
   unsigned long end;
   unsigned long min_first;
   unsigned long max_end;
-  unsigned long min_byte;
-  unsigned long max_byte_end;
-  unsigned long byte_end;
+  uint64_t min_byte;
+  uint64_t max_byte_end;
+  uint64_t byte_end;
   size_t index;
   size_t field_index;
   int found;
@@ -2323,8 +2341,12 @@ int lc_pouch_index_term_fields_select_range(
       for (field_index = 0U; field_index < field_count; ++field_index) {
         if (strcmp(fields[field_index].field_hex, terms[index].field_hex) ==
             0) {
-          byte_end =
-              fields[field_index].first_byte + fields[field_index].byte_count;
+          if (fields[field_index].byte_count >
+              UINT64_MAX - fields[field_index].first_byte) {
+            return 0;
+          }
+          byte_end = fields[field_index].first_byte +
+                     fields[field_index].byte_count;
           if (!found || fields[field_index].first_byte < min_byte) {
             min_byte = fields[field_index].first_byte;
           }

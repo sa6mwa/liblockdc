@@ -8,6 +8,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <math.h>
@@ -84,7 +85,7 @@ typedef struct lc_pouch_query_index_row {
   char *content_type_hex;
   char *etag_hex;
   unsigned long version;
-  unsigned long bytes;
+  uint64_t bytes;
   int has_query_hidden;
   int query_hidden;
 } lc_pouch_query_index_row;
@@ -106,7 +107,7 @@ typedef struct lc_pouch_query_index_term {
   int derived_terms_ready;
   unsigned long doc_id;
   unsigned long version;
-  unsigned long bytes;
+  uint64_t bytes;
   int has_query_hidden;
   int query_hidden;
 } lc_pouch_query_index_term;
@@ -146,8 +147,8 @@ typedef struct lc_pouch_query_index_incremental_change {
   char *etag;
   char *descriptor;
   unsigned long version;
-  unsigned long bytes;
-  unsigned long cipher_bytes;
+  uint64_t bytes;
+  uint64_t cipher_bytes;
   long updated_at_unix;
   int has_query_hidden;
   int query_hidden;
@@ -173,7 +174,7 @@ struct lc_pouch_query_index_pending_entry {
   char *content_type_hex;
   char *etag_hex;
   unsigned long version;
-  unsigned long bytes;
+  uint64_t bytes;
   unsigned long doc_id;
   int has_query_hidden;
   int query_hidden;
@@ -220,7 +221,7 @@ typedef struct lc_pouch_query_index_read_result {
 } lc_pouch_query_index_read_result;
 
 typedef struct lc_pouch_query_index_manifest_artifact_signature {
-  unsigned long size;
+  uint64_t size;
   unsigned long mtime;
   unsigned long mtime_nsec;
   unsigned long ctime;
@@ -519,7 +520,7 @@ static int lc_pouch_query_index_pending_segment_encode(
     size_t *temporal_term_generation_length_out, lc_error *error);
 
 typedef struct lc_pouch_query_index_file_signature {
-  unsigned long size;
+  uint64_t size;
   unsigned long mtime;
   unsigned long mtime_nsec;
   unsigned long ctime;
@@ -654,7 +655,7 @@ typedef struct lc_pouch_query_index_extract_context {
   lc_pouch_query_index_summary *summary;
   const char *key_hex;
   unsigned long version;
-  unsigned long bytes;
+  uint64_t bytes;
   int has_query_hidden;
   int query_hidden;
   char *field;
@@ -882,7 +883,7 @@ lc_pouch_query_index_term_reserve(lc_pouch_query_index_summary *summary,
 static int lc_pouch_query_index_term_add(
     lc_pouch_query_index_summary *summary, const char *field, size_t field_len,
     const char *value, size_t value_len, const char *key_hex, char value_type,
-    unsigned long version, unsigned long bytes, int has_query_hidden,
+    unsigned long version, uint64_t bytes, int has_query_hidden,
     int query_hidden, lc_error *error) {
   lc_pouch_query_index_term *term;
   int long_string;
@@ -2961,6 +2962,27 @@ static int lc_pouch_query_index_parse_ulong_token(char **cursor,
   return 1;
 }
 
+static int lc_pouch_query_index_parse_u64_token(char **cursor,
+                                                uint64_t *out) {
+  char *begin;
+  char *end;
+
+  if (cursor == NULL || *cursor == NULL || out == NULL) {
+    return 0;
+  }
+  begin = *cursor;
+  if (*begin == '\0' || *begin == '\n' || *begin == ' ') {
+    return 0;
+  }
+  errno = 0;
+  *out = strtoull(begin, &end, 10);
+  if (errno != 0 || end == begin || *end != ' ') {
+    return 0;
+  }
+  *cursor = end + 1;
+  return 1;
+}
+
 static int lc_pouch_query_index_parse_int_token(char **cursor, int *out) {
   unsigned long parsed;
 
@@ -3041,7 +3063,7 @@ static int lc_pouch_query_index_parse_and_visit_row(
   etag_hex = NULL;
   rc = LC_OK;
   if (!lc_pouch_query_index_parse_ulong_token(&cursor, &row.version) ||
-      !lc_pouch_query_index_parse_ulong_token(&cursor, &row.bytes) ||
+      !lc_pouch_query_index_parse_u64_token(&cursor, &row.bytes) ||
       !lc_pouch_query_index_parse_int_token(&cursor, &row.has_query_hidden) ||
       !lc_pouch_query_index_parse_int_token(&cursor, &row.query_hidden)) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -3706,7 +3728,7 @@ static int lc_pouch_query_index_parse_and_visit_term(
   rc = LC_OK;
   memset(&key_view, 0, sizeof(key_view));
   if (!lc_pouch_query_index_parse_ulong_token(&cursor, &key_view.version) ||
-      !lc_pouch_query_index_parse_ulong_token(&cursor, &key_view.bytes) ||
+      !lc_pouch_query_index_parse_u64_token(&cursor, &key_view.bytes) ||
       !lc_pouch_query_index_parse_int_token(&cursor,
                                             &key_view.has_query_hidden) ||
       !lc_pouch_query_index_parse_int_token(&cursor, &key_view.query_hidden) ||
@@ -4318,7 +4340,7 @@ static int lc_pouch_query_index_append_crypto_footer_fd(int fd,
 
 static int lc_pouch_query_index_read_crypto_footer(
     const lc_allocator *allocator, const char *path, char **descriptor_out,
-    unsigned long *cipher_length_out, lc_error *error) {
+    uint64_t *cipher_length_out, lc_error *error) {
   unsigned char footer[LC_POUCH_QUERY_INDEX_CRYPTO_FOOTER_BYTES];
   char *descriptor;
   struct stat st;
@@ -4336,13 +4358,14 @@ static int lc_pouch_query_index_read_crypto_footer(
                         NULL, NULL, NULL);
   }
   *descriptor_out = NULL;
-  *cipher_length_out = 0UL;
+  *cipher_length_out = 0U;
   if (stat(path, &st) != 0) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to stat pouch encrypted query-index artifact",
                         strerror(errno), NULL, "pouch");
   }
-  if (st.st_size < (off_t)LC_POUCH_QUERY_INDEX_CRYPTO_FOOTER_BYTES) {
+  if (st.st_size < 0 ||
+      st.st_size < (off_t)LC_POUCH_QUERY_INDEX_CRYPTO_FOOTER_BYTES) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch encrypted query-index artifact is missing "
                         "crypto footer",
@@ -4377,8 +4400,7 @@ static int lc_pouch_query_index_read_crypto_footer(
       descriptor_length64 >
           (uint64_t)(st.st_size -
                      (off_t)LC_POUCH_QUERY_INDEX_CRYPTO_FOOTER_BYTES) ||
-      descriptor_length64 > (uint64_t)((size_t)-1) - 1U ||
-      descriptor_length64 > (uint64_t)ULONG_MAX) {
+      descriptor_length64 > (uint64_t)((size_t)-1) - 1U) {
     close(fd);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch encrypted query-index artifact has invalid "
@@ -4389,8 +4411,7 @@ static int lc_pouch_query_index_read_crypto_footer(
   descriptor_offset = st.st_size -
                       (off_t)LC_POUCH_QUERY_INDEX_CRYPTO_FOOTER_BYTES -
                       (off_t)descriptor_length;
-  if (descriptor_offset < 0 ||
-      (uint64_t)descriptor_offset > (uint64_t)ULONG_MAX) {
+  if (descriptor_offset < 0) {
     close(fd);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch encrypted query-index artifact has invalid "
@@ -4425,7 +4446,7 @@ static int lc_pouch_query_index_read_crypto_footer(
   }
   descriptor[descriptor_length] = '\0';
   *descriptor_out = descriptor;
-  *cipher_length_out = (unsigned long)descriptor_offset;
+  *cipher_length_out = (uint64_t)descriptor_offset;
   return LC_OK;
 }
 
@@ -4497,7 +4518,7 @@ static int lc_pouch_query_index_read_encrypted_artifact_bytes(
   lc_source *source;
   char *context;
   char *descriptor;
-  unsigned long cipher_length;
+  uint64_t cipher_length;
   int rc;
 
   if (out_bytes == NULL || out_length == NULL || present == NULL ||
@@ -4516,7 +4537,7 @@ static int lc_pouch_query_index_read_encrypted_artifact_bytes(
     return rc;
   }
   descriptor = NULL;
-  cipher_length = 0UL;
+  cipher_length = 0U;
   rc = lc_pouch_query_index_read_crypto_footer(
       &pouch->allocator, path, &descriptor, &cipher_length, error);
   if (rc != LC_OK) {
@@ -5003,8 +5024,8 @@ static int lc_pouch_query_index_write_artifact_bytes(
   lc_source *source;
   char *context;
   char *descriptor;
-  unsigned long plain_bytes;
-  unsigned long cipher_bytes;
+  uint64_t plain_bytes;
+  uint64_t cipher_bytes;
   int fd;
   int rc;
 
@@ -5320,7 +5341,7 @@ lc_pouch_query_index_manifest_read(lc_pouch *pouch, const char *path,
     if (strncmp(line, "artifact ", 9U) == 0) {
       lc_pouch_query_index_manifest_segment *segment;
       unsigned long artifact_index;
-      unsigned long size;
+      uint64_t size;
       unsigned long mtime;
       unsigned long mtime_nsec;
       unsigned long ctime;
@@ -5328,7 +5349,7 @@ lc_pouch_query_index_manifest_read(lc_pouch *pouch, const char *path,
       unsigned long inode;
 
       consumed = 0;
-      if (sscanf(line, "artifact %63s %lu %lu %lu %lu %lu %lu %lu %n", id,
+      if (sscanf(line, "artifact %63s %lu %" SCNu64 " %lu %lu %lu %lu %lu %n", id,
                  &artifact_index, &size, &mtime, &mtime_nsec, &ctime,
                  &ctime_nsec, &inode, &consumed) != 8 ||
           consumed <= 0 || line[consumed] != '\0' ||
@@ -5658,7 +5679,7 @@ static int lc_pouch_query_index_manifest_write(
       }
       written =
           snprintf(artifact_line, sizeof(artifact_line),
-                   "artifact %s %lu %lu %lu %lu %lu %lu %lu\n",
+                   "artifact %s %lu %" PRIu64 " %lu %lu %lu %lu %lu\n",
                    manifest->segments[index].id, (unsigned long)artifact_index,
                    signature->size, signature->mtime, signature->mtime_nsec,
                    signature->ctime, signature->ctime_nsec, signature->inode);
@@ -6190,23 +6211,33 @@ lc_pouch_query_index_read_terms_slice(FILE *fp, unsigned long term_count,
 }
 
 static int lc_pouch_query_index_seek_term_slice(FILE *fp,
-                                                long term_section_start,
-                                                unsigned long first_byte,
+                                                uint64_t term_section_start,
+                                                uint64_t first_byte,
                                                 const lc_allocator *allocator,
                                                 int *valid, lc_error *error) {
+  uint64_t offset;
+  off_t target;
+
   if (valid == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index term seek requires valid output",
                         NULL, NULL, NULL);
   }
   *valid = 0;
-  if (fp == NULL || term_section_start < 0L ||
-      first_byte > (unsigned long)(LONG_MAX - term_section_start)) {
+  if (fp == NULL || first_byte > UINT64_MAX - term_section_start) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index term byte range is invalid", NULL,
                         NULL, NULL);
   }
-  if (fseek(fp, term_section_start + (long)first_byte, SEEK_SET) != 0) {
+  offset = term_section_start + first_byte;
+  target = (off_t)offset;
+  if (target < 0 || (uint64_t)target != offset) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index term byte range exceeds platform "
+                        "seek limit",
+                        NULL, NULL, NULL);
+  }
+  if (fseeko(fp, target, SEEK_SET) != 0) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to seek pouch query-index term slice",
                         strerror(errno), NULL, NULL);
@@ -6224,7 +6255,7 @@ static int lc_pouch_query_index_read_term_fields(
   lc_pouch_index_term_field *fields;
   unsigned long actual_fields;
   unsigned long previous_end;
-  unsigned long previous_byte_end;
+  uint64_t previous_byte_end;
   int got_line;
   int rc;
 
@@ -6256,7 +6287,7 @@ static int lc_pouch_query_index_read_term_fields(
   line.allocator = allocator;
   actual_fields = 0UL;
   previous_end = 0UL;
-  previous_byte_end = 0UL;
+  previous_byte_end = 0U;
   rc = LC_OK;
   while (actual_fields < term_field_count) {
     lc_pouch_index_term_field parsed;
@@ -6271,9 +6302,10 @@ static int lc_pouch_query_index_read_term_fields(
     if (rc != LC_OK) {
       break;
     }
-    if (parsed.line_count == 0UL || parsed.byte_count == 0UL ||
+    if (parsed.line_count == 0UL || parsed.byte_count == 0U ||
         parsed.first_line < previous_end ||
         parsed.first_byte < previous_byte_end ||
+        parsed.byte_count > UINT64_MAX - parsed.first_byte ||
         parsed.first_line > term_count ||
         parsed.line_count > term_count - parsed.first_line ||
         (actual_fields > 0UL && fields != NULL &&
@@ -6318,7 +6350,7 @@ static int lc_pouch_query_index_read_term_values(
   lc_pouch_index_term_value *values;
   unsigned long actual_values;
   unsigned long previous_end;
-  unsigned long previous_byte_end;
+  uint64_t previous_byte_end;
   int got_line;
   int rc;
 
@@ -6350,7 +6382,7 @@ static int lc_pouch_query_index_read_term_values(
   line.allocator = allocator;
   actual_values = 0UL;
   previous_end = 0UL;
-  previous_byte_end = 0UL;
+  previous_byte_end = 0U;
   rc = LC_OK;
   while (actual_values < term_value_count) {
     lc_pouch_index_term_value parsed;
@@ -6365,9 +6397,10 @@ static int lc_pouch_query_index_read_term_values(
     if (rc != LC_OK) {
       break;
     }
-    if (parsed.line_count == 0UL || parsed.byte_count == 0UL ||
+    if (parsed.line_count == 0UL || parsed.byte_count == 0U ||
         parsed.first_line < previous_end ||
         parsed.first_byte < previous_byte_end ||
+        parsed.byte_count > UINT64_MAX - parsed.first_byte ||
         parsed.first_line > term_count ||
         parsed.line_count > term_count - parsed.first_line ||
         (actual_values > 0UL && values != NULL &&
@@ -6412,9 +6445,8 @@ static int lc_pouch_query_index_read_term_values(
 static int lc_pouch_query_index_term_reader_range(
     const lc_pouch_index_term_field *fields, size_t field_count,
     const lc_pouch_query_index_term_reader *reader, unsigned long term_count,
-    unsigned long term_byte_count, unsigned long *first_line,
-    unsigned long *line_count, unsigned long *first_byte,
-    unsigned long *byte_count) {
+    uint64_t term_byte_count, unsigned long *first_line,
+    unsigned long *line_count, uint64_t *first_byte, uint64_t *byte_count) {
   if (reader == NULL || first_line == NULL || line_count == NULL) {
     return 0;
   }
@@ -6422,7 +6454,7 @@ static int lc_pouch_query_index_term_reader_range(
     *first_line = 0UL;
     *line_count = term_count;
     if (first_byte != NULL) {
-      *first_byte = 0UL;
+      *first_byte = 0U;
     }
     if (byte_count != NULL) {
       *byte_count = term_byte_count;
@@ -6551,14 +6583,14 @@ static int lc_pouch_query_index_read_with_reader_fp(
   unsigned long presence_count;
   unsigned long presence_hash;
   unsigned long presence_index_complete;
-  unsigned long first_byte;
-  unsigned long byte_count;
-  unsigned long term_byte_count;
+  uint64_t first_byte;
+  uint64_t byte_count;
+  uint64_t term_byte_count;
   lc_pouch_index_term_field *term_fields;
   lc_pouch_index_term_value *term_values;
   size_t term_field_table_count;
   size_t term_value_table_count;
-  long term_section_start;
+  uint64_t term_section_start;
   int matched;
   int row_valid;
   int term_valid;
@@ -6590,14 +6622,14 @@ static int lc_pouch_query_index_read_with_reader_fp(
   presence_count = 0UL;
   presence_hash = 0UL;
   presence_index_complete = 0UL;
-  first_byte = 0UL;
-  byte_count = 0UL;
-  term_byte_count = 0UL;
+  first_byte = 0U;
+  byte_count = 0U;
+  term_byte_count = 0U;
   term_fields = NULL;
   term_values = NULL;
   term_field_table_count = 0U;
   term_value_table_count = 0U;
-  term_section_start = -1L;
+  term_section_start = 0U;
   matched = 0;
   if (fgets(line, sizeof(line), fp) != NULL &&
       sscanf(line, "format=%63s\n", format) == 1) {
@@ -6700,18 +6732,28 @@ static int lc_pouch_query_index_read_with_reader_fp(
           error);
     }
     if (rc == LC_OK) {
-      term_section_start = ftell(fp);
-      if (term_section_start < 0L) {
+      off_t term_position;
+
+      term_position = ftello(fp);
+      if (term_position < 0) {
         rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                           "failed to locate pouch query-index term section",
                           strerror(errno), NULL, NULL);
+      } else {
+        term_section_start = (uint64_t)term_position;
       }
     }
     if (rc == LC_OK && term_field_table_count > 0U) {
       lc_pouch_index_term_field *last_field;
 
       last_field = &term_fields[term_field_table_count - 1U];
-      term_byte_count = last_field->first_byte + last_field->byte_count;
+      if (last_field->byte_count > UINT64_MAX - last_field->first_byte) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch query-index term byte range is invalid",
+                          NULL, NULL, NULL);
+      } else {
+        term_byte_count = last_field->first_byte + last_field->byte_count;
+      }
     }
     if (rc == LC_OK && want_terms) {
       unsigned long first_line;
@@ -6719,8 +6761,8 @@ static int lc_pouch_query_index_read_with_reader_fp(
 
       first_line = 0UL;
       line_count = 0UL;
-      first_byte = 0UL;
-      byte_count = 0UL;
+      first_byte = 0U;
+      byte_count = 0U;
       if (rc == LC_OK && term_reader != NULL &&
           lc_pouch_query_index_term_reader_range(
               term_fields, term_field_table_count, term_reader, term_count,
@@ -6744,7 +6786,7 @@ static int lc_pouch_query_index_read_with_reader_fp(
         }
       } else if (rc == LC_OK && term_reader != NULL && want_rows) {
         rc = lc_pouch_query_index_seek_term_slice(
-            fp, term_section_start, 0UL,
+            fp, term_section_start, 0U,
             lc_pouch_query_index_reader_allocator(reader, term_reader,
                                                   presence_reader),
             &term_valid, error);
@@ -6770,7 +6812,7 @@ static int lc_pouch_query_index_read_with_reader_fp(
       }
     } else if (rc == LC_OK && (want_rows || want_presences)) {
       rc = lc_pouch_query_index_seek_term_slice(
-          fp, term_section_start, 0UL,
+          fp, term_section_start, 0U,
           lc_pouch_query_index_reader_allocator(reader, term_reader,
                                                 presence_reader),
           &term_valid, error);
@@ -9534,8 +9576,9 @@ static int lc_pouch_query_index_pending_segment_append_entry(
     return lc_pouch_query_index_pending_segment_append_delete(
         allocator, segment, entry, error);
   }
-  written = snprintf(line, sizeof(line), "row %lu %lu %d %d ", entry->version,
-                     entry->bytes, entry->has_query_hidden ? 1 : 0,
+    written = snprintf(line, sizeof(line), "row %lu %" PRIu64 " %d %d ",
+                       entry->version, entry->bytes,
+                       entry->has_query_hidden ? 1 : 0,
                      entry->query_hidden ? 1 : 0);
   if (written < 0 || (size_t)written >= sizeof(line)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -10443,8 +10486,9 @@ static int lc_pouch_query_index_build_text(
     lc_pouch_query_index_row *row;
 
     row = &summary->rows[index];
-    written = snprintf(line, sizeof(line), "row %lu %lu %d %d ", row->version,
-                       row->bytes, row->has_query_hidden ? 1 : 0,
+    written = snprintf(line, sizeof(line), "row %lu %" PRIu64 " %d %d ",
+                       row->version, row->bytes,
+                       row->has_query_hidden ? 1 : 0,
                        row->query_hidden ? 1 : 0);
     if (written < 0 || (size_t)written >= sizeof(line)) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -12348,7 +12392,10 @@ static int lc_pouch_query_index_artifact_signature(
   if (stat(path, &st) != 0) {
     return 0;
   }
-  out->size = (unsigned long)st.st_size;
+  if (st.st_size < 0) {
+    return 0;
+  }
+  out->size = (uint64_t)st.st_size;
 #if defined(__APPLE__)
   out->mtime = (unsigned long)st.st_mtimespec.tv_sec;
   out->mtime_nsec = (unsigned long)st.st_mtimespec.tv_nsec;
@@ -14208,7 +14255,7 @@ static int lc_pouch_query_index_collect_generation_artifact_docids(
 static int lc_pouch_query_index_result_row_list_add_view(
     const lc_allocator *allocator, lc_pouch_index_result_row_list *rows,
     char *key, char *key_hex, int owns_key, int owns_key_hex,
-    unsigned long doc_id, unsigned long version, unsigned long bytes,
+    unsigned long doc_id, unsigned long version, uint64_t bytes,
     int has_query_hidden, int query_hidden, size_t value_index,
     lc_error *error) {
   lc_pouch_index_result_row *row;

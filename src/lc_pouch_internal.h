@@ -29,8 +29,8 @@ typedef struct lc_pouch_state_change_visit_entry {
   const char *content_type;
   const char *etag;
   unsigned long version;
-  unsigned long bytes;
-  unsigned long cipher_bytes;
+  uint64_t bytes;
+  uint64_t cipher_bytes;
   const char *descriptor;
   long updated_at_unix;
   int has_query_hidden;
@@ -47,8 +47,8 @@ typedef struct lc_pouch_state_scan_summary_entry {
   const char *etag;
   const char *descriptor;
   unsigned long version;
-  unsigned long bytes;
-  unsigned long cipher_bytes;
+  uint64_t bytes;
+  uint64_t cipher_bytes;
   long updated_at_unix;
   int has_query_hidden;
   int query_hidden;
@@ -67,11 +67,12 @@ typedef int (*lc_pouch_state_scan_summary_visit_fn)(
 struct lc_pouch {
   lc_allocator allocator;
   char *root_path;
-  unsigned long segment_target_bytes;
+  uint64_t segment_target_bytes;
   unsigned long compaction_min_segment_count;
-  unsigned long compaction_min_reclaimable_bytes;
-  unsigned long compaction_interval_seconds;
-  unsigned long last_compaction_check_seconds;
+  uint64_t compaction_min_reclaimable_bytes;
+  uint64_t compaction_interval_seconds;
+  uint64_t compaction_delete_grace_seconds;
+  uint64_t last_compaction_check_seconds;
   unsigned long marker_sequence;
   int background_compaction_enabled;
   int single_writer;

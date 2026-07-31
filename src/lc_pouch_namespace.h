@@ -3,6 +3,8 @@
 
 #include "lc_pouch.h"
 
+#include <stdint.h>
+
 int lc_pouch_namespace_ensure(const lc_allocator *allocator,
                               const char *root_path, const char *namespace_name,
                               lc_error *error);
@@ -20,6 +22,8 @@ typedef struct lc_pouch_namespace_manifest {
   char *latest_snapshot;
   char **obsolete_segments;
   char **obsolete_snapshots;
+  uint64_t *obsolete_segment_marked_at;
+  uint64_t *obsolete_snapshot_marked_at;
   unsigned long active_segment_id;
   unsigned long max_segment_id;
   unsigned long latest_snapshot_segment_id;
@@ -35,13 +39,13 @@ typedef struct lc_pouch_namespace_marker_snapshot {
 } lc_pouch_namespace_marker_snapshot;
 
 typedef struct lc_pouch_namespace_marker_directory_snapshot {
-  long size;
+  uint64_t size;
   long mtime;
 } lc_pouch_namespace_marker_directory_snapshot;
 
 typedef struct lc_pouch_namespace_marker_peer_stat {
   char *name;
-  long size;
+  uint64_t size;
   long mtime;
 } lc_pouch_namespace_marker_peer_stat;
 
@@ -77,17 +81,18 @@ int lc_pouch_namespace_manifest_install_snapshot(
     lc_error *error);
 int lc_pouch_namespace_manifest_mark_obsolete_segment(
     const lc_allocator *allocator, lc_pouch_namespace_manifest *manifest,
-    const char *segment_leaf, lc_error *error);
+    const char *segment_leaf, uint64_t marked_at_unix, lc_error *error);
 int lc_pouch_namespace_manifest_mark_obsolete_snapshot(
     const lc_allocator *allocator, lc_pouch_namespace_manifest *manifest,
-    const char *snapshot_leaf, lc_error *error);
+    const char *snapshot_leaf, uint64_t marked_at_unix, lc_error *error);
 int lc_pouch_namespace_manifest_save(const lc_allocator *allocator,
                                      const char *namespace_name,
                                      lc_pouch_namespace_manifest *manifest,
                                      lc_error *error);
 int lc_pouch_namespace_manifest_cleanup_obsolete(
     const lc_allocator *allocator, const char *namespace_name,
-    lc_pouch_namespace_manifest *manifest, unsigned long *deleted_count,
+    lc_pouch_namespace_manifest *manifest, uint64_t now_unix,
+    uint64_t delete_grace_seconds, unsigned long *deleted_count,
     unsigned long *pending_count, lc_error *error);
 int lc_pouch_namespace_touch_marker(const lc_allocator *allocator,
                                     const char *namespace_path,

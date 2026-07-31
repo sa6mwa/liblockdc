@@ -6,6 +6,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -149,13 +150,17 @@ static int lc_pouch_namespace_parse_snapshot_id(const char *leaf,
 
 static int
 lc_pouch_namespace_manifest_list_append(const lc_allocator *allocator,
-                                        char ***items, unsigned long *count,
-                                        const char *leaf, lc_error *error) {
+                                        char ***items, uint64_t **marked_at,
+                                        unsigned long *count, const char *leaf,
+                                        uint64_t marked_at_unix,
+                                        lc_error *error) {
   char **grown;
+  uint64_t *grown_marked_at;
   char *copy;
   unsigned long i;
 
-  if (items == NULL || count == NULL || leaf == NULL || leaf[0] == '\0') {
+  if (items == NULL || marked_at == NULL || count == NULL || leaf == NULL ||
+      leaf[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch manifest obsolete entry requires a leaf", NULL,
                         NULL, NULL);
@@ -178,6 +183,14 @@ lc_pouch_namespace_manifest_list_append(const lc_allocator *allocator,
                         NULL, NULL, NULL);
   }
   *items = grown;
+  grown_marked_at = (uint64_t *)lc_realloc_with_allocator(
+      allocator, *marked_at, ((size_t)(*count) + 1U) * sizeof(**marked_at));
+  if (grown_marked_at == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch manifest obsolete times",
+                        NULL, NULL, NULL);
+  }
+  *marked_at = grown_marked_at;
   copy = lc_strdup_with_allocator(allocator, leaf);
   if (copy == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -185,6 +198,7 @@ lc_pouch_namespace_manifest_list_append(const lc_allocator *allocator,
                         NULL, NULL, NULL);
   }
   grown[*count] = copy;
+  grown_marked_at[*count] = marked_at_unix;
   ++*count;
   return LC_OK;
 }
@@ -207,7 +221,8 @@ static int lc_pouch_namespace_manifest_list_contains(char **items,
 
 static void
 lc_pouch_namespace_manifest_list_cleanup(const lc_allocator *allocator,
-                                         char **items, unsigned long count) {
+                                         char **items, uint64_t *marked_at,
+                                         unsigned long count) {
   unsigned long i;
 
   if (items == NULL) {
@@ -217,6 +232,7 @@ lc_pouch_namespace_manifest_list_cleanup(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, items[i]);
   }
   lc_free_with_allocator(allocator, items);
+  lc_free_with_allocator(allocator, marked_at);
 }
 
 static int lc_pouch_namespace_scan_segments(const lc_allocator *allocator,
@@ -306,8 +322,10 @@ static int lc_pouch_namespace_manifest_read(
     const lc_allocator *allocator, const char *manifest_path,
     unsigned long *active_segment_id, unsigned long *snapshot_segment_id,
     unsigned long *state_max_version, char **latest_snapshot,
-    char ***obsolete_segments, unsigned long *obsolete_segment_count,
-    char ***obsolete_snapshots, unsigned long *obsolete_snapshot_count) {
+    char ***obsolete_segments, uint64_t **obsolete_segment_marked_at,
+    unsigned long *obsolete_segment_count, char ***obsolete_snapshots,
+    uint64_t **obsolete_snapshot_marked_at,
+    unsigned long *obsolete_snapshot_count) {
   char line[256];
   FILE *fp;
   int ok;
@@ -317,8 +335,10 @@ static int lc_pouch_namespace_manifest_read(
   *state_max_version = 0UL;
   *latest_snapshot = NULL;
   *obsolete_segments = NULL;
+  *obsolete_segment_marked_at = NULL;
   *obsolete_segment_count = 0UL;
   *obsolete_snapshots = NULL;
+  *obsolete_snapshot_marked_at = NULL;
   *obsolete_snapshot_count = 0UL;
   fp = fopen(manifest_path, "rb");
   if (fp == NULL) {
@@ -373,21 +393,47 @@ static int lc_pouch_namespace_manifest_read(
       }
     } else if (strcmp(line, "obsolete_segment") == 0) {
       unsigned long parsed;
+      char *timestamp;
+      char *end;
+      uint64_t marked_at_unix;
 
-      if (lc_pouch_namespace_parse_segment_id(value, &parsed) &&
-          lc_pouch_namespace_manifest_list_append(allocator, obsolete_segments,
-                                                  obsolete_segment_count, value,
-                                                  NULL) != LC_OK) {
+      timestamp = strchr(value, '\t');
+      if (timestamp == NULL) {
+        ok = 0;
+        break;
+      }
+      *timestamp++ = '\0';
+      errno = 0;
+      marked_at_unix = strtoull(timestamp, &end, 10);
+      if (errno != 0 || end == timestamp || *end != '\0' ||
+          marked_at_unix == 0U ||
+          !lc_pouch_namespace_parse_segment_id(value, &parsed) ||
+          lc_pouch_namespace_manifest_list_append(
+              allocator, obsolete_segments, obsolete_segment_marked_at,
+              obsolete_segment_count, value, marked_at_unix, NULL) != LC_OK) {
         ok = 0;
         break;
       }
     } else if (strcmp(line, "obsolete_snapshot") == 0) {
       unsigned long parsed;
+      char *timestamp;
+      char *end;
+      uint64_t marked_at_unix;
 
-      if (lc_pouch_namespace_parse_snapshot_id(value, &parsed) &&
-          lc_pouch_namespace_manifest_list_append(allocator, obsolete_snapshots,
-                                                  obsolete_snapshot_count,
-                                                  value, NULL) != LC_OK) {
+      timestamp = strchr(value, '\t');
+      if (timestamp == NULL) {
+        ok = 0;
+        break;
+      }
+      *timestamp++ = '\0';
+      errno = 0;
+      marked_at_unix = strtoull(timestamp, &end, 10);
+      if (errno != 0 || end == timestamp || *end != '\0' ||
+          marked_at_unix == 0U ||
+          !lc_pouch_namespace_parse_snapshot_id(value, &parsed) ||
+          lc_pouch_namespace_manifest_list_append(
+              allocator, obsolete_snapshots, obsolete_snapshot_marked_at,
+              obsolete_snapshot_count, value, marked_at_unix, NULL) != LC_OK) {
         ok = 0;
         break;
       }
@@ -397,13 +443,17 @@ static int lc_pouch_namespace_manifest_read(
   if (!ok) {
     lc_free_with_allocator(allocator, *latest_snapshot);
     *latest_snapshot = NULL;
-    lc_pouch_namespace_manifest_list_cleanup(allocator, *obsolete_segments,
-                                             *obsolete_segment_count);
+    lc_pouch_namespace_manifest_list_cleanup(
+        allocator, *obsolete_segments, *obsolete_segment_marked_at,
+        *obsolete_segment_count);
     *obsolete_segments = NULL;
+    *obsolete_segment_marked_at = NULL;
     *obsolete_segment_count = 0UL;
-    lc_pouch_namespace_manifest_list_cleanup(allocator, *obsolete_snapshots,
-                                             *obsolete_snapshot_count);
+    lc_pouch_namespace_manifest_list_cleanup(
+        allocator, *obsolete_snapshots, *obsolete_snapshot_marked_at,
+        *obsolete_snapshot_count);
     *obsolete_snapshots = NULL;
+    *obsolete_snapshot_marked_at = NULL;
     *obsolete_snapshot_count = 0UL;
     *snapshot_segment_id = 0UL;
     return 0;
@@ -511,8 +561,10 @@ static int lc_pouch_namespace_manifest_write(
     }
   }
   for (i = 0UL; i < manifest->obsolete_segment_count; ++i) {
-    written = snprintf(line, sizeof(line), "obsolete_segment=%s\n",
-                       manifest->obsolete_segments[i]);
+    written = snprintf(line, sizeof(line), "obsolete_segment=%s\t%" PRIu64
+                                           "\n",
+                       manifest->obsolete_segments[i],
+                       manifest->obsolete_segment_marked_at[i]);
     if (written < 0 || (size_t)written >= sizeof(line)) {
       lc_free_with_allocator(allocator, manifest_path);
       lc_free_with_allocator(allocator, text);
@@ -529,8 +581,10 @@ static int lc_pouch_namespace_manifest_write(
     }
   }
   for (i = 0UL; i < manifest->obsolete_snapshot_count; ++i) {
-    written = snprintf(line, sizeof(line), "obsolete_snapshot=%s\n",
-                       manifest->obsolete_snapshots[i]);
+    written = snprintf(line, sizeof(line), "obsolete_snapshot=%s\t%" PRIu64
+                                           "\n",
+                       manifest->obsolete_snapshots[i],
+                       manifest->obsolete_snapshot_marked_at[i]);
     if (written < 0 || (size_t)written >= sizeof(line)) {
       lc_free_with_allocator(allocator, manifest_path);
       lc_free_with_allocator(allocator, text);
@@ -590,7 +644,7 @@ static void lc_pouch_marker_refresh_peer_stats_cleanup(
 static int lc_pouch_marker_entries_append(const lc_allocator *allocator,
                                           lc_pouch_marker_entry **entries,
                                           size_t *count, size_t *capacity,
-                                          const char *name, long size,
+                                          const char *name, uint64_t size,
                                           long mtime, lc_error *error) {
   lc_pouch_marker_entry *grown;
   char *name_copy;
@@ -693,7 +747,7 @@ static int lc_pouch_marker_snapshot_build_fingerprint(
     char line[512];
     int written;
 
-    written = snprintf(line, sizeof(line), "%s size=%ld mtime=%ld\n",
+    written = snprintf(line, sizeof(line), "%s size=%" PRIu64 " mtime=%ld\n",
                        entries[i].name, entries[i].size, entries[i].mtime);
     if (written < 0 || (size_t)written >= sizeof(line)) {
       lc_free_with_allocator(allocator, fingerprint);
@@ -761,9 +815,16 @@ static int lc_pouch_marker_entries_read(const lc_allocator *allocator,
       break;
     }
     if (stat(marker_path, &st) == 0 && S_ISREG(st.st_mode)) {
+      if (st.st_size < 0) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch marker file has invalid size", NULL, NULL,
+                          "pouch");
+        lc_free_with_allocator(allocator, marker_path);
+        break;
+      }
       rc = lc_pouch_marker_entries_append(
           allocator, &entries, &count, &capacity, entry->d_name,
-          (long)st.st_size, (long)st.st_mtime, error);
+          (uint64_t)st.st_size, (long)st.st_mtime, error);
       if (rc != LC_OK) {
         lc_free_with_allocator(allocator, marker_path);
         break;
@@ -850,7 +911,8 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
   manifest_valid = lc_pouch_namespace_manifest_read(
       allocator, manifest_path, &active_segment_id, &manifest_snapshot_id,
       &state_max_version, &manifest_snapshot, &out->obsolete_segments,
-      &out->obsolete_segment_count, &out->obsolete_snapshots,
+      &out->obsolete_segment_marked_at, &out->obsolete_segment_count,
+      &out->obsolete_snapshots, &out->obsolete_snapshot_marked_at,
       &out->obsolete_snapshot_count);
   lc_free_with_allocator(allocator, manifest_path);
   if (!manifest_valid && max_snapshot_id > manifest_snapshot_id &&
@@ -898,15 +960,6 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
       lc_pouch_namespace_manifest_cleanup(allocator, out);
       return rc;
     }
-  }
-  rc = lc_pouch_namespace_manifest_cleanup_obsolete(
-      allocator, namespace_name, out, cleanup_deleted_count,
-      cleanup_pending_count, error);
-  if (rc != LC_OK) {
-    lc_free_with_allocator(allocator, manifest_snapshot);
-    lc_free_with_allocator(allocator, scanned_snapshot);
-    lc_pouch_namespace_manifest_cleanup(allocator, out);
-    return rc;
   }
   lc_free_with_allocator(allocator, manifest_snapshot);
   lc_free_with_allocator(allocator, scanned_snapshot);
@@ -995,10 +1048,10 @@ int lc_pouch_namespace_manifest_install_snapshot(
 
 int lc_pouch_namespace_manifest_mark_obsolete_segment(
     const lc_allocator *allocator, lc_pouch_namespace_manifest *manifest,
-    const char *segment_leaf, lc_error *error) {
+    const char *segment_leaf, uint64_t marked_at_unix, lc_error *error) {
   unsigned long parsed;
 
-  if (manifest == NULL ||
+  if (manifest == NULL || marked_at_unix == 0U ||
       !lc_pouch_namespace_parse_segment_id(segment_leaf, &parsed)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch obsolete segment requires a segment leaf", NULL,
@@ -1010,15 +1063,16 @@ int lc_pouch_namespace_manifest_mark_obsolete_segment(
   }
   return lc_pouch_namespace_manifest_list_append(
       allocator, &manifest->obsolete_segments,
-      &manifest->obsolete_segment_count, segment_leaf, error);
+      &manifest->obsolete_segment_marked_at, &manifest->obsolete_segment_count,
+      segment_leaf, marked_at_unix, error);
 }
 
 int lc_pouch_namespace_manifest_mark_obsolete_snapshot(
     const lc_allocator *allocator, lc_pouch_namespace_manifest *manifest,
-    const char *snapshot_leaf, lc_error *error) {
+    const char *snapshot_leaf, uint64_t marked_at_unix, lc_error *error) {
   unsigned long parsed;
 
-  if (manifest == NULL ||
+  if (manifest == NULL || marked_at_unix == 0U ||
       !lc_pouch_namespace_parse_snapshot_id(snapshot_leaf, &parsed)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch obsolete snapshot requires a snapshot leaf",
@@ -1030,7 +1084,9 @@ int lc_pouch_namespace_manifest_mark_obsolete_snapshot(
   }
   return lc_pouch_namespace_manifest_list_append(
       allocator, &manifest->obsolete_snapshots,
-      &manifest->obsolete_snapshot_count, snapshot_leaf, error);
+      &manifest->obsolete_snapshot_marked_at,
+      &manifest->obsolete_snapshot_count, snapshot_leaf, marked_at_unix,
+      error);
 }
 
 int lc_pouch_namespace_manifest_save(const lc_allocator *allocator,
@@ -1047,22 +1103,68 @@ int lc_pouch_namespace_manifest_save(const lc_allocator *allocator,
 }
 
 static int lc_pouch_namespace_manifest_prune_obsolete_list(
-    const lc_allocator *allocator, char ***items, unsigned long *count,
-    const char *namespace_path, const char *directory, int *changed,
-    unsigned long *deleted_count, unsigned long *pending_count) {
+    const lc_allocator *allocator, char ***items, uint64_t **marked_at,
+    unsigned long *count, const char *namespace_path, const char *directory,
+    const char *current_leaf, uint64_t now_unix, uint64_t delete_grace_seconds,
+    int *changed, unsigned long *deleted_count, unsigned long *pending_count,
+    lc_error *error) {
   unsigned long index;
+  int rc;
 
-  (void)allocator;
-  (void)items;
-  (void)namespace_path;
-  (void)directory;
-  (void)changed;
-  if (deleted_count != NULL) {
-    *deleted_count += 0UL;
+  if (items == NULL || marked_at == NULL || count == NULL ||
+      namespace_path == NULL || directory == NULL || changed == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch obsolete cleanup requires list context", NULL,
+                        NULL, "pouch");
   }
-  for (index = 0UL; index < *count; ++index) {
-    if (pending_count != NULL) {
-      ++*pending_count;
+  index = 0UL;
+  while (index < *count) {
+    char *directory_path;
+    char *path;
+
+    if ((*items)[index] == NULL || (*marked_at)[index] == 0U ||
+        (current_leaf != NULL &&
+         strcmp((*items)[index], current_leaf) == 0) ||
+        now_unix < (*marked_at)[index] ||
+        now_unix - (*marked_at)[index] < delete_grace_seconds) {
+      if (pending_count != NULL) {
+        ++*pending_count;
+      }
+      ++index;
+      continue;
+    }
+    directory_path = lc_pouch_path_join(allocator, namespace_path, directory);
+    path = directory_path != NULL
+               ? lc_pouch_path_join(allocator, directory_path, (*items)[index])
+               : NULL;
+    lc_free_with_allocator(allocator, directory_path);
+    if (path == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch obsolete path", NULL,
+                          NULL, NULL);
+    }
+    if (unlink(path) != 0 && errno != ENOENT) {
+      int saved_errno;
+
+      saved_errno = errno;
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to delete obsolete pouch log file",
+                        strerror(saved_errno), NULL, "pouch");
+      lc_free_with_allocator(allocator, path);
+      return rc;
+    }
+    lc_free_with_allocator(allocator, path);
+    lc_free_with_allocator(allocator, (*items)[index]);
+    if (index + 1UL < *count) {
+      memmove(*items + index, *items + index + 1UL,
+              ((size_t)(*count - index - 1UL)) * sizeof(**items));
+      memmove(*marked_at + index, *marked_at + index + 1UL,
+              ((size_t)(*count - index - 1UL)) * sizeof(**marked_at));
+    }
+    --*count;
+    *changed = 1;
+    if (deleted_count != NULL) {
+      ++*deleted_count;
     }
   }
   return LC_OK;
@@ -1070,7 +1172,8 @@ static int lc_pouch_namespace_manifest_prune_obsolete_list(
 
 int lc_pouch_namespace_manifest_cleanup_obsolete(
     const lc_allocator *allocator, const char *namespace_name,
-    lc_pouch_namespace_manifest *manifest, unsigned long *deleted_count,
+    lc_pouch_namespace_manifest *manifest, uint64_t now_unix,
+    uint64_t delete_grace_seconds, unsigned long *deleted_count,
     unsigned long *pending_count, lc_error *error) {
   int changed;
   int rc;
@@ -1089,15 +1192,18 @@ int lc_pouch_namespace_manifest_cleanup_obsolete(
   changed = 0;
   rc = lc_pouch_namespace_manifest_prune_obsolete_list(
       allocator, &manifest->obsolete_segments,
-      &manifest->obsolete_segment_count, manifest->namespace_path, "segments",
-      &changed, deleted_count, pending_count);
+      &manifest->obsolete_segment_marked_at, &manifest->obsolete_segment_count,
+      manifest->namespace_path, "segments", manifest->active_segment, now_unix,
+      delete_grace_seconds, &changed, deleted_count, pending_count, error);
   if (rc != LC_OK) {
     return rc;
   }
   rc = lc_pouch_namespace_manifest_prune_obsolete_list(
       allocator, &manifest->obsolete_snapshots,
+      &manifest->obsolete_snapshot_marked_at,
       &manifest->obsolete_snapshot_count, manifest->namespace_path, "snapshots",
-      &changed, deleted_count, pending_count);
+      manifest->latest_snapshot, now_unix, delete_grace_seconds, &changed,
+      deleted_count, pending_count, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -1225,7 +1331,12 @@ int lc_pouch_namespace_marker_directory_snapshot_read(
                         "pouch marker path is not a directory", NULL, NULL,
                         NULL);
   }
-  out->size = (long)st.st_size;
+  if (st.st_size < 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch marker directory has invalid size", NULL,
+                        NULL, "pouch");
+  }
+  out->size = (uint64_t)st.st_size;
   out->mtime = (long)st.st_mtime;
   return LC_OK;
 }
@@ -1268,7 +1379,8 @@ static int lc_pouch_marker_refresh_cached_peer_stats_changed(
       break;
     }
     if (stat(marker_path, &st) != 0 || !S_ISREG(st.st_mode) ||
-        state->peer_stats[i].size != (long)st.st_size ||
+        st.st_size < 0 ||
+        state->peer_stats[i].size != (uint64_t)st.st_size ||
         state->peer_stats[i].mtime != (long)st.st_mtime) {
       *changed = 1;
       lc_free_with_allocator(allocator, marker_path);
@@ -1400,10 +1512,12 @@ void lc_pouch_namespace_manifest_cleanup(
   lc_free_with_allocator(allocator, manifest->active_segment);
   lc_free_with_allocator(allocator, manifest->latest_snapshot);
   lc_pouch_namespace_manifest_list_cleanup(
-      allocator, manifest->obsolete_segments, manifest->obsolete_segment_count);
-  lc_pouch_namespace_manifest_list_cleanup(allocator,
-                                           manifest->obsolete_snapshots,
-                                           manifest->obsolete_snapshot_count);
+      allocator, manifest->obsolete_segments, manifest->obsolete_segment_marked_at,
+      manifest->obsolete_segment_count);
+  lc_pouch_namespace_manifest_list_cleanup(
+      allocator, manifest->obsolete_snapshots,
+      manifest->obsolete_snapshot_marked_at,
+      manifest->obsolete_snapshot_count);
   memset(manifest, 0, sizeof(*manifest));
 }
 

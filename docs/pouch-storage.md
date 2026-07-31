@@ -468,7 +468,9 @@ Direct public state APIs must reject every `q/` key and every
 `state/<key>/attachments/<id>` attachment-object key shape. Queue state lease
 keys such as `q/<queue>/state/<id>` are accepted only through internal
 lease-ref validation for queue state operations, not as public user document
-keys.
+keys. Lease acquisition is the exception: it accepts an exact queue-state
+lease key and defaults its metadata to query-hidden unless that key already
+has an explicit visibility preference, matching Go's `ForceQueryHidden` path.
 
 ## Divergence Register
 

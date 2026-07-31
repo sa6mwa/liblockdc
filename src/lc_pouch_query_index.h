@@ -14,7 +14,7 @@ typedef struct lc_pouch_query_index_row_view {
   const char *key_hex;
   unsigned long doc_id;
   unsigned long version;
-  unsigned long bytes;
+  uint64_t bytes;
   int has_query_hidden;
   int query_hidden;
 } lc_pouch_query_index_row_view;
@@ -27,7 +27,7 @@ typedef struct lc_pouch_query_index_key_view {
   const char *key_hex;
   unsigned long doc_id;
   unsigned long version;
-  unsigned long bytes;
+  uint64_t bytes;
   int has_query_hidden;
   int query_hidden;
   size_t value_index;

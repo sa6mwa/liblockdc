@@ -64,7 +64,7 @@ lc_pouch_index_result_key_list_reserve(const lc_allocator *allocator,
 int lc_pouch_index_result_key_list_add(
     const lc_allocator *allocator, lc_pouch_index_result_key_list *list,
     const char *key_hex, unsigned long doc_id, unsigned long version,
-    unsigned long bytes, int has_query_hidden, int query_hidden,
+    uint64_t bytes, int has_query_hidden, int query_hidden,
     size_t value_index, lc_error *error) {
   lc_pouch_index_result_key *item;
   int rc;
@@ -418,7 +418,7 @@ lc_pouch_index_result_row_list_reserve(const lc_allocator *allocator,
 int lc_pouch_index_result_row_list_add(
     const lc_allocator *allocator, lc_pouch_index_result_row_list *list,
     const char *key, const char *key_hex, unsigned long doc_id,
-    unsigned long version, unsigned long bytes, int has_query_hidden,
+    unsigned long version, uint64_t bytes, int has_query_hidden,
     int query_hidden, size_t value_index, lc_error *error) {
   lc_pouch_index_result_row *item;
   int rc;

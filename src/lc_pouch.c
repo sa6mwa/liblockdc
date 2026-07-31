@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,7 +26,7 @@ static pthread_mutex_t lc_pouch_writer_marker_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t lc_pouch_root_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define LC_POUCH_FSYNC_BATCH_MAX_OPS 4096U
-#define LC_POUCH_FSYNC_BATCH_DELAY_NS 0L
+#define LC_POUCH_FSYNC_BATCH_DELAY_NS (2L * 1000L * 1000L)
 
 struct lc_pouch_fsync_request {
   int fd;
@@ -352,7 +353,7 @@ lc_pouch_compression_option(const lc_pouch_open_options *options) {
 static void lc_pouch_init_options(lc_pouch *pouch,
                                   const lc_pouch_open_options *options) {
   pouch->segment_target_bytes =
-      options != NULL && options->segment_target_bytes != 0UL
+      options != NULL && options->segment_target_bytes != 0U
           ? options->segment_target_bytes
           : LC_POUCH_DEFAULT_SEGMENT_TARGET_BYTES;
   pouch->compaction_min_segment_count =
@@ -360,11 +361,15 @@ static void lc_pouch_init_options(lc_pouch *pouch,
           ? options->compaction_min_segment_count
           : LC_POUCH_DEFAULT_COMPACTION_MIN_SEGMENT_COUNT;
   pouch->compaction_min_reclaimable_bytes =
-      options != NULL && options->compaction_min_reclaimable_bytes != 0UL
+      options != NULL && options->compaction_min_reclaimable_bytes != 0U
           ? options->compaction_min_reclaimable_bytes
           : LC_POUCH_DEFAULT_COMPACTION_MIN_RECLAIMABLE_BYTES;
   pouch->compaction_interval_seconds =
-      options != NULL ? options->compaction_interval_seconds : 0UL;
+      options != NULL ? options->compaction_interval_seconds : 0U;
+  pouch->compaction_delete_grace_seconds =
+      options != NULL && options->compaction_delete_grace_seconds != 0U
+          ? options->compaction_delete_grace_seconds
+          : LC_POUCH_DEFAULT_COMPACTION_DELETE_GRACE_SECONDS;
   pouch->background_compaction_enabled =
       options != NULL ? options->background_compaction_enabled : 0;
   pouch->single_writer = options != NULL ? options->single_writer : 0;
@@ -402,13 +407,16 @@ static int lc_pouch_write_root_manifest(lc_pouch *pouch, lc_error *error) {
                         NULL, NULL);
   }
   snprintf(manifest, sizeof(manifest),
-           "layout=%s\nversion=%lu\nsegment_target_bytes=%lu\n"
+           "layout=%s\nversion=%lu\nsegment_target_bytes=%" PRIu64 "\n"
            "compaction_min_segment_count=%lu\n"
-           "compaction_min_reclaimable_bytes=%lu\ncompression=%s\ncrypto=%s\n"
+           "compaction_min_reclaimable_bytes=%" PRIu64 "\n"
+           "compaction_delete_grace_seconds=%" PRIu64 "\n"
+           "compression=%s\ncrypto=%s\n"
            "crypto_key_id=%s\n",
            LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION,
            pouch->segment_target_bytes, pouch->compaction_min_segment_count,
-           pouch->compaction_min_reclaimable_bytes, pouch->compression,
+           pouch->compaction_min_reclaimable_bytes,
+           pouch->compaction_delete_grace_seconds, pouch->compression,
            lc_pouch_crypto_enabled(pouch->crypto) ? "encrypted" : "plaintext",
            crypto_key_id != NULL ? crypto_key_id : "");
   rc = lc_pouch_path_write_text_file(manifest_path, manifest, error);
@@ -1238,6 +1246,8 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
   out->compaction_min_reclaimable_bytes =
       pouch->compaction_min_reclaimable_bytes;
   out->compaction_interval_seconds = pouch->compaction_interval_seconds;
+  out->compaction_delete_grace_seconds =
+      pouch->compaction_delete_grace_seconds;
   out->background_compaction_enabled = pouch->background_compaction_enabled;
   out->single_writer = pouch->single_writer;
   out->query_engine =

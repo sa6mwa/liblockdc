@@ -59,9 +59,9 @@ typedef struct lc_pouch_crypto_source {
   size_t plain_length;
   unsigned long frame_size;
   unsigned long counter;
-  unsigned long span_offset;
-  unsigned long span_length;
-  unsigned long span_remaining;
+  uint64_t span_offset;
+  uint64_t span_length;
+  uint64_t span_remaining;
   int bounded;
   int done;
 } lc_pouch_crypto_source;
@@ -70,9 +70,9 @@ typedef struct lc_pouch_plain_span_source {
   lc_source pub;
   lc_allocator allocator;
   FILE *fp;
-  unsigned long offset;
-  unsigned long length;
-  unsigned long read_bytes;
+  uint64_t offset;
+  uint64_t length;
+  uint64_t read_bytes;
 } lc_pouch_plain_span_source;
 
 typedef struct lc_pouch_zlib_source {
@@ -81,7 +81,7 @@ typedef struct lc_pouch_zlib_source {
   lc_source *inner;
   z_stream stream;
   unsigned char input[LC_POUCH_ZLIB_CHUNK_BYTES];
-  unsigned long input_total;
+  uint64_t input_total;
   int deflate_mode;
   int close_inner;
   int input_done;
@@ -122,6 +122,23 @@ static char *lc_pouch_crypto_strdup(const lc_allocator *allocator,
   }
   memcpy(copy, text, len);
   return copy;
+}
+
+static int lc_pouch_crypto_seek(FILE *fp, uint64_t offset,
+                                const char *message, lc_error *error) {
+  off_t target;
+
+  target = (off_t)offset;
+  if (target < 0 || (uint64_t)target != offset) {
+    errno = EINVAL;
+    return lc_error_set(error, LC_ERR_INVALID, 0L, message, strerror(errno),
+                        NULL, "pouch");
+  }
+  if (fseeko(fp, target, SEEK_SET) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L, message, strerror(errno),
+                        NULL, "pouch");
+  }
+  return LC_OK;
 }
 
 static int
@@ -1136,10 +1153,11 @@ static void lc_pouch_crypto_nonce(const unsigned char prefix[8],
   lc_pouch_crypto_put32(nonce + LC_POUCH_NONCE_PREFIX_BYTES, counter);
 }
 
-static int lc_pouch_crypto_check_byte_counter(unsigned long total, size_t delta,
+static int lc_pouch_crypto_check_byte_counter(uint64_t total, size_t delta,
                                               const char *message,
                                               lc_error *error) {
-  if (delta > (size_t)ULONG_MAX || total > ULONG_MAX - (unsigned long)delta) {
+  if ((uintmax_t)delta > UINT64_MAX ||
+      total > UINT64_MAX - (uint64_t)delta) {
     return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL,
                         "pouch");
   }
@@ -1147,7 +1165,7 @@ static int lc_pouch_crypto_check_byte_counter(unsigned long total, size_t delta,
 }
 
 #ifdef LOCKDC_TEST_BUILD
-int lc_pouch_crypto_test_check_byte_counter(unsigned long total, size_t delta,
+int lc_pouch_crypto_test_check_byte_counter(uint64_t total, size_t delta,
                                             lc_error *error) {
   return lc_pouch_crypto_check_byte_counter(
       total, delta, "pouch payload byte count exceeds platform limit", error);
@@ -1158,7 +1176,7 @@ static int lc_pouch_crypto_encrypt_frame(
     int fd, EVP_CIPHER_CTX *ctx, const unsigned char key[LC_POUCH_DEK_BYTES],
     const unsigned char nonce_prefix[LC_POUCH_NONCE_PREFIX_BYTES],
     const char *context, size_t context_len, unsigned long counter,
-    const unsigned char *plain, size_t plain_len, unsigned long *cipher_total,
+    const unsigned char *plain, size_t plain_len, uint64_t *cipher_total,
     unsigned long *stored_crc, lc_error *error) {
   unsigned char
       frame[8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES];
@@ -1218,19 +1236,19 @@ static int lc_pouch_crypto_encrypt_frame(
   }
   rc = lc_pouch_crypto_write_all_fd(fd, frame, frame_len, error);
   if (rc == LC_OK && cipher_total != NULL) {
-    *cipher_total += (unsigned long)frame_len;
+    *cipher_total += (uint64_t)frame_len;
   }
   OPENSSL_cleanse(nonce, sizeof(nonce));
   return rc;
 }
 
 static int lc_pouch_crypto_stream_plain_to_fd(int fd, lc_source *body,
-                                              unsigned long *plain_bytes,
-                                              unsigned long *cipher_bytes,
+                                              uint64_t *plain_bytes,
+                                              uint64_t *cipher_bytes,
                                               unsigned long *stored_crc,
                                               lc_error *error) {
   unsigned char buffer[LC_POUCH_FRAME_PLAINTEXT_BYTES];
-  unsigned long total;
+  uint64_t total;
   int rc;
 
   if (fd < 0 || body == NULL || plain_bytes == NULL || cipher_bytes == NULL) {
@@ -1263,7 +1281,7 @@ static int lc_pouch_crypto_stream_plain_to_fd(int fd, lc_source *body,
     if (stored_crc != NULL) {
       *stored_crc = (unsigned long)crc32((uLong)*stored_crc, buffer, (uInt)got);
     }
-    total += (unsigned long)got;
+    total += (uint64_t)got;
   }
   OPENSSL_cleanse(buffer, sizeof(buffer));
   if (rc == LC_OK) {
@@ -1307,7 +1325,7 @@ static size_t lc_pouch_zlib_source_read(lc_source *self, void *buffer,
                 error) != LC_OK) {
           return count - source->stream.avail_out;
         }
-        source->input_total += (unsigned long)got;
+        source->input_total += (uint64_t)got;
         source->stream.next_in = source->input;
         source->stream.avail_in = (uInt)got;
       }
@@ -1457,13 +1475,13 @@ static int lc_pouch_zlib_source_open(const lc_allocator *allocator,
 
 static int lc_pouch_crypto_stream_to_fd_crc_impl(
     lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
-    unsigned long *plain_bytes, unsigned long *cipher_bytes,
+    uint64_t *plain_bytes, uint64_t *cipher_bytes,
     unsigned long *stored_crc, char **descriptor_out, int allow_compression,
     lc_error *error);
 
 static int lc_pouch_crypto_stream_to_file_impl(
     lc_pouch_crypto *crypto, const char *context, const char *path,
-    lc_source *body, unsigned long *plain_bytes, unsigned long *cipher_bytes,
+    lc_source *body, uint64_t *plain_bytes, uint64_t *cipher_bytes,
     char **descriptor_out, int sync_file, int allow_compression,
     lc_error *error) {
   int fd;
@@ -1510,8 +1528,8 @@ static int lc_pouch_crypto_stream_to_file_impl(
 
 int lc_pouch_crypto_stream_to_file(lc_pouch_crypto *crypto, const char *context,
                                    const char *path, lc_source *body,
-                                   unsigned long *plain_bytes,
-                                   unsigned long *cipher_bytes,
+                                   uint64_t *plain_bytes,
+                                   uint64_t *cipher_bytes,
                                    char **descriptor_out, lc_error *error) {
   return lc_pouch_crypto_stream_to_file_impl(crypto, context, path, body,
                                              plain_bytes, cipher_bytes,
@@ -1520,7 +1538,7 @@ int lc_pouch_crypto_stream_to_file(lc_pouch_crypto *crypto, const char *context,
 
 int lc_pouch_crypto_stream_to_file_relaxed(
     lc_pouch_crypto *crypto, const char *context, const char *path,
-    lc_source *body, unsigned long *plain_bytes, unsigned long *cipher_bytes,
+    lc_source *body, uint64_t *plain_bytes, uint64_t *cipher_bytes,
     char **descriptor_out, lc_error *error) {
   return lc_pouch_crypto_stream_to_file_impl(crypto, context, path, body,
                                              plain_bytes, cipher_bytes,
@@ -1529,7 +1547,7 @@ int lc_pouch_crypto_stream_to_file_relaxed(
 
 int lc_pouch_crypto_stream_to_file_relaxed_uncompressed(
     lc_pouch_crypto *crypto, const char *context, const char *path,
-    lc_source *body, unsigned long *plain_bytes, unsigned long *cipher_bytes,
+    lc_source *body, uint64_t *plain_bytes, uint64_t *cipher_bytes,
     char **descriptor_out, lc_error *error) {
   return lc_pouch_crypto_stream_to_file_impl(crypto, context, path, body,
                                              plain_bytes, cipher_bytes,
@@ -1538,8 +1556,8 @@ int lc_pouch_crypto_stream_to_file_relaxed_uncompressed(
 
 int lc_pouch_crypto_stream_to_fd(lc_pouch_crypto *crypto, const char *context,
                                  int fd, lc_source *body,
-                                 unsigned long *plain_bytes,
-                                 unsigned long *cipher_bytes,
+                                 uint64_t *plain_bytes,
+                                 uint64_t *cipher_bytes,
                                  char **descriptor_out, lc_error *error) {
   return lc_pouch_crypto_stream_to_fd_crc_impl(crypto, context, fd, body,
                                                plain_bytes, cipher_bytes, NULL,
@@ -1548,7 +1566,7 @@ int lc_pouch_crypto_stream_to_fd(lc_pouch_crypto *crypto, const char *context,
 
 static int lc_pouch_crypto_stream_to_fd_crc_impl(
     lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
-    unsigned long *plain_bytes, unsigned long *cipher_bytes,
+    uint64_t *plain_bytes, uint64_t *cipher_bytes,
     unsigned long *stored_crc, char **descriptor_out, int allow_compression,
     lc_error *error) {
   lc_pouch_crypto_desc desc;
@@ -1556,8 +1574,8 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
   lc_source *write_body;
   EVP_CIPHER_CTX *ctx;
   unsigned char buffer[LC_POUCH_FRAME_PLAINTEXT_BYTES];
-  unsigned long plain_total;
-  unsigned long cipher_total;
+  uint64_t plain_total;
+  uint64_t cipher_total;
   unsigned long counter;
   char *descriptor;
   int compressed;
@@ -1620,7 +1638,7 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
     return rc;
   }
   if (!encrypted) {
-    unsigned long compressed_bytes;
+    uint64_t compressed_bytes;
 
     compressed_bytes = 0UL;
     rc = lc_pouch_crypto_stream_plain_to_fd(fd, write_body, &compressed_bytes,
@@ -1676,7 +1694,7 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
     if (rc != LC_OK) {
       break;
     }
-    plain_total += (unsigned long)got;
+    plain_total += (uint64_t)got;
     ++counter;
     if (counter == 0xFFFFFFFFUL) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -1710,7 +1728,7 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
 
 int lc_pouch_crypto_stream_to_fd_crc(
     lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
-    unsigned long *plain_bytes, unsigned long *cipher_bytes,
+    uint64_t *plain_bytes, uint64_t *cipher_bytes,
     unsigned long *stored_crc, char **descriptor_out, lc_error *error) {
   return lc_pouch_crypto_stream_to_fd_crc_with_compression(
       crypto, context, fd, body, plain_bytes, cipher_bytes, stored_crc,
@@ -1719,7 +1737,7 @@ int lc_pouch_crypto_stream_to_fd_crc(
 
 int lc_pouch_crypto_stream_to_fd_crc_with_compression(
     lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
-    unsigned long *plain_bytes, unsigned long *cipher_bytes,
+    uint64_t *plain_bytes, uint64_t *cipher_bytes,
     unsigned long *stored_crc, char **descriptor_out, int allow_compression,
     lc_error *error) {
   return lc_pouch_crypto_stream_to_fd_crc_impl(
@@ -1855,8 +1873,7 @@ int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
 
 int lc_pouch_crypto_source_from_file_span(lc_pouch_crypto *crypto,
                                           const char *context, const char *path,
-                                          unsigned long offset,
-                                          unsigned long length,
+                                          uint64_t offset, uint64_t length,
                                           const char *descriptor,
                                           lc_source **out, lc_error *error) {
   int fd;
@@ -1878,8 +1895,7 @@ int lc_pouch_crypto_source_from_file_span(lc_pouch_crypto *crypto,
 
 int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
                                         const char *context, int fd,
-                                        unsigned long offset,
-                                        unsigned long length,
+                                        uint64_t offset, uint64_t length,
                                         const char *descriptor, lc_source **out,
                                         lc_error *error) {
   lc_pouch_crypto_source *source;
@@ -1922,12 +1938,13 @@ int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
                           "failed to open pouch payload span descriptor",
                           strerror(errno), NULL, "pouch");
     }
-    if (fseek(plain->fp, (long)offset, SEEK_SET) != 0) {
+    if (lc_pouch_crypto_seek(plain->fp, offset,
+                             "failed to seek pouch payload span", error) !=
+        LC_OK) {
       fclose(plain->fp);
       lc_free_with_allocator(&plain->allocator, plain);
-      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                          "failed to seek pouch payload span", strerror(errno),
-                          NULL, "pouch");
+      return error != NULL && error->code != LC_OK ? error->code
+                                                    : LC_ERR_TRANSPORT;
     }
     plain->offset = offset;
     plain->length = length;
@@ -1965,12 +1982,13 @@ int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
                           "failed to open pouch payload span descriptor",
                           strerror(errno), NULL, "pouch");
     }
-    if (fseek(plain->fp, (long)offset, SEEK_SET) != 0) {
+    if (lc_pouch_crypto_seek(plain->fp, offset,
+                             "failed to seek pouch payload span", error) !=
+        LC_OK) {
       fclose(plain->fp);
       lc_free_with_allocator(&plain->allocator, plain);
-      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                          "failed to seek pouch payload span", strerror(errno),
-                          NULL, "pouch");
+      return error != NULL && error->code != LC_OK ? error->code
+                                                    : LC_ERR_TRANSPORT;
     }
     plain->offset = offset;
     plain->length = length;
@@ -2026,13 +2044,14 @@ int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
         "failed to open encrypted pouch payload span descriptor",
         strerror(errno), NULL, "pouch");
   }
-  if (fseek(source->fp, (long)offset, SEEK_SET) != 0) {
+  if (lc_pouch_crypto_seek(source->fp, offset,
+                           "failed to seek encrypted pouch payload span",
+                           error) != LC_OK) {
     fclose(source->fp);
     EVP_CIPHER_CTX_free(source->ctx);
     lc_free_with_allocator(&crypto->allocator, source);
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to seek encrypted pouch payload span",
-                        strerror(errno), NULL, "pouch");
+    return error != NULL && error->code != LC_OK ? error->code
+                                                  : LC_ERR_TRANSPORT;
   }
   if (context == NULL || context[0] == '\0') {
     fclose(source->fp);
@@ -2240,10 +2259,11 @@ static int lc_pouch_crypto_source_reset(lc_source *self, lc_error *error) {
   }
   source = (lc_pouch_crypto_source *)self->impl;
   if (source->bounded) {
-    if (fseek(source->fp, (long)source->span_offset, SEEK_SET) != 0) {
-      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                          "failed to reset encrypted pouch payload span",
-                          strerror(errno), NULL, "pouch");
+    if (lc_pouch_crypto_seek(source->fp, source->span_offset,
+                             "failed to reset encrypted pouch payload span",
+                             error) != LC_OK) {
+      return error != NULL && error->code != LC_OK ? error->code
+                                                    : LC_ERR_TRANSPORT;
     }
     source->span_remaining = source->span_length;
     source->plain_offset = 0U;
@@ -2284,7 +2304,7 @@ static void lc_pouch_crypto_source_close(lc_source *self) {
 static size_t lc_pouch_plain_span_source_read(lc_source *self, void *buffer,
                                               size_t count, lc_error *error) {
   lc_pouch_plain_span_source *source;
-  unsigned long remaining;
+  uint64_t remaining;
   size_t want;
   size_t got;
 
@@ -2296,14 +2316,14 @@ static size_t lc_pouch_plain_span_source_read(lc_source *self, void *buffer,
     return 0U;
   }
   remaining = source->length - source->read_bytes;
-  want = (unsigned long)count < remaining ? count : (size_t)remaining;
+  want = (uint64_t)count < remaining ? count : (size_t)remaining;
   got = fread(buffer, 1U, want, source->fp);
   if (got == 0U && ferror(source->fp) && error != NULL) {
     (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                        "failed to read pouch payload span", strerror(errno),
                        NULL, "pouch");
   }
-  source->read_bytes += (unsigned long)got;
+  source->read_bytes += (uint64_t)got;
   return got;
 }
 
@@ -2316,11 +2336,16 @@ static int lc_pouch_plain_span_source_reset(lc_source *self, lc_error *error) {
                         "pouch");
   }
   source = (lc_pouch_plain_span_source *)self->impl;
-  if (source == NULL || source->fp == NULL ||
-      fseek(source->fp, (long)source->offset, SEEK_SET) != 0) {
+  if (source == NULL || source->fp == NULL) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to reset pouch payload span", strerror(errno),
                         NULL, "pouch");
+  }
+  if (lc_pouch_crypto_seek(source->fp, source->offset,
+                           "failed to reset pouch payload span", error) !=
+      LC_OK) {
+    return error != NULL && error->code != LC_OK ? error->code
+                                                  : LC_ERR_TRANSPORT;
   }
   source->read_bytes = 0UL;
   return LC_OK;

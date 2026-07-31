@@ -4,14 +4,16 @@
 #include "lc/lc.h"
 
 #include <stddef.h>
+#include <stdint.h>
 
 typedef struct lc_pouch lc_pouch;
 
 typedef struct lc_pouch_open_options {
-  unsigned long segment_target_bytes;
+  uint64_t segment_target_bytes;
   unsigned long compaction_min_segment_count;
-  unsigned long compaction_min_reclaimable_bytes;
-  unsigned long compaction_interval_seconds;
+  uint64_t compaction_min_reclaimable_bytes;
+  uint64_t compaction_interval_seconds;
+  uint64_t compaction_delete_grace_seconds;
   int background_compaction_enabled;
   int single_writer;
   const char *query_engine;
@@ -27,10 +29,11 @@ typedef struct lc_pouch_status {
   char *root_path;
   char *layout_name;
   unsigned long layout_version;
-  unsigned long segment_target_bytes;
+  uint64_t segment_target_bytes;
   unsigned long compaction_min_segment_count;
-  unsigned long compaction_min_reclaimable_bytes;
-  unsigned long compaction_interval_seconds;
+  uint64_t compaction_min_reclaimable_bytes;
+  uint64_t compaction_interval_seconds;
+  uint64_t compaction_delete_grace_seconds;
   int background_compaction_enabled;
   int single_writer;
   char *query_engine;
@@ -51,7 +54,7 @@ typedef struct lc_pouch_maintenance_result {
   char *namespace_name;
   char *diagnostic;
   unsigned long candidate_segment_count;
-  unsigned long candidate_bytes;
+  uint64_t candidate_bytes;
   unsigned long compacted_segment_id;
   unsigned long cleanup_deleted_count;
   unsigned long cleanup_pending_count;
@@ -87,8 +90,8 @@ typedef struct lc_pouch_state_write_result {
   char *etag;
   unsigned long index_seq;
   unsigned long version;
-  unsigned long bytes;
-  unsigned long cipher_bytes;
+  uint64_t bytes;
+  uint64_t cipher_bytes;
   char *descriptor;
   unsigned char *metadata;
   size_t metadata_length;
@@ -103,8 +106,8 @@ typedef struct lc_pouch_state_read_result {
   char *etag;
   unsigned long index_seq;
   unsigned long version;
-  unsigned long bytes;
-  unsigned long cipher_bytes;
+  uint64_t bytes;
+  uint64_t cipher_bytes;
   char *descriptor;
   unsigned char *metadata;
   size_t metadata_length;
@@ -120,8 +123,8 @@ typedef struct lc_pouch_state_visit_entry {
   const char *content_type;
   const char *etag;
   unsigned long version;
-  unsigned long bytes;
-  unsigned long cipher_bytes;
+  uint64_t bytes;
+  uint64_t cipher_bytes;
   const char *descriptor;
   const unsigned char *metadata;
   size_t metadata_length;

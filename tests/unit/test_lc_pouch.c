@@ -1047,8 +1047,8 @@ static void test_index_term_fields_select_merged_range(void **state) {
   lc_pouch_index_term_key terms[2];
   unsigned long first;
   unsigned long count;
-  unsigned long first_byte;
-  unsigned long byte_count;
+  uint64_t first_byte;
+  uint64_t byte_count;
   int found;
 
   (void)state;
@@ -6013,7 +6013,7 @@ static void test_maintenance_reports_interval_skip(void **state) {
   assert_string_equal(maintenance_result.diagnostic, "interval-not-elapsed");
   assert_true(maintenance_result.skipped);
   assert_false(maintenance_result.compacted);
-  assert_int_equal(maintenance_result.candidate_segment_count, 2UL);
+  assert_int_equal(maintenance_result.candidate_segment_count, 3UL);
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
@@ -6027,7 +6027,7 @@ static void test_maintenance_reports_interval_skip(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
+static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   lc_pouch *pouch;
   lc_source *body;
   lc_pouch_open_options open_options;
@@ -6090,8 +6090,6 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
   assert_non_null(segment_two_path);
   assert_true(path_is_file(segment_one_path));
   assert_true(path_is_file(segment_two_path));
-  assert_int_equal(chmod(segments_path, 0555), 0);
-
   maintenance_options.namespace_name = "team/alpha";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
@@ -6119,7 +6117,6 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
   assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
   assert_int_equal(maintenance_result.cleanup_pending_count, 1UL);
 
-  assert_int_equal(chmod(segments_path, 0755), 0);
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   memset(&maintenance_result, 0, sizeof(maintenance_result));
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
@@ -6139,18 +6136,19 @@ static void test_compaction_retries_manifest_obsolete_cleanup(void **state) {
                                            "snapshot-00000000000000000099.log");
   assert_non_null(stale_snapshot_path);
   write_text_file(stale_snapshot_path, "stale\n");
-  append_text_file(manifest_path,
-                   "obsolete_snapshot=snapshot-00000000000000000099.log\n");
+  append_text_file(
+      manifest_path,
+      "obsolete_snapshot=snapshot-00000000000000000099.log\t1\n");
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   memset(&maintenance_result, 0, sizeof(maintenance_result));
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(maintenance_result.diagnostic, "cleanup-pending");
-  assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
-  assert_true(path_is_file(stale_snapshot_path));
-  assert_file_contains(manifest_path, "obsolete_snapshot=");
+  assert_int_equal(maintenance_result.cleanup_deleted_count, 1UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count, 1UL);
+  assert_false(path_is_file(stale_snapshot_path));
+  assert_file_not_contains(manifest_path, "obsolete_snapshot=");
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &first);
@@ -6265,6 +6263,7 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   lc_source *body;
   lc_pouch_open_options open_options;
   lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result roll_result;
   lc_pouch_state_write_result metadata_result;
   lc_pouch_state_read_result read_result;
   lc_pouch_state_write_options metadata_options;
@@ -6279,6 +6278,7 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   lc_error_init(&error);
   memset(&open_options, 0, sizeof(open_options));
   memset(&write_result, 0, sizeof(write_result));
+  memset(&roll_result, 0, sizeof(roll_result));
   memset(&metadata_result, 0, sizeof(metadata_result));
   memset(&read_result, 0, sizeof(read_result));
   memset(&metadata_options, 0, sizeof(metadata_options));
@@ -6296,6 +6296,13 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "team/alpha", "state/meta", body, NULL,
                             &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+
+  rc = lc_source_from_memory("roll", strlen("roll"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/roll", body, NULL,
+                            &roll_result, &error);
   assert_int_equal(rc, LC_OK);
   body->close(body);
 
@@ -6334,6 +6341,7 @@ static void test_state_metadata_survives_snapshot_compaction(void **state) {
 
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_state_write_result_cleanup(NULL, &roll_result);
   lc_pouch_state_write_result_cleanup(NULL, &metadata_result);
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_close(pouch);
@@ -7024,7 +7032,7 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   lc_error_init(&error);
   make_root("client-attachments", root, sizeof(root));
   cleanup_root(root);
-  snprintf(key, sizeof(key), "state/attachments/%ld", (long)getpid());
+  snprintf(key, sizeof(key), "attachments/%ld", (long)getpid());
 
   open_pouch_client(root, &client, &error);
   attach_op.lease.key = key;
@@ -16707,7 +16715,7 @@ int main(void) {
       cmocka_unit_test(test_maintenance_aborts_on_same_size_segment_drift),
       cmocka_unit_test(test_maintenance_reports_snapshot_write_abort),
       cmocka_unit_test(test_maintenance_reports_interval_skip),
-      cmocka_unit_test(test_compaction_retries_manifest_obsolete_cleanup),
+      cmocka_unit_test(test_compaction_reclaims_expired_obsolete_files),
       cmocka_unit_test(test_snapshot_high_water_survives_compaction_reopen),
       cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),
       cmocka_unit_test(test_namespace_manifest_repairs_from_existing_segments),
