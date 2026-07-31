@@ -76,6 +76,9 @@ struct lc_pouch {
   unsigned long marker_sequence;
   int background_compaction_enabled;
   int single_writer;
+  uint64_t single_writer_epoch;
+  pthread_mutex_t single_writer_mutex;
+  int single_writer_mutex_initialized;
   char *query_engine;
   char *query_fallback_engine;
   char *compression;
@@ -85,6 +88,16 @@ struct lc_pouch {
   pslog_logger *logger;
   int owns_logger;
   char *writer_marker_leaf;
+  char *writer_presence_dir;
+  char *writer_presence_leaf;
+  char *writer_presence_path;
+  pthread_mutex_t writer_presence_mutex;
+  pthread_cond_t writer_presence_cond;
+  pthread_t writer_presence_thread;
+  int writer_presence_mutex_initialized;
+  int writer_presence_cond_initialized;
+  int writer_presence_thread_started;
+  int writer_presence_stop;
   pthread_mutex_t fsync_mutex;
   pthread_cond_t fsync_cond;
   pthread_t fsync_thread;
@@ -131,6 +144,8 @@ extern void *lc_pouch_test_after_snapshot_write_context;
 #endif
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);
+int lc_pouch_single_writer_snapshot(lc_pouch *pouch, uint64_t *epoch_out);
+int lc_pouch_single_writer_enabled(lc_pouch *pouch);
 void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch);
 void lc_pouch_query_index_cache_cleanup(lc_pouch *pouch);
 int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,

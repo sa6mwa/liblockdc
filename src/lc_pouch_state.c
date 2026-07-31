@@ -172,9 +172,6 @@ static int lc_pouch_state_touch_marker_now(lc_pouch *pouch,
                         "pouch marker touch requires pouch and namespace path",
                         NULL, NULL, "pouch");
   }
-  if (pouch->single_writer) {
-    return LC_OK;
-  }
   sequence = ++pouch->marker_sequence;
   return lc_pouch_namespace_touch_marker(&pouch->allocator, namespace_path,
                                          pouch->writer_marker_leaf, sequence,
@@ -974,7 +971,7 @@ static int lc_pouch_state_namespace_lock_acquire(
     return error != NULL && error->code != LC_OK ? error->code
                                                  : LC_ERR_TRANSPORT;
   }
-  if (pouch->single_writer) {
+  if (lc_pouch_single_writer_enabled(pouch)) {
     return LC_OK;
   }
 
@@ -1275,6 +1272,7 @@ struct lc_pouch_state_cache_namespace {
   char *namespace_name;
   unsigned long max_segment_id;
   lc_pouch_generation max_version;
+  uint64_t writer_mode_epoch;
   int initialized;
   int decision_recovery_checked;
   lc_pouch_namespace_marker_refresh_state marker_refresh;
@@ -5178,6 +5176,38 @@ static int lc_pouch_state_cache_refresh(
   return rc;
 }
 
+static int lc_pouch_state_cache_refresh_for_mode(
+    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    const lc_pouch_namespace_manifest *manifest, lc_error *error) {
+  uint64_t mode_epoch;
+  int force_refresh;
+  int single_writer;
+  int rc;
+
+  if (pouch == NULL || cache == NULL || manifest == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch cache mode refresh requires inputs", NULL, NULL,
+                        "pouch");
+  }
+  single_writer = lc_pouch_single_writer_snapshot(pouch, &mode_epoch);
+  force_refresh = cache->writer_mode_epoch != mode_epoch;
+  if (!single_writer && !force_refresh) {
+    rc = lc_pouch_namespace_marker_refresh_should_scan(
+        &pouch->allocator, manifest->namespace_path, pouch->writer_marker_leaf,
+        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
+        &force_refresh, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  rc = lc_pouch_state_cache_refresh(pouch, cache, manifest, force_refresh,
+                                    error);
+  if (rc == LC_OK) {
+    cache->writer_mode_epoch = mode_epoch;
+  }
+  return rc;
+}
+
 int lc_pouch_state_warm_namespace(lc_pouch *pouch, const char *namespace_name,
                                   lc_error *error) {
   lc_pouch_state_cache_namespace *cache;
@@ -5212,7 +5242,7 @@ int lc_pouch_state_warm_namespace(lc_pouch *pouch, const char *namespace_name,
   if (cache == NULL) {
     rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   } else {
-    rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest, 0, error);
+    rc = lc_pouch_state_cache_refresh_for_mode(pouch, cache, &manifest, error);
   }
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
 cleanup_unlocked:
@@ -5227,27 +5257,13 @@ lc_pouch_state_cache_lookup(lc_pouch *pouch, const char *namespace_name,
                             lc_pouch_generation *max_version_out, lc_error *error) {
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_cache_record *record;
-  int force_refresh;
   int rc;
 
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
   if (cache == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  if (pouch->single_writer) {
-    force_refresh = 0;
-  } else {
-    force_refresh = 0;
-    rc = lc_pouch_namespace_marker_refresh_should_scan(
-        &pouch->allocator, manifest->namespace_path, pouch->writer_marker_leaf,
-        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
-        &force_refresh, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
-  }
-  rc = lc_pouch_state_cache_refresh(pouch, cache, manifest, force_refresh,
-                                    error);
+  rc = lc_pouch_state_cache_refresh_for_mode(pouch, cache, manifest, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -9028,7 +9044,8 @@ static int lc_pouch_state_read_internal(lc_pouch *pouch,
   }
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
   record = cache != NULL ? lc_pouch_state_cache_record_find(cache, key) : NULL;
-  if (include_body && pouch->single_writer && cache != NULL && record != NULL) {
+  if (include_body && lc_pouch_single_writer_enabled(pouch) &&
+      cache != NULL && record != NULL) {
     char *payload_span_path;
     char *crypto_context;
 
@@ -9173,7 +9190,7 @@ int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
   if (rc != LC_OK) {
     return rc;
   }
-  if (pouch->single_writer) {
+  if (lc_pouch_single_writer_enabled(pouch)) {
     cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
     record =
         cache != NULL ? lc_pouch_state_cache_record_find(cache, key) : NULL;
@@ -9275,7 +9292,6 @@ static int lc_pouch_state_read_many_internal(
   size_t index;
   size_t snapshot_count;
   lc_pouch_state_process_namespace_mutex *process_mutex;
-  int force_refresh;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -9323,20 +9339,7 @@ static int lc_pouch_state_read_many_internal(
     rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     goto cleanup_unlocked;
   }
-  if (pouch->single_writer) {
-    force_refresh = 0;
-    rc = LC_OK;
-  } else {
-    force_refresh = 0;
-    rc = lc_pouch_namespace_marker_refresh_should_scan(
-        &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
-        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
-        &force_refresh, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest, force_refresh,
-                                      error);
-  }
+  rc = lc_pouch_state_cache_refresh_for_mode(pouch, cache, &manifest, error);
   if (rc == LC_OK && key_count > 8U) {
     rc = lc_pouch_state_cache_record_index_build(pouch, cache, &record_index,
                                                  &record_index_count, error);
@@ -9497,7 +9500,6 @@ int lc_pouch_state_scan_summaries(lc_pouch *pouch, const char *namespace_name,
   size_t index;
   size_t next_index;
   lc_pouch_state_process_namespace_mutex *process_mutex;
-  int force_refresh;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -9540,20 +9542,7 @@ int lc_pouch_state_scan_summaries(lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     goto cleanup_unlocked;
   }
-  if (pouch->single_writer) {
-    force_refresh = 0;
-    rc = LC_OK;
-  } else {
-    force_refresh = 0;
-    rc = lc_pouch_namespace_marker_refresh_should_scan(
-        &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
-        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
-        &force_refresh, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest, force_refresh,
-                                      error);
-  }
+  rc = lc_pouch_state_cache_refresh_for_mode(pouch, cache, &manifest, error);
   if (rc == LC_OK) {
     rc = lc_pouch_state_cache_record_index_build(pouch, cache, &record_index,
                                                  &record_index_count, error);
@@ -9655,7 +9644,6 @@ static int lc_pouch_state_visit_internal(lc_pouch *pouch,
   size_t snapshot_capacity;
   size_t i;
   lc_pouch_state_process_namespace_mutex *process_mutex;
-  int force_refresh;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -9695,20 +9683,7 @@ static int lc_pouch_state_visit_internal(lc_pouch *pouch,
     rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     goto cleanup_unlocked;
   }
-  if (pouch->single_writer) {
-    force_refresh = 0;
-    rc = LC_OK;
-  } else {
-    force_refresh = 0;
-    rc = lc_pouch_namespace_marker_refresh_should_scan(
-        &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
-        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
-        &force_refresh, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest, force_refresh,
-                                      error);
-  }
+  rc = lc_pouch_state_cache_refresh_for_mode(pouch, cache, &manifest, error);
   for (record = rc == LC_OK ? cache->records : NULL; record != NULL;
        record = record->next) {
     if (!record->found) {
@@ -9780,7 +9755,6 @@ int lc_pouch_state_visible_count(lc_pouch *pouch, const char *namespace_name,
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_cache_record *record;
   lc_pouch_state_process_namespace_mutex *process_mutex;
-  int force_refresh;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -9798,7 +9772,8 @@ int lc_pouch_state_visible_count(lc_pouch *pouch, const char *namespace_name,
     return rc;
   }
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, error);
-  if (pouch->single_writer && cache != NULL && cache->initialized) {
+  if (lc_pouch_single_writer_enabled(pouch) && cache != NULL &&
+      cache->initialized) {
     for (record = cache->records; record != NULL; record = record->next) {
       if (!record->found ||
           (record->has_query_hidden && record->query_hidden)) {
@@ -9830,20 +9805,7 @@ int lc_pouch_state_visible_count(lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     goto cleanup_unlocked;
   }
-  if (pouch->single_writer) {
-    force_refresh = 0;
-    rc = LC_OK;
-  } else {
-    force_refresh = 0;
-    rc = lc_pouch_namespace_marker_refresh_should_scan(
-        &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
-        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
-        &force_refresh, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest, force_refresh,
-                                      error);
-  }
+  rc = lc_pouch_state_cache_refresh_for_mode(pouch, cache, &manifest, error);
   if (rc == LC_OK) {
     for (record = cache->records; record != NULL; record = record->next) {
       if (!record->found ||
@@ -9876,7 +9838,6 @@ int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
   size_t snapshot_count;
   size_t snapshot_capacity;
   size_t i;
-  int force_refresh;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -9912,20 +9873,7 @@ int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
     rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     goto cleanup;
   }
-  if (pouch->single_writer) {
-    force_refresh = 0;
-    rc = LC_OK;
-  } else {
-    force_refresh = 0;
-    rc = lc_pouch_namespace_marker_refresh_should_scan(
-        &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
-        &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
-        &force_refresh, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest, force_refresh,
-                                      error);
-  }
+  rc = lc_pouch_state_cache_refresh_for_mode(pouch, cache, &manifest, error);
   for (record = rc == LC_OK ? cache->records : NULL; record != NULL;
        record = record->next) {
     if (record->index_seq <= after_version) {
@@ -9973,7 +9921,7 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_process_namespace_mutex *process_mutex;
-  int force_refresh;
+  int single_writer;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -9985,7 +9933,8 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
   }
   *out = 0UL;
   process_mutex = NULL;
-  if (!pouch->single_writer) {
+  single_writer = lc_pouch_single_writer_enabled(pouch);
+  if (!single_writer) {
     rc = lc_pouch_state_process_namespace_mutex_lock(pouch, namespace_name,
                                                      &process_mutex, error);
     if (rc != LC_OK) {
@@ -10005,7 +9954,7 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
     goto cleanup_unlocked;
   }
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
-  if (pouch->single_writer) {
+  if (single_writer) {
     if (cache != NULL && cache->initialized) {
       *out = cache->max_version > manifest.state_max_version
                  ? cache->max_version
@@ -10032,15 +9981,8 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
     if (cache == NULL) {
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     } else {
-      force_refresh = 0;
-      rc = lc_pouch_namespace_marker_refresh_should_scan(
-          &pouch->allocator, manifest.namespace_path, pouch->writer_marker_leaf,
-          &cache->marker_refresh, LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS,
-          &force_refresh, error);
-      if (rc == LC_OK) {
-        rc = lc_pouch_state_cache_refresh(pouch, cache, &manifest,
-                                          force_refresh, error);
-      }
+      rc = lc_pouch_state_cache_refresh_for_mode(pouch, cache, &manifest,
+                                                  error);
       if (rc == LC_OK) {
         *out = cache->max_version;
         if (*out > manifest.state_max_version) {

@@ -49,6 +49,12 @@ typedef struct lc_pouch_status {
   char *compression;
 } lc_pouch_status;
 
+/** Root-scoped exclusive-writer presence used to fence HA auto mode. */
+typedef struct lc_pouch_exclusive_writer_presence {
+  int present;
+  lc_pouch_unix_seconds expires_at_unix;
+} lc_pouch_exclusive_writer_presence;
+
 typedef struct lc_pouch_maintenance_options {
   const char *namespace_name;
   int force;
@@ -154,6 +160,10 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
                          lc_error *error);
 void lc_pouch_status_cleanup(const lc_allocator *allocator,
                              lc_pouch_status *status);
+int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error);
+int lc_pouch_probe_exclusive_writer(
+    lc_pouch *pouch, lc_pouch_exclusive_writer_presence *out,
+    lc_error *error);
 int lc_pouch_maintenance_run(lc_pouch *pouch,
                              const lc_pouch_maintenance_options *options,
                              lc_pouch_maintenance_result *out, lc_error *error);

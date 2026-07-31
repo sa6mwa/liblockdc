@@ -585,14 +585,23 @@ divergence.
   with `retention_updated_before_unix`. The same deletion path is available,
   but scheduling and the retention policy live above Pouch.
 
-- Writer coordination and lock granularity:
-  Go can toggle single-writer mode at runtime and exposes root-level exclusive
-  writer presence probing for HA coordination. Pouch accepts `single_writer`
-  only at open, has namespace writer markers for refresh, and serializes
-  mutations with a namespace `fcntl` lock rather than Go's per-key lock-file
-  cache. Pouch therefore has lower unrelated-key write concurrency and no
-  Go-style exclusive-writer probe. `single_writer` is valid only when the
-  caller already knows the root is exclusively owned.
+- Writer coordination and HA fencing:
+  Pouch now matches the Go disk control semantics. `lc_pouch_set_single_writer`
+  toggles the mode at runtime, invalidates the local mode-sensitive refresh
+  path, and starts or stops a root-scoped `exclusive-writers/` heartbeat.
+  Heartbeats carry signed 64-bit Unix nanoseconds, refresh every second, and
+  expire after three seconds. `lc_pouch_probe_exclusive_writer` ignores the
+  caller's own marker, prefers a valid heartbeat payload over file mtime, and
+  falls back to mtime for legacy or malformed markers. HA auto mode can use the
+  returned presence/expiry to remain passive while another exclusive writer is
+  live. Namespace markers continue to publish every durable commit even while
+  single-writer mode is active, so shared readers refresh promptly.
+
+- Writer lock granularity:
+  Pouch still serializes mutations with a namespace `fcntl` lock rather than
+  Go's per-key lock-file cache. This preserves correctness and HA fencing but
+  has lower unrelated-key write concurrency. It is a remaining throughput
+  divergence, not a single-writer or HA semantic gap.
 
 - Queue wake-up transport:
   Go optionally consumes filesystem notifications and reports whether fsnotify

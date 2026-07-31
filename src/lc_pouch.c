@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -27,6 +28,10 @@ static pthread_mutex_t lc_pouch_root_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define LC_POUCH_FSYNC_BATCH_MAX_OPS 4096U
 #define LC_POUCH_FSYNC_BATCH_DELAY_NS (2L * 1000L * 1000L)
+#define LC_POUCH_EXCLUSIVE_WRITER_TOUCH_NS 1000000000L
+#define LC_POUCH_EXCLUSIVE_WRITER_TTL_NS \
+  ((int64_t)3 * (int64_t)1000000000)
+#define LC_POUCH_WRITER_PRESENCE_MISSING (-1001)
 
 struct lc_pouch_fsync_request {
   int fd;
@@ -1306,21 +1311,215 @@ static int lc_pouch_ensure_root(lc_pouch *pouch, lc_error *error) {
 }
 
 static int lc_pouch_init_writer_marker(lc_pouch *pouch, lc_error *error) {
-  char leaf[128];
+  char marker_leaf[128];
+  char presence_leaf[128];
   unsigned long writer_id;
 
   pthread_mutex_lock(&lc_pouch_writer_marker_mutex);
   writer_id = ++lc_pouch_next_writer_marker_id;
   pthread_mutex_unlock(&lc_pouch_writer_marker_mutex);
-  snprintf(leaf, sizeof(leaf), "writer-%ld-%020lu.marker", (long)getpid(),
+  snprintf(marker_leaf, sizeof(marker_leaf), "writer-%ld-%020lu.marker",
+           (long)getpid(),
            writer_id);
-  pouch->writer_marker_leaf = lc_strdup_with_allocator(&pouch->allocator, leaf);
-  if (pouch->writer_marker_leaf == NULL) {
+  snprintf(presence_leaf, sizeof(presence_leaf), "writer-%ld-%020lu.presence",
+           (long)getpid(), writer_id);
+  pouch->writer_marker_leaf =
+      lc_strdup_with_allocator(&pouch->allocator, marker_leaf);
+  pouch->writer_presence_leaf =
+      lc_strdup_with_allocator(&pouch->allocator, presence_leaf);
+  pouch->writer_presence_dir = lc_pouch_path_join(
+      &pouch->allocator, pouch->root_path, "exclusive-writers");
+  pouch->writer_presence_path = pouch->writer_presence_dir != NULL
+                                    ? lc_pouch_path_join(&pouch->allocator,
+                                                         pouch->writer_presence_dir,
+                                                         presence_leaf)
+                                    : NULL;
+  if (pouch->writer_marker_leaf == NULL || pouch->writer_presence_leaf == NULL ||
+      pouch->writer_presence_dir == NULL || pouch->writer_presence_path == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch writer marker leaf", NULL,
-                        NULL, NULL);
+                        "failed to allocate pouch writer marker paths", NULL,
+                        NULL, "pouch");
   }
   return LC_OK;
+}
+
+int lc_pouch_single_writer_snapshot(lc_pouch *pouch, uint64_t *epoch_out) {
+  int enabled;
+
+  if (pouch == NULL) {
+    if (epoch_out != NULL) {
+      *epoch_out = 0U;
+    }
+    return 0;
+  }
+  if (!pouch->single_writer_mutex_initialized) {
+    if (epoch_out != NULL) {
+      *epoch_out = pouch->single_writer_epoch;
+    }
+    return pouch->single_writer;
+  }
+  pthread_mutex_lock(&pouch->single_writer_mutex);
+  enabled = pouch->single_writer;
+  if (epoch_out != NULL) {
+    *epoch_out = pouch->single_writer_epoch;
+  }
+  pthread_mutex_unlock(&pouch->single_writer_mutex);
+  return enabled;
+}
+
+int lc_pouch_single_writer_enabled(lc_pouch *pouch) {
+  return lc_pouch_single_writer_snapshot(pouch, NULL);
+}
+
+static int lc_pouch_writer_presence_now_ns(int64_t *out, lc_error *error) {
+  struct timespec now;
+
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch writer presence requires output storage", NULL,
+                        NULL, "pouch");
+  }
+  if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to read pouch writer presence clock",
+                        strerror(errno), NULL, "pouch");
+  }
+  if (now.tv_sec < 0 ||
+      (uintmax_t)now.tv_sec >
+          ((uintmax_t)INT64_MAX - (uintmax_t)now.tv_nsec) / 1000000000U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch writer presence clock is out of range", NULL,
+                        NULL, "pouch");
+  }
+  *out = (int64_t)now.tv_sec * (int64_t)1000000000 +
+         (int64_t)now.tv_nsec;
+  return LC_OK;
+}
+
+static int lc_pouch_writer_presence_touch(lc_pouch *pouch, lc_error *error) {
+  char payload[64];
+  int64_t now_ns;
+  int rc;
+
+  if (pouch == NULL || pouch->writer_presence_dir == NULL ||
+      pouch->writer_presence_path == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch writer presence is not initialized", NULL,
+                        NULL, "pouch");
+  }
+  rc = lc_pouch_writer_presence_now_ns(&now_ns, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (snprintf(payload, sizeof(payload), "%" PRId64 "\n", now_ns) < 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to format pouch writer heartbeat", NULL, NULL,
+                        "pouch");
+  }
+  rc = lc_pouch_path_ensure_directory(
+      pouch->writer_presence_dir,
+      "failed to create pouch exclusive-writer directory", error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_path_write_text_file_relaxed(pouch->writer_presence_path,
+                                                payload, error);
+}
+
+static void *lc_pouch_writer_presence_main(void *context) {
+  lc_pouch *pouch;
+
+  pouch = (lc_pouch *)context;
+  pthread_mutex_lock(&pouch->writer_presence_mutex);
+  while (!pouch->writer_presence_stop) {
+    struct timespec deadline;
+    int wait_rc;
+
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_nsec += LC_POUCH_EXCLUSIVE_WRITER_TOUCH_NS;
+    if (deadline.tv_nsec >= 1000000000L) {
+      deadline.tv_sec += deadline.tv_nsec / 1000000000L;
+      deadline.tv_nsec %= 1000000000L;
+    }
+    wait_rc = pthread_cond_timedwait(&pouch->writer_presence_cond,
+                                     &pouch->writer_presence_mutex, &deadline);
+    if (pouch->writer_presence_stop) {
+      break;
+    }
+    if (wait_rc == 0 || wait_rc == ETIMEDOUT) {
+      lc_error error;
+
+      pthread_mutex_unlock(&pouch->writer_presence_mutex);
+      lc_error_init(&error);
+      (void)lc_pouch_writer_presence_touch(pouch, &error);
+      lc_error_cleanup(&error);
+      pthread_mutex_lock(&pouch->writer_presence_mutex);
+    }
+  }
+  pthread_mutex_unlock(&pouch->writer_presence_mutex);
+  return NULL;
+}
+
+static int lc_pouch_writer_presence_start(lc_pouch *pouch, lc_error *error) {
+  int pthread_rc;
+  int rc;
+
+  if (pouch == NULL || !pouch->writer_presence_mutex_initialized ||
+      !pouch->writer_presence_cond_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch writer presence is not initialized", NULL,
+                        NULL, "pouch");
+  }
+  pthread_mutex_lock(&pouch->writer_presence_mutex);
+  if (pouch->writer_presence_thread_started) {
+    pthread_mutex_unlock(&pouch->writer_presence_mutex);
+    return LC_OK;
+  }
+  pthread_mutex_unlock(&pouch->writer_presence_mutex);
+  rc = lc_pouch_writer_presence_touch(pouch, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  pthread_mutex_lock(&pouch->writer_presence_mutex);
+  pouch->writer_presence_stop = 0;
+  pthread_rc = pthread_create(&pouch->writer_presence_thread, NULL,
+                              lc_pouch_writer_presence_main, pouch);
+  if (pthread_rc == 0) {
+    pouch->writer_presence_thread_started = 1;
+  }
+  pthread_mutex_unlock(&pouch->writer_presence_mutex);
+  if (pthread_rc != 0) {
+    (void)unlink(pouch->writer_presence_path);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to start pouch writer presence worker",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  return LC_OK;
+}
+
+static void lc_pouch_writer_presence_stop(lc_pouch *pouch) {
+  int join_thread;
+
+  if (pouch == NULL || !pouch->writer_presence_mutex_initialized) {
+    return;
+  }
+  pthread_mutex_lock(&pouch->writer_presence_mutex);
+  join_thread = pouch->writer_presence_thread_started;
+  if (join_thread) {
+    pouch->writer_presence_stop = 1;
+    pthread_cond_signal(&pouch->writer_presence_cond);
+  }
+  pthread_mutex_unlock(&pouch->writer_presence_mutex);
+  if (join_thread) {
+    (void)pthread_join(pouch->writer_presence_thread, NULL);
+    pthread_mutex_lock(&pouch->writer_presence_mutex);
+    pouch->writer_presence_thread_started = 0;
+    pouch->writer_presence_stop = 0;
+    pthread_mutex_unlock(&pouch->writer_presence_mutex);
+  }
+  if (pouch->writer_presence_path != NULL) {
+    (void)unlink(pouch->writer_presence_path);
+  }
 }
 
 int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
@@ -1328,6 +1527,8 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                   lc_error *error) {
   lc_pouch *pouch;
   lc_pouch_crypto_open_options crypto_options;
+  int requested_single_writer;
+  int pthread_rc;
   int rc;
 
   if (root_path == NULL || root_path[0] == '\0' || out == NULL) {
@@ -1346,6 +1547,30 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
   } else {
     lc_allocator_init(&pouch->allocator);
   }
+  pthread_rc = pthread_mutex_init(&pouch->single_writer_mutex, NULL);
+  if (pthread_rc != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch single-writer mutex",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->single_writer_mutex_initialized = 1;
+  pthread_rc = pthread_mutex_init(&pouch->writer_presence_mutex, NULL);
+  if (pthread_rc != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch writer presence mutex",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->writer_presence_mutex_initialized = 1;
+  pthread_rc = pthread_cond_init(&pouch->writer_presence_cond, NULL);
+  if (pthread_rc != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch writer presence condition",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->writer_presence_cond_initialized = 1;
   pouch->root_path = lc_strdup_with_allocator(&pouch->allocator, root_path);
   if (pouch->root_path == NULL) {
     lc_pouch_close(pouch);
@@ -1353,6 +1578,9 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         "failed to copy pouch root path", NULL, NULL, NULL);
   }
   lc_pouch_init_options(pouch, options);
+  requested_single_writer = pouch->single_writer;
+  pouch->single_writer = 0;
+  pouch->single_writer_epoch = 1U;
   pouch->base_logger = options != NULL && options->logger != NULL
                            ? options->logger
                            : lc_log_noop_logger();
@@ -1435,6 +1663,11 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     lc_pouch_close(pouch);
     return rc;
   }
+  rc = lc_pouch_set_single_writer(pouch, requested_single_writer, error);
+  if (rc != LC_OK) {
+    lc_pouch_close(pouch);
+    return rc;
+  }
   *out = pouch;
   {
     pslog_field fields[8];
@@ -1448,7 +1681,8 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
         lc_log_bool_field("crypto", lc_pouch_crypto_enabled(pouch->crypto));
     fields[5] =
         lc_log_u64_field("segment_target_bytes", pouch->segment_target_bytes);
-    fields[6] = lc_log_bool_field("single_writer", pouch->single_writer);
+    fields[6] =
+        lc_log_bool_field("single_writer", lc_pouch_single_writer_enabled(pouch));
     fields[7] = lc_log_bool_field("background_compaction",
                                   pouch->background_compaction_enabled);
     lc_log_info(pouch->logger, "open", fields, 8U);
@@ -1469,6 +1703,7 @@ void lc_pouch_close(lc_pouch *pouch) {
     fields[0] = lc_log_str_field("path", pouch->root_path);
     lc_log_debug(pouch->logger, "close", fields, 1U);
   }
+  lc_pouch_writer_presence_stop(pouch);
   lc_pouch_compaction_worker_close(pouch);
   lc_pouch_fsync_batcher_close(pouch);
   lc_pouch_state_cache_cleanup(pouch);
@@ -1476,6 +1711,9 @@ void lc_pouch_close(lc_pouch *pouch) {
   lc_pouch_query_index_cache_cleanup(pouch);
   lc_pouch_crypto_close(pouch->crypto);
   lc_free_with_allocator(&allocator, pouch->crypto_key_file);
+  lc_free_with_allocator(&allocator, pouch->writer_presence_path);
+  lc_free_with_allocator(&allocator, pouch->writer_presence_leaf);
+  lc_free_with_allocator(&allocator, pouch->writer_presence_dir);
   lc_free_with_allocator(&allocator, pouch->writer_marker_leaf);
   lc_free_with_allocator(&allocator, pouch->compression);
   lc_free_with_allocator(&allocator, pouch->query_fallback_engine);
@@ -1485,7 +1723,245 @@ void lc_pouch_close(lc_pouch *pouch) {
       pouch->logger != lc_log_noop_logger()) {
     pouch->logger->destroy(pouch->logger);
   }
+  if (pouch->writer_presence_cond_initialized) {
+    pthread_cond_destroy(&pouch->writer_presence_cond);
+  }
+  if (pouch->writer_presence_mutex_initialized) {
+    pthread_mutex_destroy(&pouch->writer_presence_mutex);
+  }
+  if (pouch->single_writer_mutex_initialized) {
+    pthread_mutex_destroy(&pouch->single_writer_mutex);
+  }
   lc_free_with_allocator(&allocator, pouch);
+}
+
+int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
+  int normalized;
+  int rc;
+
+  if (pouch == NULL || !pouch->single_writer_mutex_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch single-writer control requires an open pouch",
+                        NULL, NULL, "pouch");
+  }
+  normalized = enabled != 0 ? 1 : 0;
+  pthread_mutex_lock(&pouch->single_writer_mutex);
+  if (pouch->single_writer == normalized) {
+    pthread_mutex_unlock(&pouch->single_writer_mutex);
+    return LC_OK;
+  }
+  if (normalized) {
+    rc = lc_pouch_writer_presence_start(pouch, error);
+    if (rc != LC_OK) {
+      pthread_mutex_unlock(&pouch->single_writer_mutex);
+      return rc;
+    }
+    pouch->single_writer = 1;
+  } else {
+    pouch->single_writer = 0;
+    lc_pouch_writer_presence_stop(pouch);
+  }
+  if (pouch->single_writer_epoch != UINT64_MAX) {
+    ++pouch->single_writer_epoch;
+  }
+  pthread_mutex_unlock(&pouch->single_writer_mutex);
+  {
+    pslog_field fields[1];
+
+    fields[0] = lc_log_bool_field("single_writer", normalized);
+    lc_log_info(pouch->logger, "single_writer.set", fields, 1U);
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_writer_presence_read(
+    const char *path, int64_t *heartbeat_ns, int *has_heartbeat,
+    lc_error *error) {
+  char buffer[128];
+  size_t length;
+  int fd;
+
+  if (path == NULL || heartbeat_ns == NULL || has_heartbeat == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch writer heartbeat requires path and outputs",
+                        NULL, NULL, "pouch");
+  }
+  *heartbeat_ns = 0;
+  *has_heartbeat = 0;
+  fd = open(path, O_RDONLY);
+  if (fd < 0) {
+    if (errno == ENOENT) {
+      return LC_POUCH_WRITER_PRESENCE_MISSING;
+    }
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to read pouch writer heartbeat",
+                        strerror(errno), NULL, "pouch");
+  }
+  length = 0U;
+  for (;;) {
+    ssize_t got;
+
+    if (length + 1U >= sizeof(buffer)) {
+      break;
+    }
+    got = read(fd, buffer + length, sizeof(buffer) - length - 1U);
+    if (got < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      close(fd);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to read pouch writer heartbeat",
+                          strerror(errno), NULL, "pouch");
+    }
+    if (got == 0) {
+      break;
+    }
+    length += (size_t)got;
+  }
+  if (close(fd) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to close pouch writer heartbeat",
+                        strerror(errno), NULL, "pouch");
+  }
+  buffer[length] = '\0';
+  if (length > 0U) {
+    char *end;
+    intmax_t value;
+
+    errno = 0;
+    value = strtoimax(buffer, &end, 10);
+    while (end != NULL && (*end == ' ' || *end == '\t' || *end == '\r' ||
+                           *end == '\n')) {
+      ++end;
+    }
+    if (errno == 0 && end != buffer && end != NULL && *end == '\0' &&
+        value > 0 && (uintmax_t)value <= (uintmax_t)INT64_MAX) {
+      *heartbeat_ns = (int64_t)value;
+      *has_heartbeat = 1;
+    }
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_writer_presence_mtime_ns(const struct stat *st,
+                                             int64_t *out) {
+  int64_t seconds;
+  long nanos;
+
+  if (st == NULL || out == NULL) {
+    return 0;
+  }
+#if defined(__APPLE__)
+  seconds = (int64_t)st->st_mtimespec.tv_sec;
+  nanos = st->st_mtimespec.tv_nsec;
+#else
+  seconds = (int64_t)st->st_mtim.tv_sec;
+  nanos = st->st_mtim.tv_nsec;
+#endif
+  if (seconds < 0 || nanos < 0 ||
+      (uintmax_t)seconds >
+          ((uintmax_t)INT64_MAX - (uintmax_t)nanos) / 1000000000U) {
+    return 0;
+  }
+  *out = seconds * (int64_t)1000000000 + (int64_t)nanos;
+  return 1;
+}
+
+int lc_pouch_probe_exclusive_writer(
+    lc_pouch *pouch, lc_pouch_exclusive_writer_presence *out,
+    lc_error *error) {
+  DIR *dir;
+  struct dirent *entry;
+  int64_t now_ns;
+  int rc;
+
+  if (pouch == NULL || out == NULL || pouch->writer_presence_dir == NULL ||
+      pouch->writer_presence_leaf == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch writer probe requires an open pouch and output",
+                        NULL, NULL, "pouch");
+  }
+  memset(out, 0, sizeof(*out));
+  rc = lc_pouch_writer_presence_now_ns(&now_ns, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  dir = opendir(pouch->writer_presence_dir);
+  if (dir == NULL) {
+    if (errno == ENOENT) {
+      return LC_OK;
+    }
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to open pouch exclusive-writer directory",
+                        strerror(errno), NULL, "pouch");
+  }
+  rc = LC_OK;
+  while (rc == LC_OK && (entry = readdir(dir)) != NULL) {
+    char *path;
+    struct stat st;
+    int64_t heartbeat_ns;
+    int64_t expires_ns;
+    int has_heartbeat;
+
+    if (entry->d_name[0] == '\0' ||
+        strcmp(entry->d_name, pouch->writer_presence_leaf) == 0) {
+      continue;
+    }
+    path = lc_pouch_path_join(&pouch->allocator, pouch->writer_presence_dir,
+                              entry->d_name);
+    if (path == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch writer presence path", NULL,
+                        NULL, "pouch");
+      break;
+    }
+    if (stat(path, &st) != 0) {
+      int saved_errno;
+
+      saved_errno = errno;
+      lc_free_with_allocator(&pouch->allocator, path);
+      if (saved_errno == ENOENT) {
+        continue;
+      }
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to stat pouch writer heartbeat",
+                        strerror(saved_errno), NULL, "pouch");
+      break;
+    }
+    if (!S_ISREG(st.st_mode)) {
+      lc_free_with_allocator(&pouch->allocator, path);
+      continue;
+    }
+    rc = lc_pouch_writer_presence_read(path, &heartbeat_ns, &has_heartbeat,
+                                       error);
+    lc_free_with_allocator(&pouch->allocator, path);
+    if (rc == LC_POUCH_WRITER_PRESENCE_MISSING) {
+      rc = LC_OK;
+      continue;
+    }
+    if (rc != LC_OK) {
+      break;
+    }
+    if (!has_heartbeat &&
+        !lc_pouch_writer_presence_mtime_ns(&st, &heartbeat_ns)) {
+      continue;
+    }
+    expires_ns = heartbeat_ns > INT64_MAX - LC_POUCH_EXCLUSIVE_WRITER_TTL_NS
+                     ? INT64_MAX
+                     : heartbeat_ns + LC_POUCH_EXCLUSIVE_WRITER_TTL_NS;
+    if (expires_ns > now_ns) {
+      out->present = 1;
+      out->expires_at_unix = expires_ns / (int64_t)1000000000;
+      break;
+    }
+  }
+  if (closedir(dir) != 0 && rc == LC_OK) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to close pouch exclusive-writer directory",
+                      strerror(errno), NULL, "pouch");
+  }
+  return rc;
 }
 
 int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
@@ -1516,7 +1992,7 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
   out->compaction_max_io_bytes_per_sec =
       pouch->compaction_max_io_bytes_per_sec;
   out->background_compaction_enabled = pouch->background_compaction_enabled;
-  out->single_writer = pouch->single_writer;
+  out->single_writer = lc_pouch_single_writer_enabled(pouch);
   out->query_engine =
       lc_strdup_with_allocator(&pouch->allocator, pouch->query_engine);
   out->query_fallback_engine =

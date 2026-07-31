@@ -22,6 +22,7 @@
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
 #include "lc_pouch_path.h"
+#include "lc_pouch_query_index.h"
 #include "lc_pouch_record.h"
 
 #include <dirent.h>
@@ -3151,6 +3152,180 @@ static void test_single_writer_state_read_uses_projection_cache(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_single_writer_runtime_control_and_ha_probe(void **state) {
+  lc_pouch *writer;
+  lc_pouch *peer;
+  lc_pouch_status status;
+  lc_pouch_exclusive_writer_presence presence;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  writer = NULL;
+  peer = NULL;
+  memset(&status, 0, sizeof(status));
+  memset(&presence, 0, sizeof(presence));
+  lc_error_init(&error);
+  make_root("single-writer-ha", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_open(root, NULL, NULL, &peer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_probe_exclusive_writer(writer, &presence, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(presence.present);
+
+  rc = lc_pouch_set_single_writer(writer, 1, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_status_read(writer, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(status.single_writer);
+  lc_pouch_status_cleanup(NULL, &status);
+  memset(&presence, 0, sizeof(presence));
+  rc = lc_pouch_probe_exclusive_writer(writer, &presence, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(presence.present);
+  rc = lc_pouch_probe_exclusive_writer(peer, &presence, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(presence.present);
+  assert_true(presence.expires_at_unix > 0);
+
+  rc = lc_pouch_set_single_writer(writer, 0, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_status_read(writer, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(status.single_writer);
+  lc_pouch_status_cleanup(NULL, &status);
+  memset(&presence, 0, sizeof(presence));
+  rc = lc_pouch_probe_exclusive_writer(peer, &presence, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(presence.present);
+
+  lc_pouch_close(peer);
+  lc_pouch_close(writer);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_exclusive_writer_probe_heartbeat_precedence(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_exclusive_writer_presence presence;
+  lc_error error;
+  char root[512];
+  char directory[1024];
+  char marker[1024];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  memset(&presence, 0, sizeof(presence));
+  lc_error_init(&error);
+  make_root("single-writer-probe", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(snprintf(directory, sizeof(directory), "%s/exclusive-writers",
+                       root) > 0);
+  assert_int_equal(mkdir(directory, 0777), 0);
+  assert_true(snprintf(marker, sizeof(marker), "%s/foreign.presence",
+                       directory) > 0);
+
+  write_text_file(marker, "1\n");
+  rc = lc_pouch_probe_exclusive_writer(pouch, &presence, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(presence.present);
+
+  write_text_file(marker, "0\n");
+  memset(&presence, 0, sizeof(presence));
+  rc = lc_pouch_probe_exclusive_writer(pouch, &presence, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(presence.present);
+  assert_true(presence.expires_at_unix > 0);
+
+  write_text_file(marker, "9223372036854775808\n");
+  memset(&presence, 0, sizeof(presence));
+  rc = lc_pouch_probe_exclusive_writer(pouch, &presence, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(presence.present);
+  assert_true(presence.expires_at_unix > 0);
+
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_single_writer_transition_invalidates_query_index_trust(
+    void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_pouch_query_index_flush_result flush_result;
+  lc_pouch_state_write_result write_result;
+  lc_source *source;
+  lc_error error;
+  char *namespace_path;
+  char manifest_path[1024];
+  char root[512];
+  lc_pouch_generation state_index_seq;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  namespace_path = NULL;
+  state_index_seq = 0U;
+  memset(&options, 0, sizeof(options));
+  memset(&flush_result, 0, sizeof(flush_result));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_error_init(&error);
+  make_root("single-writer-index-trust", root, sizeof(root));
+  cleanup_root(root);
+  options.single_writer = 1;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/single-writer-index", "doc/a",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_ensure_current(
+      pouch, "docs/single-writer-index", write_result.index_seq, 1,
+      &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, write_result.index_seq);
+  state_index_seq = write_result.index_seq;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  namespace_path = lc_pouch_namespace_path(NULL, root,
+                                            "docs/single-writer-index");
+  assert_non_null(namespace_path);
+  assert_true(snprintf(manifest_path, sizeof(manifest_path),
+                       "%s/index/query.manifest", namespace_path) > 0);
+  write_text_file(manifest_path, "broken\n");
+  rc = lc_pouch_set_single_writer(pouch, 0, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_set_single_writer(pouch, 1, &error);
+  assert_int_equal(rc, LC_OK);
+  memset(&flush_result, 0, sizeof(flush_result));
+  rc = lc_pouch_query_index_ensure_current(pouch, "docs/single-writer-index",
+                                            state_index_seq, 0, &flush_result,
+                                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, state_index_seq);
+  assert_path_file_contains(namespace_path, "index/query.manifest",
+                            "format=pouch-query-index-manifest");
+
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_shared_state_projection_cache_refreshes_peer_markers(void **state) {
   lc_pouch *writer;
@@ -3176,6 +3351,8 @@ test_shared_state_projection_cache_refreshes_peer_markers(void **state) {
   rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_open(root, NULL, NULL, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_set_single_writer(writer, 1, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
@@ -16929,6 +17106,10 @@ int main(void) {
           test_marker_snapshots_treat_same_process_handles_as_peers),
       cmocka_unit_test(test_marker_refresh_uses_directory_fast_path_and_force),
       cmocka_unit_test(test_single_writer_state_read_uses_projection_cache),
+      cmocka_unit_test(test_single_writer_runtime_control_and_ha_probe),
+      cmocka_unit_test(test_exclusive_writer_probe_heartbeat_precedence),
+      cmocka_unit_test(
+          test_single_writer_transition_invalidates_query_index_trust),
       cmocka_unit_test(
           test_shared_state_projection_cache_refreshes_peer_markers),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),

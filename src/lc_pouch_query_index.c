@@ -550,6 +550,7 @@ struct lc_pouch_query_index_packed_cache_entry {
 struct lc_pouch_query_index_manifest_trust_entry {
   char *namespace_name;
   lc_pouch_generation index_seq;
+  uint64_t writer_mode_epoch;
   struct lc_pouch_query_index_manifest_trust_entry *next;
 };
 
@@ -11666,8 +11667,8 @@ static int lc_pouch_query_index_flush_segmented(
                  !manifest.valid || manifest.index_seq > state_index_seq ||
                  manifest.segment_count >= LC_POUCH_QUERY_INDEX_MAX_SEGMENTS;
   cleanup_unreferenced = full_rebuild || validate_existing_segments;
-  pending_fast_path_allowed =
-      pouch->single_writer && !pouch->query_pending_index_incomplete;
+  pending_fast_path_allowed = lc_pouch_single_writer_enabled(pouch) &&
+                              !pouch->query_pending_index_incomplete;
   if (full_rebuild) {
     retired_manifest = manifest;
     memset(&manifest, 0, sizeof(manifest));
@@ -12808,14 +12809,19 @@ static int lc_pouch_query_index_manifest_trust_valid(const lc_pouch *pouch,
                                                      const char *namespace_name,
                                                      lc_pouch_generation index_seq) {
   lc_pouch_query_index_manifest_trust_entry *entry;
+  uint64_t writer_mode_epoch;
 
-  if (pouch == NULL || !pouch->single_writer || namespace_name == NULL ||
+  if (pouch == NULL ||
+      !lc_pouch_single_writer_snapshot((lc_pouch *)pouch,
+                                       &writer_mode_epoch) ||
+      namespace_name == NULL ||
       namespace_name[0] == '\0') {
     return 0;
   }
   entry = pouch->query_manifest_trust;
   while (entry != NULL) {
-    if (entry->index_seq == index_seq && entry->namespace_name != NULL &&
+    if (entry->writer_mode_epoch == writer_mode_epoch &&
+        entry->index_seq == index_seq && entry->namespace_name != NULL &&
         strcmp(entry->namespace_name, namespace_name) == 0) {
       return 1;
     }
@@ -12827,8 +12833,11 @@ static int lc_pouch_query_index_manifest_trust_valid(const lc_pouch *pouch,
 static void lc_pouch_query_index_manifest_trust_remember(
     lc_pouch *pouch, const char *namespace_name, lc_pouch_generation index_seq) {
   lc_pouch_query_index_manifest_trust_entry *entry;
+  uint64_t writer_mode_epoch;
 
-  if (pouch == NULL || !pouch->single_writer || namespace_name == NULL ||
+  if (pouch == NULL ||
+      !lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch) ||
+      namespace_name == NULL ||
       namespace_name[0] == '\0') {
     return;
   }
@@ -12837,6 +12846,7 @@ static void lc_pouch_query_index_manifest_trust_remember(
     if (entry->namespace_name != NULL &&
         strcmp(entry->namespace_name, namespace_name) == 0) {
       entry->index_seq = index_seq;
+      entry->writer_mode_epoch = writer_mode_epoch;
       return;
     }
     entry = entry->next;
@@ -12853,6 +12863,7 @@ static void lc_pouch_query_index_manifest_trust_remember(
     return;
   }
   entry->index_seq = index_seq;
+  entry->writer_mode_epoch = writer_mode_epoch;
   entry->next = pouch->query_manifest_trust;
   pouch->query_manifest_trust = entry;
 }
