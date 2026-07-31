@@ -112,6 +112,9 @@ These items invalidate a claim of full Go-disk alignment until fixed.
   - Queue enqueue, queue delivery, transaction decision application, attachment
     mutation, metadata mutation, and staged promotion must not regress to
     per-record sync behavior when they are one logical storage operation.
+  - Default Pouch mutations use Go disk failover's `NoSync` boundary;
+    `durable_sync=1` explicitly enables the root-scoped grouped `fdatasync`
+    boundary and diagnostics.
 
 ## Work Rules For This Correction
 
@@ -125,13 +128,17 @@ These items invalidate a claim of full Go-disk alignment until fixed.
   implemented.
 - [x] Re-analyze Pouch against Go disk and document every remaining divergence
   with a reason.
-  - 2026-07-31 source audit: Pouch `74eb7ea` versus lockd `b6ddbde` found no
-    new durable-logstore semantic gap on 64-bit C `long` targets. The
-    divergence register now records the remaining format, scheduler,
-    coordination, queue-wake-up, raw-API, snapshot-only-compaction, and ILP32
-    counter/timestamp differences.
+  - 2026-07-31 follow-up source audit removed the superseded writer-scoped
+    segment reader, uses fixed-width durable scalars on every supported ABI,
+    publishes finalized active records only after their key/metadata bytes are
+    complete, and takes client lease mutations through exact-key locks. The
+    remaining divergence register entries are intentional representation or
+    public-API differences. Default Pouch and the benchmark now use Go
+    `failover`/`NoSync`; Pouch's stricter `durable_sync=1` policy is an
+    explicit opt-in rather than a comparison divergence.
   - Broad verification remains deliberately deferred to the later functional
-    verification phase; this audit did not run `test-all` or benchmarks.
+    verification phase; the focused checks and bounded concurrency benchmark
+    do not replace `test-all`.
 
 ## Reference Files To Walk Before Coding
 
@@ -161,7 +168,9 @@ Pouch before editing the corresponding C code.
     append loop, pending refs, commit groups, segment rolling, writer markers,
     single-writer refresh optimization, fsync batching.
   - Pouch obligation: namespace is the storage boundary. Do not encode
-    namespace into keys under global side namespaces.
+    namespace into keys under global side namespaces. Pouch deliberately uses
+    its rolling active-segment tail, rather than Go's writer-marker polling, as
+    the shared-writer refresh source.
 
 - [ ] `../lockd/internal/storage/disk/disk.go`
   - `StoreMeta`, `LoadMeta`, `WriteState`, `ReadState`, `Remove`,
@@ -439,7 +448,8 @@ Acceptance:
 - [x] Keep active segment rolling at configured default segment size.
 - [x] Replay installed snapshot first, then non-obsolete segments in order.
 - [x] Track last good offsets and repair crash-truncated active tails.
-- [x] Use writer markers and single-writer refresh optimization.
+- [x] Refresh shared-writer projections from the verified active-segment tail;
+  single-writer mode reuses its local projection.
 - [x] Use bounded read-file LRU for segment/snapshot readers.
 - [x] Use append batching and cross-operation commit groups.
 - [x] Publish refs only after grouped sync succeeds, except documented

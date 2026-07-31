@@ -1001,6 +1001,7 @@ typedef struct lc_pouch_endpoint_options {
   char *compression;
   int crypto_generate_key_file;
   int single_writer;
+  int durable_sync;
   uint64_t fsync_batch_max_ops;
   int queue_watch;
   int background_compaction_enabled;
@@ -1259,6 +1260,16 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, copy);
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "durable_sync") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_durable_sync")) {
+    rc = lc_pouch_endpoint_parse_boolean(allocator, value, value_len,
+                                         "durable_sync",
+                                         &options->durable_sync, error);
+    lc_free_with_allocator(allocator, decoded_key);
+    return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
                           "background_compaction") ||
@@ -1814,6 +1825,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     }
     memset(&pouch_open_options, 0, sizeof(pouch_open_options));
     pouch_open_options.single_writer = pouch_endpoint_options.single_writer;
+    pouch_open_options.durable_sync = pouch_endpoint_options.durable_sync;
     pouch_open_options.fsync_batch_max_ops =
         pouch_endpoint_options.fsync_batch_max_ops;
     pouch_open_options.queue_watch = pouch_endpoint_options.queue_watch;

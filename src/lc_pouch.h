@@ -36,6 +36,11 @@ typedef struct lc_pouch_open_options {
   int crypto_generate_key_file;
   const char *compression;
   pslog_logger *logger;
+  /**
+   * Wait for a durable root-scoped fsync group commit at each public mutation.
+   * Defaults to zero, matching Go disk failover's NoSync policy.
+   */
+  int durable_sync;
   /** Maximum fsync requests per group commit. Zero leaves the batch unbounded. */
   uint64_t fsync_batch_max_ops;
   /** Enables filesystem queue notifications where the root supports them. */
@@ -76,6 +81,7 @@ typedef struct lc_pouch_status {
   int single_writer;
   int supports_concurrent_writes;
   int aborted;
+  int durable_sync;
   uint64_t fsync_batch_max_ops;
   int queue_watch_enabled;
   int filesystem_capabilities_known;

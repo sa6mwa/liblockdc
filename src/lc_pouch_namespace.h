@@ -32,6 +32,7 @@ typedef struct lc_pouch_namespace_manifest {
   unsigned long obsolete_segment_count;
   unsigned long obsolete_snapshot_count;
   unsigned long segment_count;
+  int snapshot_overlay;
   int repaired;
 } lc_pouch_namespace_manifest;
 
@@ -62,9 +63,6 @@ typedef struct lc_pouch_namespace_marker_refresh_state {
 
 char *lc_pouch_namespace_segment_leaf(const lc_allocator *allocator,
                                       uint64_t segment_id);
-char *lc_pouch_namespace_writer_segment_leaf(const lc_allocator *allocator,
-                                             const char *writer_id,
-                                             uint64_t sequence);
 char *lc_pouch_namespace_snapshot_leaf(const lc_allocator *allocator,
                                        uint64_t segment_id);
 int lc_pouch_namespace_segment_is_legacy(const char *leaf,
@@ -84,7 +82,7 @@ int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
 int lc_pouch_namespace_manifest_install_snapshot(
     const lc_allocator *allocator, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, const char *snapshot_leaf,
-    uint64_t snapshot_segment_id, uint64_t next_segment_id,
+    uint64_t snapshot_segment_id, uint64_t legacy_obsolete_marked_at_unix,
     lc_error *error);
 int lc_pouch_namespace_manifest_mark_obsolete_segment(
     const lc_allocator *allocator, lc_pouch_namespace_manifest *manifest,

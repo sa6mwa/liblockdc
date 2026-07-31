@@ -59,6 +59,14 @@ outside the timed region. Defaults are two writers, 32 writes per writer, and a
 `POUCH_GO_CONCURRENCY_WRITES_PER_WRITER`, and
 `POUCH_GO_CONCURRENCY_PAYLOAD_BYTES`.
 
+The Go harness does not pass `--ha`, so lockd uses its default `failover` mode.
+Go disk rejects `concurrent` for disk roots, and Go core marks failover writes
+`NoSync`. Pouch defaults to `durable_sync=false`, so this matrix uses the same
+power-loss durability boundary while comparing contention, shared-root,
+key-lock, and observed throughput. Run `durable_sync=true` separately when a
+stronger Pouch `fdatasync` group-commit boundary is required; do not compare
+that strict mode directly to the default Go failover numbers.
+
 Crypto mode measures the operational overhead of each engine's enabled
 at-rest-encryption configuration, not a byte-for-byte cryptographic-format
 comparison: Pouch uses one generated `pouch_crypto_key` across its clients, and
@@ -75,11 +83,12 @@ bounded scan subset.
 
 `make benchmark-pouch-go-compaction` runs opt-in pouch-only compaction
 benchmarks. It reports forced maintenance compaction time as `compaction-ns/op`
-and scheduled compaction impact through `write-ns/op` plus `max-write-ns/op`,
-because scheduled compaction runs synchronously inside the write that crosses
-the threshold. Forced compaction keeps both default profiles; scheduled
-compaction uses a bounded default profile so the target is usable as a routine
-gate while still exercising an early compaction threshold. Setting any
+and background-scheduled compaction impact through `write-ns/op` plus
+`max-write-ns/op`. A Pouch pthread worker performs scheduled work after a
+mutation signals it, so foreground writes do not execute the compaction pass.
+Forced compaction keeps both default profiles; scheduled compaction uses a
+bounded default profile so the target is usable as a routine gate while still
+exercising an early compaction threshold. Setting any
 `POUCH_GO_COMPACTION_*` value replaces the defaults with a single env-driven
 scenario. Use these environment knobs to simulate different schedules:
 

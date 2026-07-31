@@ -41,7 +41,7 @@ static uint64_t lc_pouch_next_writer_marker_id;
 static pthread_mutex_t lc_pouch_writer_marker_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t lc_pouch_root_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-#define LC_POUCH_FSYNC_BATCH_DELAY_NS (2L * 1000L * 1000L)
+#define LC_POUCH_FSYNC_BATCH_DELAY_NS 0L
 #define LC_POUCH_EXCLUSIVE_WRITER_TOUCH_NS 1000000000L
 #define LC_POUCH_EXCLUSIVE_WRITER_TTL_NS \
   ((int64_t)3 * (int64_t)1000000000)
@@ -67,6 +67,26 @@ typedef struct lc_pouch_fsync_batch_file {
   int fd;
 } lc_pouch_fsync_batch_file;
 
+struct lc_pouch_fsync_batcher {
+  dev_t device;
+  ino_t inode;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+  pthread_t thread;
+  lc_pouch_fsync_request *head;
+  lc_pouch_fsync_request *tail;
+  size_t queue_count;
+  uint64_t batch_max_ops;
+  lc_pouch_fsync_stats stats;
+  unsigned long refcount;
+  int stop;
+  struct lc_pouch_fsync_batcher *next;
+};
+
+static pthread_mutex_t lc_pouch_fsync_batcher_registry_mutex =
+    PTHREAD_MUTEX_INITIALIZER;
+static lc_pouch_fsync_batcher *lc_pouch_fsync_batchers;
+
 static int lc_pouch_sync_fd(int fd) {
 #ifdef __linux__
   return fdatasync(fd);
@@ -87,8 +107,8 @@ static void lc_pouch_fsync_deadline(struct timespec *deadline) {
   }
 }
 
-static uint64_t lc_pouch_fsync_elapsed_ns(const struct timespec *started,
-                                          const struct timespec *finished) {
+static uint64_t lc_pouch_elapsed_ns(const struct timespec *started,
+                                    const struct timespec *finished) {
   uint64_t seconds;
   uint64_t nanos;
 
@@ -115,22 +135,23 @@ static uint64_t lc_pouch_fsync_elapsed_ns(const struct timespec *started,
   return seconds + nanos;
 }
 
-static void lc_pouch_fsync_record_batch_locked(lc_pouch *pouch, size_t count,
-                                               uint64_t sync_ns) {
+static void
+lc_pouch_fsync_record_batch_locked(lc_pouch_fsync_batcher *batcher,
+                                   size_t count, uint64_t sync_ns) {
   size_t bucket;
   size_t index;
 
-  if (pouch == NULL || count == 0U) {
+  if (batcher == NULL || count == 0U) {
     return;
   }
-  ++pouch->fsync_stats.total_batches;
-  pouch->fsync_stats.total_requests += (uint64_t)count;
-  if ((uint64_t)count > pouch->fsync_stats.max_batch_size) {
-    pouch->fsync_stats.max_batch_size = (uint64_t)count;
+  ++batcher->stats.total_batches;
+  batcher->stats.total_requests += (uint64_t)count;
+  if ((uint64_t)count > batcher->stats.max_batch_size) {
+    batcher->stats.max_batch_size = (uint64_t)count;
   }
-  pouch->fsync_stats.total_sync_ns += sync_ns;
-  if (sync_ns > pouch->fsync_stats.max_sync_ns) {
-    pouch->fsync_stats.max_sync_ns = sync_ns;
+  batcher->stats.total_sync_ns += sync_ns;
+  if (sync_ns > batcher->stats.max_sync_ns) {
+    batcher->stats.max_sync_ns = sync_ns;
   }
   bucket = LC_POUCH_FSYNC_BATCH_BOUND_COUNT;
   for (index = 0U; index < LC_POUCH_FSYNC_BATCH_BOUND_COUNT; ++index) {
@@ -139,14 +160,15 @@ static void lc_pouch_fsync_record_batch_locked(lc_pouch *pouch, size_t count,
       break;
     }
   }
-  ++pouch->fsync_stats.counts[bucket];
+  ++batcher->stats.counts[bucket];
 }
 
-static int lc_pouch_fsync_batch_limit_reached(const lc_pouch *pouch) {
-  if (pouch == NULL || pouch->fsync_batch_max_ops == 0U) {
+static int
+lc_pouch_fsync_batch_limit_reached(const lc_pouch_fsync_batcher *batcher) {
+  if (batcher == NULL || batcher->batch_max_ops == 0U) {
     return 0;
   }
-  return (uint64_t)pouch->fsync_queue_count >= pouch->fsync_batch_max_ops;
+  return (uint64_t)batcher->queue_count >= batcher->batch_max_ops;
 }
 
 static int lc_pouch_fsync_batch_seen(lc_pouch_fsync_batch_file *files,
@@ -164,8 +186,7 @@ static int lc_pouch_fsync_batch_seen(lc_pouch_fsync_batch_file *files,
   return 0;
 }
 
-static void lc_pouch_fsync_process_batch(lc_pouch *pouch,
-                                         lc_pouch_fsync_request *batch,
+static void lc_pouch_fsync_process_batch(lc_pouch_fsync_request *batch,
                                          size_t count,
                                          uint64_t *sync_ns_out) {
   lc_pouch_fsync_batch_file inline_files[64];
@@ -186,7 +207,7 @@ static void lc_pouch_fsync_process_batch(lc_pouch *pouch,
   files = inline_files;
   if (count > sizeof(inline_files) / sizeof(inline_files[0])) {
     files = (lc_pouch_fsync_batch_file *)lc_calloc_with_allocator(
-        &pouch->allocator, count, sizeof(lc_pouch_fsync_batch_file));
+        NULL, count, sizeof(lc_pouch_fsync_batch_file));
     if (files == NULL) {
       errnum = ENOMEM;
       goto finish;
@@ -216,45 +237,46 @@ static void lc_pouch_fsync_process_batch(lc_pouch *pouch,
     }
   }
   if (files != inline_files) {
-    lc_free_with_allocator(&pouch->allocator, files);
+    lc_free_with_allocator(NULL, files);
   }
 
 finish:
   if (clock_started && clock_gettime(CLOCK_MONOTONIC, &finished) == 0 &&
       sync_ns_out != NULL) {
-    *sync_ns_out = lc_pouch_fsync_elapsed_ns(&started, &finished);
+    *sync_ns_out = lc_pouch_elapsed_ns(&started, &finished);
   }
   for (request = batch; request != NULL; request = request->next) {
     request->errnum = errnum;
   }
 }
 
-static lc_pouch_fsync_request *lc_pouch_fsync_take_batch(lc_pouch *pouch,
-                                                         size_t *out_count) {
+static lc_pouch_fsync_request *
+lc_pouch_fsync_take_batch(lc_pouch_fsync_batcher *batcher,
+                          size_t *out_count) {
   lc_pouch_fsync_request *batch;
   lc_pouch_fsync_request *tail;
   size_t count;
 
-  batch = pouch->fsync_head;
+  batch = batcher->head;
   tail = NULL;
   count = 0U;
-  while (pouch->fsync_head != NULL &&
-         (pouch->fsync_batch_max_ops == 0U ||
-          (uint64_t)count < pouch->fsync_batch_max_ops)) {
-    tail = pouch->fsync_head;
-    pouch->fsync_head = pouch->fsync_head->next;
+  while (batcher->head != NULL &&
+         (batcher->batch_max_ops == 0U ||
+          (uint64_t)count < batcher->batch_max_ops)) {
+    tail = batcher->head;
+    batcher->head = batcher->head->next;
     ++count;
   }
   if (tail != NULL) {
     tail->next = NULL;
   }
-  if (pouch->fsync_head == NULL) {
-    pouch->fsync_tail = NULL;
+  if (batcher->head == NULL) {
+    batcher->tail = NULL;
   }
-  if (pouch->fsync_queue_count >= count) {
-    pouch->fsync_queue_count -= count;
+  if (batcher->queue_count >= count) {
+    batcher->queue_count -= count;
   } else {
-    pouch->fsync_queue_count = 0U;
+    batcher->queue_count = 0U;
   }
   if (out_count != NULL) {
     *out_count = count;
@@ -263,39 +285,39 @@ static lc_pouch_fsync_request *lc_pouch_fsync_take_batch(lc_pouch *pouch,
 }
 
 static void *lc_pouch_fsync_worker(void *arg) {
-  lc_pouch *pouch;
+  lc_pouch_fsync_batcher *batcher;
   lc_pouch_fsync_request *batch;
   lc_pouch_fsync_request *request;
   struct timespec deadline;
   size_t batch_count;
   uint64_t sync_ns;
 
-  pouch = (lc_pouch *)arg;
-  pthread_mutex_lock(&pouch->fsync_mutex);
+  batcher = (lc_pouch_fsync_batcher *)arg;
+  pthread_mutex_lock(&batcher->mutex);
   for (;;) {
-    while (pouch->fsync_head == NULL && !pouch->fsync_stop) {
-      pthread_cond_wait(&pouch->fsync_cond, &pouch->fsync_mutex);
+    while (batcher->head == NULL && !batcher->stop) {
+      pthread_cond_wait(&batcher->cond, &batcher->mutex);
     }
-    if (pouch->fsync_head == NULL && pouch->fsync_stop) {
-      pthread_mutex_unlock(&pouch->fsync_mutex);
+    if (batcher->head == NULL && batcher->stop) {
+      pthread_mutex_unlock(&batcher->mutex);
       return NULL;
     }
-    if (!pouch->fsync_stop && LC_POUCH_FSYNC_BATCH_DELAY_NS > 0L &&
-        !lc_pouch_fsync_batch_limit_reached(pouch)) {
+    if (!batcher->stop && LC_POUCH_FSYNC_BATCH_DELAY_NS > 0L &&
+        !lc_pouch_fsync_batch_limit_reached(batcher)) {
       lc_pouch_fsync_deadline(&deadline);
-      while (!pouch->fsync_stop && !lc_pouch_fsync_batch_limit_reached(pouch)) {
-        if (pthread_cond_timedwait(&pouch->fsync_cond, &pouch->fsync_mutex,
+      while (!batcher->stop && !lc_pouch_fsync_batch_limit_reached(batcher)) {
+        if (pthread_cond_timedwait(&batcher->cond, &batcher->mutex,
                                    &deadline) == ETIMEDOUT) {
           break;
         }
       }
     }
-    batch = lc_pouch_fsync_take_batch(pouch, &batch_count);
-    pthread_mutex_unlock(&pouch->fsync_mutex);
+    batch = lc_pouch_fsync_take_batch(batcher, &batch_count);
+    pthread_mutex_unlock(&batcher->mutex);
     sync_ns = 0U;
-    lc_pouch_fsync_process_batch(pouch, batch, batch_count, &sync_ns);
-    pthread_mutex_lock(&pouch->fsync_mutex);
-    lc_pouch_fsync_record_batch_locked(pouch, batch_count, sync_ns);
+    lc_pouch_fsync_process_batch(batch, batch_count, &sync_ns);
+    pthread_mutex_lock(&batcher->mutex);
+    lc_pouch_fsync_record_batch_locked(batcher, batch_count, sync_ns);
     for (request = batch; request != NULL; request = request->next) {
       request->done = 1;
       pthread_cond_signal(&request->cond);
@@ -304,6 +326,9 @@ static void *lc_pouch_fsync_worker(void *arg) {
 }
 
 static int lc_pouch_fsync_batcher_init(lc_pouch *pouch, lc_error *error) {
+  struct stat st;
+  lc_pouch_fsync_batcher *batcher;
+  lc_pouch_fsync_batcher *created;
   int pthread_rc;
 
   if (pouch == NULL) {
@@ -311,51 +336,116 @@ static int lc_pouch_fsync_batcher_init(lc_pouch *pouch, lc_error *error) {
                         "pouch fsync batcher requires pouch", NULL, NULL,
                         "pouch");
   }
-  pthread_rc = pthread_mutex_init(&pouch->fsync_mutex, NULL);
+  if (stat(pouch->root_path, &st) != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to identify pouch fsync root", strerror(errno),
+                        NULL, "pouch");
+  }
+  pthread_mutex_lock(&lc_pouch_fsync_batcher_registry_mutex);
+  for (batcher = lc_pouch_fsync_batchers; batcher != NULL;
+       batcher = batcher->next) {
+    if (batcher->device == st.st_dev && batcher->inode == st.st_ino) {
+      break;
+    }
+  }
+  if (batcher != NULL) {
+    pthread_mutex_lock(&batcher->mutex);
+    if (batcher->batch_max_ops == 0U ||
+        (pouch->fsync_batch_max_ops != 0U &&
+         pouch->fsync_batch_max_ops < batcher->batch_max_ops)) {
+      batcher->batch_max_ops = pouch->fsync_batch_max_ops;
+    }
+    ++batcher->refcount;
+    pthread_mutex_unlock(&batcher->mutex);
+    pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
+    pouch->fsync_batcher = batcher;
+    return LC_OK;
+  }
+  created = (lc_pouch_fsync_batcher *)lc_calloc_with_allocator(
+      NULL, 1U, sizeof(*created));
+  if (created == NULL) {
+    pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch fsync batcher", NULL, NULL,
+                        "pouch");
+  }
+  created->device = st.st_dev;
+  created->inode = st.st_ino;
+  pthread_rc = pthread_mutex_init(&created->mutex, NULL);
   if (pthread_rc != 0) {
+    pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
+    lc_free_with_allocator(NULL, created);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to initialize pouch fsync mutex",
                         strerror(pthread_rc), NULL, "pouch");
   }
-  pouch->fsync_mutex_initialized = 1;
-  pthread_rc = pthread_cond_init(&pouch->fsync_cond, NULL);
+  pthread_rc = pthread_cond_init(&created->cond, NULL);
   if (pthread_rc != 0) {
+    pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
+    pthread_mutex_destroy(&created->mutex);
+    lc_free_with_allocator(NULL, created);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to initialize pouch fsync condition",
                         strerror(pthread_rc), NULL, "pouch");
   }
-  pouch->fsync_cond_initialized = 1;
+  created->batch_max_ops = pouch->fsync_batch_max_ops;
+  created->refcount = 1UL;
   pthread_rc =
-      pthread_create(&pouch->fsync_thread, NULL, lc_pouch_fsync_worker, pouch);
+      pthread_create(&created->thread, NULL, lc_pouch_fsync_worker, created);
   if (pthread_rc != 0) {
+    pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
+    pthread_cond_destroy(&created->cond);
+    pthread_mutex_destroy(&created->mutex);
+    lc_free_with_allocator(NULL, created);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to start pouch fsync worker",
                         strerror(pthread_rc), NULL, "pouch");
   }
-  pouch->fsync_thread_started = 1;
+  created->next = lc_pouch_fsync_batchers;
+  lc_pouch_fsync_batchers = created;
+  pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
+  pouch->fsync_batcher = created;
   return LC_OK;
 }
 
 static void lc_pouch_fsync_batcher_close(lc_pouch *pouch) {
+  lc_pouch_fsync_batcher *batcher;
+  lc_pouch_fsync_batcher **cursor;
+
   if (pouch == NULL) {
     return;
   }
-  if (pouch->fsync_thread_started) {
-    pthread_mutex_lock(&pouch->fsync_mutex);
-    pouch->fsync_stop = 1;
-    pthread_cond_broadcast(&pouch->fsync_cond);
-    pthread_mutex_unlock(&pouch->fsync_mutex);
-    pthread_join(pouch->fsync_thread, NULL);
-    pouch->fsync_thread_started = 0;
+  pthread_mutex_lock(&lc_pouch_fsync_batcher_registry_mutex);
+  batcher = pouch->fsync_batcher;
+  pouch->fsync_batcher = NULL;
+  if (batcher == NULL) {
+    pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
+    return;
   }
-  if (pouch->fsync_cond_initialized) {
-    pthread_cond_destroy(&pouch->fsync_cond);
-    pouch->fsync_cond_initialized = 0;
+  pthread_mutex_lock(&batcher->mutex);
+  if (batcher->refcount > 0UL) {
+    --batcher->refcount;
   }
-  if (pouch->fsync_mutex_initialized) {
-    pthread_mutex_destroy(&pouch->fsync_mutex);
-    pouch->fsync_mutex_initialized = 0;
+  if (batcher->refcount != 0UL) {
+    pthread_mutex_unlock(&batcher->mutex);
+    pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
+    return;
   }
+  for (cursor = &lc_pouch_fsync_batchers; *cursor != NULL;
+       cursor = &(*cursor)->next) {
+    if (*cursor == batcher) {
+      *cursor = batcher->next;
+      break;
+    }
+  }
+  batcher->stop = 1;
+  pthread_cond_broadcast(&batcher->cond);
+  pthread_mutex_unlock(&batcher->mutex);
+  pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
+  pthread_join(batcher->thread, NULL);
+  pthread_cond_destroy(&batcher->cond);
+  pthread_mutex_destroy(&batcher->mutex);
+  lc_free_with_allocator(NULL, batcher);
 }
 
 static void lc_pouch_compaction_deadline(lc_pouch *pouch,
@@ -861,53 +951,27 @@ void lc_pouch_janitor_note_mutation(lc_pouch *pouch) {
 
 int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error) {
   lc_pouch_fsync_request request;
-  struct timespec started;
-  struct timespec finished;
-  uint64_t sync_ns;
-  int clock_started;
+  lc_pouch_fsync_batcher *batcher;
   int pthread_rc;
-  int sync_failed;
 
   if (pouch == NULL || fd < 0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch fsync commit requires pouch and fd", NULL, NULL,
                         "pouch");
   }
+  if (!pouch->durable_sync) {
+    return LC_OK;
+  }
   if (pouch->aborted) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch fsync batcher is closed after abort", NULL,
                         NULL, "pouch");
   }
-  if (!pouch->fsync_thread_started) {
-    sync_ns = 0U;
-    clock_started = clock_gettime(CLOCK_MONOTONIC, &started) == 0;
-    sync_failed = lc_pouch_sync_fd(fd) != 0;
-    if (clock_started && clock_gettime(CLOCK_MONOTONIC, &finished) == 0) {
-      sync_ns = lc_pouch_fsync_elapsed_ns(&started, &finished);
-    }
-    if (pouch->fsync_mutex_initialized) {
-      pthread_mutex_lock(&pouch->fsync_mutex);
-      lc_pouch_fsync_record_batch_locked(pouch, 1U, sync_ns);
-      pthread_mutex_unlock(&pouch->fsync_mutex);
-    }
-    if (sync_failed) {
-      pslog_field fields[2];
-
-      fields[0] = lc_log_i64_field("fd", fd);
-      fields[1] = lc_log_str_field("error", strerror(errno));
-      lc_log_error(pouch->logger, "logstore.fsync.error", fields, 2U);
-      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                          "failed to sync pouch state segment", strerror(errno),
-                          NULL, "pouch");
-    }
-    {
-      pslog_field fields[2];
-
-      fields[0] = lc_log_i64_field("fd", fd);
-      fields[1] = lc_log_bool_field("batched", 0);
-      lc_log_trace(pouch->logger, "logstore.fsync", fields, 2U);
-    }
-    return LC_OK;
+  batcher = pouch->fsync_batcher;
+  if (batcher == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch fsync batcher is closed", NULL, NULL,
+                        "pouch");
   }
   memset(&request, 0, sizeof(request));
   request.fd = fd;
@@ -917,25 +981,25 @@ int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error) {
                         "failed to initialize pouch fsync request",
                         strerror(pthread_rc), NULL, "pouch");
   }
-  pthread_mutex_lock(&pouch->fsync_mutex);
-  if (pouch->fsync_stop) {
-    pthread_mutex_unlock(&pouch->fsync_mutex);
+  pthread_mutex_lock(&batcher->mutex);
+  if (batcher->stop) {
+    pthread_mutex_unlock(&batcher->mutex);
     pthread_cond_destroy(&request.cond);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch fsync batcher is closed", NULL, NULL, "pouch");
   }
-  if (pouch->fsync_tail != NULL) {
-    pouch->fsync_tail->next = &request;
+  if (batcher->tail != NULL) {
+    batcher->tail->next = &request;
   } else {
-    pouch->fsync_head = &request;
+    batcher->head = &request;
   }
-  pouch->fsync_tail = &request;
-  ++pouch->fsync_queue_count;
-  pthread_cond_signal(&pouch->fsync_cond);
+  batcher->tail = &request;
+  ++batcher->queue_count;
+  pthread_cond_signal(&batcher->cond);
   while (!request.done) {
-    pthread_cond_wait(&request.cond, &pouch->fsync_mutex);
+    pthread_cond_wait(&request.cond, &batcher->mutex);
   }
-  pthread_mutex_unlock(&pouch->fsync_mutex);
+  pthread_mutex_unlock(&batcher->mutex);
   pthread_cond_destroy(&request.cond);
   if (request.errnum != 0) {
     pslog_field fields[2];
@@ -977,6 +1041,12 @@ int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
   int timeout;
   int ready;
   int result;
+  uint64_t timeout_ns;
+  uint64_t elapsed_ns;
+  uint64_t remaining_ns;
+  struct timespec started;
+  struct timespec now;
+  int clock_started;
 
   if (pouch == NULL || !pouch->queue_watch_enabled || pouch->aborted ||
       namespace_name == NULL || namespace_name[0] == '\0' || queue == NULL ||
@@ -1014,32 +1084,68 @@ int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
     goto cleanup;
   }
   result = 0;
-  timeout = timeout_ms > (uint64_t)INT_MAX ? INT_MAX : (int)timeout_ms;
+  timeout_ns = timeout_ms > UINT64_MAX / UINT64_C(1000000)
+                   ? UINT64_MAX
+                   : timeout_ms * UINT64_C(1000000);
+  clock_started = clock_gettime(CLOCK_MONOTONIC, &started) == 0;
   memset(&pollfd, 0, sizeof(pollfd));
   pollfd.fd = fd;
   pollfd.events = POLLIN;
-  ready = poll(&pollfd, 1U, timeout);
-  if (ready > 0 && (pollfd.revents & POLLIN) != 0) {
-    bytes_read = read(fd, events.bytes, sizeof(events.bytes));
-    if (bytes_read > 0) {
-      offset = 0U;
-      while (offset + sizeof(struct inotify_event) <= (size_t)bytes_read) {
-        const struct inotify_event *event;
-        size_t event_size;
-
-        event = (const struct inotify_event *)(events.bytes + offset);
-        event_size = sizeof(*event) + event->len;
-        if (event_size > (size_t)bytes_read - offset) {
-          break;
-        }
-        if ((event->mask & (IN_Q_OVERFLOW | IN_DELETE_SELF | IN_MOVE_SELF)) !=
-                0U ||
-            (event->len > 0U && strcmp(event->name, notify_leaf) == 0)) {
-          result = 1;
-          break;
-        }
-        offset += event_size;
+  for (;;) {
+    if (clock_started && clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+      elapsed_ns = lc_pouch_elapsed_ns(&started, &now);
+      if (elapsed_ns >= timeout_ns) {
+        break;
       }
+      remaining_ns = timeout_ns - elapsed_ns;
+      timeout = remaining_ns / UINT64_C(1000000) >= (uint64_t)INT_MAX
+                    ? INT_MAX
+                    : (int)((remaining_ns + UINT64_C(999999)) /
+                            UINT64_C(1000000));
+    } else {
+      timeout = timeout_ms > (uint64_t)INT_MAX ? INT_MAX : (int)timeout_ms;
+    }
+    pollfd.revents = 0;
+    ready = poll(&pollfd, 1U, timeout);
+    if (ready == 0) {
+      break;
+    }
+    if (ready < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      break;
+    }
+    if ((pollfd.revents & POLLIN) == 0) {
+      break;
+    }
+    bytes_read = read(fd, events.bytes, sizeof(events.bytes));
+    if (bytes_read < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      break;
+    }
+    offset = 0U;
+    while (offset + sizeof(struct inotify_event) <= (size_t)bytes_read) {
+      const struct inotify_event *event;
+      size_t event_size;
+
+      event = (const struct inotify_event *)(events.bytes + offset);
+      event_size = sizeof(*event) + event->len;
+      if (event_size > (size_t)bytes_read - offset) {
+        break;
+      }
+      if ((event->mask & (IN_Q_OVERFLOW | IN_DELETE_SELF | IN_MOVE_SELF)) !=
+              0U ||
+          (event->len > 0U && strcmp(event->name, notify_leaf) == 0)) {
+        result = 1;
+        break;
+      }
+      offset += event_size;
+    }
+    if (result != 0) {
+      break;
     }
   }
   (void)inotify_rm_watch(fd, watch);
@@ -1087,6 +1193,7 @@ static void lc_pouch_init_options(lc_pouch *pouch,
           : LC_POUCH_DEFAULT_SEGMENT_TARGET_BYTES;
   pouch->fsync_batch_max_ops =
       options != NULL ? options->fsync_batch_max_ops : 0U;
+  pouch->durable_sync = options != NULL && options->durable_sync ? 1 : 0;
   pouch->compaction_min_segment_count =
       options != NULL && options->compaction_min_segment_count != 0UL
           ? options->compaction_min_segment_count
@@ -1874,7 +1981,6 @@ static int lc_pouch_init_writer_marker(lc_pouch *pouch, lc_error *error) {
   snprintf(presence_leaf, sizeof(presence_leaf),
            "writer-%s-%020" PRIu64 ".presence",
            writer_hex, writer_marker_id);
-  pouch->writer_id = lc_strdup_with_allocator(&pouch->allocator, writer_hex);
   pouch->writer_marker_leaf =
       lc_strdup_with_allocator(&pouch->allocator, marker_leaf);
   pouch->writer_presence_leaf =
@@ -1886,8 +1992,7 @@ static int lc_pouch_init_writer_marker(lc_pouch *pouch, lc_error *error) {
                                                          pouch->writer_presence_dir,
                                                          presence_leaf)
                                     : NULL;
-  if (pouch->writer_id == NULL || pouch->writer_marker_leaf == NULL ||
-      pouch->writer_presence_leaf == NULL ||
+  if (pouch->writer_marker_leaf == NULL || pouch->writer_presence_leaf == NULL ||
       pouch->writer_presence_dir == NULL || pouch->writer_presence_path == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch writer marker paths", NULL,
@@ -2125,14 +2230,6 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         strerror(pthread_rc), NULL, "pouch");
   }
   pouch->writer_presence_mutex_initialized = 1;
-  pthread_rc = pthread_mutex_init(&pouch->writer_append_mutex, NULL);
-  if (pthread_rc != 0) {
-    lc_pouch_close(pouch);
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to initialize pouch writer append mutex",
-                        strerror(pthread_rc), NULL, "pouch");
-  }
-  pouch->writer_append_mutex_initialized = 1;
   pthread_rc = pthread_mutex_init(&pouch->state_mutation_mutex, NULL);
   if (pthread_rc != 0) {
     lc_pouch_close(pouch);
@@ -2227,10 +2324,12 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     return rc;
   }
   lc_pouch_configure_filesystem_capabilities(pouch);
-  rc = lc_pouch_fsync_batcher_init(pouch, error);
-  if (rc != LC_OK) {
-    lc_pouch_close(pouch);
-    return rc;
+  if (pouch->durable_sync) {
+    rc = lc_pouch_fsync_batcher_init(pouch, error);
+    if (rc != LC_OK) {
+      lc_pouch_close(pouch);
+      return rc;
+    }
   }
   rc = lc_pouch_warm_transformed_namespaces(pouch, error);
   if (rc != LC_OK) {
@@ -2254,7 +2353,7 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
   }
   *out = pouch;
   {
-    pslog_field fields[8];
+    pslog_field fields[9];
 
     fields[0] = lc_log_str_field("path", pouch->root_path);
     fields[1] = lc_log_str_field("query_engine", pouch->query_engine);
@@ -2269,7 +2368,8 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
         lc_log_bool_field("single_writer", lc_pouch_single_writer_enabled(pouch));
     fields[7] = lc_log_bool_field("background_compaction",
                                   pouch->background_compaction_enabled);
-    lc_log_info(pouch->logger, "open", fields, 8U);
+    fields[8] = lc_log_bool_field("durable_sync", pouch->durable_sync);
+    lc_log_info(pouch->logger, "open", fields, 9U);
   }
   return LC_OK;
 }
@@ -2304,7 +2404,6 @@ void lc_pouch_close(lc_pouch *pouch) {
   lc_free_with_allocator(&allocator, pouch->writer_presence_leaf);
   lc_free_with_allocator(&allocator, pouch->writer_presence_dir);
   lc_free_with_allocator(&allocator, pouch->writer_marker_leaf);
-  lc_free_with_allocator(&allocator, pouch->writer_id);
   lc_free_with_allocator(&allocator, pouch->compression);
   lc_free_with_allocator(&allocator, pouch->query_fallback_engine);
   lc_free_with_allocator(&allocator, pouch->query_engine);
@@ -2318,9 +2417,6 @@ void lc_pouch_close(lc_pouch *pouch) {
   }
   if (pouch->writer_presence_mutex_initialized) {
     pthread_mutex_destroy(&pouch->writer_presence_mutex);
-  }
-  if (pouch->writer_append_mutex_initialized) {
-    pthread_mutex_destroy(&pouch->writer_append_mutex);
   }
   if (pouch->state_mutation_mutex_initialized) {
     pthread_mutex_destroy(&pouch->state_mutation_mutex);
@@ -2363,6 +2459,7 @@ int lc_pouch_supports_concurrent_writes(const lc_pouch *pouch) {
 
 int lc_pouch_fsync_stats_read(lc_pouch *pouch, lc_pouch_fsync_stats *out,
                               lc_error *error) {
+  lc_pouch_fsync_batcher *batcher;
   size_t index;
 
   if (pouch == NULL || out == NULL) {
@@ -2371,12 +2468,11 @@ int lc_pouch_fsync_stats_read(lc_pouch *pouch, lc_pouch_fsync_stats *out,
                         NULL, "pouch");
   }
   memset(out, 0, sizeof(*out));
-  if (pouch->fsync_mutex_initialized) {
-    pthread_mutex_lock(&pouch->fsync_mutex);
-    *out = pouch->fsync_stats;
-    pthread_mutex_unlock(&pouch->fsync_mutex);
-  } else {
-    *out = pouch->fsync_stats;
+  batcher = pouch->fsync_batcher;
+  if (batcher != NULL) {
+    pthread_mutex_lock(&batcher->mutex);
+    *out = batcher->stats;
+    pthread_mutex_unlock(&batcher->mutex);
   }
   for (index = 0U; index < LC_POUCH_FSYNC_BATCH_BOUND_COUNT; ++index) {
     out->bounds[index] = lc_pouch_fsync_batch_bounds[index];
@@ -2869,6 +2965,7 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
   out->single_writer = lc_pouch_single_writer_enabled(pouch);
   out->supports_concurrent_writes = lc_pouch_supports_concurrent_writes(pouch);
   out->aborted = pouch->aborted;
+  out->durable_sync = pouch->durable_sync;
   out->fsync_batch_max_ops = pouch->fsync_batch_max_ops;
   out->queue_watch_enabled = pouch->queue_watch_enabled;
   out->filesystem_capabilities_known = pouch->filesystem_capabilities_known;

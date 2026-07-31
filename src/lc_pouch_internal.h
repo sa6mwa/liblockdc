@@ -23,6 +23,7 @@ typedef struct lc_pouch_query_index_pending_segment
 typedef struct lc_pouch_query_index_manifest_trust_entry
     lc_pouch_query_index_manifest_trust_entry;
 typedef struct lc_pouch_fsync_request lc_pouch_fsync_request;
+typedef struct lc_pouch_fsync_batcher lc_pouch_fsync_batcher;
 
 typedef struct lc_pouch_state_change_visit_entry {
   const char *key;
@@ -77,6 +78,7 @@ struct lc_pouch {
   uint64_t retention_seconds;
   uint64_t janitor_interval_seconds;
   uint64_t marker_sequence;
+  int durable_sync;
   int background_compaction_enabled;
   int compaction_throttling_disabled;
   int single_writer;
@@ -97,7 +99,6 @@ struct lc_pouch {
   pslog_logger *base_logger;
   pslog_logger *logger;
   int owns_logger;
-  char *writer_id;
   char *writer_marker_leaf;
   char *writer_presence_dir;
   char *writer_presence_leaf;
@@ -109,22 +110,9 @@ struct lc_pouch {
   int writer_presence_cond_initialized;
   int writer_presence_thread_started;
   int writer_presence_stop;
-  pthread_mutex_t writer_append_mutex;
-  int writer_append_mutex_initialized;
-  uint64_t writer_segment_sequence;
   pthread_mutex_t state_mutation_mutex;
   int state_mutation_mutex_initialized;
-  pthread_mutex_t fsync_mutex;
-  pthread_cond_t fsync_cond;
-  pthread_t fsync_thread;
-  lc_pouch_fsync_request *fsync_head;
-  lc_pouch_fsync_request *fsync_tail;
-  size_t fsync_queue_count;
-  lc_pouch_fsync_stats fsync_stats;
-  int fsync_mutex_initialized;
-  int fsync_cond_initialized;
-  int fsync_thread_started;
-  int fsync_stop;
+  lc_pouch_fsync_batcher *fsync_batcher;
   pthread_mutex_t compaction_mutex;
   pthread_cond_t compaction_cond;
   pthread_t compaction_thread;
@@ -177,11 +165,19 @@ int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,
                                        const char *namespace_name,
                                        lc_pouch_state_precondition_fn callback,
                                        void *context, lc_error *error);
+int lc_pouch_state_with_key_lock(lc_pouch *pouch, const char *namespace_name,
+                                 const char *key,
+                                 lc_pouch_state_precondition_fn callback,
+                                 void *context, lc_error *error);
 int lc_pouch_state_read_metadata_locked(lc_pouch *pouch,
                                         const char *namespace_name,
                                         const char *key,
                                         lc_pouch_state_read_result *out,
                                         lc_error *error);
+int lc_pouch_state_update_metadata_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const lc_pouch_state_write_options *options,
+    lc_pouch_state_write_result *out, lc_error *error);
 int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_generation after_version,
                                lc_pouch_state_change_visit_fn visitor,

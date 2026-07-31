@@ -7191,10 +7191,9 @@ static int lc_pouch_write_lease_record_locked(void *context, lc_error *error) {
   lc_pouch_lease_write_context *ctx;
 
   ctx = (lc_pouch_lease_write_context *)context;
-  return lc_pouch_state_update_metadata(ctx->client->pouch,
-                                        ctx->namespace_name,
-                                        ctx->key,
-                                        ctx->options, ctx->out, error);
+  return lc_pouch_state_update_metadata_locked(ctx->client->pouch,
+                                               ctx->namespace_name, ctx->key,
+                                               ctx->options, ctx->out, error);
 }
 
 static int lc_pouch_write_lease_record_with_lock_state(
@@ -7202,7 +7201,7 @@ static int lc_pouch_write_lease_record_with_lock_state(
     const char *owner, const char *lease_id, const char *txn_id,
     long fencing_token, lc_pouch_unix_seconds expires_at_unix,
     lc_pouch_generation expected_version,
-    int namespace_locked, int force_query_hidden,
+    int state_locked, int force_query_hidden,
     lc_pouch_state_write_result *out, lc_error *error) {
   lc_pouch_txn_buffer buffer;
   lc_pouch_lease_write_context lock_context;
@@ -7253,12 +7252,12 @@ static int lc_pouch_write_lease_record_with_lock_state(
     lock_context.key = key;
     lock_context.options = &options;
     lock_context.out = out;
-    if (namespace_locked) {
+    if (state_locked) {
       rc = lc_pouch_write_lease_record_locked(&lock_context, error);
     } else {
-      rc = lc_pouch_state_with_namespace_lock(
-          client->pouch, namespace_name, lc_pouch_write_lease_record_locked,
-          &lock_context, error);
+      rc = lc_pouch_state_with_key_lock(client->pouch, namespace_name, key,
+                                        lc_pouch_write_lease_record_locked,
+                                        &lock_context, error);
     }
   }
   lc_pouch_txn_buffer_cleanup(&buffer);
@@ -9844,8 +9843,13 @@ static int lc_pouch_acquire_locked(void *context, lc_error *error) {
   ctx->version = ctx->read_result.found ? ctx->read_result.version : 0UL;
   ctx->has_query_hidden = ctx->read_result.has_query_hidden;
   ctx->query_hidden = ctx->read_result.query_hidden;
-  rc = lc_pouch_read_lease_record(ctx->client, ctx->namespace_name,
-                                  ctx->req->key, &lease_record, error);
+  rc = lc_pouch_lease_record_parse(
+      ctx->client, ctx->read_result.metadata, ctx->read_result.metadata_length,
+      ctx->read_result.version, &lease_record, error);
+  if (rc == LC_OK && lease_record.found) {
+    lease_record.has_query_hidden = ctx->read_result.has_query_hidden;
+    lease_record.query_hidden = ctx->read_result.query_hidden;
+  }
   if (rc != LC_OK) {
     return rc;
   }
@@ -9947,9 +9951,9 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   }
   for (;;) {
     lc_pouch_acquire_context_cleanup(&acquire_context);
-    rc = lc_pouch_state_with_namespace_lock(client->pouch, namespace_name,
-                                            lc_pouch_acquire_locked,
-                                            &acquire_context, error);
+    rc = lc_pouch_state_with_key_lock(client->pouch, namespace_name, req->key,
+                                      lc_pouch_acquire_locked,
+                                      &acquire_context, error);
     if (rc != LC_OK || acquire_context.acquired) {
       break;
     }
