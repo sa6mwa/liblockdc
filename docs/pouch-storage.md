@@ -43,10 +43,12 @@ Relevant Go disk files:
 
 ### Audit Baseline
 
-This register was re-read against Pouch commit `74eb7ea` and lockd commit
-`b6ddbde` on 2026-07-31. The latter has no later changes in the disk storage
-paths named above. The audit is a source-level comparison; it does not claim
-that Pouch files can be opened by Go disk or that their public storage APIs are
+This register was re-read against Pouch commit `96e26eb` and lockd commit
+`b6ddbde` on 2026-07-31. The current lockd head is `2d6fb1e`; it has no later
+changes in the disk storage paths named above. This pass also inspected disk
+locking, fsync support, queue-watch, NFS capability, copy, verification, and
+staging paths. The audit is a source-level comparison; it does not claim that
+Pouch files can be opened by Go disk or that their public storage APIs are
 interchangeable.
 
 No unresolved durable-logstore semantic gap was found in the audited surface:
@@ -603,6 +605,42 @@ divergence.
   has lower unrelated-key write concurrency. It is a remaining throughput
   divergence, not a single-writer or HA semantic gap.
 
+- Shared-writer capability contract:
+  Go disk reports `SupportsConcurrentWrites=false` to its caller because its
+  logstore has a single append owner, even though its verification path opens
+  two stores against one root and its per-key locks preserve concurrent CAS
+  outcomes. Pouch has no comparable capability flag. Normal Pouch opens use
+  `single_writer=0`, and multiple liblockdc clients or processes may share one
+  root; the namespace `fcntl` lock serializes their mutations and namespace
+  markers refresh peer projections. This is supported shared-writer behavior,
+  not an HA gap. It requires a filesystem with coherent POSIX advisory locks,
+  rename, and sync semantics.
+
+- Fsync batch tuning and telemetry:
+  Go accepts `LogstoreCommitMaxOps` (with zero meaning no batch-size cap) and
+  exposes aggregate `FsyncStats`, including batch-size and sync-latency
+  histograms. Pouch uses a fixed 4096-request cap and two-millisecond delay,
+  and exposes no equivalent configuration or statistics API. Both paths
+  deduplicate syncs per file and wait for sync before publication; this is an
+  operational tuning and observability divergence.
+
+- Filesystem capability policy:
+  Go detects NFS, closes an active segment after a drained commit on NFS, and
+  enables fsnotify queue wakeups only where supported. Pouch does not detect or
+  report filesystem capabilities. It opens and closes append descriptors per
+  Pouch mutation and always uses polling for queue wakeups, but does not offer
+  an NFS-specific mode. Deployments using shared-writer or HA roots must ensure
+  the filesystem provides coherent POSIX locking, atomic rename, and durable
+  sync semantics.
+
+- Backend lifecycle and identity hooks:
+  Go exposes a stable `BackendHash` and a test-only `Abort` lifecycle that
+  stops workers while leaving an exclusive-writer marker for crash simulation.
+  Pouch has graceful `lc_pouch_close` only; it removes its own marker. Pouch's
+  transaction and RM calls accept caller-provided backend hashes, but the
+  direct Pouch API has no root-derived identity or abort equivalent. A real
+  process crash naturally leaves the marker until its heartbeat TTL expires.
+
 - Queue wake-up transport:
   Go optionally consumes filesystem notifications and reports whether fsnotify
   is active, with polling as its fallback. Pouch writes namespace/queue
@@ -919,6 +957,11 @@ ordering is deterministic, commit publication waits for durable sync, syncs are
 deduplicated per file within a batch, and shutdown drains or fails outstanding
 commit requests deterministically. On Linux, hot segment commits use
 `fdatasync`, matching Go disk's Linux sync path.
+
+Pouch's local batch policy is fixed at a two-millisecond delay and 4096
+requests. The durable group-commit property is mandatory, but Go disk's
+configurable batch limit and detailed batch telemetry are intentionally not
+part of the current Pouch API; the operational divergence is recorded below.
 
 Initial constants should mirror Go disk unless profiling proves a C-local
 change is better:
