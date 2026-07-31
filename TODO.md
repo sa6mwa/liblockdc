@@ -76,6 +76,10 @@ These items invalidate a claim of full Go-disk alignment until fixed.
     can validate.
   - Fencing tokens must advance and validate through the target-key metadata
     model, not by assuming a constant token.
+  - Queue message/state participant parsers must accept only exact Go-shaped
+    lease keys: `q/<queue>/msg/<id>` and `q/<queue>/state/<id>`.
+  - Queue ack must delete message metadata/payload and state objects where Go
+    disk deletes them; a durable live `acked` metadata row is rejected.
 
 - [x] Align queue transaction participant application with Go disk.
   - Transaction decision application must interpret participant keys as queue
@@ -179,12 +183,19 @@ Pouch before editing the corresponding C code.
     metadata failure, crypto contexts.
   - Pouch obligation: queue metadata, payloads, leases, state, retry, ack/nack,
     DLQ where supported, and notification behavior must be namespace-local.
+  - Latest audit result: ack deletion and DLQ object movement are aligned at
+    the durable keyspace level. Pouch performs DLQ movement synchronously on
+    terminal non-transactional nack because it does not have Go's ready-cache
+    worker; this is documented as an accepted C-local timing divergence.
 
-- [ ] `../lockd/internal/queue/keys.go`
+- [x] `../lockd/internal/queue/keys.go`
   - Message and state lease key parsing for `q/<queue>/msg/<id>` and
     `q/<queue>/state/<id>`.
   - Pouch obligation: use the same relative key model so queue transaction
     marker application can pair message and state leases.
+  - Latest audit result: Pouch now rejects malformed queue-looking participant
+    keys that contain extra path components and reserves every direct public
+    `q/` state key.
 
 - [ ] `../lockd/internal/core/locks.go`
   - Acquire, keepalive, release, lease expiration, fencing token, transaction
@@ -295,6 +306,11 @@ Acceptance:
   object keys matching the Go reference topology.
 - [x] Public APIs cannot create user state keys that collide with internal
   queue/config/attachment/staging/lease key families.
+  - Direct public state APIs reject all `q/` keys.
+  - Direct public state APIs reject `state/<key>/attachments/<id>` object key
+    shapes.
+  - Queue state lease keys are accepted only through queue/state lease-ref
+    validation, not as public user document keys.
 - [x] Public scans, indexed queries, full-text queries, and get-public exclude
   every internal row by metadata and key policy.
 - [x] Reopen rebuilds queue, attachment, config, and lease projections from the

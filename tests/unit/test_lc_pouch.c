@@ -4231,6 +4231,37 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   lc_error_init(&error);
   lc_namespace_config_res_cleanup(&ns_res);
 
+  update_req.lease.namespace_name = "default";
+  update_req.lease.key = "q/jobs/state/message-1";
+  rc =
+      lc_source_from_memory("{\"kind\":\"reserved\"}",
+                            strlen("{\"kind\":\"reserved\"}"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "pouch internal keys are reserved");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_update_res_cleanup(&update_res);
+
+  update_req.lease.namespace_name = "default";
+  update_req.lease.key = "state/doc-1/attachments/file-1";
+  rc =
+      lc_source_from_memory("{\"kind\":\"reserved\"}",
+                            strlen("{\"kind\":\"reserved\"}"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch attachment keys are reserved for internal objects");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_update_res_cleanup(&update_res);
+
   update_req.lease.namespace_name = ".lockdown";
   update_req.lease.key = "doc/a";
   rc = lc_source_from_memory("{\"kind\":\"allowed\"}",
@@ -7146,10 +7177,13 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   lc_ack_op stale_ack_op;
   lc_ack_res stale_ack_res;
   lc_ack_res ack_res;
+  lc_pouch_state_read_result read_result;
   lc_error error;
   const void *bytes;
   size_t length;
   char root[512];
+  char ack_meta_key[256];
+  char ack_payload_key[256];
   int rc;
 
   (void)state;
@@ -7170,6 +7204,7 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   memset(&stale_ack_op, 0, sizeof(stale_ack_op));
   memset(&stale_ack_res, 0, sizeof(stale_ack_res));
   memset(&ack_res, 0, sizeof(ack_res));
+  memset(&read_result, 0, sizeof(read_result));
   lc_error_init(&error);
   make_root("client-queue", root, sizeof(root));
   cleanup_root(root);
@@ -7272,12 +7307,29 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
     ack_op.message.lease_id = message->lease_id;
     ack_op.message.fencing_token = message->fencing_token;
     ack_op.message.meta_etag = message->meta_etag;
+    snprintf(ack_meta_key, sizeof(ack_meta_key), "q/jobs/msg/%s.meta",
+             message->message_id);
+    snprintf(ack_payload_key, sizeof(ack_payload_key), "q/jobs/msg/%s.bin",
+             message->message_id);
     rc = client->queue_ack(client, &ack_op, &ack_res, &error);
     assert_int_equal(rc, LC_OK);
     assert_int_equal(ack_res.acked, 1);
   }
   message->close(message);
   message = NULL;
+
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default",
+                           ack_meta_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default",
+                           ack_payload_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
 
   rc = client->queue_stats(client, &stats_req, &stats_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -8426,11 +8478,14 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   lc_txn_participant participant;
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
+  lc_pouch_state_read_result read_result;
   lc_message *message;
   lc_error error;
   char root[512];
   char participant_namespace[128];
   char participant_key[256];
+  char committed_meta_key[256];
+  char committed_payload_key[256];
   int rc;
 
   (void)state;
@@ -8447,6 +8502,7 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   memset(&participant, 0, sizeof(participant));
   lc_txn_decision_req_init(&decision_req);
   memset(&decision_res, 0, sizeof(decision_res));
+  memset(&read_result, 0, sizeof(read_result));
   lc_error_init(&error);
   make_root("txn-queue", root, sizeof(root));
   cleanup_root(root);
@@ -8479,6 +8535,10 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   ack_op.message.txn_id = message->txn_id;
   ack_op.message.fencing_token = message->fencing_token;
   ack_op.message.meta_etag = message->meta_etag;
+  snprintf(committed_meta_key, sizeof(committed_meta_key),
+           "q/txn-jobs/msg/%s.meta", message->message_id);
+  snprintf(committed_payload_key, sizeof(committed_payload_key),
+           "q/txn-jobs/msg/%s.bin", message->message_id);
   rc = client->queue_ack(client, &ack_op, &ack_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(ack_res.acked, 1);
@@ -8510,6 +8570,19 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   assert_int_equal(stats_res.available, 0);
   assert_int_equal(stats_res.pending_candidates, 0);
   lc_queue_stats_res_cleanup(&stats_res);
+
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default",
+                           committed_meta_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default",
+                           committed_payload_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
   message->close(message);
   message = NULL;
 
@@ -9407,8 +9480,14 @@ static void test_client_queue_ttl_and_retry_terminal_states(void **state) {
   lc_message *message;
   lc_nack_op nack_op;
   lc_nack_res nack_res;
+  lc_pouch_state_read_result read_result;
   lc_error error;
   char root[512];
+  char original_meta_key[256];
+  char original_payload_key[256];
+  char dlq_meta_key[256];
+  char dlq_payload_key[256];
+  char payload_bytes[32];
   int rc;
 
   (void)state;
@@ -9422,6 +9501,7 @@ static void test_client_queue_ttl_and_retry_terminal_states(void **state) {
   memset(&stats_res, 0, sizeof(stats_res));
   lc_nack_op_init(&nack_op);
   memset(&nack_res, 0, sizeof(nack_res));
+  memset(&read_result, 0, sizeof(read_result));
   lc_error_init(&error);
   make_root("client-queue-terminal", root, sizeof(root));
   cleanup_root(root);
@@ -9450,11 +9530,47 @@ static void test_client_queue_ttl_and_retry_terminal_states(void **state) {
   nack_op.message.fencing_token = message->fencing_token;
   nack_op.message.meta_etag = message->meta_etag;
   nack_op.intent = LC_NACK_INTENT_FAILURE;
+  snprintf(original_meta_key, sizeof(original_meta_key), "q/retry/msg/%s.meta",
+           message->message_id);
+  snprintf(original_payload_key, sizeof(original_payload_key),
+           "q/retry/msg/%s.bin", message->message_id);
+  snprintf(dlq_meta_key, sizeof(dlq_meta_key), "q/retry/dlq/msg/%s.meta",
+           message->message_id);
+  snprintf(dlq_payload_key, sizeof(dlq_payload_key),
+           "q/retry/dlq/msg/%s.bin", message->message_id);
   rc = client->queue_nack(client, &nack_op, &nack_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(nack_res.requeued, 0);
   message->close(message);
   message = NULL;
+
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default",
+                           original_meta_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default",
+                           original_payload_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default",
+                           dlq_meta_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default",
+                           dlq_payload_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, payload_bytes,
+                        sizeof(payload_bytes));
+  assert_string_equal(payload_bytes, "retry");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
 
   stats_req.queue = "retry";
   rc = client->queue_stats(client, &stats_req, &stats_res, &error);

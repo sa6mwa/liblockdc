@@ -845,8 +845,7 @@ static int lc_pouch_client_validate_public_key(const char *key,
   }
   if (strcmp(key, LC_POUCH_NAMESPACE_CONFIG_KEY) == 0 ||
       strncmp(key, "config/", sizeof("config/") - 1U) == 0 ||
-      (strncmp(key, "q/", sizeof("q/") - 1U) == 0 &&
-       !lc_pouch_client_is_queue_state_key(key))) {
+      strncmp(key, "q/", sizeof("q/") - 1U) == 0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch internal keys are reserved", NULL, NULL,
                         "pouch");
@@ -861,6 +860,13 @@ static int lc_pouch_client_validate_public_key(const char *key,
       strstr(key, "/.staging/") != NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch staging keys are reserved for internal state",
+                        NULL, NULL, "pouch");
+  }
+  if (strncmp(key, "state/", sizeof("state/") - 1U) == 0 &&
+      strstr(key, "/attachments/") != NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch attachment keys are reserved for internal "
+                        "objects",
                         NULL, NULL, "pouch");
   }
   return LC_OK;
@@ -6490,6 +6496,74 @@ static char *lc_pouch_queue_payload_key_from_meta(const char *metadata_key,
   return key;
 }
 
+static char *lc_pouch_queue_dlq_meta_key(const char *queue,
+                                         const char *message_id,
+                                         lc_error *error) {
+  char *queue_name;
+  char *key;
+  size_t length;
+
+  queue_name = lc_pouch_queue_normalize_name(queue, error);
+  if (queue_name == NULL) {
+    return NULL;
+  }
+  if (message_id == NULL || message_id[0] == '\0' ||
+      strchr(message_id, '/') != NULL) {
+    lc_free_with_allocator(NULL, queue_name);
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch queue message id is invalid", NULL, NULL,
+                       "pouch");
+    return NULL;
+  }
+  length = strlen("q//dlq/msg/.meta") + strlen(queue_name) +
+           strlen(message_id) + 1U;
+  key = (char *)lc_alloc_with_allocator(NULL, length);
+  if (key == NULL) {
+    lc_free_with_allocator(NULL, queue_name);
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch queue DLQ metadata key", NULL,
+                       NULL, NULL);
+    return NULL;
+  }
+  snprintf(key, length, "q/%s/dlq/msg/%s.meta", queue_name, message_id);
+  lc_free_with_allocator(NULL, queue_name);
+  return key;
+}
+
+static char *lc_pouch_queue_dlq_state_key(const char *queue,
+                                          const char *message_id,
+                                          lc_error *error) {
+  char *queue_name;
+  char *key;
+  size_t length;
+
+  queue_name = lc_pouch_queue_normalize_name(queue, error);
+  if (queue_name == NULL) {
+    return NULL;
+  }
+  if (message_id == NULL || message_id[0] == '\0' ||
+      strchr(message_id, '/') != NULL) {
+    lc_free_with_allocator(NULL, queue_name);
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch queue message id is invalid", NULL, NULL,
+                       "pouch");
+    return NULL;
+  }
+  length = strlen("q//dlq/state/.json") + strlen(queue_name) +
+           strlen(message_id) + 1U;
+  key = (char *)lc_alloc_with_allocator(NULL, length);
+  if (key == NULL) {
+    lc_free_with_allocator(NULL, queue_name);
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch queue DLQ state key", NULL,
+                       NULL, NULL);
+    return NULL;
+  }
+  snprintf(key, length, "q/%s/dlq/state/%s.json", queue_name, message_id);
+  lc_free_with_allocator(NULL, queue_name);
+  return key;
+}
+
 static char *lc_pouch_queue_message_lease_key_from_meta(const char *metadata_key,
                                                         lc_error *error) {
   char *key;
@@ -6553,19 +6627,36 @@ static char *lc_pouch_queue_message_meta_key_from_lease_key(
   return key;
 }
 
-static int lc_pouch_queue_is_message_lease_key(const char *key) {
-  const char *msg;
+static int lc_pouch_queue_has_exact_lease_key_shape(const char *key,
+                                                    const char *kind) {
+  const char *cursor;
+  const char *sep;
+  size_t kind_length;
 
-  if (key == NULL || strncmp(key, "q/", sizeof("q/") - 1U) != 0 ||
+  if (key == NULL || kind == NULL ||
+      strncmp(key, "q/", sizeof("q/") - 1U) != 0 ||
       lc_pouch_key_has_suffix(key, ".meta") ||
       lc_pouch_key_has_suffix(key, ".bin") ||
       lc_pouch_key_has_suffix(key, ".json")) {
     return 0;
   }
-  msg = strstr(key + (sizeof("q/") - 1U), "/msg/");
-  return msg != NULL && msg != key + (sizeof("q/") - 1U) &&
-         msg[sizeof("/msg/") - 1U] != '\0' &&
-         strchr(msg + sizeof("/msg/") - 1U, '/') == NULL;
+  cursor = key + (sizeof("q/") - 1U);
+  sep = strchr(cursor, '/');
+  if (sep == NULL || sep == cursor) {
+    return 0;
+  }
+  cursor = sep + 1;
+  kind_length = strlen(kind);
+  if (strncmp(cursor, kind, kind_length) != 0 ||
+      cursor[kind_length] != '/') {
+    return 0;
+  }
+  cursor += kind_length + 1U;
+  return cursor[0] != '\0' && strchr(cursor, '/') == NULL;
+}
+
+static int lc_pouch_queue_is_message_lease_key(const char *key) {
+  return lc_pouch_queue_has_exact_lease_key_shape(key, "msg");
 }
 
 static char *lc_pouch_queue_state_lease_key(const char *queue,
@@ -7059,36 +7150,11 @@ static int lc_pouch_lease_ref_has_credentials(const lc_lease_ref *lease) {
 }
 
 static int lc_pouch_client_is_queue_state_key(const char *key) {
-  const char *state;
-  const char *id;
-
-  if (key == NULL || strncmp(key, "q/", sizeof("q/") - 1U) != 0) {
-    return 0;
-  }
-  state = strstr(key + (sizeof("q/") - 1U), "/state/");
-  if (state == NULL || state == key + (sizeof("q/") - 1U)) {
-    return 0;
-  }
-  id = state + sizeof("/state/") - 1U;
-  return id[0] != '\0' && strchr(id, '/') == NULL;
+  return lc_pouch_queue_has_exact_lease_key_shape(key, "state");
 }
 
 static int lc_pouch_queue_is_state_lease_key(const char *key) {
-  const char *state;
-  const char *id;
-
-  if (key == NULL || strncmp(key, "q/", sizeof("q/") - 1U) != 0 ||
-      lc_pouch_key_has_suffix(key, ".json") ||
-      lc_pouch_key_has_suffix(key, ".meta") ||
-      lc_pouch_key_has_suffix(key, ".bin")) {
-    return 0;
-  }
-  state = strstr(key + (sizeof("q/") - 1U), "/state/");
-  if (state == NULL || state == key + (sizeof("q/") - 1U)) {
-    return 0;
-  }
-  id = state + sizeof("/state/") - 1U;
-  return id[0] != '\0' && strchr(id, '/') == NULL;
+  return lc_pouch_queue_has_exact_lease_key_shape(key, "state");
 }
 
 static int lc_pouch_client_validate_lease_key(const lc_lease_ref *lease,
@@ -7906,6 +7972,351 @@ static int lc_pouch_queue_write_record(lc_client_handle *client,
     }
   }
   lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+  return rc;
+}
+
+static int lc_pouch_queue_write_new_record(lc_client_handle *client,
+                                           lc_pouch_queue_record *record,
+                                           lc_error *error) {
+  lc_source *source;
+  lc_source *payload_source;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  int rc;
+
+  source = NULL;
+  payload_source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  rc = lc_pouch_queue_open_record_source(client, record, &payload_source,
+                                         &source, error);
+  if (rc == LC_OK) {
+    options.content_type = "application/x-lockdc-pouch-queue";
+    options.create_if_absent = 1;
+    options.has_query_hidden = 1;
+    options.query_hidden = 1;
+    options.object_record = 1;
+    rc = lc_pouch_state_write(client->pouch, record->namespace_name,
+                              record->storage_key, source, &options, &result,
+                              error);
+  }
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  if (payload_source != NULL) {
+    lc_source_close(payload_source);
+  }
+  if (rc == LC_OK) {
+    lc_free_with_allocator(NULL, record->meta_etag);
+    record->meta_etag = lc_strdup_local(result.etag);
+    record->version = result.version;
+    if (record->meta_etag == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch queue meta etag", NULL, NULL,
+                        NULL);
+    }
+  }
+  lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+  return rc;
+}
+
+static int lc_pouch_queue_copy_object_if_exists(lc_client_handle *client,
+                                                const char *namespace_name,
+                                                const char *source_key,
+                                                const char *destination_key,
+                                                lc_error *error) {
+  lc_pouch_state_read_result read_result;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  int rc;
+
+  memset(&read_result, 0, sizeof(read_result));
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  rc = lc_pouch_state_read(client->pouch, namespace_name, source_key,
+                           &read_result, error);
+  if (rc == LC_OK && !read_result.found) {
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+    return LC_OK;
+  }
+  if (rc == LC_OK) {
+    options.content_type =
+        read_result.content_type != NULL ? read_result.content_type
+                                         : "application/octet-stream";
+    options.metadata = read_result.metadata;
+    options.metadata_length = read_result.metadata_length;
+    options.has_metadata = read_result.metadata_length > 0U;
+    options.create_if_absent = 1;
+    options.has_query_hidden = 1;
+    options.query_hidden = 1;
+    options.object_record = 1;
+    rc = lc_pouch_state_write(client->pouch, namespace_name, destination_key,
+                              read_result.body, &options, &write_result,
+                              error);
+    if (lc_pouch_queue_retryable_create_collision(error)) {
+      lc_error_cleanup(error);
+      lc_error_init(error);
+      rc = LC_OK;
+    }
+  }
+  lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  return rc;
+}
+
+static int lc_pouch_queue_delete_object(lc_client_handle *client,
+                                        const char *namespace_name,
+                                        const char *key,
+                                        int has_expected_version,
+                                        unsigned long expected_version,
+                                        lc_error *error) {
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  int rc;
+
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  options.object_record = 1;
+  if (has_expected_version) {
+    options.has_expected_version = 1;
+    options.expected_version = expected_version;
+  }
+  rc = lc_pouch_state_delete(client->pouch, namespace_name, key, &options,
+                             &result, error);
+  lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+  return rc;
+}
+
+static int lc_pouch_queue_move_to_dlq(lc_client_handle *client,
+                                      lc_pouch_queue_record *record,
+                                      lc_error *error) {
+  char *original_meta_key;
+  char *original_payload_key;
+  char *original_state_lease_key;
+  char *original_state_key;
+  char *dlq_meta_key;
+  char *dlq_payload_key;
+  char *dlq_state_key;
+  char *old_storage_key;
+  char *old_meta_etag;
+  unsigned long original_version;
+  int rc;
+
+  original_meta_key = NULL;
+  original_payload_key = NULL;
+  original_state_lease_key = NULL;
+  original_state_key = NULL;
+  dlq_meta_key = NULL;
+  dlq_payload_key = NULL;
+  dlq_state_key = NULL;
+  old_storage_key = NULL;
+  old_meta_etag = NULL;
+  original_version = 0UL;
+  if (client == NULL || record == NULL || record->namespace_name == NULL ||
+      record->queue == NULL || record->message_id == NULL ||
+      record->storage_key == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue DLQ move requires complete record", NULL,
+                        NULL, NULL);
+  }
+  original_meta_key = lc_strdup_local(record->storage_key);
+  if (original_meta_key == NULL) {
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to allocate pouch queue DLQ source key", NULL,
+                      NULL, NULL);
+    goto cleanup;
+  }
+  original_payload_key =
+      lc_pouch_queue_payload_key_from_meta(original_meta_key, error);
+  if (original_payload_key == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
+  }
+  original_state_lease_key =
+      lc_pouch_queue_state_lease_key(record->queue, record->message_id, error);
+  if (original_state_lease_key == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
+  }
+  original_state_key =
+      lc_pouch_queue_state_object_key_from_lease_key(original_state_lease_key,
+                                                     error);
+  if (original_state_key == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
+  }
+  dlq_meta_key = lc_pouch_queue_dlq_meta_key(record->queue, record->message_id,
+                                             error);
+  if (dlq_meta_key == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
+  }
+  dlq_payload_key = lc_pouch_queue_payload_key_from_meta(dlq_meta_key, error);
+  if (dlq_payload_key == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
+  }
+  dlq_state_key =
+      lc_pouch_queue_dlq_state_key(record->queue, record->message_id, error);
+  if (dlq_state_key == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
+  }
+  rc = lc_pouch_queue_copy_object_if_exists(
+      client, record->namespace_name, original_payload_key, dlq_payload_key,
+      error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_copy_object_if_exists(
+        client, record->namespace_name, original_state_key, dlq_state_key,
+        error);
+  }
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  old_storage_key = record->storage_key;
+  old_meta_etag = record->meta_etag;
+  original_version = record->version;
+  record->storage_key = dlq_meta_key;
+  record->meta_etag = lc_strdup_local("");
+  record->version = 0UL;
+  dlq_meta_key = NULL;
+  if (record->meta_etag == NULL) {
+    record->storage_key = old_storage_key;
+    record->meta_etag = old_meta_etag;
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to allocate pouch queue DLQ etag", NULL, NULL,
+                      NULL);
+    goto cleanup;
+  }
+  lc_free_with_allocator(NULL, old_meta_etag);
+  rc = lc_pouch_queue_write_new_record(client, record, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_delete_object(client, record->namespace_name,
+                                      original_meta_key, original_version > 0UL,
+                                      original_version, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_delete_object(client, record->namespace_name,
+                                      original_payload_key, 0, 0UL, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_delete_object(client, record->namespace_name,
+                                      original_state_key, 0, 0UL, error);
+  }
+  lc_free_with_allocator(NULL, old_storage_key);
+  if (rc == LC_OK) {
+    lc_pouch_queue_touch_notification(client, record->namespace_name,
+                                      record->queue);
+  }
+
+cleanup:
+  lc_free_with_allocator(NULL, original_meta_key);
+  lc_free_with_allocator(NULL, original_payload_key);
+  lc_free_with_allocator(NULL, original_state_lease_key);
+  lc_free_with_allocator(NULL, original_state_key);
+  lc_free_with_allocator(NULL, dlq_meta_key);
+  lc_free_with_allocator(NULL, dlq_payload_key);
+  lc_free_with_allocator(NULL, dlq_state_key);
+  return rc;
+}
+
+static int lc_pouch_queue_delete_state_object_for_ack(
+    lc_client_handle *client, const lc_message_ref *message, lc_error *error) {
+  lc_pouch_state_read_result read_result;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  char *state_lease_key;
+  char *state_object_key;
+  int state_required;
+  int rc;
+
+  if (client == NULL || message == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue ack state delete requires client and "
+                        "message",
+                        NULL, NULL, NULL);
+  }
+  state_required = message->state_lease_id != NULL &&
+                   message->state_lease_id[0] != '\0';
+  if (!state_required &&
+      (message->state_etag == NULL || message->state_etag[0] == '\0')) {
+    return LC_OK;
+  }
+  memset(&read_result, 0, sizeof(read_result));
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  state_lease_key = NULL;
+  state_object_key = NULL;
+  state_lease_key =
+      lc_pouch_queue_state_lease_key(message->queue, message->message_id, error);
+  if (state_lease_key == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  state_object_key =
+      lc_pouch_queue_state_object_key_from_lease_key(state_lease_key, error);
+  if (state_object_key == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
+  }
+  rc = lc_pouch_state_read(client->pouch, message->namespace_name,
+                           state_object_key, &read_result, error);
+  if (rc == LC_OK && !read_result.found && state_required) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch queue state object not found", NULL, NULL, NULL);
+  }
+  if (rc == LC_OK && read_result.found) {
+    options.object_record = 1;
+    if (message->state_etag != NULL && message->state_etag[0] != '\0') {
+      options.expected_etag = message->state_etag;
+    }
+    rc = lc_pouch_state_delete(client->pouch, message->namespace_name,
+                               state_object_key, &options, &result, error);
+  }
+
+cleanup:
+  lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  lc_free_with_allocator(NULL, state_lease_key);
+  lc_free_with_allocator(NULL, state_object_key);
+  return rc;
+}
+
+static int lc_pouch_queue_delete_message_objects(lc_client_handle *client,
+                                                 lc_pouch_queue_record *record,
+                                                 lc_error *error) {
+  char *metadata_key;
+  char *payload_key;
+  int rc;
+
+  if (client == NULL || record == NULL || record->namespace_name == NULL ||
+      record->storage_key == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue delete requires complete record", NULL,
+                        NULL, NULL);
+  }
+  metadata_key = lc_strdup_local(record->storage_key);
+  payload_key = NULL;
+  if (metadata_key == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch queue delete key", NULL,
+                        NULL, NULL);
+  }
+  payload_key = lc_pouch_queue_payload_key_from_meta(metadata_key, error);
+  if (payload_key == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
+  }
+  rc = lc_pouch_queue_delete_object(client, record->namespace_name,
+                                    metadata_key, record->version > 0UL,
+                                    record->version, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_delete_object(client, record->namespace_name,
+                                      payload_key, 0, 0UL, error);
+  }
+
+cleanup:
+  lc_free_with_allocator(NULL, metadata_key);
+  lc_free_with_allocator(NULL, payload_key);
   return rc;
 }
 
@@ -8737,14 +9148,18 @@ static int lc_pouch_txn_commit_queue_stage(lc_client_handle *client,
                                            const char *txn_id,
                                            lc_error *error) {
   lc_pouch_state_read_result staged;
+  lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
   lc_pouch_queue_record record;
+  char *payload_key;
   char *staged_key;
   int rc;
 
   memset(&staged, 0, sizeof(staged));
+  memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
   memset(&record, 0, sizeof(record));
+  payload_key = NULL;
   staged_key = lc_pouch_staged_storage_key(base_key, txn_id, error);
   if (staged_key == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -8755,7 +9170,30 @@ static int lc_pouch_txn_commit_queue_stage(lc_client_handle *client,
     rc = lc_pouch_queue_record_parse(client, &staged, staged_key, &record,
                                      error);
   }
-  if (rc == LC_OK) {
+  if (rc == LC_OK && staged.found && strcmp(record.status, "acked") == 0) {
+    options.object_record = 1;
+    rc = lc_pouch_state_delete(client->pouch, namespace_name, base_key,
+                               &options, &result, error);
+    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    memset(&result, 0, sizeof(result));
+    if (rc == LC_OK) {
+      payload_key = lc_pouch_queue_payload_key_from_meta(base_key, error);
+      if (payload_key == NULL) {
+        rc = error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_NOMEM;
+      }
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_delete(client->pouch, namespace_name, payload_key,
+                                 &options, &result, error);
+      lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+      memset(&result, 0, sizeof(result));
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_delete(client->pouch, namespace_name, staged_key,
+                                 &options, &result, error);
+    }
+  } else if (rc == LC_OK) {
     rc = lc_pouch_state_commit_staged(client->pouch, namespace_name, base_key,
                                       txn_id, &result, error);
   }
@@ -8763,6 +9201,7 @@ static int lc_pouch_txn_commit_queue_stage(lc_client_handle *client,
     lc_pouch_queue_touch_notification(client, record.namespace_name,
                                       record.queue);
   }
+  lc_free_with_allocator(NULL, payload_key);
   lc_free_with_allocator(NULL, staged_key);
   lc_pouch_queue_record_cleanup(&record);
   lc_pouch_state_read_result_cleanup(&client->allocator, &staged);
@@ -10735,11 +11174,17 @@ int lc_pouch_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch queue ack status", NULL, NULL,
                         NULL);
-    } else {
+    } else if (lc_pouch_txn_id_present(req->message.txn_id)) {
       rc = lc_pouch_queue_clear_lease(&record, error);
       if (rc == LC_OK) {
         rc = lc_pouch_queue_write_or_stage_record(client, &record,
                                                   req->message.txn_id, error);
+      }
+    } else {
+      rc = lc_pouch_queue_delete_state_object_for_ack(client, &req->message,
+                                                      error);
+      if (rc == LC_OK) {
+        rc = lc_pouch_queue_delete_message_objects(client, &record, error);
       }
     }
     if (rc == LC_OK &&
@@ -10835,8 +11280,14 @@ int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
         }
       }
       if (rc == LC_OK) {
-        rc = lc_pouch_queue_write_or_stage_record(client, &record,
-                                                  req->message.txn_id, error);
+        if (strcmp(record.status, "dead") == 0 &&
+            !lc_pouch_txn_id_present(req->message.txn_id)) {
+          rc = lc_pouch_queue_move_to_dlq(client, &record, error);
+        } else {
+          rc = lc_pouch_queue_write_or_stage_record(client, &record,
+                                                    req->message.txn_id,
+                                                    error);
+        }
       }
       if (rc == LC_OK &&
           (req->message.txn_id == NULL || req->message.txn_id[0] == '\0')) {

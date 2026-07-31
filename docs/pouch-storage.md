@@ -347,10 +347,22 @@ Queue delivery obligations:
   error, and DLQ behavior match the supported Go queue behavior;
 - ack/nack/extend validate active lease id, fencing token, txn id, status, and
   expiry;
+- non-transactional ack deletes queue state when a state lease/state etag is
+  present, deletes message metadata, deletes message payload, clears message
+  lease metadata, and clears state lease metadata; it must not leave an
+  authoritative `acked` message metadata row behind;
+- transaction commit of a staged queue ack deletes message metadata and payload
+  before clearing message lease metadata; transaction rollback discards the
+  staged ack and makes the message visible again;
 - stateful queue operations acquire paired message and state leases;
 - transaction marker application pairs `q/<queue>/msg/<id>` and
   `q/<queue>/state/<id>` the same way Go `queue.ParseMessageLeaseKey` and
   `ParseStateLeaseKey` do.
+
+Pouch uses a C-native transient `acked` status only as a staged transaction
+decision marker before commit. It is not a durable terminal message state after
+non-transactional ack or after transaction commit. Go disk has no durable
+`acked` queue metadata row; it deletes the message objects.
 
 ### Namespace Configuration
 
@@ -448,6 +460,12 @@ Hidden means all of the following:
 - rejected or protected against direct public state-key collision where a user
   key could address an internal row.
 
+Direct public state APIs must reject every `q/` key and every
+`state/<key>/attachments/<id>` attachment-object key shape. Queue state lease
+keys such as `q/<queue>/state/<id>` are accepted only through internal
+lease-ref validation for queue state operations, not as public user document
+keys.
+
 ## Divergence Register
 
 Every divergence from Go disk belongs in one of these two buckets.
@@ -479,9 +497,17 @@ Every divergence from Go disk belongs in one of these two buckets.
   Go's internal TC cluster store takes an explicit identity and TTL. The current
   liblockdc Pouch client API exposes only `self_endpoint` for cluster announce
   and no TTL, so Pouch persists the singleton membership at
-  `.lockd/tc-cluster/leases/self` with no expiry. Reason: preserving the public
-  C API avoids inventing a hidden identity source while still using Go's
-  control namespace/key topology.
+  namespace `.lockd`, key `tc-cluster/leases/self`, with no expiry. Reason:
+  preserving the public C API avoids inventing a hidden identity source while
+  still using Go's control namespace/key topology.
+
+- Queue DLQ timing:
+  Go queue moves max-attempt messages to DLQ when the ready cache observes a
+  descriptor. Pouch has no Go ready-cache worker, so non-transactional terminal
+  failure nacks synchronously move message metadata, payload, and workflow
+  state to the DLQ keys. Reason: this preserves the same durable DLQ end state
+  without adding a background cache layer; callers observe the terminal message
+  removed from the live queue immediately.
 
 - Public names and diagnostics:
   Pouch uses Pouch terminology in files, errors, events, and durable metadata.
