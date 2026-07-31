@@ -37,20 +37,26 @@ Client examples:
 
 Pouch examples:
 
-- `logstore.append`
-- `logstore.flush`
-- `manifest.open`
-- `scan.start`
+- `open`, `close`, `abort`
+- `logstore.write`, `logstore.read`, `logstore.tail.repair`
+- `logstore.fsync`
+- `manifest.ensure_namespace`
+- `scan.summaries`
 - `index.flush`
-- `fulltext.query`
-- `crypto.open`
-- `compression.open`
 - `compaction.start`
 - `compaction.complete`
 
-Use trace for detailed internal flow, debug for developer-facing lifecycle and
-subsystem facts, sparse info for broad operational lifecycle, warn for
-non-fatal operational problems, and error for operation failures.
+Use trace for successful hot-path storage flow and request-detail records;
+debug for lifecycle, cache, recovery, and maintenance facts; sparse info for
+operator-visible lifecycle or mode changes; warn for repaired corruption and
+non-fatal operational problems; and error when an operation fails. Do not emit
+an additional success event at info merely because a trace event already
+describes the same storage operation.
+
+Event names are a liblockdc contract, not a mirror of Go lockd disk. New event
+families must describe a local public operation or a Pouch storage transition,
+use the existing `noun.verb[.outcome]` pattern where applicable, and be added
+to this document with their stable fields.
 
 ## Field Names
 
@@ -122,8 +128,8 @@ Pouch storage logs may use these storage-specific fields when relevant:
 - `snapshot`
 - `record_offset`
 - `payload_offset`
-- `record_len`
-- `payload_len`
+- `record_bytes`
+- `payload_bytes`
 - `stored_bytes`
 - `plaintext_bytes`
 - `generation`
@@ -134,6 +140,7 @@ Pouch storage logs may use these storage-specific fields when relevant:
 - `records`
 - `bytes`
 - `reclaim_bytes`
+- `pending_count`
 - `reason`
 - `elapsed_ms`
 - `error`
@@ -142,5 +149,11 @@ Pouch storage logs may use these storage-specific fields when relevant:
 
 Logs must never include production payload data: no state JSON, queue payload,
 attachment body, object body, full document text, crypto key material, transform
-secret, or bearer credential. Log identifiers, byte counts, statuses, timings,
-bounded names, and durable metadata facts only.
+secret, or bearer credential. A field that represents a payload must contain
+only its byte count, checksum, descriptor, or other bounded durable metadata.
+Log identifiers, byte counts, statuses, timings, bounded names, and durable
+metadata facts only.
+
+All durable counters and offsets are emitted as exact-width signed or unsigned
+64-bit pslog values. Do not narrow a persistent Pouch scalar through `size_t`,
+`long`, or a formatting conversion before it reaches the logger.

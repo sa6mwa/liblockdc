@@ -5306,7 +5306,7 @@ static void lc_pouch_state_log_tail_repair(lc_pouch *pouch, const char *reason,
 
   fields[0] = lc_log_str_field("reason", reason);
   fields[1] = lc_log_str_field("segment", segment);
-  fields[2] = lc_log_u64_field("offset", offset);
+  fields[2] = lc_log_u64_field("record_offset", offset);
   lc_log_warn(pouch->logger, "logstore.tail.repair", fields, 3U);
 }
 
@@ -9291,7 +9291,8 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
     fields[1] = lc_log_str_field("key", key);
     fields[2] =
         lc_log_u64_field("generation", out != NULL ? out->version : 0UL);
-    fields[3] = lc_log_u64_field("payload_len", out != NULL ? out->bytes : 0UL);
+    fields[3] =
+        lc_log_u64_field("payload_bytes", out != NULL ? out->bytes : 0UL);
     fields[4] =
         lc_log_u64_field("stored_bytes", out != NULL ? out->cipher_bytes : 0UL);
     fields[5] = lc_log_str_field("content_type",
@@ -10311,7 +10312,8 @@ cleanup_unlocked:
     fields[1] = lc_log_str_field("key", key);
     fields[2] = lc_log_bool_field("with_state", include_body);
     fields[3] = lc_log_bool_field("found", out != NULL ? out->found : 0);
-    fields[4] = lc_log_u64_field("payload_len", out != NULL ? out->bytes : 0UL);
+    fields[4] =
+        lc_log_u64_field("payload_bytes", out != NULL ? out->bytes : 0UL);
     fields[5] =
         lc_log_u64_field("stored_bytes", out != NULL ? out->cipher_bytes : 0UL);
     lc_log_trace(pouch->logger,

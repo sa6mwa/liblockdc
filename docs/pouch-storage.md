@@ -785,11 +785,11 @@ Pouch logs through pslog using the liblockdc logging contract in
 Every Pouch log uses `sys=storage.pouch`, including logstore, manifest, scan,
 index, crypto, compression, compaction, queue-backed storage,
 attachment/object storage, and maintenance internals. Internal areas are
-expressed in event names such as `logstore.append`, `index.flush`, and
+expressed in event names such as `logstore.write`, `index.flush`, and
 `compaction.start`; they must not be represented by changing `sys`.
 
 Pouch logs must use short, readable fields such as `ns`, `key`, `segment`,
-`record_offset`, `payload_len`, `stored_bytes`, `plaintext_bytes`,
+`record_offset`, `payload_bytes`, `stored_bytes`, `plaintext_bytes`,
 `generation`, `reason`, and `elapsed_ms`. Pouch logs must never include state
 JSON, queue payloads, attachment/object bodies, full document text, crypto key
 material, transform secrets, or credentials.

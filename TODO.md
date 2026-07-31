@@ -592,13 +592,16 @@ Acceptance:
 
 ## Logging Contract Follow-Up
 
-- [ ] Preserve `docs/logging.md` as the liblockdc pslog contract.
-- [ ] All Pouch logs use `sys=storage.pouch`.
-- [ ] Public liblockdc client logs use `sys=client.lockd`.
-- [ ] Pouch event names identify internal areas, for example
-  `logstore.append`, `index.flush`, `compaction.start`, `queue.enqueue`.
-- [ ] Logs use short readable fields such as `ns`, `key`, `msg_id`,
+- [x] Preserve `docs/logging.md` as the liblockdc pslog contract.
+- [x] All Pouch logs use `sys=storage.pouch`.
+- [x] Public liblockdc client logs use `sys=client.lockd`.
+- [x] Pouch event names identify internal areas, for example
+  `logstore.write`, `index.flush`, `compaction.start`, `queue.enqueue`.
+- [x] Logs use short readable fields such as `ns`, `key`, `msg_id`,
   `cur_*`, `lease_id`, `txn_id`, `attachment_id`, `fencing_token`,
   `payload_bytes`, `stored_bytes`, `plaintext_bytes`, and `elapsed_ms`.
-- [ ] Logs do not contain state JSON, queue payloads, attachment/object bodies,
+- [x] Logs do not contain state JSON, queue payloads, attachment/object bodies,
   full document text, crypto key material, transform secrets, or credentials.
+  - The Pouch logger test captures write/read events and asserts that a supplied
+    state body never reaches pslog; all Pouch durable counters now preserve
+    their `uint64_t` value through the shared field helper.

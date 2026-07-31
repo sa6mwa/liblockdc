@@ -5,6 +5,7 @@
 
 #include <pslog.h>
 #include <stddef.h>
+#include <stdint.h>
 
 pslog_logger *lc_log_client_logger(pslog_logger *base_logger,
                                    int disable_sys_field);
@@ -24,8 +25,8 @@ void lc_log_error(pslog_logger *logger, const char *msg,
 
 pslog_field lc_log_str_field(const char *key, const char *value);
 pslog_field lc_log_bool_field(const char *key, int value);
-pslog_field lc_log_i64_field(const char *key, long value);
-pslog_field lc_log_u64_field(const char *key, size_t value);
+pslog_field lc_log_i64_field(const char *key, int64_t value);
+pslog_field lc_log_u64_field(const char *key, uint64_t value);
 pslog_field lc_log_error_field(const char *key, const lc_error *error);
 pslog_field lc_log_http_status_field(const lc_error *error);
 pslog_field lc_log_code_field(const lc_error *error);

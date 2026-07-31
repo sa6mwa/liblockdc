@@ -131,12 +131,12 @@ pslog_field lc_log_bool_field(const char *key, int value) {
   return pslog_bool(key, value);
 }
 
-pslog_field lc_log_i64_field(const char *key, long value) {
+pslog_field lc_log_i64_field(const char *key, int64_t value) {
   key = lc_log_canonical_key(key);
   return pslog_i64(key, (pslog_int64)value);
 }
 
-pslog_field lc_log_u64_field(const char *key, size_t value) {
+pslog_field lc_log_u64_field(const char *key, uint64_t value) {
   key = lc_log_canonical_key(key);
   return pslog_u64(key, (pslog_uint64)value);
 }

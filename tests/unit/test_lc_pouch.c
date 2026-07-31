@@ -4695,6 +4695,9 @@ static void test_pouch_logs_use_storage_pouch_subsystem(void **state) {
   lc_pouch *pouch;
   lc_pouch_status status;
   lc_pouch_open_options options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_source *source;
   lc_error error;
   pslog_logger *logger;
   FILE *log_fp;
@@ -4704,11 +4707,14 @@ static void test_pouch_logs_use_storage_pouch_subsystem(void **state) {
 
   (void)state;
   pouch = NULL;
+  source = NULL;
   logger = NULL;
   log_fp = NULL;
   logs = NULL;
   memset(&options, 0, sizeof(options));
   memset(&status, 0, sizeof(status));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
   lc_error_init(&error);
   make_root("logging", root, sizeof(root));
   cleanup_root(root);
@@ -4725,7 +4731,22 @@ static void test_pouch_logs_use_storage_pouch_subsystem(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_ensure_namespace(pouch, "logging-ns", &error);
   assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("pouch-log-secret-payload",
+                             strlen("pouch-log-secret-payload"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "logging-ns", "logging/key", source,
+                            NULL, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  rc = lc_pouch_state_read(pouch, "logging-ns", "logging/key", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
 
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
   lc_pouch_status_cleanup(NULL, &status);
   lc_pouch_close(pouch);
   logger->destroy(logger);
@@ -4737,7 +4758,14 @@ static void test_pouch_logs_use_storage_pouch_subsystem(void **state) {
   assert_non_null(strstr(logs, "\"message\":\"cache.load.complete\""));
   assert_non_null(strstr(logs, "\"message\":\"status.read\""));
   assert_non_null(strstr(logs, "\"message\":\"manifest.ensure_namespace\""));
+  assert_non_null(strstr(logs, "\"message\":\"logstore.write\""));
+  assert_non_null(strstr(logs, "\"message\":\"logstore.read\""));
   assert_non_null(strstr(logs, "\"ns\":\"logging-ns\""));
+  assert_non_null(strstr(logs, "\"payload_bytes\":"));
+  assert_non_null(strstr(logs, "\"stored_bytes\":"));
+  assert_null(strstr(logs, "pouch-log-secret-payload"));
+  assert_null(strstr(logs, "\"payload_len\":"));
+  assert_null(strstr(logs, "\"namespace\":"));
   assert_null(strstr(logs, "\"sys\":\"client.lockd\""));
   assert_null(strstr(logs, "\"message\":\"pouch."));
   assert_null(strstr(logs, "\"component\":"));
