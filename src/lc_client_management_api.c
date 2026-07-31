@@ -148,10 +148,12 @@ static int lc_copy_namespace_config_res(
   out->namespace_name = lc_strdup_local(engine->namespace_name);
   out->preferred_engine = lc_strdup_local(engine->preferred_engine);
   out->fallback_engine = lc_strdup_local(engine->fallback_engine);
+  out->etag = lc_strdup_local(engine->etag);
   out->correlation_id = lc_strdup_local(engine->correlation_id);
   if ((engine->namespace_name != NULL && out->namespace_name == NULL) ||
       (engine->preferred_engine != NULL && out->preferred_engine == NULL) ||
       (engine->fallback_engine != NULL && out->fallback_engine == NULL) ||
+      (engine->etag != NULL && out->etag == NULL) ||
       (engine->correlation_id != NULL && out->correlation_id == NULL)) {
     lc_namespace_config_res_cleanup(out);
     return 0;
@@ -390,6 +392,7 @@ int lc_client_update_namespace_config_method(lc_client *self,
   engine_req.namespace_name = req->namespace_name;
   engine_req.preferred_engine = req->preferred_engine;
   engine_req.fallback_engine = req->fallback_engine;
+  engine_req.if_etag = req->if_etag;
   rc = lc_engine_client_update_namespace_config(client->engine, &engine_req,
                                                 &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {

@@ -566,12 +566,14 @@ typedef struct lc_engine_namespace_config_request {
   const char *namespace_name;
   const char *preferred_engine;
   const char *fallback_engine;
+  const char *if_etag;
 } lc_engine_namespace_config_request;
 
 typedef struct lc_engine_namespace_config_response {
   char *namespace_name;
   char *preferred_engine;
   char *fallback_engine;
+  char *etag;
   char *correlation_id;
 } lc_engine_namespace_config_response;
 

@@ -105,6 +105,7 @@ typedef struct lc_pouch_mutate_file {
 
 typedef struct lc_pouch_namespace_config_record {
   int found;
+  char *etag;
   char preferred_engine[sizeof("index")];
   char fallback_engine[sizeof("scan")];
 } lc_pouch_namespace_config_record;
@@ -660,8 +661,12 @@ static int lc_pouch_namespace_config_set_record(
                         "pouch namespace fallback_engine must be scan or none",
                         NULL, NULL, "pouch");
   }
-  strcpy(record->preferred_engine, preferred_engine);
-  strcpy(record->fallback_engine, fallback_engine);
+  if (preferred_engine != record->preferred_engine) {
+    strcpy(record->preferred_engine, preferred_engine);
+  }
+  if (fallback_engine != record->fallback_engine) {
+    strcpy(record->fallback_engine, fallback_engine);
+  }
   return LC_OK;
 }
 
@@ -727,6 +732,15 @@ static int lc_pouch_namespace_config_build_record(
   return rc;
 }
 
+static void lc_pouch_namespace_config_record_cleanup(
+    lc_pouch_namespace_config_record *record) {
+  if (record == NULL) {
+    return;
+  }
+  lc_free_with_allocator(NULL, record->etag);
+  memset(record, 0, sizeof(*record));
+}
+
 static int lc_pouch_namespace_config_read(
     lc_client_handle *client, const char *namespace_name,
     lc_pouch_namespace_config_record *record, lc_error *error) {
@@ -766,6 +780,14 @@ static int lc_pouch_namespace_config_read(
     rc = lc_pouch_namespace_config_parse_body((const char *)bytes, length,
                                               record, error);
   }
+  if (rc == LC_OK && read_result.found) {
+    record->etag = lc_strdup_local(read_result.etag);
+    if (record->etag == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch namespace config etag", NULL,
+                        NULL, NULL);
+    }
+  }
   if (sink != NULL) {
     lc_sink_close(sink);
   }
@@ -781,9 +803,11 @@ static int lc_pouch_namespace_config_response(
   out->namespace_name = lc_strdup_local(namespace_name);
   out->preferred_engine = lc_strdup_local(record->preferred_engine);
   out->fallback_engine = lc_strdup_local(record->fallback_engine);
+  out->etag = lc_strdup_local(record->etag != NULL ? record->etag : "");
   out->correlation_id = lc_strdup_local("pouch-namespace-config");
   if (out->namespace_name == NULL || out->preferred_engine == NULL ||
-      out->fallback_engine == NULL || out->correlation_id == NULL) {
+      out->fallback_engine == NULL || out->etag == NULL ||
+      out->correlation_id == NULL) {
     lc_namespace_config_res_cleanup(out);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch namespace config response",
@@ -811,15 +835,18 @@ static int lc_pouch_client_query_engine(lc_client_handle *client,
   }
   if (!record.found) {
     *out_engine = lc_pouch_client_endpoint_query_engine(client);
+    lc_pouch_namespace_config_record_cleanup(&record);
     return LC_OK;
   }
   *owned_engine = lc_strdup_local(record.preferred_engine);
   if (*owned_engine == NULL) {
+    lc_pouch_namespace_config_record_cleanup(&record);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch query engine", NULL, NULL,
                         NULL);
   }
   *out_engine = *owned_engine;
+  lc_pouch_namespace_config_record_cleanup(&record);
   return LC_OK;
 }
 
@@ -12743,8 +12770,9 @@ int lc_pouch_client_get_namespace_config_method(
   if (rc != LC_OK) {
     return rc;
   }
-  return lc_pouch_namespace_config_response(out, namespace_name, &record,
-                                            error);
+  rc = lc_pouch_namespace_config_response(out, namespace_name, &record, error);
+  lc_pouch_namespace_config_record_cleanup(&record);
+  return rc;
 }
 
 int lc_pouch_client_update_namespace_config_method(
@@ -12780,8 +12808,10 @@ int lc_pouch_client_update_namespace_config_method(
     return rc;
   }
   if (req->preferred_engine == NULL && req->fallback_engine == NULL) {
-    return lc_pouch_namespace_config_response(out, namespace_name, &record,
-                                              error);
+    rc = lc_pouch_namespace_config_response(out, namespace_name, &record,
+                                            error);
+    lc_pouch_namespace_config_record_cleanup(&record);
+    return rc;
   }
   preferred_engine =
       req->preferred_engine != NULL
@@ -12794,16 +12824,19 @@ int lc_pouch_client_update_namespace_config_method(
   rc = lc_pouch_namespace_config_set_record(&record, preferred_engine,
                                             fallback_engine, error);
   if (rc != LC_OK) {
+    lc_pouch_namespace_config_record_cleanup(&record);
     return rc;
   }
   memset(&body, 0, sizeof(body));
   rc = lc_pouch_namespace_config_build_record(&record, &body, error);
   if (rc != LC_OK) {
+    lc_pouch_namespace_config_record_cleanup(&record);
     return rc;
   }
   key = lc_pouch_namespace_config_key(namespace_name, error);
   if (key == NULL) {
     lc_pouch_txn_buffer_cleanup(&body);
+    lc_pouch_namespace_config_record_cleanup(&record);
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
   source = NULL;
@@ -12814,6 +12847,7 @@ int lc_pouch_client_update_namespace_config_method(
   options.has_query_hidden = 1;
   options.query_hidden = 1;
   options.object_record = 1;
+  options.expected_etag = req->if_etag;
   if (rc == LC_OK) {
     rc = lc_pouch_state_write(client->pouch, namespace_name, key, source,
                               &options, &write_result, error);
@@ -12822,12 +12856,22 @@ int lc_pouch_client_update_namespace_config_method(
     lc_source_close(source);
   }
   if (rc == LC_OK) {
+    lc_free_with_allocator(NULL, record.etag);
+    record.etag = lc_strdup_local(write_result.etag);
+    if (record.etag == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch namespace config etag", NULL,
+                        NULL, NULL);
+    }
+  }
+  if (rc == LC_OK) {
     rc =
         lc_pouch_namespace_config_response(out, namespace_name, &record, error);
   }
   lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
   lc_pouch_txn_buffer_cleanup(&body);
   lc_free_with_allocator(NULL, key);
+  lc_pouch_namespace_config_record_cleanup(&record);
   return rc;
 }
 

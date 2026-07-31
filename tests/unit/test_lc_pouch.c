@@ -4024,11 +4024,13 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   lc_source *source;
   lc_error error;
   char root[512];
+  char *first_config_etag;
   int rc;
 
   (void)state;
   client = NULL;
   source = NULL;
+  first_config_etag = NULL;
   memset(&ns_res, 0, sizeof(ns_res));
   memset(&update_res, 0, sizeof(update_res));
   memset(&query_res, 0, sizeof(query_res));
@@ -4052,6 +4054,7 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   assert_string_equal(ns_res.namespace_name, namespace_name);
   assert_string_equal(ns_res.preferred_engine, "index");
   assert_string_equal(ns_res.fallback_engine, "none");
+  assert_string_equal(ns_res.etag, "");
   lc_namespace_config_res_cleanup(&ns_res);
 
   ns_req.preferred_engine = "scan";
@@ -4060,6 +4063,10 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(ns_res.preferred_engine, "scan");
   assert_string_equal(ns_res.fallback_engine, "none");
+  assert_non_null(ns_res.etag);
+  assert_true(ns_res.etag[0] != '\0');
+  first_config_etag = lc_strdup_local(ns_res.etag);
+  assert_non_null(first_config_etag);
   lc_namespace_config_res_cleanup(&ns_res);
 
   update_req.lease.namespace_name = namespace_name;
@@ -4101,11 +4108,25 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
 
   ns_req.preferred_engine = NULL;
   ns_req.fallback_engine = "scan";
+  ns_req.if_etag = first_config_etag;
   rc = client->update_namespace_config(client, &ns_req, &ns_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(ns_res.preferred_engine, "scan");
   assert_string_equal(ns_res.fallback_engine, "scan");
+  assert_non_null(ns_res.etag);
+  assert_true(strcmp(ns_res.etag, first_config_etag) != 0);
   lc_namespace_config_res_cleanup(&ns_res);
+
+  ns_req.preferred_engine = "index";
+  ns_req.fallback_engine = NULL;
+  ns_req.if_etag = first_config_etag;
+  rc = client->update_namespace_config(client, &ns_req, &ns_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "etag precondition failed"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_namespace_config_res_cleanup(&ns_res);
+  ns_req.if_etag = NULL;
 
   lc_client_close(client);
   client = NULL;
@@ -4131,6 +4152,7 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
 
   lc_error_cleanup(&error);
+  lc_free_with_allocator(NULL, first_config_etag);
   if (source != NULL) {
     source->close(source);
   }

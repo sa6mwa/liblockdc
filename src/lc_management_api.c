@@ -13,6 +13,7 @@ typedef struct lc_engine_namespace_query_json {
 typedef struct lc_engine_namespace_config_response_json {
   char *namespace_name;
   lc_engine_namespace_query_json query;
+  char *etag;
 } lc_engine_namespace_config_response_json;
 
 typedef struct lc_engine_index_flush_response_json {
@@ -95,7 +96,9 @@ static const lonejson_field lc_engine_namespace_config_response_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_config_response_json,
                                 namespace_name, "namespace"),
     LONEJSON_FIELD_OBJECT(lc_engine_namespace_config_response_json, query,
-                          "query", &lc_engine_namespace_query_map)};
+                          "query", &lc_engine_namespace_query_map),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_config_response_json, etag,
+                                "etag")};
 
 LONEJSON_MAP_DEFINE(lc_engine_namespace_config_response_map,
                     lc_engine_namespace_config_response_json,
@@ -368,6 +371,7 @@ void lc_engine_namespace_config_response_cleanup(
   lc_engine_free_string(&response->namespace_name);
   lc_engine_free_string(&response->preferred_engine);
   lc_engine_free_string(&response->fallback_engine);
+  lc_engine_free_string(&response->etag);
   lc_engine_free_string(&response->correlation_id);
 }
 
@@ -501,11 +505,13 @@ lc_engine_parse_namespace_response(const void *parsed_json,
       lc_engine_strdup_local(parsed->query.preferred_engine);
   response->fallback_engine =
       lc_engine_strdup_local(parsed->query.fallback_engine);
+  response->etag = lc_engine_strdup_local(parsed->etag);
   if ((parsed->namespace_name != NULL && response->namespace_name == NULL) ||
       (parsed->query.preferred_engine != NULL &&
        response->preferred_engine == NULL) ||
       (parsed->query.fallback_engine != NULL &&
-       response->fallback_engine == NULL)) {
+       response->fallback_engine == NULL) ||
+      (parsed->etag != NULL && response->etag == NULL)) {
     lc_engine_namespace_config_response_cleanup(response);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate namespace response");
@@ -857,7 +863,8 @@ int lc_engine_client_update_namespace_config(
   lc_engine_namespace_config_response_json body_src;
   lc_engine_namespace_config_response_json parsed;
   lc_engine_http_result result;
-  lc_engine_header_pair headers[1];
+  lc_engine_header_pair headers[2];
+  size_t header_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -876,12 +883,19 @@ int lc_engine_client_update_namespace_config(
       (char *)lc_engine_effective_namespace(client, request->namespace_name);
   body_src.query.preferred_engine = (char *)request->preferred_engine;
   body_src.query.fallback_engine = (char *)request->fallback_engine;
+  header_count = 0U;
   headers[0].name = "Content-Type";
   headers[0].value = "application/json";
+  header_count += 1U;
+  if (request->if_etag != NULL && request->if_etag[0] != '\0') {
+    headers[header_count].name = "X-If-Config-ETag";
+    headers[header_count].value = request->if_etag;
+    header_count += 1U;
+  }
   rc = lc_engine_http_json_request_stream(
       client, "PUT", "/v1/namespace", &lc_engine_namespace_config_body_map,
-      &body_src, headers, 1U, &lc_engine_namespace_config_response_map, &parsed,
-      &result, error);
+      &body_src, headers, header_count, &lc_engine_namespace_config_response_map,
+      &parsed, &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }

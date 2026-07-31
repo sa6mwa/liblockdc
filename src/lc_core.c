@@ -2266,6 +2266,7 @@ void lc_namespace_config_res_cleanup(lc_namespace_config_res *response) {
   free(response->namespace_name);
   free(response->preferred_engine);
   free(response->fallback_engine);
+  free(response->etag);
   free(response->correlation_id);
   memset(response, 0, sizeof(*response));
 }

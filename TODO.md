@@ -232,12 +232,17 @@ Pouch before editing the corresponding C code.
     `tc-rm-members` with C-native binary payload and CAS by Pouch version. Do
     not store one object per endpoint and do not reintroduce `.lockd/tc-rm`.
 
-- [ ] `../lockd/namespaces/config_store.go`
+- [x] `../lockd/namespaces/config_store.go`
   - Namespace config key `config/namespace.pb`, cache TTL, load/save CAS and
     crypto behavior.
   - Pouch obligation: store pouch namespace config in the configured namespace
     under `config/namespace` or an explicitly documented C-native suffix, never
     in `.lockd/namespace-config`.
+  - Latest audit result: Pouch uses namespace-local `config/namespace` as a
+    query-hidden object, returns empty etag for default/missing config, returns
+    object etag for stored config, and enforces `if_etag` CAS on updates.
+    Pouch does not use Go's protobuf suffix or cache implementation; those are
+    documented C-native/API divergences.
 
 ## Slice 1: Keyspace Cutover
 

@@ -378,6 +378,10 @@ Go disk namespace config is an object in the configured namespace:
 Pouch must store namespace config in the configured namespace, not in a global
 namespace. The Pouch key is `config/namespace` unless a C-native suffix is
 explicitly selected before implementation. The object is internal/query-hidden.
+Pouch returns the config object's etag on get/update and enforces
+`lc_namespace_config_req.if_etag` on update with the same stale-etag failure
+shape as other Pouch CAS writes. The missing-config default response returns an
+empty etag.
 
 ### Staging
 
@@ -508,6 +512,14 @@ Every divergence from Go disk belongs in one of these two buckets.
   state to the DLQ keys. Reason: this preserves the same durable DLQ end state
   without adding a background cache layer; callers observe the terminal message
   removed from the live queue immediately.
+
+- Namespace config cache:
+  Go wraps namespace config loads in a short TTL cache above the storage
+  backend. Pouch reads the namespace-local config object through its in-process
+  logstore projection and does not add a separate config TTL cache. Reason: the
+  Pouch projection already keeps the hot object metadata in memory, while
+  preserving the same durable object, default-on-missing behavior, and update
+  CAS semantics.
 
 - Public names and diagnostics:
   Pouch uses Pouch terminology in files, errors, events, and durable metadata.
