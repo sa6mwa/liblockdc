@@ -49,12 +49,13 @@ paths named above. The audit is a source-level comparison; it does not claim
 that Pouch files can be opened by Go disk or that their public storage APIs are
 interchangeable.
 
-Within a 64-bit C `long` runtime, no unresolved durable-logstore semantic gap
-was found in the audited surface: namespace locality, record families, streamed
+No unresolved durable-logstore semantic gap was found in the audited surface:
+namespace locality, record families, fixed-width durable scalars, streamed
 payload spans, replay/tail repair, staged links, grouped sync, and
-capture/validate/install compaction all preserve the Go disk property. The
-divergences below remain material for configuration, operations, portability,
-or raw-backend users and must not be described as byte or API compatibility.
+capture/validate/install compaction all preserve the Go disk property on every
+supported C ABI. The divergences below remain material for configuration,
+operations, portability, or raw-backend users and must not be described as byte
+or API compatibility.
 
 ## Go Disk Alignment Contract
 
@@ -151,6 +152,17 @@ Go disk record metadata carries:
 - payload CRC in the physical header.
 
 Pouch must carry the same logical facts in C-native binary metadata and refs.
+Durable generations and index high-water values use
+`lc_pouch_generation` (`uint64_t`); durable Unix timestamps use
+`lc_pouch_unix_seconds` (`int64_t`). The generic C API follows Go's public
+boundary with `lc_version` (`int64_t`) for object versions,
+`lc_unix_seconds` (`int64_t`) for timestamps, and `lc_index_seq` (`uint64_t`)
+for query/index sequences. Transaction-coordinator terms use `lc_tc_term`
+(`uint64_t`), and queue enqueue ordering tokens remain `uint64_t` across their
+binary encode/decode path. A physical generation is range-checked before it is
+exposed as an API version, preserving Go's signed public version contract
+without narrowing the durable counter on ILP32.
+
 Pouch additionally uses `uint64_t` payload lengths and offsets. This is an
 accepted divergence from Go's 32-bit physical payload length because Pouch's
 large-payload/file-size invariant is stronger.
@@ -605,17 +617,6 @@ divergence.
   segment id as snapshot identity. Rewriting a snapshot alone has no data or
   durability effect, so Pouch deliberately skips that physical churn.
 
-- Counter and timestamp ABI limits:
-  Durable Pouch metadata encodes generations, high-water values, and timestamps
-  in 64-bit fields, but the current C API/cache/manifest exposes generations
-  and high-water values as `unsigned long` and timestamps as `long`. Pouch
-  rejects a decoded generation or high-water value above `ULONG_MAX`; timestamp
-  range follows the target C ABI. Consequently, the audited storage semantics
-  are fully aligned on 64-bit `long` targets, while ILP32 builds do not provide
-  Go's full `uint64` generation or `int64` timestamp range. This limitation is
-  separate from file sizes and offsets, which remain `uint64_t` on every
-  target.
-
 ### Removed Rejected Divergences
 
 The source sweep found no durable use of `.lockd/queue`, `.lockd/attachments`,
@@ -624,6 +625,14 @@ namespace-config data are namespace-local; object rows retain object record
 families and query-hidden visibility; and lease hot paths use target-key
 metadata rather than parsing user JSON. Reintroducing any of those layouts is
 an unaccepted divergence.
+
+Architecture-dependent durable scalar widths are also removed: Pouch no longer
+uses `unsigned long` or `long` for persisted generations, index high-water
+values, Unix timestamps, TC terms, or queue enqueue ordering tokens, and no
+longer rejects valid 64-bit generations at an `ULONG_MAX` boundary. The Pouch
+direct API, namespace manifests, projection cache, query-index artifacts,
+queue/TC binary records, and generic client boundary use the fixed-width types
+stated above.
 
 ## Non-Negotiable Model
 

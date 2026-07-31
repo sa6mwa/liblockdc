@@ -585,7 +585,7 @@ int lc_client_load_method(lc_client *self, const char *key,
   char *content_type;
   char *etag;
   char *correlation_id;
-  long version;
+  lc_version version;
   long fencing_token;
   int rc;
 
@@ -1895,7 +1895,7 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
     fields[0] = lc_log_str_field("ns", req->namespace_name);
     fields[1] = lc_log_str_field("return_mode", out->return_mode);
     fields[2] = lc_log_str_field("cursor", out->cursor);
-    fields[3] = pslog_i64("index_seq", (pslog_int64)out->index_seq);
+    fields[3] = lc_log_u64_field("index_seq", out->index_seq);
     fields[4] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "query.success", fields, 5U);
   }
@@ -2074,7 +2074,7 @@ int lc_client_query_keys_method(lc_client *self, const lc_query_req *req,
     fields[0] = lc_log_str_field("ns", req->namespace_name);
     fields[1] = lc_log_str_field("return_mode", out->return_mode);
     fields[2] = lc_log_str_field("cursor", out->cursor);
-    fields[3] = pslog_i64("index_seq", (pslog_int64)out->index_seq);
+    fields[3] = lc_log_u64_field("index_seq", out->index_seq);
     fields[4] = lc_log_str_field("cid", out->correlation_id);
     lc_log_trace(client->logger, "query_keys.success", fields, 5U);
   }

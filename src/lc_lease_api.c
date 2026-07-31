@@ -99,9 +99,9 @@ lc_lease_duplicate_get_metadata(const char *content_type, const char *etag,
 }
 
 static int lc_lease_refresh_state_view(lc_lease_handle *lease,
-                                       const char *state_etag, long version,
+                                       const char *state_etag, lc_version version,
                                        long fencing_token,
-                                       long lease_expires_at_unix,
+                                       lc_unix_seconds lease_expires_at_unix,
                                        lc_error *error) {
   char *state_etag_copy;
 
@@ -131,7 +131,8 @@ static int lc_lease_refresh_state_view(lc_lease_handle *lease,
 }
 
 static int lc_lease_refresh_new_state_etag(lc_lease_handle *lease,
-                                           const char *state_etag, long version,
+                                           const char *state_etag,
+                                           lc_version version,
                                            lc_error *error) {
   char *state_etag_copy;
 
@@ -346,7 +347,7 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
   char *content_type;
   char *etag;
   char *correlation_id;
-  long version;
+  lc_version version;
   long fencing_token;
   int rc;
 

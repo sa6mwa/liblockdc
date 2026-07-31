@@ -29,7 +29,7 @@ typedef struct lc_engine_body_capture_state {
 } lc_engine_body_capture_state;
 typedef struct lc_engine_query_response_json {
   char *cursor;
-  lonejson_int64 index_seq;
+  lonejson_uint64 index_seq;
 } lc_engine_query_response_json;
 typedef struct lc_engine_query_body_json {
   char *namespace_name;
@@ -95,7 +95,7 @@ static const lonejson_field lc_engine_mutate_body_fields[] = {
 static const lonejson_field lc_engine_query_response_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_query_response_json, cursor,
                                 "cursor"),
-    LONEJSON_FIELD_I64(lc_engine_query_response_json, index_seq, "index_seq")};
+    LONEJSON_FIELD_U64(lc_engine_query_response_json, index_seq, "index_seq")};
 LONEJSON_MAP_DEFINE(lc_engine_query_response_map, lc_engine_query_response_json,
                     lc_engine_query_response_fields);
 typedef struct lc_engine_dequeue_capture_state {
@@ -1894,7 +1894,7 @@ int lc_engine_client_query(lc_engine_client *client,
   if (parsed.cursor != NULL && response->cursor == NULL) {
     rc = LC_ENGINE_ERROR_NO_MEMORY;
   }
-  response->index_seq = (unsigned long)parsed.index_seq;
+  response->index_seq = (lc_index_seq)parsed.index_seq;
   if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
     if (response->correlation_id == NULL) {

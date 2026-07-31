@@ -1,6 +1,5 @@
 #include "lc_internal.h"
 
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,7 +22,7 @@ typedef struct lc_engine_index_flush_response_json {
   bool accepted;
   bool flushed;
   bool pending;
-  lonejson_int64 index_seq;
+  lonejson_uint64 index_seq;
 } lc_engine_index_flush_response_json;
 
 typedef struct lc_engine_txn_response_json {
@@ -35,7 +34,7 @@ typedef struct lc_engine_tc_lease_response_json {
   bool granted;
   char *leader_id;
   char *leader_endpoint;
-  lonejson_int64 term;
+  lonejson_uint64 term;
   lonejson_int64 expires_at;
 } lc_engine_tc_lease_response_json;
 
@@ -78,7 +77,7 @@ typedef struct lc_engine_txn_decision_body_json {
   char *state;
   lonejson_object_array participants;
   lonejson_int64 expires_at_unix;
-  lonejson_int64 tc_term;
+  lonejson_uint64 tc_term;
   char *target_backend_hash;
 } lc_engine_txn_decision_body_json;
 
@@ -117,7 +116,7 @@ static const lonejson_field lc_engine_index_flush_response_fields[] = {
                         "flushed"),
     LONEJSON_FIELD_BOOL(lc_engine_index_flush_response_json, pending,
                         "pending"),
-    LONEJSON_FIELD_I64(lc_engine_index_flush_response_json, index_seq,
+    LONEJSON_FIELD_U64(lc_engine_index_flush_response_json, index_seq,
                        "index_seq")};
 
 LONEJSON_MAP_DEFINE(lc_engine_index_flush_response_map,
@@ -154,7 +153,7 @@ static const lonejson_field lc_engine_txn_decision_body_fields[] = {
                                 LONEJSON_OVERFLOW_FAIL),
     LONEJSON_FIELD_I64(lc_engine_txn_decision_body_json, expires_at_unix,
                        "expires_at_unix"),
-    LONEJSON_FIELD_I64(lc_engine_txn_decision_body_json, tc_term, "tc_term"),
+    LONEJSON_FIELD_U64(lc_engine_txn_decision_body_json, tc_term, "tc_term"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_decision_body_json,
                                 target_backend_hash, "target_backend_hash")};
 
@@ -163,19 +162,19 @@ static const lonejson_field lc_engine_tc_lease_acquire_body_fields[] = {
                                 candidate_id, "candidate_id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_acquire_request,
                                 candidate_endpoint, "candidate_endpoint"),
-    LONEJSON_FIELD_I64(lc_engine_tc_lease_acquire_request, term, "term"),
+    LONEJSON_FIELD_U64(lc_engine_tc_lease_acquire_request, term, "term"),
     LONEJSON_FIELD_I64(lc_engine_tc_lease_acquire_request, ttl_ms, "ttl_ms")};
 
 static const lonejson_field lc_engine_tc_lease_renew_body_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_renew_request, leader_id,
                                 "leader_id"),
-    LONEJSON_FIELD_I64(lc_engine_tc_lease_renew_request, term, "term"),
+    LONEJSON_FIELD_U64(lc_engine_tc_lease_renew_request, term, "term"),
     LONEJSON_FIELD_I64(lc_engine_tc_lease_renew_request, ttl_ms, "ttl_ms")};
 
 static const lonejson_field lc_engine_tc_lease_release_body_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_release_request, leader_id,
                                 "leader_id"),
-    LONEJSON_FIELD_I64(lc_engine_tc_lease_release_request, term, "term")};
+    LONEJSON_FIELD_U64(lc_engine_tc_lease_release_request, term, "term")};
 
 static const lonejson_field lc_engine_tc_cluster_announce_body_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_cluster_announce_request,
@@ -206,7 +205,7 @@ static const lonejson_field lc_engine_tc_lease_response_fields[] = {
                                 "leader_id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_response_json,
                                 leader_endpoint, "leader_endpoint"),
-    LONEJSON_FIELD_I64(lc_engine_tc_lease_response_json, term, "term"),
+    LONEJSON_FIELD_U64(lc_engine_tc_lease_response_json, term, "term"),
     LONEJSON_FIELD_I64(lc_engine_tc_lease_response_json, expires_at,
                        "expires_at")};
 
@@ -274,20 +273,6 @@ static int lc_engine_mgmt_i64_to_long_checked(lonejson_int64 value,
                                               lonejson_int64 *out_value,
                                               lc_engine_error *error) {
   (void)label;
-  if (out_value == NULL) {
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
-                                      "missing i64 output");
-  }
-  *out_value = value;
-  return LC_ENGINE_OK;
-}
-
-static int lc_engine_mgmt_i64_to_int64_checked(lonejson_int64 value,
-                                               const char *label,
-                                               lonejson_int64 *out_value,
-                                               lc_engine_error *error) {
-  (void)label;
-
   if (out_value == NULL) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
                                       "missing i64 output");
@@ -543,7 +528,7 @@ static int lc_engine_parse_index_flush_response(
   response->accepted = parsed->accepted ? 1 : 0;
   response->flushed = parsed->flushed ? 1 : 0;
   response->pending = parsed->pending ? 1 : 0;
-  response->index_seq = (unsigned long)parsed->index_seq;
+  response->index_seq = (lc_index_seq)parsed->index_seq;
   lc_engine_mgmt_capture_correlation(result, &response->correlation_id);
   return LC_ENGINE_OK;
 }
@@ -587,11 +572,7 @@ static int lc_engine_parse_tc_lease_acquire_response(
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate tc lease response");
   }
-  if (lc_engine_mgmt_i64_to_int64_checked(
-          parsed->term, "tc lease term is out of range", &response->term,
-          error) != LC_ENGINE_OK) {
-    return LC_ENGINE_ERROR_PROTOCOL;
-  }
+  response->term = parsed->term;
   if (lc_engine_mgmt_i64_to_long_checked(
           parsed->expires_at, "tc lease expires_at is out of range",
           &response->expires_at_unix, error) != LC_ENGINE_OK) {
@@ -1031,7 +1012,7 @@ static int lc_engine_mgmt_build_txn_decision_body(
   if (request->expires_at_unix > 0L) {
     body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[3];
   }
-  if (request->tc_term > 0 && request->tc_term <= (lonejson_int64)LONG_MAX) {
+  if (request->tc_term > 0U) {
     body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[4];
   }
   if (request->target_backend_hash != NULL &&

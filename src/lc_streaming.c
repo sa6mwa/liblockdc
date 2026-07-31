@@ -196,13 +196,16 @@ static size_t lc_engine_stream_header_callback(char *buffer, size_t size,
     }
   } else if ((size_t)(colon - buffer) == 23U &&
              strncasecmp(buffer, "X-Lockd-Query-Index-Seq", 23U) == 0) {
-    if (!lc_parse_ulong_base10_range_checked(value, (size_t)(end - value),
-                                             &state->response->index_seq)) {
+    lc_u64 index_seq;
+
+    if (!lc_parse_u64_base10_range_checked(value, (size_t)(end - value),
+                                           &index_seq)) {
       lc_engine_set_protocol_error(state->error,
                                    "failed to parse query index sequence");
       state->header_failed = 1;
       return 0U;
     }
+    state->response->index_seq = (lc_index_seq)index_seq;
     state->response->index_seq_present = 1;
   } else if ((size_t)(colon - buffer) == 22U &&
              strncasecmp(buffer, "X-Lockd-Query-Metadata", 22U) == 0) {
@@ -296,11 +299,7 @@ static int lc_engine_query_keys_apply_body_metadata(
     }
   }
   if (!response->index_seq_present && body->has_index_seq) {
-    if (body->index_seq > (lonejson_uint64)ULONG_MAX) {
-      return lc_engine_set_protocol_error(error,
-                                          "query index sequence is too large");
-    }
-    response->index_seq = (unsigned long)body->index_seq;
+    response->index_seq = (lc_index_seq)body->index_seq;
     response->index_seq_present = 1;
   }
   if (response->metadata_json == NULL &&

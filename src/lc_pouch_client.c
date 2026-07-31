@@ -11,6 +11,7 @@
 #include <lql/lql.h>
 
 #include <errno.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -88,6 +89,7 @@ static int lc_pouch_txn_buffer_append_string(lc_pouch_txn_buffer *buffer,
                                              const char *value,
                                              lc_error *error);
 static int lc_pouch_txn_id_present(const char *txn_id);
+static int lc_pouch_now_unix(lc_pouch_unix_seconds *out, lc_error *error);
 static int lc_pouch_binary_cursor_magic(lc_pouch_binary_cursor *cursor,
                                         const char magic[4], lc_error *error);
 static int lc_pouch_binary_cursor_string(lc_pouch_binary_cursor *cursor,
@@ -100,7 +102,7 @@ typedef struct lc_pouch_mutate_file {
   FILE *fp;
   int found;
   char *etag;
-  unsigned long version;
+  lc_pouch_generation version;
 } lc_pouch_mutate_file;
 
 typedef struct lc_pouch_namespace_config_record {
@@ -114,9 +116,9 @@ typedef struct lc_pouch_tc_lease_record {
   int found;
   char *leader_id;
   char *leader_endpoint;
-  unsigned long term;
-  long expires_at_unix;
-  unsigned long version;
+  lc_tc_term term;
+  lc_pouch_unix_seconds expires_at_unix;
+  lc_pouch_generation version;
 } lc_pouch_tc_lease_record;
 
 typedef struct lc_pouch_lease_record {
@@ -127,8 +129,8 @@ typedef struct lc_pouch_lease_record {
   char *lease_id;
   char *txn_id;
   long fencing_token;
-  long expires_at_unix;
-  unsigned long version;
+  lc_pouch_unix_seconds expires_at_unix;
+  lc_pouch_generation version;
   int has_query_hidden;
   int query_hidden;
 } lc_pouch_lease_record;
@@ -139,10 +141,10 @@ typedef struct lc_pouch_acquire_context {
   const char *namespace_name;
   lc_pouch_state_read_result read_result;
   lc_pouch_state_write_result lease_write_result;
-  long lease_expires_at_unix;
-  long held_until_unix;
+  lc_pouch_unix_seconds lease_expires_at_unix;
+  lc_pouch_unix_seconds held_until_unix;
   long fencing_token;
-  unsigned long version;
+  lc_pouch_generation version;
   int has_query_hidden;
   int query_hidden;
   int acquired;
@@ -153,22 +155,22 @@ typedef struct lc_pouch_tc_endpoint_list {
   char **items;
   size_t count;
   size_t capacity;
-  long updated_at_unix;
-  long expires_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
+  lc_pouch_unix_seconds expires_at_unix;
 } lc_pouch_tc_endpoint_list;
 
 typedef struct lc_pouch_tc_rm_registry {
   lc_tc_rm_backend *backends;
   size_t backend_count;
   size_t backend_capacity;
-  long updated_at_unix;
-  unsigned long version;
+  lc_pouch_unix_seconds updated_at_unix;
+  lc_pouch_generation version;
   int found;
 } lc_pouch_tc_rm_registry;
 
 typedef struct lc_pouch_attachment_key_ref {
   char *key;
-  unsigned long version;
+  lc_pouch_generation version;
 } lc_pouch_attachment_key_ref;
 
 typedef struct lc_pouch_attachment_list_builder {
@@ -193,15 +195,15 @@ typedef struct lc_pouch_queue_record {
   char *lease_txn_id;
   char *meta_etag;
   long lease_fencing_token;
-  unsigned long version;
+  lc_pouch_generation version;
   int attempts;
   int max_attempts;
   int failure_attempts;
-  long enqueued_at_unix;
+  lc_pouch_unix_seconds enqueued_at_unix;
   long enqueued_at_nsec;
-  unsigned long enqueue_sequence;
-  long expires_at_unix;
-  long not_visible_until_unix;
+  uint64_t enqueue_sequence;
+  lc_pouch_unix_seconds expires_at_unix;
+  lc_pouch_unix_seconds not_visible_until_unix;
   long visibility_timeout_seconds;
   unsigned char *payload;
   size_t payload_length;
@@ -219,8 +221,8 @@ typedef struct lc_pouch_queue_scan {
 
 typedef struct lc_pouch_txn_record {
   char *state;
-  long expires_at_unix;
-  unsigned long tc_term;
+  lc_pouch_unix_seconds expires_at_unix;
+  lc_tc_term tc_term;
   char *target_backend_hash;
   lc_txn_participant *participants;
   size_t participant_count;
@@ -325,7 +327,7 @@ typedef struct lc_pouch_query_scan_context {
   size_t emitted;
   size_t matched;
   size_t limit;
-  unsigned long index_seq;
+  lc_pouch_generation index_seq;
   const char *any_text_contains_needle;
   int any_text_contains_ignore_case;
   const lc_pouch_query_index_plan *scan_scalar_plan;
@@ -336,7 +338,7 @@ typedef struct lc_pouch_query_scan_context {
 } lc_pouch_query_scan_context;
 
 static void lc_pouch_query_track_index_seq(lc_pouch_query_scan_context *context,
-                                           unsigned long seq) {
+                                           lc_pouch_generation seq) {
   if (context != NULL && context->track_index_seq && seq > context->index_seq) {
     context->index_seq = seq;
   }
@@ -352,7 +354,7 @@ static int
 lc_pouch_query_page_mark_emitted(lc_pouch_query_scan_context *context,
                                  lc_error *error);
 static int lc_pouch_query_run_index_predicate(lc_pouch_query_scan_context *scan,
-                                              unsigned long *flushed_seq_out,
+                                              lc_pouch_generation *flushed_seq_out,
                                               lc_error *error);
 
 struct lc_pouch_query_index_plan {
@@ -4409,7 +4411,7 @@ static int lc_pouch_query_run_scan_predicate(lc_pouch_query_scan_context *scan,
     if (rc == LC_OK && lc_pouch_query_scan_scalar_plan_supported(&plan)) {
       scan->scan_scalar_plan = &plan;
       if (!scan->emit_documents) {
-        unsigned long flushed_seq;
+        lc_pouch_generation flushed_seq;
 
         flushed_seq = 0UL;
         scan->scan_scalar_plan = NULL;
@@ -4458,7 +4460,7 @@ static int lc_pouch_query_run_scan_predicate(lc_pouch_query_scan_context *scan,
 static int lc_pouch_query_flush_summary_index(lc_client_handle *client,
                                               const char *namespace_name,
                                               int validate_current,
-                                              unsigned long *index_seq,
+                                              lc_pouch_generation *index_seq,
                                               lc_error *error) {
   lc_pouch_query_index_flush_result flush_result;
   int rc;
@@ -4633,13 +4635,13 @@ lc_pouch_query_index_process_keys(lc_pouch_query_scan_context *context,
 }
 
 static int lc_pouch_query_run_index_predicate(lc_pouch_query_scan_context *scan,
-                                              unsigned long *flushed_seq_out,
+                                              lc_pouch_generation *flushed_seq_out,
                                               lc_error *error) {
   lc_pouch_query_index_plan plan;
   lc_pouch_query_index_key_set keys;
   lc_pouch_query_index_exact_document_page exact_document_page;
-  unsigned long flushed_seq;
-  unsigned long value_seq;
+  lc_pouch_generation flushed_seq;
+  lc_pouch_generation value_seq;
   size_t value_index;
   int indexed_candidates_exact;
   int processed_exact_documents;
@@ -4987,8 +4989,41 @@ run_index_query:
   return rc;
 }
 
+static int lc_pouch_generation_to_version(lc_pouch_generation generation,
+                                          lc_version *out, lc_error *error) {
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch version conversion requires output storage",
+                        NULL, NULL, NULL);
+  }
+  if (generation > (uint64_t)INT64_MAX) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch generation exceeds lockd version range", NULL,
+                        NULL, NULL);
+  }
+  *out = (lc_version)generation;
+  return LC_OK;
+}
+
+static int lc_pouch_version_to_generation(lc_version version,
+                                          lc_pouch_generation *out,
+                                          lc_error *error) {
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch generation conversion requires output storage",
+                        NULL, NULL, NULL);
+  }
+  if (version < 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch version must be non-negative", NULL, NULL,
+                        NULL);
+  }
+  *out = (lc_pouch_generation)version;
+  return LC_OK;
+}
+
 static int lc_pouch_lease_refresh_state(lc_lease_handle *lease,
-                                        const char *etag, long version,
+                                        const char *etag, lc_version version,
                                         lc_error *error) {
   char *etag_copy;
 
@@ -5018,7 +5053,7 @@ static void lc_pouch_lease_refresh_query_metadata(lc_lease_handle *lease,
   lease->pub.query_hidden = lease->query_hidden;
 }
 
-static int lc_pouch_now_unix(long *out, lc_error *error) {
+static int lc_pouch_now_unix(lc_pouch_unix_seconds *out, lc_error *error) {
   time_t now;
 
   if (out == NULL) {
@@ -5031,13 +5066,19 @@ static int lc_pouch_now_unix(long *out, lc_error *error) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to read pouch wall clock", NULL, NULL, NULL);
   }
-  *out = (long)now;
+  if (now > 0 && (uintmax_t)now > (uintmax_t)INT64_MAX) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch wall clock exceeds supported timestamp range",
+                        NULL, NULL, NULL);
+  }
+  *out = (lc_pouch_unix_seconds)now;
   return LC_OK;
 }
 
-static int lc_pouch_expiration_from_ttl(long ttl_seconds, long *out,
+static int lc_pouch_expiration_from_ttl(long ttl_seconds,
+                                        lc_pouch_unix_seconds *out,
                                         lc_error *error) {
-  long now;
+  lc_pouch_unix_seconds now;
   int rc;
 
   if (ttl_seconds <= 0L) {
@@ -5049,7 +5090,8 @@ static int lc_pouch_expiration_from_ttl(long ttl_seconds, long *out,
   if (rc != LC_OK) {
     return rc;
   }
-  if (ttl_seconds > LONG_MAX - now) {
+  if ((uintmax_t)ttl_seconds > (uintmax_t)INT64_MAX ||
+      now > INT64_MAX - (lc_pouch_unix_seconds)ttl_seconds) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch ttl_seconds exceeds supported range", NULL, NULL,
                         NULL);
@@ -5058,8 +5100,10 @@ static int lc_pouch_expiration_from_ttl(long ttl_seconds, long *out,
   return LC_OK;
 }
 
-static int lc_pouch_timestamp_add(long base, long delta, const char *field,
-                                  long *out, lc_error *error) {
+static int lc_pouch_timestamp_add(lc_pouch_unix_seconds base, long delta,
+                                  const char *field,
+                                  lc_pouch_unix_seconds *out,
+                                  lc_error *error) {
   char message[128];
 
   if (out == NULL) {
@@ -5072,7 +5116,8 @@ static int lc_pouch_timestamp_add(long base, long delta, const char *field,
              field != NULL ? field : "duration");
     return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
   }
-  if (delta > LONG_MAX - base) {
+  if ((uintmax_t)delta > (uintmax_t)INT64_MAX ||
+      base > INT64_MAX - (lc_pouch_unix_seconds)delta) {
     snprintf(message, sizeof(message),
              "pouch %s exceeds supported timestamp range",
              field != NULL ? field : "duration");
@@ -5082,8 +5127,8 @@ static int lc_pouch_timestamp_add(long base, long delta, const char *field,
   return LC_OK;
 }
 
-static void lc_pouch_lease_refresh_expiration(lc_lease_handle *lease,
-                                              long lease_expires_at_unix) {
+static void lc_pouch_lease_refresh_expiration(
+    lc_lease_handle *lease, lc_pouch_unix_seconds lease_expires_at_unix) {
   if (lease == NULL) {
     return;
   }
@@ -5109,7 +5154,12 @@ static int lc_pouch_client_copy_state_metadata(
   }
   out->content_type = content_type;
   out->etag = etag;
-  out->version = (long)read_result->version;
+  if (lc_pouch_generation_to_version(read_result->version, &out->version,
+                                     error) != LC_OK) {
+    lc_free_with_allocator(NULL, content_type);
+    lc_free_with_allocator(NULL, etag);
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  }
   out->no_content = !read_result->found;
   return LC_OK;
 }
@@ -5125,8 +5175,12 @@ static int lc_pouch_client_copy_update_metadata(
                         "failed to allocate pouch update metadata", NULL, NULL,
                         NULL);
   }
+  if (lc_pouch_generation_to_version(write_result->version, &out->new_version,
+                                     error) != LC_OK) {
+    lc_free_with_allocator(NULL, etag);
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  }
   out->new_state_etag = etag;
-  out->new_version = (long)write_result->version;
   out->bytes = (long)write_result->bytes;
   return LC_OK;
 }
@@ -5142,8 +5196,12 @@ static int lc_pouch_client_copy_mutate_metadata(
                         "failed to allocate pouch mutate metadata", NULL, NULL,
                         NULL);
   }
+  if (lc_pouch_generation_to_version(write_result->version, &out->new_version,
+                                     error) != LC_OK) {
+    lc_free_with_allocator(NULL, etag);
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  }
   out->new_state_etag = etag;
-  out->new_version = (long)write_result->version;
   out->bytes = (long)write_result->bytes;
   return LC_OK;
 }
@@ -5792,7 +5850,7 @@ static int lc_pouch_size_to_public_long(uint64_t size, long *out,
 static int lc_pouch_attachment_info_fill(lc_attachment_info *info,
                                          const char *name, uint64_t size,
                                          const char *content_type,
-                                         unsigned long version,
+                                         lc_pouch_generation version,
                                          lc_error *error) {
   long public_size;
   int rc;
@@ -5816,8 +5874,12 @@ static int lc_pouch_attachment_info_fill(lc_attachment_info *info,
                         NULL, NULL);
   }
   info->size = public_size;
-  info->created_at_unix = (long)version;
-  info->updated_at_unix = (long)version;
+  rc = lc_pouch_generation_to_version(version, &info->created_at_unix, error);
+  if (rc != LC_OK) {
+    lc_attachment_info_cleanup(info);
+    return rc;
+  }
+  info->updated_at_unix = info->created_at_unix;
   return LC_OK;
 }
 
@@ -5903,7 +5965,7 @@ static void lc_pouch_attachment_list_builder_cleanup(
 
 static int
 lc_pouch_attachment_append_key(lc_pouch_attachment_list_builder *builder,
-                               const char *key, unsigned long version,
+                               const char *key, lc_pouch_generation version,
                                lc_error *error) {
   lc_pouch_attachment_key_ref *next;
   char *copy;
@@ -5935,7 +5997,7 @@ lc_pouch_attachment_append_key(lc_pouch_attachment_list_builder *builder,
 
 static int lc_pouch_attachment_append_info(
     lc_pouch_attachment_list_builder *builder, const char *name, uint64_t size,
-    const char *content_type, unsigned long version, lc_error *error) {
+    const char *content_type, lc_pouch_generation version, lc_error *error) {
   lc_attachment_info *next;
   size_t capacity;
   int rc;
@@ -6804,14 +6866,15 @@ static char *lc_pouch_queue_state_object_key_from_lease_key(
   return key;
 }
 
-static char *lc_pouch_queue_message_id(long *seconds_out, long *nanos_out,
-                                       unsigned long *sequence_out,
+static char *lc_pouch_queue_message_id(lc_pouch_unix_seconds *seconds_out,
+                                       long *nanos_out,
+                                       uint64_t *sequence_out,
                                        lc_error *error) {
-  static unsigned long counter;
+  static uint64_t counter;
   struct timespec now;
   char text[128];
-  unsigned long candidate;
-  unsigned long sequence;
+  uint64_t candidate;
+  uint64_t sequence;
 
   if (seconds_out == NULL || nanos_out == NULL || sequence_out == NULL) {
     (void)lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -6825,32 +6888,39 @@ static char *lc_pouch_queue_message_id(long *seconds_out, long *nanos_out,
                        NULL, NULL);
     return NULL;
   }
-  if ((unsigned long)now.tv_sec >
-      (ULONG_MAX - (unsigned long)now.tv_nsec) / 1000000000UL) {
-    candidate = counter < ULONG_MAX ? counter + 1UL : ULONG_MAX;
+  if (now.tv_sec < 0 ||
+      (uintmax_t)now.tv_sec >
+          ((uintmax_t)UINT64_MAX - (uintmax_t)now.tv_nsec) / 1000000000U) {
+    candidate = counter < UINT64_MAX ? counter + 1U : UINT64_MAX;
   } else {
-    candidate = ((unsigned long)now.tv_sec * 1000000000UL) +
-                (unsigned long)now.tv_nsec;
+    candidate = ((uint64_t)now.tv_sec * 1000000000U) +
+                (uint64_t)now.tv_nsec;
   }
   pthread_mutex_lock(&lc_pouch_queue_message_id_mutex);
   if (candidate <= counter) {
-    if (counter == ULONG_MAX) {
+    if (counter == UINT64_MAX) {
       pthread_mutex_unlock(&lc_pouch_queue_message_id_mutex);
       (void)lc_error_set(error, LC_ERR_INVALID, 0L,
                          "pouch queue message id sequence overflow", NULL, NULL,
                          NULL);
       return NULL;
     }
-    candidate = counter + 1UL;
+    candidate = counter + 1U;
   }
   counter = candidate;
   sequence = counter;
   pthread_mutex_unlock(&lc_pouch_queue_message_id_mutex);
-  *seconds_out = (long)now.tv_sec;
+  if (now.tv_sec > 0 && (uintmax_t)now.tv_sec > (uintmax_t)INT64_MAX) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch queue clock exceeds supported timestamp range",
+                       NULL, NULL, NULL);
+    return NULL;
+  }
+  *seconds_out = (lc_pouch_unix_seconds)now.tv_sec;
   *nanos_out = (long)now.tv_nsec;
   *sequence_out = sequence;
-  snprintf(text, sizeof(text), "pouch-msg-%ld-%020ld-%09ld-%020lu",
-           (long)getpid(), (long)now.tv_sec, (long)now.tv_nsec, sequence);
+  snprintf(text, sizeof(text), "pouch-msg-%ld-%020" PRId64 "-%09ld-%020" PRIu64,
+           (long)getpid(), (int64_t)now.tv_sec, (long)now.tv_nsec, sequence);
   return lc_strdup_local(text);
 }
 
@@ -6934,8 +7004,8 @@ static int lc_pouch_queue_record_header(const lc_pouch_queue_record *record,
         &buffer, (int64_t)record->enqueued_at_nsec, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_txn_buffer_append_u64(
-        &buffer, (uint64_t)record->enqueue_sequence, error);
+    rc = lc_pouch_txn_buffer_append_u64(&buffer, record->enqueue_sequence,
+                                        error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_i64(
@@ -7018,18 +7088,22 @@ static void lc_pouch_lease_record_cleanup(lc_pouch_lease_record *record) {
 
 static void lc_pouch_generate_lease_id(char *buffer, size_t buffer_size) {
   unsigned long sequence;
-  long now_seconds;
+  lc_pouch_unix_seconds now_seconds;
 
   pthread_mutex_lock(&lc_pouch_lease_id_mutex);
   sequence = ++lc_pouch_lease_id_counter;
   pthread_mutex_unlock(&lc_pouch_lease_id_mutex);
-  now_seconds = (long)time(NULL);
-  snprintf(buffer, buffer_size, "pouch-lease-%ld-%lu", now_seconds, sequence);
+  now_seconds = 0;
+  if (lc_pouch_now_unix(&now_seconds, NULL) != LC_OK) {
+    now_seconds = 0;
+  }
+  snprintf(buffer, buffer_size, "pouch-lease-%" PRId64 "-%lu", now_seconds,
+           sequence);
 }
 
 static int
 lc_pouch_lease_record_parse(lc_client_handle *client, const unsigned char *bytes,
-                            size_t length, unsigned long version,
+                            size_t length, lc_pouch_generation version,
                             lc_pouch_lease_record *record, lc_error *error) {
   lc_pouch_binary_cursor cursor;
   int64_t signed_value;
@@ -7066,7 +7140,7 @@ lc_pouch_lease_record_parse(lc_client_handle *client, const unsigned char *bytes
   }
   if (rc == LC_OK) {
     rc = lc_pouch_binary_cursor_i64(&cursor, &signed_value, error);
-    record->expires_at_unix = (long)signed_value;
+    record->expires_at_unix = (lc_pouch_unix_seconds)signed_value;
   }
   if (rc == LC_OK && cursor.offset != cursor.length) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -7126,7 +7200,8 @@ static int lc_pouch_write_lease_record_locked(void *context, lc_error *error) {
 static int lc_pouch_write_lease_record_with_lock_state(
     lc_client_handle *client, const char *namespace_name, const char *key,
     const char *owner, const char *lease_id, const char *txn_id,
-    long fencing_token, long expires_at_unix, unsigned long expected_version,
+    long fencing_token, lc_pouch_unix_seconds expires_at_unix,
+    lc_pouch_generation expected_version,
     int namespace_locked, int force_query_hidden,
     lc_pouch_state_write_result *out, lc_error *error) {
   lc_pouch_txn_buffer buffer;
@@ -7193,7 +7268,8 @@ static int lc_pouch_write_lease_record_with_lock_state(
 static int lc_pouch_write_lease_record(
     lc_client_handle *client, const char *namespace_name, const char *key,
     const char *owner, const char *lease_id, const char *txn_id,
-    long fencing_token, long expires_at_unix, unsigned long expected_version,
+    long fencing_token, lc_pouch_unix_seconds expires_at_unix,
+    lc_pouch_generation expected_version,
     lc_pouch_state_write_result *out, lc_error *error) {
   return lc_pouch_write_lease_record_with_lock_state(
       client, namespace_name, key, owner, lease_id, txn_id, fencing_token,
@@ -7204,7 +7280,7 @@ static int lc_pouch_write_lease_tombstone(lc_client_handle *client,
                                           const char *namespace_name,
                                           const char *key, const char *owner,
                                           long fencing_token,
-                                          unsigned long expected_version,
+                                          lc_pouch_generation expected_version,
                                           lc_error *error) {
   lc_pouch_state_write_result result;
   int rc;
@@ -7249,7 +7325,7 @@ static int lc_pouch_validate_lease_record(lc_client_handle *client,
   lc_pouch_lease_record *target;
   const char *lease_txn_id;
   const char *stored_txn_id;
-  long now_seconds;
+  lc_pouch_unix_seconds now_seconds;
   int rc;
 
   if (!lc_pouch_lease_ref_has_credentials(lease)) {
@@ -7270,7 +7346,11 @@ static int lc_pouch_validate_lease_record(lc_client_handle *client,
   if (rc != LC_OK) {
     return rc;
   }
-  now_seconds = (long)time(NULL);
+  rc = lc_pouch_now_unix(&now_seconds, error);
+  if (rc != LC_OK) {
+    lc_pouch_lease_record_cleanup(target);
+    return rc;
+  }
   if (!target->found || strcmp(target->namespace_name, namespace_name) != 0 ||
       strcmp(target->key, key) != 0 ||
       strcmp(target->lease_id, lease->lease_id) != 0 ||
@@ -7305,11 +7385,12 @@ static int lc_pouch_lease_precondition_check(void *context, lc_error *error) {
 static int lc_pouch_queue_acquire_message_lease(
     lc_client_handle *client, const char *namespace_name,
     const lc_dequeue_req *req, const char *message_lease_key,
-    const char *lease_id, long lease_expires_at_unix, long now_seconds,
+    const char *lease_id, lc_pouch_unix_seconds lease_expires_at_unix,
+    lc_pouch_unix_seconds now_seconds,
     long *fencing_token_out, int *acquired_out, lc_error *error) {
   lc_pouch_lease_record lease_record;
   lc_pouch_state_write_result write_result;
-  unsigned long expected_version;
+  lc_pouch_generation expected_version;
   long fencing_token;
   const char *owner;
   const char *txn_id;
@@ -7407,7 +7488,7 @@ static int lc_pouch_queue_clear_message_lease(lc_client_handle *client,
 
 static int lc_pouch_queue_extend_message_lease(
     lc_client_handle *client, const lc_message_ref *message,
-    long lease_expires_at_unix, lc_error *error) {
+    lc_pouch_unix_seconds lease_expires_at_unix, lc_error *error) {
   lc_pouch_lease_record lease_record;
   lc_pouch_state_write_result write_result;
   char *message_lease_key;
@@ -7625,7 +7706,7 @@ static int lc_pouch_queue_record_parse(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
-    record->enqueued_at_unix = (long)signed_value;
+    record->enqueued_at_unix = (lc_pouch_unix_seconds)signed_value;
     header_length += 8U;
   }
   if (rc == LC_OK) {
@@ -7635,17 +7716,17 @@ static int lc_pouch_queue_record_parse(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_u64(read_result->body, &payload_bytes, error);
-    record->enqueue_sequence = (unsigned long)payload_bytes;
+    record->enqueue_sequence = payload_bytes;
     header_length += 8U;
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
-    record->expires_at_unix = (long)signed_value;
+    record->expires_at_unix = (lc_pouch_unix_seconds)signed_value;
     header_length += 8U;
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
-    record->not_visible_until_unix = (long)signed_value;
+    record->not_visible_until_unix = (lc_pouch_unix_seconds)signed_value;
     header_length += 8U;
   }
   if (rc == LC_OK) {
@@ -7749,11 +7830,11 @@ static int lc_pouch_queue_record_compare(const void *left, const void *right) {
 
   a = (const lc_pouch_queue_record *)left;
   b = (const lc_pouch_queue_record *)right;
-  if (a->enqueue_sequence > 0UL && b->enqueue_sequence > 0UL &&
+  if (a->enqueue_sequence > 0U && b->enqueue_sequence > 0U &&
       a->enqueue_sequence < b->enqueue_sequence) {
     return -1;
   }
-  if (a->enqueue_sequence > 0UL && b->enqueue_sequence > 0UL &&
+  if (a->enqueue_sequence > 0U && b->enqueue_sequence > 0U &&
       a->enqueue_sequence > b->enqueue_sequence) {
     return 1;
   }
@@ -7812,7 +7893,7 @@ static int lc_pouch_queue_record_is_live(const lc_pouch_queue_record *record) {
 }
 
 static int lc_pouch_queue_record_is_live_at(const lc_pouch_queue_record *record,
-                                            long now) {
+                                            lc_pouch_unix_seconds now) {
   if (!lc_pouch_queue_record_is_live(record)) {
     return 0;
   }
@@ -7823,7 +7904,7 @@ static int lc_pouch_queue_record_is_live_at(const lc_pouch_queue_record *record,
 }
 
 static int lc_pouch_queue_record_available(const lc_pouch_queue_record *record,
-                                           long now) {
+                                           lc_pouch_unix_seconds now) {
   if (!lc_pouch_queue_record_is_live_at(record, now) ||
       record->not_visible_until_unix > now) {
     return 0;
@@ -8140,7 +8221,7 @@ static int lc_pouch_queue_delete_object(lc_client_handle *client,
                                         const char *namespace_name,
                                         const char *key,
                                         int has_expected_version,
-                                        unsigned long expected_version,
+                                        lc_pouch_generation expected_version,
                                         lc_error *error) {
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
@@ -8171,7 +8252,7 @@ static int lc_pouch_queue_move_to_dlq(lc_client_handle *client,
   char *dlq_state_key;
   char *old_storage_key;
   char *old_meta_etag;
-  unsigned long original_version;
+  lc_pouch_generation original_version;
   int rc;
 
   original_meta_key = NULL;
@@ -8472,7 +8553,8 @@ static int lc_pouch_queue_validate_active_delivery(
     lc_error *error) {
   const char *message_txn_id;
   const char *record_txn_id;
-  long now_seconds;
+  lc_pouch_unix_seconds now_seconds;
+  int rc;
 
   if (message == NULL || record == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -8506,7 +8588,10 @@ static int lc_pouch_queue_validate_active_delivery(
                         "pouch queue delivery lease validation failed", NULL,
                         NULL, NULL);
   }
-  now_seconds = (long)time(NULL);
+  rc = lc_pouch_now_unix(&now_seconds, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   if (record->not_visible_until_unix <= now_seconds) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch queue delivery lease expired", NULL, NULL,
@@ -8617,7 +8702,8 @@ static int lc_pouch_queue_release_state_lease(
 
 static int lc_pouch_queue_extend_state_lease(
     lc_client_handle *client, const lc_message_ref *message,
-    long lease_expires_at_unix, long *state_lease_expires_at_unix,
+    lc_pouch_unix_seconds lease_expires_at_unix,
+    lc_pouch_unix_seconds *state_lease_expires_at_unix,
     lc_error *error) {
   lc_lease_ref lease_ref;
   lc_pouch_lease_record lease_record;
@@ -8814,11 +8900,11 @@ static int lc_pouch_txn_parse_record(const char *bytes, size_t length,
   }
   if (rc == LC_OK) {
     rc = lc_pouch_binary_cursor_i64(&cursor, &signed_value, error);
-    record->expires_at_unix = (long)signed_value;
+    record->expires_at_unix = (lc_pouch_unix_seconds)signed_value;
   }
   if (rc == LC_OK) {
     rc = lc_pouch_binary_cursor_u64(&cursor, &value, error);
-    record->tc_term = (unsigned long)value;
+    record->tc_term = value;
   }
   if (rc == LC_OK) {
     rc = lc_pouch_binary_cursor_string(&cursor, &record->target_backend_hash,
@@ -8947,7 +9033,7 @@ static int lc_pouch_txn_build_record(const lc_txn_decision_req *req,
     rc = lc_pouch_txn_buffer_append_i64(record, req->expires_at_unix, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_txn_buffer_append_u64(record, (uint64_t)req->tc_term, error);
+    rc = lc_pouch_txn_buffer_append_u64(record, req->tc_term, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_string(record, req->target_backend_hash,
@@ -9000,7 +9086,7 @@ static int lc_pouch_txn_extract_state(const char *record, size_t length,
 
 static int lc_pouch_txn_decision_response(lc_txn_decision_res *out,
                                           const char *txn_id, const char *state,
-                                          unsigned long version,
+                                          lc_pouch_generation version,
                                           lc_error *error) {
   char correlation[96];
 
@@ -9021,7 +9107,7 @@ static int lc_pouch_txn_decision_response(lc_txn_decision_res *out,
 
 static int lc_pouch_txn_replay_response(lc_txn_replay_res *out,
                                         const char *txn_id, const char *state,
-                                        unsigned long version,
+                                        lc_pouch_generation version,
                                         lc_error *error) {
   char correlation[96];
 
@@ -9726,8 +9812,8 @@ static int lc_pouch_rollback_acquire_claim(lc_pouch_acquire_context *ctx,
 static int lc_pouch_acquire_locked(void *context, lc_error *error) {
   lc_pouch_acquire_context *ctx;
   lc_pouch_lease_record lease_record;
-  unsigned long expected_lease_version;
-  long now_seconds;
+  lc_pouch_generation expected_lease_version;
+  lc_pouch_unix_seconds now_seconds;
   int rc;
 
   ctx = (lc_pouch_acquire_context *)context;
@@ -9757,7 +9843,11 @@ static int lc_pouch_acquire_locked(void *context, lc_error *error) {
   if (rc != LC_OK) {
     return rc;
   }
-  now_seconds = (long)time(NULL);
+  rc = lc_pouch_now_unix(&now_seconds, error);
+  if (rc != LC_OK) {
+    lc_pouch_lease_record_cleanup(&lease_record);
+    return rc;
+  }
   if (lease_record.found && lease_record.expires_at_unix > now_seconds) {
     ctx->held_until_unix = lease_record.expires_at_unix;
     lc_pouch_lease_record_cleanup(&lease_record);
@@ -9802,8 +9892,9 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   lc_client_handle *client;
   lc_pouch_acquire_context acquire_context;
   const char *namespace_name = NULL;
-  long block_deadline_unix;
-  long now_seconds;
+  lc_version acquired_version;
+  lc_pouch_unix_seconds block_deadline_unix;
+  lc_pouch_unix_seconds now_seconds;
   lc_lease *lease;
   int rc;
 
@@ -9836,9 +9927,18 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   acquire_context.client = client;
   acquire_context.req = req;
   acquire_context.namespace_name = namespace_name;
-  now_seconds = (long)time(NULL);
-  block_deadline_unix =
-      req->block_seconds > 0L ? now_seconds + req->block_seconds : now_seconds;
+  rc = lc_pouch_now_unix(&now_seconds, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  block_deadline_unix = now_seconds;
+  if (req->block_seconds > 0L) {
+    rc = lc_pouch_timestamp_add(now_seconds, req->block_seconds,
+                                "block_seconds", &block_deadline_unix, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
   for (;;) {
     lc_pouch_acquire_context_cleanup(&acquire_context);
     rc = lc_pouch_state_with_namespace_lock(client->pouch, namespace_name,
@@ -9852,7 +9952,10 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                         NULL, NULL, NULL);
       break;
     }
-    now_seconds = (long)time(NULL);
+    rc = lc_pouch_now_unix(&now_seconds, error);
+    if (rc != LC_OK) {
+      break;
+    }
     if (now_seconds >= block_deadline_unix) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L, "pouch lease already held",
                         NULL, NULL, NULL);
@@ -9871,9 +9974,15 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
     lc_pouch_acquire_context_cleanup(&acquire_context);
     return rc;
   }
+  rc = lc_pouch_generation_to_version(acquire_context.version,
+                                      &acquired_version, error);
+  if (rc != LC_OK) {
+    lc_pouch_acquire_context_cleanup(&acquire_context);
+    return rc;
+  }
   lease = lc_lease_new(
       client, namespace_name, req->key, req->owner, acquire_context.lease_id,
-      req->txn_id, acquire_context.fencing_token, (long)acquire_context.version,
+      req->txn_id, acquire_context.fencing_token, acquired_version,
       acquire_context.read_result.found ? acquire_context.read_result.etag
                                         : NULL,
       NULL);
@@ -10047,8 +10156,14 @@ int lc_pouch_client_acquire_for_update_method(
         stage_txn_id, get_res.no_content ? NULL : get_res.etag, &promote_result,
         error);
     if (rc == LC_OK) {
-      rc = lc_pouch_lease_refresh_state(lease_handle, promote_result.etag,
-                                        (long)promote_result.version, error);
+      lc_version version;
+
+      rc = lc_pouch_generation_to_version(promote_result.version, &version,
+                                          error);
+      if (rc == LC_OK) {
+        rc = lc_pouch_lease_refresh_state(lease_handle, promote_result.etag,
+                                          version, error);
+      }
     }
     if (rc != LC_OK) {
       lc_error discard_error;
@@ -10107,7 +10222,7 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
   lc_pouch_lease_record lease_record;
   lc_pouch_state_read_result read_result;
   const char *namespace_name = NULL;
-  long now_seconds;
+  lc_pouch_unix_seconds now_seconds;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -10148,7 +10263,12 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
   out->namespace_name = lc_strdup_local(namespace_name);
   out->key = lc_strdup_local(req->key);
   out->state_etag = lc_strdup_local(read_result.etag);
-  now_seconds = (long)time(NULL);
+  rc = lc_pouch_now_unix(&now_seconds, error);
+  if (rc != LC_OK) {
+    lc_pouch_lease_record_cleanup(&lease_record);
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+    return rc;
+  }
   if (lease_record.found && lease_record.expires_at_unix > now_seconds) {
     out->owner = lc_strdup_local(lease_record.owner);
     out->lease_id = lc_strdup_local(lease_record.lease_id);
@@ -10167,7 +10287,14 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
                         "failed to allocate pouch describe response", NULL,
                         NULL, NULL);
   }
-  out->version = (long)read_result.version;
+  rc = lc_pouch_generation_to_version(read_result.version, &out->version,
+                                      error);
+  if (rc != LC_OK) {
+    lc_pouch_lease_record_cleanup(&lease_record);
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+    lc_describe_res_cleanup(out);
+    return rc;
+  }
   out->has_query_hidden = read_result.has_query_hidden;
   out->query_hidden = read_result.query_hidden;
   lc_pouch_lease_record_cleanup(&lease_record);
@@ -10268,12 +10395,11 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
   options.precondition = lc_pouch_lease_precondition_check;
   options.precondition_context = &lease_precondition;
   if (req->has_if_version) {
-    if (req->if_version < 0L) {
-      return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch update if_version must be non-negative", NULL,
-                          NULL, NULL);
+    rc = lc_pouch_version_to_generation(req->if_version,
+                                        &options.expected_version, error);
+    if (rc != LC_OK) {
+      return rc;
     }
-    options.expected_version = (unsigned long)req->if_version;
     options.has_expected_version = 1;
   }
   if (lc_pouch_txn_id_present(req->lease.txn_id)) {
@@ -10362,13 +10488,11 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
   options.precondition = lc_pouch_lease_precondition_check;
   options.precondition_context = &lease_precondition;
   if (req->has_if_version) {
-    if (req->if_version < 0L) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch mutate if_version must be non-negative", NULL,
-                        NULL, NULL);
+    rc = lc_pouch_version_to_generation(req->if_version,
+                                        &options.expected_version, error);
+    if (rc != LC_OK) {
       goto cleanup;
     }
-    options.expected_version = (unsigned long)req->if_version;
     options.has_expected_version = 1;
   }
   if (lc_pouch_txn_id_present(req->lease.txn_id)) {
@@ -10430,12 +10554,11 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
   options.has_query_hidden = 1;
   options.query_hidden = req->query_hidden;
   if (req->has_if_version) {
-    if (req->if_version < 0L) {
-      return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch metadata if_version must be non-negative",
-                          NULL, NULL, NULL);
+    rc = lc_pouch_version_to_generation(req->if_version,
+                                        &options.expected_version, error);
+    if (rc != LC_OK) {
+      return rc;
     }
-    options.expected_version = (unsigned long)req->if_version;
     options.has_expected_version = 1;
   }
   rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
@@ -10474,7 +10597,12 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
   }
   out->namespace_name = namespace_copy;
   out->key = key_copy;
-  out->version = (long)result.version;
+  rc = lc_pouch_generation_to_version(result.version, &out->version, error);
+  if (rc != LC_OK) {
+    lc_metadata_res_cleanup(out);
+    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    return rc;
+  }
   out->has_query_hidden = result.has_query_hidden;
   out->query_hidden = result.query_hidden;
   lc_pouch_state_write_result_cleanup(&client->allocator, &result);
@@ -10516,12 +10644,11 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
     return rc;
   }
   if (req->has_if_version) {
-    if (req->if_version < 0L) {
-      return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch remove if_version must be non-negative", NULL,
-                          NULL, NULL);
+    rc = lc_pouch_version_to_generation(req->if_version,
+                                        &options.expected_version, error);
+    if (rc != LC_OK) {
+      return rc;
     }
-    options.expected_version = (unsigned long)req->if_version;
     options.has_expected_version = 1;
   }
   lease_precondition.client = client;
@@ -10534,7 +10661,8 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
                              &options, &result, error);
   if (rc == LC_OK) {
     out->removed = result.version > 0UL;
-    out->new_version = (long)result.version;
+    rc = lc_pouch_generation_to_version(result.version, &out->new_version,
+                                        error);
   }
   lc_pouch_state_write_result_cleanup(&client->allocator, &result);
   return rc;
@@ -10548,7 +10676,7 @@ int lc_pouch_client_keepalive_method(lc_client *self,
   lc_pouch_state_write_result lease_write_result;
   lc_pouch_lease_record lease_record;
   const char *namespace_name = NULL;
-  long lease_expires_at_unix = 0L;
+  lc_pouch_unix_seconds lease_expires_at_unix = 0;
   char *state_etag;
   int rc;
 
@@ -10608,7 +10736,15 @@ int lc_pouch_client_keepalive_method(lc_client *self,
   }
   memset(out, 0, sizeof(*out));
   out->lease_expires_at_unix = lease_expires_at_unix;
-  out->version = read_result.found ? (long)read_result.version : 0L;
+  if (read_result.found) {
+    rc = lc_pouch_generation_to_version(read_result.version, &out->version,
+                                        error);
+    if (rc != LC_OK) {
+      lc_free_with_allocator(NULL, state_etag);
+      lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+      return rc;
+    }
+  }
   out->state_etag = state_etag;
   lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
   return LC_OK;
@@ -10809,7 +10945,9 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
                                        content_type, result.version, error);
   }
   if (rc == LC_OK) {
-    out->version = (long)result.version;
+    rc = lc_pouch_generation_to_version(result.version, &out->version, error);
+  }
+  if (rc == LC_OK) {
     out->correlation_id = lc_strdup_local("pouch-attachment-put");
     if (out->correlation_id == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -11159,7 +11297,7 @@ int lc_pouch_client_queue_stats_method(lc_client *self,
   lc_client_handle *client;
   lc_pouch_queue_scan scan;
   const char *namespace_name = NULL;
-  long now;
+  lc_pouch_unix_seconds now;
   size_t i;
   int rc;
 
@@ -11296,7 +11434,7 @@ int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
                                       lc_nack_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_queue_record record;
-  long now;
+  lc_pouch_unix_seconds now;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -11400,7 +11538,7 @@ int lc_pouch_client_queue_extend_method(lc_client *self,
                                         lc_extend_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_queue_record record;
-  long now;
+  lc_pouch_unix_seconds now;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -11740,7 +11878,7 @@ static int lc_pouch_client_dequeue_once(lc_client_handle *client,
                                         lc_message **out, lc_error *error) {
   lc_pouch_queue_scan scan;
   const char *next_cursor;
-  long now;
+  lc_pouch_unix_seconds now;
   size_t i;
   int after_cursor;
   int rc;
@@ -11903,9 +12041,9 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
   char *state_key;
   char *state_object_key;
   char state_lease_id[192];
-  long state_version;
+  lc_version state_version;
   long state_fencing_token;
-  long now_seconds;
+  lc_pouch_unix_seconds now_seconds;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -11943,7 +12081,14 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
   if (rc != LC_OK) {
     goto cleanup;
   }
-  state_version = read_result.found ? (long)read_result.version : 0L;
+  state_version = 0;
+  if (read_result.found) {
+    rc = lc_pouch_generation_to_version(read_result.version, &state_version,
+                                        error);
+    if (rc != LC_OK) {
+      goto cleanup;
+    }
+  }
   snprintf(state_lease_id, sizeof(state_lease_id), "pouch-qstate-%s-%d",
            handle->message_id, handle->attempts);
   rc = lc_pouch_read_lease_record(client, handle->namespace_name, state_key,
@@ -11951,7 +12096,10 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
   if (rc != LC_OK) {
     goto cleanup;
   }
-  now_seconds = (long)time(NULL);
+  rc = lc_pouch_now_unix(&now_seconds, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
   if (lease_record.found && lease_record.expires_at_unix > now_seconds) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch queue state lease already held", NULL, NULL, NULL);
@@ -12027,7 +12175,7 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
   lc_pouch_queue_scan scan;
   lc_message **messages;
   const char *namespace_name;
-  long now;
+  lc_pouch_unix_seconds now;
   long visibility_timeout;
   size_t count;
   size_t capacity;
@@ -12546,7 +12694,7 @@ int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
   rc = lc_pouch_query_parse_cursor(req->cursor, &scan.start_after_key, error);
   if (rc == LC_OK) {
     if (use_index_predicate) {
-      unsigned long flushed_seq;
+      lc_pouch_generation flushed_seq;
 
       flushed_seq = 0UL;
       rc = lc_pouch_query_run_index_predicate(&scan, &flushed_seq, error);
@@ -12674,7 +12822,7 @@ int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
     return rc;
   }
   if (use_index_summary) {
-    unsigned long flushed_seq;
+    lc_pouch_generation flushed_seq;
     int retried_repair;
     int validate_current;
 
@@ -12753,7 +12901,7 @@ int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
   scan.runtime = runtime;
   scan.selector = selector;
   if (use_index_predicate) {
-    unsigned long flushed_seq;
+    lc_pouch_generation flushed_seq;
 
     flushed_seq = 0UL;
     rc = lc_pouch_query_run_index_predicate(&scan, &flushed_seq, error);
@@ -12929,7 +13077,7 @@ int lc_pouch_client_flush_index_method(lc_client *self,
   lc_pouch_query_index_flush_result index_result;
   const char *namespace_name = NULL;
   const char *mode;
-  unsigned long index_seq;
+  lc_pouch_generation index_seq;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -12962,7 +13110,7 @@ int lc_pouch_client_flush_index_method(lc_client *self,
     rc = lc_pouch_query_index_flush_validated(client->pouch, namespace_name,
                                               index_seq, &index_result, error);
   } else {
-    unsigned long manifest_seq;
+    lc_pouch_generation manifest_seq;
     int has_pending;
 
     rc = lc_pouch_state_index_seq(client->pouch, namespace_name, &index_seq,
@@ -13158,7 +13306,7 @@ int lc_pouch_client_txn_rollback_method(lc_client *self,
 int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_txn_key_list keys;
-  long now;
+  lc_pouch_unix_seconds now;
   size_t i;
   int rc;
 
@@ -13267,8 +13415,8 @@ static void lc_pouch_tc_lease_record_cleanup(lc_pouch_tc_lease_record *record) {
   memset(record, 0, sizeof(*record));
 }
 
-static long lc_pouch_tc_expiration_from_ttl_ms(long now, long ttl_ms,
-                                               lc_error *error) {
+static lc_pouch_unix_seconds lc_pouch_tc_expiration_from_ttl_ms(
+    lc_pouch_unix_seconds now, long ttl_ms, lc_error *error) {
   long ttl_seconds;
 
   if (ttl_ms <= 0L) {
@@ -13280,7 +13428,8 @@ static long lc_pouch_tc_expiration_from_ttl_ms(long now, long ttl_ms,
   if (ttl_ms % 1000L != 0L) {
     ++ttl_seconds;
   }
-  if (ttl_seconds <= 0L || ttl_seconds > LONG_MAX - now) {
+  if (ttl_seconds <= 0L || (uintmax_t)ttl_seconds > (uintmax_t)INT64_MAX ||
+      now > INT64_MAX - (lc_pouch_unix_seconds)ttl_seconds) {
     lc_error_set(error, LC_ERR_INVALID, 0L,
                  "pouch TC ttl_ms exceeds supported range", NULL, NULL, NULL);
     return 0L;
@@ -13364,11 +13513,11 @@ static int lc_pouch_tc_read_lease(lc_client_handle *client,
     }
     if (rc == LC_OK) {
       rc = lc_pouch_binary_cursor_u64(&cursor, &term, error);
-      record->term = (unsigned long)term;
+      record->term = term;
     }
     if (rc == LC_OK) {
       rc = lc_pouch_binary_cursor_i64(&cursor, &expires_at, error);
-      record->expires_at_unix = (long)expires_at;
+      record->expires_at_unix = (lc_pouch_unix_seconds)expires_at;
     }
     if (rc == LC_OK && cursor.offset != cursor.length) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -13397,8 +13546,9 @@ static int lc_pouch_tc_read_lease(lc_client_handle *client,
 static int lc_pouch_tc_write_lease(lc_client_handle *client,
                                    const char *leader_id,
                                    const char *leader_endpoint,
-                                   unsigned long term, long expires_at_unix,
-                                   unsigned long expected_version,
+                                   lc_tc_term term,
+                                   lc_pouch_unix_seconds expires_at_unix,
+                                   lc_pouch_generation expected_version,
                                    lc_error *error) {
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
@@ -13417,7 +13567,7 @@ static int lc_pouch_tc_write_lease(lc_client_handle *client,
     rc = lc_pouch_txn_buffer_append_string(&buffer, leader_endpoint, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_txn_buffer_append_u64(&buffer, (uint64_t)term, error);
+    rc = lc_pouch_txn_buffer_append_u64(&buffer, term, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_i64(&buffer, (int64_t)expires_at_unix,
@@ -13453,7 +13603,7 @@ static int lc_pouch_tc_write_lease(lc_client_handle *client,
 static int lc_pouch_tc_delete_key(lc_client_handle *client,
                                   const char *namespace_name, const char *key,
                                   int has_expected_version,
-                                  unsigned long expected_version,
+                                  lc_pouch_generation expected_version,
                                   lc_error *error) {
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
@@ -13476,7 +13626,8 @@ static int lc_pouch_tc_delete_key(lc_client_handle *client,
 
 static int lc_pouch_tc_copy_lease_acquire_res(
     lc_tc_lease_acquire_res *out, int granted, const char *leader_id,
-    const char *leader_endpoint, unsigned long term, long expires_at_unix,
+    const char *leader_endpoint, lc_tc_term term,
+    lc_pouch_unix_seconds expires_at_unix,
     lc_error *error) {
   memset(out, 0, sizeof(*out));
   out->granted = granted;
@@ -13499,8 +13650,8 @@ static int lc_pouch_tc_copy_lease_acquire_res(
 static int lc_pouch_tc_copy_lease_renew_res(lc_tc_lease_renew_res *out,
                                             int renewed, const char *leader_id,
                                             const char *leader_endpoint,
-                                            unsigned long term,
-                                            long expires_at_unix,
+                                            lc_tc_term term,
+                                            lc_pouch_unix_seconds expires_at_unix,
                                             lc_error *error) {
   memset(out, 0, sizeof(*out));
   out->renewed = renewed;
@@ -13523,7 +13674,8 @@ static int lc_pouch_tc_copy_lease_renew_res(lc_tc_lease_renew_res *out,
 static int lc_pouch_tc_copy_leader_res(lc_tc_leader_res *out,
                                        const char *leader_id,
                                        const char *leader_endpoint,
-                                       unsigned long term, long expires_at_unix,
+                                       lc_tc_term term,
+                                       lc_pouch_unix_seconds expires_at_unix,
                                        lc_error *error) {
   memset(out, 0, sizeof(*out));
   out->leader_id = lc_strdup_local(leader_id);
@@ -13741,13 +13893,13 @@ static int lc_pouch_tc_copy_string_list(lc_string_list *out,
 typedef struct lc_pouch_tc_cluster_scan {
   lc_client_handle *client;
   lc_pouch_tc_endpoint_list list;
-  long now;
+  lc_pouch_unix_seconds now;
 } lc_pouch_tc_cluster_scan;
 
 static int lc_pouch_tc_cluster_read_endpoint(lc_client_handle *client,
                                              const char *key, char **endpoint,
-                                             long *updated_at_unix,
-                                             long *expires_at_unix,
+                                             lc_pouch_unix_seconds *updated_at_unix,
+                                             lc_pouch_unix_seconds *expires_at_unix,
                                              lc_error *error) {
   lc_pouch_state_read_result read_result;
   lc_pouch_binary_cursor cursor;
@@ -13784,11 +13936,11 @@ static int lc_pouch_tc_cluster_read_endpoint(lc_client_handle *client,
   }
   if (rc == LC_OK) {
     rc = lc_pouch_binary_cursor_i64(&cursor, &signed_value, error);
-    *updated_at_unix = (long)signed_value;
+    *updated_at_unix = (lc_pouch_unix_seconds)signed_value;
   }
   if (rc == LC_OK) {
     rc = lc_pouch_binary_cursor_i64(&cursor, &signed_value, error);
-    *expires_at_unix = (long)signed_value;
+    *expires_at_unix = (lc_pouch_unix_seconds)signed_value;
   }
   if (rc == LC_OK && cursor.offset != cursor.length) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -13808,8 +13960,8 @@ static int lc_pouch_tc_cluster_visit(const lc_pouch_state_visit_entry *entry,
                                      void *context, lc_error *error) {
   lc_pouch_tc_cluster_scan *scan;
   char *endpoint;
-  long updated_at_unix;
-  long expires_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
+  lc_pouch_unix_seconds expires_at_unix;
   int rc;
 
   scan = (lc_pouch_tc_cluster_scan *)context;
@@ -13880,7 +14032,7 @@ static int lc_pouch_tc_write_cluster_self(lc_client_handle *client,
   lc_pouch_txn_buffer buffer;
   char *normalized;
   lc_source *source;
-  long now;
+  lc_pouch_unix_seconds now;
   int rc;
 
   normalized = lc_pouch_tc_endpoint_normalize(endpoint, error);
@@ -14053,7 +14205,7 @@ lc_pouch_tc_rm_registry_read(lc_client_handle *client,
   }
   if (rc == LC_OK) {
     rc = lc_pouch_binary_cursor_i64(&cursor, &signed_value, error);
-    registry->updated_at_unix = (long)signed_value;
+    registry->updated_at_unix = (lc_pouch_unix_seconds)signed_value;
   }
   if (rc == LC_OK) {
     rc = lc_pouch_binary_cursor_u64(&cursor, &count, error);
@@ -14074,7 +14226,7 @@ lc_pouch_tc_rm_registry_read(lc_client_handle *client,
     }
     if (rc == LC_OK) {
       rc = lc_pouch_binary_cursor_i64(&cursor, &signed_value, error);
-      backend->updated_at_unix = (long)signed_value;
+      backend->updated_at_unix = (lc_pouch_unix_seconds)signed_value;
     }
     if (rc == LC_OK) {
       rc = lc_pouch_binary_cursor_u64(&cursor, &endpoint_count, error);
@@ -14232,7 +14384,8 @@ lc_pouch_tc_rm_registry_copy_backend(const lc_pouch_tc_rm_registry *registry,
 static int
 lc_pouch_tc_rm_registry_upsert(lc_pouch_tc_rm_registry *registry,
                                const char *backend_hash, const char *endpoint,
-                               long now, int *changed, lc_error *error) {
+                               lc_pouch_unix_seconds now, int *changed,
+                               lc_error *error) {
   lc_tc_rm_backend *backend;
   size_t i;
   size_t before;
@@ -14263,7 +14416,7 @@ lc_pouch_tc_rm_registry_upsert(lc_pouch_tc_rm_registry *registry,
 static int
 lc_pouch_tc_rm_registry_remove(lc_pouch_tc_rm_registry *registry,
                                const char *backend_hash, const char *endpoint,
-                               long now, int *changed) {
+                               lc_pouch_unix_seconds now, int *changed) {
   size_t backend_index;
   size_t endpoint_index;
   size_t write_index;
@@ -14370,8 +14523,8 @@ int lc_pouch_client_tc_lease_acquire_method(lc_client *self,
                                             lc_error *error) {
   lc_client_handle *client;
   lc_pouch_tc_lease_record record;
-  long now;
-  long expires_at_unix;
+  lc_pouch_unix_seconds now;
+  lc_pouch_unix_seconds expires_at_unix;
   int grant;
   int rc;
 
@@ -14435,8 +14588,8 @@ int lc_pouch_client_tc_lease_renew_method(lc_client *self,
                                           lc_error *error) {
   lc_client_handle *client;
   lc_pouch_tc_lease_record record;
-  long now;
-  long expires_at_unix;
+  lc_pouch_unix_seconds now;
+  lc_pouch_unix_seconds expires_at_unix;
   int renewed;
   int rc;
 
@@ -14491,7 +14644,7 @@ int lc_pouch_client_tc_lease_release_method(lc_client *self,
                                             lc_error *error) {
   lc_client_handle *client;
   lc_pouch_tc_lease_record record;
-  long now;
+  lc_pouch_unix_seconds now;
   int released;
   int rc;
 
@@ -14539,7 +14692,7 @@ int lc_pouch_client_tc_leader_method(lc_client *self, lc_tc_leader_res *out,
                                      lc_error *error) {
   lc_client_handle *client;
   lc_pouch_tc_lease_record record;
-  long now;
+  lc_pouch_unix_seconds now;
   int rc;
 
   if (self == NULL || out == NULL) {
@@ -14623,7 +14776,7 @@ int lc_pouch_client_tc_rm_register_method(lc_client *self,
   lc_pouch_tc_rm_registry registry;
   char *backend_hash;
   char *endpoint;
-  long now;
+  lc_pouch_unix_seconds now;
   int changed;
   int rc;
 
@@ -14680,7 +14833,7 @@ int lc_pouch_client_tc_rm_unregister_method(lc_client *self,
   lc_pouch_tc_rm_registry registry;
   char *backend_hash;
   char *endpoint;
-  long now;
+  lc_pouch_unix_seconds now;
   int changed;
   int rc;
 
@@ -14944,9 +15097,17 @@ int lc_pouch_lease_describe_method(lc_lease *self, lc_error *error) {
   rc = lc_pouch_state_read_metadata(lease->client->pouch, lease->namespace_name,
                                     state_key, &read_result, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_lease_refresh_state(
-        lease, read_result.found ? read_result.etag : NULL,
-        read_result.found ? (long)read_result.version : 0L, error);
+    lc_version version;
+
+    version = 0;
+    if (read_result.found) {
+      rc = lc_pouch_generation_to_version(read_result.version, &version,
+                                          error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_lease_refresh_state(
+          lease, read_result.found ? read_result.etag : NULL, version, error);
+    }
   }
   lc_pouch_state_read_result_cleanup(&lease->client->allocator, &read_result);
   return rc;
@@ -15069,18 +15230,20 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
         opts->content_type != NULL ? opts->content_type : options.content_type;
     options.expected_etag = opts->if_state_etag;
     if (opts->has_if_version) {
-      if (opts->if_version < 0L) {
-        return lc_error_set(error, LC_ERR_INVALID, 0L,
-                            "pouch staged update if_version must be "
-                            "non-negative",
-                            NULL, NULL, NULL);
+      rc = lc_pouch_version_to_generation(opts->if_version,
+                                          &options.expected_version, error);
+      if (rc != LC_OK) {
+        return rc;
       }
-      options.expected_version = (unsigned long)opts->if_version;
       options.has_expected_version = 1;
     }
   } else if (lease->pouch_stage_dirty) {
     options.expected_etag = lease->pouch_stage_etag;
-    options.expected_version = (unsigned long)lease->pouch_stage_version;
+    rc = lc_pouch_version_to_generation(lease->pouch_stage_version,
+                                        &options.expected_version, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
     options.has_expected_version = 1;
   }
   rc = lc_pouch_state_stage_write(lease->client->pouch, lease->namespace_name,
@@ -15096,10 +15259,13 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
     }
     lc_client_free(lease->client, lease->pouch_stage_etag);
     lease->pouch_stage_etag = etag_copy;
-    lease->pouch_stage_version = (long)result.version;
-    lease->pouch_stage_dirty = 1;
-    rc = lc_pouch_lease_refresh_state(lease, result.etag, (long)result.version,
-                                      error);
+    rc = lc_pouch_generation_to_version(result.version,
+                                        &lease->pouch_stage_version, error);
+    if (rc == LC_OK) {
+      lease->pouch_stage_dirty = 1;
+      rc = lc_pouch_lease_refresh_state(lease, result.etag,
+                                        lease->pouch_stage_version, error);
+    }
   }
   lc_pouch_state_write_result_cleanup(&lease->client->allocator, &result);
   return rc;
@@ -15142,18 +15308,20 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
     if (opts != NULL) {
       options.expected_etag = opts->if_state_etag;
       if (opts->has_if_version) {
-        if (opts->if_version < 0L) {
-          return lc_error_set(error, LC_ERR_INVALID, 0L,
-                              "pouch lease update if_version must be "
-                              "non-negative",
-                              NULL, NULL, NULL);
+        rc = lc_pouch_version_to_generation(opts->if_version,
+                                            &options.expected_version, error);
+        if (rc != LC_OK) {
+          return rc;
         }
-        options.expected_version = (unsigned long)opts->if_version;
         options.has_expected_version = 1;
       }
     }
     if (!options.has_expected_version && lease->version > 0L) {
-      options.expected_version = (unsigned long)lease->version;
+      rc = lc_pouch_version_to_generation(lease->version,
+                                          &options.expected_version, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
       options.has_expected_version = 1;
     }
     lc_lease_ref_init(&lease_ref);
@@ -15185,8 +15353,14 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
                                 error);
     }
     if (rc == LC_OK) {
-      rc = lc_pouch_lease_refresh_state(lease, write_result.etag,
-                                        (long)write_result.version, error);
+      lc_version version;
+
+      rc = lc_pouch_generation_to_version(write_result.version, &version,
+                                          error);
+      if (rc == LC_OK) {
+        rc = lc_pouch_lease_refresh_state(lease, write_result.etag, version,
+                                          error);
+      }
     }
     lc_pouch_state_write_result_cleanup(&lease->client->allocator,
                                         &write_result);
@@ -15337,7 +15511,11 @@ static int lc_pouch_lease_mutate_local_method(lc_lease *self,
       opts.if_state_etag = mutated.etag;
     }
     if (!opts.has_if_version && mutated.found) {
-      opts.if_version = (long)mutated.version;
+      rc = lc_pouch_generation_to_version(mutated.version, &opts.if_version,
+                                          error);
+      if (rc != LC_OK) {
+        goto cleanup;
+      }
       opts.has_if_version = 1;
     }
   }
@@ -15381,16 +15559,18 @@ int lc_pouch_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
     options.query_hidden = req->query_hidden;
     options.object_record = 1;
     if (req->has_if_version) {
-      if (req->if_version < 0L) {
-        return lc_error_set(error, LC_ERR_INVALID, 0L,
-                            "pouch lease metadata if_version must be "
-                            "non-negative",
-                            NULL, NULL, NULL);
+      rc = lc_pouch_version_to_generation(req->if_version,
+                                          &options.expected_version, error);
+      if (rc != LC_OK) {
+        return rc;
       }
-      options.expected_version = (unsigned long)req->if_version;
       options.has_expected_version = 1;
     } else if (lease->version > 0L) {
-      options.expected_version = (unsigned long)lease->version;
+      rc = lc_pouch_version_to_generation(lease->version,
+                                          &options.expected_version, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
       options.has_expected_version = 1;
     }
     rc = lc_pouch_lease_validate_private_read(lease, error);
@@ -15413,10 +15593,13 @@ int lc_pouch_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
         lease->client->pouch, lease->namespace_name,
         lc_pouch_lease_state_storage_key(lease), &options, &result, error);
     if (rc == LC_OK) {
-      lease->version = (long)result.version;
-      lease->pub.version = lease->version;
-      lc_pouch_lease_refresh_query_metadata(lease, result.has_query_hidden,
-                                            result.query_hidden);
+      rc = lc_pouch_generation_to_version(result.version, &lease->version,
+                                          error);
+      if (rc == LC_OK) {
+        lease->pub.version = lease->version;
+        lc_pouch_lease_refresh_query_metadata(lease, result.has_query_hidden,
+                                              result.query_hidden);
+      }
     }
     lc_pouch_state_write_result_cleanup(&lease->client->allocator, &result);
     return rc;
@@ -15473,18 +15656,20 @@ int lc_pouch_lease_remove_method(lc_lease *self, const lc_remove_req *req,
     if (req != NULL) {
       options.expected_etag = req->if_state_etag;
       if (req->has_if_version) {
-        if (req->if_version < 0L) {
-          return lc_error_set(error, LC_ERR_INVALID, 0L,
-                              "pouch lease remove if_version must be "
-                              "non-negative",
-                              NULL, NULL, NULL);
+        rc = lc_pouch_version_to_generation(req->if_version,
+                                            &options.expected_version, error);
+        if (rc != LC_OK) {
+          return rc;
         }
-        options.expected_version = (unsigned long)req->if_version;
         options.has_expected_version = 1;
       }
     }
     if (!options.has_expected_version && lease->version > 0L) {
-      options.expected_version = (unsigned long)lease->version;
+      rc = lc_pouch_version_to_generation(lease->version,
+                                          &options.expected_version, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
       options.has_expected_version = 1;
     }
     rc = lc_pouch_lease_validate_private_read(lease, error);
@@ -15573,8 +15758,9 @@ int lc_pouch_lease_keepalive_method(lc_lease *self, const lc_keepalive_req *req,
         rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch keepalive state etag", NULL,
                           NULL, NULL);
-      } else {
-        res.version = read_result.found ? (long)read_result.version : 0L;
+      } else if (read_result.found) {
+        rc = lc_pouch_generation_to_version(read_result.version, &res.version,
+                                            error);
       }
     }
     lc_pouch_state_read_result_cleanup(&lease->client->allocator,

@@ -33,6 +33,17 @@
 
 #define POUCH_UNIT_TMP_PREFIX "/tmp/liblockdc-unit-pouch-"
 
+typedef char pouch_test_generation_is_u64[
+    sizeof(lc_pouch_generation) == sizeof(uint64_t) ? 1 : -1];
+typedef char pouch_test_unix_seconds_is_i64[
+    sizeof(lc_pouch_unix_seconds) == sizeof(int64_t) ? 1 : -1];
+typedef char pouch_test_public_version_is_i64[
+    sizeof(lc_version) == sizeof(int64_t) ? 1 : -1];
+typedef char pouch_test_index_sequence_is_u64[
+    sizeof(lc_index_seq) == sizeof(uint64_t) ? 1 : -1];
+typedef char pouch_test_tc_term_is_u64[
+    sizeof(lc_tc_term) == sizeof(uint64_t) ? 1 : -1];
+
 typedef struct pouch_value_doc {
   lonejson_int64 value;
 } pouch_value_doc;
@@ -1873,7 +1884,7 @@ static void pouch_test_put32(unsigned char *out, unsigned long value) {
   out[3] = (unsigned char)((value >> 24U) & 0xffUL);
 }
 
-static void pouch_test_put64(unsigned char *out, unsigned long value) {
+static void pouch_test_put64(unsigned char *out, uint64_t value) {
   size_t index;
 
   for (index = 0U; index < 8U; ++index) {
@@ -1884,7 +1895,7 @@ static void pouch_test_put64(unsigned char *out, unsigned long value) {
 static void append_state_decision_record(const char *path,
                                          const char *staged_key,
                                          const char *etag, const char *decision,
-                                         unsigned long version) {
+                                         lc_pouch_generation version) {
   lc_pouch_record_header record_header;
   unsigned char header[32];
   unsigned char meta[19 + 128];
@@ -2229,8 +2240,9 @@ static void test_binary_buffer_string(test_binary_buffer *buffer,
 }
 
 static void test_write_binary_txn_record(
-    lc_pouch *pouch, const char *key, const char *state, long expires_at_unix,
-    unsigned long tc_term, const char *target_backend_hash,
+    lc_pouch *pouch, const char *key, const char *state,
+    lc_pouch_unix_seconds expires_at_unix,
+    lc_tc_term tc_term, const char *target_backend_hash,
     const lc_txn_participant *participants, size_t participant_count,
     lc_error *error) {
   lc_pouch_state_write_options options;
@@ -2246,8 +2258,8 @@ static void test_write_binary_txn_record(
   source = NULL;
   test_binary_buffer_append(&buffer, "LPT1", 4U);
   test_binary_buffer_string(&buffer, state);
-  test_binary_buffer_i64(&buffer, (int64_t)expires_at_unix);
-  test_binary_buffer_u64(&buffer, (uint64_t)tc_term);
+  test_binary_buffer_i64(&buffer, expires_at_unix);
+  test_binary_buffer_u64(&buffer, tc_term);
   test_binary_buffer_string(&buffer, target_backend_hash);
   test_binary_buffer_u64(&buffer, (uint64_t)participant_count);
   for (i = 0U; i < participant_count; ++i) {
@@ -6312,7 +6324,7 @@ static void test_snapshot_high_water_survives_compaction_reopen(void **state) {
   char root[512];
   char *namespace_path;
   const unsigned char high_water_header[] = {'L', 'H', 'C', 'P', 1U, 6U};
-  unsigned long index_seq;
+  lc_pouch_generation index_seq;
   int visit_count;
   int rc;
 

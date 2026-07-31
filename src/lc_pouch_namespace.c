@@ -321,7 +321,7 @@ static int lc_pouch_namespace_scan_snapshots(const lc_allocator *allocator,
 static int lc_pouch_namespace_manifest_read(
     const lc_allocator *allocator, const char *manifest_path,
     unsigned long *active_segment_id, unsigned long *snapshot_segment_id,
-    unsigned long *state_max_version, char **latest_snapshot,
+    lc_pouch_generation *state_max_version, char **latest_snapshot,
     char ***obsolete_segments, uint64_t **obsolete_segment_marked_at,
     unsigned long *obsolete_segment_count, char ***obsolete_snapshots,
     uint64_t **obsolete_snapshot_marked_at,
@@ -384,10 +384,10 @@ static int lc_pouch_namespace_manifest_read(
       }
     } else if (strcmp(line, "state_max_version") == 0) {
       char *end;
-      unsigned long parsed;
+      uint64_t parsed;
 
       errno = 0;
-      parsed = strtoul(value, &end, 10);
+      parsed = strtoull(value, &end, 10);
       if (errno == 0 && end != value && *end == '\0') {
         *state_max_version = parsed;
       }
@@ -526,7 +526,7 @@ static int lc_pouch_namespace_manifest_write(
   written = snprintf(line, sizeof(line),
                      "layout=%s\nversion=%lu\nnamespace=%s\n"
                      "active_segment=%s\nmax_segment_id=%lu\n"
-                     "state_max_version=%lu\n",
+                     "state_max_version=%" PRIu64 "\n",
                      LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION,
                      namespace_name, manifest->active_segment,
                      manifest->max_segment_id, manifest->state_max_version);
@@ -860,7 +860,7 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
   unsigned long max_segment_id;
   unsigned long manifest_snapshot_id;
   unsigned long max_snapshot_id;
-  unsigned long state_max_version;
+  lc_pouch_generation state_max_version;
   int manifest_valid;
   int rc;
 

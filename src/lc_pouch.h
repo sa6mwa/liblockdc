@@ -8,6 +8,10 @@
 
 typedef struct lc_pouch lc_pouch;
 
+/* Durable state generations and Unix timestamps have fixed-width storage. */
+typedef uint64_t lc_pouch_generation;
+typedef int64_t lc_pouch_unix_seconds;
+
 typedef struct lc_pouch_open_options {
   uint64_t segment_target_bytes;
   unsigned long compaction_min_segment_count;
@@ -49,7 +53,7 @@ typedef struct lc_pouch_maintenance_options {
   const char *namespace_name;
   int force;
   int cleanup_only;
-  long retention_updated_before_unix;
+  lc_pouch_unix_seconds retention_updated_before_unix;
 } lc_pouch_maintenance_options;
 
 typedef struct lc_pouch_maintenance_result {
@@ -79,7 +83,7 @@ typedef struct lc_pouch_state_write_options {
   int has_metadata;
   lc_pouch_state_precondition_fn precondition;
   void *precondition_context;
-  unsigned long expected_version;
+  lc_pouch_generation expected_version;
   int has_expected_version;
   int create_if_absent;
   int has_query_hidden;
@@ -90,14 +94,14 @@ typedef struct lc_pouch_state_write_options {
 
 typedef struct lc_pouch_state_write_result {
   char *etag;
-  unsigned long index_seq;
-  unsigned long version;
+  lc_pouch_generation index_seq;
+  lc_pouch_generation version;
   uint64_t bytes;
   uint64_t cipher_bytes;
   char *descriptor;
   unsigned char *metadata;
   size_t metadata_length;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
 } lc_pouch_state_write_result;
@@ -106,14 +110,14 @@ typedef struct lc_pouch_state_read_result {
   int found;
   char *content_type;
   char *etag;
-  unsigned long index_seq;
-  unsigned long version;
+  lc_pouch_generation index_seq;
+  lc_pouch_generation version;
   uint64_t bytes;
   uint64_t cipher_bytes;
   char *descriptor;
   unsigned char *metadata;
   size_t metadata_length;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
   int has_body;
@@ -124,13 +128,13 @@ typedef struct lc_pouch_state_visit_entry {
   const char *key;
   const char *content_type;
   const char *etag;
-  unsigned long version;
+  lc_pouch_generation version;
   uint64_t bytes;
   uint64_t cipher_bytes;
   const char *descriptor;
   const unsigned char *metadata;
   size_t metadata_length;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
 } lc_pouch_state_visit_entry;
@@ -220,7 +224,7 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
                          lc_pouch_state_visit_fn visitor, void *context,
                          lc_error *error);
 int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
-                             unsigned long *out, lc_error *error);
+                             lc_pouch_generation *out, lc_error *error);
 void lc_pouch_state_read_result_cleanup(const lc_allocator *allocator,
                                         lc_pouch_state_read_result *result);
 

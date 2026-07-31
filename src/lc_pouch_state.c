@@ -512,11 +512,11 @@ typedef struct lc_pouch_state_entry {
   unsigned char *metadata;
   size_t metadata_length;
   char *decision;
-  unsigned long index_seq;
-  unsigned long version;
+  lc_pouch_generation index_seq;
+  lc_pouch_generation version;
   uint64_t bytes;
   uint64_t cipher_bytes;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
   int seen;
@@ -548,7 +548,7 @@ typedef struct lc_pouch_state_binary_append_item {
 typedef struct lc_pouch_state_body_cache_entry {
   unsigned char *bytes;
   size_t length;
-  unsigned long version;
+  lc_pouch_generation version;
   unsigned long refcount;
   int retired;
 } lc_pouch_state_body_cache_entry;
@@ -564,7 +564,7 @@ typedef struct lc_pouch_state_decision {
   char *staged_key;
   char *etag;
   char *decision;
-  unsigned long version;
+  lc_pouch_generation version;
   struct lc_pouch_state_decision *next;
 } lc_pouch_state_decision;
 
@@ -579,11 +579,11 @@ typedef struct lc_pouch_state_cache_record {
   char *descriptor;
   unsigned char *metadata;
   size_t metadata_length;
-  unsigned long index_seq;
-  unsigned long version;
+  lc_pouch_generation index_seq;
+  lc_pouch_generation version;
   uint64_t bytes;
   uint64_t cipher_bytes;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   lc_pouch_state_body_cache_entry *body_cache;
   int has_query_hidden;
   int query_hidden;
@@ -637,11 +637,11 @@ typedef struct lc_pouch_state_visit_snapshot {
   char *descriptor;
   unsigned char *metadata;
   size_t metadata_length;
-  unsigned long index_seq;
-  unsigned long version;
+  lc_pouch_generation index_seq;
+  lc_pouch_generation version;
   uint64_t bytes;
   uint64_t cipher_bytes;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
   int found;
@@ -659,11 +659,11 @@ typedef struct lc_pouch_state_read_many_snapshot {
   size_t metadata_length;
   char *crypto_context;
   lc_source *body;
-  unsigned long index_seq;
-  unsigned long version;
+  lc_pouch_generation index_seq;
+  lc_pouch_generation version;
   uint64_t bytes;
   uint64_t cipher_bytes;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
   int found;
@@ -681,10 +681,10 @@ typedef struct lc_pouch_state_scan_body_snapshot {
   unsigned char *metadata;
   size_t metadata_length;
   lc_pouch_state_body_cache_entry *body_cache;
-  unsigned long version;
+  lc_pouch_generation version;
   uint64_t bytes;
   uint64_t cipher_bytes;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
   int found;
@@ -1274,7 +1274,7 @@ typedef struct lc_pouch_state_compaction_capture {
 struct lc_pouch_state_cache_namespace {
   char *namespace_name;
   unsigned long max_segment_id;
-  unsigned long max_version;
+  lc_pouch_generation max_version;
   int initialized;
   int decision_recovery_checked;
   lc_pouch_namespace_marker_refresh_state marker_refresh;
@@ -1951,7 +1951,7 @@ static int lc_pouch_state_read_many_snapshot_body_from_cache(
 
 static void lc_pouch_state_cache_record_store_body_source(
     lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
-    lc_pouch_state_cache_record *record, lc_source *body, unsigned long version,
+    lc_pouch_state_cache_record *record, lc_source *body, lc_pouch_generation version,
     uint64_t bytes) {
   lc_pouch_state_body_cache_entry *entry;
   lc_sink *sink;
@@ -3127,14 +3127,24 @@ static uint64_t lc_pouch_state_get64(const unsigned char *in) {
   return value;
 }
 
-static int lc_pouch_state_u64_to_ulong(uint64_t value, unsigned long *out,
-                                       const char *message, lc_error *error) {
-  if (value > (uint64_t)ULONG_MAX) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL,
+static int lc_pouch_state_decode_generation(uint64_t value,
+                                            lc_pouch_generation *out,
+                                            lc_error *error) {
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch generation decode requires output", NULL, NULL,
                         "pouch");
   }
-  *out = (unsigned long)value;
+  *out = value;
   return LC_OK;
+}
+
+static lc_pouch_unix_seconds
+lc_pouch_state_decode_unix_seconds(uint64_t value) {
+  if (value <= (uint64_t)INT64_MAX) {
+    return (lc_pouch_unix_seconds)value;
+  }
+  return -1 - (lc_pouch_unix_seconds)(UINT64_MAX - value);
 }
 
 static int lc_pouch_state_record_write_prefix(
@@ -3333,9 +3343,9 @@ static void lc_pouch_state_truncate_path_best_effort(const char *path,
 static int lc_pouch_state_note_index_records(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, unsigned long count,
-    unsigned long *index_seq_out, lc_error *error) {
+    lc_pouch_generation *index_seq_out, lc_error *error) {
   lc_pouch_state_cache_namespace *cache;
-  unsigned long base;
+  lc_pouch_generation base;
 
   if (index_seq_out != NULL) {
     *index_seq_out = 0UL;
@@ -3356,7 +3366,8 @@ static int lc_pouch_state_note_index_records(
   if (cache != NULL && cache->initialized && cache->max_version > base) {
     base = cache->max_version;
   }
-  if (base > ULONG_MAX - count) {
+  if ((uintmax_t)count > UINT64_MAX ||
+      base > UINT64_MAX - (uint64_t)count) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch state index sequence overflow", NULL, NULL,
                         "pouch");
@@ -3539,7 +3550,7 @@ static int lc_pouch_state_meta_new(const lc_allocator *allocator, size_t length,
 }
 
 static int lc_pouch_state_encode_payload_meta(
-    const lc_allocator *allocator, unsigned long version, long updated_at_unix,
+    const lc_allocator *allocator, lc_pouch_generation version, lc_pouch_unix_seconds updated_at_unix,
     uint64_t plain_bytes, uint64_t stored_bytes,
     const char *content_type, const char *etag, const char *descriptor,
     const lc_pouch_state_payload_span *payload_span,
@@ -3667,7 +3678,7 @@ static int lc_pouch_state_encode_payload_meta(
 
 static int
 lc_pouch_state_encode_delete_meta(const lc_allocator *allocator,
-                                  unsigned long version, long updated_at_unix,
+                                  lc_pouch_generation version, lc_pouch_unix_seconds updated_at_unix,
                                   const char *etag, unsigned char **out,
                                   size_t *out_length, lc_error *error) {
   size_t etag_len;
@@ -3699,7 +3710,7 @@ lc_pouch_state_encode_delete_meta(const lc_allocator *allocator,
 
 static int
 lc_pouch_state_encode_decision_meta(const lc_allocator *allocator,
-                                    unsigned long version, const char *etag,
+                                    lc_pouch_generation version, const char *etag,
                                     const char *decision, unsigned char **out,
                                     size_t *out_length, lc_error *error) {
   size_t etag_len;
@@ -3741,7 +3752,7 @@ lc_pouch_state_encode_decision_meta(const lc_allocator *allocator,
 }
 
 static int lc_pouch_state_encode_high_water_meta(const lc_allocator *allocator,
-                                                 unsigned long version,
+                                                 lc_pouch_generation version,
                                                  unsigned char **out,
                                                  size_t *out_length,
                                                  lc_error *error) {
@@ -3767,7 +3778,7 @@ static int lc_pouch_state_decode_payload_meta(
     const char *container_leaf, uint64_t record_offset,
     uint64_t payload_offset, uint64_t payload_length,
     unsigned long payload_crc, lc_pouch_state_entry *entry, lc_error *error) {
-  unsigned long version;
+  lc_pouch_generation version;
   uint64_t plain_bytes;
   uint64_t stored_bytes;
   uint64_t ref_record_offset;
@@ -3807,8 +3818,7 @@ static int lc_pouch_state_decode_payload_meta(
                         "pouch");
   }
   value = lc_pouch_state_get64(meta);
-  rc = lc_pouch_state_u64_to_ulong(
-      value, &version, "pouch state version exceeds local limit", error);
+  rc = lc_pouch_state_decode_generation(value, &version, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -3955,7 +3965,8 @@ payload_ref_decoded:
   entry->version = version;
   entry->bytes = plain_bytes;
   entry->cipher_bytes = stored_bytes;
-  entry->updated_at_unix = (long)lc_pouch_state_get64(meta + 8);
+  entry->updated_at_unix =
+      lc_pouch_state_decode_unix_seconds(lc_pouch_state_get64(meta + 8));
   entry->has_query_hidden = (meta[60] & 1U) != 0;
   entry->query_hidden = (meta[60] & 2U) != 0;
   entry->seen = 1;
@@ -3976,7 +3987,7 @@ static int lc_pouch_state_decode_delete_meta(
     const unsigned char *meta, size_t meta_len, unsigned char record_type,
     const char *container_leaf, uint64_t record_offset,
     lc_pouch_state_entry *entry, lc_error *error) {
-  unsigned long version;
+  lc_pouch_generation version;
   unsigned long etag_len;
   int rc;
 
@@ -3987,9 +3998,8 @@ static int lc_pouch_state_decode_delete_meta(
                         "pouch state delete metadata is truncated", NULL, NULL,
                         "pouch");
   }
-  rc = lc_pouch_state_u64_to_ulong(
-      lc_pouch_state_get64(meta), &version,
-      "pouch state delete version exceeds local limit", error);
+  rc = lc_pouch_state_decode_generation(lc_pouch_state_get64(meta), &version,
+                                         error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -4008,7 +4018,8 @@ static int lc_pouch_state_decode_delete_meta(
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
   entry->version = version;
-  entry->updated_at_unix = (long)lc_pouch_state_get64(meta + 8);
+  entry->updated_at_unix =
+      lc_pouch_state_decode_unix_seconds(lc_pouch_state_get64(meta + 8));
   entry->seen = 1;
   entry->found = 0;
   entry->record_type = record_type;
@@ -4026,7 +4037,7 @@ static int lc_pouch_state_decode_decision_meta(
     const lc_allocator *allocator, const unsigned char *key, size_t key_len,
     const unsigned char *meta, size_t meta_len, lc_pouch_state_entry *entry,
     lc_error *error) {
-  unsigned long version;
+  lc_pouch_generation version;
   unsigned long etag_len;
   const char *decision;
   int rc;
@@ -4039,9 +4050,8 @@ static int lc_pouch_state_decode_decision_meta(
                         "pouch state decision metadata is truncated", NULL,
                         NULL, "pouch");
   }
-  rc = lc_pouch_state_u64_to_ulong(
-      lc_pouch_state_get64(meta), &version,
-      "pouch state decision version exceeds local limit", error);
+  rc = lc_pouch_state_decode_generation(lc_pouch_state_get64(meta), &version,
+                                         error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -4082,7 +4092,7 @@ static int lc_pouch_state_decode_high_water_meta(const lc_allocator *allocator,
                                                  size_t meta_len,
                                                  lc_pouch_state_entry *entry,
                                                  lc_error *error) {
-  unsigned long version;
+  lc_pouch_generation version;
   int rc;
 
   version = 0UL;
@@ -4091,9 +4101,8 @@ static int lc_pouch_state_decode_high_water_meta(const lc_allocator *allocator,
                         "pouch state high-water metadata is truncated", NULL,
                         NULL, "pouch");
   }
-  rc = lc_pouch_state_u64_to_ulong(
-      lc_pouch_state_get64(meta), &version,
-      "pouch high-water version exceeds local limit", error);
+  rc = lc_pouch_state_decode_generation(lc_pouch_state_get64(meta), &version,
+                                         error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -4352,7 +4361,7 @@ static int lc_pouch_state_scan_file(lc_pouch *pouch, const char *segment_path,
                                     const char *container_leaf,
                                     int allow_truncated_tail, const char *key,
                                     lc_pouch_state_entry *current,
-                                    unsigned long *max_version,
+                                    lc_pouch_generation *max_version,
                                     lc_error *error) {
   lc_pouch_state_entry entry;
   FILE *fp;
@@ -4462,7 +4471,7 @@ static int lc_pouch_state_skip_file_bytes(FILE *fp, uint64_t length,
 static int lc_pouch_state_scan_file_max_version(lc_pouch *pouch,
                                                 const char *segment_path,
                                                 int allow_truncated_tail,
-                                                unsigned long *max_version,
+                                                lc_pouch_generation *max_version,
                                                 lc_error *error) {
   FILE *fp;
   int rc;
@@ -4486,7 +4495,7 @@ static int lc_pouch_state_scan_file_max_version(lc_pouch *pouch,
     lc_pouch_record_header header;
     unsigned char encoded[LC_POUCH_STATE_RECORD_HEADER_BYTES];
     unsigned char version_meta[8];
-    unsigned long version;
+    lc_pouch_generation version;
     size_t got;
 
     version = 0UL;
@@ -4573,9 +4582,8 @@ static int lc_pouch_state_scan_file_max_version(lc_pouch *pouch,
                         NULL, "pouch");
       break;
     }
-    rc = lc_pouch_state_u64_to_ulong(
-        lc_pouch_state_get64(version_meta), &version,
-        "pouch state sequence version exceeds local limit", error);
+    rc = lc_pouch_state_decode_generation(lc_pouch_state_get64(version_meta),
+                                           &version, error);
     if (rc != LC_OK) {
       break;
     }
@@ -4602,7 +4610,7 @@ static int lc_pouch_state_scan_file_max_version(lc_pouch *pouch,
 
 static int lc_pouch_state_manifest_max_version(
     lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
-    unsigned long *max_version, lc_error *error) {
+    lc_pouch_generation *max_version, lc_error *error) {
   unsigned long segment_id;
   int rc;
 
@@ -4669,7 +4677,7 @@ static int lc_pouch_state_manifest_max_version(
 static int lc_pouch_state_scan(lc_pouch *pouch,
                                const lc_pouch_namespace_manifest *manifest,
                                const char *key, lc_pouch_state_entry *current,
-                               unsigned long *max_version, lc_error *error) {
+                               lc_pouch_generation *max_version, lc_error *error) {
   unsigned long segment_id;
   int rc;
 
@@ -4985,7 +4993,7 @@ static int lc_pouch_state_cache_replay_file(
       } else if (snapshot_file) {
         entry.index_seq = cache->max_version;
       } else {
-        if (cache->max_version == ULONG_MAX) {
+        if (cache->max_version == UINT64_MAX) {
           rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                             "pouch state replay index sequence overflow", NULL,
                             NULL, "pouch");
@@ -5216,7 +5224,7 @@ static int
 lc_pouch_state_cache_lookup(lc_pouch *pouch, const char *namespace_name,
                             const lc_pouch_namespace_manifest *manifest,
                             const char *key, lc_pouch_state_entry *out,
-                            unsigned long *max_version_out, lc_error *error) {
+                            lc_pouch_generation *max_version_out, lc_error *error) {
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_cache_record *record;
   int force_refresh;
@@ -5556,7 +5564,7 @@ static int lc_pouch_state_snapshot_write_record(
 }
 
 static int lc_pouch_state_snapshot_write_high_water(
-    int fd, unsigned long high_water_version, lc_error *error) {
+    int fd, lc_pouch_generation high_water_version, lc_error *error) {
   unsigned char *meta;
   size_t meta_len;
   int rc;
@@ -6367,21 +6375,27 @@ static void lc_pouch_maintenance_mark_aborted(lc_pouch *pouch,
       pouch, out, diagnostic != NULL ? diagnostic : "compaction-aborted");
 }
 
-static uint64_t lc_pouch_maintenance_now_seconds(void) {
+static lc_pouch_unix_seconds lc_pouch_maintenance_now_seconds(void) {
   time_t now;
 
   now = time(NULL);
-  return now > 0 ? (uint64_t)now : 0U;
+  if (now <= 0) {
+    return 0;
+  }
+  if ((uintmax_t)now > (uintmax_t)INT64_MAX) {
+    return INT64_MAX;
+  }
+  return (lc_pouch_unix_seconds)now;
 }
 
 typedef struct lc_pouch_retention_key {
   char *key;
-  unsigned long version;
+  lc_pouch_generation version;
 } lc_pouch_retention_key;
 
 typedef struct lc_pouch_retention_scan {
   lc_pouch *pouch;
-  long cutoff_unix;
+  lc_pouch_unix_seconds cutoff_unix;
   lc_pouch_retention_key *keys;
   size_t count;
   size_t capacity;
@@ -6403,7 +6417,7 @@ static void lc_pouch_retention_scan_cleanup(lc_pouch_retention_scan *scan) {
 }
 
 static int lc_pouch_retention_scan_add(lc_pouch_retention_scan *scan,
-                                       const char *key, unsigned long version,
+                                       const char *key, lc_pouch_generation version,
                                        lc_error *error) {
   lc_pouch_retention_key *next_keys;
   size_t next_capacity;
@@ -6458,7 +6472,7 @@ lc_pouch_retention_scan_visit(const lc_pouch_state_visit_entry *entry,
 
 static int lc_pouch_state_retention_sweep(lc_pouch *pouch,
                                           const char *namespace_name,
-                                          long cutoff_unix,
+                                          lc_pouch_unix_seconds cutoff_unix,
                                           lc_pouch_maintenance_result *out,
                                           lc_error *error) {
   lc_pouch_retention_scan scan;
@@ -7202,8 +7216,8 @@ static int lc_pouch_state_cache_apply_write(
     const char *content_type, const char *etag,
     const lc_pouch_state_payload_span *payload_span,
     const char *payload_context, const unsigned char *metadata,
-    size_t metadata_length, unsigned long version, uint64_t bytes,
-    uint64_t cipher_bytes, const char *descriptor, long updated_at_unix,
+    size_t metadata_length, lc_pouch_generation version, uint64_t bytes,
+    uint64_t cipher_bytes, const char *descriptor, lc_pouch_unix_seconds updated_at_unix,
     int has_query_hidden, int query_hidden, int found,
     unsigned char record_type) {
   lc_pouch_state_cache_namespace *cache;
@@ -7255,7 +7269,7 @@ static int lc_pouch_state_cache_apply_write(
 static int lc_pouch_state_append_tombstone(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, const char *key, const char *etag,
-    unsigned long version, long updated_at_unix, unsigned char record_type,
+    lc_pouch_generation version, lc_pouch_unix_seconds updated_at_unix, unsigned char record_type,
     lc_error *error) {
   unsigned char *meta;
   size_t meta_len;
@@ -7288,8 +7302,8 @@ static int lc_pouch_state_append_record(
     const char *key, const char *content_type, const char *etag,
     const lc_pouch_state_payload_span *payload_span,
     const char *payload_context, const unsigned char *metadata,
-    size_t metadata_length, unsigned long version, uint64_t bytes,
-    uint64_t cipher_bytes, const char *descriptor, long updated_at_unix,
+    size_t metadata_length, lc_pouch_generation version, uint64_t bytes,
+    uint64_t cipher_bytes, const char *descriptor, lc_pouch_unix_seconds updated_at_unix,
     int has_query_hidden, int query_hidden, lc_error *error) {
   unsigned char *meta;
   size_t meta_len;
@@ -7323,9 +7337,9 @@ static int lc_pouch_state_append_staged_commit_batch(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, const char *key,
     const char *staged_key, const lc_pouch_state_entry *staged,
-    const unsigned char *metadata, size_t metadata_length, unsigned long version,
-    unsigned long decision_version, unsigned long discard_version,
-    long updated_at_unix, lc_error *error) {
+    const unsigned char *metadata, size_t metadata_length, lc_pouch_generation version,
+    lc_pouch_generation decision_version, lc_pouch_generation discard_version,
+    lc_pouch_unix_seconds updated_at_unix, lc_error *error) {
   lc_pouch_state_binary_append_item items[3];
   unsigned char *link_meta;
   unsigned char *decision_meta;
@@ -7392,8 +7406,8 @@ static int lc_pouch_state_append_staged_commit_batch(
 static int lc_pouch_state_append_staged_discard_batch(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, const char *staged_key,
-    const char *etag, unsigned long decision_version,
-    unsigned long tombstone_version, long updated_at_unix, lc_error *error) {
+    const char *etag, lc_pouch_generation decision_version,
+    lc_pouch_generation tombstone_version, lc_pouch_unix_seconds updated_at_unix, lc_error *error) {
   lc_pouch_state_binary_append_item items[2];
   unsigned char *decision_meta;
   unsigned char *delete_meta;
@@ -7496,9 +7510,9 @@ static int lc_pouch_state_recover_staged_decisions_locked(
   for (decision = decisions; rc == LC_OK && decision != NULL;
        decision = decision->next) {
     lc_pouch_state_entry staged;
-    unsigned long max_version;
-    unsigned long tombstone_version;
-    long updated_at_unix;
+    lc_pouch_generation max_version;
+    lc_pouch_generation tombstone_version;
+    lc_pouch_unix_seconds updated_at_unix;
 
     memset(&staged, 0, sizeof(staged));
     rc = lc_pouch_state_scan(pouch, &manifest, decision->staged_key, &staged,
@@ -7513,7 +7527,7 @@ static int lc_pouch_state_recover_staged_decisions_locked(
     }
     (void)max_version;
     tombstone_version = staged.version + 1UL;
-    updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
+    updated_at_unix = lc_pouch_maintenance_now_seconds();
     rc = lc_pouch_state_append_tombstone(
         pouch, namespace_name, &manifest, decision->staged_key, decision->etag,
         tombstone_version, updated_at_unix, LC_POUCH_STATE_RECORD_STATE_DELETE,
@@ -7589,8 +7603,8 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   const char placeholder_etag[] =
       "0000000000000000000000000000000000000000000000000000000000000000";
   int fd;
-  unsigned long max_version;
-  unsigned long version;
+  lc_pouch_generation max_version;
+  lc_pouch_generation version;
   uint64_t bytes;
   uint64_t cipher_bytes;
   unsigned long stored_crc;
@@ -7598,12 +7612,12 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   uint64_t payload_offset;
   size_t meta_len;
   size_t final_meta_len;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
   const unsigned char *metadata;
   size_t metadata_length;
-  unsigned long index_seq;
+  lc_pouch_generation index_seq;
   int rc;
   unsigned char put_record_type;
 
@@ -7679,7 +7693,7 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   (void)max_version;
   version = current.found && current.payload_span.present ? current.version + 1UL
                                                           : 1UL;
-  updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
+  updated_at_unix = lc_pouch_maintenance_now_seconds();
   etag = NULL;
   payload_context = NULL;
   memset(&payload_span, 0, sizeof(payload_span));
@@ -7897,7 +7911,7 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
     }
   }
   EVP_MD_CTX_free(hash_ctx);
-  updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
+  updated_at_unix = lc_pouch_maintenance_now_seconds();
   if (rc == LC_OK) {
     lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
     rc = lc_pouch_state_payload_span_set(
@@ -8103,10 +8117,10 @@ static int lc_pouch_state_update_metadata_locked(
     lc_pouch_state_write_result *out, lc_error *error) {
   lc_pouch_state_entry current;
   lc_pouch_namespace_manifest manifest;
-  unsigned long max_version;
-  unsigned long logical_version;
-  unsigned long version;
-  long updated_at_unix;
+  lc_pouch_generation max_version;
+  lc_pouch_generation logical_version;
+  lc_pouch_generation version;
+  lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
   int rc;
@@ -8173,7 +8187,7 @@ static int lc_pouch_state_update_metadata_locked(
   }
   (void)max_version;
   version = logical_version;
-  updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
+  updated_at_unix = lc_pouch_maintenance_now_seconds();
   rc = lc_pouch_state_append_record(
       pouch, namespace_name, &manifest, LC_POUCH_STATE_RECORD_STATE_META, key,
       current.content_type != NULL ? current.content_type
@@ -8304,9 +8318,9 @@ static int lc_pouch_state_delete_locked(
   lc_pouch_state_entry current;
   lc_pouch_namespace_manifest manifest;
   char *etag;
-  unsigned long max_version;
-  unsigned long version;
-  long updated_at_unix;
+  lc_pouch_generation max_version;
+  lc_pouch_generation version;
+  lc_pouch_unix_seconds updated_at_unix;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -8375,7 +8389,7 @@ static int lc_pouch_state_delete_locked(
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
+  updated_at_unix = lc_pouch_maintenance_now_seconds();
   rc = lc_pouch_state_append_tombstone(pouch, namespace_name, &manifest, key,
                                        etag, version, updated_at_unix,
                                        options != NULL && options->object_record
@@ -8502,14 +8516,14 @@ static int lc_pouch_state_promote_staged_locked(
   lc_pouch_state_entry staged;
   lc_pouch_namespace_manifest manifest;
   char *staged_key;
-  unsigned long committed_max_version;
-  unsigned long staged_max_version;
-  unsigned long version;
-  unsigned long decision_version;
-  unsigned long discard_version;
+  lc_pouch_generation committed_max_version;
+  lc_pouch_generation staged_max_version;
+  lc_pouch_generation version;
+  lc_pouch_generation decision_version;
+  lc_pouch_generation discard_version;
   const unsigned char *promoted_metadata;
   size_t promoted_metadata_length;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -8583,7 +8597,7 @@ static int lc_pouch_state_promote_staged_locked(
   version = committed.found && committed.payload_span.present
                 ? committed.version + 1UL
                 : 1UL;
-  updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
+  updated_at_unix = lc_pouch_maintenance_now_seconds();
   decision_version = staged.version + 1UL;
   discard_version = decision_version + 1UL;
   rc = lc_pouch_state_append_staged_commit_batch(
@@ -8688,14 +8702,14 @@ static int lc_pouch_state_commit_staged_locked(
   lc_pouch_state_entry staged;
   lc_pouch_namespace_manifest manifest;
   char *staged_key;
-  unsigned long committed_max_version;
-  unsigned long staged_max_version;
-  unsigned long version;
-  unsigned long decision_version;
-  unsigned long discard_version;
+  lc_pouch_generation committed_max_version;
+  lc_pouch_generation staged_max_version;
+  lc_pouch_generation version;
+  lc_pouch_generation decision_version;
+  lc_pouch_generation discard_version;
   const unsigned char *promoted_metadata;
   size_t promoted_metadata_length;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -8752,7 +8766,7 @@ static int lc_pouch_state_commit_staged_locked(
   version = committed.found && committed.payload_span.present
                 ? committed.version + 1UL
                 : 1UL;
-  updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
+  updated_at_unix = lc_pouch_maintenance_now_seconds();
   decision_version = staged.version + 1UL;
   discard_version = decision_version + 1UL;
   rc = lc_pouch_state_append_staged_commit_batch(
@@ -8857,10 +8871,10 @@ static int lc_pouch_state_discard_staged_locked(
   lc_pouch_namespace_manifest manifest;
   char *staged_key;
   char *etag;
-  unsigned long max_version;
-  unsigned long decision_version;
-  unsigned long tombstone_version;
-  long updated_at_unix;
+  lc_pouch_generation max_version;
+  lc_pouch_generation decision_version;
+  lc_pouch_generation tombstone_version;
+  lc_pouch_unix_seconds updated_at_unix;
   int rc;
 
   if (discarded != NULL) {
@@ -8900,7 +8914,7 @@ static int lc_pouch_state_discard_staged_locked(
     (void)max_version;
     decision_version = staged.version + 1UL;
     tombstone_version = decision_version + 1UL;
-    updated_at_unix = (long)lc_pouch_maintenance_now_seconds();
+    updated_at_unix = lc_pouch_maintenance_now_seconds();
     etag = lc_pouch_state_empty_etag(&pouch->allocator, error);
     if (etag == NULL) {
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -9851,7 +9865,7 @@ cleanup_unlocked:
 }
 
 int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
-                               unsigned long after_version,
+                               lc_pouch_generation after_version,
                                lc_pouch_state_change_visit_fn visitor,
                                void *context, lc_error *error) {
   lc_pouch_namespace_manifest manifest;
@@ -9955,7 +9969,7 @@ cleanup:
 }
 
 int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
-                             unsigned long *out, lc_error *error) {
+                             lc_pouch_generation *out, lc_error *error) {
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_process_namespace_mutex *process_mutex;

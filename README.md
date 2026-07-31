@@ -35,9 +35,10 @@ The library itself is delivered as:
 
 Pouch is liblockdc's C-native local storage engine. It follows Go lockd disk
 storage semantics while intentionally using its own binary records, manifests,
-and `uint64_t` payload/file-size accounting. The current semantic alignment
-scope and every remaining format, operational, API, and portability divergence
-are recorded in [the Pouch storage specification](docs/pouch-storage.md).
+`uint64_t` payload/file-size, generation/index, and coordinator-term
+accounting, and `int64_t` Unix timestamps. The current semantic alignment scope
+and every remaining format, operational, API, and portability divergence are
+recorded in [the Pouch storage specification](docs/pouch-storage.md).
 
 ## Build system
 

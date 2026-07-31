@@ -5,6 +5,7 @@
 #include <lonejson.h>
 #include <pslog.h>
 #include <stddef.h>
+#include <stdint.h>
 
 /** Default maximum bytes accepted while parsing a typed JSON HTTP response. */
 #define LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT (100UL * 1024UL * 1024UL)
@@ -23,6 +24,15 @@ typedef struct lc_source lc_source;
 /** Opaque byte sink used for downloads and streamed response bodies. */
 typedef struct lc_sink lc_sink;
 
+/** API-visible monotonic object version. Mirrors lockd's signed int64 value. */
+typedef int64_t lc_version;
+/** Unix timestamp in seconds. Mirrors lockd's signed int64 value. */
+typedef int64_t lc_unix_seconds;
+/** Query/index sequence. Mirrors lockd's unsigned uint64 value. */
+typedef uint64_t lc_index_seq;
+/** Transaction-coordinator leader term. Mirrors lockd's unsigned uint64 value. */
+typedef uint64_t lc_tc_term;
+
 /** Snapshot fetched by `acquire_for_update()` before invoking the handler. */
 typedef struct lc_state_snapshot {
   /** Streamed private state payload. `NULL` when `has_state` is zero. */
@@ -34,7 +44,7 @@ typedef struct lc_state_snapshot {
   /** State entity tag returned by lockd. */
   const char *etag;
   /** State version returned by lockd. */
-  long version;
+  lc_version version;
   /** Current fencing token returned by lockd. */
   long fencing_token;
   /** Correlation id for the snapshot read. */
@@ -227,7 +237,7 @@ typedef struct lc_acquire_req {
 
 /** Result metadata returned by a successful lease acquisition. */
 typedef struct lc_acquire_res {
-  long version;
+  lc_version version;
   char *state_etag;
   long fencing_token;
   char *correlation_id;
@@ -259,9 +269,9 @@ typedef struct lc_describe_res {
   char *namespace_name;
   char *key;
   char *owner;
-  long version;
+  lc_version version;
   char *lease_id;
-  long lease_expires_at_unix;
+  lc_unix_seconds lease_expires_at_unix;
   long fencing_token;
   char *txn_id;
   char *state_etag;
@@ -282,7 +292,7 @@ typedef struct lc_get_res {
   int no_content;
   char *content_type;
   char *etag;
-  long version;
+  lc_version version;
   long fencing_token;
   char *correlation_id;
 } lc_get_res;
@@ -292,7 +302,7 @@ typedef struct lc_update_opts {
   /** Optional state etag precondition for optimistic concurrency. */
   const char *if_state_etag;
   /** Optional version precondition for optimistic concurrency. */
-  long if_version;
+  lc_version if_version;
   /** Enables `if_version` when non-zero so version `0` stays representable. */
   int has_if_version;
   /** Content type sent with the JSON state body. */
@@ -306,7 +316,7 @@ typedef struct lc_update_req {
   /** Optional state etag precondition for optimistic concurrency. */
   const char *if_state_etag;
   /** Optional version precondition for optimistic concurrency. */
-  long if_version;
+  lc_version if_version;
   /** Enables `if_version` when non-zero so version `0` stays representable. */
   int has_if_version;
   /** Content type sent with the JSON state body. */
@@ -315,7 +325,7 @@ typedef struct lc_update_req {
 
 /** Metadata returned by a successful state update. */
 typedef struct lc_update_res {
-  long new_version;
+  lc_version new_version;
   char *new_state_etag;
   long bytes;
   char *correlation_id;
@@ -330,7 +340,7 @@ typedef struct lc_mutate_req {
   /** Optional state etag precondition for optimistic concurrency. */
   const char *if_state_etag;
   /** Optional version precondition for optimistic concurrency. */
-  long if_version;
+  lc_version if_version;
   /** Enables `if_version` when non-zero so version `0` stays representable. */
   int has_if_version;
 } lc_mutate_req;
@@ -362,13 +372,13 @@ typedef struct lc_mutate_op {
   const char *const *mutations;
   size_t mutation_count;
   const char *if_state_etag;
-  long if_version;
+  lc_version if_version;
   int has_if_version;
 } lc_mutate_op;
 
 /** Metadata returned by a successful mutate operation. */
 typedef struct lc_mutate_res {
-  long new_version;
+  lc_version new_version;
   char *new_state_etag;
   long bytes;
   char *correlation_id;
@@ -381,7 +391,7 @@ typedef struct lc_metadata_req {
   /** Whether the state should be hidden from normal query results. */
   int query_hidden;
   /** Optional version precondition for optimistic concurrency. */
-  long if_version;
+  lc_version if_version;
   /** Enables `if_version` when non-zero so version `0` stays representable. */
   int has_if_version;
 } lc_metadata_req;
@@ -391,7 +401,7 @@ typedef struct lc_metadata_op {
   lc_lease_ref lease;
   int has_query_hidden;
   int query_hidden;
-  long if_version;
+  lc_version if_version;
   int has_if_version;
 } lc_metadata_op;
 
@@ -399,7 +409,7 @@ typedef struct lc_metadata_op {
 typedef struct lc_metadata_res {
   char *namespace_name;
   char *key;
-  long version;
+  lc_version version;
   int has_query_hidden;
   int query_hidden;
   char *correlation_id;
@@ -410,7 +420,7 @@ typedef struct lc_remove_req {
   /** Optional state etag precondition for optimistic concurrency. */
   const char *if_state_etag;
   /** Optional version precondition for optimistic concurrency. */
-  long if_version;
+  lc_version if_version;
   /** Enables `if_version` when non-zero so version `0` stays representable. */
   int has_if_version;
 } lc_remove_req;
@@ -419,14 +429,14 @@ typedef struct lc_remove_req {
 typedef struct lc_remove_op {
   lc_lease_ref lease;
   const char *if_state_etag;
-  long if_version;
+  lc_version if_version;
   int has_if_version;
 } lc_remove_op;
 
 /** Result returned by a remove operation. */
 typedef struct lc_remove_res {
   int removed;
-  long new_version;
+  lc_version new_version;
   char *correlation_id;
 } lc_remove_res;
 
@@ -444,8 +454,8 @@ typedef struct lc_keepalive_op {
 
 /** Result returned by a successful keepalive operation. */
 typedef struct lc_keepalive_res {
-  long lease_expires_at_unix;
-  long version;
+  lc_unix_seconds lease_expires_at_unix;
+  lc_version version;
   char *state_etag;
   char *correlation_id;
 } lc_keepalive_res;
@@ -498,7 +508,7 @@ typedef struct lc_query_req {
 typedef struct lc_query_res {
   char *cursor;
   char *return_mode;
-  unsigned long index_seq;
+  lc_index_seq index_seq;
   char *correlation_id;
   /** Raw JSON metadata emitted by query responses, when present. */
   char *metadata_json;
@@ -552,7 +562,7 @@ typedef struct lc_index_flush_res {
   int accepted;
   int flushed;
   int pending;
-  unsigned long index_seq;
+  lc_index_seq index_seq;
   char *correlation_id;
 } lc_index_flush_res;
 
@@ -582,8 +592,8 @@ typedef struct lc_txn_decision_req {
   const char *txn_id;
   const lc_txn_participant *participants;
   size_t participant_count;
-  long expires_at_unix;
-  unsigned long tc_term;
+  lc_unix_seconds expires_at_unix;
+  lc_tc_term tc_term;
   const char *target_backend_hash;
 } lc_txn_decision_req;
 
@@ -598,7 +608,7 @@ typedef struct lc_txn_decision_res {
 typedef struct lc_tc_lease_acquire_req {
   const char *candidate_id;
   const char *candidate_endpoint;
-  unsigned long term;
+  lc_tc_term term;
   long ttl_ms;
 } lc_tc_lease_acquire_req;
 
@@ -607,15 +617,15 @@ typedef struct lc_tc_lease_acquire_res {
   int granted;
   char *leader_id;
   char *leader_endpoint;
-  unsigned long term;
-  long expires_at_unix;
+  lc_tc_term term;
+  lc_unix_seconds expires_at_unix;
   char *correlation_id;
 } lc_tc_lease_acquire_res;
 
 /** Request used to renew the TC leader lease. */
 typedef struct lc_tc_lease_renew_req {
   const char *leader_id;
-  unsigned long term;
+  lc_tc_term term;
   long ttl_ms;
 } lc_tc_lease_renew_req;
 
@@ -624,15 +634,15 @@ typedef struct lc_tc_lease_renew_res {
   int renewed;
   char *leader_id;
   char *leader_endpoint;
-  unsigned long term;
-  long expires_at_unix;
+  lc_tc_term term;
+  lc_unix_seconds expires_at_unix;
   char *correlation_id;
 } lc_tc_lease_renew_res;
 
 /** Request used to release the TC leader lease. */
 typedef struct lc_tc_lease_release_req {
   const char *leader_id;
-  unsigned long term;
+  lc_tc_term term;
 } lc_tc_lease_release_req;
 
 /** Result returned by TC leader lease release. */
@@ -645,8 +655,8 @@ typedef struct lc_tc_lease_release_res {
 typedef struct lc_tc_leader_res {
   char *leader_id;
   char *leader_endpoint;
-  unsigned long term;
-  long expires_at_unix;
+  lc_tc_term term;
+  lc_unix_seconds expires_at_unix;
   char *correlation_id;
 } lc_tc_leader_res;
 
@@ -658,8 +668,8 @@ typedef struct lc_tc_cluster_announce_req {
 /** Cluster membership state returned by TC cluster operations. */
 typedef struct lc_tc_cluster_res {
   lc_string_list endpoints;
-  long updated_at_unix;
-  long expires_at_unix;
+  lc_unix_seconds updated_at_unix;
+  lc_unix_seconds expires_at_unix;
   char *correlation_id;
 } lc_tc_cluster_res;
 
@@ -680,7 +690,7 @@ typedef struct lc_tc_rm_unregister_req {
 typedef struct lc_tc_rm_res {
   char *backend_hash;
   lc_string_list endpoints;
-  long updated_at_unix;
+  lc_unix_seconds updated_at_unix;
   char *correlation_id;
 } lc_tc_rm_res;
 
@@ -688,14 +698,14 @@ typedef struct lc_tc_rm_res {
 typedef struct lc_tc_rm_backend {
   char *backend_hash;
   lc_string_list endpoints;
-  long updated_at_unix;
+  lc_unix_seconds updated_at_unix;
 } lc_tc_rm_backend;
 
 /** Full TC RM backend listing. */
 typedef struct lc_tc_rm_list_res {
   lc_tc_rm_backend *backends;
   size_t backend_count;
-  long updated_at_unix;
+  lc_unix_seconds updated_at_unix;
   char *correlation_id;
 } lc_tc_rm_list_res;
 
@@ -724,7 +734,7 @@ typedef struct lc_enqueue_res {
   int attempts;
   int max_attempts;
   int failure_attempts;
-  long not_visible_until_unix;
+  lc_unix_seconds not_visible_until_unix;
   long visibility_timeout_seconds;
   long payload_bytes;
   char *correlation_id;
@@ -766,8 +776,8 @@ typedef struct lc_queue_stats_res {
   int has_active_watcher;
   int available;
   char *head_message_id;
-  long head_enqueued_at_unix;
-  long head_not_visible_until_unix;
+  lc_unix_seconds head_enqueued_at_unix;
+  lc_unix_seconds head_not_visible_until_unix;
   long head_age_seconds;
   char *correlation_id;
 } lc_queue_stats_res;
@@ -913,10 +923,10 @@ typedef struct lc_extend_op {
 
 /** Result returned by queue visibility extension operations. */
 typedef struct lc_extend_res {
-  long lease_expires_at_unix;
+  lc_unix_seconds lease_expires_at_unix;
   long visibility_timeout_seconds;
   char *meta_etag;
-  long state_lease_expires_at_unix;
+  lc_unix_seconds state_lease_expires_at_unix;
   char *correlation_id;
 } lc_extend_res;
 
@@ -932,7 +942,7 @@ typedef struct lc_watch_event {
   char *queue;
   int available;
   char *head_message_id;
-  long changed_at_unix;
+  lc_unix_seconds changed_at_unix;
   char *correlation_id;
 } lc_watch_event;
 
@@ -1130,8 +1140,8 @@ typedef struct lc_attachment_info {
   long size;
   char *plaintext_sha256;
   char *content_type;
-  long created_at_unix;
-  long updated_at_unix;
+  lc_unix_seconds created_at_unix;
+  lc_unix_seconds updated_at_unix;
 } lc_attachment_info;
 
 /** Request used to attach streamed content to a lease. */
@@ -1162,7 +1172,7 @@ typedef struct lc_attach_op {
 typedef struct lc_attach_res {
   lc_attachment_info attachment;
   int noop;
-  long version;
+  lc_version version;
   char *correlation_id;
 } lc_attach_res;
 
@@ -1353,9 +1363,9 @@ struct lc_lease {
   /** Current fencing token for optimistic concurrency. */
   long fencing_token;
   /** Current state version published by the server. */
-  long version;
+  lc_version version;
   /** Current lease expiry as a Unix timestamp. */
-  long lease_expires_at_unix;
+  lc_unix_seconds lease_expires_at_unix;
   /** Current private state etag. */
   const char *state_etag;
   /** Non-zero when `query_hidden` was explicitly set by the server. */
@@ -1439,7 +1449,7 @@ struct lc_message {
   /** Number of failed delivery attempts recorded by the server. */
   int failure_attempts;
   /** Unix timestamp until which the message is hidden from other consumers. */
-  long not_visible_until_unix;
+  lc_unix_seconds not_visible_until_unix;
   /** Current visibility timeout in seconds. */
   long visibility_timeout_seconds;
   /** Payload content type recorded with the message. */
@@ -1449,7 +1459,7 @@ struct lc_message {
   /** Delivery lease identifier for the message. */
   const char *lease_id;
   /** Current delivery lease expiry as a Unix timestamp. */
-  long lease_expires_at_unix;
+  lc_unix_seconds lease_expires_at_unix;
   /** Current fencing token for the delivery lease. */
   long fencing_token;
   /** Transaction identifier associated with the message, if any. */

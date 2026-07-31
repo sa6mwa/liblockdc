@@ -1689,7 +1689,7 @@ static int lc_pouch_index_term_generation_decode_posting_bytes(
 
 int lc_pouch_index_term_generation_decode(
     const lc_allocator *allocator, const char *bytes, size_t length,
-    unsigned long expected_index_seq, unsigned long expected_row_count,
+    uint64_t expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, lc_pouch_index_term_generation *generation,
     lc_error *error) {
   lc_pouch_index_term_generation decoded;
@@ -1742,9 +1742,8 @@ int lc_pouch_index_term_generation_decode(
                       NULL, "pouch");
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_index_term_generation_cursor_ulong(
-        &cursor, &decoded.index_seq,
-        "pouch index term generation missing index sequence", error);
+    rc = lc_pouch_index_term_generation_cursor_u64(
+        &cursor, &decoded.index_seq, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_cursor_ulong(
@@ -1928,7 +1927,7 @@ int lc_pouch_index_term_generation_decode(
 
 int lc_pouch_index_term_generation_load_bytes(
     const lc_allocator *allocator, const char *bytes, size_t length,
-    unsigned long expected_index_seq, unsigned long expected_row_count,
+    uint64_t expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, lc_pouch_index_term_generation *generation,
     int *valid, lc_error *error) {
   lc_error decode_error;
@@ -2047,7 +2046,7 @@ static int lc_pouch_index_term_generation_read_file(
 
 int lc_pouch_index_term_generation_validate_file(
     const lc_allocator *allocator, const char *path,
-    unsigned long expected_index_seq, unsigned long expected_row_count,
+    uint64_t expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, int *present, int *valid,
     lc_error *error) {
   lc_pouch_index_term_generation generation;
@@ -2087,7 +2086,7 @@ int lc_pouch_index_term_generation_validate_file(
 
 int lc_pouch_index_term_generation_load_file(
     const lc_allocator *allocator, const char *path,
-    unsigned long expected_index_seq, unsigned long expected_row_count,
+    uint64_t expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, lc_pouch_index_term_generation *generation,
     int *present, int *valid, lc_error *error) {
   lc_error decode_error;

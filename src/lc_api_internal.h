@@ -65,8 +65,8 @@ struct lc_lease_handle {
   char *lease_id;
   char *txn_id;
   long fencing_token;
-  long version;
-  long lease_expires_at_unix;
+  lc_version version;
+  lc_unix_seconds lease_expires_at_unix;
   char *state_etag;
   char *queue_state_etag;
   char *pouch_state_key;
@@ -74,7 +74,7 @@ struct lc_lease_handle {
   int pouch_stage_active;
   int pouch_stage_dirty;
   char *pouch_stage_etag;
-  long pouch_stage_version;
+  lc_version pouch_stage_version;
   int has_query_hidden;
   int query_hidden;
 };
@@ -88,12 +88,12 @@ struct lc_message_handle {
   int attempts;
   int max_attempts;
   int failure_attempts;
-  long not_visible_until_unix;
+  lc_unix_seconds not_visible_until_unix;
   long visibility_timeout_seconds;
   char *payload_content_type;
   char *correlation_id;
   char *lease_id;
-  long lease_expires_at_unix;
+  lc_unix_seconds lease_expires_at_unix;
   long fencing_token;
   char *txn_id;
   char *meta_etag;
@@ -103,7 +103,7 @@ struct lc_message_handle {
   lc_lease *state_lease;
   char *state_etag;
   char *state_lease_id;
-  long state_lease_expires_at_unix;
+  lc_unix_seconds state_lease_expires_at_unix;
   long state_fencing_token;
   char *state_txn_id;
   int batch_owned;
@@ -192,7 +192,7 @@ void lc_stream_pipe_finish(lc_stream_pipe *pipe);
 void lc_stream_pipe_fail(lc_stream_pipe *pipe, int code, const char *message);
 lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
                        const char *key, const char *owner, const char *lease_id,
-                       const char *txn_id, long fencing_token, long version,
+                       const char *txn_id, long fencing_token, lc_version version,
                        const char *state_etag, const char *queue_state_etag);
 lc_message *lc_message_new(lc_client_handle *client,
                            const lc_engine_dequeue_response *engine,

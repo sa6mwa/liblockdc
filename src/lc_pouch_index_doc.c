@@ -334,7 +334,7 @@ static int lc_pouch_index_doc_table_reserve(lc_pouch_index_doc_table *table,
 }
 
 int lc_pouch_index_doc_table_append_sorted_unique(
-    lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
+    lc_pouch_index_doc_table *table, const char *key_hex, uint64_t version,
     uint64_t bytes, int has_query_hidden, int query_hidden,
     unsigned long *doc_id, const lc_allocator *allocator, lc_error *error) {
   lc_pouch_index_doc *doc;
@@ -377,7 +377,7 @@ int lc_pouch_index_doc_table_append_sorted_unique(
 }
 
 static int lc_pouch_index_doc_table_append_unique_impl(
-    lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
+    lc_pouch_index_doc_table *table, const char *key_hex, uint64_t version,
     uint64_t bytes, int has_query_hidden, int query_hidden,
     int copy_key_hex, int check_unique, unsigned long *doc_id,
     const lc_allocator *allocator, lc_error *error) {
@@ -429,7 +429,7 @@ static int lc_pouch_index_doc_table_append_unique_impl(
 }
 
 int lc_pouch_index_doc_table_append_unique(
-    lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
+    lc_pouch_index_doc_table *table, const char *key_hex, uint64_t version,
     uint64_t bytes, int has_query_hidden, int query_hidden,
     unsigned long *doc_id, const lc_allocator *allocator, lc_error *error) {
   return lc_pouch_index_doc_table_append_unique_impl(
@@ -438,7 +438,7 @@ int lc_pouch_index_doc_table_append_unique(
 }
 
 int lc_pouch_index_doc_table_append_owned(
-    lc_pouch_index_doc_table *table, const char *key_hex, unsigned long version,
+    lc_pouch_index_doc_table *table, const char *key_hex, uint64_t version,
     uint64_t bytes, int has_query_hidden, int query_hidden,
     unsigned long *doc_id, const lc_allocator *allocator, lc_error *error) {
   return lc_pouch_index_doc_table_append_unique_impl(
@@ -586,7 +586,7 @@ static int lc_pouch_index_doc_generation_append_cstr(
 }
 
 int lc_pouch_index_doc_table_generation_encode(
-    const lc_pouch_index_doc_table *table, unsigned long index_seq,
+    const lc_pouch_index_doc_table *table, uint64_t index_seq,
     unsigned long row_hash, const lc_allocator *allocator, char **out_bytes,
     size_t *out_length, lc_error *error) {
   char *bytes;
@@ -624,7 +624,8 @@ int lc_pouch_index_doc_table_generation_encode(
                             NULL, NULL, NULL);
   }
   if (rc == LC_OK) {
-    written = snprintf(line, sizeof(line), "index_seq=%lu\n", index_seq);
+    written = snprintf(line, sizeof(line), "index_seq=%" PRIu64 "\n",
+                       index_seq);
     rc = written >= 0 && (size_t)written < sizeof(line)
              ? lc_pouch_index_doc_generation_append(allocator, &bytes, &length,
                                                     &capacity, line,
@@ -675,7 +676,8 @@ int lc_pouch_index_doc_table_generation_encode(
           allocator, &bytes, &length, &capacity, doc->key_hex, error);
     }
     if (rc == LC_OK) {
-      written = snprintf(line, sizeof(line), " %lu %" PRIu64 " %d %d\n",
+      written = snprintf(line, sizeof(line), " %" PRIu64 " %" PRIu64
+                                            " %d %d\n",
                          doc->version, doc->bytes,
                          doc->has_query_hidden ? 1 : 0,
                          doc->query_hidden ? 1 : 0);
@@ -727,6 +729,24 @@ static int lc_pouch_index_doc_generation_header_ulong(const char *line,
   return lc_pouch_index_doc_generation_parse_ulong(line + prefix_len, out);
 }
 
+static int lc_pouch_index_doc_generation_header_u64(const char *line,
+                                                     const char *prefix,
+                                                     uint64_t *out) {
+  size_t prefix_len;
+  char *end;
+
+  if (line == NULL || prefix == NULL || out == NULL) {
+    return 0;
+  }
+  prefix_len = strlen(prefix);
+  if (strncmp(line, prefix, prefix_len) != 0) {
+    return 0;
+  }
+  errno = 0;
+  *out = strtoull(line + prefix_len, &end, 10);
+  return errno == 0 && end != line + prefix_len && *end == '\0';
+}
+
 static char *lc_pouch_index_doc_generation_next_line(char **cursor) {
   char *line;
   char *newline;
@@ -765,12 +785,12 @@ static int lc_pouch_index_doc_generation_hex_token_valid(const char *token) {
 
 static int lc_pouch_index_doc_generation_parse_bytes(
     const lc_allocator *allocator, char *bytes,
-    unsigned long expected_index_seq, unsigned long expected_row_count,
+    uint64_t expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, lc_pouch_index_doc_table *table,
     int *valid, lc_error *error) {
   char *cursor;
   char *line;
-  unsigned long version;
+  uint64_t version;
   unsigned long row_count;
   unsigned long row_hash;
   unsigned long actual_count;
@@ -796,14 +816,13 @@ static int lc_pouch_index_doc_generation_parse_bytes(
   }
   line = lc_pouch_index_doc_generation_next_line(&cursor);
   if (line == NULL ||
-      !lc_pouch_index_doc_generation_header_ulong(line, "version=", &version) ||
+      !lc_pouch_index_doc_generation_header_u64(line, "version=", &version) ||
       version != LC_POUCH_INDEX_DOC_TABLE_GENERATION_VERSION) {
     goto done;
   }
   line = lc_pouch_index_doc_generation_next_line(&cursor);
   if (line == NULL ||
-      !lc_pouch_index_doc_generation_header_ulong(line,
-                                                  "index_seq=", &version) ||
+      !lc_pouch_index_doc_generation_header_u64(line, "index_seq=", &version) ||
       version != expected_index_seq) {
     goto done;
   }
@@ -842,7 +861,8 @@ static int lc_pouch_index_doc_generation_parse_bytes(
       goto done;
     }
     consumed = 0;
-    if (sscanf(rest, "%lu %" SCNu64 " %d %d %n", &version, &doc_bytes,
+    if (sscanf(rest, "%" SCNu64 " %" SCNu64 " %d %d %n", &version,
+               &doc_bytes,
                &has_hidden, &hidden, &consumed) != 4 ||
         consumed <= 0 || rest[consumed] != '\0' ||
         (has_hidden != 0 && has_hidden != 1) || (hidden != 0 && hidden != 1)) {
@@ -952,12 +972,13 @@ static int lc_pouch_index_doc_generation_read_file(
 
 int lc_pouch_index_doc_table_generation_validate_file(
     const lc_allocator *allocator, const char *path,
-    unsigned long expected_index_seq, unsigned long expected_row_count,
+    uint64_t expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, int *present, int *valid,
     lc_error *error) {
   FILE *fp;
   char line[256];
   unsigned long value;
+  uint64_t index_seq;
 
   (void)allocator;
   if (valid == NULL) {
@@ -1006,8 +1027,8 @@ int lc_pouch_index_doc_table_generation_validate_file(
     return LC_OK;
   }
   line[strcspn(line, "\n")] = '\0';
-  if (!lc_pouch_index_doc_generation_header_ulong(line, "index_seq=", &value) ||
-      value != expected_index_seq) {
+  if (!lc_pouch_index_doc_generation_header_u64(line, "index_seq=", &index_seq) ||
+      index_seq != expected_index_seq) {
     fclose(fp);
     return LC_OK;
   }
@@ -1042,7 +1063,7 @@ int lc_pouch_index_doc_table_generation_validate_file(
 
 int lc_pouch_index_doc_table_generation_load_bytes(
     const lc_allocator *allocator, char **bytes_inout, size_t length,
-    unsigned long expected_index_seq, unsigned long expected_row_count,
+    uint64_t expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, lc_pouch_index_doc_table *table,
     int *valid, lc_error *error) {
   int rc;
@@ -1071,7 +1092,7 @@ int lc_pouch_index_doc_table_generation_load_bytes(
 
 int lc_pouch_index_doc_table_generation_load_file(
     const lc_allocator *allocator, const char *path,
-    unsigned long expected_index_seq, unsigned long expected_row_count,
+    uint64_t expected_index_seq, unsigned long expected_row_count,
     unsigned long expected_row_hash, lc_pouch_index_doc_table *table,
     int *present, int *valid, lc_error *error) {
   char *bytes;

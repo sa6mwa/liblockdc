@@ -811,7 +811,7 @@ int lc_engine_write_bridge(void *context, const void *bytes, size_t count,
 
 lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
                        const char *key, const char *owner, const char *lease_id,
-                       const char *txn_id, long fencing_token, long version,
+                       const char *txn_id, long fencing_token, lc_version version,
                        const char *state_etag, const char *queue_state_etag) {
   lc_lease_handle *lease;
 

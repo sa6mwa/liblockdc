@@ -28,11 +28,11 @@ typedef struct lc_pouch_state_change_visit_entry {
   const char *key;
   const char *content_type;
   const char *etag;
-  unsigned long version;
+  lc_pouch_generation version;
   uint64_t bytes;
   uint64_t cipher_bytes;
   const char *descriptor;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
   int found;
@@ -46,10 +46,10 @@ typedef struct lc_pouch_state_scan_summary_entry {
   const char *content_type;
   const char *etag;
   const char *descriptor;
-  unsigned long version;
+  lc_pouch_generation version;
   uint64_t bytes;
   uint64_t cipher_bytes;
-  long updated_at_unix;
+  lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
   const void *opaque;
@@ -143,7 +143,7 @@ int lc_pouch_state_read_metadata_locked(lc_pouch *pouch,
                                         lc_pouch_state_read_result *out,
                                         lc_error *error);
 int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
-                               unsigned long after_version,
+                               lc_pouch_generation after_version,
                                lc_pouch_state_change_visit_fn visitor,
                                void *context, lc_error *error);
 int lc_pouch_state_visible_count(lc_pouch *pouch, const char *namespace_name,
