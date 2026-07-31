@@ -1003,6 +1003,11 @@ typedef struct lc_pouch_endpoint_options {
   int single_writer;
   uint64_t fsync_batch_max_ops;
   int queue_watch;
+  int background_compaction_enabled;
+  int background_compaction_enabled_set;
+  int compaction_throttling_disabled;
+  uint64_t retention_seconds;
+  uint64_t janitor_interval_seconds;
 } lc_pouch_endpoint_options;
 
 static void
@@ -1098,6 +1103,70 @@ static char *lc_pouch_endpoint_decode_component(const lc_allocator *allocator,
   return decoded;
 }
 
+static int lc_pouch_endpoint_parse_boolean(const lc_allocator *allocator,
+                                           const char *value, size_t value_len,
+                                           const char *option, int *out,
+                                           lc_error *error) {
+  char *copy;
+  int result;
+
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch endpoint boolean output is required", NULL,
+                        NULL, "pouch");
+  }
+  copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
+                                            option, error);
+  if (copy == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  if (strcmp(copy, "true") == 0 || strcmp(copy, "1") == 0) {
+    result = 1;
+  } else if (strcmp(copy, "false") == 0 || strcmp(copy, "0") == 0) {
+    result = 0;
+  } else {
+    lc_free_with_allocator(allocator, copy);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch endpoint boolean option must be true or false",
+                        option, NULL, "pouch");
+  }
+  lc_free_with_allocator(allocator, copy);
+  *out = result;
+  return LC_OK;
+}
+
+static int lc_pouch_endpoint_parse_u64(const lc_allocator *allocator,
+                                       const char *value, size_t value_len,
+                                       const char *option, uint64_t *out,
+                                       lc_error *error) {
+  char *copy;
+  char *end;
+  uintmax_t parsed;
+
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch endpoint integer output is required", NULL,
+                        NULL, "pouch");
+  }
+  copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
+                                            option, error);
+  if (copy == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  errno = 0;
+  parsed = strtoumax(copy, &end, 10);
+  if (errno == ERANGE || end == copy || *end != '\0' ||
+      parsed > (uintmax_t)UINT64_MAX) {
+    lc_free_with_allocator(allocator, copy);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch endpoint option must be a u64", option, NULL,
+                        "pouch");
+  }
+  lc_free_with_allocator(allocator, copy);
+  *out = (uint64_t)parsed;
+  return LC_OK;
+}
+
 static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
                                           const char *key, size_t key_len,
                                           const char *value, size_t value_len,
@@ -1105,6 +1174,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
                                           lc_error *error) {
   char *decoded_key;
   char *copy;
+  int rc;
 
   if (key_len == 0U) {
     return LC_OK;
@@ -1189,6 +1259,50 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, copy);
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "background_compaction") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_background_compaction")) {
+    rc = lc_pouch_endpoint_parse_boolean(
+        allocator, value, value_len, "background_compaction",
+        &options->background_compaction_enabled, error);
+    if (rc == LC_OK) {
+      options->background_compaction_enabled_set = 1;
+    }
+    lc_free_with_allocator(allocator, decoded_key);
+    return rc;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "disable_compaction_throttling") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_disable_compaction_throttling")) {
+    rc = lc_pouch_endpoint_parse_boolean(
+        allocator, value, value_len, "disable_compaction_throttling",
+        &options->compaction_throttling_disabled, error);
+    lc_free_with_allocator(allocator, decoded_key);
+    return rc;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "retention_seconds") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_retention_seconds")) {
+    rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
+                                     "retention_seconds",
+                                     &options->retention_seconds, error);
+    lc_free_with_allocator(allocator, decoded_key);
+    return rc;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "janitor_interval_seconds") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_janitor_interval_seconds")) {
+    rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
+                                     "janitor_interval_seconds",
+                                     &options->janitor_interval_seconds,
+                                     error);
+    lc_free_with_allocator(allocator, decoded_key);
+    return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key), "query_engine") ||
       lc_query_part_equal(decoded_key, strlen(decoded_key),
@@ -1703,6 +1817,15 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     pouch_open_options.fsync_batch_max_ops =
         pouch_endpoint_options.fsync_batch_max_ops;
     pouch_open_options.queue_watch = pouch_endpoint_options.queue_watch;
+    pouch_open_options.background_compaction_enabled =
+        pouch_endpoint_options.background_compaction_enabled;
+    pouch_open_options.background_compaction_enabled_set =
+        pouch_endpoint_options.background_compaction_enabled_set;
+    pouch_open_options.compaction_throttling_disabled =
+        pouch_endpoint_options.compaction_throttling_disabled;
+    pouch_open_options.retention_seconds = pouch_endpoint_options.retention_seconds;
+    pouch_open_options.janitor_interval_seconds =
+        pouch_endpoint_options.janitor_interval_seconds;
     pouch_open_options.query_engine = pouch_endpoint_options.query_engine;
     pouch_open_options.query_fallback_engine =
         pouch_endpoint_options.query_fallback_engine;

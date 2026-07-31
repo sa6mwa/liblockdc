@@ -74,8 +74,11 @@ struct lc_pouch {
   uint64_t compaction_interval_seconds;
   uint64_t compaction_delete_grace_seconds;
   uint64_t compaction_max_io_bytes_per_sec;
+  uint64_t retention_seconds;
+  uint64_t janitor_interval_seconds;
   unsigned long marker_sequence;
   int background_compaction_enabled;
+  int compaction_throttling_disabled;
   int single_writer;
   int aborted;
   int queue_watch_enabled;
@@ -126,6 +129,14 @@ struct lc_pouch {
   char **compaction_namespaces;
   size_t compaction_namespace_count;
   size_t compaction_namespace_capacity;
+  pthread_mutex_t janitor_mutex;
+  pthread_cond_t janitor_cond;
+  pthread_t janitor_thread;
+  int janitor_mutex_initialized;
+  int janitor_cond_initialized;
+  int janitor_thread_started;
+  int janitor_stop;
+  int janitor_pending;
   lc_pouch_state_cache_namespace *state_cache_namespaces;
   lc_pouch_source_cache_entry *source_cache_entries;
   size_t source_cache_count;
@@ -191,6 +202,7 @@ void lc_pouch_state_scan_summaries_result_cleanup(
 int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error);
 int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
                               const char *queue, uint64_t timeout_ms);
+void lc_pouch_janitor_note_mutation(lc_pouch *pouch);
 int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
                                         const char *namespace_name,
                                         lc_error *error);

@@ -8086,6 +8086,9 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   }
   lc_pouch_state_namespace_lock_release(&lock);
   if (rc == LC_OK) {
+    lc_pouch_janitor_note_mutation(pouch);
+  }
+  if (rc == LC_OK) {
     pslog_field fields[7];
 
     fields[0] = lc_log_str_field("ns", namespace_name);
@@ -8329,6 +8332,9 @@ int lc_pouch_state_update_metadata(lc_pouch *pouch, const char *namespace_name,
     lc_pouch_state_cache_cleanup(pouch);
   }
   lc_pouch_state_namespace_lock_release(&lock);
+  if (rc == LC_OK) {
+    lc_pouch_janitor_note_mutation(pouch);
+  }
   return rc;
 }
 
@@ -8477,6 +8483,9 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
     lc_pouch_state_cache_cleanup(pouch);
   }
   lc_pouch_state_namespace_lock_release(&lock);
+  if (rc == LC_OK) {
+    lc_pouch_janitor_note_mutation(pouch);
+  }
   if (rc == LC_OK) {
     pslog_field fields[3];
 
@@ -8713,6 +8722,9 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
   rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
                                           error);
   lc_pouch_state_namespace_lock_release(&lock);
+  if (rc == LC_OK) {
+    lc_pouch_janitor_note_mutation(pouch);
+  }
   return rc;
 }
 
@@ -8882,6 +8894,9 @@ int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
   rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
                                           error);
   lc_pouch_state_namespace_lock_release(&lock);
+  if (rc == LC_OK) {
+    lc_pouch_janitor_note_mutation(pouch);
+  }
   return rc;
 }
 
@@ -8994,6 +9009,9 @@ int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
   rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
                                           error);
   lc_pouch_state_namespace_lock_release(&lock);
+  if (rc == LC_OK) {
+    lc_pouch_janitor_note_mutation(pouch);
+  }
   return rc;
 }
 

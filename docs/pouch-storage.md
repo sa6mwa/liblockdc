@@ -613,23 +613,24 @@ divergence.
   differs from Go disk's `disk|` descriptor because the two file formats are
   not interoperable.
 
-### Remaining Operational And Public API Differences
-
 - Background compaction defaults:
-  The resolved Go lockd configuration enables background compaction every 30
-  minutes with an 8 MiB/s throttle. A zeroed Pouch open-options struct instead
-  leaves background compaction disabled, has no interval, and treats a zero
-  throttle as unlimited. Pouch runs the same lifecycle when callers enable it,
-  and `lc_pouch_maintenance_run(... force=1 ...)` remains immediate. Reason:
-  the current C options have no separate "was set" fields, so zero cannot mean
-  both an explicit disable and an omitted setting. This does not alter durable
-  record semantics, but deployments must configure the scheduler explicitly.
+  Pouch now applies Go disk's resolved defaults when callers leave compaction
+  controls unset: enabled, a 30-minute interval, two sealed files, a 64 MiB
+  reclaim threshold, a 15-minute deletion grace, and an 8 MiB/s throttle.
+  `background_compaction_enabled_set` distinguishes an explicit disable from
+  the default, and `compaction_throttling_disabled` explicitly selects an
+  unlimited throttle. Endpoint options expose the enable/throttle choices;
+  direct Pouch open options retain the full tuning surface.
 
-- Retention scheduling:
-  Go starts a janitor when its retention configuration is non-zero. Pouch has
-  no root retention scheduler; callers request a namespace maintenance pass
-  with `retention_updated_before_unix`. The same deletion path is available,
-  but scheduling and the retention policy live above Pouch.
+- Retention lifecycle:
+  `retention_seconds` enables one root-local pthread janitor;
+  `janitor_interval_seconds` defaults to one hour. Successful state mutations
+  signal the janitor only after their commit and namespace lock release. The
+  worker coalesces those signals, performs the existing retention sweep after
+  the configured interval, and joins on close or abort. It never forks or runs
+  before a completed mutation.
+
+### Remaining Operational And Public API Differences
 
 - Writer lock granularity:
   Pouch still serializes mutations with a namespace `fcntl` lock rather than

@@ -20,6 +20,14 @@ typedef struct lc_pouch_open_options {
   uint64_t compaction_delete_grace_seconds;
   uint64_t compaction_max_io_bytes_per_sec;
   int background_compaction_enabled;
+  /** Distinguishes an explicit compaction setting from the Go-compatible default. */
+  int background_compaction_enabled_set;
+  /** Leaves compaction IO unlimited instead of using the default 8 MiB/s throttle. */
+  int compaction_throttling_disabled;
+  /** Zero disables retention. Positive values delete state older than this duration. */
+  uint64_t retention_seconds;
+  /** Zero uses the default one-hour retention sweep interval. */
+  uint64_t janitor_interval_seconds;
   int single_writer;
   const char *query_engine;
   const char *query_fallback_engine;
@@ -61,6 +69,10 @@ typedef struct lc_pouch_status {
   uint64_t compaction_delete_grace_seconds;
   uint64_t compaction_max_io_bytes_per_sec;
   int background_compaction_enabled;
+  int compaction_throttling_disabled;
+  uint64_t retention_seconds;
+  uint64_t janitor_interval_seconds;
+  int janitor_running;
   int single_writer;
   int supports_concurrent_writes;
   int aborted;

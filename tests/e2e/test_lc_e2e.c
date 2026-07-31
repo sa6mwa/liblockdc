@@ -3789,6 +3789,7 @@ static void pouch_e2e_write_segmented_docs_direct(const char *root,
   open_options.compaction_min_segment_count = 2UL;
   open_options.compaction_min_reclaimable_bytes = 1UL;
   open_options.background_compaction_enabled = 0;
+  open_options.background_compaction_enabled_set = 1;
   open_options.query_engine = "index";
   write_options.content_type = "application/json";
 

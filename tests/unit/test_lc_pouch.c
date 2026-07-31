@@ -3393,7 +3393,7 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   lc_pouch_status status;
   lc_error error;
   char root[512];
-  char endpoint[640];
+  char endpoint[1024];
   int rc;
 
   (void)state;
@@ -3403,7 +3403,10 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   make_root("endpoint-runtime-controls", root, sizeof(root));
   cleanup_root(root);
   assert_true(snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?fsync_batch_max_ops=0&queue_watch=true",
+                       "pouch://%s?fsync_batch_max_ops=0&queue_watch=true&"
+                       "background_compaction=false&"
+                       "disable_compaction_throttling=true&retention_seconds=5&"
+                       "janitor_interval_seconds=3",
                        root) > 0);
 
   open_pouch_client_endpoint(endpoint, &client, &error);
@@ -3412,11 +3415,114 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   rc = lc_pouch_status_read(handle->pouch, &status, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(status.fsync_batch_max_ops, 0U);
+  assert_false(status.background_compaction_enabled);
+  assert_true(status.compaction_throttling_disabled);
+  assert_int_equal(status.compaction_max_io_bytes_per_sec, 0U);
+  assert_int_equal(status.retention_seconds, 5U);
+  assert_int_equal(status.janitor_interval_seconds, 3U);
+  assert_true(status.janitor_running);
   assert_non_null(status.queue_watch_mode);
   assert_non_null(status.queue_watch_reason);
   lc_pouch_status_cleanup(NULL, &status);
 
   lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_defaults_and_post_mutation_janitor(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_pouch_status status;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_source *source;
+  lc_error error;
+  struct timespec delay;
+  time_t deadline;
+  char root[512];
+  int found;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&status, 0, sizeof(status));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("default-compaction-janitor", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_status_read(pouch, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(status.background_compaction_enabled);
+  assert_false(status.compaction_throttling_disabled);
+  assert_int_equal(status.compaction_interval_seconds, 30U * 60U);
+  assert_int_equal(status.compaction_min_segment_count, 2U);
+  assert_int_equal(status.compaction_min_reclaimable_bytes,
+                   64U * 1024U * 1024U);
+  assert_int_equal(status.compaction_delete_grace_seconds, 15U * 60U);
+  assert_int_equal(status.compaction_max_io_bytes_per_sec, 8U * 1024U * 1024U);
+  assert_int_equal(status.retention_seconds, 0U);
+  assert_int_equal(status.janitor_interval_seconds, 60U * 60U);
+  assert_false(status.janitor_running);
+  lc_pouch_status_cleanup(NULL, &status);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  memset(&options, 0, sizeof(options));
+  options.retention_seconds = 1U;
+  options.janitor_interval_seconds = 1U;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_status_read(pouch, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(status.janitor_running);
+  lc_pouch_status_cleanup(NULL, &status);
+
+  rc = lc_source_from_memory("expired", strlen("expired"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "expired", source, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  delay.tv_sec = 2;
+  delay.tv_nsec = 0L;
+  (void)nanosleep(&delay, NULL);
+
+  rc = lc_source_from_memory("trigger", strlen("trigger"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "trigger", source, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  found = 1;
+  deadline = time(NULL) + 4;
+  delay.tv_sec = 0;
+  delay.tv_nsec = 50L * 1000L * 1000L;
+  while (found && time(NULL) <= deadline) {
+    memset(&read_result, 0, sizeof(read_result));
+    rc = lc_pouch_state_read(pouch, "default", "expired", &read_result,
+                             &error);
+    assert_int_equal(rc, LC_OK);
+    found = read_result.found;
+    lc_pouch_state_read_result_cleanup(NULL, &read_result);
+    if (found) {
+      (void)nanosleep(&delay, NULL);
+    }
+  }
+  assert_false(found);
+
+  lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -17320,6 +17426,7 @@ int main(void) {
       cmocka_unit_test(test_single_writer_runtime_control_and_ha_probe),
       cmocka_unit_test(test_pouch_disk_runtime_controls),
       cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),
+      cmocka_unit_test(test_pouch_defaults_and_post_mutation_janitor),
       cmocka_unit_test(test_exclusive_writer_probe_heartbeat_precedence),
       cmocka_unit_test(
           test_single_writer_transition_invalidates_query_index_trust),
