@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +18,9 @@
 #include <unistd.h>
 
 #define LOCKDC_POUCH_BENCH_TMP_PREFIX "/tmp/liblockdc-pouch-go-bench-"
+
+static const char lockdc_bench_concurrency_payload_prefix[] = "{\"payload\":\"";
+static const char lockdc_bench_concurrency_payload_suffix[] = "\"}";
 
 typedef struct lockdc_bench_key_count {
   long rows;
@@ -383,6 +387,30 @@ static int lockdc_bench_open_client(const char *root, const char *crypto_key,
   config.default_namespace = "bench";
   config.pouch_crypto_key = crypto_key;
   config.pouch_compression = compression;
+  rc = lc_client_open(&config, out, error);
+  return rc;
+}
+
+static int lockdc_bench_open_shared_client(const char *root,
+                                           const char *crypto_key,
+                                           lc_client **out, lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+  char endpoint[1200];
+  int written;
+  int rc;
+
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?pouch_single_writer=false", root);
+  if (written <= 0 || (size_t)written >= sizeof(endpoint)) {
+    return LC_ERR_INVALID;
+  }
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  config.pouch_crypto_key = crypto_key;
   rc = lc_client_open(&config, out, error);
   return rc;
 }
@@ -1206,6 +1234,455 @@ static void lockdc_bench_result_set_error(lockdc_pouch_bench_result *out,
       error->message[0] != '\0') {
     snprintf(out->error, sizeof(out->error), "%s", error->message);
   }
+}
+
+typedef struct lockdc_bench_concurrency_gate {
+  pthread_mutex_t mutex;
+  pthread_cond_t condition;
+  int started;
+} lockdc_bench_concurrency_gate;
+
+typedef struct lockdc_bench_concurrency_worker {
+  lc_client *client;
+  lockdc_bench_concurrency_gate *gate;
+  const unsigned char *payload;
+  size_t payload_bytes;
+  long writer_id;
+  long writes_per_writer;
+  int same_key;
+  int rc;
+  uint64_t update_ns;
+  uint64_t max_update_ns;
+  char error[256];
+} lockdc_bench_concurrency_worker;
+
+static void lockdc_bench_concurrency_worker_set_error(
+    lockdc_bench_concurrency_worker *worker, const lc_error *error,
+    const char *phase) {
+  if (worker == NULL) {
+    return;
+  }
+  if (error != NULL && error->message != NULL && error->message[0] != '\0') {
+    if (phase != NULL && error->detail != NULL && error->detail[0] != '\0') {
+      snprintf(worker->error, sizeof(worker->error), "%s: %s: %s", phase,
+               error->message, error->detail);
+    } else if (phase != NULL) {
+      snprintf(worker->error, sizeof(worker->error), "%s: %s", phase,
+               error->message);
+    } else if (error->detail != NULL && error->detail[0] != '\0') {
+      snprintf(worker->error, sizeof(worker->error), "%s: %s", error->message,
+               error->detail);
+    } else {
+      snprintf(worker->error, sizeof(worker->error), "%s", error->message);
+    }
+  } else if (phase != NULL) {
+    snprintf(worker->error, sizeof(worker->error), "%s", phase);
+  }
+}
+
+static int
+lockdc_bench_concurrency_write(lockdc_bench_concurrency_worker *worker,
+                               const char *key, const char *owner,
+                               const char **phase, lc_error *error) {
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_update_opts update_opts;
+  lc_lease *lease;
+  lc_source *source;
+  int rc;
+
+  if (worker == NULL || worker->client == NULL || key == NULL ||
+      owner == NULL) {
+    return LC_ERR_INVALID;
+  }
+  if (phase != NULL) {
+    *phase = "acquire";
+  }
+  lease = NULL;
+  source = NULL;
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.namespace_name = "bench";
+  acquire_req.key = key;
+  acquire_req.owner = owner;
+  acquire_req.ttl_seconds = 60L;
+  /* Match Go disk's bounded blocking acquire under same-key contention. */
+  acquire_req.block_seconds = 30L;
+  rc = worker->client->acquire(worker->client, &acquire_req, &lease, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (phase != NULL) {
+    *phase = "update";
+  }
+  rc = lc_source_from_memory(worker->payload, worker->payload_bytes, &source,
+                             error);
+  if (rc == LC_OK) {
+    lc_update_opts_init(&update_opts);
+    update_opts.content_type = "application/json";
+    rc = lease->update(lease, source, &update_opts, error);
+  }
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  if (rc == LC_OK) {
+    if (phase != NULL) {
+      *phase = "release";
+    }
+    lc_release_req_init(&release_req);
+    rc = lease->release(lease, &release_req, error);
+    if (rc == LC_OK) {
+      /* release() closes a successful public lease. */
+      lease = NULL;
+    }
+  }
+  if (lease != NULL) {
+    lease->close(lease);
+  }
+  return rc;
+}
+
+static void *lockdc_bench_concurrency_worker_main(void *context) {
+  lockdc_bench_concurrency_worker *worker;
+  lc_error error;
+  long operation;
+
+  worker = (lockdc_bench_concurrency_worker *)context;
+  if (worker == NULL || worker->gate == NULL) {
+    return NULL;
+  }
+  lc_error_init(&error);
+  if (pthread_mutex_lock(&worker->gate->mutex) != 0) {
+    worker->rc = LC_ERR_INVALID;
+    snprintf(worker->error, sizeof(worker->error), "lock start gate");
+    lc_error_cleanup(&error);
+    return NULL;
+  }
+  while (!worker->gate->started) {
+    if (pthread_cond_wait(&worker->gate->condition, &worker->gate->mutex) !=
+        0) {
+      (void)pthread_mutex_unlock(&worker->gate->mutex);
+      worker->rc = LC_ERR_INVALID;
+      snprintf(worker->error, sizeof(worker->error), "wait for start gate");
+      lc_error_cleanup(&error);
+      return NULL;
+    }
+  }
+  (void)pthread_mutex_unlock(&worker->gate->mutex);
+
+  for (operation = 0L; operation < worker->writes_per_writer; ++operation) {
+    char key[128];
+    char owner[64];
+    const char *phase;
+    uint64_t start;
+    uint64_t end;
+    int rc;
+
+    if (worker->same_key != 0) {
+      snprintf(key, sizeof(key), "concurrency/shared");
+    } else {
+      snprintf(key, sizeof(key), "concurrency/w%03ld/k%06ld", worker->writer_id,
+               operation);
+    }
+    snprintf(owner, sizeof(owner), "pouch-concurrency-%03ld",
+             worker->writer_id);
+    phase = NULL;
+    start = lockdc_bench_now_ns();
+    rc = lockdc_bench_concurrency_write(worker, key, owner, &phase, &error);
+    end = lockdc_bench_now_ns();
+    if (rc != LC_OK) {
+      worker->rc = rc;
+      lockdc_bench_concurrency_worker_set_error(worker, &error, phase);
+      lc_error_cleanup(&error);
+      return NULL;
+    }
+    if (end >= start) {
+      uint64_t elapsed = end - start;
+
+      worker->update_ns += elapsed;
+      if (elapsed > worker->max_update_ns) {
+        worker->max_update_ns = elapsed;
+      }
+    }
+  }
+  worker->rc = LC_OK;
+  lc_error_cleanup(&error);
+  return NULL;
+}
+
+static int lockdc_bench_concurrency_read_version(lc_client *client,
+                                                 const char *key,
+                                                 lc_version *version,
+                                                 lc_error *error) {
+  lc_get_opts options;
+  lc_get_res result;
+  lc_sink *sink;
+  int rc;
+
+  if (client == NULL || key == NULL || version == NULL) {
+    return LC_ERR_INVALID;
+  }
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  options.public_read = 1;
+  sink = NULL;
+  rc = lc_sink_to_discard(&sink, error);
+  if (rc == LC_OK) {
+    rc = client->get(client, key, &options, sink, &result, error);
+  }
+  if (rc == LC_OK && result.no_content) {
+    rc = LC_ERR_INVALID;
+  }
+  if (rc == LC_OK) {
+    *version = result.version;
+  }
+  if (sink != NULL) {
+    lc_sink_close(sink);
+  }
+  lc_get_res_cleanup(&result);
+  return rc;
+}
+
+int lockdc_pouch_bench_concurrency_run(long writers, long writes_per_writer,
+                                       long payload_bytes, int same_key,
+                                       int crypto_enabled,
+                                       lockdc_pouch_bench_result *out) {
+  char root_template[] = LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX";
+  char root[sizeof(LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX")];
+  lockdc_bench_concurrency_gate gate;
+  lockdc_bench_concurrency_worker *workers;
+  pthread_t *threads;
+  lc_client **clients;
+  unsigned char *payload;
+  lc_error error;
+  char *crypto_key;
+  uint64_t start;
+  uint64_t end;
+  long total_writes;
+  long index;
+  long started_threads;
+  int gate_mutex_initialized;
+  int gate_condition_initialized;
+  int rc;
+
+  if (out == NULL) {
+    return LC_ERR_INVALID;
+  }
+  memset(out, 0, sizeof(*out));
+  if (writers <= 0L) {
+    writers = 2L;
+  }
+  if (writes_per_writer <= 0L) {
+    writes_per_writer = 32L;
+  }
+  if (payload_bytes <= 0L) {
+    payload_bytes = 256L;
+  }
+  if (writers > 64L || writes_per_writer > LONG_MAX / writers ||
+      payload_bytes <
+          (long)((sizeof(lockdc_bench_concurrency_payload_prefix) - 1U) +
+                 (sizeof(lockdc_bench_concurrency_payload_suffix) - 1U)) ||
+      payload_bytes > 1024L * 1024L ||
+      (uintmax_t)payload_bytes > (uintmax_t)SIZE_MAX) {
+    out->rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error),
+             "invalid concurrency benchmark dimensions");
+    return out->rc;
+  }
+  total_writes = writers * writes_per_writer;
+  if (total_writes > LONG_MAX / payload_bytes) {
+    out->rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error),
+             "concurrency benchmark byte count overflows long");
+    return out->rc;
+  }
+  root[0] = '\0';
+  workers = NULL;
+  threads = NULL;
+  clients = NULL;
+  payload = NULL;
+  crypto_key = NULL;
+  started_threads = 0L;
+  gate_mutex_initialized = 0;
+  gate_condition_initialized = 0;
+  rc = LC_OK;
+  lc_error_init(&error);
+  if (mkdtemp(root_template) == NULL) {
+    out->rc = errno;
+    lc_error_cleanup(&error);
+    return out->rc;
+  }
+  snprintf(root, sizeof(root), "%s", root_template);
+  payload = (unsigned char *)malloc((size_t)payload_bytes);
+  workers = (lockdc_bench_concurrency_worker *)calloc((size_t)writers,
+                                                      sizeof(*workers));
+  threads = (pthread_t *)calloc((size_t)writers, sizeof(*threads));
+  clients = (lc_client **)calloc((size_t)writers, sizeof(*clients));
+  if (payload == NULL || workers == NULL || threads == NULL ||
+      clients == NULL) {
+    rc = LC_ERR_NOMEM;
+    goto done;
+  }
+  memcpy(payload, lockdc_bench_concurrency_payload_prefix,
+         sizeof(lockdc_bench_concurrency_payload_prefix) - 1U);
+  memset(payload + sizeof(lockdc_bench_concurrency_payload_prefix) - 1U, 'x',
+         (size_t)payload_bytes -
+             ((sizeof(lockdc_bench_concurrency_payload_prefix) - 1U) +
+              (sizeof(lockdc_bench_concurrency_payload_suffix) - 1U)));
+  memcpy(payload + (size_t)payload_bytes -
+             (sizeof(lockdc_bench_concurrency_payload_suffix) - 1U),
+         lockdc_bench_concurrency_payload_suffix,
+         sizeof(lockdc_bench_concurrency_payload_suffix) - 1U);
+  if (crypto_enabled != 0) {
+    rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+    if (rc != LC_OK) {
+      goto done;
+    }
+  }
+  for (index = 0L; index < writers; ++index) {
+    rc = lockdc_bench_open_shared_client(root, crypto_key, &clients[index],
+                                         &error);
+    if (rc != LC_OK) {
+      goto done;
+    }
+  }
+  memset(&gate, 0, sizeof(gate));
+  if (pthread_mutex_init(&gate.mutex, NULL) != 0) {
+    rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error), "initialize start gate mutex");
+    goto done;
+  }
+  gate_mutex_initialized = 1;
+  if (pthread_cond_init(&gate.condition, NULL) != 0) {
+    rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error), "initialize start gate condition");
+    goto done;
+  }
+  gate_condition_initialized = 1;
+  for (index = 0L; index < writers; ++index) {
+    workers[index].client = clients[index];
+    workers[index].gate = &gate;
+    workers[index].payload = payload;
+    workers[index].payload_bytes = (size_t)payload_bytes;
+    workers[index].writer_id = index;
+    workers[index].writes_per_writer = writes_per_writer;
+    workers[index].same_key = same_key != 0 ? 1 : 0;
+    if (pthread_create(&threads[index], NULL,
+                       lockdc_bench_concurrency_worker_main,
+                       &workers[index]) != 0) {
+      rc = LC_ERR_INVALID;
+      snprintf(out->error, sizeof(out->error), "create concurrent writer");
+      goto join_started_threads;
+    }
+    ++started_threads;
+  }
+  start = lockdc_bench_now_ns();
+  if (pthread_mutex_lock(&gate.mutex) != 0) {
+    rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error), "unlock start gate");
+    goto join_started_threads;
+  }
+  gate.started = 1;
+  (void)pthread_cond_broadcast(&gate.condition);
+  (void)pthread_mutex_unlock(&gate.mutex);
+
+join_started_threads:
+  if (!gate.started && gate_mutex_initialized && gate_condition_initialized) {
+    if (pthread_mutex_lock(&gate.mutex) == 0) {
+      gate.started = 1;
+      (void)pthread_cond_broadcast(&gate.condition);
+      (void)pthread_mutex_unlock(&gate.mutex);
+    }
+  }
+  for (index = 0L; index < started_threads; ++index) {
+    (void)pthread_join(threads[index], NULL);
+  }
+  end = lockdc_bench_now_ns();
+  if (rc != LC_OK) {
+    goto done;
+  }
+  out->c_ns = end >= start ? end - start : 0U;
+  out->rows = writers;
+  out->writes = total_writes;
+  out->bytes = total_writes * payload_bytes;
+  for (index = 0L; index < writers; ++index) {
+    if (workers[index].rc != LC_OK) {
+      rc = workers[index].rc;
+      snprintf(out->error, sizeof(out->error), "writer %ld: %.200s", index,
+               workers[index].error[0] != '\0' ? workers[index].error
+                                               : "concurrent write failed");
+      goto done;
+    }
+    out->update_ns += workers[index].update_ns;
+    if (workers[index].max_update_ns > out->max_update_ns) {
+      out->max_update_ns = workers[index].max_update_ns;
+    }
+  }
+  if (same_key != 0) {
+    lc_version version;
+
+    rc = lockdc_bench_concurrency_read_version(clients[0], "concurrency/shared",
+                                               &version, &error);
+    if (rc != LC_OK || version != (lc_version)total_writes) {
+      if (rc == LC_OK) {
+        rc = LC_ERR_INVALID;
+        snprintf(out->error, sizeof(out->error),
+                 "shared key version %lld, expected %ld", (long long)version,
+                 total_writes);
+      }
+      goto done;
+    }
+  } else {
+    for (index = 0L; index < writers; ++index) {
+      long operation;
+
+      for (operation = 0L; operation < writes_per_writer; ++operation) {
+        char key[128];
+        lc_version version;
+
+        snprintf(key, sizeof(key), "concurrency/w%03ld/k%06ld", index,
+                 operation);
+        rc = lockdc_bench_concurrency_read_version(clients[0], key, &version,
+                                                   &error);
+        if (rc != LC_OK || version != 1) {
+          if (rc == LC_OK) {
+            rc = LC_ERR_INVALID;
+            snprintf(out->error, sizeof(out->error),
+                     "independent key %s version %lld, expected 1", key,
+                     (long long)version);
+          }
+          goto done;
+        }
+      }
+    }
+  }
+  out->segments = lockdc_bench_count_segments_in(root);
+
+done:
+  if (rc != LC_OK && out->error[0] == '\0') {
+    lockdc_bench_result_set_error(out, &error);
+  }
+  if (gate_condition_initialized) {
+    (void)pthread_cond_destroy(&gate.condition);
+  }
+  if (gate_mutex_initialized) {
+    (void)pthread_mutex_destroy(&gate.mutex);
+  }
+  if (clients != NULL) {
+    for (index = 0L; index < writers; ++index) {
+      if (clients[index] != NULL) {
+        lc_client_close(clients[index]);
+      }
+    }
+  }
+  lc_pouch_crypto_key_string_free(crypto_key);
+  free(payload);
+  free(clients);
+  free(threads);
+  free(workers);
+  lockdc_bench_cleanup_root(root);
+  lc_error_cleanup(&error);
+  out->rc = rc;
+  return rc;
 }
 
 int lockdc_pouch_bench_fixture_open(long rows, lockdc_pouch_bench_fixture **out,

@@ -77,18 +77,23 @@ func lockdBenchDocument(i int64) []byte {
 }
 
 type lockdDiskHarness struct {
-	client   *lockdclient.Client
-	logs     *bytes.Buffer
-	bin      string
-	root     string
-	authRoot string
-	dataRoot string
-	addr     string
-	cancel   context.CancelFunc
-	cmd      *exec.Cmd
+	client        *lockdclient.Client
+	logs          *bytes.Buffer
+	bin           string
+	root          string
+	authRoot      string
+	dataRoot      string
+	addr          string
+	cryptoEnabled bool
+	cancel        context.CancelFunc
+	cmd           *exec.Cmd
 }
 
 func startLockdDiskHarness(tb testing.TB) *lockdDiskHarness {
+	return startLockdDiskHarnessWithCrypto(tb, false)
+}
+
+func startLockdDiskHarnessWithCrypto(tb testing.TB, cryptoEnabled bool) *lockdDiskHarness {
 	tb.Helper()
 
 	bin := lockdDiskBenchBinary()
@@ -121,12 +126,13 @@ func startLockdDiskHarness(tb testing.TB) *lockdDiskHarness {
 	}
 
 	h := &lockdDiskHarness{
-		bin:      bin,
-		root:     root,
-		authRoot: authRoot,
-		dataRoot: dataRoot,
-		addr:     addr,
-		logs:     &bytes.Buffer{},
+		bin:           bin,
+		root:          root,
+		authRoot:      authRoot,
+		dataRoot:      dataRoot,
+		addr:          addr,
+		cryptoEnabled: cryptoEnabled,
+		logs:          &bytes.Buffer{},
 	}
 	h.start(tb)
 	tb.Cleanup(func() {
@@ -139,19 +145,22 @@ func (h *lockdDiskHarness) start(tb testing.TB) {
 	tb.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, h.bin,
+	args := []string{
 		"--bootstrap", h.authRoot,
-		"--store", "disk://"+h.dataRoot,
+		"--store", "disk://" + h.dataRoot,
 		"--listen", h.addr,
 		"--disable-mtls",
-		"--disable-storage-encryption",
 		"--log-level", "error",
 		"--default-namespace", lockdDiskBenchNamespace,
 		"--qrf-disabled",
 		"--disk-retention", "0",
 		"--indexer-flush-docs", "64",
 		"--indexer-flush-interval", "1s",
-	)
+	}
+	if !h.cryptoEnabled {
+		args = append(args, "--disable-storage-encryption")
+	}
+	cmd := exec.CommandContext(ctx, h.bin, args...)
 	cmd.Stdout = h.logs
 	cmd.Stderr = h.logs
 	if err := cmd.Start(); err != nil {

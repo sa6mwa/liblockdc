@@ -104,6 +104,10 @@ typedef struct lc_pouch_state_process_namespace_mutex {
 typedef struct lc_pouch_state_process_namespace_guard {
   char *identity;
   pthread_rwlock_t lock;
+  pthread_mutex_t writer_mutex;
+  pthread_t writer;
+  unsigned long writer_depth;
+  int writer_active;
   unsigned long refcount;
   struct lc_pouch_state_process_namespace_guard *next;
 } lc_pouch_state_process_namespace_guard;
@@ -786,6 +790,16 @@ static int lc_pouch_state_process_namespace_guard_lock(
                           "failed to initialize pouch maintenance guard",
                           strerror(pthread_rc), NULL, "pouch");
     }
+    pthread_rc = pthread_mutex_init(&created->writer_mutex, NULL);
+    if (pthread_rc != 0) {
+      (void)pthread_rwlock_destroy(&created->lock);
+      pthread_mutex_unlock(&lc_pouch_state_process_guard_registry);
+      lc_free_with_allocator(NULL, identity);
+      lc_free_with_allocator(NULL, created);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to initialize pouch maintenance writer state",
+                          strerror(pthread_rc), NULL, "pouch");
+    }
     created->identity = identity;
     created->next = lc_pouch_state_process_guards;
     lc_pouch_state_process_guards = created;
@@ -795,6 +809,24 @@ static int lc_pouch_state_process_namespace_guard_lock(
   entry->refcount += 1UL;
   pthread_mutex_unlock(&lc_pouch_state_process_guard_registry);
   lc_free_with_allocator(NULL, identity);
+  if (exclusive) {
+    pthread_rc = pthread_mutex_lock(&entry->writer_mutex);
+    if (pthread_rc != 0) {
+      pthread_mutex_lock(&lc_pouch_state_process_guard_registry);
+      entry->refcount -= 1UL;
+      pthread_mutex_unlock(&lc_pouch_state_process_guard_registry);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to lock pouch maintenance writer state",
+                          strerror(pthread_rc), NULL, "pouch");
+    }
+    if (entry->writer_active && pthread_equal(entry->writer, pthread_self())) {
+      entry->writer_depth += 1UL;
+      (void)pthread_mutex_unlock(&entry->writer_mutex);
+      *out = entry;
+      return LC_OK;
+    }
+    (void)pthread_mutex_unlock(&entry->writer_mutex);
+  }
   pthread_rc = exclusive ? pthread_rwlock_wrlock(&entry->lock)
                          : pthread_rwlock_rdlock(&entry->lock);
   if (pthread_rc != 0) {
@@ -805,6 +837,22 @@ static int lc_pouch_state_process_namespace_guard_lock(
                         "failed to lock pouch maintenance guard",
                         strerror(pthread_rc), NULL, "pouch");
   }
+  if (exclusive) {
+    pthread_rc = pthread_mutex_lock(&entry->writer_mutex);
+    if (pthread_rc != 0) {
+      (void)pthread_rwlock_unlock(&entry->lock);
+      pthread_mutex_lock(&lc_pouch_state_process_guard_registry);
+      entry->refcount -= 1UL;
+      pthread_mutex_unlock(&lc_pouch_state_process_guard_registry);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to record pouch maintenance writer",
+                          strerror(pthread_rc), NULL, "pouch");
+    }
+    entry->writer = pthread_self();
+    entry->writer_active = 1;
+    entry->writer_depth = 1UL;
+    (void)pthread_mutex_unlock(&entry->writer_mutex);
+  }
   *out = entry;
   return LC_OK;
 }
@@ -812,13 +860,30 @@ static int lc_pouch_state_process_namespace_guard_lock(
 static void lc_pouch_state_process_namespace_guard_unlock(
     lc_pouch_state_process_namespace_guard **guard) {
   lc_pouch_state_process_namespace_guard *entry;
+  int unlock_rwlock;
 
   if (guard == NULL || *guard == NULL) {
     return;
   }
   entry = *guard;
   *guard = NULL;
-  pthread_rwlock_unlock(&entry->lock);
+  unlock_rwlock = 1;
+  if (pthread_mutex_lock(&entry->writer_mutex) == 0) {
+    if (entry->writer_active && pthread_equal(entry->writer, pthread_self())) {
+      if (entry->writer_depth > 0UL) {
+        entry->writer_depth -= 1UL;
+      }
+      if (entry->writer_depth == 0UL) {
+        entry->writer_active = 0;
+      } else {
+        unlock_rwlock = 0;
+      }
+    }
+    (void)pthread_mutex_unlock(&entry->writer_mutex);
+  }
+  if (unlock_rwlock) {
+    (void)pthread_rwlock_unlock(&entry->lock);
+  }
   pthread_mutex_lock(&lc_pouch_state_process_guard_registry);
   if (entry->refcount > 0UL) {
     entry->refcount -= 1UL;
@@ -6730,7 +6795,7 @@ static int lc_pouch_state_compaction_candidate_add(
     int snapshot, lc_error *error) {
   char *path;
   char *leaf_copy;
-  uint64_t size;
+  uint64_t size = 0U;
   int rc;
 
   if (capture == NULL || leaf == NULL || leaf[0] == '\0') {

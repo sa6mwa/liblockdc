@@ -193,6 +193,42 @@ func runPouchCompactionC(b *testing.B, rows, updatesPerKey, payloadBytes, segmen
 	b.ReportMetric(float64(result.compaction_ns), "compaction-ns/op")
 }
 
+func runPouchConcurrencyC(b *testing.B, writers, writesPerWriter, payloadBytes int64, sameKey, cryptoEnabled bool) {
+	var totalCNS uint64
+	var result C.lockdc_pouch_bench_result
+
+	for i := 0; i < b.N; i++ {
+		result = C.lockdc_pouch_bench_result{}
+		rc := C.lockdc_pouch_bench_concurrency_run(
+			C.long(writers),
+			C.long(writesPerWriter),
+			C.long(payloadBytes),
+			C.int(boolToInt(sameKey)),
+			C.int(boolToInt(cryptoEnabled)),
+			&result,
+		)
+		if rc != 0 {
+			b.Fatalf("pouch concurrency benchmark failed: rc=%d writers=%d writes_per_writer=%d payload=%d same_key=%t crypto=%t error=%q", int(rc), writers, writesPerWriter, payloadBytes, sameKey, cryptoEnabled, C.GoString(&result.error[0]))
+		}
+		totalCNS += uint64(result.c_ns)
+	}
+	if b.N == 0 {
+		return
+	}
+	b.ReportMetric(float64(totalCNS)/float64(b.N), "write-wall-ns/op")
+	b.ReportMetric(float64(result.rows), "writers/op")
+	b.ReportMetric(float64(result.writes), "writes/op")
+	b.ReportMetric(float64(result.bytes), "bytes/op")
+	b.ReportMetric(float64(result.segments), "segments/op")
+	if result.writes > 0 {
+		b.ReportMetric(float64(result.update_ns)/float64(result.writes), "write-mean-ns/op")
+	}
+	b.ReportMetric(float64(result.max_update_ns), "max-write-ns/op")
+	if result.c_ns > 0 {
+		b.ReportMetric(float64(result.writes)*1e9/float64(result.c_ns), "writes/s")
+	}
+}
+
 func boolToInt(value bool) int {
 	if value {
 		return 1

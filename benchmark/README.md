@@ -40,6 +40,30 @@ explicit variants by default: `ProductionPouchPT`, `ProductionPouchCrypto`, and
 metrics so index flush work can be attributed to intermediate write-churn
 flushes, final flush, no-op flush, and post-reopen flush.
 
+`make benchmark-pouch-go-concurrency` is the bounded lock and shared-root
+comparison matrix. It runs Pouch and Go lockd disk with crypto disabled and
+enabled, over a contended single key and independent keys. Pouch opens the
+requested number of distinct liblockdc clients with `pouch_single_writer=false`
+against one root. The same-key case uses public acquire/update/release calls and
+asserts the final version equals every completed write; the independent-key case
+reads back every key at version one. This confirms both key-lock serialization
+and multi-client shared-root mutation behavior.
+
+Go lockd disk is measured through its supported topology: the same number of
+independent Go clients connect to one disk-backed lockd server. The Go disk
+backend itself remains a single disk writer and does not support several disk
+server instances mutating one root. The target reports `write-wall-ns/op`,
+`write-mean-ns/op`, `max-write-ns/op`, and `writes/s`; readback validation is
+outside the timed region. Defaults are two writers, 32 writes per writer, and a
+256-byte payload. Override them with `POUCH_GO_CONCURRENCY_WRITERS`,
+`POUCH_GO_CONCURRENCY_WRITES_PER_WRITER`, and
+`POUCH_GO_CONCURRENCY_PAYLOAD_BYTES`.
+
+Crypto mode measures the operational overhead of each engine's enabled
+at-rest-encryption configuration, not a byte-for-byte cryptographic-format
+comparison: Pouch uses one generated `pouch_crypto_key` across its clients, and
+the bootstrapped Go lockd disk server enables its storage encryption.
+
 `make benchmark-pouch-go-medium` mirrors the Go lockd disk comparison shape over
 both key and document result modes for scan and indexed engines. The default
 matrix includes sparse/dense equality, numeric range, `in`, array membership,

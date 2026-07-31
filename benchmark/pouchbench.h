@@ -67,4 +67,9 @@ int lockdc_pouch_bench_compaction_run(
     long compaction_min_reclaimable_bytes, int scheduled, int crypto_enabled,
     int compression_enabled, lockdc_pouch_bench_result *out);
 
+int lockdc_pouch_bench_concurrency_run(long writers, long writes_per_writer,
+                                       long payload_bytes, int same_key,
+                                       int crypto_enabled,
+                                       lockdc_pouch_bench_result *out);
+
 #endif

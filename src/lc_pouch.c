@@ -1951,7 +1951,7 @@ static int lc_pouch_writer_presence_now_ns(int64_t *out, lc_error *error) {
 
 static int lc_pouch_writer_presence_touch(lc_pouch *pouch, lc_error *error) {
   char payload[64];
-  int64_t now_ns;
+  int64_t now_ns = 0;
   int rc;
 
   if (pouch == NULL || pouch->writer_presence_dir == NULL ||
@@ -2742,7 +2742,7 @@ int lc_pouch_probe_exclusive_writer(
     lc_error *error) {
   DIR *dir;
   struct dirent *entry;
-  int64_t now_ns;
+  int64_t now_ns = 0;
   int rc;
 
   if (pouch == NULL || out == NULL || pouch->writer_presence_dir == NULL ||
