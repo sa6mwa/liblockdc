@@ -2217,9 +2217,10 @@ static void test_write_binary_txn_record(
     test_binary_buffer_string(&buffer, participants[i].backend_hash);
   }
   options.content_type = "application/x-lockdc-pouch-txn";
+  options.object_record = 1;
   rc = lc_source_from_memory(buffer.bytes, buffer.length, &source, error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, ".lockd/txn", key, source, &options,
+  rc = lc_pouch_state_write(pouch, ".txns", key, source, &options,
                             &write_result, error);
   assert_int_equal(rc, LC_OK);
   source->close(source);
@@ -8903,7 +8904,7 @@ static void test_txn_recovery_applies_queue_side_effects(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  test_write_binary_txn_record(pouch, "txn/txn-queue-recover", "commit", 0L,
+  test_write_binary_txn_record(pouch, "txn-queue-recover", "commit", 0L,
                                1UL, "", &participant, 1U, &error);
   lc_pouch_close(pouch);
   pouch = NULL;
@@ -8920,7 +8921,7 @@ static void test_txn_recovery_applies_queue_side_effects(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, ".lockd/txn", "txn/txn-queue-recover",
+  rc = lc_pouch_state_read(pouch, ".txns", "txn-queue-recover",
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
@@ -15539,7 +15540,7 @@ static void test_txn_decisions_persist_participant_records(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, ".lockd/txn", "txn/txn-pouch-records",
+  rc = lc_pouch_state_read(pouch, ".txns", "txn-pouch-records",
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
@@ -15567,7 +15568,7 @@ static void test_txn_decisions_persist_participant_records(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, ".lockd/txn", "txn/txn-pouch-records",
+  rc = lc_pouch_state_read(pouch, ".txns", "txn-pouch-records",
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
@@ -15754,7 +15755,7 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
     participant.namespace_name = "objects/recover";
     participant.key = "state/object-2";
     participant.backend_hash = "backend-object";
-    test_write_binary_txn_record(pouch, "txn/txn-attachment-recover", "commit",
+    test_write_binary_txn_record(pouch, "txn-attachment-recover", "commit",
                                  0L, 1UL, "", &participant, 1U, &error);
   }
   lc_pouch_close(pouch);
@@ -15773,7 +15774,7 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, ".lockd/txn", "txn/txn-attachment-recover",
+  rc = lc_pouch_state_read(pouch, ".txns", "txn-attachment-recover",
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
@@ -16200,7 +16201,7 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
     participant.namespace_name = "orders/recover";
     participant.key = "state/recover-commit";
     participant.backend_hash = "backend-recover";
-    test_write_binary_txn_record(pouch, "txn/txn-recover-commit", "commit", 0L,
+    test_write_binary_txn_record(pouch, "txn-recover-commit", "commit", 0L,
                                  1UL, "", &participant, 1U, &error);
   }
   rc = lc_source_from_memory("expired-stage", strlen("expired-stage"), &source,
@@ -16220,7 +16221,7 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
     participant.namespace_name = "orders/recover";
     participant.key = "state/recover-expired";
     participant.backend_hash = "backend-recover";
-    test_write_binary_txn_record(pouch, "txn/txn-recover-expired", "prepare",
+    test_write_binary_txn_record(pouch, "txn-recover-expired", "prepare",
                                  1L, 1UL, "", &participant, 1U, &error);
   }
   lc_pouch_close(pouch);
@@ -16268,12 +16269,12 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  rc = lc_pouch_state_read(pouch, ".lockd/txn", "txn/txn-recover-commit",
+  rc = lc_pouch_state_read(pouch, ".txns", "txn-recover-commit",
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  rc = lc_pouch_state_read(pouch, ".lockd/txn", "txn/txn-recover-expired",
+  rc = lc_pouch_state_read(pouch, ".txns", "txn-recover-expired",
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);

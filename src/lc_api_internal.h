@@ -106,6 +106,7 @@ struct lc_message_handle {
   long state_lease_expires_at_unix;
   long state_fencing_token;
   char *state_txn_id;
+  int batch_owned;
 };
 
 typedef struct lc_write_bridge {

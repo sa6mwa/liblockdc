@@ -198,12 +198,28 @@ Pouch before editing the corresponding C code.
   - Pouch obligation: update must preserve Go disk state/meta/staged invariants
     through pouch binary metadata.
 
-- [ ] `../lockd/internal/core/txn*.go`
+- [x] `../lockd/internal/core/txn*.go`
   - Transaction records, decision markers, participant application, queue
     marker coupling, rollback/commit semantics.
   - Pouch obligation: keep true transaction decision/control namespaces only
-    where Go disk uses them; do not use reserved namespaces for queue,
-    attachment, namespace config, or leases.
+    where Go disk uses them (`.txns` / `.txn-decisions`); do not use reserved
+    namespaces for queue, attachment, namespace config, or leases.
+
+- [x] `../lockd/internal/tccluster/store.go`
+  - Cluster lease namespace/key topology, endpoint normalization, active
+    membership response shape, and hidden object storage.
+  - Pouch obligation: use Go's `.lockd` namespace and
+    `tc-cluster/leases/` key prefix. Because the current public C API exposes
+    only `self_endpoint` and no explicit identity or TTL, Pouch stores the
+    singleton local lease at `tc-cluster/leases/self` with no expiry. Do not
+    reintroduce `.lockd/tc-cluster`.
+
+- [x] `../lockd/internal/tcrm/store.go`
+  - RM membership registry namespace/key topology, trim/dedupe/sort merge
+    behavior, and delete-on-empty semantics.
+  - Pouch obligation: use a single hidden object in `.lockd` at
+    `tc-rm-members` with C-native binary payload and CAS by Pouch version. Do
+    not store one object per endpoint and do not reintroduce `.lockd/tc-rm`.
 
 - [ ] `../lockd/namespaces/config_store.go`
   - Namespace config key `config/namespace.pb`, cache TTL, load/save CAS and
@@ -264,6 +280,9 @@ This is the highest-priority correctness issue.
 - [x] Keep only true control namespaces.
   - Transaction records and decision markers may use reserved control
     namespaces when the Go reference does so.
+  - Transaction-coordinator leader, cluster, and RM membership records use
+    Go-aligned `.lockd` control object keys:
+    `tc/leader`, `tc-cluster/leases/self`, and `tc-rm-members`.
   - Reserved namespaces must not contain user namespace queue records,
     attachment payloads, namespace config, or lease tables.
 
@@ -271,6 +290,9 @@ Acceptance:
 
 - [x] `rg` finds no durable uses of `.lockd/queue`,
   `.lockd/attachments`, `.lockd/leases`, or `.lockd/namespace-config`.
+- [x] `rg` finds no durable uses of Pouch-only `.lockd/tc`,
+  `.lockd/tc-cluster`, or `.lockd/tc-rm`; TC control records use `.lockd`
+  object keys matching the Go reference topology.
 - [x] Public APIs cannot create user state keys that collide with internal
   queue/config/attachment/staging/lease key families.
 - [x] Public scans, indexed queries, full-text queries, and get-public exclude

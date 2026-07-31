@@ -2268,6 +2268,7 @@ static int lc_dequeue_end(void *context,
     }
     bridge->batch->messages = next;
     bridge->batch->messages[bridge->batch->count] = message;
+    ((lc_message_handle *)message)->batch_owned = 1;
     bridge->batch->count = next_count;
   } else {
     *bridge->out = message;

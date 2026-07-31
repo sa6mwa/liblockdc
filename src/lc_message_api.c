@@ -72,7 +72,9 @@ int lc_message_ack_method(lc_message *self, lc_error *error) {
   }
   lc_engine_queue_ack_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
-  lc_message_close_method(self);
+  if (!message->batch_owned) {
+    lc_message_close_method(self);
+  }
   return LC_OK;
 }
 
@@ -162,7 +164,9 @@ int lc_message_nack_method(lc_message *self, const lc_nack_req *req,
   }
   lc_engine_queue_nack_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
-  lc_message_close_method(self);
+  if (!message->batch_owned) {
+    lc_message_close_method(self);
+  }
   return LC_OK;
 }
 

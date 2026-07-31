@@ -81,9 +81,24 @@ Rejected Pouch layout:
 - `.lockd/namespace-config`.
 
 The only reserved namespaces that remain acceptable are true control stores
-where Go disk also uses out-of-band control, such as transaction records and
-decision markers. Any Pouch-only reserved control store must be named here
-before implementation.
+where Go disk also uses out-of-band control. Pouch transaction records use
+`.txns`, and decision marker support, when present, uses `.txn-decisions`.
+Pouch stores the C-native transaction record at key `<txn_id>` instead of a
+protobuf/JSON Go payload; a `txn/` prefix or `.lockd/txn` namespace is rejected.
+Transaction-coordinator control records follow Go's `.lockd` control namespace:
+
+- leader lease: `.lockd` / `tc/leader`;
+- cluster membership lease: `.lockd` / `tc-cluster/leases/self`;
+- RM membership registry: `.lockd` / `tc-rm-members`.
+
+The C cluster API currently has no explicit Go-style node identity or
+membership TTL field, so Pouch maps the single local membership surface to the
+reserved identity `self` and stores no cluster expiry. That is an accepted
+public-API divergence from Go's internal `tccluster.Store`, not permission to
+use Pouch-only `.lockd/tc-cluster` namespaces. Pouch stores C-native binary
+control values at these keys; Go stores JSON/protobuf-supported values. Any
+additional Pouch-only reserved control store must be named here before
+implementation.
 
 ### Logstore Records
 
@@ -380,7 +395,8 @@ shape and applied to the paired key.
 Pouch obligations:
 
 - keep transaction decision/control records only in documented control
-  namespaces;
+  namespaces: `.txns` for transaction records and `.txn-decisions` for
+  decision markers;
 - do not use transaction control namespaces to hide queue or attachment data;
 - transaction commit/rollback mutates participant metadata in participant
   namespaces;
@@ -458,6 +474,14 @@ Every divergence from Go disk belongs in one of these two buckets.
   derived artifacts. Reason: indexes are derived from the authoritative
   logstore and may use a local format as long as query semantics, rebuild, and
   performance intent are preserved.
+
+- TC cluster identity and TTL API:
+  Go's internal TC cluster store takes an explicit identity and TTL. The current
+  liblockdc Pouch client API exposes only `self_endpoint` for cluster announce
+  and no TTL, so Pouch persists the singleton membership at
+  `.lockd/tc-cluster/leases/self` with no expiry. Reason: preserving the public
+  C API avoids inventing a hidden identity source while still using Go's
+  control namespace/key topology.
 
 - Public names and diagnostics:
   Pouch uses Pouch terminology in files, errors, events, and durable metadata.
