@@ -2976,11 +2976,47 @@ static int lc_pouch_state_write_all(int fd, const void *bytes, size_t count,
   return LC_OK;
 }
 
-static int lc_pouch_state_copy_file_span_to_fd_crc(const char *path,
-                                                   uint64_t offset,
-                                                   uint64_t length, int fd,
-                                                   unsigned long *stored_crc,
-                                                   lc_error *error) {
+static int lc_pouch_state_compaction_throttle(lc_pouch *pouch,
+                                              size_t bytes,
+                                              lc_error *error) {
+  struct timespec delay;
+  struct timespec remaining;
+  uint64_t rate;
+  uint64_t seconds;
+  uint64_t remainder;
+  uint64_t nanoseconds;
+
+  if (pouch == NULL || bytes == 0U ||
+      pouch->compaction_max_io_bytes_per_sec == 0U) {
+    return LC_OK;
+  }
+  rate = pouch->compaction_max_io_bytes_per_sec;
+  seconds = (uint64_t)bytes / rate;
+  remainder = (uint64_t)bytes % rate;
+  if (rate <= UINT64_MAX / 1000000000U) {
+    nanoseconds = remainder * 1000000000U / rate;
+  } else {
+    nanoseconds = remainder / (rate / 1000000000U);
+  }
+  delay.tv_sec = (time_t)seconds;
+  delay.tv_nsec = (long)nanoseconds;
+  if (delay.tv_sec == 0 && delay.tv_nsec == 0L) {
+    return LC_OK;
+  }
+  while (nanosleep(&delay, &remaining) != 0) {
+    if (errno != EINTR) {
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to throttle pouch compaction",
+                          strerror(errno), NULL, "pouch");
+    }
+    delay = remaining;
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_state_copy_file_span_to_fd_crc(
+    lc_pouch *pouch, const char *path, uint64_t offset, uint64_t length,
+    int fd, unsigned long *stored_crc, lc_error *error) {
   unsigned char buffer[128U * 1024U];
   uint64_t remaining;
   int in_fd;
@@ -3035,6 +3071,9 @@ static int lc_pouch_state_copy_file_span_to_fd_crc(const char *path,
     }
     *stored_crc = (unsigned long)crc32((uLong)*stored_crc, buffer, (uInt)got);
     rc = lc_pouch_state_write_all(fd, buffer, (size_t)got, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_compaction_throttle(pouch, (size_t)got, error);
+    }
     if (rc != LC_OK) {
       break;
     }
@@ -5450,7 +5489,7 @@ static int lc_pouch_state_snapshot_write_record(
         0U, 0UL, LC_POUCH_RECORD_FLAG_PENDING, error);
     if (rc == LC_OK) {
       rc = lc_pouch_state_copy_file_span_to_fd_crc(
-          old_path, record->payload_span.payload_offset,
+          pouch, old_path, record->payload_span.payload_offset,
           record->payload_span.payload_length, fd, &stored_crc, error);
     }
     cipher_bytes = record->payload_span.payload_length;
@@ -6101,10 +6140,19 @@ static int lc_pouch_state_compaction_capture_record_add(
 static int lc_pouch_state_compaction_capture_records(
     lc_pouch *pouch, lc_pouch_state_compaction_capture *capture,
     lc_pouch_state_cache_namespace *cache, lc_error *error) {
-  lc_pouch_state_cache_record *record;
+  lc_pouch_state_cache_record **records;
+  size_t record_count;
+  size_t index;
   int rc;
 
-  for (record = cache->records; record != NULL; record = record->next) {
+  records = NULL;
+  record_count = 0U;
+  rc = lc_pouch_state_cache_record_index_build(pouch, cache, &records,
+                                               &record_count, error);
+  for (index = 0U; rc == LC_OK && index < record_count; ++index) {
+    lc_pouch_state_cache_record *record;
+
+    record = records[index];
     if (!record->found || !record->has_record_ref) {
       continue;
     }
@@ -6114,11 +6162,9 @@ static int lc_pouch_state_compaction_capture_records(
     }
     rc = lc_pouch_state_compaction_capture_record_add(pouch, capture, record,
                                                       error);
-    if (rc != LC_OK) {
-      return rc;
-    }
   }
-  return LC_OK;
+  lc_free_with_allocator(&pouch->allocator, records);
+  return rc;
 }
 
 static int lc_pouch_state_compaction_record_ref_matches(

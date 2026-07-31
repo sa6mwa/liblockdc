@@ -11,7 +11,6 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -635,6 +634,8 @@ static void lc_pouch_init_options(lc_pouch *pouch,
       options != NULL && options->compaction_delete_grace_seconds != 0U
           ? options->compaction_delete_grace_seconds
           : LC_POUCH_DEFAULT_COMPACTION_DELETE_GRACE_SECONDS;
+  pouch->compaction_max_io_bytes_per_sec =
+      options != NULL ? options->compaction_max_io_bytes_per_sec : 0U;
   pouch->background_compaction_enabled =
       options != NULL ? options->background_compaction_enabled : 0;
   pouch->single_writer = options != NULL ? options->single_writer : 0;
@@ -672,16 +673,9 @@ static int lc_pouch_write_root_manifest(lc_pouch *pouch, lc_error *error) {
                         NULL, NULL);
   }
   snprintf(manifest, sizeof(manifest),
-           "layout=%s\nversion=%lu\nsegment_target_bytes=%" PRIu64 "\n"
-           "compaction_min_segment_count=%lu\n"
-           "compaction_min_reclaimable_bytes=%" PRIu64 "\n"
-           "compaction_delete_grace_seconds=%" PRIu64 "\n"
-           "compression=%s\ncrypto=%s\n"
+           "layout=%s\nversion=%lu\ncompression=%s\ncrypto=%s\n"
            "crypto_key_id=%s\n",
-           LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION,
-           pouch->segment_target_bytes, pouch->compaction_min_segment_count,
-           pouch->compaction_min_reclaimable_bytes,
-           pouch->compaction_delete_grace_seconds, pouch->compression,
+           LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION, pouch->compression,
            lc_pouch_crypto_enabled(pouch->crypto) ? "encrypted" : "plaintext",
            crypto_key_id != NULL ? crypto_key_id : "");
   rc = lc_pouch_path_write_text_file(manifest_path, manifest, error);
@@ -1519,6 +1513,8 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
   out->compaction_interval_seconds = pouch->compaction_interval_seconds;
   out->compaction_delete_grace_seconds =
       pouch->compaction_delete_grace_seconds;
+  out->compaction_max_io_bytes_per_sec =
+      pouch->compaction_max_io_bytes_per_sec;
   out->background_compaction_enabled = pouch->background_compaction_enabled;
   out->single_writer = pouch->single_writer;
   out->query_engine =

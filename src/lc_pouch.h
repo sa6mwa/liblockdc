@@ -14,6 +14,7 @@ typedef struct lc_pouch_open_options {
   uint64_t compaction_min_reclaimable_bytes;
   uint64_t compaction_interval_seconds;
   uint64_t compaction_delete_grace_seconds;
+  uint64_t compaction_max_io_bytes_per_sec;
   int background_compaction_enabled;
   int single_writer;
   const char *query_engine;
@@ -34,6 +35,7 @@ typedef struct lc_pouch_status {
   uint64_t compaction_min_reclaimable_bytes;
   uint64_t compaction_interval_seconds;
   uint64_t compaction_delete_grace_seconds;
+  uint64_t compaction_max_io_bytes_per_sec;
   int background_compaction_enabled;
   int single_writer;
   char *query_engine;

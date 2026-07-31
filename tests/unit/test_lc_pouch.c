@@ -3697,11 +3697,19 @@ static void test_open_creates_segmented_root_layout(void **state) {
   options.segment_target_bytes = 4096UL;
   options.background_compaction_enabled = 1;
   options.compaction_interval_seconds = 30UL;
+  options.compaction_max_io_bytes_per_sec = 1U << 20;
   rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(pouch);
   assert_path_dir(root, "namespaces");
   assert_path_file(root, "manifest");
+  assert_path_file_not_contains(root, "manifest", "segment_target_bytes=");
+  assert_path_file_not_contains(root, "manifest",
+                                "compaction_min_segment_count=");
+  assert_path_file_not_contains(root, "manifest",
+                                "compaction_min_reclaimable_bytes=");
+  assert_path_file_not_contains(root, "manifest",
+                                "compaction_delete_grace_seconds=");
 
   rc = lc_pouch_status_read(pouch, &status, &error);
   assert_int_equal(rc, LC_OK);
@@ -3709,8 +3717,12 @@ static void test_open_creates_segmented_root_layout(void **state) {
   assert_string_equal(status.layout_name, "pouch-segmented");
   assert_int_equal(status.layout_version, 1UL);
   assert_int_equal(status.segment_target_bytes, 4096UL);
+  assert_int_equal(status.compaction_min_segment_count, 2UL);
+  assert_int_equal(status.compaction_min_reclaimable_bytes, 64UL * 1024UL *
+                                                             1024UL);
   assert_int_equal(status.background_compaction_enabled, 1);
   assert_int_equal(status.compaction_interval_seconds, 30UL);
+  assert_int_equal(status.compaction_max_io_bytes_per_sec, 1U << 20);
 
   lc_pouch_status_cleanup(NULL, &status);
   lc_pouch_close(pouch);

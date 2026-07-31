@@ -1084,6 +1084,8 @@ Required behavior:
   open and once per interval without making mutations perform compaction;
 - run explicit namespace maintenance immediately rather than delaying it for
   the background interval;
+- honor `compaction_max_io_bytes_per_sec` while copying snapshot payload
+  chunks; `0` leaves compaction unthrottled;
 - detect live state links that point into candidate files and protect those
   files until the links can be rewritten safely;
 - capture current refs from meta, state, and object projections in deterministic
