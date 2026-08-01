@@ -8072,6 +8072,7 @@ static void test_client_update_waits_for_namespace_mutation_lock(void **state) {
   lc_error error;
   const void *bytes;
   size_t length;
+  char endpoint[560];
   char root[512];
   int lock_fd;
   pid_t pid;
@@ -8087,7 +8088,10 @@ static void test_client_update_waits_for_namespace_mutation_lock(void **state) {
   make_root("client-mutation-lock", root, sizeof(root));
   cleanup_root(root);
 
-  open_pouch_client(root, &client, &error);
+  /* The child opens Pouch after fork, so keep the parent single-threaded. */
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?background_compaction=false", root) > 0);
+  open_pouch_client_endpoint(endpoint, &client, &error);
   write_client_state(client, "state/locked", "{\"value\":1}", NULL, 0L, 0,
                      &update_res, &error);
   lc_update_res_cleanup(&update_res);
@@ -11603,6 +11607,7 @@ test_client_queue_watch_detects_forked_transaction_ack_commit(void **state) {
   lc_watch_handler handler;
   pouch_watch_txn_ack_capture capture;
   lc_error error;
+  char endpoint[560];
   char root[512];
   int rc;
 
@@ -11618,7 +11623,10 @@ test_client_queue_watch_detects_forked_transaction_ack_commit(void **state) {
   make_root("client-queue-watch-fork-txn", root, sizeof(root));
   cleanup_root(root);
 
-  open_pouch_client(root, &watcher, &error);
+  /* The watch callback forks a child which opens Pouch. */
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?background_compaction=false", root) > 0);
+  open_pouch_client_endpoint(endpoint, &watcher, &error);
   enqueue_req.queue = "watch-fork-txn";
   enqueue_req.visibility_timeout_seconds = 120L;
   rc = lc_source_from_memory("watch-fork-txn", strlen("watch-fork-txn"),
