@@ -230,8 +230,11 @@ metadata records and must not be a separate durable namespace.
 Pouch encodes active lease fields as a C-native side-metadata blob attached to
 the target key metadata record. A target with no state payload may still have a
 metadata-only record so acquire, keepalive, and release can preserve fencing
-and expiry without creating a public document. Body reads treat metadata-only
-records as no-content; metadata reads return the lease metadata.
+and expiry without creating a public document. The placeholder is query-hidden
+only while it has no body: its first body write, including a transaction-staged
+write promoted on commit, is query-visible unless the body itself explicitly
+sets query-hidden metadata. Body reads treat metadata-only records as
+no-content; metadata reads return the lease metadata.
 
 Metadata-only rows do not consume the public state generation for the key. A
 live body write after a missing/tombstoned/metadata-only row starts at public

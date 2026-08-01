@@ -13339,6 +13339,108 @@ static void test_transaction_bound_lease_requires_transaction_id(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture scan_capture;
+  pouch_query_key_capture index_capture;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&scan_capture, 0, sizeof(scan_capture));
+  memset(&index_capture, 0, sizeof(index_capture));
+  lc_error_init(&error);
+  make_root("lease-txn-visible", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "doc/lease-txn-visible/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.namespace_name = "docs/lease-txn-visible";
+  acquire_req.key = key;
+  acquire_req.owner = "txn-owner";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "txn-lease-visible";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(lease->has_query_hidden);
+  assert_true(lease->query_hidden);
+
+  rc = lc_source_from_memory(
+      "{\"category\":\"planning\",\"value\":1}",
+      strlen("{\"category\":\"planning\",\"value\":1}"), &source,
+      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  participant.namespace_name = acquire_req.namespace_name;
+  participant.key = key;
+  participant.backend_hash = "pouch-state";
+  decision_req.txn_id = acquire_req.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = acquire_req.namespace_name;
+  query_req.selector_json = selector;
+  query_req.engine = "scan";
+  rc = client->query_keys(client, &query_req, &handler, &scan_capture,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(scan_capture.count, 1);
+  assert_true(pouch_query_capture_has(&scan_capture, key));
+  lc_query_res_cleanup(&query_res);
+
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = client->query_keys(client, &query_req, &handler, &index_capture,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(index_capture.count, 1);
+  assert_true(pouch_query_capture_has(&index_capture, key));
+  lc_query_res_cleanup(&query_res);
+
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_lease_metadata_persists_query_hidden(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -13382,6 +13484,7 @@ static void test_lease_metadata_persists_query_hidden(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lease->version, 1L);
   assert_false(lease->has_query_hidden);
+  assert_false(lease->query_hidden);
 
   metadata_req.has_query_hidden = 1;
   metadata_req.query_hidden = 1;
@@ -18570,6 +18673,76 @@ static void test_acquire_for_update_success_and_rollback(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_acquire_for_update_first_body_is_queryable(void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
+  lc_client *client;
+  lc_acquire_req acquire_req;
+  lc_error error;
+  pouch_acquire_for_update_state handler_state;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture scan_capture;
+  pouch_query_key_capture index_capture;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lc_acquire_req_init(&acquire_req);
+  memset(&handler_state, 0, sizeof(handler_state));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&scan_capture, 0, sizeof(scan_capture));
+  memset(&index_capture, 0, sizeof(index_capture));
+  lc_error_init(&error);
+  make_root("afu-first-body-visible", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/afu-first-body/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  handler_state.replacement =
+      "{\"category\":\"planning\",\"value\":1}";
+  handler_state.observer = client;
+  handler_state.key = key;
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire_for_update(client, &acquire_req,
+                                  pouch_acquire_for_update_handler,
+                                  &handler_state, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(handler_state.saw_staged_invisible, 1);
+
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.selector_json = selector;
+  query_req.engine = "scan";
+  rc = client->query_keys(client, &query_req, &handler, &scan_capture,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(scan_capture.count, 1);
+  assert_true(pouch_query_capture_has(&scan_capture, key));
+  lc_query_res_cleanup(&query_res);
+
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = client->query_keys(client, &query_req, &handler, &index_capture,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(index_capture.count, 1);
+  assert_true(pouch_query_capture_has(&index_capture, key));
+  lc_query_res_cleanup(&query_res);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_acquire_for_update_rollback_removes_new_state(void **state) {
   lc_client *client;
   lc_sink *sink;
@@ -18794,6 +18967,8 @@ int main(void) {
           test_acquire_rolls_back_unrepresentable_generation_claim),
       cmocka_unit_test(test_acquire_honors_block_seconds),
       cmocka_unit_test(test_transaction_bound_lease_requires_transaction_id),
+      cmocka_unit_test(
+          test_transaction_bound_lease_commit_makes_first_body_queryable),
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),
       cmocka_unit_test(test_query_keys_scan_uses_liblql_and_query_hidden),
@@ -18839,6 +19014,7 @@ int main(void) {
       cmocka_unit_test(test_txn_recovery_applies_decisions_on_client_open),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),
+      cmocka_unit_test(test_acquire_for_update_first_body_is_queryable),
       cmocka_unit_test(test_acquire_for_update_rollback_removes_new_state),
   };
 

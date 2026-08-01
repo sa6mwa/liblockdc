@@ -5695,8 +5695,9 @@ static int lc_pouch_client_prepare_txn_stage_options(
                         NULL);
     }
   }
+  /* Lease-only metadata must not hide its first body write. */
   if (rc == LC_OK && !options->has_query_hidden && precondition_source->found &&
-      precondition_source->has_query_hidden) {
+      precondition_source->has_body && precondition_source->has_query_hidden) {
     options->has_query_hidden = 1;
     options->query_hidden = precondition_source->query_hidden;
   }
@@ -10350,6 +10351,11 @@ int lc_pouch_client_acquire_for_update_method(
       if (rc == LC_OK) {
         rc = lc_pouch_lease_refresh_state(lease_handle, promote_result.etag,
                                           version, error);
+        if (rc == LC_OK) {
+          lc_pouch_lease_refresh_query_metadata(
+              lease_handle, promote_result.has_query_hidden,
+              promote_result.query_hidden);
+        }
       }
     }
     if (rc != LC_OK) {
@@ -15475,6 +15481,12 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
   options.content_type = "application/json";
   options.has_query_hidden = lease->has_query_hidden;
   options.query_hidden = lease->query_hidden;
+  /* Do not propagate automatic placeholder hiding into a staged first body. */
+  if (lease->pouch_state_key == NULL && lease->version == 0L &&
+      lease->has_query_hidden && lease->query_hidden) {
+    options.has_query_hidden = 0;
+    options.query_hidden = 0;
+  }
   if (lease->pouch_state_key != NULL) {
     options.has_query_hidden = 1;
     options.query_hidden = 1;
@@ -15520,6 +15532,10 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
       lease->pouch_stage_dirty = 1;
       rc = lc_pouch_lease_refresh_state(lease, result.etag,
                                         lease->pouch_stage_version, error);
+      if (rc == LC_OK) {
+        lc_pouch_lease_refresh_query_metadata(lease, result.has_query_hidden,
+                                              result.query_hidden);
+      }
     }
   }
   lc_pouch_state_write_result_cleanup(&lease->client->allocator, &result);
@@ -15537,6 +15553,7 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
   lc_update_res res;
   const char *state_key;
   const char *stage_txn_id;
+  int first_body_from_hidden_placeholder;
   int rc;
 
   if (self == NULL || src == NULL) {
@@ -15545,6 +15562,10 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
                         NULL);
   }
   lease = (lc_lease_handle *)self;
+  /* Align the public lease view with a direct first-body write. */
+  first_body_from_hidden_placeholder =
+      !lc_pouch_txn_id_present(lease->txn_id) && lease->version == 0L &&
+      lease->has_query_hidden && lease->query_hidden;
   if (lease->pouch_state_key != NULL) {
     memset(&lease_precondition, 0, sizeof(lease_precondition));
     memset(&options, 0, sizeof(options));
@@ -15646,6 +15667,9 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
   if (rc == LC_OK) {
     rc = lc_pouch_lease_refresh_state(lease, res.new_state_etag,
                                       res.new_version, error);
+    if (rc == LC_OK && first_body_from_hidden_placeholder) {
+      lc_pouch_lease_refresh_query_metadata(lease, 0, 0);
+    }
   }
   lc_update_res_cleanup(&res);
   return rc;
