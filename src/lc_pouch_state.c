@@ -4234,6 +4234,7 @@ static int lc_pouch_state_append_binary_records(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest,
     lc_pouch_state_binary_append_item *items, size_t item_count,
+    int preserve_single_writer_cache,
     lc_error *error) {
   char *segment_path;
   lc_pouch_state_append_lock append_lock;
@@ -4356,7 +4357,8 @@ static int lc_pouch_state_append_binary_records(
                       "failed to close pouch state segment", strerror(errno),
                       NULL, NULL);
   }
-  if (rc == LC_OK) {
+  if (rc == LC_OK &&
+      !(preserve_single_writer_cache && lc_pouch_single_writer_enabled(pouch))) {
     lc_pouch_state_cache_namespace *cache;
 
     cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0,
@@ -4379,7 +4381,9 @@ lc_pouch_state_append_binary_record(lc_pouch *pouch, const char *namespace_name,
                                     lc_pouch_namespace_manifest *manifest,
                                     unsigned char record_type, const void *key,
                                     size_t key_len, unsigned char *meta,
-                                    size_t meta_len, lc_error *error) {
+                                    size_t meta_len,
+                                    int preserve_single_writer_cache,
+                                    lc_error *error) {
   lc_pouch_state_binary_append_item item;
 
   memset(&item, 0, sizeof(item));
@@ -4389,7 +4393,9 @@ lc_pouch_state_append_binary_record(lc_pouch *pouch, const char *namespace_name,
   item.meta = meta;
   item.meta_len = meta_len;
   return lc_pouch_state_append_binary_records(pouch, namespace_name, manifest,
-                                              &item, 1U, error);
+                                              &item, 1U,
+                                              preserve_single_writer_cache,
+                                              error);
 }
 
 static char *lc_pouch_state_bytes_to_string(const lc_allocator *allocator,
@@ -8468,7 +8474,7 @@ static int lc_pouch_state_append_tombstone(
   }
   rc = lc_pouch_state_append_binary_record(
       pouch, namespace_name, manifest, delete_record_type, key,
-      strlen(key), meta, meta_len, error);
+      strlen(key), meta, meta_len, 0, error);
   lc_free_with_allocator(&pouch->allocator, meta);
   return rc;
 }
@@ -8504,7 +8510,7 @@ static int lc_pouch_state_append_record(
   if (rc == LC_OK) {
     rc = lc_pouch_state_append_binary_record(pouch, namespace_name, manifest,
                                              record_type, key, strlen(key),
-                                             meta, meta_len, error);
+                                             meta, meta_len, 1, error);
   }
   lc_free_with_allocator(&pouch->allocator, meta);
   return rc;
@@ -8572,7 +8578,7 @@ static int lc_pouch_state_append_staged_commit_batch(
     items[2].meta = delete_meta;
     items[2].meta_len = delete_meta_len;
     rc = lc_pouch_state_append_binary_records(pouch, namespace_name, manifest,
-                                              items, 3U, error);
+                                              items, 3U, 0, error);
   }
   lc_free_with_allocator(&pouch->allocator, link_meta);
   lc_free_with_allocator(&pouch->allocator, decision_meta);
@@ -8618,7 +8624,7 @@ static int lc_pouch_state_append_staged_discard_batch(
     items[1].meta = delete_meta;
     items[1].meta_len = delete_meta_len;
     rc = lc_pouch_state_append_binary_records(pouch, namespace_name, manifest,
-                                              items, 2U, error);
+                                              items, 2U, 0, error);
   }
   lc_free_with_allocator(&pouch->allocator, decision_meta);
   lc_free_with_allocator(&pouch->allocator, delete_meta);

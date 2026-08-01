@@ -3259,6 +3259,63 @@ static void test_single_writer_state_read_uses_projection_cache(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_single_writer_acquire_preserves_projection_cache(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_lease *first_lease;
+  lc_lease *second_lease;
+  lc_acquire_req acquire_req;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char endpoint[560];
+  char root[512];
+  char segment_path[1024];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  first_lease = NULL;
+  second_lease = NULL;
+  memset(&read_result, 0, sizeof(read_result));
+  lc_acquire_req_init(&acquire_req);
+  lc_error_init(&error);
+  make_root("single-writer-acquire-cache", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?single_writer=true", root) > 0);
+  open_pouch_client_endpoint(endpoint, &client, &error);
+
+  acquire_req.key = "state/cache-first";
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &first_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first_lease);
+
+  acquire_req.key = "state/cache-second";
+  rc = client->acquire(client, &acquire_req, &second_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(second_lease);
+
+  handle = (lc_client_handle *)client;
+  pouch_state_segment_path(root, "default", 1UL, segment_path,
+                           sizeof(segment_path));
+  assert_int_equal(unlink(segment_path), 0);
+  rc = lc_pouch_state_read_metadata(handle->pouch, "default",
+                                    "state/cache-first", &read_result,
+                                    &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_non_null(read_result.metadata);
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  second_lease->close(second_lease);
+  first_lease->close(first_lease);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_single_writer_runtime_control_and_ha_probe(void **state) {
   lc_pouch *writer;
   lc_pouch *peer;
@@ -18126,6 +18183,7 @@ int main(void) {
           test_marker_snapshots_treat_same_process_handles_as_peers),
       cmocka_unit_test(test_marker_refresh_uses_directory_fast_path_and_force),
       cmocka_unit_test(test_single_writer_state_read_uses_projection_cache),
+      cmocka_unit_test(test_single_writer_acquire_preserves_projection_cache),
       cmocka_unit_test(test_single_writer_runtime_control_and_ha_probe),
       cmocka_unit_test(test_pouch_disk_runtime_controls),
       cmocka_unit_test(test_pouch_durable_sync_policy),
