@@ -11140,6 +11140,7 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_state_process_namespace_mutex *process_mutex;
+  uint64_t writer_mode_epoch;
   int single_writer;
   int rc;
 
@@ -11152,7 +11153,13 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
   }
   *out = 0UL;
   process_mutex = NULL;
-  single_writer = lc_pouch_single_writer_enabled(pouch);
+  single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
+  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  if (single_writer && cache != NULL && cache->initialized &&
+      cache->writer_mode_epoch == writer_mode_epoch) {
+    *out = cache->max_version;
+    return LC_OK;
+  }
   if (!single_writer) {
     rc = lc_pouch_state_process_namespace_mutex_lock(pouch, namespace_name,
                                                      &process_mutex, error);

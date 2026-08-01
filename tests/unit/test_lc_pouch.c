@@ -15974,6 +15974,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   lc_query_key_handler handler;
   pouch_query_key_capture capture;
   lc_error error;
+  char endpoint[560];
   char *namespace_path;
   char header_path[1024];
   char doc_table_path[1024];
@@ -15981,6 +15982,11 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   char root[512];
   unsigned long delete_version;
   unsigned long stale_repair_version;
+  size_t warmed_artifact_cache_count;
+  size_t warmed_doc_table_cache_count;
+  size_t warmed_generation_cache_count;
+  size_t warmed_packed_cache_count;
+  void *warmed_manifest_trust;
   int rc;
 
   (void)state;
@@ -16118,6 +16124,36 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_query_index_segment_contains(namespace_path, "query.index.lcpttg",
                                       "666c757368");
   lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  client = NULL;
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?single_writer=true", root) > 0);
+  open_pouch_client_endpoint(endpoint, &client, &error);
+
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(flush_res.mode, "wait");
+  assert_true(((lc_client_handle *)client)->pouch->query_packed_cache_count >
+              0U);
+  assert_true(((lc_client_handle *)client)->pouch->query_doc_table_cache_count >
+              0U);
+  assert_true(
+      ((lc_client_handle *)client)->pouch->query_generation_cache_count > 0U);
+  assert_true(
+      ((lc_client_handle *)client)->pouch->query_artifact_cache_count > 0U);
+  warmed_artifact_cache_count =
+      ((lc_client_handle *)client)->pouch->query_artifact_cache_count;
+  warmed_doc_table_cache_count =
+      ((lc_client_handle *)client)->pouch->query_doc_table_cache_count;
+  warmed_generation_cache_count =
+      ((lc_client_handle *)client)->pouch->query_generation_cache_count;
+  warmed_packed_cache_count =
+      ((lc_client_handle *)client)->pouch->query_packed_cache_count;
+  warmed_manifest_trust =
+      ((lc_client_handle *)client)->pouch->query_manifest_trust;
+  assert_non_null(warmed_manifest_trust);
+  lc_index_flush_res_cleanup(&flush_res);
 
   query_req.namespace_name = "docs/flush";
   query_req.engine = "index";
@@ -16130,7 +16166,24 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_true(pouch_query_capture_has(&capture, "doc/live"));
   assert_true(((lc_client_handle *)client)->pouch->query_packed_cache_count >
               0U);
+  assert_int_equal(
+      ((lc_client_handle *)client)->pouch->query_artifact_cache_count,
+      warmed_artifact_cache_count);
+  assert_int_equal(
+      ((lc_client_handle *)client)->pouch->query_doc_table_cache_count,
+      warmed_doc_table_cache_count);
+  assert_int_equal(
+      ((lc_client_handle *)client)->pouch->query_generation_cache_count,
+      warmed_generation_cache_count);
+  assert_int_equal(
+      ((lc_client_handle *)client)->pouch->query_packed_cache_count,
+      warmed_packed_cache_count);
+  assert_ptr_equal(((lc_client_handle *)client)->pouch->query_manifest_trust,
+                   warmed_manifest_trust);
   lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  client = NULL;
+  open_pouch_client(root, &client, &error);
 
   newest_query_index_path(namespace_path, "query.index.lcpdtg", doc_table_path,
                           sizeof(doc_table_path));
@@ -16155,9 +16208,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(flush_res.flush_id, "pouch-query-index-repair");
   assert_true(flush_res.index_seq >= stale_repair_version);
-  assert_query_index_segment_contains(namespace_path, "query.index.lcpdtg",
-                                      "format=pouch-doc-table-generation");
-  assert_query_index_segment_contains(namespace_path, "query.index.lcpdtg",
+  assert_query_index_segment_contains(namespace_path, "query.index",
                                       "row_count=3");
   lc_index_flush_res_cleanup(&flush_res);
   assert_int_equal(

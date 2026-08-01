@@ -2054,6 +2054,25 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   }
   lockdc_bench_add_ns(&out->index_query_keys_ns, phase_start,
                       lockdc_bench_now_ns());
+  matched_rows = 0L;
+  phase_start = lockdc_bench_now_ns();
+  phase = "RangeHalf warm index keys";
+  rc = lockdc_bench_query(client, "RangeHalf", "index", 0, rows,
+                          &matched_rows, &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  if (matched_rows != lockdc_bench_expected_query_matches("RangeHalf", rows)) {
+    rc = LC_ERR_INVALID;
+    snprintf(out->error, sizeof(out->error),
+             "pouch production warm RangeHalf index query matched %ld rows",
+             matched_rows);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+    goto done;
+  }
+  lockdc_bench_add_ns(&out->index_query_keys_warm_ns, phase_start,
+                      lockdc_bench_now_ns());
   phase = "NarrativeSummary warm index docs";
   rc = lockdc_bench_warm_query(client, "NarrativeSummary", "index", 1, rows,
                                out, &error);

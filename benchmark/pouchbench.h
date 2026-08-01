@@ -36,6 +36,7 @@ typedef struct lockdc_pouch_bench_result {
   uint64_t get_public_ns;
   uint64_t get_lease_ns;
   uint64_t index_query_keys_ns;
+  uint64_t index_query_keys_warm_ns;
   uint64_t index_query_docs_ns;
   uint64_t scan_query_keys_ns;
   uint64_t scan_query_docs_ns;

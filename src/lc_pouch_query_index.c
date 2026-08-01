@@ -551,6 +551,8 @@ struct lc_pouch_query_index_manifest_trust_entry {
   char *namespace_name;
   lc_pouch_generation index_seq;
   uint64_t writer_mode_epoch;
+  lc_pouch_query_index_manifest manifest;
+  int manifest_cached;
   struct lc_pouch_query_index_manifest_trust_entry *next;
 };
 
@@ -614,7 +616,12 @@ static int lc_pouch_query_index_manifest_trust_valid(const lc_pouch *pouch,
                                                      const char *namespace_name,
                                                      lc_pouch_generation index_seq);
 static void lc_pouch_query_index_manifest_trust_remember(
-    lc_pouch *pouch, const char *namespace_name, lc_pouch_generation index_seq);
+    lc_pouch *pouch, const char *namespace_name, lc_pouch_generation index_seq,
+    const lc_pouch_query_index_manifest *manifest);
+static const lc_pouch_query_index_manifest *
+lc_pouch_query_index_manifest_trust_snapshot(
+    const lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_generation index_seq);
 static int lc_pouch_query_index_append_generation_posting(
     const lc_allocator *allocator, char kind, unsigned long count,
     unsigned long max_doc_id, unsigned long payload_length,
@@ -4959,6 +4966,7 @@ static int lc_pouch_query_index_read_packed_component_bytes(
   char *component_bytes;
   size_t header_len;
   size_t offset;
+  size_t component_offset;
   size_t index;
   size_t component_length;
   int rc;
@@ -4983,8 +4991,8 @@ static int lc_pouch_query_index_read_packed_component_bytes(
   packed = NULL;
   rc = lc_pouch_query_index_packed_cache_get(pouch, namespace_name, packed_path,
                                              &packed, present, valid, error);
-  lc_free_with_allocator(&pouch->allocator, packed_path);
   if (rc != LC_OK || !*present || !*valid) {
+    lc_free_with_allocator(&pouch->allocator, packed_path);
     return rc;
   }
   header_len = LC_POUCH_QUERY_INDEX_PACKED_MAGIC_LEN + 16U +
@@ -5000,9 +5008,11 @@ static int lc_pouch_query_index_read_packed_component_bytes(
                                       8U) !=
           LC_POUCH_QUERY_INDEX_PACKED_COMPONENT_COUNT) {
     *valid = 0;
+    lc_free_with_allocator(&pouch->allocator, packed_path);
     return LC_OK;
   }
   offset = header_len;
+  component_offset = 0U;
   component_length = 0U;
   for (index = 0U; index < LC_POUCH_QUERY_INDEX_PACKED_COMPONENT_COUNT;
        ++index) {
@@ -5014,18 +5024,31 @@ static int lc_pouch_query_index_read_packed_component_bytes(
         LC_POUCH_QUERY_INDEX_PACKED_MAGIC_LEN + 16U + (index * 8U));
     if (length64 > (uint64_t)((size_t)-1)) {
       *valid = 0;
+      lc_free_with_allocator(&pouch->allocator, packed_path);
       return LC_OK;
     }
     length = (size_t)length64;
-    if (length > packed->length - offset) {
+    if (offset > packed->length || length > packed->length - offset) {
       *valid = 0;
+      lc_free_with_allocator(&pouch->allocator, packed_path);
       return LC_OK;
     }
     if (index == component) {
+      component_offset = offset;
       component_length = length;
-      break;
     }
     offset += length;
+  }
+  if (offset != packed->length) {
+    *valid = 0;
+    lc_free_with_allocator(&pouch->allocator, packed_path);
+    return LC_OK;
+  }
+  lc_free_with_allocator(&pouch->allocator, packed_path);
+  if (component_offset > packed->length ||
+      component_length > packed->length - component_offset) {
+    *valid = 0;
+    return LC_OK;
   }
   component_bytes =
       (char *)lc_alloc_with_allocator(&pouch->allocator, component_length + 1U);
@@ -5036,7 +5059,7 @@ static int lc_pouch_query_index_read_packed_component_bytes(
                         NULL, NULL, NULL);
   }
   if (component_length > 0U) {
-    memcpy(component_bytes, packed->bytes + offset, component_length);
+    memcpy(component_bytes, packed->bytes + component_offset, component_length);
   }
   component_bytes[component_length] = '\0';
   *out_bytes = component_bytes;
@@ -5122,6 +5145,41 @@ lc_pouch_query_index_manifest_cleanup(const lc_allocator *allocator,
   }
   lc_free_with_allocator(allocator, manifest->segments);
   memset(manifest, 0, sizeof(*manifest));
+}
+
+static int lc_pouch_query_index_manifest_clone(
+    const lc_allocator *allocator, lc_pouch_query_index_manifest *out,
+    const lc_pouch_query_index_manifest *source) {
+  size_t index;
+
+  if (out == NULL || source == NULL) {
+    return LC_ERR_INVALID;
+  }
+  memset(out, 0, sizeof(*out));
+  out->index_seq = source->index_seq;
+  out->present = source->present;
+  out->valid = source->valid;
+  if (source->segment_count == 0U) {
+    return LC_OK;
+  }
+  out->segments = (lc_pouch_query_index_manifest_segment *)
+      lc_calloc_with_allocator(allocator, source->segment_count,
+                               sizeof(out->segments[0]));
+  if (out->segments == NULL) {
+    return LC_ERR_NOMEM;
+  }
+  out->segment_capacity = source->segment_count;
+  for (index = 0U; index < source->segment_count; ++index) {
+    out->segments[index] = source->segments[index];
+    out->segments[index].id =
+        lc_strdup_with_allocator(allocator, source->segments[index].id);
+    if (out->segments[index].id == NULL) {
+      lc_pouch_query_index_manifest_cleanup(allocator, out);
+      return LC_ERR_NOMEM;
+    }
+  }
+  out->segment_count = source->segment_count;
+  return LC_OK;
 }
 
 static int
@@ -11647,8 +11705,8 @@ static int lc_pouch_query_index_flush_segmented(
   if (manifest.present && manifest.valid) {
     manifest_trusted = lc_pouch_query_index_manifest_trust_valid(
         pouch, namespace_name, manifest.index_seq);
-    if (manifest_trusted || (!validate_existing_segments &&
-                             manifest.index_seq <= state_index_seq)) {
+    if (!validate_existing_segments &&
+        (manifest_trusted || manifest.index_seq <= state_index_seq)) {
       manifest_segments_valid = 1;
     } else {
       rc = lc_pouch_query_index_manifest_segments_validate(
@@ -11920,7 +11978,7 @@ static int lc_pouch_query_index_flush_segmented(
   }
   if (rc == LC_OK) {
     lc_pouch_query_index_manifest_trust_remember(pouch, namespace_name,
-                                                 state_index_seq);
+                                                 state_index_seq, &manifest);
     out->index_seq = state_index_seq;
     out->repaired = 1;
   }
@@ -12026,7 +12084,7 @@ int lc_pouch_query_index_manifest_seq(lc_pouch *pouch,
     } else {
       *index_seq = manifest.index_seq;
       lc_pouch_query_index_manifest_trust_remember(pouch, namespace_name,
-                                                   manifest.index_seq);
+                                                   manifest.index_seq, &manifest);
     }
   }
   lc_pouch_query_index_manifest_cleanup(&pouch->allocator, &manifest);
@@ -12040,6 +12098,7 @@ int lc_pouch_query_index_ensure_current(lc_pouch *pouch,
                                         lc_pouch_query_index_flush_result *out,
                                         lc_error *error) {
   lc_pouch_query_index_manifest manifest;
+  const lc_pouch_query_index_manifest *manifest_snapshot;
   char *manifest_path;
   int rc;
 
@@ -12051,8 +12110,9 @@ int lc_pouch_query_index_ensure_current(lc_pouch *pouch,
                         NULL, NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
-  if (!validate_current && lc_pouch_query_index_manifest_trust_valid(
-                               pouch, namespace_name, state_index_seq)) {
+  manifest_snapshot = lc_pouch_query_index_manifest_trust_snapshot(
+      pouch, namespace_name, state_index_seq);
+  if (!validate_current && manifest_snapshot != NULL) {
     out->index_seq = state_index_seq;
     return LC_OK;
   }
@@ -12802,6 +12862,7 @@ static void lc_pouch_query_index_manifest_trust_entry_cleanup(
     return;
   }
   lc_free_with_allocator(allocator, entry->namespace_name);
+  lc_pouch_query_index_manifest_cleanup(allocator, &entry->manifest);
   memset(entry, 0, sizeof(*entry));
 }
 
@@ -12831,7 +12892,8 @@ static int lc_pouch_query_index_manifest_trust_valid(const lc_pouch *pouch,
 }
 
 static void lc_pouch_query_index_manifest_trust_remember(
-    lc_pouch *pouch, const char *namespace_name, lc_pouch_generation index_seq) {
+    lc_pouch *pouch, const char *namespace_name, lc_pouch_generation index_seq,
+    const lc_pouch_query_index_manifest *manifest) {
   lc_pouch_query_index_manifest_trust_entry *entry;
   uint64_t writer_mode_epoch;
 
@@ -12847,6 +12909,16 @@ static void lc_pouch_query_index_manifest_trust_remember(
         strcmp(entry->namespace_name, namespace_name) == 0) {
       entry->index_seq = index_seq;
       entry->writer_mode_epoch = writer_mode_epoch;
+      lc_pouch_query_index_manifest_cleanup(&pouch->allocator,
+                                            &entry->manifest);
+      entry->manifest_cached = 0;
+      if (manifest != NULL && manifest->present && manifest->valid &&
+          manifest->index_seq == index_seq &&
+          lc_pouch_query_index_manifest_clone(&pouch->allocator,
+                                              &entry->manifest, manifest) ==
+              LC_OK) {
+        entry->manifest_cached = 1;
+      }
       return;
     }
     entry = entry->next;
@@ -12864,8 +12936,39 @@ static void lc_pouch_query_index_manifest_trust_remember(
   }
   entry->index_seq = index_seq;
   entry->writer_mode_epoch = writer_mode_epoch;
+  if (manifest != NULL && manifest->present && manifest->valid &&
+      manifest->index_seq == index_seq &&
+      lc_pouch_query_index_manifest_clone(&pouch->allocator, &entry->manifest,
+                                          manifest) == LC_OK) {
+    entry->manifest_cached = 1;
+  }
   entry->next = pouch->query_manifest_trust;
   pouch->query_manifest_trust = entry;
+}
+
+static const lc_pouch_query_index_manifest *
+lc_pouch_query_index_manifest_trust_snapshot(
+    const lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_generation index_seq) {
+  lc_pouch_query_index_manifest_trust_entry *entry;
+  uint64_t writer_mode_epoch;
+
+  if (pouch == NULL ||
+      !lc_pouch_single_writer_snapshot((lc_pouch *)pouch, &writer_mode_epoch) ||
+      namespace_name == NULL || namespace_name[0] == '\0') {
+    return NULL;
+  }
+  entry = pouch->query_manifest_trust;
+  while (entry != NULL) {
+    if (entry->manifest_cached && entry->writer_mode_epoch == writer_mode_epoch &&
+        entry->index_seq == index_seq && entry->manifest.index_seq == index_seq &&
+        entry->namespace_name != NULL &&
+        strcmp(entry->namespace_name, namespace_name) == 0) {
+      return &entry->manifest;
+    }
+    entry = entry->next;
+  }
+  return NULL;
 }
 
 void lc_pouch_query_index_cache_cleanup(lc_pouch *pouch) {
@@ -13688,6 +13791,9 @@ int lc_pouch_query_index_warm_namespace(lc_pouch *pouch,
     char *trigram_term_path;
     char *temporal_term_path;
     char *delete_path;
+    lc_pouch_query_index_key_hex_set deletes;
+    unsigned long delete_count;
+    unsigned long delete_hash;
     int present;
     int valid;
 
@@ -13703,6 +13809,9 @@ int lc_pouch_query_index_warm_namespace(lc_pouch *pouch,
     trigram_term_path = NULL;
     temporal_term_path = NULL;
     delete_path = NULL;
+    memset(&deletes, 0, sizeof(deletes));
+    delete_count = 0UL;
+    delete_hash = lc_pouch_query_index_hash_init();
     rc = lc_pouch_query_index_segmented_paths(
         pouch, namespace_name, segment->id, &header_path, &doc_table_path,
         &exact_term_path, &presence_term_path, &range_term_path,
@@ -13719,6 +13828,11 @@ int lc_pouch_query_index_warm_namespace(lc_pouch *pouch,
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index segment header is not readable",
                         NULL, NULL, "pouch");
+    }
+    if (rc == LC_OK) {
+      lc_pouch_query_index_artifact_cache_remember(
+          pouch, header_path, LC_POUCH_QUERY_INDEX_ARTIFACT_HEADER,
+          segment->index_seq, segment->row_count, segment->row_hash);
     }
     present = 0;
     valid = 0;
@@ -13763,10 +13877,27 @@ int lc_pouch_query_index_warm_namespace(lc_pouch *pouch,
           pouch, namespace_name, temporal_term_path, segment->index_seq,
           segment->row_count, segment->row_hash, error);
     }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_load_delete_keys(
+          pouch, namespace_name, delete_path, &deletes, &delete_count,
+          &delete_hash, error);
+    }
+    if (rc == LC_OK && (delete_count != segment->delete_count ||
+                        delete_hash != segment->delete_hash)) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index segment deletes do not match the "
+                        "manifest",
+                        NULL, NULL, "pouch");
+    }
+    lc_pouch_query_index_key_hex_set_cleanup(&pouch->allocator, &deletes);
     lc_pouch_query_index_segmented_paths_cleanup(
         pouch, &header_path, &doc_table_path, &exact_term_path,
         &presence_term_path, &range_term_path, &text_term_path,
         &trigram_term_path, &temporal_term_path, &delete_path);
+  }
+  if (rc == LC_OK) {
+    lc_pouch_query_index_manifest_trust_remember(pouch, namespace_name,
+                                                 manifest.index_seq, &manifest);
   }
 
 cleanup:
@@ -14602,10 +14733,12 @@ static int lc_pouch_query_index_segmented_collect(
     lc_pouch_index_result_row_list *rows, lc_pouch_generation *index_seq,
     int *text_complete_out, lc_error *error) {
   lc_pouch_query_index_manifest manifest;
+  const lc_pouch_query_index_manifest *cached_manifest;
   lc_pouch_query_index_key_hex_set hidden;
   lc_pouch_query_index_segmented_collect_kind collect_kind;
   char *manifest_path;
   const char *collect_needle_hex;
+  lc_pouch_generation state_index_seq;
   char trigram_needles[LC_POUCH_QUERY_INDEX_MAX_CONTAINS_TRIGRAMS][7];
   size_t trigram_count;
   size_t segment_index;
@@ -14655,6 +14788,8 @@ static int lc_pouch_query_index_segmented_collect(
 
   memset(&manifest, 0, sizeof(manifest));
   memset(&hidden, 0, sizeof(hidden));
+  cached_manifest = NULL;
+  state_index_seq = 0UL;
   collect_kind = kind;
   collect_needle_hex = needle_hex;
   memset(trigram_needles, 0, sizeof(trigram_needles));
@@ -14710,21 +14845,35 @@ static int lc_pouch_query_index_segmented_collect(
     }
   }
   *index_seq = 0UL;
-  manifest_path =
-      lc_pouch_query_index_manifest_path(pouch, namespace_name, error);
-  if (manifest_path == NULL) {
-    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  rc = LC_OK;
+  if (lc_pouch_single_writer_enabled(pouch)) {
+    rc = lc_pouch_state_index_seq(pouch, namespace_name, &state_index_seq,
+                                  error);
+    if (rc == LC_OK) {
+      cached_manifest = lc_pouch_query_index_manifest_trust_snapshot(
+          pouch, namespace_name, state_index_seq);
+    }
   }
-  rc = lc_pouch_query_index_manifest_read(pouch, manifest_path, &manifest,
-                                          error);
-  lc_free_with_allocator(&pouch->allocator, manifest_path);
+  if (rc == LC_OK && cached_manifest != NULL) {
+    manifest = *cached_manifest;
+  } else if (rc == LC_OK) {
+    manifest_path =
+        lc_pouch_query_index_manifest_path(pouch, namespace_name, error);
+    if (manifest_path == NULL) {
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_manifest_read(pouch, manifest_path, &manifest,
+                                              error);
+    }
+    lc_free_with_allocator(&pouch->allocator, manifest_path);
+    if (rc == LC_OK && (!manifest.present || !manifest.valid)) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index manifest is not readable", NULL,
+                        NULL, "pouch");
+    }
+  }
   if (rc != LC_OK) {
-    goto cleanup;
-  }
-  if (!manifest.present || !manifest.valid) {
-    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch query-index manifest is not readable", NULL, NULL,
-                      "pouch");
     goto cleanup;
   }
   *index_seq = manifest.index_seq;
@@ -15006,7 +15155,9 @@ static int lc_pouch_query_index_segmented_collect(
 
 cleanup:
   lc_pouch_query_index_key_hex_set_cleanup(&pouch->allocator, &hidden);
-  lc_pouch_query_index_manifest_cleanup(&pouch->allocator, &manifest);
+  if (cached_manifest == NULL) {
+    lc_pouch_query_index_manifest_cleanup(&pouch->allocator, &manifest);
+  }
   return rc;
 }
 

@@ -13116,6 +13116,12 @@ int lc_pouch_client_flush_index_method(lc_client *self,
     return rc;
   }
   mode = req->mode != NULL && req->mode[0] != '\0' ? req->mode : "wait";
+  if (strcmp(mode, "wait") == 0) {
+    rc = lc_pouch_state_warm_namespace(client->pouch, namespace_name, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
   index_seq = 0UL;
   memset(&index_result, 0, sizeof(index_result));
   if (strcmp(mode, "sync") == 0) {
@@ -13152,6 +13158,13 @@ int lc_pouch_client_flush_index_method(lc_client *self,
   }
   if (rc != LC_OK) {
     return rc;
+  }
+  if (strcmp(mode, "wait") == 0) {
+    rc = lc_pouch_query_index_warm_namespace(client->pouch, namespace_name,
+                                             error);
+    if (rc != LC_OK) {
+      return rc;
+    }
   }
   out->namespace_name = lc_strdup_local(namespace_name);
   out->mode = lc_strdup_local(mode);

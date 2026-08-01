@@ -465,6 +465,7 @@ __benchmark-pouch-go: __build-x86_64-linux-gnu-release
 	cd benchmark && $(LOCKD_GO_CACHE_ENV) $(GO) mod download
 	cd $(LOCKD_GO_MODULE_DIR) && $(LOCKD_GO_CACHE_ENV) $(GO) build -o $(ROOT)/.cache/go/bin/lockd ./cmd/lockd
 	cd benchmark && \
+	  set -- $$(cksum "$(X86_64_GNU_RELEASE_BUILD_DIR)/liblockdc.a"); \
 	  $(LOCKD_GO_CACHE_ENV) \
 	  LOCKDC_BENCH_LOCKD_BIN="$(ROOT)/.cache/go/bin/lockd" \
 	  LOCKDC_BENCH_SEED_ROWS="$(POUCH_GO_SEED_ROWS)" \
@@ -483,7 +484,7 @@ __benchmark-pouch-go: __build-x86_64-linux-gnu-release
 	  LOCKDC_BENCH_CONCURRENCY_WRITERS="$(LOCKDC_BENCH_CONCURRENCY_WRITERS)" \
 	  LOCKDC_BENCH_CONCURRENCY_WRITES_PER_WRITER="$(LOCKDC_BENCH_CONCURRENCY_WRITES_PER_WRITER)" \
 	  LOCKDC_BENCH_CONCURRENCY_PAYLOAD_BYTES="$(LOCKDC_BENCH_CONCURRENCY_PAYLOAD_BYTES)" \
-	  CGO_CFLAGS="$(POUCH_GO_BENCH_CFLAGS)" \
+	  CGO_CFLAGS="$(POUCH_GO_BENCH_CFLAGS) -DLOCKDC_BENCH_ARCHIVE_BUILD_ID=$$1" \
 	  CGO_LDFLAGS="$(POUCH_GO_BENCH_LDFLAGS)" \
 	  timeout --kill-after=5s '$(POUCH_GO_TEST_TIMEOUT)' \
 	    $(GO) test -run '^$$' -bench '$(POUCH_GO_BENCH)' -benchtime '$(POUCH_GO_BENCHTIME)' -count '$(POUCH_GO_BENCH_COUNT)' -timeout '$(POUCH_GO_TEST_TIMEOUT)'

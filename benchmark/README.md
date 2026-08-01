@@ -69,6 +69,13 @@ loads the namespace lazily when the first operation needs it. The existing
 `reopen-ns/op` and `flush-reopen-ns/op` metrics remain diagnostic sub-phases and
 must not be compared independently across the two implementations.
 
+The production indexed-query pair distinguishes reader readiness from steady
+state. `index-query-keys-ns/op` is the first indexed `RangeHalf` query after a
+reopen followed by a wait flush; `index-query-keys-warm-ns/op` is its immediate
+repeat. The first metric catches deferred reader recovery or stale index work
+that would otherwise be hidden by a warmed cache, while the second measures the
+resident query path.
+
 `make benchmark-pouch-go-concurrency` is the bounded lock and shared-root
 comparison matrix. It runs Pouch and Go lockd disk with crypto disabled and
 enabled, over a contended single key and independent keys. Pouch opens the
