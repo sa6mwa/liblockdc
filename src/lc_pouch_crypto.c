@@ -1,6 +1,7 @@
 #include "lc_pouch_crypto.h"
 
 #include "lc_api_internal.h"
+#include "lc_intcompat.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -1151,8 +1152,7 @@ static void lc_pouch_crypto_nonce(const unsigned char prefix[8],
 static int lc_pouch_crypto_check_byte_counter(uint64_t total, size_t delta,
                                               const char *message,
                                               lc_error *error) {
-  if ((uintmax_t)delta > UINT64_MAX ||
-      total > UINT64_MAX - (uint64_t)delta) {
+  if (total > LC_U64_MAX - (uint64_t)delta) {
     return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL,
                         "pouch");
   }

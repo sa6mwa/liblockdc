@@ -1,6 +1,7 @@
 #include "lc_pouch_index.h"
 
 #include "lc_api_internal.h"
+#include "lc_intcompat.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -83,18 +84,15 @@ static int lc_pouch_index_term_parse_u64_token(const char *token,
                                                uint64_t *out,
                                                const char *message,
                                                lc_error *error) {
-  char *end;
-  uint64_t parsed;
+  lc_u64 parsed;
 
   if (token == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
   }
-  errno = 0;
-  parsed = strtoull(token, &end, 10);
-  if (errno != 0 || end == token || *end != '\0') {
+  if (!lc_u64_parse_base10(token, &parsed)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
   }
-  *out = parsed;
+  *out = (uint64_t)parsed;
   return LC_OK;
 }
 
@@ -2138,6 +2136,8 @@ int lc_pouch_index_term_field_parse_line(char *line,
                         "pouch index term field requires line and output", NULL,
                         NULL, NULL);
   }
+  first_byte = 0U;
+  byte_count = 0U;
   if (strncmp(line, "term_field ", sizeof("term_field ") - 1U) != 0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index term field has invalid prefix", NULL, NULL,
@@ -2216,6 +2216,8 @@ int lc_pouch_index_term_value_parse_line(char *line,
                         "pouch index term value requires line and output", NULL,
                         NULL, NULL);
   }
+  first_byte = 0U;
+  byte_count = 0U;
   if (strncmp(line, "term_value ", sizeof("term_value ") - 1U) != 0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index term value has invalid prefix", NULL, NULL,
@@ -2341,7 +2343,7 @@ int lc_pouch_index_term_fields_select_range(
         if (strcmp(fields[field_index].field_hex, terms[index].field_hex) ==
             0) {
           if (fields[field_index].byte_count >
-              UINT64_MAX - fields[field_index].first_byte) {
+              LC_U64_MAX - fields[field_index].first_byte) {
             return 0;
           }
           byte_end = fields[field_index].first_byte +

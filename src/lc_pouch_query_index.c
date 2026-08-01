@@ -1,6 +1,7 @@
 #include "lc_pouch_query_index.h"
 
 #include "lc_api_internal.h"
+#include "lc_intcompat.h"
 #include "lc_log.h"
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
@@ -8,7 +9,6 @@
 
 #include <dirent.h>
 #include <errno.h>
-#include <inttypes.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <math.h>
@@ -2780,6 +2780,7 @@ static int lc_pouch_query_index_text_append_u64_line(
     lc_pouch_query_index_text *text, const char *name, uint64_t value,
     lc_error *error) {
   char line[96];
+  char value_text[32];
   int written;
 
   if (text == NULL || name == NULL) {
@@ -2787,7 +2788,13 @@ static int lc_pouch_query_index_text_append_u64_line(
                         "pouch query-index header line requires text and name",
                         NULL, NULL, NULL);
   }
-  written = snprintf(line, sizeof(line), "%s=%" PRIu64 "\n", name, value);
+  if (lc_u64_format_base10((lc_u64)value, value_text, sizeof(value_text)) <
+      0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index header line exceeds local limit",
+                        NULL, NULL, NULL);
+  }
+  written = snprintf(line, sizeof(line), "%s=%s\n", name, value_text);
   if (written < 0 || (size_t)written >= sizeof(line)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index header line exceeds local limit",
@@ -3000,6 +3007,7 @@ static int lc_pouch_query_index_parse_u64_token(char **cursor,
                                                 uint64_t *out) {
   char *begin;
   char *end;
+  lc_u64 value;
 
   if (cursor == NULL || *cursor == NULL || out == NULL) {
     return 0;
@@ -3008,11 +3016,16 @@ static int lc_pouch_query_index_parse_u64_token(char **cursor,
   if (*begin == '\0' || *begin == '\n' || *begin == ' ') {
     return 0;
   }
-  errno = 0;
-  *out = strtoull(begin, &end, 10);
-  if (errno != 0 || end == begin || *end != ' ') {
+  end = begin;
+  while (*end >= '0' && *end <= '9') {
+    ++end;
+  }
+  if (end == begin || *end != ' ' ||
+      !lc_parse_u64_base10_range_checked(begin, (size_t)(end - begin),
+                                          &value)) {
     return 0;
   }
+  *out = (uint64_t)value;
   *cursor = end + 1;
   return 1;
 }
@@ -5227,15 +5240,13 @@ lc_pouch_query_index_manifest_reserve(const lc_allocator *allocator,
 
 static int lc_pouch_query_index_segment_id(lc_pouch_generation index_seq, char *out,
                                            size_t out_size, lc_error *error) {
-  int written;
-
   if (out == NULL || out_size == 0U) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index segment id requires output", NULL,
                         NULL, NULL);
   }
-  written = snprintf(out, out_size, "%020" PRIu64, index_seq);
-  if (written < 0 || (size_t)written >= out_size) {
+  if (lc_u64_format_base10_padded((lc_u64)index_seq, 20U, out, out_size) <
+      0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index segment id exceeds local limit",
                         NULL, NULL, NULL);
@@ -5346,6 +5357,45 @@ static char *lc_pouch_query_index_manifest_next_line(char **cursor) {
   return line;
 }
 
+static char *lc_pouch_query_index_manifest_next_token(char **cursor) {
+  char *token;
+  char *space;
+
+  if (cursor == NULL || *cursor == NULL || **cursor == '\0') {
+    return NULL;
+  }
+  token = *cursor;
+  space = strchr(token, ' ');
+  if (space == NULL) {
+    *cursor = token + strlen(token);
+  } else {
+    *space = '\0';
+    *cursor = space + 1U;
+  }
+  return token;
+}
+
+static int lc_pouch_query_index_manifest_parse_u64(char **cursor,
+                                                    uint64_t *out) {
+  char *token;
+  lc_u64 value;
+
+  token = lc_pouch_query_index_manifest_next_token(cursor);
+  if (token == NULL || !lc_u64_parse_base10(token, &value)) {
+    return 0;
+  }
+  *out = (uint64_t)value;
+  return 1;
+}
+
+static int lc_pouch_query_index_manifest_parse_ulong(char **cursor,
+                                                      unsigned long *out) {
+  char *token;
+
+  token = lc_pouch_query_index_manifest_next_token(cursor);
+  return token != NULL && lc_parse_ulong_base10_checked(token, out);
+}
+
 static lc_pouch_query_index_manifest_segment *
 lc_pouch_query_index_manifest_find_segment(
     lc_pouch_query_index_manifest *manifest, const char *segment_id) {
@@ -5412,14 +5462,13 @@ lc_pouch_query_index_manifest_read(lc_pouch *pouch, const char *path,
     goto done;
   }
   while ((line = lc_pouch_query_index_manifest_next_line(&cursor)) != NULL) {
-    char id[64];
+    char *id;
     lc_pouch_generation base_index_seq;
     lc_pouch_generation index_seq;
     unsigned long row_count;
     unsigned long row_hash;
     unsigned long delete_count;
     unsigned long delete_hash;
-    int consumed;
 
     if (line[0] == '\0') {
       continue;
@@ -5434,11 +5483,25 @@ lc_pouch_query_index_manifest_read(lc_pouch *pouch, const char *path,
       unsigned long ctime_nsec;
       unsigned long inode;
 
-      consumed = 0;
-      if (sscanf(line, "artifact %63s %lu %" SCNu64 " %lu %lu %lu %lu %lu %n", id,
-                 &artifact_index, &size, &mtime, &mtime_nsec, &ctime,
-                 &ctime_nsec, &inode, &consumed) != 8 ||
-          consumed <= 0 || line[consumed] != '\0' ||
+      char *artifact_cursor;
+
+      artifact_cursor = line + 9U;
+      id = lc_pouch_query_index_manifest_next_token(&artifact_cursor);
+      if (id == NULL || strlen(id) >= 64U ||
+          !lc_pouch_query_index_manifest_parse_ulong(&artifact_cursor,
+                                                      &artifact_index) ||
+          !lc_pouch_query_index_manifest_parse_u64(&artifact_cursor, &size) ||
+          !lc_pouch_query_index_manifest_parse_ulong(&artifact_cursor,
+                                                      &mtime) ||
+          !lc_pouch_query_index_manifest_parse_ulong(&artifact_cursor,
+                                                      &mtime_nsec) ||
+          !lc_pouch_query_index_manifest_parse_ulong(&artifact_cursor,
+                                                      &ctime) ||
+          !lc_pouch_query_index_manifest_parse_ulong(&artifact_cursor,
+                                                      &ctime_nsec) ||
+          !lc_pouch_query_index_manifest_parse_ulong(&artifact_cursor,
+                                                      &inode) ||
+          lc_pouch_query_index_manifest_next_token(&artifact_cursor) != NULL ||
           artifact_index >= LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_COUNT) {
         goto done;
       }
@@ -5455,13 +5518,30 @@ lc_pouch_query_index_manifest_read(lc_pouch *pouch, const char *path,
       segment->artifact_signatures[artifact_index].present = 1;
       continue;
     }
-    consumed = 0;
-    if (sscanf(line, "segment %63s %" SCNu64 " %" SCNu64
-                     " %lu %lu %lu %lu %n", id,
-               &base_index_seq, &index_seq, &row_count, &row_hash,
-               &delete_count, &delete_hash, &consumed) != 7 ||
-        consumed <= 0 || line[consumed] != '\0') {
+    if (strncmp(line, "segment ", 8U) != 0) {
       goto done;
+    }
+    {
+      char *segment_cursor;
+
+      segment_cursor = line + 8U;
+      id = lc_pouch_query_index_manifest_next_token(&segment_cursor);
+      if (id == NULL || strlen(id) >= 64U ||
+          !lc_pouch_query_index_manifest_parse_u64(&segment_cursor,
+                                                    &base_index_seq) ||
+          !lc_pouch_query_index_manifest_parse_u64(&segment_cursor,
+                                                    &index_seq) ||
+          !lc_pouch_query_index_manifest_parse_ulong(&segment_cursor,
+                                                      &row_count) ||
+          !lc_pouch_query_index_manifest_parse_ulong(&segment_cursor,
+                                                      &row_hash) ||
+          !lc_pouch_query_index_manifest_parse_ulong(&segment_cursor,
+                                                      &delete_count) ||
+          !lc_pouch_query_index_manifest_parse_ulong(&segment_cursor,
+                                                      &delete_hash) ||
+          lc_pouch_query_index_manifest_next_token(&segment_cursor) != NULL) {
+        goto done;
+      }
     }
     rc = lc_pouch_query_index_manifest_reserve(
         &pouch->allocator, manifest, manifest->segment_count + 1U, error);
@@ -5733,17 +5813,28 @@ static int lc_pouch_query_index_manifest_write(
   }
   for (index = 0U; rc == LC_OK && index < manifest->segment_count; ++index) {
     char line[192];
+    char base_index_seq_text[32];
+    char index_seq_text[32];
     size_t artifact_index;
     int written;
 
-    written = snprintf(
-        line, sizeof(line), "segment %s %" PRIu64 " %" PRIu64
-                            " %lu %lu %lu %lu\n",
-        manifest->segments[index].id, manifest->segments[index].base_index_seq,
-        manifest->segments[index].index_seq,
-        manifest->segments[index].row_count, manifest->segments[index].row_hash,
-        manifest->segments[index].delete_count,
-        manifest->segments[index].delete_hash);
+    if (lc_u64_format_base10((lc_u64)manifest->segments[index].base_index_seq,
+                             base_index_seq_text,
+                             sizeof(base_index_seq_text)) < 0 ||
+        lc_u64_format_base10((lc_u64)manifest->segments[index].index_seq,
+                             index_seq_text, sizeof(index_seq_text)) < 0) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index manifest segment exceeds local "
+                        "limit",
+                        NULL, NULL, NULL);
+      break;
+    }
+    written = snprintf(line, sizeof(line), "segment %s %s %s %lu %lu %lu %lu\n",
+                       manifest->segments[index].id, base_index_seq_text,
+                       index_seq_text, manifest->segments[index].row_count,
+                       manifest->segments[index].row_hash,
+                       manifest->segments[index].delete_count,
+                       manifest->segments[index].delete_hash);
     if (written < 0 || (size_t)written >= sizeof(line)) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index manifest segment exceeds local "
@@ -5759,18 +5850,28 @@ static int lc_pouch_query_index_manifest_write(
          ++artifact_index) {
       const lc_pouch_query_index_manifest_artifact_signature *signature;
       char artifact_line[256];
+      char size_text[32];
 
       signature =
           &manifest->segments[index].artifact_signatures[artifact_index];
       if (!signature->present) {
         continue;
       }
-      written =
-          snprintf(artifact_line, sizeof(artifact_line),
-                   "artifact %s %lu %" PRIu64 " %lu %lu %lu %lu %lu\n",
-                   manifest->segments[index].id, (unsigned long)artifact_index,
-                   signature->size, signature->mtime, signature->mtime_nsec,
-                   signature->ctime, signature->ctime_nsec, signature->inode);
+      if (lc_u64_format_base10((lc_u64)signature->size, size_text,
+                               sizeof(size_text)) < 0) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch query-index manifest artifact exceeds local "
+                          "limit",
+                          NULL, NULL, NULL);
+        break;
+      }
+      written = snprintf(artifact_line, sizeof(artifact_line),
+                         "artifact %s %lu %s %lu %lu %lu %lu %lu\n",
+                         manifest->segments[index].id,
+                         (unsigned long)artifact_index, size_text,
+                         signature->mtime, signature->mtime_nsec,
+                         signature->ctime, signature->ctime_nsec,
+                         signature->inode);
       if (written < 0 || (size_t)written >= sizeof(artifact_line)) {
         rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch query-index manifest artifact exceeds local "
@@ -6130,8 +6231,9 @@ static int lc_pouch_query_index_parse_header_u64(const char *line,
                                                  const char *name,
                                                  uint64_t *out) {
   const char *value;
-  char *end;
   size_t name_len;
+  size_t value_len;
+  lc_u64 parsed;
 
   if (line == NULL || name == NULL || out == NULL) {
     return 0;
@@ -6144,9 +6246,14 @@ static int lc_pouch_query_index_parse_header_u64(const char *line,
   if (*value == '\0' || *value == '\n') {
     return 0;
   }
-  errno = 0;
-  *out = strtoull(value, &end, 10);
-  return errno == 0 && end != value && (*end == '\n' || *end == '\0');
+  value_len = strcspn(value, "\n");
+  if (value_len == 0U ||
+      (value[value_len] != '\0' && value[value_len] != '\n') ||
+      !lc_parse_u64_base10_range_checked(value, value_len, &parsed)) {
+    return 0;
+  }
+  *out = (uint64_t)parsed;
+  return 1;
 }
 
 static int lc_pouch_query_index_read_rows(
@@ -6335,7 +6442,7 @@ static int lc_pouch_query_index_seek_term_slice(FILE *fp,
                         NULL, NULL, NULL);
   }
   *valid = 0;
-  if (fp == NULL || first_byte > UINT64_MAX - term_section_start) {
+  if (fp == NULL || first_byte > LC_U64_MAX - term_section_start) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index term byte range is invalid", NULL,
                         NULL, NULL);
@@ -6416,7 +6523,7 @@ static int lc_pouch_query_index_read_term_fields(
     if (parsed.line_count == 0UL || parsed.byte_count == 0U ||
         parsed.first_line < previous_end ||
         parsed.first_byte < previous_byte_end ||
-        parsed.byte_count > UINT64_MAX - parsed.first_byte ||
+        parsed.byte_count > LC_U64_MAX - parsed.first_byte ||
         parsed.first_line > term_count ||
         parsed.line_count > term_count - parsed.first_line ||
         (actual_fields > 0UL && fields != NULL &&
@@ -6511,7 +6618,7 @@ static int lc_pouch_query_index_read_term_values(
     if (parsed.line_count == 0UL || parsed.byte_count == 0U ||
         parsed.first_line < previous_end ||
         parsed.first_byte < previous_byte_end ||
-        parsed.byte_count > UINT64_MAX - parsed.first_byte ||
+        parsed.byte_count > LC_U64_MAX - parsed.first_byte ||
         parsed.first_line > term_count ||
         parsed.line_count > term_count - parsed.first_line ||
         (actual_values > 0UL && values != NULL &&
@@ -6858,7 +6965,7 @@ static int lc_pouch_query_index_read_with_reader_fp(
       lc_pouch_index_term_field *last_field;
 
       last_field = &term_fields[term_field_table_count - 1U];
-      if (last_field->byte_count > UINT64_MAX - last_field->first_byte) {
+      if (last_field->byte_count > LC_U64_MAX - last_field->first_byte) {
         rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch query-index term byte range is invalid",
                           NULL, NULL, NULL);
@@ -9672,6 +9779,8 @@ static int lc_pouch_query_index_pending_segment_append_entry(
     lc_pouch_query_index_pending_segment *segment,
     lc_pouch_query_index_pending_entry *entry, lc_error *error) {
   char line[256];
+  char version_text[32];
+  char bytes_text[32];
   unsigned long doc_id;
   size_t index;
   int written;
@@ -9687,10 +9796,16 @@ static int lc_pouch_query_index_pending_segment_append_entry(
     return lc_pouch_query_index_pending_segment_append_delete(
         allocator, segment, entry, error);
   }
-    written = snprintf(line, sizeof(line), "row %" PRIu64 " %" PRIu64
-                                          " %d %d ",
-                       entry->version, entry->bytes,
-                       entry->has_query_hidden ? 1 : 0,
+  if (lc_u64_format_base10((lc_u64)entry->version, version_text,
+                           sizeof(version_text)) < 0 ||
+      lc_u64_format_base10((lc_u64)entry->bytes, bytes_text,
+                           sizeof(bytes_text)) < 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch pending segment row exceeds local limit", NULL,
+                        NULL, NULL);
+  }
+  written = snprintf(line, sizeof(line), "row %s %s %d %d ", version_text,
+                     bytes_text, entry->has_query_hidden ? 1 : 0,
                      entry->query_hidden ? 1 : 0);
   if (written < 0 || (size_t)written >= sizeof(line)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -10596,12 +10711,21 @@ static int lc_pouch_query_index_build_text(
   }
   for (index = 0U; rc == LC_OK && index < summary->count; ++index) {
     lc_pouch_query_index_row *row;
+    char version_text[32];
+    char bytes_text[32];
 
     row = &summary->rows[index];
-    written = snprintf(line, sizeof(line), "row %" PRIu64 " %" PRIu64
-                                          " %d %d ",
-                       row->version, row->bytes,
-                       row->has_query_hidden ? 1 : 0,
+    if (lc_u64_format_base10((lc_u64)row->version, version_text,
+                             sizeof(version_text)) < 0 ||
+        lc_u64_format_base10((lc_u64)row->bytes, bytes_text,
+                             sizeof(bytes_text)) < 0) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index row exceeds local limit", NULL,
+                        NULL, NULL);
+      break;
+    }
+    written = snprintf(line, sizeof(line), "row %s %s %d %d ", version_text,
+                       bytes_text, row->has_query_hidden ? 1 : 0,
                        row->query_hidden ? 1 : 0);
     if (written < 0 || (size_t)written >= sizeof(line)) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,

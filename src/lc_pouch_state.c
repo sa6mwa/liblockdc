@@ -15,7 +15,6 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -1487,20 +1486,27 @@ static int lc_pouch_state_key_lock_acquire(lc_pouch *pouch,
       break;
     }
   }
-  hash = UINT64_C(14695981039346656037);
+  hash = ((uint64_t)0xcbf29ce4UL << 32U) | (uint64_t)0x84222325UL;
   for (cursor = (const unsigned char *)canonical_key;
        (size_t)(cursor - (const unsigned char *)canonical_key) < key_len;
        ++cursor) {
     hash ^= (uint64_t)*cursor;
-    hash *= UINT64_C(1099511628211);
+    hash *= ((uint64_t)0x00000100UL << 32U) | (uint64_t)0x000001b3UL;
   }
   lock_path = NULL;
   if (rc == LC_OK) {
     char leaf[32];
 
-    snprintf(leaf, sizeof(leaf), "%016" PRIx64 ".lock", hash);
-    lock_path = lc_pouch_path_join(&pouch->allocator, locks_path, leaf);
-    if (lock_path == NULL) {
+    if (lc_u64_format_base16_padded((lc_u64)hash, 16U, leaf,
+                                    sizeof(leaf)) < 0) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "failed to format pouch key lock path", NULL, NULL,
+                        "pouch");
+    } else {
+      memcpy(leaf + 16U, ".lock", sizeof(".lock"));
+      lock_path = lc_pouch_path_join(&pouch->allocator, locks_path, leaf);
+    }
+    if (rc == LC_OK && lock_path == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch key lock path", NULL, NULL,
                         "pouch");
@@ -3634,7 +3640,7 @@ static int lc_pouch_state_compaction_throttle(lc_pouch *pouch,
   rate = pouch->compaction_max_io_bytes_per_sec;
   seconds = (uint64_t)bytes / rate;
   remainder = (uint64_t)bytes % rate;
-  if (rate <= UINT64_MAX / 1000000000U) {
+  if (rate <= LC_U64_MAX / 1000000000U) {
     nanoseconds = remainder * 1000000000U / rate;
   } else {
     nanoseconds = remainder / (rate / 1000000000U);
@@ -3785,10 +3791,10 @@ static int lc_pouch_state_fd_seek(int fd, uint64_t offset,
 
 static lc_pouch_unix_seconds
 lc_pouch_state_decode_unix_seconds(uint64_t value) {
-  if (value <= (uint64_t)INT64_MAX) {
+  if (value <= (uint64_t)LC_I64_MAX) {
     return (lc_pouch_unix_seconds)value;
   }
-  return -1 - (lc_pouch_unix_seconds)(UINT64_MAX - value);
+  return -1 - (lc_pouch_unix_seconds)(LC_U64_MAX - value);
 }
 
 static int lc_pouch_state_record_write_header(
@@ -3849,7 +3855,7 @@ static int lc_pouch_state_record_finalize(
 
   if ((key_len > 0U && key == NULL) || (meta_len > 0U && meta == NULL) ||
       key_len > 0xFFFFFFFFUL || meta_len > 0xFFFFFFFFUL ||
-      record_offset > UINT64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES) {
+      record_offset > LC_U64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch state record finalization is invalid", NULL,
                         NULL, "pouch");
@@ -4062,9 +4068,9 @@ static int lc_pouch_state_reserve_index_records(
   char *sequence_path;
   struct flock fl;
   char line[96];
+  char end_index_text[32];
   FILE *fp;
-  uint64_t parsed;
-  char *end;
+  lc_u64 parsed;
   lc_pouch_generation base;
   lc_pouch_generation end_index;
   lc_pouch_state_cache_namespace *cache;
@@ -4136,10 +4142,8 @@ static int lc_pouch_state_reserve_index_records(
     sequence_valid =
         fgets(line, sizeof(line), fp) != NULL && strncmp(line, "max=", 4U) == 0;
     if (sequence_valid) {
-      errno = 0;
-      parsed = strtoull(line + 4U, &end, 10);
-      sequence_valid = errno == 0 && end != line + 4U &&
-                       (*end == '\0' || *end == '\n');
+      sequence_valid = lc_parse_u64_base10_range_checked(
+          line + 4U, strlen(line + 4U), &parsed);
     }
     if (fclose(fp) != 0) {
       rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -4173,15 +4177,16 @@ static int lc_pouch_state_reserve_index_records(
       base = durable_max;
     }
   }
-  if ((uintmax_t)count > UINT64_MAX ||
-      base > UINT64_MAX - (uint64_t)count) {
+  if (base > LC_U64_MAX - (uint64_t)count) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch state index sequence overflow", NULL, NULL,
                       "pouch");
     goto cleanup;
   }
   end_index = base + (uint64_t)count;
-  if (snprintf(line, sizeof(line), "max=%" PRIu64 "\n", end_index) < 0) {
+  if (lc_u64_format_base10((lc_u64)end_index, end_index_text,
+                           sizeof(end_index_text)) < 0 ||
+      snprintf(line, sizeof(line), "max=%s\n", end_index_text) < 0) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "failed to format pouch state sequence", NULL, NULL,
                       "pouch");
@@ -4258,7 +4263,7 @@ static int lc_pouch_state_append_binary_records(
                           "pouch binary record batch item is invalid", NULL,
                           NULL, "pouch");
     }
-    if (record_size > UINT64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES -
+    if (record_size > LC_U64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES -
                           (uint64_t)items[index].key_len -
                           (uint64_t)items[index].meta_len) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -4310,7 +4315,7 @@ static int lc_pouch_state_append_binary_records(
     rc = lc_pouch_state_file_size(segment_path, &segment_size, error);
   }
   if (rc == LC_OK && segment_size > 0U &&
-      (record_size > UINT64_MAX - segment_size ||
+      (record_size > LC_U64_MAX - segment_size ||
        segment_size + record_size > pouch->segment_target_bytes)) {
     lc_free_with_allocator(&pouch->allocator, segment_path);
     segment_path = NULL;
@@ -5306,7 +5311,7 @@ static int lc_pouch_state_read_next_record(
                           "pouch state segment payload CRC mismatch", NULL,
                           NULL, "pouch");
     }
-  } else if (payload_length > UINT64_MAX - payload_offset ||
+  } else if (payload_length > LC_U64_MAX - payload_offset ||
              (off_t)(payload_offset + payload_length) < 0 ||
              (uint64_t)(off_t)(payload_offset + payload_length) !=
                  payload_offset + payload_length ||
@@ -6599,11 +6604,11 @@ static int lc_pouch_state_snapshot_write_record(
     if (rc != LC_OK) {
       return rc;
     }
-    if (record_start > UINT64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES ||
+    if (record_start > LC_U64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES ||
         (uint64_t)strlen(record->key) >
-            UINT64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES - record_start ||
+            LC_U64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES - record_start ||
         (uint64_t)meta_len >
-            UINT64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES - record_start -
+            LC_U64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES - record_start -
                 (uint64_t)strlen(record->key)) {
       lc_free_with_allocator(&pouch->allocator, meta);
       lc_pouch_state_payload_span_cleanup(&pouch->allocator, &snapshot_span);
@@ -7080,7 +7085,7 @@ static int lc_pouch_state_compaction_candidate_add(
     lc_free_with_allocator(&pouch->allocator, leaf_copy);
     return rc;
   }
-  if (size > UINT64_MAX - capture->candidate_bytes) {
+  if (size > LC_U64_MAX - capture->candidate_bytes) {
     lc_free_with_allocator(&pouch->allocator, leaf_copy);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch compaction candidate bytes overflow", NULL,
@@ -7508,8 +7513,8 @@ static lc_pouch_unix_seconds lc_pouch_maintenance_now_seconds(void) {
   if (now <= 0) {
     return 0;
   }
-  if ((uintmax_t)now > (uintmax_t)INT64_MAX) {
-    return INT64_MAX;
+  if ((uintmax_t)now > (uintmax_t)LC_I64_MAX) {
+    return LC_I64_MAX;
   }
   return (lc_pouch_unix_seconds)now;
 }
@@ -7932,7 +7937,7 @@ static int lc_pouch_state_compact_namespace_if_needed(
   if (manifest->latest_snapshot_segment_id > compacted_segment_id) {
     compacted_segment_id = manifest->latest_snapshot_segment_id;
   }
-  if (compacted_segment_id == UINT64_MAX) {
+  if (compacted_segment_id == LC_U64_MAX) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch snapshot sequence overflow", NULL, NULL,
                         "pouch");
@@ -8094,7 +8099,7 @@ static int lc_pouch_state_compact_namespace(
   if (manifest->latest_snapshot_segment_id > compacted_segment_id) {
     compacted_segment_id = manifest->latest_snapshot_segment_id;
   }
-  if (compacted_segment_id == UINT64_MAX) {
+  if (compacted_segment_id == LC_U64_MAX) {
     lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
     lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
     lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
@@ -8921,9 +8926,9 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
     rc = lc_pouch_state_file_size(segment_path, &segment_size, error);
   }
   if (rc == LC_OK &&
-      (segment_size > UINT64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES ||
+      (segment_size > LC_U64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES ||
        (uint64_t)strlen(key) >
-           UINT64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES - segment_size)) {
+           LC_U64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES - segment_size)) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch state record offset exceeds u64", NULL, NULL,
                       "pouch");
@@ -9009,11 +9014,11 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return rc;
   }
-  if (segment_size > UINT64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES ||
+  if (segment_size > LC_U64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES ||
       (uint64_t)strlen(key) >
-          UINT64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES - segment_size ||
+          LC_U64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES - segment_size ||
       (uint64_t)meta_len >
-          UINT64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES - segment_size -
+          LC_U64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES - segment_size -
               (uint64_t)strlen(key)) {
     lc_pouch_state_truncate_fd_best_effort(fd, segment_size);
     close(fd);

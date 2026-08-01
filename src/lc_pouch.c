@@ -1,6 +1,7 @@
 #include "lc_pouch.h"
 
 #include "lc_api_internal.h"
+#include "lc_intcompat.h"
 #include "lc_log.h"
 #include "lc_pouch_format.h"
 #include "lc_pouch_internal.h"
@@ -125,12 +126,12 @@ static uint64_t lc_pouch_elapsed_ns(const struct timespec *started,
   } else {
     nanos = (uint64_t)(finished->tv_nsec - started->tv_nsec);
   }
-  if (seconds > UINT64_MAX / 1000000000U) {
-    return UINT64_MAX;
+  if (seconds > LC_U64_MAX / 1000000000U) {
+    return LC_U64_MAX;
   }
   seconds *= 1000000000U;
-  if (nanos > UINT64_MAX - seconds) {
-    return UINT64_MAX;
+  if (nanos > LC_U64_MAX - seconds) {
+    return LC_U64_MAX;
   }
   return seconds + nanos;
 }
@@ -1119,9 +1120,9 @@ int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
     goto cleanup;
   }
   result = 0;
-  timeout_ns = timeout_ms > UINT64_MAX / UINT64_C(1000000)
-                   ? UINT64_MAX
-                   : timeout_ms * UINT64_C(1000000);
+  timeout_ns = timeout_ms > LC_U64_MAX / (uint64_t)1000000UL
+                   ? LC_U64_MAX
+                   : timeout_ms * (uint64_t)1000000UL;
   clock_started = clock_gettime(CLOCK_MONOTONIC, &started) == 0;
   memset(&pollfd, 0, sizeof(pollfd));
   pollfd.fd = fd;
@@ -1133,10 +1134,10 @@ int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
         break;
       }
       remaining_ns = timeout_ns - elapsed_ns;
-      timeout = remaining_ns / UINT64_C(1000000) >= (uint64_t)INT_MAX
+      timeout = remaining_ns / (uint64_t)1000000UL >= (uint64_t)INT_MAX
                     ? INT_MAX
-                    : (int)((remaining_ns + UINT64_C(999999)) /
-                            UINT64_C(1000000));
+                    : (int)((remaining_ns + (uint64_t)999999UL) /
+                            (uint64_t)1000000UL);
     } else {
       timeout = timeout_ms > (uint64_t)INT_MAX ? INT_MAX : (int)timeout_ms;
     }
@@ -1996,6 +1997,7 @@ static int lc_pouch_init_writer_marker(lc_pouch *pouch, lc_error *error) {
   char marker_leaf[128];
   char presence_leaf[128];
   char writer_hex[33];
+  char writer_marker_text[32];
   uint64_t writer_marker_id;
   size_t index;
 
@@ -2011,11 +2013,17 @@ static int lc_pouch_init_writer_marker(lc_pouch *pouch, lc_error *error) {
   pthread_mutex_lock(&lc_pouch_writer_marker_mutex);
   writer_marker_id = ++lc_pouch_next_writer_marker_id;
   pthread_mutex_unlock(&lc_pouch_writer_marker_mutex);
-  snprintf(marker_leaf, sizeof(marker_leaf), "writer-%s-%020" PRIu64 ".marker",
-           writer_hex, writer_marker_id);
-  snprintf(presence_leaf, sizeof(presence_leaf),
-           "writer-%s-%020" PRIu64 ".presence",
-           writer_hex, writer_marker_id);
+  if (lc_u64_format_base10_padded((lc_u64)writer_marker_id, 20U,
+                                  writer_marker_text,
+                                  sizeof(writer_marker_text)) < 0 ||
+      snprintf(marker_leaf, sizeof(marker_leaf), "writer-%s-%s.marker",
+               writer_hex, writer_marker_text) < 0 ||
+      snprintf(presence_leaf, sizeof(presence_leaf), "writer-%s-%s.presence",
+               writer_hex, writer_marker_text) < 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "failed to format pouch writer marker", NULL, NULL,
+                        "pouch");
+  }
   pouch->writer_marker_leaf =
       lc_strdup_with_allocator(&pouch->allocator, marker_leaf);
   pouch->writer_presence_leaf =
@@ -2079,7 +2087,7 @@ static int lc_pouch_writer_presence_now_ns(int64_t *out, lc_error *error) {
   }
   if (now.tv_sec < 0 ||
       (uintmax_t)now.tv_sec >
-          ((uintmax_t)INT64_MAX - (uintmax_t)now.tv_nsec) / 1000000000U) {
+          ((uintmax_t)LC_I64_MAX - (uintmax_t)now.tv_nsec) / 1000000000U) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch writer presence clock is out of range", NULL,
                         NULL, "pouch");
@@ -2104,7 +2112,10 @@ static int lc_pouch_writer_presence_touch(lc_pouch *pouch, lc_error *error) {
   if (rc != LC_OK) {
     return rc;
   }
-  if (snprintf(payload, sizeof(payload), "%" PRId64 "\n", now_ns) < 0) {
+  if (lc_i64_format_base10((lc_i64)now_ns, payload, sizeof(payload)) < 0 ||
+      strlen(payload) + 2U > sizeof(payload) ||
+      snprintf(payload + strlen(payload),
+               sizeof(payload) - strlen(payload), "\n") < 0) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to format pouch writer heartbeat", NULL, NULL,
                         "pouch");
@@ -2761,7 +2772,7 @@ int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
     pouch->single_writer = 0;
     lc_pouch_writer_presence_stop(pouch);
   }
-  if (pouch->single_writer_epoch != UINT64_MAX) {
+  if (pouch->single_writer_epoch != LC_U64_MAX) {
     ++pouch->single_writer_epoch;
   }
   pthread_mutex_unlock(&pouch->single_writer_mutex);
@@ -2827,16 +2838,18 @@ static int lc_pouch_writer_presence_read(
   buffer[length] = '\0';
   if (length > 0U) {
     char *end;
-    intmax_t value;
+    lc_i64 value;
 
-    errno = 0;
-    value = strtoimax(buffer, &end, 10);
-    while (end != NULL && (*end == ' ' || *end == '\t' || *end == '\r' ||
-                           *end == '\n')) {
-      ++end;
+    while (*buffer == ' ' || *buffer == '\t' || *buffer == '\r' ||
+           *buffer == '\n') {
+      memmove(buffer, buffer + 1U, strlen(buffer));
     }
-    if (errno == 0 && end != buffer && end != NULL && *end == '\0' &&
-        value > 0 && (uintmax_t)value <= (uintmax_t)INT64_MAX) {
+    end = buffer + strlen(buffer);
+    while (end > buffer && (end[-1] == ' ' || end[-1] == '\t' ||
+                            end[-1] == '\r' || end[-1] == '\n')) {
+      *--end = '\0';
+    }
+    if (lc_i64_parse_base10(buffer, &value) && value > 0) {
       *heartbeat_ns = (int64_t)value;
       *has_heartbeat = 1;
     }
@@ -2861,7 +2874,7 @@ static int lc_pouch_writer_presence_mtime_ns(const struct stat *st,
 #endif
   if (seconds < 0 || nanos < 0 ||
       (uintmax_t)seconds >
-          ((uintmax_t)INT64_MAX - (uintmax_t)nanos) / 1000000000U) {
+          ((uintmax_t)LC_I64_MAX - (uintmax_t)nanos) / 1000000000U) {
     return 0;
   }
   *out = seconds * (int64_t)1000000000 + (int64_t)nanos;
@@ -2947,8 +2960,8 @@ int lc_pouch_probe_exclusive_writer(
         !lc_pouch_writer_presence_mtime_ns(&st, &heartbeat_ns)) {
       continue;
     }
-    expires_ns = heartbeat_ns > INT64_MAX - LC_POUCH_EXCLUSIVE_WRITER_TTL_NS
-                     ? INT64_MAX
+    expires_ns = heartbeat_ns > LC_I64_MAX - LC_POUCH_EXCLUSIVE_WRITER_TTL_NS
+                     ? LC_I64_MAX
                      : heartbeat_ns + LC_POUCH_EXCLUSIVE_WRITER_TTL_NS;
     if (expires_ns > now_ns) {
       out->present = 1;

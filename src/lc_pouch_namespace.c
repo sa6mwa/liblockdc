@@ -1,12 +1,12 @@
 #include "lc_pouch_namespace.h"
 
 #include "lc_api_internal.h"
+#include "lc_intcompat.h"
 #include "lc_pouch_format.h"
 #include "lc_pouch_path.h"
 
 #include <dirent.h>
 #include <errno.h>
-#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +19,18 @@
 #define LC_POUCH_SNAPSHOT_SUFFIX ".log"
 
 typedef lc_pouch_namespace_marker_peer_stat lc_pouch_marker_entry;
+
+static int lc_pouch_namespace_parse_u64(const char *text, size_t length,
+                                        uint64_t *out_value) {
+  lc_u64 value;
+
+  if (out_value == NULL ||
+      !lc_parse_u64_base10_range_checked(text, length, &value)) {
+    return 0;
+  }
+  *out_value = (uint64_t)value;
+  return 1;
+}
 
 char *lc_pouch_namespace_path(const lc_allocator *allocator,
                               const char *root_path,
@@ -40,18 +52,28 @@ char *lc_pouch_namespace_path(const lc_allocator *allocator,
 char *lc_pouch_namespace_segment_leaf(const lc_allocator *allocator,
                                       uint64_t segment_id) {
   char stack[96];
+  char id[32];
 
-  snprintf(stack, sizeof(stack), "%s%020" PRIu64 "%s", LC_POUCH_SEGMENT_PREFIX,
-           segment_id, LC_POUCH_SEGMENT_SUFFIX);
+  if (lc_u64_format_base10_padded((lc_u64)segment_id, 20U, id,
+                                  sizeof(id)) < 0 ||
+      snprintf(stack, sizeof(stack), "%s%s%s", LC_POUCH_SEGMENT_PREFIX, id,
+               LC_POUCH_SEGMENT_SUFFIX) < 0) {
+    return NULL;
+  }
   return lc_strdup_with_allocator(allocator, stack);
 }
 
 char *lc_pouch_namespace_snapshot_leaf(const lc_allocator *allocator,
                                        uint64_t segment_id) {
   char stack[96];
+  char id[32];
 
-  snprintf(stack, sizeof(stack), "%s%020" PRIu64 "%s", LC_POUCH_SNAPSHOT_PREFIX,
-           segment_id, LC_POUCH_SNAPSHOT_SUFFIX);
+  if (lc_u64_format_base10_padded((lc_u64)segment_id, 20U, id,
+                                  sizeof(id)) < 0 ||
+      snprintf(stack, sizeof(stack), "%s%s%s", LC_POUCH_SNAPSHOT_PREFIX, id,
+               LC_POUCH_SNAPSHOT_SUFFIX) < 0) {
+    return NULL;
+  }
   return lc_strdup_with_allocator(allocator, stack);
 }
 
@@ -77,7 +99,6 @@ static int lc_pouch_namespace_ensure_child(const lc_allocator *allocator,
 static int lc_pouch_namespace_parse_segment_id(const char *leaf,
                                                uint64_t *segment_id) {
   const char *digits;
-  char *end;
   uint64_t value;
   size_t prefix_len;
   size_t suffix_len;
@@ -103,9 +124,8 @@ static int lc_pouch_namespace_parse_segment_id(const char *leaf,
       return 0;
     }
   }
-  errno = 0;
-  value = strtoull(digits, &end, 10);
-  if (errno != 0 || end != digits + digits_len || value == 0U) {
+  if (!lc_pouch_namespace_parse_u64(digits, digits_len, &value) ||
+      value == 0U) {
     return 0;
   }
   *segment_id = value;
@@ -120,7 +140,6 @@ int lc_pouch_namespace_parse_segment_leaf(const char *leaf,
 static int lc_pouch_namespace_parse_snapshot_id(const char *leaf,
                                                 uint64_t *snapshot_id) {
   const char *digits;
-  char *end;
   uint64_t value;
   size_t prefix_len;
   size_t suffix_len;
@@ -146,9 +165,8 @@ static int lc_pouch_namespace_parse_snapshot_id(const char *leaf,
       return 0;
     }
   }
-  errno = 0;
-  value = strtoull(digits, &end, 10);
-  if (errno != 0 || end != digits + digits_len || value == 0U) {
+  if (!lc_pouch_namespace_parse_u64(digits, digits_len, &value) ||
+      value == 0U) {
     return 0;
   }
   *snapshot_id = value;
@@ -457,18 +475,14 @@ static int lc_pouch_namespace_manifest_read(
         *snapshot_segment_id = parsed;
       }
     } else if (strcmp(line, "state_max_version") == 0) {
-      char *end;
       uint64_t parsed;
 
-      errno = 0;
-      parsed = strtoull(value, &end, 10);
-      if (errno == 0 && end != value && *end == '\0') {
+      if (lc_pouch_namespace_parse_u64(value, strlen(value), &parsed)) {
         *state_max_version = parsed;
       }
     } else if (strcmp(line, "obsolete_segment") == 0) {
       uint64_t parsed;
       char *timestamp;
-      char *end;
       uint64_t marked_at_unix;
 
       timestamp = strchr(value, '\t');
@@ -477,9 +491,8 @@ static int lc_pouch_namespace_manifest_read(
         break;
       }
       *timestamp++ = '\0';
-      errno = 0;
-      marked_at_unix = strtoull(timestamp, &end, 10);
-      if (errno != 0 || end == timestamp || *end != '\0' ||
+      if (!lc_pouch_namespace_parse_u64(timestamp, strlen(timestamp),
+                                        &marked_at_unix) ||
           marked_at_unix == 0U ||
           !lc_pouch_namespace_parse_segment_id(value, &parsed) ||
           lc_pouch_namespace_manifest_list_append(
@@ -491,7 +504,6 @@ static int lc_pouch_namespace_manifest_read(
     } else if (strcmp(line, "obsolete_snapshot") == 0) {
       uint64_t parsed;
       char *timestamp;
-      char *end;
       uint64_t marked_at_unix;
 
       timestamp = strchr(value, '\t');
@@ -500,9 +512,8 @@ static int lc_pouch_namespace_manifest_read(
         break;
       }
       *timestamp++ = '\0';
-      errno = 0;
-      marked_at_unix = strtoull(timestamp, &end, 10);
-      if (errno != 0 || end == timestamp || *end != '\0' ||
+      if (!lc_pouch_namespace_parse_u64(timestamp, strlen(timestamp),
+                                        &marked_at_unix) ||
           marked_at_unix == 0U ||
           !lc_pouch_namespace_parse_snapshot_id(value, &parsed) ||
           lc_pouch_namespace_manifest_list_append(
@@ -579,6 +590,9 @@ static int lc_pouch_namespace_manifest_write(
     const lc_allocator *allocator, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, lc_error *error) {
   char line[512];
+  char max_segment_id[32];
+  char state_max_version[32];
+  char marked_at_unix[32];
   char *text;
   char *manifest_path;
   size_t length;
@@ -597,13 +611,22 @@ static int lc_pouch_namespace_manifest_write(
   text = NULL;
   length = 0U;
   capacity = 0U;
+  if (lc_u64_format_base10((lc_u64)manifest->max_segment_id, max_segment_id,
+                           sizeof(max_segment_id)) < 0 ||
+      lc_u64_format_base10((lc_u64)manifest->state_max_version,
+                           state_max_version, sizeof(state_max_version)) < 0) {
+    lc_free_with_allocator(allocator, manifest_path);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "failed to format pouch namespace manifest", NULL,
+                        NULL, NULL);
+  }
   written = snprintf(line, sizeof(line),
                      "layout=%s\nversion=%lu\nnamespace=%s\n"
-                     "active_segment=%s\nmax_segment_id=%" PRIu64 "\n"
-                     "state_max_version=%" PRIu64 "\n",
+                     "active_segment=%s\nmax_segment_id=%s\n"
+                     "state_max_version=%s\n",
                      LC_POUCH_LAYOUT_NAME, LC_POUCH_LAYOUT_VERSION,
                      namespace_name, manifest->active_segment,
-                     manifest->max_segment_id, manifest->state_max_version);
+                     max_segment_id, state_max_version);
   if (written < 0 || (size_t)written >= sizeof(line)) {
     lc_free_with_allocator(allocator, manifest_path);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -635,10 +658,16 @@ static int lc_pouch_namespace_manifest_write(
     }
   }
   for (i = 0UL; i < manifest->obsolete_segment_count; ++i) {
-    written = snprintf(line, sizeof(line), "obsolete_segment=%s\t%" PRIu64
-                                           "\n",
-                       manifest->obsolete_segments[i],
-                       manifest->obsolete_segment_marked_at[i]);
+    if (lc_u64_format_base10((lc_u64)manifest->obsolete_segment_marked_at[i],
+                             marked_at_unix, sizeof(marked_at_unix)) < 0) {
+      lc_free_with_allocator(allocator, manifest_path);
+      lc_free_with_allocator(allocator, text);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "failed to format pouch namespace manifest", NULL,
+                          NULL, NULL);
+    }
+    written = snprintf(line, sizeof(line), "obsolete_segment=%s\t%s\n",
+                       manifest->obsolete_segments[i], marked_at_unix);
     if (written < 0 || (size_t)written >= sizeof(line)) {
       lc_free_with_allocator(allocator, manifest_path);
       lc_free_with_allocator(allocator, text);
@@ -655,10 +684,16 @@ static int lc_pouch_namespace_manifest_write(
     }
   }
   for (i = 0UL; i < manifest->obsolete_snapshot_count; ++i) {
-    written = snprintf(line, sizeof(line), "obsolete_snapshot=%s\t%" PRIu64
-                                           "\n",
-                       manifest->obsolete_snapshots[i],
-                       manifest->obsolete_snapshot_marked_at[i]);
+    if (lc_u64_format_base10((lc_u64)manifest->obsolete_snapshot_marked_at[i],
+                             marked_at_unix, sizeof(marked_at_unix)) < 0) {
+      lc_free_with_allocator(allocator, manifest_path);
+      lc_free_with_allocator(allocator, text);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "failed to format pouch namespace manifest", NULL,
+                          NULL, NULL);
+    }
+    written = snprintf(line, sizeof(line), "obsolete_snapshot=%s\t%s\n",
+                       manifest->obsolete_snapshots[i], marked_at_unix);
     if (written < 0 || (size_t)written >= sizeof(line)) {
       lc_free_with_allocator(allocator, manifest_path);
       lc_free_with_allocator(allocator, text);
@@ -819,10 +854,18 @@ static int lc_pouch_marker_snapshot_build_fingerprint(
   }
   for (i = 0U; i < count; ++i) {
     char line[512];
+    char size_text[32];
     int written;
 
-    written = snprintf(line, sizeof(line), "%s size=%" PRIu64 " mtime=%ld\n",
-                       entries[i].name, entries[i].size, entries[i].mtime);
+    if (lc_u64_format_base10((lc_u64)entries[i].size, size_text,
+                             sizeof(size_text)) < 0) {
+      lc_free_with_allocator(allocator, fingerprint);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "failed to format pouch marker fingerprint", NULL,
+                          NULL, NULL);
+    }
+    written = snprintf(line, sizeof(line), "%s size=%s mtime=%ld\n",
+                       entries[i].name, size_text, entries[i].mtime);
     if (written < 0 || (size_t)written >= sizeof(line)) {
       lc_free_with_allocator(allocator, fingerprint);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -1277,22 +1320,28 @@ int lc_pouch_namespace_touch_marker(const lc_allocator *allocator,
                                     const char *writer_marker_leaf,
                                     uint64_t sequence, lc_error *error) {
   char text[256];
+  char sequence_text[32];
   char *markers_path;
   char *marker_path;
   FILE *fp;
 
   if (namespace_path == NULL || writer_marker_leaf == NULL ||
-      writer_marker_leaf[0] == '\0' || sequence == UINT64_C(0)) {
+      writer_marker_leaf[0] == '\0' || sequence == (uint64_t)0U) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch marker touch requires namespace path and "
                         "writer marker leaf and non-zero sequence",
                         NULL, NULL, NULL);
   }
+  if (lc_u64_format_base10_padded((lc_u64)sequence, 20U, sequence_text,
+                                  sizeof(sequence_text)) < 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "failed to format pouch marker sequence", NULL, NULL,
+                        NULL);
+  }
   snprintf(text, sizeof(text),
-           "writer_pid=%ld\nwriter_marker=%s\n"
-           "sequence=%020" PRIu64 "\n%s",
-           (long)getpid(), writer_marker_leaf, sequence,
-           (sequence % UINT64_C(2)) == UINT64_C(0) ? "pad=x\n" : "");
+           "writer_pid=%ld\nwriter_marker=%s\nsequence=%s\n%s",
+           (long)getpid(), writer_marker_leaf, sequence_text,
+           (sequence % (uint64_t)2U) == (uint64_t)0U ? "pad=x\n" : "");
   markers_path = lc_pouch_path_join(allocator, namespace_path, "markers");
   marker_path =
       markers_path != NULL

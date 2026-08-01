@@ -54,7 +54,7 @@
 static pthread_mutex_t lc_pouch_queue_message_id_mutex =
     PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t lc_pouch_lease_id_mutex = PTHREAD_MUTEX_INITIALIZER;
-static uint64_t lc_pouch_lease_id_counter = UINT64_C(0);
+static uint64_t lc_pouch_lease_id_counter = 0U;
 
 typedef struct lc_pouch_acquire_for_update_file {
   FILE *fp;
@@ -4851,9 +4851,9 @@ run_index_query:
         }
       } else if (plan.contains) {
         lc_pouch_query_index_key_collect_context collect_context;
-        unsigned long candidate_seq;
-        unsigned long complete_seq;
-        unsigned long exact_seq;
+        lc_pouch_generation candidate_seq;
+        lc_pouch_generation complete_seq;
+        lc_pouch_generation exact_seq;
         size_t needle_len;
         int text_complete_known;
         int text_complete;
@@ -5003,7 +5003,7 @@ static int lc_pouch_generation_to_version(lc_pouch_generation generation,
                         "pouch version conversion requires output storage",
                         NULL, NULL, NULL);
   }
-  if (generation > (uint64_t)INT64_MAX) {
+  if (generation > (uint64_t)LC_I64_MAX) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch generation exceeds lockd version range", NULL,
                         NULL, NULL);
@@ -5073,7 +5073,7 @@ static int lc_pouch_now_unix(lc_pouch_unix_seconds *out, lc_error *error) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to read pouch wall clock", NULL, NULL, NULL);
   }
-  if (now > 0 && (uintmax_t)now > (uintmax_t)INT64_MAX) {
+  if (now > 0 && (uintmax_t)now > (uintmax_t)LC_I64_MAX) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch wall clock exceeds supported timestamp range",
                         NULL, NULL, NULL);
@@ -5097,8 +5097,8 @@ static int lc_pouch_expiration_from_ttl(long ttl_seconds,
   if (rc != LC_OK) {
     return rc;
   }
-  if ((uintmax_t)ttl_seconds > (uintmax_t)INT64_MAX ||
-      now > INT64_MAX - (lc_pouch_unix_seconds)ttl_seconds) {
+  if ((uintmax_t)ttl_seconds > (uintmax_t)LC_I64_MAX ||
+      now > LC_I64_MAX - (lc_pouch_unix_seconds)ttl_seconds) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch ttl_seconds exceeds supported range", NULL, NULL,
                         NULL);
@@ -5123,8 +5123,8 @@ static int lc_pouch_timestamp_add(lc_pouch_unix_seconds base, long delta,
              field != NULL ? field : "duration");
     return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
   }
-  if ((uintmax_t)delta > (uintmax_t)INT64_MAX ||
-      base > INT64_MAX - (lc_pouch_unix_seconds)delta) {
+  if ((uintmax_t)delta > (uintmax_t)LC_I64_MAX ||
+      base > LC_I64_MAX - (lc_pouch_unix_seconds)delta) {
     snprintf(message, sizeof(message),
              "pouch %s exceeds supported timestamp range",
              field != NULL ? field : "duration");
@@ -5956,8 +5956,7 @@ static size_t lc_pouch_counting_source_read(void *context, void *buffer,
   if (nread == 0U) {
     return 0U;
   }
-  if ((uintmax_t)nread > UINT64_MAX ||
-      source->bytes > UINT64_MAX - (uint64_t)nread) {
+  if (source->bytes > LC_U64_MAX - (uint64_t)nread) {
     (void)lc_error_set(error, LC_ERR_INVALID, 0L,
                        "pouch streamed payload is too large", NULL, NULL,
                        NULL);
@@ -6135,6 +6134,7 @@ static int lc_pouch_attachment_visit(const lc_pouch_state_visit_entry *entry,
   int rc;
 
   builder = (lc_pouch_attachment_list_builder *)context;
+  created_at_unix = 0L;
   if (strncmp(entry->key, builder->prefix, builder->prefix_len) != 0) {
     return LC_OK;
   }
@@ -6982,6 +6982,8 @@ static char *lc_pouch_queue_message_id(lc_pouch_unix_seconds *seconds_out,
   static uint64_t counter;
   struct timespec now;
   char text[128];
+  char seconds_text[32];
+  char sequence_text[32];
   uint64_t candidate;
   uint64_t sequence;
 
@@ -6999,15 +7001,15 @@ static char *lc_pouch_queue_message_id(lc_pouch_unix_seconds *seconds_out,
   }
   if (now.tv_sec < 0 ||
       (uintmax_t)now.tv_sec >
-          ((uintmax_t)UINT64_MAX - (uintmax_t)now.tv_nsec) / 1000000000U) {
-    candidate = counter < UINT64_MAX ? counter + 1U : UINT64_MAX;
+          ((uintmax_t)LC_U64_MAX - (uintmax_t)now.tv_nsec) / 1000000000U) {
+    candidate = counter < LC_U64_MAX ? counter + 1U : LC_U64_MAX;
   } else {
     candidate = ((uint64_t)now.tv_sec * 1000000000U) +
                 (uint64_t)now.tv_nsec;
   }
   pthread_mutex_lock(&lc_pouch_queue_message_id_mutex);
   if (candidate <= counter) {
-    if (counter == UINT64_MAX) {
+    if (counter == LC_U64_MAX) {
       pthread_mutex_unlock(&lc_pouch_queue_message_id_mutex);
       (void)lc_error_set(error, LC_ERR_INVALID, 0L,
                          "pouch queue message id sequence overflow", NULL, NULL,
@@ -7019,7 +7021,7 @@ static char *lc_pouch_queue_message_id(lc_pouch_unix_seconds *seconds_out,
   counter = candidate;
   sequence = counter;
   pthread_mutex_unlock(&lc_pouch_queue_message_id_mutex);
-  if (now.tv_sec > 0 && (uintmax_t)now.tv_sec > (uintmax_t)INT64_MAX) {
+  if (now.tv_sec > 0 && (uintmax_t)now.tv_sec > (uintmax_t)LC_I64_MAX) {
     (void)lc_error_set(error, LC_ERR_INVALID, 0L,
                        "pouch queue clock exceeds supported timestamp range",
                        NULL, NULL, NULL);
@@ -7028,8 +7030,18 @@ static char *lc_pouch_queue_message_id(lc_pouch_unix_seconds *seconds_out,
   *seconds_out = (lc_pouch_unix_seconds)now.tv_sec;
   *nanos_out = (long)now.tv_nsec;
   *sequence_out = sequence;
-  snprintf(text, sizeof(text), "pouch-msg-%ld-%020" PRId64 "-%09ld-%020" PRIu64,
-           (long)getpid(), (int64_t)now.tv_sec, (long)now.tv_nsec, sequence);
+  if (lc_i64_format_base10_padded((lc_i64)now.tv_sec, 20U, seconds_text,
+                                  sizeof(seconds_text)) < 0 ||
+      lc_u64_format_base10_padded((lc_u64)sequence, 20U, sequence_text,
+                                  sizeof(sequence_text)) < 0 ||
+      snprintf(text, sizeof(text), "pouch-msg-%ld-%s-%09ld-%s",
+               (long)getpid(), seconds_text, (long)now.tv_nsec,
+               sequence_text) < 0) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "failed to format pouch queue message id", NULL, NULL,
+                       NULL);
+    return NULL;
+  }
   return lc_strdup_local(text);
 }
 
@@ -7198,6 +7210,8 @@ static void lc_pouch_lease_record_cleanup(lc_pouch_lease_record *record) {
 static void lc_pouch_generate_lease_id(char *buffer, size_t buffer_size) {
   uint64_t sequence;
   lc_pouch_unix_seconds now_seconds;
+  char seconds_text[32];
+  char sequence_text[32];
 
   pthread_mutex_lock(&lc_pouch_lease_id_mutex);
   sequence = ++lc_pouch_lease_id_counter;
@@ -7206,8 +7220,16 @@ static void lc_pouch_generate_lease_id(char *buffer, size_t buffer_size) {
   if (lc_pouch_now_unix(&now_seconds, NULL) != LC_OK) {
     now_seconds = 0;
   }
-  snprintf(buffer, buffer_size, "pouch-lease-%" PRId64 "-%" PRIu64,
-           now_seconds, sequence);
+  if (lc_i64_format_base10(now_seconds, seconds_text, sizeof(seconds_text)) <
+          0 ||
+      lc_u64_format_base10((lc_u64)sequence, sequence_text,
+                           sizeof(sequence_text)) < 0 ||
+      snprintf(buffer, buffer_size, "pouch-lease-%s-%s", seconds_text,
+               sequence_text) < 0) {
+    if (buffer != NULL && buffer_size > 0U) {
+      buffer[0] = '\0';
+    }
+  }
 }
 
 static int
@@ -8078,6 +8100,7 @@ static void lc_pouch_queue_touch_notification(lc_client_handle *client,
                                               const char *queue) {
   lc_error ignored;
   char text[256];
+  char sequence_text[32];
   char *namespace_path;
   char *notify_dir;
   char *escaped_queue;
@@ -8124,9 +8147,13 @@ static void lc_pouch_queue_touch_notification(lc_client_handle *client,
     goto cleanup;
   }
   sequence = ++client->pouch->marker_sequence;
-  snprintf(text, sizeof(text), "queue=%s\nsequence=%020" PRIu64 "\n%s",
-           escaped_queue, sequence,
-           (sequence % UINT64_C(2)) == UINT64_C(0) ? "pad=x\n" : "");
+  if (lc_u64_format_base10_padded((lc_u64)sequence, 20U, sequence_text,
+                                  sizeof(sequence_text)) < 0) {
+    goto cleanup;
+  }
+  snprintf(text, sizeof(text), "queue=%s\nsequence=%s\n%s", escaped_queue,
+           sequence_text,
+           (sequence % (uint64_t)2U) == (uint64_t)0U ? "pad=x\n" : "");
   (void)lc_pouch_path_write_text_file(notify_path, text, NULL);
 
 cleanup:
@@ -9201,10 +9228,17 @@ static int lc_pouch_txn_decision_response(lc_txn_decision_res *out,
                                           lc_pouch_generation version,
                                           lc_error *error) {
   char correlation[96];
+  char version_text[32];
 
   memset(out, 0, sizeof(*out));
-  snprintf(correlation, sizeof(correlation), "pouch-txn-%020" PRIu64,
-           version);
+  if (lc_u64_format_base10_padded((lc_u64)version, 20U, version_text,
+                                  sizeof(version_text)) < 0 ||
+      snprintf(correlation, sizeof(correlation), "pouch-txn-%s", version_text) <
+          0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "failed to format pouch transaction correlation", NULL,
+                        NULL, NULL);
+  }
   out->txn_id = lc_strdup_local(txn_id);
   out->state = lc_strdup_local(state);
   out->correlation_id = lc_strdup_local(correlation);
@@ -9223,10 +9257,17 @@ static int lc_pouch_txn_replay_response(lc_txn_replay_res *out,
                                         lc_pouch_generation version,
                                         lc_error *error) {
   char correlation[96];
+  char version_text[32];
 
   memset(out, 0, sizeof(*out));
-  snprintf(correlation, sizeof(correlation), "pouch-txn-%020" PRIu64,
-           version);
+  if (lc_u64_format_base10_padded((lc_u64)version, 20U, version_text,
+                                  sizeof(version_text)) < 0 ||
+      snprintf(correlation, sizeof(correlation), "pouch-txn-%s", version_text) <
+          0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "failed to format pouch transaction correlation", NULL,
+                        NULL, NULL);
+  }
   out->txn_id = lc_strdup_local(txn_id);
   out->state = lc_strdup_local(state);
   out->correlation_id = lc_strdup_local(correlation);
@@ -13618,8 +13659,8 @@ static lc_pouch_unix_seconds lc_pouch_tc_expiration_from_ttl_ms(
   if (ttl_ms % 1000L != 0L) {
     ++ttl_seconds;
   }
-  if (ttl_seconds <= 0L || (uintmax_t)ttl_seconds > (uintmax_t)INT64_MAX ||
-      now > INT64_MAX - (lc_pouch_unix_seconds)ttl_seconds) {
+  if (ttl_seconds <= 0L || (uintmax_t)ttl_seconds > (uintmax_t)LC_I64_MAX ||
+      now > LC_I64_MAX - (lc_pouch_unix_seconds)ttl_seconds) {
     lc_error_set(error, LC_ERR_INVALID, 0L,
                  "pouch TC ttl_ms exceeds supported range", NULL, NULL, NULL);
     return 0L;

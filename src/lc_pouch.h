@@ -2,15 +2,15 @@
 #define LC_POUCH_H
 
 #include "lc/lc.h"
+#include "lc_intcompat.h"
 
 #include <stddef.h>
-#include <stdint.h>
 
 typedef struct lc_pouch lc_pouch;
 
 /* Durable state generations and Unix timestamps have fixed-width storage. */
-typedef uint64_t lc_pouch_generation;
-typedef int64_t lc_pouch_unix_seconds;
+typedef lc_u64 lc_pouch_generation;
+typedef lc_i64 lc_pouch_unix_seconds;
 
 typedef struct lc_pouch_open_options {
   uint64_t segment_target_bytes;

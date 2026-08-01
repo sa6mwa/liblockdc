@@ -1,9 +1,9 @@
 #include "lc_pouch_index.h"
 
 #include "lc_api_internal.h"
+#include "lc_intcompat.h"
 
 #include <errno.h>
-#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -593,6 +593,7 @@ int lc_pouch_index_doc_table_generation_encode(
   size_t length;
   size_t capacity;
   char line[256];
+  char index_seq_text[32];
   size_t index;
   int written;
   int rc;
@@ -624,16 +625,22 @@ int lc_pouch_index_doc_table_generation_encode(
                             NULL, NULL, NULL);
   }
   if (rc == LC_OK) {
-    written = snprintf(line, sizeof(line), "index_seq=%" PRIu64 "\n",
-                       index_seq);
-    rc = written >= 0 && (size_t)written < sizeof(line)
-             ? lc_pouch_index_doc_generation_append(allocator, &bytes, &length,
-                                                    &capacity, line,
-                                                    (size_t)written, error)
-             : lc_error_set(error, LC_ERR_INVALID, 0L,
-                            "pouch doc table generation index exceeds local "
-                            "limit",
-                            NULL, NULL, NULL);
+    if (lc_u64_format_base10((lc_u64)index_seq, index_seq_text,
+                             sizeof(index_seq_text)) < 0) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch doc table generation index exceeds local limit",
+                        NULL, NULL, NULL);
+    } else {
+      written = snprintf(line, sizeof(line), "index_seq=%s\n", index_seq_text);
+      rc = written >= 0 && (size_t)written < sizeof(line)
+               ? lc_pouch_index_doc_generation_append(allocator, &bytes,
+                                                      &length, &capacity, line,
+                                                      (size_t)written, error)
+               : lc_error_set(error, LC_ERR_INVALID, 0L,
+                              "pouch doc table generation index exceeds local "
+                              "limit",
+                              NULL, NULL, NULL);
+    }
   }
   if (rc == LC_OK) {
     written = snprintf(line, sizeof(line), "row_count=%lu\n",
@@ -660,6 +667,8 @@ int lc_pouch_index_doc_table_generation_encode(
   }
   for (index = 0U; rc == LC_OK && index < table->count; ++index) {
     const lc_pouch_index_doc *doc;
+    char version_text[32];
+    char bytes_text[32];
 
     doc = &table->items[index];
     written = snprintf(line, sizeof(line), "doc ");
@@ -676,19 +685,26 @@ int lc_pouch_index_doc_table_generation_encode(
           allocator, &bytes, &length, &capacity, doc->key_hex, error);
     }
     if (rc == LC_OK) {
-      written = snprintf(line, sizeof(line), " %" PRIu64 " %" PRIu64
-                                            " %d %d\n",
-                         doc->version, doc->bytes,
-                         doc->has_query_hidden ? 1 : 0,
-                         doc->query_hidden ? 1 : 0);
-      rc = written >= 0 && (size_t)written < sizeof(line)
-               ? lc_pouch_index_doc_generation_append(allocator, &bytes,
-                                                      &length, &capacity, line,
-                                                      (size_t)written, error)
-               : lc_error_set(error, LC_ERR_INVALID, 0L,
-                              "pouch doc table generation row exceeds local "
-                              "limit",
-                              NULL, NULL, NULL);
+      if (lc_u64_format_base10((lc_u64)doc->version, version_text,
+                               sizeof(version_text)) < 0 ||
+          lc_u64_format_base10((lc_u64)doc->bytes, bytes_text,
+                               sizeof(bytes_text)) < 0) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch doc table generation row exceeds local limit",
+                          NULL, NULL, NULL);
+      } else {
+        written = snprintf(line, sizeof(line), " %s %s %d %d\n", version_text,
+                           bytes_text, doc->has_query_hidden ? 1 : 0,
+                           doc->query_hidden ? 1 : 0);
+        rc = written >= 0 && (size_t)written < sizeof(line)
+                 ? lc_pouch_index_doc_generation_append(
+                       allocator, &bytes, &length, &capacity, line,
+                       (size_t)written, error)
+                 : lc_error_set(error, LC_ERR_INVALID, 0L,
+                                "pouch doc table generation row exceeds local "
+                                "limit",
+                                NULL, NULL, NULL);
+      }
     }
   }
   if (rc == LC_OK) {
@@ -733,7 +749,7 @@ static int lc_pouch_index_doc_generation_header_u64(const char *line,
                                                      const char *prefix,
                                                      uint64_t *out) {
   size_t prefix_len;
-  char *end;
+  lc_u64 value;
 
   if (line == NULL || prefix == NULL || out == NULL) {
     return 0;
@@ -742,9 +758,11 @@ static int lc_pouch_index_doc_generation_header_u64(const char *line,
   if (strncmp(line, prefix, prefix_len) != 0) {
     return 0;
   }
-  errno = 0;
-  *out = strtoull(line + prefix_len, &end, 10);
-  return errno == 0 && end != line + prefix_len && *end == '\0';
+  if (!lc_u64_parse_base10(line + prefix_len, &value)) {
+    return 0;
+  }
+  *out = (uint64_t)value;
+  return 1;
 }
 
 static char *lc_pouch_index_doc_generation_next_line(char **cursor) {
@@ -783,6 +801,24 @@ static int lc_pouch_index_doc_generation_hex_token_valid(const char *token) {
   return index % 2U == 0U;
 }
 
+static char *lc_pouch_index_doc_generation_next_token(char **cursor) {
+  char *token;
+  char *space;
+
+  if (cursor == NULL || *cursor == NULL || **cursor == '\0') {
+    return NULL;
+  }
+  token = *cursor;
+  space = strchr(token, ' ');
+  if (space == NULL) {
+    *cursor = token + strlen(token);
+  } else {
+    *space = '\0';
+    *cursor = space + 1U;
+  }
+  return token;
+}
+
 static int lc_pouch_index_doc_generation_parse_bytes(
     const lc_allocator *allocator, char *bytes,
     uint64_t expected_index_seq, unsigned long expected_row_count,
@@ -795,9 +831,10 @@ static int lc_pouch_index_doc_generation_parse_bytes(
   unsigned long row_hash;
   unsigned long actual_count;
   uint64_t doc_bytes;
+  unsigned long parsed_has_hidden;
+  unsigned long parsed_hidden;
   int has_hidden;
   int hidden;
-  int consumed;
   int rc;
   unsigned long doc_id;
 
@@ -860,14 +897,20 @@ static int lc_pouch_index_doc_generation_parse_bytes(
     if (!lc_pouch_index_doc_generation_hex_token_valid(key)) {
       goto done;
     }
-    consumed = 0;
-    if (sscanf(rest, "%" SCNu64 " %" SCNu64 " %d %d %n", &version,
-               &doc_bytes,
-               &has_hidden, &hidden, &consumed) != 4 ||
-        consumed <= 0 || rest[consumed] != '\0' ||
-        (has_hidden != 0 && has_hidden != 1) || (hidden != 0 && hidden != 1)) {
+    if (!lc_pouch_index_doc_generation_header_u64(
+            lc_pouch_index_doc_generation_next_token(&rest), "", &version) ||
+        !lc_pouch_index_doc_generation_header_u64(
+            lc_pouch_index_doc_generation_next_token(&rest), "", &doc_bytes) ||
+        !lc_pouch_index_doc_generation_parse_ulong(
+            lc_pouch_index_doc_generation_next_token(&rest), &parsed_has_hidden) ||
+        !lc_pouch_index_doc_generation_parse_ulong(
+            lc_pouch_index_doc_generation_next_token(&rest), &parsed_hidden) ||
+        lc_pouch_index_doc_generation_next_token(&rest) != NULL ||
+        parsed_has_hidden > 1UL || parsed_hidden > 1UL) {
       goto done;
     }
+    has_hidden = (int)parsed_has_hidden;
+    hidden = (int)parsed_hidden;
     if (table != NULL) {
       rc = lc_pouch_index_doc_table_append_unique_impl(
           table, key, version, doc_bytes, has_hidden, hidden, 0, 1, &doc_id,

@@ -1,5 +1,6 @@
 #include "lc/lc.h"
 #include "lc_engine_api.h"
+#include "lc_intcompat.h"
 #include "lc_log.h"
 
 #include <errno.h>
@@ -1142,8 +1143,7 @@ static int lc_pouch_endpoint_parse_u64(const lc_allocator *allocator,
                                        const char *option, uint64_t *out,
                                        lc_error *error) {
   char *copy;
-  char *end;
-  uintmax_t parsed;
+  lc_u64 parsed;
 
   if (out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -1155,10 +1155,7 @@ static int lc_pouch_endpoint_parse_u64(const lc_allocator *allocator,
   if (copy == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  errno = 0;
-  parsed = strtoumax(copy, &end, 10);
-  if (errno == ERANGE || end == copy || *end != '\0' ||
-      parsed > (uintmax_t)UINT64_MAX) {
+  if (!lc_u64_parse_base10(copy, &parsed)) {
     lc_free_with_allocator(allocator, copy);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch endpoint option must be a u64", option, NULL,
@@ -1238,8 +1235,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
                           "fsync_batch_max_ops") ||
       lc_query_part_equal(decoded_key, strlen(decoded_key),
                           "pouch_fsync_batch_max_ops")) {
-    uintmax_t parsed;
-    char *end;
+    lc_u64 parsed;
 
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
                                               "fsync_batch_max_ops", error);
@@ -1247,10 +1243,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
       lc_free_with_allocator(allocator, decoded_key);
       return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     }
-    errno = 0;
-    parsed = strtoumax(copy, &end, 10);
-    if (errno == ERANGE || end == copy || *end != '\0' ||
-        parsed > (uintmax_t)UINT64_MAX) {
+    if (!lc_u64_parse_base10(copy, &parsed)) {
       lc_free_with_allocator(allocator, copy);
       lc_free_with_allocator(allocator, decoded_key);
       return lc_error_set(error, LC_ERR_INVALID, 0L,

@@ -1001,6 +1001,26 @@ static void test_intcompat_roundtrips_large_decimal_literal(void **state) {
   assert_string_equal(text, "-9223372036854775808");
 }
 
+static void test_intcompat_formats_fixed_width_values(void **state) {
+  lc_i64 signed_value;
+  lc_u64 unsigned_value;
+  char text[64];
+  int rc;
+
+  (void)state;
+  assert_true(lc_u64_parse_base10("18446744073709551615", &unsigned_value));
+  rc = lc_u64_format_base10(unsigned_value, text, sizeof(text));
+  assert_int_equal(rc, 20);
+  assert_string_equal(text, "18446744073709551615");
+  rc = lc_u64_format_base16_padded(unsigned_value, 16U, text, sizeof(text));
+  assert_int_equal(rc, 16);
+  assert_string_equal(text, "ffffffffffffffff");
+  assert_true(lc_i64_parse_base10("-1", &signed_value));
+  rc = lc_i64_format_base10_padded(signed_value, 20U, text, sizeof(text));
+  assert_int_equal(rc, 20);
+  assert_string_equal(text, "-0000000000000000001");
+}
+
 static void test_intcompat_rejects_out_of_range_narrowing(void **state) {
   int ivalue;
   long lvalue;
@@ -1040,6 +1060,7 @@ int main(void) {
       cmocka_unit_test(test_mutation_plan_rejects_invalid_utf8_textfile),
       cmocka_unit_test(test_mutation_plan_expands_home_prefix),
       cmocka_unit_test(test_intcompat_roundtrips_large_decimal_literal),
+      cmocka_unit_test(test_intcompat_formats_fixed_width_values),
       cmocka_unit_test(test_intcompat_rejects_out_of_range_narrowing),
   };
 
