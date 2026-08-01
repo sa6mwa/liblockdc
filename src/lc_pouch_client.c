@@ -42,12 +42,14 @@
 #define LC_POUCH_QUEUE_RECORD_MAGIC "LPQ1"
 #define LC_POUCH_LEASE_RECORD_MAGIC "LPL1"
 #define LC_POUCH_TXN_RECORD_MAGIC "LPT1"
+#define LC_POUCH_ATTACHMENT_METADATA_MAGIC "LPA1"
 #define LC_POUCH_TC_RECORD_MAGIC "LPC1"
 #define LC_POUCH_TC_CLUSTER_RECORD_MAGIC "LCC1"
 #define LC_POUCH_TC_RM_RECORD_MAGIC "LCR1"
 #define LC_POUCH_NAMESPACE_CONFIG_MAGIC "LPN1"
 #define LC_POUCH_CONTROL_STRING_MAX 65535U
 #define LC_POUCH_CONTROL_HEADER_MAX (64U * 1024U)
+#define LC_POUCH_ATTACHMENT_METADATA_BYTES 12U
 
 static pthread_mutex_t lc_pouch_queue_message_id_mutex =
     PTHREAD_MUTEX_INITIALIZER;
@@ -276,6 +278,7 @@ typedef struct lc_pouch_attach_write_context {
   lc_source *source;
   lc_pouch_state_write_options *options;
   lc_pouch_state_write_result *result;
+  lc_pouch_unix_seconds attachment_created_at_unix;
 } lc_pouch_attach_write_context;
 
 typedef struct lc_pouch_query_match_state {
@@ -5847,11 +5850,54 @@ static int lc_pouch_size_to_public_long(uint64_t size, long *out,
   return LC_OK;
 }
 
-static int lc_pouch_attachment_info_fill(lc_attachment_info *info,
-                                         const char *name, uint64_t size,
-                                         const char *content_type,
-                                         lc_pouch_generation version,
-                                         lc_error *error) {
+static void lc_pouch_attachment_metadata_encode(
+    unsigned char metadata[LC_POUCH_ATTACHMENT_METADATA_BYTES],
+    lc_pouch_unix_seconds created_at_unix) {
+  uint64_t value;
+  size_t i;
+
+  memcpy(metadata, LC_POUCH_ATTACHMENT_METADATA_MAGIC, 4U);
+  value = (uint64_t)created_at_unix;
+  for (i = 0U; i < sizeof(value); ++i) {
+    metadata[4U + i] = (unsigned char)((value >> (i * 8U)) & 0xFFU);
+  }
+}
+
+static int lc_pouch_attachment_created_at_decode(
+    const unsigned char *metadata, size_t metadata_length,
+    lc_pouch_unix_seconds legacy_updated_at_unix,
+    lc_pouch_unix_seconds *created_at_unix, lc_error *error) {
+  uint64_t value;
+  size_t i;
+
+  if (created_at_unix == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch attachment timestamp requires output", NULL,
+                        NULL, NULL);
+  }
+  if (metadata_length == 0U) {
+    /* Pre-timestamp attachment records have only their persisted update time. */
+    *created_at_unix = legacy_updated_at_unix;
+    return LC_OK;
+  }
+  if (metadata == NULL || metadata_length != LC_POUCH_ATTACHMENT_METADATA_BYTES ||
+      memcmp(metadata, LC_POUCH_ATTACHMENT_METADATA_MAGIC, 4U) != 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch attachment metadata is invalid", NULL, NULL,
+                        NULL);
+  }
+  value = 0U;
+  for (i = 0U; i < sizeof(value); ++i) {
+    value |= ((uint64_t)metadata[4U + i]) << (i * 8U);
+  }
+  *created_at_unix = (lc_pouch_unix_seconds)(int64_t)value;
+  return LC_OK;
+}
+
+static int lc_pouch_attachment_info_fill(
+    lc_attachment_info *info, const char *name, uint64_t size,
+    const char *content_type, lc_pouch_unix_seconds created_at_unix,
+    lc_pouch_unix_seconds updated_at_unix, lc_error *error) {
   long public_size = 0L;
   int rc;
 
@@ -5874,12 +5920,8 @@ static int lc_pouch_attachment_info_fill(lc_attachment_info *info,
                         NULL, NULL);
   }
   info->size = public_size;
-  rc = lc_pouch_generation_to_version(version, &info->created_at_unix, error);
-  if (rc != LC_OK) {
-    lc_attachment_info_cleanup(info);
-    return rc;
-  }
-  info->updated_at_unix = info->created_at_unix;
+  info->created_at_unix = created_at_unix;
+  info->updated_at_unix = updated_at_unix;
   return LC_OK;
 }
 
@@ -5932,16 +5974,60 @@ static int lc_pouch_counting_source_reset(void *context, lc_error *error) {
 
 static int lc_pouch_attach_write_locked(void *context, lc_error *error) {
   lc_pouch_attach_write_context *ctx;
+  lc_pouch_state_read_result current;
+  lc_pouch_state_write_options options;
+  lc_pouch_unix_seconds created_at_unix;
+  const char *write_key;
+  unsigned char metadata[LC_POUCH_ATTACHMENT_METADATA_BYTES];
+  int current_is_attachment;
+  int rc;
 
   ctx = (lc_pouch_attach_write_context *)context;
-  if (lc_pouch_txn_id_present(ctx->req->lease.txn_id)) {
-    return lc_pouch_state_write(ctx->client->pouch, ctx->namespace_name,
-                                ctx->staged_attachment_key, ctx->source,
-                                ctx->options, ctx->result, error);
+  memset(&current, 0, sizeof(current));
+  created_at_unix = 0L;
+  write_key = lc_pouch_txn_id_present(ctx->req->lease.txn_id)
+                  ? ctx->staged_attachment_key
+                  : ctx->attachment_key;
+  rc = lc_pouch_state_read(ctx->client->pouch, ctx->namespace_name, write_key,
+                           &current, error);
+  current_is_attachment = current.found &&
+                          !lc_pouch_attachment_is_delete_marker(
+                              current.content_type);
+  if (rc == LC_OK && current_is_attachment) {
+    rc = lc_pouch_attachment_created_at_decode(
+        current.metadata, current.metadata_length, current.updated_at_unix,
+        &created_at_unix, error);
   }
-  return lc_pouch_state_write(ctx->client->pouch, ctx->namespace_name,
-                              ctx->attachment_key, ctx->source, ctx->options,
-                              ctx->result, error);
+  lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &current);
+  memset(&current, 0, sizeof(current));
+  if (rc == LC_OK && created_at_unix == 0L &&
+      lc_pouch_txn_id_present(ctx->req->lease.txn_id)) {
+    rc = lc_pouch_state_read(ctx->client->pouch, ctx->namespace_name,
+                             ctx->attachment_key, &current, error);
+    if (rc == LC_OK && current.found) {
+      rc = lc_pouch_attachment_created_at_decode(
+          current.metadata, current.metadata_length, current.updated_at_unix,
+          &created_at_unix, error);
+    }
+    lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &current);
+  }
+  if (rc == LC_OK && created_at_unix == 0L) {
+    rc = lc_pouch_now_unix(&created_at_unix, error);
+  }
+  if (rc == LC_OK) {
+    lc_pouch_attachment_metadata_encode(metadata, created_at_unix);
+    options = *ctx->options;
+    options.metadata = metadata;
+    options.metadata_length = sizeof(metadata);
+    options.has_metadata = 1;
+    rc = lc_pouch_state_write(ctx->client->pouch, ctx->namespace_name,
+                              write_key, ctx->source, &options, ctx->result,
+                              error);
+  }
+  if (rc == LC_OK) {
+    ctx->attachment_created_at_unix = created_at_unix;
+  }
+  return rc;
 }
 
 static void lc_pouch_attachment_list_builder_cleanup(
@@ -5997,7 +6083,8 @@ lc_pouch_attachment_append_key(lc_pouch_attachment_list_builder *builder,
 
 static int lc_pouch_attachment_append_info(
     lc_pouch_attachment_list_builder *builder, const char *name, uint64_t size,
-    const char *content_type, lc_pouch_generation version, lc_error *error) {
+    const char *content_type, lc_pouch_unix_seconds created_at_unix,
+    lc_pouch_unix_seconds updated_at_unix, lc_error *error) {
   lc_attachment_info *next;
   size_t capacity;
   int rc;
@@ -6017,7 +6104,8 @@ static int lc_pouch_attachment_append_info(
     builder->capacity = capacity;
   }
   rc = lc_pouch_attachment_info_fill(&builder->items[builder->count], name,
-                                     size, content_type, version, error);
+                                     size, content_type, created_at_unix,
+                                     updated_at_unix, error);
   if (rc == LC_OK) {
     ++builder->count;
   }
@@ -6027,6 +6115,7 @@ static int lc_pouch_attachment_append_info(
 static int lc_pouch_attachment_visit(const lc_pouch_state_visit_entry *entry,
                                      void *context, lc_error *error) {
   lc_pouch_attachment_list_builder *builder;
+  lc_pouch_unix_seconds created_at_unix;
   char *name;
   int rc;
 
@@ -6043,9 +6132,14 @@ static int lc_pouch_attachment_visit(const lc_pouch_state_visit_entry *entry,
                         "pouch attachment key is corrupt", entry->key, NULL,
                         NULL);
   }
-  rc = lc_pouch_attachment_append_info(builder, name, entry->bytes,
-                                       entry->content_type, entry->version,
-                                       error);
+  rc = lc_pouch_attachment_created_at_decode(
+      entry->metadata, entry->metadata_length, entry->updated_at_unix,
+      &created_at_unix, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_attachment_append_info(
+        builder, name, entry->bytes, entry->content_type, created_at_unix,
+        entry->updated_at_unix, error);
+  }
   if (rc == LC_OK) {
     rc = lc_pouch_attachment_append_key(builder, entry->key, entry->version,
                                         error);
@@ -9251,6 +9345,9 @@ static int lc_pouch_txn_commit_attachment_stage(lc_client_handle *client,
     }
   } else if (rc == LC_OK) {
     options.content_type = staged.content_type;
+    options.metadata = staged.metadata;
+    options.metadata_length = staged.metadata_length;
+    options.has_metadata = staged.metadata_length > 0U;
     options.has_query_hidden = 1;
     options.query_hidden = 1;
     options.object_record = 1;
@@ -10952,7 +11049,9 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   if (rc == LC_OK) {
     rc = lc_pouch_attachment_info_fill(&out->attachment, req->name,
                                        counting_source.bytes,
-                                       content_type, result.version, error);
+                                       content_type,
+                                       attach_context.attachment_created_at_unix,
+                                       result.updated_at_unix, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_generation_to_version(result.version, &out->version, error);
@@ -11037,6 +11136,7 @@ int lc_pouch_client_get_attachment_method(lc_client *self,
   const char *namespace_name = NULL;
   char *name;
   char *attachment_key;
+  lc_pouch_unix_seconds created_at_unix;
   int rc;
 
   if (self == NULL || req == NULL || dst == NULL || out == NULL) {
@@ -11052,6 +11152,7 @@ int lc_pouch_client_get_attachment_method(lc_client *self,
   }
   memset(out, 0, sizeof(*out));
   memset(&read_result, 0, sizeof(read_result));
+  created_at_unix = 0L;
   name = NULL;
   attachment_key = NULL;
   rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
@@ -11080,9 +11181,15 @@ int lc_pouch_client_get_attachment_method(lc_client *self,
     rc = lc_copy(read_result.body, dst, NULL, error);
   }
   if (rc == LC_OK) {
+    rc = lc_pouch_attachment_created_at_decode(
+        read_result.metadata, read_result.metadata_length,
+        read_result.updated_at_unix, &created_at_unix, error);
+  }
+  if (rc == LC_OK) {
     rc = lc_pouch_attachment_info_fill(
         &out->attachment, name, read_result.bytes,
-        read_result.content_type, read_result.version, error);
+        read_result.content_type, created_at_unix, read_result.updated_at_unix,
+        error);
   }
   if (rc == LC_OK) {
     out->correlation_id = lc_strdup_local("pouch-attachment-get");

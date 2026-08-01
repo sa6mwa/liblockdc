@@ -307,6 +307,10 @@ Implementation obligations:
 - committed attachment metadata is stored in the target key metadata;
 - staged attachment metadata is stored in the target key staged metadata;
 - staged attachment promotion/discard follows release/transaction outcome;
+- attachment creation time is preserved in compact attachment-owned metadata,
+  while the object record's persisted update timestamp is the authority for
+  `updated_at_unix`; pre-metadata attachment records report their persisted
+  update time as their creation time because no earlier value exists;
 - attachment bytes are exact on readback;
 - attachment rows are hidden from public state scans/query/index/get-public.
 

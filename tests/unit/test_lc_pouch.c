@@ -8551,6 +8551,8 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   size_t length;
   int deleted;
   int deleted_count;
+  lc_unix_seconds alpha_created_at_unix;
+  lc_unix_seconds alpha_updated_at_unix;
   char root[512];
   char key[96];
   char beta_id[256];
@@ -8564,6 +8566,8 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   length = 0U;
   deleted = 0;
   deleted_count = 0;
+  alpha_created_at_unix = 0L;
+  alpha_updated_at_unix = 0L;
   memset(&attach_res, 0, sizeof(attach_res));
   memset(&list, 0, sizeof(list));
   memset(&get_res, 0, sizeof(get_res));
@@ -8592,6 +8596,11 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   assert_string_equal(attach_res.attachment.content_type, "text/plain");
   assert_int_equal(attach_res.attachment.size, 5L);
   assert_non_null(attach_res.attachment.id);
+  assert_true(attach_res.attachment.created_at_unix > 1000000000L);
+  assert_true(attach_res.attachment.updated_at_unix >=
+              attach_res.attachment.created_at_unix);
+  alpha_created_at_unix = attach_res.attachment.created_at_unix;
+  alpha_updated_at_unix = attach_res.attachment.updated_at_unix;
   lc_attach_res_cleanup(&attach_res);
 
   rc = lc_source_from_memory("again", strlen("again"), &source, &error);
@@ -8603,6 +8612,20 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   assert_non_null(strstr(error.message, "already exists"));
   lc_error_cleanup(&error);
   lc_error_init(&error);
+  lc_attach_res_cleanup(&attach_res);
+
+  attach_op.prevent_overwrite = 0;
+  rc = lc_source_from_memory("alpha replacement", strlen("alpha replacement"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->attach(client, &attach_op, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(attach_res.attachment.created_at_unix,
+                   alpha_created_at_unix);
+  assert_true(attach_res.attachment.updated_at_unix >= alpha_updated_at_unix);
+  alpha_updated_at_unix = attach_res.attachment.updated_at_unix;
   lc_attach_res_cleanup(&attach_res);
 
   attach_op.name = "beta.bin";
@@ -8622,6 +8645,8 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(list.count, 2U);
   assert_string_equal(list.items[0].name, "alpha.txt");
+  assert_int_equal(list.items[0].created_at_unix, alpha_created_at_unix);
+  assert_int_equal(list.items[0].updated_at_unix, alpha_updated_at_unix);
   assert_string_equal(list.items[1].name, "beta.bin");
   assert_string_equal(list.items[1].id, beta_id);
   lc_attachment_list_cleanup(&list);
@@ -8631,6 +8656,8 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(list.count, 2U);
   assert_string_equal(list.items[0].name, "alpha.txt");
+  assert_int_equal(list.items[0].created_at_unix, alpha_created_at_unix);
+  assert_int_equal(list.items[0].updated_at_unix, alpha_updated_at_unix);
   assert_string_equal(list.items[1].name, "beta.bin");
   lc_attachment_list_cleanup(&list);
 
@@ -8641,10 +8668,12 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(get_res.attachment.name, "alpha.txt");
+  assert_int_equal(get_res.attachment.created_at_unix, alpha_created_at_unix);
+  assert_int_equal(get_res.attachment.updated_at_unix, alpha_updated_at_unix);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(length, strlen("alpha"));
-  assert_memory_equal(bytes, "alpha", strlen("alpha"));
+  assert_int_equal(length, strlen("alpha replacement"));
+  assert_memory_equal(bytes, "alpha replacement", strlen("alpha replacement"));
   sink->close(sink);
   sink = NULL;
   lc_attachment_get_res_cleanup(&get_res);
@@ -8657,10 +8686,12 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(get_res.attachment.name, "alpha.txt");
+  assert_int_equal(get_res.attachment.created_at_unix, alpha_created_at_unix);
+  assert_int_equal(get_res.attachment.updated_at_unix, alpha_updated_at_unix);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(length, strlen("alpha"));
-  assert_memory_equal(bytes, "alpha", strlen("alpha"));
+  assert_int_equal(length, strlen("alpha replacement"));
+  assert_memory_equal(bytes, "alpha replacement", strlen("alpha replacement"));
   sink->close(sink);
   sink = NULL;
   lc_attachment_get_res_cleanup(&get_res);
@@ -17483,6 +17514,8 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   lc_error error;
   const void *bytes;
   size_t length;
+  lc_unix_seconds created_at_unix;
+  lc_unix_seconds updated_at_unix;
   char root[512];
   int rc;
 
@@ -17502,6 +17535,8 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   lc_error_init(&error);
   bytes = NULL;
   length = 0U;
+  created_at_unix = 0L;
+  updated_at_unix = 0L;
   make_root("txn-attachments", root, sizeof(root));
   cleanup_root(root);
 
@@ -17519,6 +17554,11 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   source->close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
+  assert_true(attach_res.attachment.created_at_unix > 1000000000L);
+  assert_true(attach_res.attachment.updated_at_unix >=
+              attach_res.attachment.created_at_unix);
+  created_at_unix = attach_res.attachment.created_at_unix;
+  updated_at_unix = attach_res.attachment.updated_at_unix;
   lc_attach_res_cleanup(&attach_res);
 
   list_req.lease.namespace_name = "objects/txn";
@@ -17543,6 +17583,8 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(list.count, 1U);
   assert_string_equal(list.items[0].name, "report.txt");
+  assert_int_equal(list.items[0].created_at_unix, created_at_unix);
+  assert_true(list.items[0].updated_at_unix >= updated_at_unix);
   lc_attachment_list_cleanup(&list);
 
   get_op.lease.namespace_name = "objects/txn";
@@ -17552,6 +17594,8 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
   assert_int_equal(rc, LC_OK);
+  assert_int_equal(get_res.attachment.created_at_unix, created_at_unix);
+  assert_true(get_res.attachment.updated_at_unix >= updated_at_unix);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(length, strlen("committed-object"));

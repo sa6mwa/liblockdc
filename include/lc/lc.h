@@ -1141,7 +1141,9 @@ typedef struct lc_attachment_info {
   long size;
   char *plaintext_sha256;
   char *content_type;
+  /** Unix timestamp when this attachment was first created. */
   lc_unix_seconds created_at_unix;
+  /** Unix timestamp of the attachment revision returned by this operation. */
   lc_unix_seconds updated_at_unix;
 } lc_attachment_info;
 
