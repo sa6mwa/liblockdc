@@ -378,6 +378,13 @@ static void pouch_fail_allocator_init(lc_allocator *allocator,
   allocator->context = state;
 }
 
+static void pouch_fail_next_allocation_after_acquire_claim(void *context) {
+  pouch_fail_allocator_state *state;
+
+  state = (pouch_fail_allocator_state *)context;
+  state->fail_at = state->calls + 1U;
+}
+
 static void test_index_docid_set_keeps_sorted_unique_docids(void **state) {
   lc_allocator allocator;
   lc_pouch_index_docid_set set;
@@ -13066,63 +13073,55 @@ static void test_acquire_allocation_failure_rolls_back_claim(void **state) {
   char endpoint[540];
   char root[512];
   char key[96];
-  size_t fail_at;
-  int saw_post_claim_failure;
   int rc;
 
   (void)state;
-  saw_post_claim_failure = 0;
-  for (fail_at = 1U; fail_at < 2000U && !saw_post_claim_failure; ++fail_at) {
-    memset(&alloc_state, 0, sizeof(alloc_state));
-    alloc_state.fail_at = fail_at;
-    pouch_fail_allocator_init(&allocator, &alloc_state);
-    lc_error_init(&error);
-    lc_acquire_req_init(&acquire_req);
-    lc_release_req_init(&release_req);
-    make_root("lease-alloc-rollback", root, sizeof(root));
-    cleanup_root(root);
-    make_endpoint(root, endpoint, sizeof(endpoint));
-    snprintf(key, sizeof(key), "state/lease-alloc-rollback/%lu",
-             (unsigned long)fail_at);
-    endpoints[0] = endpoint;
-    lc_client_config_init(&config);
-    config.endpoints = endpoints;
-    config.endpoint_count = 1U;
-    config.allocator = allocator;
-    client = NULL;
-    lease = NULL;
-    rc = lc_client_open(&config, &client, &error);
-    if (rc == LC_OK) {
-      acquire_req.key = key;
-      acquire_req.owner = "alloc-fail-owner";
-      acquire_req.ttl_seconds = 30L;
-      rc = client->acquire(client, &acquire_req, &lease, &error);
-      if (rc == LC_ERR_NOMEM) {
-        lc_error_cleanup(&error);
-        lc_error_init(&error);
-        alloc_state.fail_at = 0U;
-        rc = client->acquire(client, &acquire_req, &lease, &error);
-        assert_int_equal(rc, LC_OK);
-        assert_non_null(lease);
-        if (lease->fencing_token > 1L) {
-          saw_post_claim_failure = 1;
-        }
-        rc = lease->release(lease, &release_req, &error);
-        assert_int_equal(rc, LC_OK);
-        lease = NULL;
-      } else if (rc == LC_OK) {
-        alloc_state.fail_at = 0U;
-        rc = lease->release(lease, &release_req, &error);
-        assert_int_equal(rc, LC_OK);
-        lease = NULL;
-      }
-      lc_client_close(client);
-      client = NULL;
-    }
-    cleanup_root(root);
-    lc_error_cleanup(&error);
-  }
-  assert_true(saw_post_claim_failure);
+  memset(&alloc_state, 0, sizeof(alloc_state));
+  pouch_fail_allocator_init(&allocator, &alloc_state);
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  make_root("lease-alloc-rollback", root, sizeof(root));
+  cleanup_root(root);
+  make_endpoint(root, endpoint, sizeof(endpoint));
+  snprintf(key, sizeof(key), "state/lease-alloc-rollback/%ld", (long)getpid());
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.allocator = allocator;
+  client = NULL;
+  lease = NULL;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  acquire_req.key = key;
+  acquire_req.owner = "alloc-fail-owner";
+  acquire_req.ttl_seconds = 30L;
+  lc_pouch_test_after_acquire_claim_context = &alloc_state;
+  lc_pouch_test_after_acquire_claim_hook =
+      pouch_fail_next_allocation_after_acquire_claim;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  lc_pouch_test_after_acquire_claim_hook = NULL;
+  lc_pouch_test_after_acquire_claim_context = NULL;
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_null(lease);
+  assert_true(alloc_state.fail_at != 0U);
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  alloc_state.fail_at = 0U;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  assert_int_equal(lease->fencing_token, 2L);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
 }
 
 static void test_acquire_honors_block_seconds(void **state) {

@@ -155,6 +155,10 @@ struct lc_pouch {
 typedef int (*lc_pouch_test_hook)(void *context, lc_error *error);
 extern lc_pouch_test_hook lc_pouch_test_after_snapshot_write_hook;
 extern void *lc_pouch_test_after_snapshot_write_context;
+typedef void (*lc_pouch_test_after_acquire_claim_hook_fn)(void *context);
+extern lc_pouch_test_after_acquire_claim_hook_fn
+    lc_pouch_test_after_acquire_claim_hook;
+extern void *lc_pouch_test_after_acquire_claim_context;
 #endif
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);

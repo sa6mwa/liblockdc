@@ -56,6 +56,12 @@ static pthread_mutex_t lc_pouch_queue_message_id_mutex =
 static pthread_mutex_t lc_pouch_lease_id_mutex = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t lc_pouch_lease_id_counter = 0U;
 
+#ifdef LOCKDC_TEST_BUILD
+lc_pouch_test_after_acquire_claim_hook_fn
+    lc_pouch_test_after_acquire_claim_hook = NULL;
+void *lc_pouch_test_after_acquire_claim_context = NULL;
+#endif
+
 typedef struct lc_pouch_acquire_for_update_file {
   FILE *fp;
 } lc_pouch_acquire_for_update_file;
@@ -10143,6 +10149,12 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
     lc_pouch_acquire_context_cleanup(&acquire_context);
     return rc;
   }
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_pouch_test_after_acquire_claim_hook != NULL) {
+    lc_pouch_test_after_acquire_claim_hook(
+        lc_pouch_test_after_acquire_claim_context);
+  }
+#endif
   lease = lc_lease_new(
       client, namespace_name, req->key, req->owner, acquire_context.lease_id,
       req->txn_id, acquire_context.fencing_token, acquired_version,
