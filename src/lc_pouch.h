@@ -16,6 +16,7 @@ typedef struct lc_pouch_open_options {
   uint64_t segment_target_bytes;
   unsigned long compaction_min_segment_count;
   uint64_t compaction_min_reclaimable_bytes;
+  /** Delay after the latest mutation and interval between idle compaction sweeps. */
   uint64_t compaction_interval_seconds;
   uint64_t compaction_delete_grace_seconds;
   uint64_t compaction_max_io_bytes_per_sec;

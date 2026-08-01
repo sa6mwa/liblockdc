@@ -6119,6 +6119,7 @@ static void test_pouch_crypto_compression_leases_skip_zlib(void **state) {
   lc_lease *lease;
   lc_pouch_state_read_result read_result;
   lc_acquire_req acquire_req;
+  lc_release_req release_req;
   lc_error error;
   char *crypto_key;
   char root[512];
@@ -6130,6 +6131,7 @@ static void test_pouch_crypto_compression_leases_skip_zlib(void **state) {
   crypto_key = NULL;
   memset(&read_result, 0, sizeof(read_result));
   lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
   lc_error_init(&error);
   make_root("crypto-compression-lease-uncompressed", root, sizeof(root));
   cleanup_root(root);
@@ -6158,7 +6160,9 @@ static void test_pouch_crypto_compression_leases_skip_zlib(void **state) {
   assert_true(read_result.has_query_hidden);
   assert_true(read_result.query_hidden);
 
-  lease->close(lease);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_client_close(client);
   lc_pouch_crypto_key_string_free(crypto_key);

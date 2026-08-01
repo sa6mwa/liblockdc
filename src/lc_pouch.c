@@ -702,7 +702,6 @@ static void *lc_pouch_compaction_worker(void *arg) {
   lc_pouch *pouch;
 
   pouch = (lc_pouch *)arg;
-  lc_pouch_compaction_run_pass(pouch);
   pthread_mutex_lock(&pouch->compaction_mutex);
   while (!pouch->compaction_stop) {
     struct timespec deadline;
@@ -710,12 +709,17 @@ static void *lc_pouch_compaction_worker(void *arg) {
 
     lc_pouch_compaction_deadline(pouch, &deadline);
     wait_rc = 0;
-    while (!pouch->compaction_stop && wait_rc != ETIMEDOUT) {
+    while (!pouch->compaction_stop && !pouch->compaction_pending &&
+           wait_rc != ETIMEDOUT) {
       wait_rc = pthread_cond_timedwait(&pouch->compaction_cond,
                                        &pouch->compaction_mutex, &deadline);
     }
     if (pouch->compaction_stop) {
       break;
+    }
+    if (pouch->compaction_pending) {
+      pouch->compaction_pending = 0;
+      continue;
     }
     pthread_mutex_unlock(&pouch->compaction_mutex);
     lc_pouch_compaction_run_pass(pouch);
@@ -794,6 +798,18 @@ static void lc_pouch_compaction_worker_close(lc_pouch *pouch) {
   pouch->compaction_namespaces = NULL;
   pouch->compaction_namespace_count = 0U;
   pouch->compaction_namespace_capacity = 0U;
+}
+
+void lc_pouch_compaction_note_mutation(lc_pouch *pouch) {
+  if (pouch == NULL || !pouch->background_compaction_enabled ||
+      pouch->compaction_interval_seconds == 0U || pouch->aborted ||
+      !pouch->compaction_thread_started) {
+    return;
+  }
+  pthread_mutex_lock(&pouch->compaction_mutex);
+  pouch->compaction_pending = 1;
+  pthread_cond_signal(&pouch->compaction_cond);
+  pthread_mutex_unlock(&pouch->compaction_mutex);
 }
 
 static void lc_pouch_janitor_run_pass(lc_pouch *pouch) {
@@ -937,7 +953,11 @@ static void lc_pouch_janitor_worker_close(lc_pouch *pouch) {
 }
 
 void lc_pouch_janitor_note_mutation(lc_pouch *pouch) {
-  if (pouch == NULL || pouch->retention_seconds == 0U || pouch->aborted ||
+  if (pouch == NULL) {
+    return;
+  }
+  lc_pouch_compaction_note_mutation(pouch);
+  if (pouch->retention_seconds == 0U || pouch->aborted ||
       !pouch->janitor_mutex_initialized) {
     return;
   }
