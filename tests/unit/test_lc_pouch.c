@@ -6771,6 +6771,78 @@ static void test_state_idle_compaction_installs_snapshot(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_state_idle_compaction_waits_for_first_mutation(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char snapshot_path[1024];
+  struct timespec delay;
+  int attempts;
+  int written;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  namespace_path = NULL;
+  lc_error_init(&error);
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  make_root("state-compact-unarmed", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1UL;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 0;
+  open_options.compaction_min_segment_count = 1UL;
+  open_options.compaction_min_reclaimable_bytes = 1UL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/a", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  body = NULL;
+  rc = lc_pouch_state_delete(pouch, "team/alpha", "state/a", NULL,
+                             &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_options.background_compaction_enabled = 1;
+  open_options.compaction_interval_seconds = 1UL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
+  assert_non_null(namespace_path);
+  written = snprintf(snapshot_path, sizeof(snapshot_path), "%s/snapshots/%s",
+                     namespace_path, "snapshot-00000000000000000003.log");
+  assert_true(written > 0 && (size_t)written < sizeof(snapshot_path));
+
+  delay.tv_sec = 0;
+  delay.tv_nsec = 100L * 1000L * 1000L;
+  for (attempts = 0; attempts < 15; ++attempts) {
+    assert_false(path_is_file(snapshot_path));
+    assert_int_equal(nanosleep(&delay, NULL), 0);
+  }
+  assert_false(path_is_file(snapshot_path));
+
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_state_replay_ignores_stale_generation(void **state) {
   lc_pouch *pouch;
   lc_source *body;
@@ -18504,6 +18576,7 @@ int main(void) {
       cmocka_unit_test(test_state_write_enforces_create_if_absent),
       cmocka_unit_test(test_state_writes_roll_active_segments),
       cmocka_unit_test(test_state_idle_compaction_installs_snapshot),
+      cmocka_unit_test(test_state_idle_compaction_waits_for_first_mutation),
       cmocka_unit_test(test_state_replay_ignores_stale_generation),
       cmocka_unit_test(test_pouch_root_path_aliases_share_store_identity),
       cmocka_unit_test(test_maintenance_reports_disabled_without_force),

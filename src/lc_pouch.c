@@ -700,13 +700,27 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
 
 static void *lc_pouch_compaction_worker(void *arg) {
   lc_pouch *pouch;
+  int armed;
 
   pouch = (lc_pouch *)arg;
+  armed = 0;
   pthread_mutex_lock(&pouch->compaction_mutex);
   while (!pouch->compaction_stop) {
     struct timespec deadline;
     int wait_rc;
 
+    /* Opening a root alone must not schedule background maintenance. */
+    if (!armed) {
+      while (!pouch->compaction_stop && !pouch->compaction_pending) {
+        (void)pthread_cond_wait(&pouch->compaction_cond,
+                                &pouch->compaction_mutex);
+      }
+      if (pouch->compaction_stop) {
+        break;
+      }
+      pouch->compaction_pending = 0;
+      armed = 1;
+    }
     lc_pouch_compaction_deadline(pouch, &deadline);
     wait_rc = 0;
     while (!pouch->compaction_stop && !pouch->compaction_pending &&
