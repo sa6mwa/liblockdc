@@ -261,6 +261,10 @@ typedef struct lc_pouch_counting_source {
   int has_max_bytes;
 } lc_pouch_counting_source;
 
+static size_t lc_pouch_counting_source_read(void *context, void *buffer,
+                                            size_t count, lc_error *error);
+static int lc_pouch_counting_source_reset(void *context, lc_error *error);
+
 typedef struct lc_pouch_enqueue_context {
   lc_client_handle *client;
   const char *namespace_name;
@@ -5171,6 +5175,12 @@ static int lc_pouch_client_copy_update_metadata(
     const lc_pouch_state_write_result *write_result, lc_update_res *out,
     lc_error *error) {
   char *etag;
+  long public_bytes;
+
+  if (lc_pouch_size_to_public_long(write_result->bytes, &public_bytes,
+                                   error) != LC_OK) {
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  }
 
   etag = lc_strdup_local(write_result->etag);
   if (write_result->etag != NULL && etag == NULL) {
@@ -5184,7 +5194,7 @@ static int lc_pouch_client_copy_update_metadata(
     return error != NULL ? error->code : LC_ERR_INVALID;
   }
   out->new_state_etag = etag;
-  out->bytes = (long)write_result->bytes;
+  out->bytes = public_bytes;
   return LC_OK;
 }
 
@@ -5192,6 +5202,12 @@ static int lc_pouch_client_copy_mutate_metadata(
     const lc_pouch_state_write_result *write_result, lc_mutate_res *out,
     lc_error *error) {
   char *etag;
+  long public_bytes;
+
+  if (lc_pouch_size_to_public_long(write_result->bytes, &public_bytes,
+                                   error) != LC_OK) {
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  }
 
   etag = lc_strdup_local(write_result->etag);
   if (write_result->etag != NULL && etag == NULL) {
@@ -5205,7 +5221,7 @@ static int lc_pouch_client_copy_mutate_metadata(
     return error != NULL ? error->code : LC_ERR_INVALID;
   }
   out->new_state_etag = etag;
-  out->bytes = (long)write_result->bytes;
+  out->bytes = public_bytes;
   return LC_OK;
 }
 
@@ -5834,8 +5850,7 @@ lc_pouch_attachment_name_from_selector(const lc_attachment_selector *selector,
   return NULL;
 }
 
-static int lc_pouch_size_to_public_long(uint64_t size, long *out,
-                                        lc_error *error) {
+int lc_pouch_size_to_public_long(uint64_t size, long *out, lc_error *error) {
   if (out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch size conversion requires output", NULL, NULL,
@@ -10461,9 +10476,11 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
                                   lc_source *src, lc_update_res *out,
                                   lc_error *error) {
   lc_client_handle *client;
+  lc_pouch_counting_source counting_source;
   lc_pouch_lease_precondition lease_precondition;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
+  lc_source *counted_source;
   const char *namespace_name = NULL;
   int rc;
 
@@ -10479,9 +10496,11 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
     return rc;
   }
   memset(out, 0, sizeof(*out));
+  memset(&counting_source, 0, sizeof(counting_source));
   memset(&lease_precondition, 0, sizeof(lease_precondition));
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
+  counted_source = NULL;
   rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
                                         &namespace_name, error);
   if (rc != LC_OK) {
@@ -10509,19 +10528,32 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
     }
     options.has_expected_version = 1;
   }
+  /* The generic response reports a long byte count on every architecture. */
+  counting_source.inner = src;
+  counting_source.max_bytes = LONG_MAX;
+  counting_source.has_max_bytes = 1;
+  rc = lc_source_from_callbacks(lc_pouch_counting_source_read,
+                                lc_pouch_counting_source_reset, NULL,
+                                &counting_source, &counted_source, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
+    return rc;
+  }
   if (lc_pouch_txn_id_present(req->lease.txn_id)) {
     rc = lc_pouch_client_prepare_txn_stage_options(
         client, namespace_name, req->lease.key, req->lease.txn_id, &options,
         error);
     if (rc == LC_OK) {
       rc = lc_pouch_state_stage_write(client->pouch, namespace_name,
-                                      req->lease.key, req->lease.txn_id, src,
-                                      &options, &write_result, error);
+                                      req->lease.key, req->lease.txn_id,
+                                      counted_source, &options, &write_result,
+                                      error);
     }
   } else {
     rc = lc_pouch_state_write(client->pouch, namespace_name, req->lease.key,
-                              src, &options, &write_result, error);
+                              counted_source, &options, &write_result, error);
   }
+  lc_source_close(counted_source);
   if (rc == LC_OK) {
     rc = lc_pouch_client_copy_update_metadata(&write_result, out, error);
   }
@@ -10532,10 +10564,12 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
 int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
                                   lc_mutate_res *out, lc_error *error) {
   lc_client_handle *client;
+  lc_pouch_counting_source counting_source;
   lc_pouch_lease_precondition lease_precondition;
   lc_pouch_mutate_file mutated;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
+  lc_source *counted_source;
   lc_source *source;
   const char *namespace_name = NULL;
   int rc;
@@ -10551,10 +10585,12 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
     return rc;
   }
   memset(out, 0, sizeof(*out));
+  memset(&counting_source, 0, sizeof(counting_source));
   memset(&lease_precondition, 0, sizeof(lease_precondition));
   memset(&mutated, 0, sizeof(mutated));
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
+  counted_source = NULL;
   source = NULL;
   rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
                                         &namespace_name, error);
@@ -10586,6 +10622,15 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
                       NULL);
     goto cleanup;
   }
+  counting_source.inner = source;
+  counting_source.max_bytes = LONG_MAX;
+  counting_source.has_max_bytes = 1;
+  rc = lc_source_from_callbacks(lc_pouch_counting_source_read,
+                                lc_pouch_counting_source_reset, NULL,
+                                &counting_source, &counted_source, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
   options.content_type = "application/json";
   options.expected_etag = req->if_state_etag;
   lease_precondition.client = client;
@@ -10608,18 +10653,26 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
         error);
     if (rc == LC_OK) {
       rc = lc_pouch_state_stage_write(client->pouch, namespace_name,
-                                      req->lease.key, req->lease.txn_id, source,
-                                      &options, &write_result, error);
+                                      req->lease.key, req->lease.txn_id,
+                                      counted_source, &options, &write_result,
+                                      error);
     }
   } else {
     rc = lc_pouch_state_write(client->pouch, namespace_name, req->lease.key,
-                              source, &options, &write_result, error);
+                              counted_source, &options, &write_result, error);
+  }
+  if (counted_source != NULL) {
+    lc_source_close(counted_source);
+    counted_source = NULL;
   }
   if (rc == LC_OK) {
     rc = lc_pouch_client_copy_mutate_metadata(&write_result, out, error);
   }
 
 cleanup:
+  if (counted_source != NULL) {
+    lc_source_close(counted_source);
+  }
   if (source != NULL) {
     lc_source_close(source);
   }

@@ -4890,6 +4890,26 @@ static void test_open_creates_segmented_root_layout(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_pouch_public_size_rejects_unrepresentable_u64(void **state) {
+  lc_error error;
+  uint64_t oversized;
+  long public_size;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  public_size = 0L;
+  rc = lc_pouch_size_to_public_long((uint64_t)LONG_MAX, &public_size, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(public_size, LONG_MAX);
+
+  oversized = (uint64_t)LONG_MAX + UINT64_C(1);
+  rc = lc_pouch_size_to_public_long(oversized, &public_size, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "pouch size exceeds public API limit");
+  lc_error_cleanup(&error);
+}
+
 static void test_pouch_logs_use_storage_pouch_subsystem(void **state) {
   lc_pouch *pouch;
   lc_pouch_status status;
@@ -18547,6 +18567,7 @@ int main(void) {
       cmocka_unit_test(test_index_posting_roundtrips_dense_docids),
       cmocka_unit_test(test_index_posting_selects_adaptive_encoding),
       cmocka_unit_test(test_open_creates_segmented_root_layout),
+      cmocka_unit_test(test_pouch_public_size_rejects_unrepresentable_u64),
       cmocka_unit_test(test_pouch_logs_use_storage_pouch_subsystem),
       cmocka_unit_test(test_open_rejects_unsupported_root_manifest),
       cmocka_unit_test(test_ensure_namespace_creates_per_namespace_layout),

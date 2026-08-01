@@ -328,6 +328,7 @@ typedef struct lc_update_req {
 typedef struct lc_update_res {
   lc_version new_version;
   char *new_state_etag;
+  /** State bytes, representable by `long` on the calling architecture. */
   long bytes;
   char *correlation_id;
 } lc_update_res;
@@ -381,6 +382,7 @@ typedef struct lc_mutate_op {
 typedef struct lc_mutate_res {
   lc_version new_version;
   char *new_state_etag;
+  /** State bytes, representable by `long` on the calling architecture. */
   long bytes;
   char *correlation_id;
 } lc_mutate_res;

@@ -210,6 +210,8 @@ void lc_pouch_state_scan_summaries_result_cleanup(
 int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error);
 int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
                               const char *queue, uint64_t timeout_ms);
+/** Converts a durable Pouch byte count for generic C API response fields. */
+int lc_pouch_size_to_public_long(uint64_t size, long *out, lc_error *error);
 void lc_pouch_janitor_note_mutation(lc_pouch *pouch);
 int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
                                         const char *namespace_name,

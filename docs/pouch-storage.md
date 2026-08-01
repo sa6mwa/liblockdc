@@ -170,6 +170,12 @@ Pouch additionally uses `uint64_t` payload lengths and offsets. This is an
 accepted divergence from Go's 32-bit physical payload length because Pouch's
 large-payload/file-size invariant is stronger.
 
+The generic C API retains its established `long` byte-count fields for update
+and mutate responses. Pouch client update and mutate operations therefore
+reject a streamed state write before it commits when its payload would exceed
+`LONG_MAX` on the calling architecture; they never narrow a durable `uint64_t`
+count into an incorrect public result.
+
 All authoritative Pouch storage identities that may outlive a process are
 also fixed-width: numeric segment and snapshot identities,
 queue-notification sequences, and namespace index high-water values are
