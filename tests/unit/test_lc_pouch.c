@@ -2019,6 +2019,34 @@ static void pouch_test_put64(unsigned char *out, uint64_t value) {
   }
 }
 
+static void pouch_state_record_set_first_version(const char *path,
+                                                 uint64_t version) {
+  lc_pouch_record_header header;
+  unsigned char encoded[LC_POUCH_RECORD_HEADER_BYTES];
+  unsigned char metadata_version[8];
+  FILE *fp;
+  long metadata_offset;
+  lc_error error;
+  int rc;
+
+  lc_error_init(&error);
+  fp = fopen(path, "r+b");
+  assert_non_null(fp);
+  assert_int_equal(fread(encoded, 1U, sizeof(encoded), fp), sizeof(encoded));
+  rc = lc_pouch_record_header_decode(encoded, &header, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(header.meta_len >= sizeof(metadata_version));
+  assert_true(header.key_len <= (unsigned long)LONG_MAX -
+                                     LC_POUCH_RECORD_HEADER_BYTES);
+  metadata_offset = (long)(LC_POUCH_RECORD_HEADER_BYTES + header.key_len);
+  pouch_test_put64(metadata_version, version);
+  assert_int_equal(fseek(fp, metadata_offset, SEEK_SET), 0);
+  assert_int_equal(fwrite(metadata_version, 1U, sizeof(metadata_version), fp),
+                   sizeof(metadata_version));
+  assert_int_equal(fclose(fp), 0);
+  lc_error_cleanup(&error);
+}
+
 static void append_state_decision_record_with_index(
     const char *path, const char *staged_key, const char *etag,
     const char *decision, lc_pouch_generation version,
@@ -13124,6 +13152,64 @@ static void test_acquire_allocation_failure_rolls_back_claim(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_acquire_rolls_back_unrepresentable_generation_claim(
+    void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire_req;
+  lc_error error;
+  lc_update_res update_res;
+  char root[512];
+  char key[96];
+  char segment_path[1024];
+  uint64_t version;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_acquire_req_init(&acquire_req);
+  lc_error_init(&error);
+  make_root("lease-version-rollback", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-version-rollback/%ld",
+           (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, key, "{}", NULL, 0L, 0, &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+  lc_client_close(client);
+  client = NULL;
+
+  pouch_state_segment_path(root, "default", 1UL, segment_path,
+                           sizeof(segment_path));
+  version = (uint64_t)LC_I64_MAX + 1U;
+  pouch_state_record_set_first_version(segment_path, version);
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "version-rollback-owner";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(lease);
+  assert_string_equal(error.message,
+                      "pouch generation exceeds lockd version range");
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(lease);
+  assert_string_equal(error.message,
+                      "pouch generation exceeds lockd version range");
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_acquire_honors_block_seconds(void **state) {
   lc_client *client;
   lc_lease *lease;
@@ -18704,6 +18790,8 @@ int main(void) {
       cmocka_unit_test(test_acquire_rejects_non_positive_ttl),
       cmocka_unit_test(test_describe_missing_key_returns_not_found),
       cmocka_unit_test(test_acquire_allocation_failure_rolls_back_claim),
+      cmocka_unit_test(
+          test_acquire_rolls_back_unrepresentable_generation_claim),
       cmocka_unit_test(test_acquire_honors_block_seconds),
       cmocka_unit_test(test_transaction_bound_lease_requires_transaction_id),
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),

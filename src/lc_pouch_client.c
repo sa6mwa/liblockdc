@@ -9973,6 +9973,22 @@ static int lc_pouch_rollback_acquire_claim(lc_pouch_acquire_context *ctx,
   return rc;
 }
 
+static int lc_pouch_rollback_acquire_claim_after_failure(
+    lc_pouch_acquire_context *ctx, lc_error *error) {
+  lc_error rollback_error;
+  int rollback_rc;
+
+  lc_error_init(&rollback_error);
+  rollback_rc = lc_pouch_rollback_acquire_claim(ctx, &rollback_error);
+  if (rollback_rc != LC_OK && error != NULL) {
+    lc_error_cleanup(error);
+    *error = rollback_error;
+    lc_error_init(&rollback_error);
+  }
+  lc_error_cleanup(&rollback_error);
+  return rollback_rc;
+}
+
 static int lc_pouch_acquire_locked(void *context, lc_error *error) {
   lc_pouch_acquire_context *ctx;
   lc_pouch_lease_record lease_record;
@@ -10146,8 +10162,12 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   rc = lc_pouch_generation_to_version(acquire_context.version,
                                       &acquired_version, error);
   if (rc != LC_OK) {
+    int rollback_rc;
+
+    rollback_rc =
+        lc_pouch_rollback_acquire_claim_after_failure(&acquire_context, error);
     lc_pouch_acquire_context_cleanup(&acquire_context);
-    return rc;
+    return rollback_rc != LC_OK ? rollback_rc : rc;
   }
 #ifdef LOCKDC_TEST_BUILD
   if (lc_pouch_test_after_acquire_claim_hook != NULL) {
@@ -10162,22 +10182,14 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                                         : NULL,
       NULL);
   if (lease == NULL) {
-    lc_error rollback_error;
     int rollback_rc;
 
-    lc_error_init(&rollback_error);
     rollback_rc =
-        lc_pouch_rollback_acquire_claim(&acquire_context, &rollback_error);
+        lc_pouch_rollback_acquire_claim_after_failure(&acquire_context, error);
     lc_pouch_acquire_context_cleanup(&acquire_context);
     if (rollback_rc != LC_OK) {
-      if (error != NULL) {
-        *error = rollback_error;
-        lc_error_init(&rollback_error);
-      }
-      lc_error_cleanup(&rollback_error);
       return rollback_rc;
     }
-    lc_error_cleanup(&rollback_error);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch lease", NULL, NULL, NULL);
   }
