@@ -983,6 +983,17 @@ if(LOCKDC_BUILD_TESTS)
         RUN_SERIAL TRUE
         TIMEOUT 20)
 
+    add_test(NAME clean_read_only_cache_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/clean_read_only_cache_test.cmake
+    )
+    set_tests_properties(clean_read_only_cache_test PROPERTIES
+        LABELS "unit;local"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
     add_test(NAME lifecycle_command_surface_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
