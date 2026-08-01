@@ -160,7 +160,10 @@ extern void *lc_pouch_test_after_snapshot_write_context;
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);
 int lc_pouch_single_writer_snapshot(lc_pouch *pouch, uint64_t *epoch_out);
 int lc_pouch_single_writer_enabled(lc_pouch *pouch);
-/** Resets the asynchronous compaction deadline after a successful mutation. */
+/**
+ * Starts a fresh idle-compaction delay after a successful mutation. The worker
+ * does not compact at open or while successful mutations keep arriving.
+ */
 void lc_pouch_compaction_note_mutation(lc_pouch *pouch);
 void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch);
 void lc_pouch_query_index_cache_cleanup(lc_pouch *pouch);

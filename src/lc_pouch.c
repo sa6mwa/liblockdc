@@ -718,6 +718,7 @@ static void *lc_pouch_compaction_worker(void *arg) {
       break;
     }
     if (pouch->compaction_pending) {
+      /* A later mutation restarts the full idle delay before maintenance. */
       pouch->compaction_pending = 0;
       continue;
     }

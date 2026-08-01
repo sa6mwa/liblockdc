@@ -666,6 +666,19 @@ divergence.
   unlimited throttle. Endpoint options expose the enable/throttle choices;
   direct Pouch open options retain the full tuning surface.
 
+- Background compaction scheduling:
+  Go disk runs a pass at open and then on a fixed periodic timer. Pouch
+  deliberately uses idle-debounced scheduling instead: it does not compact at
+  open, and each successful mutation starts a fresh full interval. A pass runs
+  only after that interval has remained mutation-free, then repeats once per
+  interval while the root remains idle. Continuous successful mutation can
+  therefore defer automatic compaction indefinitely. This is intentional: it
+  keeps background maintenance out of Pouch's write hot path and prevents an
+  open-time worker from interleaving with application recovery or integrity
+  inspection. It does not affect replay or durability; it only delays space
+  reclamation. Callers that require reclamation under continuous writes must
+  invoke explicit namespace maintenance, which runs immediately.
+
 - Retention lifecycle:
   `retention_seconds` enables one root-local pthread janitor;
   `janitor_interval_seconds` defaults to one hour. Successful state mutations
@@ -1286,8 +1299,10 @@ Required behavior:
 - compute reclaimable bytes;
 - enforce configurable `min_segments`, `min_reclaimable_bytes`, interval,
   delete grace, and optional IO throttle;
-- when background compaction is enabled with a non-zero interval, run a pass at
-  open and once per interval without making mutations perform compaction;
+- when background compaction is enabled with a non-zero interval, start an
+  idle-debounced pass only after a successful mutation and a full quiet
+  interval; never run it at open, restart the delay after every mutation, and
+  repeat it once per interval only while the root remains idle;
 - run explicit namespace maintenance immediately rather than delaying it for
   the background interval;
 - honor `compaction_max_io_bytes_per_sec` while copying snapshot payload

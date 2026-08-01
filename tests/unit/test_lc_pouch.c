@@ -6649,7 +6649,7 @@ static void test_state_writes_roll_active_segments(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_state_scheduled_compaction_installs_snapshot(void **state) {
+static void test_state_idle_compaction_installs_snapshot(void **state) {
   lc_pouch *pouch;
   lc_source *body;
   lc_pouch_open_options open_options;
@@ -6664,6 +6664,7 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   char rejected_payload_file_path[1024];
   char path[1024];
   char snapshot_path[1024];
+  char snapshot_manifest_line[128];
   struct timespec delay;
   int attempts;
   int written;
@@ -6709,13 +6710,23 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
   written = snprintf(snapshot_path, sizeof(snapshot_path), "%s/snapshots/%s",
                      namespace_path, "snapshot-00000000000000000003.log");
   assert_true(written > 0 && (size_t)written < sizeof(snapshot_path));
+  written = snprintf(path, sizeof(path), "%s/manifest", namespace_path);
+  assert_true(written > 0 && (size_t)written < sizeof(path));
+  written = snprintf(snapshot_manifest_line, sizeof(snapshot_manifest_line),
+                     "snapshot=%s", "snapshot-00000000000000000003.log");
+  assert_true(written > 0 && (size_t)written < sizeof(snapshot_manifest_line));
   delay.tv_sec = 0;
   delay.tv_nsec = 100L * 1000L * 1000L;
-  for (attempts = 0; attempts < 30 && !path_is_file(snapshot_path);
+  /* The successful writes debounce maintenance; this quiet interval permits it. */
+  for (attempts = 0;
+       attempts < 30 &&
+       (!path_is_file(snapshot_path) ||
+        !pouch_file_contains_text(path, snapshot_manifest_line));
        ++attempts) {
     assert_int_equal(nanosleep(&delay, NULL), 0);
   }
   assert_true(path_is_file(snapshot_path));
+  assert_true(pouch_file_contains_text(path, snapshot_manifest_line));
   assert_path_file(namespace_path,
                    "snapshots/snapshot-00000000000000000003.log");
   assert_path_file_contains(namespace_path, "manifest",
@@ -18492,7 +18503,7 @@ int main(void) {
       cmocka_unit_test(test_state_write_enforces_expected_etag),
       cmocka_unit_test(test_state_write_enforces_create_if_absent),
       cmocka_unit_test(test_state_writes_roll_active_segments),
-      cmocka_unit_test(test_state_scheduled_compaction_installs_snapshot),
+      cmocka_unit_test(test_state_idle_compaction_installs_snapshot),
       cmocka_unit_test(test_state_replay_ignores_stale_generation),
       cmocka_unit_test(test_pouch_root_path_aliases_share_store_identity),
       cmocka_unit_test(test_maintenance_reports_disabled_without_force),
