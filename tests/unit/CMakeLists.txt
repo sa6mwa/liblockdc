@@ -160,6 +160,8 @@ target_sources(lc_unit_mutate_stream PRIVATE
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
 )
 lc_add_unit_test(lc_unit_pouch test_lc_pouch.c)
+# Pouch combines logstore recovery and durability cases in one debug target.
+set_tests_properties(lc_unit_pouch PROPERTIES TIMEOUT 180)
 target_sources(lc_unit_pouch PRIVATE
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
 )
