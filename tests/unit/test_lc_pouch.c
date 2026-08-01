@@ -2242,7 +2242,7 @@ typedef struct pouch_compaction_drift_hook_state {
   int called;
 } pouch_compaction_drift_hook_state;
 
-static void flip_file_byte(const char *path, long offset);
+static void flip_file_byte(const char *path, uint64_t offset);
 
 static int pouch_compaction_drift_hook(void *context, lc_error *error) {
   pouch_compaction_drift_hook_state *state;
@@ -4564,18 +4564,121 @@ static unsigned long pouch_state_segment_count(
   return count;
 }
 
-static void flip_file_byte(const char *path, long offset) {
+static void pouch_test_discard_file_bytes(FILE *fp, uint64_t length) {
+  unsigned char buffer[256];
+
+  while (length > 0U) {
+    size_t count;
+
+    count = length > sizeof(buffer) ? sizeof(buffer) : (size_t)length;
+    assert_int_equal(fread(buffer, 1U, count, fp), count);
+    length -= (uint64_t)count;
+  }
+}
+
+static void pouch_state_payload_span_for_key(const char *root,
+                                             const char *namespace_name,
+                                             const char *key, char *path_out,
+                                             size_t path_out_size,
+                                             uint64_t *payload_offset_out,
+                                             uint64_t *payload_length_out) {
+  lc_pouch_record_header header;
+  unsigned char encoded[LC_POUCH_RECORD_HEADER_BYTES];
+  unsigned char *record_key;
+  unsigned long segment_count;
+  uint64_t record_offset;
+  uint64_t payload_offset;
+  char segment_path[1024];
+  FILE *fp;
+  size_t key_length;
+  size_t got;
+  unsigned long segment_id;
+  int found;
+  lc_error error;
+  int rc;
+
+  assert_non_null(root);
+  assert_non_null(namespace_name);
+  assert_non_null(key);
+  assert_non_null(path_out);
+  assert_non_null(payload_offset_out);
+  assert_non_null(payload_length_out);
+  assert_true(path_out_size > 0U);
+  found = 0;
+  segment_count = pouch_state_segment_count(root, namespace_name);
+  lc_error_init(&error);
+  for (segment_id = 1UL; segment_id <= segment_count && !found;
+       ++segment_id) {
+    pouch_state_segment_path(root, namespace_name, segment_id, segment_path,
+                             sizeof(segment_path));
+    fp = fopen(segment_path, "rb");
+    assert_non_null(fp);
+    record_offset = 0U;
+    for (;;) {
+      got = fread(encoded, 1U, sizeof(encoded), fp);
+      if (got == 0U) {
+        assert_false(ferror(fp));
+        break;
+      }
+      assert_int_equal(got, sizeof(encoded));
+      rc = lc_pouch_record_header_decode(encoded, &header, &error);
+      assert_int_equal(rc, LC_OK);
+      assert_true(header.key_len <= SIZE_MAX - 1U);
+      key_length = (size_t)header.key_len;
+      record_key = (unsigned char *)malloc(key_length + 1U);
+      assert_non_null(record_key);
+      assert_int_equal(fread(record_key, 1U, key_length, fp), key_length);
+      record_key[key_length] = '\0';
+      assert_true(record_offset <=
+                  UINT64_MAX - LC_POUCH_RECORD_HEADER_BYTES - header.key_len);
+      payload_offset = record_offset + LC_POUCH_RECORD_HEADER_BYTES +
+                       (uint64_t)header.key_len;
+      assert_true(payload_offset <= UINT64_MAX - header.meta_len);
+      payload_offset += (uint64_t)header.meta_len;
+      assert_true(header.payload_len <= UINT64_MAX - payload_offset);
+      if (strlen(key) == key_length &&
+          memcmp(record_key, key, key_length) == 0 &&
+          header.payload_len != 0U) {
+        assert_true(snprintf(path_out, path_out_size, "%s", segment_path) > 0);
+        assert_true(strlen(segment_path) < path_out_size);
+        *payload_offset_out = payload_offset;
+        *payload_length_out = header.payload_len;
+        found = 1;
+        free(record_key);
+        break;
+      }
+      free(record_key);
+      pouch_test_discard_file_bytes(fp, (uint64_t)header.meta_len);
+      pouch_test_discard_file_bytes(fp, header.payload_len);
+      record_offset = payload_offset + header.payload_len;
+    }
+    assert_int_equal(fclose(fp), 0);
+  }
+  lc_error_cleanup(&error);
+  assert_true(found);
+}
+
+static void flip_file_byte(const char *path, uint64_t offset) {
   FILE *fp;
   int ch;
 
   fp = fopen(path, "r+b");
   assert_non_null(fp);
-  assert_int_equal(fseek(fp, offset, SEEK_SET), 0);
+  assert_true(offset <= (uint64_t)LONG_MAX);
+  assert_int_equal(fseek(fp, (long)offset, SEEK_SET), 0);
   ch = fgetc(fp);
   assert_true(ch != EOF);
-  assert_int_equal(fseek(fp, offset, SEEK_SET), 0);
+  assert_int_equal(fseek(fp, (long)offset, SEEK_SET), 0);
   assert_true(fputc((ch ^ 0x01) & 0xFF, fp) != EOF);
   assert_int_equal(fclose(fp), 0);
+}
+
+static void truncate_file_at(const char *path, uint64_t length) {
+  off_t file_length;
+
+  file_length = (off_t)length;
+  assert_true(file_length >= 0 && (uint64_t)file_length == length);
+  assert_int_equal(truncate(path, file_length), 0);
 }
 
 static void truncate_file_tail(const char *path) {
@@ -4583,7 +4686,7 @@ static void truncate_file_tail(const char *path) {
 
   assert_int_equal(stat(path, &st), 0);
   assert_true(st.st_size > 0);
-  assert_int_equal(truncate(path, st.st_size - 1), 0);
+  truncate_file_at(path, (uint64_t)st.st_size - 1U);
 }
 
 static void assert_client_get_protocol_failure(lc_client *client,
@@ -4600,6 +4703,23 @@ static void assert_client_get_protocol_failure(lc_client *client,
   rc = client->get(client, key, NULL, sink, &get_res, error);
   assert_int_not_equal(rc, LC_OK);
   assert_int_equal(error->code, LC_ERR_PROTOCOL);
+  sink->close(sink);
+  lc_get_res_cleanup(&get_res);
+}
+
+static void assert_client_get_no_content(lc_client *client, const char *key,
+                                         lc_error *error) {
+  lc_sink *sink;
+  lc_get_res get_res;
+  int rc;
+
+  sink = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+  rc = lc_sink_to_memory(&sink, error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
   sink->close(sink);
   lc_get_res_cleanup(&get_res);
 }
@@ -7268,8 +7388,11 @@ static void test_maintenance_runs_immediately_despite_interval(void **state) {
   lc_error error;
   char root[512];
   char *namespace_path;
+  char *snapshot_leaf;
+  char snapshot_relative[128];
   int i;
   int rc;
+  int written;
 
   (void)state;
   lc_error_init(&error);
@@ -7314,9 +7437,15 @@ static void test_maintenance_runs_immediately_despite_interval(void **state) {
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
-  assert_path_file(namespace_path,
-                   "snapshots/snapshot-00000000000000000003.log");
+  snapshot_leaf = lc_pouch_namespace_snapshot_leaf(
+      NULL, maintenance_result.compacted_segment_id);
+  assert_non_null(snapshot_leaf);
+  written = snprintf(snapshot_relative, sizeof(snapshot_relative),
+                     "snapshots/%s", snapshot_leaf);
+  assert_true(written > 0 && (size_t)written < sizeof(snapshot_relative));
+  assert_path_file(namespace_path, snapshot_relative);
 
+  lc_free_with_allocator(NULL, snapshot_leaf);
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_close(pouch);
@@ -7342,6 +7471,7 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   char *segment_one_path;
   char *segment_two_path;
   char *stale_snapshot_path;
+  unsigned long cleanup_pending_count;
   int rc;
 
   (void)state;
@@ -7396,7 +7526,12 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(maintenance_result.diagnostic, "compacted");
   assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
+  /* The second segment remains active; only the sealed first segment is
+   * retired by this compaction. */
+  assert_int_equal(maintenance_result.candidate_segment_count, 1UL);
+  cleanup_pending_count = maintenance_result.cleanup_pending_count;
+  assert_int_equal(cleanup_pending_count,
+                   maintenance_result.candidate_segment_count);
   assert_true(path_is_file(segment_one_path));
   assert_true(path_is_file(segment_two_path));
   snprintf(obsolete_line, sizeof(obsolete_line), "obsolete_segment=%s",
@@ -7415,7 +7550,8 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   assert_true(maintenance_result.skipped);
   assert_false(maintenance_result.compacted);
   assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count,
+                   cleanup_pending_count);
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   memset(&maintenance_result, 0, sizeof(maintenance_result));
@@ -7426,7 +7562,8 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   assert_true(maintenance_result.skipped);
   assert_false(maintenance_result.compacted);
   assert_int_equal(maintenance_result.cleanup_deleted_count, 0UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count,
+                   cleanup_pending_count);
 
   assert_true(path_is_file(segment_one_path));
   assert_true(path_is_file(segment_two_path));
@@ -7446,7 +7583,8 @@ static void test_compaction_reclaims_expired_obsolete_files(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(maintenance_result.diagnostic, "cleanup-pending");
   assert_int_equal(maintenance_result.cleanup_deleted_count, 1UL);
-  assert_int_equal(maintenance_result.cleanup_pending_count, 2UL);
+  assert_int_equal(maintenance_result.cleanup_pending_count,
+                   cleanup_pending_count);
   assert_false(path_is_file(stale_snapshot_path));
   assert_file_not_contains(manifest_path, "obsolete_snapshot=");
 
@@ -8929,6 +9067,39 @@ test_client_queue_large_payload_stats_dequeue_and_ack(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_pouch_compression_public_config_is_retained(void **state) {
+  lc_client *client;
+  lc_client_config config;
+  lc_client_handle *handle;
+  lc_error error;
+  const char *endpoints[1];
+  char endpoint[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lc_error_init(&error);
+  make_root("compression-public-config", root, sizeof(root));
+  cleanup_root(root);
+
+  make_endpoint(root, endpoint, sizeof(endpoint));
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_compression = "zlib";
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  handle = (lc_client_handle *)client;
+  assert_string_equal(handle->pouch_compression, "zlib");
+  assert_path_file_contains(root, "manifest", "compression=zlib");
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_pouch_compression_public_api_roundtrips_state(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -9688,8 +9859,10 @@ static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   lc_update_res update_res;
   lc_error error;
   char *crypto_key;
-  char segment_path[1024];
+  char payload_path[1024];
   char root[512];
+  uint64_t payload_length;
+  uint64_t payload_offset;
   int rc;
 
   (void)state;
@@ -9710,9 +9883,11 @@ static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   lc_client_close(client);
   client = NULL;
 
-  pouch_state_segment_path(root, "default", 1UL, segment_path,
-                           sizeof(segment_path));
-  flip_file_byte(segment_path, 512L);
+  pouch_state_payload_span_for_key(root, "default", "crypto/tamper",
+                                   payload_path, sizeof(payload_path),
+                                   &payload_offset, &payload_length);
+  assert_true(payload_length > 8U);
+  flip_file_byte(payload_path, payload_offset + 8U);
 
   open_pouch_client_crypto(root, crypto_key, &reader, &error);
   assert_client_get_protocol_failure(reader, "crypto/tamper", &error);
@@ -9724,14 +9899,17 @@ static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_pouch_crypto_rejects_truncated_payload(void **state) {
+static void
+test_pouch_crypto_does_not_replay_truncated_active_payload(void **state) {
   lc_client *client;
   lc_client *reader;
   lc_update_res update_res;
   lc_error error;
   char *crypto_key;
-  char segment_path[1024];
+  char payload_path[1024];
   char root[512];
+  uint64_t payload_length;
+  uint64_t payload_offset;
   int rc;
 
   (void)state;
@@ -9752,15 +9930,77 @@ static void test_pouch_crypto_rejects_truncated_payload(void **state) {
   lc_client_close(client);
   client = NULL;
 
-  pouch_state_segment_path(root, "default", 1UL, segment_path,
-                           sizeof(segment_path));
-  truncate_file_tail(segment_path);
+  pouch_state_payload_span_for_key(root, "default", "crypto/truncated",
+                                   payload_path, sizeof(payload_path),
+                                   &payload_offset, &payload_length);
+  assert_true(payload_length > 0U);
+  truncate_file_at(payload_path, payload_offset + payload_length - 1U);
 
   open_pouch_client_crypto(root, crypto_key, &reader, &error);
-  assert_client_get_protocol_failure(reader, "crypto/truncated", &error);
+  /* An incomplete active record is a crash tail, not a sealed corruption. */
+  assert_client_get_no_content(reader, "crypto/truncated", &error);
 
   lc_client_close(reader);
   lc_update_res_cleanup(&update_res);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_crypto_rejects_truncated_sealed_payload(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_update_res first_update;
+  lc_update_res second_update;
+  lc_error error;
+  char *crypto_key;
+  char endpoint[1536];
+  char payload_path[1024];
+  char root[512];
+  uint64_t payload_length;
+  uint64_t payload_offset;
+  int written;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  reader = NULL;
+  crypto_key = NULL;
+  memset(&first_update, 0, sizeof(first_update));
+  memset(&second_update, 0, sizeof(second_update));
+  lc_error_init(&error);
+  make_root("crypto-truncated-sealed", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?pouch_crypto_key=%s&segment_target_bytes=1",
+                     root, crypto_key);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  write_client_state(client, "crypto/truncated-sealed",
+                     "{\"secret\":\"sealed-payload\"}", NULL, 0L, 0,
+                     &first_update, &error);
+  write_client_state(client, "crypto/rotate",
+                     "{\"secret\":\"rotate-segment\"}", NULL, 0L, 0,
+                     &second_update, &error);
+  lc_client_close(client);
+  client = NULL;
+
+  pouch_state_payload_span_for_key(root, "default", "crypto/truncated-sealed",
+                                   payload_path, sizeof(payload_path),
+                                   &payload_offset, &payload_length);
+  assert_true(payload_length > 0U);
+  truncate_file_at(payload_path, payload_offset + payload_length - 1U);
+
+  open_pouch_client_crypto(root, crypto_key, &reader, &error);
+  assert_client_get_protocol_failure(reader, "crypto/truncated-sealed",
+                                     &error);
+
+  lc_client_close(reader);
+  lc_update_res_cleanup(&second_update);
+  lc_update_res_cleanup(&first_update);
   lc_pouch_crypto_key_string_free(crypto_key);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -18146,6 +18386,7 @@ int main(void) {
       cmocka_unit_test(
           test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout),
       cmocka_unit_test(test_client_queue_large_payload_stats_dequeue_and_ack),
+      cmocka_unit_test(test_pouch_compression_public_config_is_retained),
       cmocka_unit_test(test_pouch_compression_public_api_roundtrips_state),
       cmocka_unit_test(test_pouch_crypto_encrypts_public_api_payloads_at_rest),
       cmocka_unit_test(test_pouch_crypto_repairs_damaged_query_index),
@@ -18159,7 +18400,9 @@ int main(void) {
       cmocka_unit_test(test_pouch_crypto_roundtrips_large_multiframe_state),
       cmocka_unit_test(test_pouch_crypto_rejects_wrong_key),
       cmocka_unit_test(test_pouch_crypto_rejects_tampered_payload),
-      cmocka_unit_test(test_pouch_crypto_rejects_truncated_payload),
+      cmocka_unit_test(
+          test_pouch_crypto_does_not_replay_truncated_active_payload),
+      cmocka_unit_test(test_pouch_crypto_rejects_truncated_sealed_payload),
       cmocka_unit_test(test_pouch_crypto_rejects_trailing_payload_bytes),
       cmocka_unit_test(test_txn_decisions_apply_queue_side_effects),
       cmocka_unit_test(

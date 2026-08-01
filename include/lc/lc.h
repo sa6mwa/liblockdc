@@ -168,7 +168,8 @@ typedef struct lc_client_config {
   /** Creates `pouch_crypto_key_file` with a new root key when it is missing. */
   int pouch_crypto_generate_key_file;
   /** Local pouch at-rest compression mode: NULL/"none" disables it, "zlib"
-   * enables streaming zlib compression before storage/encryption.
+   * enables streaming zlib compression before storage/encryption. Consumer
+   * service workers retain the resolved mode when reopening this Pouch root.
    */
   const char *pouch_compression;
 } lc_client_config;

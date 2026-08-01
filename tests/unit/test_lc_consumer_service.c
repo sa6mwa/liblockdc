@@ -56,6 +56,7 @@ typedef struct consumer_test_state {
   int fail_thread_create_call;
   int thread_create_calls;
   size_t last_client_open_json_limit;
+  char last_client_open_pouch_compression[16];
   int track_pthread_primitives;
   int wrapped_mutex_init_calls;
   int wrapped_mutex_destroy_calls;
@@ -172,6 +173,7 @@ struct lc_consumer_service_handle {
   size_t http_json_response_limit_bytes;
   char *pouch_crypto_key;
   char *pouch_crypto_key_file;
+  char *pouch_compression;
   int pouch_crypto_generate_key_file;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
@@ -906,6 +908,12 @@ int __wrap_lc_client_open(const lc_client_config *config, lc_client **out,
   if (g_consumer_test_state == NULL) {
     return __real_lc_client_open(config, out, error);
   }
+  assert_true(config->pouch_compression == NULL ||
+              strlen(config->pouch_compression) <
+                  sizeof(g_consumer_test_state->last_client_open_pouch_compression));
+  snprintf(g_consumer_test_state->last_client_open_pouch_compression,
+           sizeof(g_consumer_test_state->last_client_open_pouch_compression), "%s",
+           config->pouch_compression != NULL ? config->pouch_compression : "");
   client = (lc_client_handle *)lc_calloc_with_allocator(&config->allocator, 1U,
                                                         sizeof(*client));
   if (client == NULL) {
@@ -2786,6 +2794,62 @@ test_consumer_service_worker_clone_preserves_json_response_limit(void **state) {
 }
 
 static void
+test_consumer_service_worker_clone_preserves_pouch_compression(void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_consumer_config consumer;
+  lc_consumer_service_config config;
+  lc_consumer_service *service;
+  consumer_test_state runtime_state;
+  lc_error error;
+  char *endpoints[1];
+  int rc;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  endpoints[0] = "pouch:///tmp/liblockdc-consumer-service-compression-test";
+  client.endpoints = endpoints;
+  client.endpoint_count = 1U;
+  client.pouch_compression = "zlib";
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&config);
+  lc_error_init(&error);
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  pthread_mutex_init(&runtime_state.mutex, NULL);
+  runtime_state.stop_after_pouch_dequeue_calls = 1U;
+
+  consumer.name = "worker-test";
+  consumer.request.queue = "jobs";
+  consumer.handle = handle_consumer_message;
+  consumer.worker_count = 1U;
+  consumer.context = &runtime_state;
+  config.consumers = &consumer;
+  config.consumer_count = 1U;
+
+  rc = lc_client_new_consumer_service_method(&client.pub, &config, &service,
+                                             &error);
+  assert_int_equal(rc, LC_OK);
+  runtime_state.service = service;
+  g_consumer_test_state = &runtime_state;
+
+  rc = service->run(service, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(runtime_state.last_client_open_pouch_compression,
+                      "zlib");
+
+  service->close(service);
+  g_consumer_test_state = NULL;
+  pthread_mutex_destroy(&runtime_state.mutex);
+  lc_error_cleanup(&error);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void
 test_consumer_service_no_delivery_does_not_destroy_uninitialized_primitives(
     void **state) {
   tracked_allocator_state alloc_state;
@@ -2898,6 +2962,8 @@ int main(void) {
       cmocka_unit_test(test_consumer_service_message_factory_failure_is_fatal),
       cmocka_unit_test(
           test_consumer_service_worker_clone_preserves_json_response_limit),
+      cmocka_unit_test(
+          test_consumer_service_worker_clone_preserves_pouch_compression),
       cmocka_unit_test(
           test_consumer_service_no_delivery_does_not_destroy_uninitialized_primitives),
       cmocka_unit_test(

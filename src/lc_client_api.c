@@ -2834,5 +2834,6 @@ void lc_client_close_method(lc_client *self) {
   lc_secret_free_string_with_allocator(&client->allocator,
                                        client->pouch_crypto_key);
   lc_client_free(client, client->pouch_crypto_key_file);
+  lc_client_free(client, client->pouch_compression);
   lc_client_free(client, client);
 }

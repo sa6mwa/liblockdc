@@ -1904,6 +1904,19 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                           "failed to copy pouch crypto key file", NULL, NULL,
                           NULL);
     }
+    client->pouch_compression = lc_strdup_with_allocator(
+        &config->allocator, pouch_open_options.compression);
+    if (pouch_open_options.compression != NULL &&
+        client->pouch_compression == NULL) {
+      lc_client_close_method(&client->pub);
+      lc_engine_error_cleanup(&engine_error);
+      lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
+      lc_pouch_endpoint_options_cleanup(&config->allocator,
+                                        &pouch_endpoint_options);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to copy pouch compression", NULL, NULL,
+                          NULL);
+    }
     client->pouch_crypto_generate_key_file =
         pouch_open_options.crypto_generate_key_file;
     lc_pouch_endpoint_options_cleanup(&config->allocator,

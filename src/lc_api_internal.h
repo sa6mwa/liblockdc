@@ -48,6 +48,7 @@ struct lc_client_handle {
   size_t http_json_response_limit_bytes;
   char *pouch_crypto_key;
   char *pouch_crypto_key_file;
+  char *pouch_compression;
   int pouch_crypto_generate_key_file;
   int disable_logger_sys_field;
   pslog_logger *base_logger;

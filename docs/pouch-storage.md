@@ -994,8 +994,11 @@ Required behavior:
 - make the finalized active-record header the shared-reader publication point;
   shared readers compare the active file size with their verified offset and
   replay only the new complete tail;
-- let a reader stop at an active pending or incomplete tail, and repair that
-  tail only from a later appender holding the physical append gate;
+- treat an active pending or incomplete tail, including a truncated encrypted
+  payload frame, as an unpublished crash tail: readers stop before it and a
+  later appender repairs it while holding the physical append gate. Sealed
+  segments and snapshots do not receive this recovery treatment and reject
+  truncation or authentication failure;
 - make refs visible in projections after finalized-record publication and, when
   `durable_sync=1`, only after the commit group succeeds at the public boundary;
   explicit same-operation staged visibility remains supported;

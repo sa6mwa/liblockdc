@@ -82,6 +82,7 @@ struct lc_consumer_service_handle {
   size_t http_json_response_limit_bytes;
   char *pouch_crypto_key;
   char *pouch_crypto_key_file;
+  char *pouch_compression;
   int pouch_crypto_generate_key_file;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
@@ -1044,6 +1045,13 @@ static int lc_consumer_copy_base_config(lc_consumer_service_handle *service,
                         "failed to copy consumer pouch crypto key file", NULL,
                         NULL, NULL);
   }
+  service->pouch_compression =
+      lc_strdup_with_allocator(&service->allocator, client->pouch_compression);
+  if (client->pouch_compression != NULL && service->pouch_compression == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy consumer pouch compression", NULL,
+                        NULL, NULL);
+  }
   service->pouch_crypto_generate_key_file =
       client->pouch_crypto_generate_key_file;
   service->disable_logger_sys_field = client->disable_logger_sys_field;
@@ -1109,6 +1117,7 @@ static int lc_consumer_clone_client(lc_consumer_service_handle *service,
       service->http_json_response_limit_bytes;
   config.pouch_crypto_key = service->pouch_crypto_key;
   config.pouch_crypto_key_file = service->pouch_crypto_key_file;
+  config.pouch_compression = service->pouch_compression;
   config.pouch_crypto_generate_key_file =
       service->pouch_crypto_generate_key_file;
   config.disable_logger_sys_field = service->disable_logger_sys_field;
@@ -2379,6 +2388,7 @@ void lc_consumer_service_close_method(lc_consumer_service *self) {
   lc_secret_free_string_with_allocator(&service->allocator,
                                        service->pouch_crypto_key);
   lc_free_with_allocator(&service->allocator, service->pouch_crypto_key_file);
+  lc_free_with_allocator(&service->allocator, service->pouch_compression);
   lc_error_cleanup(&service->fatal_error);
   pthread_cond_destroy(&service->cond);
   pthread_mutex_destroy(&service->mutex);
