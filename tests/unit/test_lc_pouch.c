@@ -2012,13 +2012,13 @@ static void pouch_test_put64(unsigned char *out, uint64_t value) {
   }
 }
 
-static void append_state_decision_record(const char *path,
-                                         const char *staged_key,
-                                         const char *etag, const char *decision,
-                                         lc_pouch_generation version) {
+static void append_state_decision_record_with_index(
+    const char *path, const char *staged_key, const char *etag,
+    const char *decision, lc_pouch_generation version,
+    lc_pouch_generation index_seq, int include_index_trailer) {
   lc_pouch_record_header record_header;
   unsigned char header[32];
-  unsigned char meta[19 + 128];
+  unsigned char meta[19 + 128 + 12];
   FILE *fp;
   size_t key_len;
   size_t etag_len;
@@ -2034,7 +2034,7 @@ static void append_state_decision_record(const char *path,
     assert_string_equal(decision, "discarded");
     decision_code = 2U;
   }
-  meta_len = 19U + etag_len;
+  meta_len = 19U + etag_len + (include_index_trailer ? 12U : 0U);
   memset(&record_header, 0, sizeof(record_header));
   memset(header, 0, sizeof(header));
   memset(meta, 0, sizeof(meta));
@@ -2049,12 +2049,32 @@ static void append_state_decision_record(const char *path,
   pouch_test_put16(meta + 16, (unsigned long)etag_len);
   meta[18] = decision_code;
   memcpy(meta + 19, etag, etag_len);
+  if (include_index_trailer) {
+    pouch_test_put32(meta + 19U + etag_len, 0x4c435349UL);
+    pouch_test_put64(meta + 23U + etag_len, (uint64_t)index_seq);
+  }
   fp = fopen(path, "ab");
   assert_non_null(fp);
   assert_int_equal(fwrite(header, 1U, sizeof(header), fp), sizeof(header));
   assert_int_equal(fwrite(staged_key, 1U, key_len, fp), key_len);
   assert_int_equal(fwrite(meta, 1U, meta_len, fp), meta_len);
   assert_int_equal(fclose(fp), 0);
+}
+
+static void append_state_decision_record(const char *path,
+                                         const char *staged_key,
+                                         const char *etag, const char *decision,
+                                         lc_pouch_generation version,
+                                         lc_pouch_generation index_seq) {
+  append_state_decision_record_with_index(path, staged_key, etag, decision,
+                                          version, index_seq, 1);
+}
+
+static void append_state_decision_record_without_index_trailer(
+    const char *path, const char *staged_key, const char *etag,
+    const char *decision, lc_pouch_generation version) {
+  append_state_decision_record_with_index(path, staged_key, etag, decision,
+                                          version, 0UL, 0);
 }
 
 static void append_first_state_record(const char *path) {
@@ -5118,6 +5138,20 @@ static void test_namespace_manifest_uses_u64_snapshot_ids(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_namespace_segment_leaf_parser_rejects_retired_layout(
+    void **state) {
+  uint64_t segment_id;
+
+  (void)state;
+  segment_id = 0U;
+  assert_true(lc_pouch_namespace_parse_segment_leaf(
+      "seg-00000000000000000042.log", &segment_id));
+  assert_int_equal(segment_id, 42UL);
+  assert_false(lc_pouch_namespace_parse_segment_leaf(
+      "seg-0123456789abcdef0123456789abcdef-00000000000000000042.log",
+      &segment_id));
+}
+
 static void
 test_pouch_endpoint_opens_new_backend_without_http_engine(void **state) {
   lc_client_config config;
@@ -6232,6 +6266,59 @@ static void test_state_replay_rejects_corrupt_binary_header(void **state) {
   cleanup_root(root);
 }
 
+static void test_state_replay_rejects_record_without_index_trailer(
+    void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char segment_path[1024];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("state-missing-index-trailer", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("current", strlen("current"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body,
+                            NULL, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  body = NULL;
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  pouch_state_segment_path(root, "team/alpha", 1UL, segment_path,
+                           sizeof(segment_path));
+  append_state_decision_record_without_index_trailer(
+      segment_path, "state/retired/.staging/txn", "retired", "discarded",
+      2UL);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/current", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_string_equal(error.message,
+                      "pouch state metadata index trailer is invalid");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_state_replay_repairs_truncated_active_segment(void **state) {
   lc_pouch *pouch;
   lc_source *body;
@@ -6629,6 +6716,7 @@ static void test_state_scheduled_compaction_installs_snapshot(void **state) {
                    "snapshots/snapshot-00000000000000000003.log");
   assert_path_file_contains(namespace_path, "manifest",
                             "snapshot=snapshot-00000000000000000003.log");
+  assert_path_file_not_contains(namespace_path, "manifest", "snapshot_mode=");
   pouch_state_segment_path(root, "team/alpha", 1UL, path, sizeof(path));
   assert_true(path_is_file(path));
   pouch_state_segment_path(root, "team/alpha", 2UL, path, sizeof(path));
@@ -7992,7 +8080,7 @@ test_staged_decision_recovery_tombstones_interrupted_discard(void **state) {
                      "state/recover/.staging/txn-recover");
   assert_true(written > 0 && (size_t)written < sizeof(staged_key));
   append_state_decision_record(segment_path, staged_key, staged.etag,
-                               "discarded", 2UL);
+                               "discarded", 2UL, 2UL);
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
@@ -18332,6 +18420,7 @@ int main(void) {
       cmocka_unit_test(test_open_rejects_unsupported_root_manifest),
       cmocka_unit_test(test_ensure_namespace_creates_per_namespace_layout),
       cmocka_unit_test(test_namespace_manifest_uses_u64_snapshot_ids),
+      cmocka_unit_test(test_namespace_segment_leaf_parser_rejects_retired_layout),
       cmocka_unit_test(
           test_pouch_endpoint_opens_new_backend_without_http_engine),
       cmocka_unit_test(test_pouch_endpoint_rejects_unix_socket_mix),
@@ -18349,6 +18438,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_crypto_compression_leases_skip_zlib),
       cmocka_unit_test(test_pouch_compression_leases_skip_zlib),
       cmocka_unit_test(test_state_replay_rejects_corrupt_binary_header),
+      cmocka_unit_test(test_state_replay_rejects_record_without_index_trailer),
       cmocka_unit_test(test_state_replay_repairs_truncated_active_segment),
       cmocka_unit_test(test_state_replay_rejects_truncated_sealed_segment),
       cmocka_unit_test(test_state_write_enforces_expected_etag),

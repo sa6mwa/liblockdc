@@ -243,12 +243,13 @@ must filter changed records by this log/index sequence, not by public state
 generation, because metadata-only records and independent keys may share public
 generation values.
 
-New Pouch record metadata ends with a fixed binary index trailer containing a
-magic and the `uint64_t` sequence. The sequence allocator is durable and
-namespace-scoped, and serializes the short reservation path across processes
-and separate Pouch handles in one process. Older numeric Pouch records without
-that trailer replay through the legacy sequential fallback only; newly written
-records never depend on that fallback.
+Every state, object, staged-link, delete, and decision record ends with a fixed
+binary index trailer containing a magic and the `uint64_t` sequence. The
+sequence allocator is durable and namespace-scoped, and serializes the short
+reservation path across processes and separate Pouch handles in one process.
+A complete record without that trailer is rejected as corruption; replay never
+synthesizes ordering from physical file position. The high-water control record
+carries its sequence as its sole generation field.
 
 ### State Records
 
@@ -1073,8 +1074,8 @@ Required behavior:
   the tie-breaker for equal versions. `STATE_META` overlays are ordered by that
   sequence independently of payload generation, matching Go disk's separate
   state and metadata indexes; physical filename order is never commit order;
-- use the durable per-record index sequence when present, with sequential
-  replay only for historical records that predate the trailer;
+- require the durable per-record index sequence for every state, object,
+  staged-link, delete, and decision record;
 - stop at an incomplete, pending, or truncated tail in the manifest's active
   rolling segment, then let a later append-gate holder repair it; reject the
   same condition in a sealed non-active segment or installed snapshot as

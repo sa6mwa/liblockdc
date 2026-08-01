@@ -112,8 +112,8 @@ static int lc_pouch_namespace_parse_segment_id(const char *leaf,
   return 1;
 }
 
-int lc_pouch_namespace_segment_is_legacy(const char *leaf,
-                                         uint64_t *segment_id) {
+int lc_pouch_namespace_parse_segment_leaf(const char *leaf,
+                                          uint64_t *segment_id) {
   return lc_pouch_namespace_parse_segment_id(leaf, segment_id);
 }
 
@@ -396,7 +396,6 @@ static int lc_pouch_namespace_manifest_read(
     const lc_allocator *allocator, const char *manifest_path,
     uint64_t *active_segment_id, uint64_t *snapshot_segment_id,
     lc_pouch_generation *state_max_version, char **latest_snapshot,
-    int *snapshot_overlay,
     char ***obsolete_segments, uint64_t **obsolete_segment_marked_at,
     unsigned long *obsolete_segment_count, char ***obsolete_snapshots,
     uint64_t **obsolete_snapshot_marked_at,
@@ -409,7 +408,6 @@ static int lc_pouch_namespace_manifest_read(
   *snapshot_segment_id = 0UL;
   *state_max_version = 0UL;
   *latest_snapshot = NULL;
-  *snapshot_overlay = 0;
   *obsolete_segments = NULL;
   *obsolete_segment_marked_at = NULL;
   *obsolete_segment_count = 0UL;
@@ -457,10 +455,6 @@ static int lc_pouch_namespace_manifest_read(
         lc_free_with_allocator(allocator, *latest_snapshot);
         *latest_snapshot = copy;
         *snapshot_segment_id = parsed;
-      }
-    } else if (strcmp(line, "snapshot_mode") == 0) {
-      if (strcmp(value, "overlay") == 0) {
-        *snapshot_overlay = 1;
       }
     } else if (strcmp(line, "state_max_version") == 0) {
       char *end;
@@ -536,7 +530,6 @@ static int lc_pouch_namespace_manifest_read(
     *obsolete_snapshot_marked_at = NULL;
     *obsolete_snapshot_count = 0UL;
     *snapshot_segment_id = 0UL;
-    *snapshot_overlay = 0;
     return 0;
   }
   return *active_segment_id != 0UL;
@@ -635,15 +628,6 @@ static int lc_pouch_namespace_manifest_write(
     }
     rc = lc_pouch_namespace_manifest_text_append(allocator, &text, &length,
                                                  &capacity, line, error);
-    if (rc != LC_OK) {
-      lc_free_with_allocator(allocator, manifest_path);
-      lc_free_with_allocator(allocator, text);
-      return rc;
-    }
-  }
-  if (manifest->snapshot_overlay) {
-    rc = lc_pouch_namespace_manifest_text_append(
-        allocator, &text, &length, &capacity, "snapshot_mode=overlay\n", error);
     if (rc != LC_OK) {
       lc_free_with_allocator(allocator, manifest_path);
       lc_free_with_allocator(allocator, text);
@@ -1001,8 +985,7 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
   }
   manifest_valid = lc_pouch_namespace_manifest_read(
       allocator, manifest_path, &active_segment_id, &manifest_snapshot_id,
-      &state_max_version, &manifest_snapshot, &out->snapshot_overlay,
-      &out->obsolete_segments,
+      &state_max_version, &manifest_snapshot, &out->obsolete_segments,
       &out->obsolete_segment_marked_at, &out->obsolete_segment_count,
       &out->obsolete_snapshots, &out->obsolete_snapshot_marked_at,
       &out->obsolete_snapshot_count);
@@ -1017,12 +1000,9 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
     manifest_snapshot_id = max_snapshot_id;
     out->repaired = 1;
   }
-  if (!manifest_valid ||
-      (!out->snapshot_overlay &&
-       (active_segment_id < max_segment_id ||
-        active_segment_id <= manifest_snapshot_id))) {
+  if (!manifest_valid || active_segment_id < max_segment_id) {
     active_segment_id = max_segment_id != 0UL ? max_segment_id : 1UL;
-    if (active_segment_id <= manifest_snapshot_id) {
+    if (!manifest_valid && active_segment_id <= manifest_snapshot_id) {
       active_segment_id = manifest_snapshot_id + 1UL;
     }
     out->repaired = 1;
@@ -1097,10 +1077,8 @@ int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
 int lc_pouch_namespace_manifest_install_snapshot(
     const lc_allocator *allocator, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, const char *snapshot_leaf,
-    uint64_t snapshot_segment_id, uint64_t legacy_obsolete_marked_at_unix,
-    lc_error *error) {
+    uint64_t snapshot_segment_id, lc_error *error) {
   char *snapshot_copy;
-  unsigned long segment_index;
   int rc;
 
   if (manifest == NULL || snapshot_leaf == NULL || snapshot_leaf[0] == '\0' ||
@@ -1115,35 +1093,9 @@ int lc_pouch_namespace_manifest_install_snapshot(
                         "failed to allocate pouch snapshot name", NULL, NULL,
                         NULL);
   }
-  if (!manifest->snapshot_overlay && manifest->latest_snapshot != NULL) {
-    if (legacy_obsolete_marked_at_unix == 0U) {
-      lc_free_with_allocator(allocator, snapshot_copy);
-      return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch snapshot migration requires timestamp", NULL,
-                          NULL, NULL);
-    }
-    for (segment_index = 0UL; segment_index < manifest->segment_count;
-         ++segment_index) {
-      uint64_t segment_id;
-
-      if (!lc_pouch_namespace_parse_segment_id(
-              manifest->segment_leaves[segment_index], &segment_id) ||
-          segment_id > manifest->latest_snapshot_segment_id) {
-        continue;
-      }
-      rc = lc_pouch_namespace_manifest_mark_obsolete_segment(
-          allocator, manifest, manifest->segment_leaves[segment_index],
-          legacy_obsolete_marked_at_unix, error);
-      if (rc != LC_OK) {
-        lc_free_with_allocator(allocator, snapshot_copy);
-        return rc;
-      }
-    }
-  }
   lc_free_with_allocator(allocator, manifest->latest_snapshot);
   manifest->latest_snapshot = snapshot_copy;
   manifest->latest_snapshot_segment_id = snapshot_segment_id;
-  manifest->snapshot_overlay = 1;
   rc = lc_pouch_namespace_manifest_write(allocator, namespace_name, manifest,
                                          error);
   if (rc == LC_OK) {

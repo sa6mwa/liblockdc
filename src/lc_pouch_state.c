@@ -119,26 +119,19 @@ static int lc_pouch_state_manifest_leaf_obsolete(
 
 static int lc_pouch_state_manifest_segment_visible(
     const lc_pouch_namespace_manifest *manifest, const char *leaf) {
-  uint64_t legacy_id;
-
   if (manifest == NULL || leaf == NULL ||
       lc_pouch_state_manifest_leaf_obsolete(manifest, leaf, 0)) {
     return 0;
   }
-  return manifest->snapshot_overlay ||
-         !lc_pouch_namespace_segment_is_legacy(leaf, &legacy_id) ||
-         legacy_id > manifest->latest_snapshot_segment_id;
+  return 1;
 }
 
 static int lc_pouch_state_manifest_segment_allows_tail_repair(
     const lc_pouch_namespace_manifest *manifest, const char *leaf) {
-  uint64_t legacy_id;
-
   if (manifest == NULL || leaf == NULL) {
     return 0;
   }
-  return lc_pouch_namespace_segment_is_legacy(leaf, &legacy_id) &&
-         manifest->active_segment != NULL &&
+  return manifest->active_segment != NULL &&
          strcmp(leaf, manifest->active_segment) == 0;
 }
 
@@ -146,8 +139,10 @@ static int lc_pouch_state_meta_set_index_seq(unsigned char *meta,
                                              size_t meta_len,
                                              lc_pouch_generation index_seq,
                                              lc_error *error);
-static lc_pouch_generation
-lc_pouch_state_meta_index_seq(const unsigned char *meta, size_t meta_len);
+static int lc_pouch_state_meta_index_seq(const unsigned char *meta,
+                                         size_t meta_len,
+                                         lc_pouch_generation *out,
+                                         lc_error *error);
 static void
 lc_pouch_state_namespace_lock_release(lc_pouch_state_namespace_lock *lock);
 static int lc_pouch_state_manifest_max_version(
@@ -3265,15 +3260,13 @@ static int lc_pouch_state_entry_supersedes(
   if (current == NULL || !current->seen) {
     return 1;
   }
-  if (candidate->record_type == LC_POUCH_STATE_RECORD_STATE_META &&
-      candidate->index_seq != 0UL && current->index_seq != 0UL) {
+  if (candidate->record_type == LC_POUCH_STATE_RECORD_STATE_META) {
     /* Metadata is ordered independently from payload state. */
     return candidate->index_seq > current->index_seq;
   }
   return candidate->version > current->version ||
          (candidate->version == current->version &&
-          (candidate->index_seq == 0UL || current->index_seq == 0UL ||
-           candidate->index_seq > current->index_seq));
+          candidate->index_seq > current->index_seq);
 }
 
 static int lc_pouch_state_cache_apply_entry(lc_pouch *pouch,
@@ -4468,19 +4461,37 @@ static int lc_pouch_state_meta_set_index_seq(unsigned char *meta,
   return LC_OK;
 }
 
-static lc_pouch_generation
-lc_pouch_state_meta_index_seq(const unsigned char *meta, size_t meta_len) {
+static int lc_pouch_state_meta_index_seq(const unsigned char *meta,
+                                         size_t meta_len,
+                                         lc_pouch_generation *out,
+                                         lc_error *error) {
   size_t trailer_offset;
+  int rc;
 
-  if (meta == NULL || meta_len < LC_POUCH_STATE_INDEX_TRAILER_BYTES) {
-    return 0UL;
+  if (meta == NULL || out == NULL ||
+      meta_len < LC_POUCH_STATE_INDEX_TRAILER_BYTES) {
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "pouch state metadata index trailer is missing", NULL,
+                        NULL, "pouch");
   }
   trailer_offset = meta_len - LC_POUCH_STATE_INDEX_TRAILER_BYTES;
   if (lc_pouch_state_get32(meta + trailer_offset) !=
       LC_POUCH_STATE_INDEX_TRAILER_MAGIC) {
-    return 0UL;
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "pouch state metadata index trailer is invalid", NULL,
+                        NULL, "pouch");
   }
-  return (lc_pouch_generation)lc_pouch_state_get64(meta + trailer_offset + 4U);
+  rc = lc_pouch_state_decode_generation(
+      lc_pouch_state_get64(meta + trailer_offset + 4U), out, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (*out == 0UL) {
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "pouch state metadata index sequence is invalid", NULL,
+                        NULL, "pouch");
+  }
+  return LC_OK;
 }
 
 static int lc_pouch_state_encode_payload_meta(
@@ -4913,8 +4924,12 @@ payload_ref_decoded:
     lc_pouch_state_entry_cleanup(allocator, entry);
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
+  rc = lc_pouch_state_meta_index_seq(meta, meta_len, &entry->index_seq, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_entry_cleanup(allocator, entry);
+    return rc;
+  }
   entry->version = version;
-  entry->index_seq = lc_pouch_state_meta_index_seq(meta, meta_len);
   entry->bytes = plain_bytes;
   entry->cipher_bytes = stored_bytes;
   entry->updated_at_unix =
@@ -4969,8 +4984,12 @@ static int lc_pouch_state_decode_delete_meta(
     lc_pouch_state_entry_cleanup(allocator, entry);
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
+  rc = lc_pouch_state_meta_index_seq(meta, meta_len, &entry->index_seq, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_entry_cleanup(allocator, entry);
+    return rc;
+  }
   entry->version = version;
-  entry->index_seq = lc_pouch_state_meta_index_seq(meta, meta_len);
   entry->updated_at_unix =
       lc_pouch_state_decode_unix_seconds(lc_pouch_state_get64(meta + 8));
   entry->seen = 1;
@@ -5032,8 +5051,12 @@ static int lc_pouch_state_decode_decision_meta(
     lc_pouch_state_entry_cleanup(allocator, entry);
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
+  rc = lc_pouch_state_meta_index_seq(meta, meta_len, &entry->index_seq, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_entry_cleanup(allocator, entry);
+    return rc;
+  }
   entry->version = version;
-  entry->index_seq = lc_pouch_state_meta_index_seq(meta, meta_len);
   entry->seen = 1;
   entry->found = 0;
   entry->control = 1;
@@ -5069,6 +5092,7 @@ static int lc_pouch_state_decode_high_water_meta(const lc_allocator *allocator,
                         NULL);
   }
   entry->version = version;
+  entry->index_seq = version;
   entry->seen = 1;
   entry->found = 0;
   entry->control = 1;
@@ -5765,8 +5789,7 @@ static int lc_pouch_state_decision_apply(lc_pouch *pouch,
       continue;
     }
     if (entry->version < decision->version ||
-        (entry->version == decision->version && entry->index_seq != 0UL &&
-         decision->index_seq != 0UL &&
+        (entry->version == decision->version &&
          entry->index_seq <= decision->index_seq)) {
       return LC_OK;
     }
@@ -5932,7 +5955,6 @@ static int lc_pouch_state_cache_replay_file(
   uint64_t repair_offset;
   uint64_t file_size;
   struct stat st;
-  int snapshot_file;
   int rc;
 
   fp = fopen(segment_path, "rb");
@@ -5962,7 +5984,6 @@ static int lc_pouch_state_cache_replay_file(
     (void)fclose(fp);
     return rc;
   }
-  snapshot_file = strncmp(container_leaf, "snapshot-", 9U) == 0;
   memset(&entry, 0, sizeof(entry));
   rc = LC_OK;
   repair_tail = 0;
@@ -5996,25 +6017,8 @@ static int lc_pouch_state_cache_replay_file(
     if (!found) {
       break;
     }
-    if (entry.seen) {
-      if (entry.index_seq != 0UL) {
-        if (entry.index_seq > cache->max_version) {
-          cache->max_version = entry.index_seq;
-        }
-      } else if (entry.control) {
-        entry.index_seq = entry.version;
-      } else if (snapshot_file) {
-        entry.index_seq = cache->max_version;
-      } else {
-        if (cache->max_version == UINT64_MAX) {
-          rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                            "pouch state replay index sequence overflow", NULL,
-                            NULL, "pouch");
-          break;
-        }
-        ++cache->max_version;
-        entry.index_seq = cache->max_version;
-      }
+    if (entry.seen && entry.index_seq > cache->max_version) {
+      cache->max_version = entry.index_seq;
     }
     rc = lc_pouch_state_cache_apply_entry(pouch, cache, &entry, error);
     if (rc != LC_OK) {
@@ -7677,31 +7681,13 @@ static int lc_pouch_state_queue_compacted_files(
 static int lc_pouch_state_payload_container_is_valid(const char *leaf) {
   size_t len;
   size_t i;
-  uint64_t legacy_id;
+  uint64_t segment_id;
 
   if (leaf == NULL) {
     return 0;
   }
   len = strlen(leaf);
-  if (lc_pouch_namespace_segment_is_legacy(leaf, &legacy_id)) {
-    return 1;
-  }
-  if (len == 61U && strncmp(leaf, "seg-", 4U) == 0 &&
-      strcmp(leaf + 57U, ".log") == 0) {
-    for (i = 4U; i < 36U; ++i) {
-      if (!((leaf[i] >= '0' && leaf[i] <= '9') ||
-            (leaf[i] >= 'a' && leaf[i] <= 'f'))) {
-        return 0;
-      }
-    }
-    if (leaf[36] != '-') {
-      return 0;
-    }
-    for (i = 37U; i < 57U; ++i) {
-      if (leaf[i] < '0' || leaf[i] > '9') {
-        return 0;
-      }
-    }
+  if (lc_pouch_namespace_parse_segment_leaf(leaf, &segment_id)) {
     return 1;
   }
   if (len == 33U && strncmp(leaf, "snapshot-", 9U) == 0 &&
@@ -8026,14 +8012,12 @@ static int lc_pouch_state_compact_namespace(
   lc_pouch_state_compaction_capture capture;
   char *snapshot_leaf;
   uint64_t compacted_segment_id;
-  uint64_t legacy_obsolete_marked_at;
   int snapshot_installed;
   int protected_snapshot_blocked;
   int rc;
 
   snapshot_installed = 0;
   protected_snapshot_blocked = 0;
-  legacy_obsolete_marked_at = 0U;
   if (compacted_out != NULL) {
     *compacted_out = 0;
   }
@@ -8156,23 +8140,9 @@ static int lc_pouch_state_compact_namespace(
           pouch, manifest, &capture, &snapshot_cache, error);
     }
     if (rc == LC_OK) {
-      if (!manifest->snapshot_overlay && manifest->latest_snapshot != NULL) {
-        lc_pouch_unix_seconds now;
-
-        now = lc_pouch_maintenance_now_seconds();
-        if (now <= 0L) {
-          rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                            "pouch snapshot migration timestamp is invalid",
-                            NULL, NULL, "pouch");
-        } else {
-          legacy_obsolete_marked_at = (uint64_t)now;
-        }
-      }
-    }
-    if (rc == LC_OK) {
       rc = lc_pouch_namespace_manifest_install_snapshot(
           &pouch->allocator, namespace_name, manifest, snapshot_leaf,
-          compacted_segment_id, legacy_obsolete_marked_at, error);
+          compacted_segment_id, error);
       if (rc == LC_OK) {
         snapshot_installed = 1;
       } else if (abort_diagnostic != NULL) {

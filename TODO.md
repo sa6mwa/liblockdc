@@ -136,6 +136,10 @@ These items invalidate a claim of full Go-disk alignment until fixed.
     public-API differences. Default Pouch and the benchmark now use Go
     `failover`/`NoSync`; Pouch's stricter `durable_sync=1` policy is an
     explicit opt-in rather than a comparison divergence.
+  - 2026-08-01 cutover cleanup removed the remaining UUID writer-segment leaf
+    acceptance, snapshot migration discriminator, and no-index-trailer replay
+    fallback. Numeric rolling segments and durable index trailers are now the
+    sole Pouch replay format.
   - Broad verification remains deliberately deferred to the later functional
     verification phase; the focused checks and bounded concurrency benchmark
     do not replace `test-all`.
