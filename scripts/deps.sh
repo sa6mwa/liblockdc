@@ -12,6 +12,9 @@ local_download_root=${LOCKDC_DOWNLOAD_ROOT:-$repo_root/.cache/downloads}
 lonejson_abi_version=${LOCKDC_LONEJSON_ABI_VERSION:-25}
 liblql_abi_version=${LOCKDC_LIBLQL_ABI_VERSION:-0}
 
+# shellcheck source=assert_generated_path.sh
+source "$script_dir/assert_generated_path.sh"
+
 case "$preset" in
   deps-x86_64-linux-gnu)
     cmake_preset="x86_64-linux-gnu-release"
@@ -104,6 +107,10 @@ case "$preset" in
     exit 2
     ;;
 esac
+
+lockdc_assert_generated_path "$repo_root" "$local_download_root"
+lockdc_assert_generated_path "$repo_root" "$deps_root"
+lockdc_assert_generated_path "$repo_root" "$deps_build_root"
 
 if [ "$dry_run" = "1" ]; then
   printf 'preset=%s\n' "$preset"
@@ -580,7 +587,10 @@ stage_cpkt_component_layout() {
 }
 
 prune_dependency_install_trees() {
-  cmake -DLOCKDC_EXTERNAL_ROOT="$deps_root" -P "$repo_root/cmake/prune_dependency_install_tree.cmake"
+  cmake \
+    -DLOCKDC_ROOT="$repo_root" \
+    -DLOCKDC_EXTERNAL_ROOT="$deps_root" \
+    -P "$repo_root/cmake/prune_dependency_install_tree.cmake"
 }
 
 assert_dependency_install_tree_privacy() {

@@ -77,6 +77,7 @@ if(TARGET lc_example_acquire_lease_lifecycle)
   set_tests_properties(lc_example_smoke_acquire_lease_lifecycle PROPERTIES
     LABELS "e2e;examples"
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -89,6 +90,7 @@ if(TARGET lc_example_acquire_for_update)
     LABELS "e2e;examples"
     PASS_REGULAR_EXPRESSION "acquire_for_update updated key"
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -100,6 +102,7 @@ if(TARGET lc_example_client_and_lease_methods)
   set_tests_properties(lc_example_smoke_client_and_lease_methods PROPERTIES
     LABELS "e2e;examples"
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -111,6 +114,7 @@ if(TARGET lc_example_management_admin)
   set_tests_properties(lc_example_smoke_management_admin PROPERTIES
     LABELS "e2e;examples"
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -122,6 +126,7 @@ if(TARGET lc_example_curl_fetch_into_lockd)
   set_tests_properties(lc_example_smoke_curl_fetch_into_lockd PROPERTIES
     LABELS "e2e;examples"
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -139,6 +144,7 @@ if(TARGET lc_example_local_mutate)
     LABELS "e2e;examples"
     PASS_REGULAR_EXPRESSION "\"kind\":\"example-local-mutate\""
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -151,6 +157,7 @@ if(TARGET lc_example_startconsumer)
     LABELS "e2e;examples"
     PASS_REGULAR_EXPRESSION "\\{\"counter\":3\\}"
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -210,3 +217,4 @@ lc_add_lua_e2e_test(
   "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_bundle_sources.lua"
   ENV_OVERRIDES "LOCKDC_KEY_PREFIX=tests/lua/e2e-bundle-sources;LOCKDC_OWNER=lua-e2e-bundle-sources"
 )
+lc_apply_default_test_timeouts()

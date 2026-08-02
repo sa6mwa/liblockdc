@@ -61,6 +61,7 @@ install_lonejson_dependency() {
         require_command tar
 
         lonejson_unpack_dir="${tree_dir}-lonejson-src"
+        lockdc_assert_generated_path "$luarocks_workdir" "$lonejson_unpack_dir"
         rm -rf "$lonejson_unpack_dir"
         mkdir -p "$lonejson_unpack_dir"
         (

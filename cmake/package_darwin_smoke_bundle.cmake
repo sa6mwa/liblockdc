@@ -4,6 +4,7 @@ endif()
 if(NOT DEFINED LOCKDC_ROOT)
     message(FATAL_ERROR "LOCKDC_ROOT is required")
 endif()
+include("${CMAKE_CURRENT_LIST_DIR}/LcGeneratedPath.cmake")
 get_filename_component(LOCKDC_BINARY_DIR "${LOCKDC_BINARY_DIR}" ABSOLUTE)
 get_filename_component(LOCKDC_ROOT "${LOCKDC_ROOT}" ABSOLUTE)
 if(DEFINED LOCKDC_DIST_DIR AND NOT "${LOCKDC_DIST_DIR}" STREQUAL "")
@@ -56,6 +57,9 @@ set(release_archive "${bundle_dist}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_
 set(release_prefix "${extract_root}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}")
 set(smoke_archive "${bundle_root}/${stage_name}.zip")
 
+lockdc_assert_generated_path("${LOCKDC_ROOT}" "${LOCKDC_BINARY_DIR}")
+lockdc_assert_generated_path("${LOCKDC_ROOT}" "${lockdc_dist_dir}")
+lockdc_assert_generated_path("${LOCKDC_ROOT}" "${bundle_root}")
 file(REMOVE_RECURSE "${bundle_root}")
 file(MAKE_DIRECTORY "${bundle_dist}" "${extract_root}" "${consumer_src_dir}" "${consumer_bin_dir}")
 

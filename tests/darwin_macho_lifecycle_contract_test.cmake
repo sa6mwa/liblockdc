@@ -74,6 +74,14 @@ assert_contains(
     "explicit osxcross Darwin linker")
 assert_contains(
     "${darwin_toolchain}"
+    [=[set(CMAKE_NM "${LOCKDC_OSXCROSS_BIN_DIR}/${LOCKDC_OSXCROSS_HOST}-nm"]=]
+    "explicit osxcross Darwin nm")
+assert_contains(
+    "${darwin_toolchain}"
+    [=[set(CMAKE_STRIP "${LOCKDC_OSXCROSS_BIN_DIR}/${LOCKDC_OSXCROSS_HOST}-strip"]=]
+    "explicit osxcross Darwin strip")
+assert_contains(
+    "${darwin_toolchain}"
     [=[set(_lockdc_darwin_linker_flag "--ld-path=${CMAKE_LINKER}")]=]
     "absolute Darwin --ld-path linker route")
 assert_not_contains(

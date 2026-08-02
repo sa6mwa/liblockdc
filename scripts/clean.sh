@@ -4,7 +4,11 @@ set -euo pipefail
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 
+# shellcheck source=assert_generated_path.sh
+source "$script_dir/assert_generated_path.sh"
+
 remove_if_present() {
+  lockdc_assert_generated_path "$repo_root" "$1"
   if [ -e "$1" ]; then
     # Go makes cached module directories read-only. Restore owner access on
     # directories only so rm can remove the repository-local generated tree.

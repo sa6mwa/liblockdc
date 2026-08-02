@@ -174,6 +174,12 @@ endif()
 if(NOT DEFINED LOCKDC_DEPENDENCY_BUILD_ROOT)
     set(LOCKDC_DEPENDENCY_BUILD_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps-build/${LOCKDC_TARGET_ID}" CACHE PATH "Stable build root for downloaded third-party dependencies.")
 endif()
+if(LOCKDC_BUILD_DEPENDENCIES)
+    include(LcGeneratedPath)
+    lockdc_assert_generated_path("${CMAKE_SOURCE_DIR}" "${LOCKDC_DOWNLOAD_ROOT}")
+    lockdc_assert_generated_path("${CMAKE_SOURCE_DIR}" "${LOCKDC_EXTERNAL_ROOT}")
+    lockdc_assert_generated_path("${CMAKE_SOURCE_DIR}" "${LOCKDC_DEPENDENCY_BUILD_ROOT}")
+endif()
 
 set(LOCKDC_C_TEST_ENVIRONMENT "")
 if(CMAKE_CROSSCOMPILING)
@@ -752,6 +758,17 @@ if(LOCKDC_BUILD_TESTS OR LOCKDC_BUILD_FUZZERS)
     enable_testing()
 endif()
 
+macro(lc_apply_default_test_timeouts)
+    get_property(lockdc_registered_tests DIRECTORY PROPERTY TESTS)
+    foreach(lockdc_registered_test IN LISTS lockdc_registered_tests)
+        get_property(lockdc_timeout_is_set
+            TEST "${lockdc_registered_test}" PROPERTY TIMEOUT SET)
+        if(NOT lockdc_timeout_is_set)
+            set_tests_properties("${lockdc_registered_test}" PROPERTIES TIMEOUT 120)
+        endif()
+    endforeach()
+endmacro()
+
 if(LOCKDC_BUILD_TESTS)
     add_subdirectory(tests)
 
@@ -1008,6 +1025,38 @@ if(LOCKDC_BUILD_TESTS)
         RUN_SERIAL TRUE
         TIMEOUT 10)
 
+    add_test(NAME dependency_prune_path_guard_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/dependency_prune_path_guard_test.cmake
+    )
+    set_tests_properties(dependency_prune_path_guard_test PROPERTIES
+        LABELS "unit;local;packaging"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
+    add_test(NAME ctest_timeout_contract_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ctest_timeout_contract_test.cmake
+    )
+    set_tests_properties(ctest_timeout_contract_test PROPERTIES
+        LABELS "unit;local"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
+    add_test(NAME source_manifest_boundary_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/source_manifest_boundary_test.cmake
+    )
+    set_tests_properties(source_manifest_boundary_test PROPERTIES
+        LABELS "unit;local;packaging"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
     add_test(NAME lifecycle_command_surface_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
@@ -1039,11 +1088,14 @@ if(LOCKDC_BUILD_TESTS)
         RUN_SERIAL TRUE
         TIMEOUT 10)
 
+    lc_apply_default_test_timeouts()
+
 endif()
 
 if(LOCKDC_BUILD_FUZZERS)
     lc_assert_fuzz_toolchain_supported()
     add_subdirectory(tests/fuzz)
+    lc_apply_default_test_timeouts()
 endif()
 
 find_program(GCOV_BIN NAMES gcov)

@@ -1,6 +1,11 @@
+if(NOT DEFINED LOCKDC_ROOT OR LOCKDC_ROOT STREQUAL "")
+  message(FATAL_ERROR "LOCKDC_ROOT is required")
+endif()
 if(NOT DEFINED LOCKDC_EXTERNAL_ROOT OR LOCKDC_EXTERNAL_ROOT STREQUAL "")
   message(FATAL_ERROR "LOCKDC_EXTERNAL_ROOT is required")
 endif()
+include("${CMAKE_CURRENT_LIST_DIR}/LcGeneratedPath.cmake")
+lockdc_assert_generated_path("${LOCKDC_ROOT}" "${LOCKDC_EXTERNAL_ROOT}")
 
 function(lockdc_remove_if_exists path)
   if(EXISTS "${path}" OR IS_SYMLINK "${path}")

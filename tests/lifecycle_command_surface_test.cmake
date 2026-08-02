@@ -8,6 +8,7 @@ set(release_script_path "${LOCKDC_ROOT}/scripts/release.sh")
 set(release_matrix_script_path "${LOCKDC_ROOT}/scripts/run_linux_release_matrix.sh")
 set(source_smoke_script_path "${LOCKDC_ROOT}/scripts/test_release_from_source.sh")
 set(clean_script_path "${LOCKDC_ROOT}/scripts/clean.sh")
+set(e2e_script_path "${LOCKDC_ROOT}/scripts/test-e2e.sh")
 set(ledger_path "${LOCKDC_ROOT}/docs/lifecycle-migration.md")
 
 file(READ "${makefile_path}" root_makefile)
@@ -16,6 +17,7 @@ file(READ "${release_script_path}" release_script)
 file(READ "${release_matrix_script_path}" release_matrix_script)
 file(READ "${source_smoke_script_path}" source_smoke_script)
 file(READ "${clean_script_path}" clean_script)
+file(READ "${e2e_script_path}" e2e_script)
 file(READ "${ledger_path}" lifecycle_ledger)
 
 function(assert_contains haystack needle description)
@@ -47,6 +49,9 @@ foreach(obsolete_script
 endforeach()
 
 foreach(target
+        build-host
+        test-install-tree
+        example-smoke-local
         finalize-slice
         valgrind
         prerelease
@@ -93,6 +98,9 @@ assert_contains(root_makefile "bash ./scripts/lifecycle-version-contract.sh" "li
 assert_contains(root_makefile "print-release-version:" "Make-owned release version surface")
 assert_contains(root_makefile "bash ./scripts/release_version.sh" "standard release version printer runner")
 assert_contains(root_makefile "bash ./scripts/test-e2e.sh" "standard e2e runner")
+assert_contains(root_makefile "bash ./scripts/host_test.sh build" "standard host build runner")
+assert_contains(root_makefile "'^install_tree_sdk_test$$'" "installed SDK test filter")
+assert_contains(root_makefile "bash ./scripts/test-e2e.sh examples" "example smoke runner")
 assert_contains(root_makefile "$(CTEST) --preset debug-lua" "standard Lua test preset runner")
 assert_contains(root_makefile "bash ./scripts/test_release_from_source.sh" "standard source archive smoke runner")
 assert_contains(root_makefile "bash ./scripts/verify_release_privacy.sh" "standard release privacy runner")
@@ -122,6 +130,10 @@ assert_not_contains(source_smoke_script "detect_host_release_preset" "ambient so
 assert_contains(release_matrix_script "bash \"$script_dir/cross_test.sh\" release" "standard release matrix cross test step")
 assert_contains(release_matrix_script "bash \"$script_dir/run_linux_package_matrix.sh\"" "standard release matrix package step")
 assert_contains(clean_script "remove_if_present \"$repo_root/.luarocks-build\"" "LuaRocks build state cleanup")
+assert_contains(clean_script "lockdc_assert_generated_path" "generated-path cleanup guard")
+assert_not_contains(e2e_script "test.sh" "deleted e2e dispatcher reference")
+assert_contains(e2e_script "-L examples" "example-only e2e filter")
+assert_contains(e2e_script "unset LD_LIBRARY_PATH" "isolated e2e runtime loader path")
 
 execute_process(
     COMMAND
@@ -158,6 +170,9 @@ if(NOT help_result EQUAL 0)
 endif()
 
 foreach(target
+        build-host
+        test-install-tree
+        example-smoke-local
         finalize-slice
         valgrind
         prerelease

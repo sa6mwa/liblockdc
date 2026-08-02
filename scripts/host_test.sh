@@ -3,6 +3,16 @@ set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+mode=${1:-test}
+
+case "$mode" in
+  build|test)
+    ;;
+  *)
+    printf '%s\n' "usage: scripts/host_test.sh [build|test]" >&2
+    exit 2
+    ;;
+esac
 
 # Host-executable release testing always uses the pinned Bootlin x86_64 Linux
 # targets. Do not select a compiler or dependency root from the ambient host.
@@ -37,6 +47,8 @@ done
 
 for preset in "${presets[@]}"; do
   "$script_dir/build.sh" "$preset"
-  ctest --preset "$preset" --output-on-failure --progress --stop-on-failure \
-    --timeout "$ctest_timeout" -LE lifecycle-host
+  if [ "$mode" = "test" ]; then
+    ctest --preset "$preset" --output-on-failure --progress --stop-on-failure \
+      --timeout "$ctest_timeout" -LE lifecycle-host
+  fi
 done

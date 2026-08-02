@@ -223,7 +223,7 @@ if(EXISTS "${LOCKDC_ROOT}/.git")
     set(lockdc_ignored_source_manifest_path "${lockdc_verify_work_dir}/lockdc-source-ignored-manifest.txt")
     set(lockdc_actual_source_manifest_path "${lockdc_verify_work_dir}/lockdc-source-actual-manifest.txt")
     execute_process(
-        COMMAND git -C "${LOCKDC_ROOT}" ls-files --cached --modified --others --exclude-standard
+        COMMAND git -C "${LOCKDC_ROOT}" ls-files --cached
         OUTPUT_FILE "${lockdc_expected_source_manifest_path}"
         RESULT_VARIABLE lockdc_git_ls_result
     )

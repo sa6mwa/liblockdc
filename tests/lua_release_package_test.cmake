@@ -172,6 +172,7 @@ foreach(required_source
     "src/lc_engine_api.h"
     "src/lc_intcompat.h"
     "src/lc_pouch.h"
+    "scripts/assert_generated_path.sh"
     "scripts/build_lua_rock.sh"
 )
     if(NOT EXISTS "${lockdc_lua_source_extract_root}/${required_source}")

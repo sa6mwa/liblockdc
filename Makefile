@@ -117,8 +117,8 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 .PHONY: \
 	help \
 	__deps-debug __deps-release __deps-cross \
-	__build-debug __build-x86_64-linux-gnu-release __build-release __build-e2e __build-coverage __build-fuzz \
-	__test-debug __test-host __test-cross __test-e2e __test-all __test-coverage \
+	__build-debug __build-host __build-x86_64-linux-gnu-release __build-release __build-e2e __build-coverage __build-fuzz \
+	__test-debug __test-host __test-cross __test-e2e __test-install-tree __example-smoke-local __test-all __test-coverage \
 	__format \
 	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf __benchmark-pouch-routine __benchmark-pouch-go __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __verify-release-privacy __clean-dist \
@@ -126,8 +126,8 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__dev-up __dev-down __dev-reset __dev-ps __dev-logs __cross-build __cross-preset-test __cross-test \
 	__prerelease __prerelease-ordinary __prerelease-live __prerelease-hardening __lifecycle-version-contract __release __release-pipeline __release-matrix __clean \
 	deps-debug deps-release deps-cross \
-	build build-debug build-release build-e2e build-coverage build-fuzz \
-	test test-debug test-host test-cross test-e2e test-all test-coverage \
+	build build-debug build-host build-release build-e2e build-coverage build-fuzz \
+	test test-debug test-host test-cross test-e2e test-install-tree example-smoke-local test-all test-coverage \
 	format \
 	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives verify-release-privacy clean-dist \
@@ -139,6 +139,7 @@ help:
 	@printf '%s\n' \
 		'make build              Configure and build the ASan/UBSan debug preset.' \
 		'make build-debug        Configure and build the ASan/UBSan debug preset.' \
+		'make build-host         Configure and build the pinned Bootlin host-executable GNU and musl release presets.' \
 		'make build-release      Configure and build the full shipped Linux release matrix.' \
 		'make build-e2e          Configure and build the e2e preset.' \
 		'make build-coverage     Configure and build the coverage preset.' \
@@ -151,6 +152,8 @@ help:
 		'make test-host          Run the pinned Bootlin host-executable GNU and musl release suites.' \
 		'make test-cross         Run the non-host cross release suites.' \
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
+		'make test-install-tree  Validate CMake and pkg-config consumers against the installed native SDK.' \
+		'make example-smoke-local Run local-service example smoke tests.' \
 		'make test-all           Run debug, host and QEMU cross tests, Valgrind, fuzz smoke, local e2e, and Pouch-vs-disk performance gates.' \
 		'make test-coverage      Run the coverage preset test suite and build the coverage report.' \
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
@@ -205,7 +208,7 @@ help:
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
 		'make prerelease         Run deterministic pre-release confidence without an initial clean.' \
 		'make prerelease-live    Refuse without LOCKDC_PRERELEASE_LIVE=1; no live-provider checks are currently defined.' \
-		'make prerelease-hardening  Run prerelease plus full fuzzing, Pouch Go parity, and the release matrix.' \
+		'make prerelease-hardening  Run prerelease plus full fuzzing and the release matrix.' \
 		'make lifecycle-version-contract  Verify exact release tag semantics before clean release work.' \
 		'make print-release-version  Print the release version resolved by the Make-owned release surface.' \
 		'make release            Run the clean-slate final release workflow: version contract, clean, then the shared release proof graph.' \
@@ -243,6 +246,12 @@ build-debug:
 __build-debug: __deps-debug
 	$(CMAKE) --preset $(DEBUG_PRESET)
 	$(CMAKE) --build --preset $(DEBUG_PRESET)
+
+build-host:
+	$(TIMED) build-host $(MAKE) __build-host
+
+__build-host:
+	bash ./scripts/host_test.sh build
 
 build-release:
 	$(TIMED) build-release $(MAKE) __build-release
@@ -300,6 +309,19 @@ test-e2e:
 
 __test-e2e:
 	bash ./scripts/test-e2e.sh
+
+test-install-tree:
+	$(TIMED) test-install-tree $(MAKE) __test-install-tree
+
+__test-install-tree: __build-x86_64-linux-gnu-release
+	$(CTEST) --preset $(X86_64_GNU_RELEASE_PRESET) --output-on-failure \
+		--progress --stop-on-failure -R '^install_tree_sdk_test$$'
+
+example-smoke-local:
+	$(TIMED) example-smoke-local $(MAKE) __example-smoke-local
+
+__example-smoke-local:
+	bash ./scripts/test-e2e.sh examples
 
 test-all:
 	$(TIMED) test-all $(MAKE) __test-all

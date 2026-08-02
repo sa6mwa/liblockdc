@@ -11,7 +11,6 @@ stage_dir=$2
 release_version=${3:-}
 manifest_path="$repo_root/RELEASE_MANIFEST"
 tmp_manifest=""
-tmp_ignored=""
 tmp_filtered=""
 tmp_existing=""
 
@@ -21,9 +20,6 @@ source "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/assert_generated_path.sh
 cleanup() {
     if [[ -n "$tmp_manifest" && -f "$tmp_manifest" ]]; then
         rm -f "$tmp_manifest"
-    fi
-    if [[ -n "$tmp_ignored" && -f "$tmp_ignored" ]]; then
-        rm -f "$tmp_ignored"
     fi
     if [[ -n "$tmp_filtered" && -f "$tmp_filtered" ]]; then
         rm -f "$tmp_filtered"
@@ -41,17 +37,10 @@ mkdir -p "$stage_dir"
 
 if git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     tmp_manifest="$(mktemp)"
-    tmp_ignored="$(mktemp)"
     tmp_filtered="$(mktemp)"
-    git -C "$repo_root" ls-files --cached --modified --others --exclude-standard \
+    git -C "$repo_root" ls-files --cached \
         | sort -u >"$tmp_manifest"
-    git -C "$repo_root" check-ignore --no-index --stdin <"$tmp_manifest" \
-        >"$tmp_ignored" 2>/dev/null || true
-    if [[ -s "$tmp_ignored" ]]; then
-        grep -F -x -v -f "$tmp_ignored" "$tmp_manifest" >"$tmp_filtered"
-    else
-        cp "$tmp_manifest" "$tmp_filtered"
-    fi
+    cp "$tmp_manifest" "$tmp_filtered"
     tmp_existing="$(mktemp)"
     while IFS= read -r source_path; do
         if [[ -e "$repo_root/$source_path" || -L "$repo_root/$source_path" ]]; then

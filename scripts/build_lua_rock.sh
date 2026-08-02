@@ -23,6 +23,14 @@ module_path="${module_dir}/core.${lib_ext}"
 rock_install_module_path="${module_dir}/core.so"
 lockdc_release_base_url="https://github.com/sa6mwa/liblockdc/releases/download/v${expected_lockdc_version}"
 
+# shellcheck source=assert_generated_path.sh
+. "$repo_root/scripts/assert_generated_path.sh"
+lockdc_assert_generated_path "$repo_root" "$build_root"
+lockdc_assert_generated_path "$repo_root" "$module_dir"
+lockdc_assert_generated_path "$repo_root" "$object_path"
+lockdc_assert_generated_path "$repo_root" "$module_path"
+lockdc_assert_generated_path "$repo_root" "$rock_install_module_path"
+
 if [ -z "${cc}" ]; then
   printf 'compiler command is empty\n' >&2
   exit 1

@@ -9,6 +9,13 @@ if(DEFINED lockdc_input_dist_dir)
 elseif(NOT DEFINED LOCKDC_DIST_DIR OR "${LOCKDC_DIST_DIR}" STREQUAL "")
     set(LOCKDC_DIST_DIR "${LOCKDC_ROOT}/dist")
 endif()
+if(NOT DEFINED LOCKDC_ROOT OR "${LOCKDC_ROOT}" STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_ROOT is required")
+endif()
+if(NOT DEFINED LOCKDC_BINARY_DIR OR "${LOCKDC_BINARY_DIR}" STREQUAL "")
+    message(FATAL_ERROR "LOCKDC_BINARY_DIR is required")
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/LcGeneratedPath.cmake")
 
 find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks)
 find_program(LOCKDC_TAR_BIN NAMES tar)
@@ -41,6 +48,9 @@ set(lockdc_lua_source_archive_base "${lockdc_lua_stage_root}/${lockdc_lua_source
 set(lockdc_lua_source_archive_path "${lockdc_lua_source_archive_base}.gz")
 get_filename_component(lockdc_lua_source_archive_name "${lockdc_lua_source_archive_path}" NAME)
 
+lockdc_assert_generated_path("${LOCKDC_ROOT}" "${LOCKDC_BINARY_DIR}")
+lockdc_assert_generated_path("${LOCKDC_ROOT}" "${LOCKDC_DIST_DIR}")
+lockdc_assert_generated_path("${LOCKDC_ROOT}" "${lockdc_lua_stage_root}")
 file(REMOVE_RECURSE "${lockdc_lua_stage_root}")
 file(MAKE_DIRECTORY "${lockdc_lua_stage_workdir}")
 file(MAKE_DIRECTORY "${lockdc_lua_source_root}/lua/lockdc")
@@ -63,6 +73,7 @@ file(COPY "${LOCKDC_ROOT}/src/lc_engine_api.h" DESTINATION "${lockdc_lua_source_
 file(COPY "${LOCKDC_ROOT}/src/lc_intcompat.h" DESTINATION "${lockdc_lua_source_root}/src")
 file(COPY "${LOCKDC_ROOT}/src/lc_pouch.h" DESTINATION "${lockdc_lua_source_root}/src")
 file(COPY "${LOCKDC_ROOT}/scripts/build_lua_rock.sh" DESTINATION "${lockdc_lua_source_root}/scripts")
+file(COPY "${LOCKDC_ROOT}/scripts/assert_generated_path.sh" DESTINATION "${lockdc_lua_source_root}/scripts")
 file(COPY "${LOCKDC_ROOT}/include/lc/lc.h" DESTINATION "${lockdc_lua_source_root}/include/lc")
 file(COPY "${LOCKDC_ROOT}/LICENSE" DESTINATION "${lockdc_lua_source_root}")
 file(COPY "${LOCKDC_ROOT}/README.md" DESTINATION "${lockdc_lua_source_root}")
@@ -76,6 +87,7 @@ file(WRITE "${lockdc_lua_source_root}/RELEASE_MANIFEST"
     "include/lc/lc.h\n"
     "lockdc.rockspec.in\n"
     "lua/lockdc/init.lua\n"
+    "scripts/assert_generated_path.sh\n"
     "scripts/build_lua_rock.sh\n"
     "src/lc_api_internal.h\n"
     "src/lc_engine_api.h\n"
