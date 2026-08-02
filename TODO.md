@@ -4,13 +4,12 @@
 
 ### Status
 
-Pouch is not fully aligned with Go lockd disk. The previous cutover aligned the
-durable record model, keyspace, lease semantics, queue/attachment behavior,
-transactions, recovery, and compaction safety, but it did not align the
-performance-critical logstore architecture. In particular, Pouch still sends
-normal exclusive-mode mutations through shared-root discovery and append
-machinery. It must not be described as fully aligned until this document's
-work is complete and verified.
+Pouch is not fully aligned with Go lockd disk. The cutover aligned the durable
+record model, keyspace, lease semantics, queue/attachment behavior,
+transactions, recovery, compaction safety, and the normal exclusive-mode
+resident append path. It must not be described as fully aligned until this
+document's remaining correctness, lifecycle, shared-root, and performance work
+is complete and verified.
 
 Pouch remains unreleased. Delete rejected pre-release implementations rather
 than adding migration readers, format dispatch, compatibility modes, or legacy
@@ -219,8 +218,9 @@ Acceptance:
   total benchmark time to hide a slow query path.
 - [x] Report independent comparable attachment write and retrieve metrics;
   retain the combined roundtrip only as a diagnostic.
-- [ ] Add bounded exclusive and shared-root microbenchmark commands suitable
-  for development, plus the existing production comparison gate.
+- [x] Provide bounded development commands: isolated exclusive Pouch probes,
+  the segmented production matrix, and explicit shared-root concurrency, with
+  the combined routine limited by one 90-second outer timeout.
 - [ ] Set and document the numeric exclusive-mode release budget from a stable
   baseline before claiming completion. The intended outcome is a substantial
   Pouch advantage on every core feature, not merely aggregate parity.
