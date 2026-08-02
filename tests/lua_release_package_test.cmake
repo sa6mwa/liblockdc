@@ -54,11 +54,12 @@ endfunction()
 
 set(lockdc_lua_rockspec_path "${lockdc_dist_dir}/lockdc-${LOCKDC_VERSION}-1.rockspec")
 set(lockdc_lua_src_rock_path "${lockdc_dist_dir}/lockdc-${LOCKDC_VERSION}-1.src.rock")
+set(lockdc_lua_source_archive_path "${lockdc_dist_dir}/liblockdc-lua-${LOCKDC_VERSION}.tar.gz")
 set(lockdc_release_archive "${lockdc_dist_dir}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz")
 set(lockdc_extract_root "${LOCKDC_BINARY_DIR}/lua-release-package-test")
 set(lockdc_release_prefix "${lockdc_extract_root}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}")
 set(lockdc_lua_rock_extract_root "${LOCKDC_BINARY_DIR}/lua-release-package-src-rock")
-set(lockdc_lua_inner_archive_path "${lockdc_lua_rock_extract_root}/lockdc-${LOCKDC_VERSION}-1.tar.gz")
+set(lockdc_lua_inner_archive_path "${lockdc_lua_rock_extract_root}/liblockdc-lua-${LOCKDC_VERSION}.tar.gz")
 set(lockdc_lua_inner_rockspec_path "${lockdc_lua_rock_extract_root}/lockdc-${LOCKDC_VERSION}-1.rockspec")
 
 file(REMOVE_RECURSE "${lockdc_test_root}")
@@ -103,6 +104,7 @@ endif()
 foreach(required_path
     "${lockdc_lua_rockspec_path}"
     "${lockdc_lua_src_rock_path}"
+    "${lockdc_lua_source_archive_path}"
     "${lockdc_release_archive}"
 )
     if(NOT EXISTS "${required_path}")
@@ -134,6 +136,12 @@ if(NOT EXISTS "${lockdc_lua_inner_rockspec_path}")
 endif()
 
 assert_tar_numeric_owner_group("${lockdc_lua_inner_archive_path}")
+assert_tar_numeric_owner_group("${lockdc_lua_source_archive_path}")
+file(SHA256 "${lockdc_lua_inner_archive_path}" lockdc_lua_inner_archive_sha256)
+file(SHA256 "${lockdc_lua_source_archive_path}" lockdc_lua_source_archive_sha256)
+if(NOT lockdc_lua_inner_archive_sha256 STREQUAL lockdc_lua_source_archive_sha256)
+    message(FATAL_ERROR "Lua source rock does not embed the standalone Lua source package verbatim")
+endif()
 
 set(lockdc_lua_source_unpack_root "${lockdc_lua_rock_extract_root}/source")
 file(MAKE_DIRECTORY "${lockdc_lua_source_unpack_root}")
@@ -151,8 +159,14 @@ if(NOT source_extract_result EQUAL 0)
         "stderr:\n${source_extract_stderr}")
 endif()
 
-set(lockdc_lua_source_extract_root "${lockdc_lua_source_unpack_root}/lockdc-${LOCKDC_VERSION}-1")
+set(lockdc_lua_source_extract_root "${lockdc_lua_source_unpack_root}/liblockdc-lua-${LOCKDC_VERSION}")
 foreach(required_source
+    "LICENSE"
+    "README.md"
+    "RELEASE_MANIFEST"
+    "VERSION"
+    "include/lc/lc.h"
+    "lockdc.rockspec.in"
     "src/lua/lockdc_lua.c"
     "src/lc_api_internal.h"
     "src/lc_engine_api.h"
@@ -177,11 +191,52 @@ foreach(disallowed_path "${LOCKDC_ROOT}" "$ENV{HOME}")
             "rockspec:\n${lockdc_lua_inner_rockspec_text}")
     endif()
 endforeach()
-string(FIND "${lockdc_lua_inner_rockspec_text}" "url = \"lockdc-${LOCKDC_VERSION}-1.tar.gz\"" inner_source_index)
+string(FIND "${lockdc_lua_inner_rockspec_text}" "url = \"liblockdc-lua-${LOCKDC_VERSION}.tar.gz\"" inner_source_index)
 if(inner_source_index EQUAL -1)
     message(FATAL_ERROR
         "Lua source rock embedded rockspec should reference the embedded source archive by relative name\n"
         "rockspec:\n${lockdc_lua_inner_rockspec_text}")
+endif()
+string(FIND "${lockdc_lua_inner_rockspec_text}" "dir = \"liblockdc-lua-${LOCKDC_VERSION}\"" inner_source_dir_index)
+if(inner_source_dir_index EQUAL -1)
+    message(FATAL_ERROR
+        "Lua source rock embedded rockspec should name the staged source root\n"
+        "rockspec:\n${lockdc_lua_inner_rockspec_text}")
+endif()
+
+set(lockdc_lua_standalone_unpack_root "${lockdc_extract_root}/lua-source")
+file(REMOVE_RECURSE "${lockdc_lua_standalone_unpack_root}")
+file(MAKE_DIRECTORY "${lockdc_lua_standalone_unpack_root}")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar xf "${lockdc_lua_source_archive_path}"
+    WORKING_DIRECTORY "${lockdc_lua_standalone_unpack_root}"
+    RESULT_VARIABLE standalone_source_extract_result
+    OUTPUT_VARIABLE standalone_source_extract_stdout
+    ERROR_VARIABLE standalone_source_extract_stderr
+)
+if(NOT standalone_source_extract_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to extract standalone Lua source archive\n"
+        "stdout:\n${standalone_source_extract_stdout}\n"
+        "stderr:\n${standalone_source_extract_stderr}")
+endif()
+if(NOT EXISTS "${lockdc_lua_standalone_unpack_root}/liblockdc-lua-${LOCKDC_VERSION}/RELEASE_MANIFEST")
+    message(FATAL_ERROR "standalone Lua source archive is missing its staged release manifest")
+endif()
+file(STRINGS "${lockdc_lua_source_extract_root}/RELEASE_MANIFEST" lockdc_lua_expected_manifest)
+file(GLOB_RECURSE lockdc_lua_actual_manifest
+    RELATIVE "${lockdc_lua_source_extract_root}"
+    LIST_DIRECTORIES false
+    "${lockdc_lua_source_extract_root}/*")
+list(SORT lockdc_lua_expected_manifest)
+list(SORT lockdc_lua_actual_manifest)
+if(NOT lockdc_lua_expected_manifest STREQUAL lockdc_lua_actual_manifest)
+    list(JOIN lockdc_lua_expected_manifest "\n  " lockdc_lua_expected_manifest_text)
+    list(JOIN lockdc_lua_actual_manifest "\n  " lockdc_lua_actual_manifest_text)
+    message(FATAL_ERROR
+        "standalone Lua source archive does not match its release manifest\n"
+        "expected:\n  ${lockdc_lua_expected_manifest_text}\n"
+        "actual:\n  ${lockdc_lua_actual_manifest_text}")
 endif()
 string(FIND "${lockdc_lua_inner_rockspec_text}" "\"lonejson == 0.42.0-1\"" inner_lonejson_index)
 if(inner_lonejson_index EQUAL -1)

@@ -2,7 +2,6 @@ if(NOT DEFINED LOCKDC_ROOT)
     message(FATAL_ERROR "LOCKDC_ROOT is required")
 endif()
 
-file(READ "${LOCKDC_ROOT}/CMakePresets.json" lockdc_presets)
 file(READ "${LOCKDC_ROOT}/CMakeLists.txt" lockdc_cmake)
 
 function(count_occurrences haystack needle out_var)
@@ -15,53 +14,34 @@ function(count_occurrences haystack needle out_var)
     set(${out_var} "${count}" PARENT_SCOPE)
 endfunction()
 
-string(FIND "${lockdc_presets}" "\"name\": \"x86_64-linux-gnu-release\"" release_preset_index)
-if(release_preset_index EQUAL -1)
-    message(FATAL_ERROR "Expected x86_64-linux-gnu-release preset to exist")
-endif()
-
-string(FIND "${lockdc_presets}" "\"LOCKDC_RELEASE_WERROR\": \"ON\"" release_werror_index)
-if(release_werror_index EQUAL -1)
-    message(FATAL_ERROR
-        "Expected release presets to pin LOCKDC_RELEASE_WERROR=ON")
-endif()
-
-if(release_werror_index LESS release_preset_index)
-    message(FATAL_ERROR
-        "Expected LOCKDC_RELEASE_WERROR=ON to be configured by the release preset family")
-endif()
-
-string(FIND "${lockdc_cmake}"
-    "option(LOCKDC_RELEASE_WERROR \"Treat warnings as errors for lockdc release builds.\" ON)"
-    release_option_index)
-if(release_option_index EQUAL -1)
-    message(FATAL_ERROR "Expected LOCKDC_RELEASE_WERROR to default to ON")
-endif()
-
-string(FIND "${lockdc_cmake}"
-    "if(LOCKDC_RELEASE_WERROR AND CMAKE_BUILD_TYPE STREQUAL \"Release\")"
-    release_gate_index)
-if(release_gate_index EQUAL -1)
-    message(FATAL_ERROR "Expected release C target helpers to gate -Werror on Release builds")
-endif()
-count_occurrences("${lockdc_cmake}"
-    "if(LOCKDC_RELEASE_WERROR AND CMAKE_BUILD_TYPE STREQUAL \"Release\")"
-    release_gate_count)
-if(release_gate_count LESS 2)
-    message(FATAL_ERROR
-        "Expected both release C target helpers to gate -Werror on Release builds")
-endif()
-
-string(FIND "${lockdc_cmake}"
-    [=[target_compile_options(${target} PRIVATE -Werror)]=]
-    werror_option_index)
+string(FIND "${lockdc_cmake}" [=[-Werror]=] werror_option_index)
 if(werror_option_index EQUAL -1)
-    message(FATAL_ERROR "Expected release C target helpers to add -Werror")
+    message(FATAL_ERROR "Expected C target helpers to make warnings fatal")
 endif()
-count_occurrences("${lockdc_cmake}"
-    [=[target_compile_options(${target} PRIVATE -Werror)]=]
-    werror_option_count)
+count_occurrences("${lockdc_cmake}" [=[-Werror]=] werror_option_count)
 if(werror_option_count LESS 2)
     message(FATAL_ERROR
-        "Expected both release C target helpers to add -Werror")
+        "Expected both C target helpers to add -Werror")
+endif()
+
+string(FIND "${lockdc_cmake}" [=[LINKER:--fatal-warnings]=] elf_fatal_warnings_index)
+if(elf_fatal_warnings_index EQUAL -1)
+    message(FATAL_ERROR "Expected the C target policy to make ELF linker warnings fatal")
+endif()
+
+string(FIND "${lockdc_cmake}" [=[LINKER:-fatal_warnings]=] darwin_fatal_warnings_index)
+if(darwin_fatal_warnings_index EQUAL -1)
+    message(FATAL_ERROR "Expected the C target policy to make Darwin linker warnings fatal")
+endif()
+
+string(FIND "${lockdc_cmake}"
+    [=[-pedantic-errors]=]
+    pedantic_errors_index)
+if(pedantic_errors_index EQUAL -1)
+    message(FATAL_ERROR "Expected C89 target helper to make pedantic diagnostics fatal")
+endif()
+
+string(FIND "${lockdc_cmake}" "C_STANDARD 90" c_standard_90_index)
+if(NOT c_standard_90_index EQUAL -1)
+    message(FATAL_ERROR "C89 target policy must use explicit compiler flags, not C_STANDARD 90")
 endif()

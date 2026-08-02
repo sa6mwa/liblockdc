@@ -155,7 +155,7 @@ if(TARGET lc_example_startconsumer)
   )
 endif()
 
-find_program(LOCKDC_LUA_BIN NAMES lua lua5.5)
+find_program(LOCKDC_LUA_BIN NAMES lua5.5)
 find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks)
 
 lc_add_lua_e2e_test(

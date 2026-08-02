@@ -21,12 +21,13 @@ if [[ ! -f "$source_tarball" ]]; then
     exit 1
 fi
 
-case "$smoke_root" in
-    /|"")
-        printf 'test_release_from_source.sh: refusing to use unsafe smoke root\n' >&2
-        exit 1
-        ;;
-esac
+# shellcheck source=assert_generated_path.sh
+source "$script_dir/assert_generated_path.sh"
+if [[ "$(CDPATH= cd -- "$repo_root_arg" && pwd -P)" != "$repo_root" ]]; then
+    printf 'test_release_from_source.sh: repo root must be the current repository: %s\n' "$repo_root_arg" >&2
+    exit 1
+fi
+lockdc_assert_generated_path "$repo_root" "$smoke_root"
 
 rm -rf "$smoke_root"
 mkdir -p "$extract_root" "$build_root"
@@ -84,5 +85,5 @@ if [[ "$pc_version" != "$release_version" ]]; then
         "$pc_version" "$release_version" >&2
     exit 1
 fi
-cmake --build "$build_root"
-ctest --test-dir "$build_root" --output-on-failure --stop-on-failure -R '^lc_unit_'
+cmake --build "$build_root" --target lc_unit_contracts
+ctest --test-dir "$build_root" --output-on-failure --stop-on-failure -R '^lc_unit_contracts$'

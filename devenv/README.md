@@ -135,7 +135,7 @@ Dependency bootstrap is split from the low-level script workflow:
 - `scripts/deps.sh deps-host-debug` remains as a compatibility alias to the same host GNU dependency root
 - it skips dependency work if the dependency manifest and artifacts still match
 - the primary Makefile workflow provisions the required dependency roots automatically for the common host and release paths
-- the low-level `scripts/build.sh` and `scripts/test.sh` entry points assume the required dependency tree already exists
+- the low-level `scripts/build.sh` entry point assumes the required dependency tree already exists
 
 ## Packaging
 
@@ -149,17 +149,16 @@ Normal packaging flows:
 
 ```bash
 make release
-scripts/package-verify.sh
+make package-verify
 ```
 
 `make release` is the clean-slate release gate. It removes generated state,
 runs the release version contract, then executes the same proof graph as
 `make prerelease`: formatting, debug sanitizer tests, Valgrind, fuzz smoke,
 lockd e2e, Lua tests, benchmark gates, and the release matrix. The primary
-Makefile release flow provisions the dependency roots it needs; direct
-lower-level packaging scripts still assume those roots already exist.
+Makefile release flow provisions the dependency roots it needs.
 
-By default `scripts/package.sh` now builds the full release matrix:
+`make package-verify` runs the full release matrix:
 
 - `x86_64-linux-gnu`
 - `x86_64-linux-musl`

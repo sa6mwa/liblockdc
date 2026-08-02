@@ -69,7 +69,6 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "LOCKDC_DIST_DIR": "${sourceDir}/dist",
-        "LOCKDC_RELEASE_WERROR": "ON",
         "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/x86_64-linux-gnu",
         "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/x86_64-linux-gnu",
         "LOCKDC_TARGET_ARCH": "x86_64",

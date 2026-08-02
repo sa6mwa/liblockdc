@@ -1,6 +1,7 @@
 SHELL := bash
 .DEFAULT_GOAL := help
 MAKEFLAGS += --no-builtin-rules
+.NOTPARALLEL:
 
 ROOT := $(CURDIR)
 CMAKE := cmake
@@ -146,11 +147,11 @@ help:
 		'make deps-release       Provision the shipped x86_64 GNU/musl release dependency trees.' \
 		'make deps-cross         Provision all non-host cross release dependency trees.' \
 		'make test-debug         Run the ASan/UBSan debug preset test suite.' \
-		'make test               Run the host-native release suite (GNU plus musl when the native musl toolchain is available).' \
-		'make test-host          Run the host-native release suite (GNU plus musl when the native musl toolchain is available).' \
+		'make test               Run the pinned Bootlin host-executable GNU and musl release suites.' \
+		'make test-host          Run the pinned Bootlin host-executable GNU and musl release suites.' \
 		'make test-cross         Run the non-host cross release suites.' \
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
-		'make test-all           Run ASan/UBSan debug first, then the host-native release suite.' \
+		'make test-all           Run debug, host and QEMU cross tests, Valgrind, fuzz smoke, local e2e, and Pouch-vs-disk performance gates.' \
 		'make test-coverage      Run the coverage preset test suite and build the coverage report.' \
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
@@ -166,8 +167,8 @@ help:
 		'make fuzz-long          Build fuzz targets and run longer bounded corpus passes (FUZZ_LONG_TIME=$(FUZZ_LONG_TIME)).' \
 		'make bench              Standard short name for benchmarks.' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
-		'make bench-check        Run the benchmark regression gate.' \
-		'make bench-gate         Run the benchmark regression gate.' \
+		'make bench-check        Run native benchmarks and enforce Pouch-vs-disk parity.' \
+		'make bench-gate         Run native benchmarks and enforce Pouch-vs-disk parity.' \
 		'make benchmarks-go      Run Go parity benchmarks through the standard lifecycle name.' \
 		'make perf-gate          Run the Pouch Go parity performance gate.' \
 		'make benchmark-pouch-perf Run one sub-minute native pouch perf case (POUCH_PERF_CASE=$(POUCH_PERF_CASE), POUCH_PERF_ROWS=$(POUCH_PERF_ROWS), POUCH_PERF_CRYPTO=$(POUCH_PERF_CRYPTO)).' \
@@ -187,16 +188,16 @@ help:
 		'make benchmark-pouch-go-compaction Run opt-in pouch forced/scheduled compaction benchmarks; set POUCH_GO_COMPACTION_* to tune early compaction.' \
 		'make benchmark-pouch-go-concurrency Run bounded pouch-vs-disk key-lock contention and shared-root concurrency matrix with crypto off/on.' \
 		'make benchmark-pouch-go-parity-gate Run production pouch-vs-disk benchmarks and fail if any Pouch performance metric is slower than Go disk.' \
-		'make package            Build the shipped x86_64-linux-gnu release preset and write the combined release archive, source archive, and Lua source rock to dist/.' \
+		'make package            Build a clean native Bootlin release package with source, Lua, and checksums under dist/.' \
 		'make package-source     Build the source-only release archive.' \
 		'make package-source-smoke  Build and verify the source-only release archive.' \
 		'make package-checksums  Refresh the dist/ checksum manifest.' \
-		'make package-verify     Build release packages and run package verification.' \
+		'make package-verify     Run the full release matrix, checksum, source/SDK/Lua, and recursive privacy verification.' \
 		'make verify-release-archives  Assert the complete shipped Linux release archive set and checksums.' \
 		'make verify-release-privacy  Scan checksum-listed release artifacts for local private traces.' \
 		'make lua-rock           Build the Lua release package and source rock artifacts.' \
 		'make lua-test           Run local Lua layout, SDK, facade, and binding smoke tests.' \
-		'make lua-env            Print shell exports for the repo-local Lua rock tree.' \
+		'make lua-env            Print shell exports for the repo-local Lua 5.5 rock tree.' \
 		'make release-lua-artifacts  Build Lua release artifacts under dist/.' \
 		'make clean-dist         Reset dist/ release artifacts.' \
 		'make cross-build        Build all non-host cross release presets.' \
@@ -303,7 +304,7 @@ __test-e2e:
 test-all:
 	$(TIMED) test-all $(MAKE) __test-all
 
-__test-all: __test-debug __test-host
+__test-all: __test-debug __test-host __test-cross __valgrind __fuzz-smoke __test-e2e __bench-gate
 
 dev-up:
 	$(TIMED) dev-up $(MAKE) __dev-up
@@ -396,7 +397,7 @@ __benchmarks: __build-x86_64-linux-gnu-release
 bench-gate:
 	$(TIMED) bench-gate $(MAKE) __bench-gate
 
-__bench-gate: __benchmarks
+__bench-gate: __benchmarks __perf-gate
 
 bench-check:
 	$(TIMED) bench-check $(MAKE) __bench-check
@@ -601,9 +602,11 @@ package:
 	$(TIMED) package $(MAKE) __package
 
 __package: __build-x86_64-linux-gnu-release
+	$(MAKE) __clean-dist
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_archive.cmake
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_source.cmake
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_lua_rock.cmake
+	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_checksums.cmake
 
 package-source:
 	$(TIMED) package-source $(MAKE) __package-source
@@ -620,17 +623,12 @@ __package-source-smoke: __package-source
 package-checksums:
 	$(TIMED) package-checksums $(MAKE) __package-checksums
 
-__package-checksums: __deps-release
-	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)
-	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_source.cmake
-	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_lua_rock.cmake
-	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_checksums.cmake
+__package-checksums: __package
 
 package-verify:
 	$(TIMED) package-verify $(MAKE) __package-verify
 
-__package-verify:
-	bash ./scripts/package-verify.sh
+__package-verify: __release-matrix __verify-release-privacy
 
 verify-release-privacy:
 	$(TIMED) verify-release-privacy $(MAKE) __verify-release-privacy
@@ -656,7 +654,7 @@ lua-env:
 __lua-env:
 	@printf 'export LOCKDC_PREFIX=%s\n' '$(X86_64_GNU_RELEASE_BUILD_DIR)/package/liblockdc-$$(sed -n '"'"'s/^set(LOCKDC_VERSION "\(.*\)")$$/\1/p'"'"' $(X86_64_GNU_RELEASE_BUILD_DIR)/package-metadata.cmake)-x86_64-linux-gnu'
 	@printf 'export LUA_PATH=%s\n' '$(ROOT)/lua/?.lua;$(ROOT)/lua/?/init.lua;;'
-	@printf 'export LUA_CPATH=%s\n' '$(ROOT)/build/luarocks/lib/lua/5.5/?.so;;'
+	@printf 'export LUA_CPATH=%s\n' '$(ROOT)/.luarocks-build/lockdc/?.so;;'
 
 release-lua-artifacts:
 	$(TIMED) release-lua-artifacts $(MAKE) __release-lua-artifacts
@@ -724,7 +722,7 @@ __prerelease-live:
 prerelease-hardening:
 	$(TIMED) prerelease-hardening $(MAKE) __prerelease-hardening
 
-__prerelease-hardening: __prerelease __fuzz __benchmark-pouch-go-parity-gate __release-matrix
+__prerelease-hardening: __prerelease __fuzz __release-matrix
 
 lifecycle-version-contract:
 	$(TIMED) lifecycle-version-contract $(MAKE) __lifecycle-version-contract

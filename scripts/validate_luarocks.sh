@@ -12,7 +12,7 @@ sdk_prefix="$2"
 lua_package_path="$3"
 lua_script="$4"
 
-lua_bin="${LOCKDC_LUA_BIN:-lua}"
+lua_bin="${LOCKDC_LUA_BIN:-lua5.5}"
 luarocks_bin="${LOCKDC_LUAROCKS_BIN:-luarocks}"
 lua_version="${LOCKDC_LUA_VERSION:-5.5}"
 lonejson_src_rock="${LOCKDC_LONEJSON_SRC_ROCK:-https://github.com/sa6mwa/lonejson/releases/download/v0.42.0/lonejson-0.42.0-1.src.rock}"
@@ -20,6 +20,9 @@ luarocks_build_root="${LOCKDC_LUAROCKS_BUILD_ROOT:-${tree_dir}/.luarocks-build}"
 luarocks_workdir="${LOCKDC_LUAROCKS_WORKDIR:-$PWD}"
 run_lua_smoke="${LOCKDC_RUN_LUA_SMOKE:-1}"
 lockdc_ld_preload="${LOCKDC_LD_PRELOAD:-}"
+
+# shellcheck source=assert_generated_path.sh
+source "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)/assert_generated_path.sh"
 
 require_path() {
   if [ ! -e "$1" ]; then
@@ -41,6 +44,14 @@ require_path "$sdk_prefix"
 require_path "$lua_package_path"
 require_path "$lua_script"
 require_path "$luarocks_workdir"
+lockdc_assert_generated_path "$luarocks_workdir" "$tree_dir"
+lockdc_assert_generated_path "$luarocks_workdir" "$luarocks_build_root"
+
+lua_runtime_version="$($lua_bin -e 'io.write(_VERSION)' 2>/dev/null || true)"
+if [ "$lua_runtime_version" != "Lua 5.5" ]; then
+  printf 'Lua 5.5 is required, got %s from %s\n' "${lua_runtime_version:-unknown}" "$lua_bin" >&2
+  exit 1
+fi
 
 install_lonejson_dependency() {
   case "$lonejson_src_rock" in

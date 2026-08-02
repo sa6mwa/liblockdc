@@ -124,9 +124,20 @@ function(assert_shared_library_runpath extract_root archive_path shared_lib_name
         return()
     endif()
 
-    find_program(LOCKDC_READELF_BIN NAMES readelf)
-    if(NOT LOCKDC_READELF_BIN)
-        message(FATAL_ERROR "readelf is required for archive shared-library validation")
+    execute_process(
+        COMMAND "${LOCKDC_TEST_ROOT}/scripts/discover_target_tools.sh"
+            --build-dir "${LOCKDC_BINARY_DIR}"
+            --target-id "${LOCKDC_TARGET_ID}"
+            --tool readelf
+        RESULT_VARIABLE readelf_discovery_result
+        OUTPUT_VARIABLE LOCKDC_READELF_BIN
+        ERROR_VARIABLE readelf_discovery_error
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(NOT readelf_discovery_result EQUAL 0 OR NOT EXISTS "${LOCKDC_READELF_BIN}")
+        message(FATAL_ERROR
+            "external-tool-unavailable: target readelf is required for archive shared-library validation\n"
+            "${readelf_discovery_error}")
     endif()
 
     execute_process(

@@ -33,7 +33,7 @@ get_filename_component(lockdc_generated_rockspec_name "${lockdc_generated_rocksp
 
 set(lockdc_lua_stage_root "${LOCKDC_BINARY_DIR}/lua-package")
 set(lockdc_lua_stage_workdir "${lockdc_lua_stage_root}/work")
-set(lockdc_lua_source_root_name "lockdc-${LOCKDC_VERSION}-1")
+set(lockdc_lua_source_root_name "liblockdc-lua-${LOCKDC_VERSION}")
 set(lockdc_lua_source_root "${lockdc_lua_stage_root}/${lockdc_lua_source_root_name}")
 set(lockdc_lua_rockspec_name "lockdc-${LOCKDC_VERSION}-1.rockspec")
 set(lockdc_lua_src_rock_name "lockdc-${LOCKDC_VERSION}-1.src.rock")
@@ -46,6 +46,7 @@ file(MAKE_DIRECTORY "${lockdc_lua_stage_workdir}")
 file(MAKE_DIRECTORY "${lockdc_lua_source_root}/lua/lockdc")
 file(MAKE_DIRECTORY "${lockdc_lua_source_root}/src/lua")
 file(MAKE_DIRECTORY "${lockdc_lua_source_root}/scripts")
+file(MAKE_DIRECTORY "${lockdc_lua_source_root}/include/lc")
 file(MAKE_DIRECTORY "${LOCKDC_DIST_DIR}")
 
 file(COPY "${lockdc_generated_rockspec_path}" DESTINATION "${lockdc_lua_stage_workdir}")
@@ -62,6 +63,25 @@ file(COPY "${LOCKDC_ROOT}/src/lc_engine_api.h" DESTINATION "${lockdc_lua_source_
 file(COPY "${LOCKDC_ROOT}/src/lc_intcompat.h" DESTINATION "${lockdc_lua_source_root}/src")
 file(COPY "${LOCKDC_ROOT}/src/lc_pouch.h" DESTINATION "${lockdc_lua_source_root}/src")
 file(COPY "${LOCKDC_ROOT}/scripts/build_lua_rock.sh" DESTINATION "${lockdc_lua_source_root}/scripts")
+file(COPY "${LOCKDC_ROOT}/include/lc/lc.h" DESTINATION "${lockdc_lua_source_root}/include/lc")
+file(COPY "${LOCKDC_ROOT}/LICENSE" DESTINATION "${lockdc_lua_source_root}")
+file(COPY "${LOCKDC_ROOT}/README.md" DESTINATION "${lockdc_lua_source_root}")
+file(COPY "${LOCKDC_ROOT}/lockdc.rockspec.in" DESTINATION "${lockdc_lua_source_root}")
+file(WRITE "${lockdc_lua_source_root}/VERSION" "${LOCKDC_VERSION}\n")
+file(WRITE "${lockdc_lua_source_root}/RELEASE_MANIFEST"
+    "LICENSE\n"
+    "README.md\n"
+    "RELEASE_MANIFEST\n"
+    "VERSION\n"
+    "include/lc/lc.h\n"
+    "lockdc.rockspec.in\n"
+    "lua/lockdc/init.lua\n"
+    "scripts/build_lua_rock.sh\n"
+    "src/lc_api_internal.h\n"
+    "src/lc_engine_api.h\n"
+    "src/lc_intcompat.h\n"
+    "src/lc_pouch.h\n"
+    "src/lua/lockdc_lua.c\n")
 
 file(REMOVE "${lockdc_lua_source_archive_base}" "${lockdc_lua_source_archive_path}")
 execute_process(
@@ -78,7 +98,7 @@ if(NOT lockdc_lua_tar_result EQUAL 0)
         "stderr:\n${lockdc_lua_tar_stderr}")
 endif()
 execute_process(
-    COMMAND "${LOCKDC_GZIP_BIN}" -9 -f "${lockdc_lua_source_archive_base}"
+    COMMAND "${LOCKDC_GZIP_BIN}" -9 -f -n "${lockdc_lua_source_archive_base}"
     RESULT_VARIABLE lockdc_lua_gzip_result
     OUTPUT_VARIABLE lockdc_lua_gzip_stdout
     ERROR_VARIABLE lockdc_lua_gzip_stderr
@@ -93,7 +113,7 @@ endif()
 file(COPY "${lockdc_lua_source_archive_path}" DESTINATION "${lockdc_lua_stage_workdir}")
 
 file(READ "${lockdc_lua_stage_workdir}/${lockdc_lua_rockspec_name}" lockdc_lua_pack_rockspec_text)
-string(REGEX REPLACE "source = \\{[^\\}]*\\}" "source = {\n  url = \"${lockdc_lua_source_archive_path}\",\n}" lockdc_lua_pack_rockspec_text "${lockdc_lua_pack_rockspec_text}")
+string(REGEX REPLACE "source = \\{[^\\}]*\\}" "source = {\n  url = \"${lockdc_lua_source_archive_path}\",\n  dir = \"${lockdc_lua_source_root_name}\",\n}" lockdc_lua_pack_rockspec_text "${lockdc_lua_pack_rockspec_text}")
 file(WRITE "${lockdc_lua_stage_workdir}/${lockdc_lua_rockspec_name}" "${lockdc_lua_pack_rockspec_text}")
 
 execute_process(
@@ -136,7 +156,7 @@ if(NOT EXISTS "${lockdc_lua_embedded_rockspec}")
     message(FATAL_ERROR "Lua source rock is missing embedded rockspec: ${lockdc_lua_embedded_rockspec}")
 endif()
 file(READ "${lockdc_lua_embedded_rockspec}" lockdc_lua_embedded_rockspec_text)
-string(REGEX REPLACE "source = \\{[^\\}]*\\}" "source = {\n  url = \"${lockdc_lua_source_archive_name}\",\n}" lockdc_lua_embedded_rockspec_text "${lockdc_lua_embedded_rockspec_text}")
+string(REGEX REPLACE "source = \\{[^\\}]*\\}" "source = {\n  url = \"${lockdc_lua_source_archive_name}\",\n  dir = \"${lockdc_lua_source_root_name}\",\n}" lockdc_lua_embedded_rockspec_text "${lockdc_lua_embedded_rockspec_text}")
 file(WRITE "${lockdc_lua_embedded_rockspec}" "${lockdc_lua_embedded_rockspec_text}")
 
 file(REMOVE "${lockdc_lua_stage_workdir}/${lockdc_lua_src_rock_name}")
@@ -157,4 +177,5 @@ if(NOT lockdc_lua_repack_result EQUAL 0)
 endif()
 
 file(COPY "${lockdc_generated_rockspec_path}" DESTINATION "${LOCKDC_DIST_DIR}")
+file(COPY "${lockdc_lua_source_archive_path}" DESTINATION "${LOCKDC_DIST_DIR}")
 file(COPY "${lockdc_lua_stage_workdir}/${lockdc_lua_src_rock_name}" DESTINATION "${LOCKDC_DIST_DIR}")

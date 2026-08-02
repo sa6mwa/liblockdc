@@ -7,15 +7,6 @@ preset=${1:-debug}
 unset LD_LIBRARY_PATH
 
 case "$preset" in
-  dev)
-    preset=debug
-    ;;
-  test)
-    preset=debug
-    ;;
-esac
-
-case "$preset" in
   debug|e2e|release|x86_64-linux-gnu-release|x86_64-linux-musl-release|aarch64-linux-gnu-release|aarch64-linux-musl-release|armhf-linux-gnu-release|armhf-linux-musl-release|arm64-apple-darwin-release|coverage|fuzz)
     ;;
   *)

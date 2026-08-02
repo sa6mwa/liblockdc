@@ -30,11 +30,11 @@ function(write_cache build_dir contents)
     file(WRITE "${build_dir}/CMakeCache.txt" "${contents}")
 endfunction()
 
-function(run_discover build_dir tool out_var)
+function(run_discover build_dir target_id tool out_var)
     execute_process(
         COMMAND "${discover_script}"
             --build-dir "${build_dir}"
-            --target-id arm64-apple-darwin
+            --target-id "${target_id}"
             --tool "${tool}"
         RESULT_VARIABLE result
         OUTPUT_VARIABLE output
@@ -59,8 +59,8 @@ write_fake_tool("${explicit_dir}/configured-ld")
 set(explicit_build "${test_root}/explicit-build")
 write_cache("${explicit_build}"
     "LOCKDC_OTOOL:FILEPATH=${explicit_dir}/configured-otool\nCMAKE_LINKER:FILEPATH=${explicit_dir}/configured-ld\n")
-run_discover("${explicit_build}" otool explicit_otool)
-run_discover("${explicit_build}" ld explicit_ld)
+run_discover("${explicit_build}" arm64-apple-darwin otool explicit_otool)
+run_discover("${explicit_build}" arm64-apple-darwin ld explicit_ld)
 assert_equal("${explicit_otool}" "${explicit_dir}/configured-otool" "configured otool cache value")
 assert_equal("${explicit_ld}" "${explicit_dir}/configured-ld" "configured linker cache value")
 
@@ -70,7 +70,7 @@ write_fake_tool("${prefixed_bin}/arm64-apple-darwin25-otool")
 set(prefixed_build "${test_root}/prefixed-build")
 write_cache("${prefixed_build}"
     "CMAKE_C_COMPILER:FILEPATH=${prefixed_bin}/arm64-apple-darwin25-clang\n")
-run_discover("${prefixed_build}" otool prefixed_otool)
+run_discover("${prefixed_build}" arm64-apple-darwin otool prefixed_otool)
 assert_equal("${prefixed_otool}" "${prefixed_bin}/arm64-apple-darwin25-otool" "target-prefixed compiler sibling")
 
 set(unprefixed_bin "${test_root}/unprefixed/bin")
@@ -79,8 +79,25 @@ write_fake_tool("${unprefixed_bin}/otool")
 set(unprefixed_build "${test_root}/unprefixed-build")
 write_cache("${unprefixed_build}"
     "CMAKE_C_COMPILER:FILEPATH=${unprefixed_bin}/arm64-apple-darwin25-clang\n")
-run_discover("${unprefixed_build}" otool unprefixed_otool)
+run_discover("${unprefixed_build}" arm64-apple-darwin otool unprefixed_otool)
 assert_equal("${unprefixed_otool}" "${unprefixed_bin}/otool" "unprefixed compiler sibling")
+
+set(linux_bin "${test_root}/linux/bin")
+write_fake_tool("${linux_bin}/arm-linux-readelf")
+set(linux_build "${test_root}/linux-build")
+write_cache("${linux_build}"
+    "CMAKE_READELF:FILEPATH=${linux_bin}/arm-linux-readelf\n")
+run_discover("${linux_build}" armhf-linux-gnu readelf linux_readelf)
+assert_equal("${linux_readelf}" "${linux_bin}/arm-linux-readelf" "configured Linux readelf cache value")
+
+set(custom_darwin_bin "${test_root}/custom-darwin/bin")
+write_fake_tool("${custom_darwin_bin}/custom-apple-darwin-clang")
+write_fake_tool("${custom_darwin_bin}/custom-apple-darwin-otool")
+set(custom_darwin_build "${test_root}/custom-darwin-build")
+write_cache("${custom_darwin_build}"
+    "LOCKDC_OSXCROSS_HOST:STRING=custom-apple-darwin\nCMAKE_C_COMPILER:FILEPATH=${custom_darwin_bin}/custom-apple-darwin-clang\n")
+run_discover("${custom_darwin_build}" arm64-apple-darwin otool custom_darwin_otool)
+assert_equal("${custom_darwin_otool}" "${custom_darwin_bin}/custom-apple-darwin-otool" "configured Darwin host prefix")
 
 set(path_bin "${test_root}/path/bin")
 write_fake_tool("${path_bin}/arm64-apple-darwin25-strip")

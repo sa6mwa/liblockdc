@@ -16,7 +16,9 @@ file(MAKE_DIRECTORY "${dist_dir}")
 set(checksum_inputs "")
 foreach(pattern
     "${dist_dir}/liblockdc-${LOCKDC_VERSION}.tar.gz"
-    "${dist_dir}/liblockdc-${LOCKDC_VERSION}-*.tar.gz"
+    "${dist_dir}/liblockdc-${LOCKDC_VERSION}-*-linux-*.tar.gz"
+    "${dist_dir}/liblockdc-${LOCKDC_VERSION}-*-apple-darwin.tar.gz"
+    "${dist_dir}/liblockdc-lua-${LOCKDC_VERSION}.tar.gz"
     "${dist_dir}/lockdc-${LOCKDC_VERSION}-1.rockspec"
     "${dist_dir}/lockdc-${LOCKDC_VERSION}-1.src.rock"
 )

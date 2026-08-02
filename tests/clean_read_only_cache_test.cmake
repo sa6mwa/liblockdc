@@ -8,6 +8,7 @@ endif()
 set(test_root "${LOCKDC_BINARY_DIR}/clean-read-only-cache")
 set(fake_root "${test_root}/repo")
 set(read_only_module "${fake_root}/.cache/go/pkg/mod/example.test/module@v1.0.0")
+set(lua_build_root "${fake_root}/.luarocks-build/lockdc")
 set(shared_cache_sentinel "${test_root}/shared-cache/sentinel")
 
 file(REMOVE_RECURSE "${test_root}")
@@ -16,6 +17,7 @@ file(MAKE_DIRECTORY
     "${fake_root}/build"
     "${fake_root}/dist"
     "${read_only_module}/nested"
+    "${lua_build_root}"
     "${test_root}/shared-cache")
 file(COPY_FILE "${LOCKDC_ROOT}/scripts/clean.sh" "${fake_root}/scripts/clean.sh")
 file(WRITE "${fake_root}/scripts/dev-reset.sh" "#!/usr/bin/env bash\nset -euo pipefail\n")
@@ -25,6 +27,7 @@ file(CHMOD "${fake_root}/scripts/dev-reset.sh"
         GROUP_READ GROUP_EXECUTE
         WORLD_READ WORLD_EXECUTE)
 file(WRITE "${read_only_module}/nested/payload.txt" "module cache payload\n")
+file(WRITE "${lua_build_root}/core.so" "generated Lua module\n")
 file(WRITE "${shared_cache_sentinel}" "shared cache must survive\n")
 
 execute_process(
@@ -51,7 +54,7 @@ if(NOT clean_result EQUAL 0)
         "stderr:\n${clean_error}")
 endif()
 
-foreach(removed_path "${fake_root}/build" "${fake_root}/dist" "${fake_root}/.cache")
+foreach(removed_path "${fake_root}/build" "${fake_root}/dist" "${fake_root}/.cache" "${fake_root}/.luarocks-build")
     if(EXISTS "${removed_path}")
         message(FATAL_ERROR "clean left generated state behind: ${removed_path}")
     endif()

@@ -63,7 +63,6 @@ cmake_dependent_option(LOCKDC_BUILD_E2E_TESTS
 option(LOCKDC_BUILD_BENCHMARKS "Build local benchmark targets." ON)
 option(LOCKDC_BUILD_FUZZERS "Build AFL++ targets for parser and stream hardening." OFF)
 option(LOCKDC_ENABLE_COVERAGE "Build test targets with gcov coverage instrumentation." OFF)
-option(LOCKDC_RELEASE_WERROR "Treat warnings as errors for lockdc release builds." ON)
 option(LOCKDC_INSTALL "Enable install rules." ON)
 
 set(LOCKDC_OPENSSL_VERSION "3.6.2" CACHE STRING "Pinned OpenSSL release supplied by c.pkt.systems.")
@@ -210,6 +209,21 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSROOT AND LOCKDC_TARGET_LIBC S
     endif()
 endif()
 
+function(lc_configure_fatal_linker_warnings target)
+    get_target_property(target_type ${target} TYPE)
+    if(NOT target_type STREQUAL "EXECUTABLE" AND
+       NOT target_type STREQUAL "SHARED_LIBRARY" AND
+       NOT target_type STREQUAL "MODULE_LIBRARY")
+        return()
+    endif()
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        target_link_options(${target} PRIVATE "LINKER:-fatal_warnings")
+    elseif(UNIX OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+        target_link_options(${target} PRIVATE "LINKER:--fatal-warnings")
+    endif()
+endfunction()
+
 function(lc_configure_c_target target)
     if(UNIX OR APPLE OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
         target_compile_definitions(${target} PRIVATE _POSIX_C_SOURCE=200809L)
@@ -218,8 +232,6 @@ function(lc_configure_c_target target)
         target_compile_definitions(${target} PRIVATE _DARWIN_C_SOURCE=1)
     endif()
     set_target_properties(${target} PROPERTIES
-        C_STANDARD 90
-        C_STANDARD_REQUIRED ON
         C_EXTENSIONS OFF
         POSITION_INDEPENDENT_CODE ON
         VISIBILITY_INLINES_HIDDEN NO
@@ -230,11 +242,11 @@ function(lc_configure_c_target target)
             -Wall
             -Wextra
             -Wpedantic
+            -pedantic-errors
+            -Werror
         )
-        if(LOCKDC_RELEASE_WERROR AND CMAKE_BUILD_TYPE STREQUAL "Release")
-            target_compile_options(${target} PRIVATE -Werror)
-        endif()
     endif()
+    lc_configure_fatal_linker_warnings(${target})
 endfunction()
 
 function(lc_configure_c_test_target target)
@@ -250,11 +262,10 @@ function(lc_configure_c_test_target target)
             -Wpedantic
             -Wno-missing-field-initializers
             -Wno-unused-function
+            -Werror
         )
-        if(LOCKDC_RELEASE_WERROR AND CMAKE_BUILD_TYPE STREQUAL "Release")
-            target_compile_options(${target} PRIVATE -Werror)
-        endif()
     endif()
+    lc_configure_fatal_linker_warnings(${target})
 endfunction()
 
 function(lc_enable_coverage_if_requested target)
@@ -640,7 +651,7 @@ set(LOCKDC_LUA_LIBRARY "")
 if(LOCKDC_BUILD_LUA_BINDINGS)
     find_path(LOCKDC_LUA_INCLUDE_DIR
         NAMES lua.h
-        PATH_SUFFIXES include include/lua5.5 include/lua-5.5 include/lua lua5.5 lua-5.5 lua
+        PATH_SUFFIXES include include/lua5.5 include/lua-5.5 lua5.5 lua-5.5
         PATHS /usr/local /usr /usr/local/include /usr/include
     )
     if("${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "" AND EXISTS "/usr/local/include/lua.h")
@@ -648,7 +659,7 @@ if(LOCKDC_BUILD_LUA_BINDINGS)
     endif()
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
         find_library(LOCKDC_LUA_LIBRARY
-            NAMES lua5.5 lua-5.5 lua55 lua
+            NAMES lua5.5 lua-5.5 lua55
             PATH_SUFFIXES lib lib64
             PATHS /usr/local /usr /opt/local
         )
@@ -867,16 +878,6 @@ if(LOCKDC_BUILD_TESTS)
     )
     set_tests_properties(arch_alias_configure_test PROPERTIES RUN_SERIAL TRUE)
 
-    add_test(NAME package_script_targeting_test
-        COMMAND ${CMAKE_COMMAND}
-            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
-            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/package_script_targeting_test.cmake
-    )
-    set_tests_properties(package_script_targeting_test PROPERTIES
-        RUN_SERIAL TRUE
-        LABELS "lifecycle-host")
-
     add_test(NAME cross_test_targeting_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
@@ -997,13 +998,23 @@ if(LOCKDC_BUILD_TESTS)
         RUN_SERIAL TRUE
         TIMEOUT 10)
 
+    add_test(NAME generated_path_guard_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/generated_path_guard_test.cmake
+    )
+    set_tests_properties(generated_path_guard_test PROPERTIES
+        LABELS "unit;local"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
     add_test(NAME lifecycle_command_surface_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lifecycle_command_surface_test.cmake
     )
     set_tests_properties(lifecycle_command_surface_test PROPERTIES
-        LABELS "unit;local"
+        LABELS "unit;local;lifecycle-host"
         RUN_SERIAL TRUE
         TIMEOUT 10)
 
@@ -1013,7 +1024,7 @@ if(LOCKDC_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lifecycle_preset_contract_test.cmake
     )
     set_tests_properties(lifecycle_preset_contract_test PROPERTIES
-        LABELS "unit;local"
+        LABELS "unit;local;lifecycle-host"
         RUN_SERIAL TRUE
         TIMEOUT 10)
 
@@ -1024,7 +1035,7 @@ if(LOCKDC_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/discover_target_tools_test.cmake
     )
     set_tests_properties(discover_target_tools_test PROPERTIES
-        LABELS "unit;local;packaging"
+        LABELS "unit;local;packaging;lifecycle-host"
         RUN_SERIAL TRUE
         TIMEOUT 10)
 

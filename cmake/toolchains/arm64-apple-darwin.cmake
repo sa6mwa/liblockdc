@@ -38,12 +38,12 @@ foreach(_lockdc_required_tool
     endif()
 endforeach()
 
-set(_lockdc_darwin_linker_flag "-fuse-ld=${CMAKE_LINKER}")
+set(_lockdc_darwin_linker_flag "--ld-path=${CMAKE_LINKER}")
 foreach(_lockdc_linker_flags
         CMAKE_EXE_LINKER_FLAGS
         CMAKE_SHARED_LINKER_FLAGS
         CMAKE_MODULE_LINKER_FLAGS)
-    if(NOT "${${_lockdc_linker_flags}}" MATCHES "(^| )-fuse-ld=")
+    if(NOT "${${_lockdc_linker_flags}}" MATCHES "(^| )--ld-path=")
         set(${_lockdc_linker_flags} "${_lockdc_darwin_linker_flag} ${${_lockdc_linker_flags}}" CACHE STRING "" FORCE)
     endif()
 endforeach()

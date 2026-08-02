@@ -569,7 +569,7 @@ endif()
 if(LOCKDC_TARGET_ID MATCHES "apple-darwin$"
         AND DEFINED CMAKE_LINKER
         AND NOT "${CMAKE_LINKER}" STREQUAL "")
-    list(PREPEND lockdc_direct_link_flags "-fuse-ld=${CMAKE_LINKER}")
+    list(PREPEND lockdc_direct_link_flags "--ld-path=${CMAKE_LINKER}")
 endif()
 
 set(lockdc_pkgconfig_static_consumer "${consumer_bin_dir}/release_tarball_pkgconfig_static")

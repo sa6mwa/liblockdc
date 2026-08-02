@@ -53,7 +53,7 @@ The repository (<https://github.com/sa6mwa/liblockdc>) uses a Makefile-first wor
   - exported package metadata
   - test registration
 
-Normal host and release Make targets provision the required dependency trees automatically. Low-level scripts such as `scripts/build.sh` and `scripts/test.sh` assume that the matching dependency root already exists.
+Normal host and release Make targets provision the required dependency trees automatically. The low-level `scripts/build.sh` helper assumes that the matching dependency root already exists.
 
 ## Build prerequisites
 
@@ -94,15 +94,17 @@ Run the non-host cross release suites:
 make test-cross
 ```
 
-Run the local debug and host-release verification path:
+Run the complete local confidence path:
 
 ```bash
 make test-all
 ```
 
-`make test-all` starts with the sanitizer-instrumented debug suite before the
-host release suite. Cross release verification lives behind `make test-cross`,
-`make release-matrix`, and `make release`.
+`make test-all` runs the sanitizer-instrumented debug suite, both
+host-executable Bootlin release suites, QEMU cross suites, Valgrind, fuzz
+smoke, deterministic local e2e, native benchmarks, and the Pouch-versus-disk
+performance parity gate. The complete artifact rehearsal remains
+`make release-matrix`.
 
 Run focused verification layers:
 
@@ -165,8 +167,9 @@ make release
 
 `make release` is the final clean-slate release workflow. It verifies release
 tag semantics, removes generated state, then runs the same proof graph as
-`make prerelease`: formatting, debug sanitizer tests, Valgrind, fuzz smoke,
-lockd e2e, Lua tests, benchmark gates, and the release matrix. Use
+`make prerelease`: formatting, debug sanitizer tests including Lua coverage,
+Valgrind, fuzz smoke, lockd e2e, bounded benchmark smoke, and the release
+matrix. Use
 `make release-matrix` when you explicitly want to reuse existing build and
 dependency caches for a faster release matrix/package rerun.
 
@@ -174,7 +177,6 @@ Create only the `x86_64-linux-gnu` package:
 
 ```bash
 make package
-make package-checksums
 ```
 
 Package archive names follow this pattern:
@@ -183,6 +185,11 @@ Package archive names follow this pattern:
   - `liblockdc-<version>-<target>.tar.gz`
 - checksum manifest:
   - `liblockdc-<version>-CHECKSUMS`
+- standalone Lua source package:
+  - `liblockdc-lua-<version>.tar.gz`
+- rendered Lua release artifacts:
+  - `lockdc-<version>-1.rockspec`
+  - `lockdc-<version>-1.src.rock`
 
 ### Release archive contents
 
@@ -451,11 +458,7 @@ scripts/build.sh e2e
 scripts/build.sh x86_64-linux-gnu-release
 scripts/cross_build.sh
 scripts/cross_test.sh release
-scripts/test.sh unit
-scripts/test.sh e2e
 scripts/fuzz.sh
-scripts/package.sh all
-scripts/package-verify.sh
 ```
 
 Unlike the primary Makefile workflow, these lower-level scripts do not generally provision dependency roots implicitly. `scripts/cross_build.sh` prepares the non-host release build trees, and `scripts/cross_test.sh release` runs the cross release tests against those existing build trees. Use them when you want direct preset control and are prepared to manage the prerequisite dependency tree yourself.

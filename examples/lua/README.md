@@ -30,7 +30,7 @@ When running from this repository after building and staging the SDK locally,
 one workable path is:
 
 ```bash
-eval "$(luarocks --tree ./build/luarocks path --lua-version 5.5)"
+eval "$(make -s lua-env)"
 export LD_LIBRARY_PATH="$PWD/build/install-tree-sdk-test/prefix/lib:${LD_LIBRARY_PATH:-}"
 ```
 

@@ -7,6 +7,7 @@ set(root_cmake_path "${LOCKDC_ROOT}/CMakeLists.txt")
 set(release_script_path "${LOCKDC_ROOT}/scripts/release.sh")
 set(release_matrix_script_path "${LOCKDC_ROOT}/scripts/run_linux_release_matrix.sh")
 set(source_smoke_script_path "${LOCKDC_ROOT}/scripts/test_release_from_source.sh")
+set(clean_script_path "${LOCKDC_ROOT}/scripts/clean.sh")
 set(ledger_path "${LOCKDC_ROOT}/docs/lifecycle-migration.md")
 
 file(READ "${makefile_path}" root_makefile)
@@ -14,6 +15,7 @@ file(READ "${root_cmake_path}" root_cmake)
 file(READ "${release_script_path}" release_script)
 file(READ "${release_matrix_script_path}" release_matrix_script)
 file(READ "${source_smoke_script_path}" source_smoke_script)
+file(READ "${clean_script_path}" clean_script)
 file(READ "${ledger_path}" lifecycle_ledger)
 
 function(assert_contains haystack needle description)
@@ -34,8 +36,11 @@ foreach(obsolete_script
         scripts/dev-e2e.sh
         scripts/print-release-version.sh
         scripts/test_release_source.sh
+        scripts/test.sh
         scripts/build_lockdc_lua_rock.sh
-        scripts/validate_lockdc_luarocks.sh)
+        scripts/validate_lockdc_luarocks.sh
+        scripts/package.sh
+        scripts/package-verify.sh)
     if(EXISTS "${LOCKDC_ROOT}/${obsolete_script}")
         message(FATAL_ERROR "obsolete compatibility script still exists: ${obsolete_script}")
     endif()
@@ -75,12 +80,14 @@ foreach(script
 endforeach()
 
 assert_contains(root_makefile "bash ./scripts/valgrind.sh" "Valgrind runner wiring")
+assert_contains(root_makefile ".NOTPARALLEL:" "serialized lifecycle command graph")
 assert_contains(root_makefile "LOCKDC_PRERELEASE_LIVE=1" "live prerelease opt-in diagnostic")
 assert_contains(root_makefile "__finalize-slice: __format __test-debug" "ordinary slice gate graph")
-assert_contains(root_makefile "__test-all: __test-debug __test-host" "bounded test-all graph")
+assert_contains(root_makefile "__test-all: __test-debug __test-host __test-cross __valgrind __fuzz-smoke __test-e2e __bench-gate" "complete test-all graph")
 assert_contains(root_makefile "__prerelease-ordinary: __finalize-slice __valgrind __fuzz-smoke __test-e2e __bench-gate" "ordinary prerelease graph")
 assert_contains(root_makefile "__prerelease: __prerelease-ordinary" "deterministic prerelease graph")
-assert_contains(root_makefile "__prerelease-hardening: __prerelease __fuzz __benchmark-pouch-go-parity-gate __release-matrix" "hardening prerelease graph")
+assert_contains(root_makefile "__bench-gate: __benchmarks __perf-gate" "performance benchmark gate graph")
+assert_contains(root_makefile "__prerelease-hardening: __prerelease __fuzz __release-matrix" "hardening prerelease graph")
 assert_contains(root_makefile "__lifecycle-version-contract:" "lifecycle version contract target")
 assert_contains(root_makefile "bash ./scripts/lifecycle-version-contract.sh" "lifecycle version contract runner")
 assert_contains(root_makefile "print-release-version:" "Make-owned release version surface")
@@ -90,12 +97,13 @@ assert_contains(root_makefile "$(CTEST) --preset debug-lua" "standard Lua test p
 assert_contains(root_makefile "bash ./scripts/test_release_from_source.sh" "standard source archive smoke runner")
 assert_contains(root_makefile "bash ./scripts/verify_release_privacy.sh" "standard release privacy runner")
 assert_contains(root_makefile "bash ./scripts/run_linux_release_matrix.sh" "standard release matrix runner")
+assert_contains(root_makefile "__package-verify: __release-matrix __verify-release-privacy" "complete package verification graph")
 assert_not_contains(root_makefile "build-asan:" "non-standard build-asan compatibility target")
 assert_not_contains(root_makefile "test-asan:" "non-standard test-asan compatibility target")
 assert_not_contains(root_makefile "asan:" "non-standard asan compatibility target")
 assert_not_contains(root_makefile "__release-package-only" "obsolete release package-only internal target")
 assert_contains(root_makefile "__release-pipeline: __prerelease __release-matrix" "complete release pipeline graph")
-assert_contains(root_cmake "LABELS \"lifecycle-host\"" "target-independent lifecycle test label")
+assert_contains(root_cmake "lifecycle-host" "target-independent lifecycle test label")
 assert_contains(release_script "run_step __lifecycle-version-contract\nrun_step __clean\nrun_step __release-pipeline" "release version contract, clean, shared pipeline order")
 assert_contains(release_script "run_timed.sh" "per-phase release timing")
 string(REGEX MATCHALL "run_step __clean" release_clean_steps "${release_script}")
@@ -108,9 +116,12 @@ assert_contains(release_matrix_script "x86_64-linux-gnu-release x86_64-linux-mus
 assert_contains(release_matrix_script "-LE lifecycle-host" "release matrix lifecycle-test exclusion")
 assert_contains(source_smoke_script "host_target_id=x86_64-linux-gnu" "Bootlin source-smoke target")
 assert_contains(source_smoke_script "-DCMAKE_TOOLCHAIN_FILE=\"$toolchain_file\"" "Bootlin source-smoke toolchain")
+assert_contains(source_smoke_script "--target lc_unit_contracts" "bounded source-archive build target")
+assert_contains(source_smoke_script "-R '^lc_unit_contracts$'" "bounded source-archive unit smoke")
 assert_not_contains(source_smoke_script "detect_host_release_preset" "ambient source-smoke target detection")
 assert_contains(release_matrix_script "bash \"$script_dir/cross_test.sh\" release" "standard release matrix cross test step")
 assert_contains(release_matrix_script "bash \"$script_dir/run_linux_package_matrix.sh\"" "standard release matrix package step")
+assert_contains(clean_script "remove_if_present \"$repo_root/.luarocks-build\"" "LuaRocks build state cleanup")
 
 execute_process(
     COMMAND
@@ -174,4 +185,4 @@ assert_contains(lifecycle_ledger "## Command Surface" "migration ledger command 
 assert_contains(lifecycle_ledger "make finalize-slice" "migration ledger finalize-slice entry")
 assert_contains(lifecycle_ledger "make valgrind" "migration ledger valgrind entry")
 assert_contains(lifecycle_ledger "make lifecycle-version-contract" "migration ledger version contract entry")
-assert_contains(lifecycle_ledger "## Decisions Still Required" "migration ledger decisions section")
+assert_contains(lifecycle_ledger "## Optional Extensions" "lifecycle ledger optional extensions section")

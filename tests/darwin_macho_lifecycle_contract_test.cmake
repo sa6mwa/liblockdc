@@ -74,8 +74,12 @@ assert_contains(
     "explicit osxcross Darwin linker")
 assert_contains(
     "${darwin_toolchain}"
-    [=[set(_lockdc_darwin_linker_flag "-fuse-ld=${CMAKE_LINKER}")]=]
-    "absolute Darwin -fuse-ld linker route")
+    [=[set(_lockdc_darwin_linker_flag "--ld-path=${CMAKE_LINKER}")]=]
+    "absolute Darwin --ld-path linker route")
+assert_not_contains(
+    "${darwin_toolchain}"
+    "-fuse-ld=${CMAKE_LINKER}"
+    "deprecated Darwin absolute -fuse-ld linker route")
 assert_contains(
     "${darwin_smoke_bundle}"
     [=["PATH=${lockdc_darwin_tool_path}"]=]

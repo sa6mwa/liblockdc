@@ -19,3 +19,4 @@ remove_if_present() {
 remove_if_present "$repo_root/build"
 remove_if_present "$repo_root/dist"
 remove_if_present "$repo_root/.cache"
+remove_if_present "$repo_root/.luarocks-build"

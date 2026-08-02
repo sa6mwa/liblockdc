@@ -80,11 +80,13 @@ endif()
 
 list(APPEND lockdc_expected_artifacts
     "liblockdc-${lockdc_release_version}.tar.gz"
+    "liblockdc-lua-${lockdc_release_version}.tar.gz"
     "lockdc-${lockdc_release_version}-1.rockspec"
     "lockdc-${lockdc_release_version}-1.src.rock"
 )
 list(APPEND lockdc_expected_checksum_artifacts
     "liblockdc-${lockdc_release_version}.tar.gz"
+    "liblockdc-lua-${lockdc_release_version}.tar.gz"
     "lockdc-${lockdc_release_version}-1.rockspec"
     "lockdc-${lockdc_release_version}-1.src.rock"
 )
@@ -104,9 +106,11 @@ endif()
 
 set(lockdc_lua_rockspec_path "${lockdc_dist_dir}/lockdc-${lockdc_release_version}-1.rockspec")
 set(lockdc_lua_src_rock_path "${lockdc_dist_dir}/lockdc-${lockdc_release_version}-1.src.rock")
+set(lockdc_lua_source_archive_path "${lockdc_dist_dir}/liblockdc-lua-${lockdc_release_version}.tar.gz")
 foreach(required_path
     "${lockdc_lua_rockspec_path}"
     "${lockdc_lua_src_rock_path}"
+    "${lockdc_lua_source_archive_path}"
 )
     if(NOT EXISTS "${required_path}")
         message(FATAL_ERROR "missing standalone Lua release artifact: ${required_path}")
@@ -219,7 +223,7 @@ if(EXISTS "${LOCKDC_ROOT}/.git")
     set(lockdc_ignored_source_manifest_path "${lockdc_verify_work_dir}/lockdc-source-ignored-manifest.txt")
     set(lockdc_actual_source_manifest_path "${lockdc_verify_work_dir}/lockdc-source-actual-manifest.txt")
     execute_process(
-        COMMAND git -C "${LOCKDC_ROOT}" ls-files
+        COMMAND git -C "${LOCKDC_ROOT}" ls-files --cached --modified --others --exclude-standard
         OUTPUT_FILE "${lockdc_expected_source_manifest_path}"
         RESULT_VARIABLE lockdc_git_ls_result
     )
@@ -244,6 +248,11 @@ if(EXISTS "${LOCKDC_ROOT}/.git")
                 endif()
             endforeach()
         endif()
+        foreach(lockdc_expected_source_entry IN LISTS lockdc_expected_source_manifest)
+            if(NOT EXISTS "${LOCKDC_ROOT}/${lockdc_expected_source_entry}")
+                list(REMOVE_ITEM lockdc_expected_source_manifest "${lockdc_expected_source_entry}")
+            endif()
+        endforeach()
         list(APPEND lockdc_expected_source_manifest "VERSION" "RELEASE_MANIFEST")
         list(REMOVE_DUPLICATES lockdc_expected_source_manifest)
         list(SORT lockdc_expected_source_manifest)

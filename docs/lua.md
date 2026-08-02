@@ -39,6 +39,12 @@ The generated rockspec expects:
 - `lonejson == 0.42.0-1`
 - Lua `>= 5.5, < 5.6`
 
+The lifecycle executes and packages only Lua 5.5. Each release includes the
+standalone `liblockdc-lua-<version>.tar.gz` source package, the rendered
+`lockdc-<version>-1.rockspec`, and the matching `.src.rock`. The source rock
+embeds that exact standalone archive; all three artifacts are checksum-listed
+and recursively privacy-scanned before release.
+
 The C SDK is pinned to the matching `lonejson 0.42.0` native dependency for
 mapped state load/save and internal typed JSON parsing. The Lua rock declares
 the corresponding Lua-facing `lonejson` rock so Lua JSON behavior and the C

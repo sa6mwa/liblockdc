@@ -6,14 +6,9 @@ if(NOT DEFINED LOCKDC_BUILD_TYPE)
     message(FATAL_ERROR "LOCKDC_BUILD_TYPE is required")
 endif()
 
-if(NOT LOCKDC_BUILD_TYPE STREQUAL "Release")
-    message(STATUS "Skipping release compile warning contract for ${LOCKDC_BUILD_TYPE}")
-    return()
-endif()
-
 set(compile_commands "${LOCKDC_BINARY_DIR}/compile_commands.json")
 if(NOT EXISTS "${compile_commands}")
-    message(FATAL_ERROR "release compile_commands.json not found: ${compile_commands}")
+    message(FATAL_ERROR "compile_commands.json not found: ${compile_commands}")
 endif()
 
 file(READ "${compile_commands}" compile_commands_json)
@@ -29,7 +24,7 @@ if(lockdc_build_benchmarks_cache)
     endif()
 endif()
 
-function(assert_release_output_has_werror output_regex label required)
+function(assert_output_has_werror output_regex label required c89_required)
     string(REGEX MATCH
         "\"command\": [^\n]*\n  \"file\": [^\n]*\n  \"output\": \"${output_regex}\""
         entry
@@ -44,38 +39,57 @@ function(assert_release_output_has_werror output_regex label required)
     endif()
     if(entry STREQUAL "")
         if(required)
-            message(FATAL_ERROR "Expected release compile command for ${label}")
+            message(FATAL_ERROR "Expected compile command for ${label}")
         endif()
         return()
     endif()
     if(NOT entry MATCHES "(^|[ \t])-Werror([ \t\"]|$)")
         message(FATAL_ERROR
-            "Expected release compile command for ${label} to include -Werror:\n${entry}")
+            "Expected compile command for ${label} to include -Werror:\n${entry}")
+    endif()
+    if(c89_required)
+        foreach(required_option
+                -std=c89
+                -Wall
+                -Wextra
+                -Wpedantic
+                -pedantic-errors)
+            string(FIND "${entry}" "${required_option}" required_option_index)
+            if(required_option_index EQUAL -1)
+                message(FATAL_ERROR
+                    "Expected compile command for ${label} to include ${required_option}:\n${entry}")
+            endif()
+        endforeach()
     endif()
 endfunction()
 
-assert_release_output_has_werror(
+assert_output_has_werror(
     "CMakeFiles/lc_static.dir/src/lc_api.c.o"
     "lc_static"
     TRUE
+    TRUE
 )
-assert_release_output_has_werror(
+assert_output_has_werror(
     "CMakeFiles/lc_shared.dir/src/lc_api.c.o"
     "lc_shared"
     TRUE
+    TRUE
 )
-assert_release_output_has_werror(
+assert_output_has_werror(
     "tests/unit/CMakeFiles/lc_unit_pouch.dir/test_lc_pouch.c.o"
     "release unit tests"
     TRUE
+    FALSE
 )
-assert_release_output_has_werror(
+assert_output_has_werror(
     "bench/CMakeFiles/lockdc_bench.dir/bench_main.c.o"
     "release benchmarks"
     ${lockdc_benchmarks_required}
+    FALSE
 )
-assert_release_output_has_werror(
+assert_output_has_werror(
     "CMakeFiles/lockdc_lua_core.dir/src/lua/lockdc_lua.c.o"
     "Lua binding"
     FALSE
+    TRUE
 )

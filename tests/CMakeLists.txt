@@ -124,6 +124,17 @@ set_tests_properties(release_compile_werror_test PROPERTIES
   TIMEOUT 10
 )
 
+add_test(NAME release_privacy_recursive_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/release_privacy_recursive_test.cmake"
+)
+set_tests_properties(release_privacy_recursive_test PROPERTIES
+  LABELS "unit;local;packaging"
+  TIMEOUT 10
+)
+
 add_test(NAME darwin_macho_lifecycle_contract_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
@@ -193,7 +204,7 @@ if(lockdc_lua_test_sanitizer_flags MATCHES "(^|[ \t])-fsanitize=([^ \t,]+,)*addr
   endif()
 endif()
 
-find_program(LOCKDC_LUA_BIN NAMES lua lua5.5)
+find_program(LOCKDC_LUA_BIN NAMES lua5.5)
 if(LOCKDC_LUA_BIN)
   add_test(NAME lua_facade_unit_test
     COMMAND "${LOCKDC_LUA_BIN}" "${CMAKE_SOURCE_DIR}/tests/lua/test_lockdc_facade_unit.lua"

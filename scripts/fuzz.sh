@@ -9,6 +9,9 @@ work_corpus_root="$repo_root/build/fuzz/corpus"
 findings_root="$repo_root/build/fuzz/findings"
 max_total_time=${1:-30}
 
+# shellcheck source=assert_generated_path.sh
+source "$script_dir/assert_generated_path.sh"
+
 unset LD_LIBRARY_PATH
 
 prepare_corpus() {
@@ -16,6 +19,7 @@ prepare_corpus() {
     local src_dir="$source_corpus_root/$name"
     local dst_dir="$work_corpus_root/$name"
 
+    lockdc_assert_generated_path "$repo_root" "$dst_dir"
     rm -rf "$dst_dir"
     mkdir -p "$dst_dir"
     cp -R "$src_dir/." "$dst_dir/"
@@ -36,6 +40,7 @@ run_fuzzer() {
 
     corpus_dir=$(prepare_corpus "$name")
     findings_dir="$findings_root/$name"
+    lockdc_assert_generated_path "$repo_root" "$findings_dir"
     rm -rf "$findings_dir"
     mkdir -p "$findings_dir"
     AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_NO_AFFINITY=1 \
