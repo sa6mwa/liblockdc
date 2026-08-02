@@ -217,8 +217,8 @@ Acceptance:
   diagnostic only; they are not independent cross-engine comparison metrics.
 - [x] Record matching cold/warm indexed-key query metrics instead of allowing
   total benchmark time to hide a slow query path.
-- [ ] Split the attachment roundtrip timing into independently comparable
-  attach and retrieve metrics.
+- [x] Report independent comparable attachment write and retrieve metrics;
+  retain the combined roundtrip only as a diagnostic.
 - [ ] Add bounded exclusive and shared-root microbenchmark commands suitable
   for development, plus the existing production comparison gate.
 - [ ] Set and document the numeric exclusive-mode release budget from a stable

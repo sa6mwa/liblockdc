@@ -133,6 +133,8 @@ func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes, segmen
 	}
 	b.ReportMetric(float64(result.stale_ns), "stale-ns/op")
 	b.ReportMetric(float64(result.attachment_ns), "attachment-ns/op")
+	b.ReportMetric(float64(result.attachment_write_ns), "attachment-write-ns/op")
+	b.ReportMetric(float64(result.attachment_read_ns), "attachment-read-ns/op")
 	b.ReportMetric(float64(result.queue_ns), "queue-ns/op")
 	if result.queue_messages > 0 {
 		b.ReportMetric(float64(result.queue_ns)/float64(result.queue_messages), "queue-one-ns/op")

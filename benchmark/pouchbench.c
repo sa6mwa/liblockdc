@@ -857,28 +857,23 @@ static int lockdc_bench_read_lease(lc_lease *lease, long row, long generation,
   return rc;
 }
 
-static int lockdc_bench_attach_and_read(lc_lease *lease, long row,
-                                        lc_error *error) {
-  char payload[4096];
-  char name[64];
+static int lockdc_bench_attach(lc_lease *lease, const char *name,
+                               const void *payload, size_t payload_length,
+                               lc_error *error) {
   lc_attach_req attach_req;
   lc_attach_res attach_res;
-  lc_attachment_get_req get_req;
-  lc_attachment_get_res get_res;
   lc_source *source;
-  lc_sink *sink;
-  const void *bytes;
-  size_t length;
   int rc;
 
-  memset(payload, (int)('A' + (row % 26L)), sizeof(payload));
-  snprintf(name, sizeof(name), "blob-%08ld.bin", row);
+  if (lease == NULL || name == NULL || payload == NULL) {
+    return LC_ERR_INVALID;
+  }
   lc_attach_req_init(&attach_req);
   memset(&attach_res, 0, sizeof(attach_res));
   attach_req.name = name;
   attach_req.content_type = "application/octet-stream";
   source = NULL;
-  rc = lc_source_from_memory(payload, sizeof(payload), &source, error);
+  rc = lc_source_from_memory(payload, payload_length, &source, error);
   if (rc == LC_OK) {
     rc = lease->attach(lease, &attach_req, source, &attach_res, error);
   }
@@ -886,10 +881,23 @@ static int lockdc_bench_attach_and_read(lc_lease *lease, long row,
     lc_source_close(source);
   }
   lc_attach_res_cleanup(&attach_res);
-  if (rc != LC_OK) {
-    return rc;
-  }
+  return rc;
+}
 
+static int lockdc_bench_read_attachment(lc_lease *lease, const char *name,
+                                        const void *expected,
+                                        size_t expected_length,
+                                        lc_error *error) {
+  lc_attachment_get_req get_req;
+  lc_attachment_get_res get_res;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  int rc;
+
+  if (lease == NULL || name == NULL || expected == NULL) {
+    return LC_ERR_INVALID;
+  }
   lc_attachment_get_req_init(&get_req);
   memset(&get_res, 0, sizeof(get_res));
   get_req.selector.name = name;
@@ -903,8 +911,8 @@ static int lockdc_bench_attach_and_read(lc_lease *lease, long row,
   if (rc == LC_OK) {
     rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
   }
-  if (rc == LC_OK && (length != sizeof(payload) ||
-                      memcmp(bytes, payload, sizeof(payload)) != 0)) {
+  if (rc == LC_OK && (length != expected_length ||
+                      memcmp(bytes, expected, expected_length) != 0)) {
     (void)error;
     rc = LC_ERR_INVALID;
   }
@@ -1867,9 +1875,12 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
     lc_acquire_req acquire_req;
     lc_release_req release_req;
     lc_lease *lease;
+    char attachment_name[64];
+    char attachment_payload[4096];
     char key[64];
     char *stale_etag;
     long generation;
+    int attachment_name_len;
 
     snprintf(key, sizeof(key), "doc/%08ld", row);
     lc_acquire_req_init(&acquire_req);
@@ -1970,15 +1981,37 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
     }
     free(stale_etag);
     if ((row % 16L) == 0L) {
-      phase = "attachment roundtrip";
+      memset(attachment_payload, (int)('A' + (row % 26L)),
+             sizeof(attachment_payload));
+      attachment_name_len = snprintf(attachment_name, sizeof(attachment_name),
+                                     "blob-%08ld.bin", row);
+      if (attachment_name_len <= 0 ||
+          (size_t)attachment_name_len >= sizeof(attachment_name)) {
+        rc = LC_ERR_INVALID;
+        lease->close(lease);
+        goto done;
+      }
+      phase = "attach";
       phase_start = lockdc_bench_now_ns();
-      rc = lockdc_bench_attach_and_read(lease, row, &error);
+      rc = lockdc_bench_attach(lease, attachment_name, attachment_payload,
+                               sizeof(attachment_payload), &error);
       if (rc != LC_OK) {
         lease->close(lease);
         goto done;
       }
-      lockdc_bench_add_ns(&out->attachment_ns, phase_start,
-                          lockdc_bench_now_ns());
+      lockdc_bench_add_phase_ns(&out->attachment_write_ns, &out->attachment_ns,
+                                phase_start, lockdc_bench_now_ns());
+      phase = "retrieve attachment";
+      phase_start = lockdc_bench_now_ns();
+      rc = lockdc_bench_read_attachment(lease, attachment_name,
+                                        attachment_payload,
+                                        sizeof(attachment_payload), &error);
+      if (rc != LC_OK) {
+        lease->close(lease);
+        goto done;
+      }
+      lockdc_bench_add_phase_ns(&out->attachment_read_ns, &out->attachment_ns,
+                                phase_start, lockdc_bench_now_ns());
       out->attachments++;
       out->reads++;
     }

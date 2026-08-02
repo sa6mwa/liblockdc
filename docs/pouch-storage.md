@@ -1455,7 +1455,7 @@ the rollover threshold.
 
 The exclusive-writer comparison gate has an explicit allowlist of comparable
 end-to-end core metrics: acquire, lease/public get, update, release, queue,
-attachment roundtrip, cold and warm indexed key queries, indexed document
+attachment write and attachment retrieve, cold and warm indexed key queries, indexed document
 queries, scan/full-text queries, and restart recovery. Each metric must be
 reported by both engines. `reopen`, `flush-reopen`, aggregate `ns/op`, and
 Pouch-only C timing remain diagnostics, not independent cross-engine parity

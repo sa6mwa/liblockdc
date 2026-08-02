@@ -49,6 +49,9 @@ explicit variants by default: `ProductionPouchPT`, `ProductionPouchCrypto`,
 `--disable-storage-encryption`. The production target reports split flush
 metrics so index flush work can be attributed to intermediate write-churn
 flushes, final flush, no-op flush, and post-reopen flush.
+Attachment output separates `attachment-write-ns/op` from
+`attachment-read-ns/op`; the legacy combined `attachment-ns/op` remains a
+diagnostic only.
 
 The fixed production profiles use deterministic, JSON-safe high-entropy payload
 tails and size each profile above the 64 MiB segment target after compression.

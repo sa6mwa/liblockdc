@@ -570,6 +570,8 @@ type productionMetrics struct {
 	releaseNS            int64
 	staleNS              int64
 	attachmentNS         int64
+	attachmentWriteNS    int64
+	attachmentReadNS     int64
 	queueNS              int64
 	flushNS              int64
 	flushIntermediateNS  int64
@@ -683,6 +685,8 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes, seg
 				_ = session.Release(context.Background())
 				b.Fatalf("lockd disk production attach row %d: %v\n%s", row, err, h.logs.String())
 			}
+			addMetricPhaseDuration(&metrics.attachmentWriteNS, &metrics.attachmentNS, phaseStart)
+			phaseStart = time.Now()
 			ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 			attachment, err := session.RetrieveAttachment(ctx, lockdclient.AttachmentSelector{Name: fmt.Sprintf("blob-%08d.bin", row)})
 			var readPayload []byte
@@ -702,7 +706,7 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes, seg
 				_ = session.Release(context.Background())
 				b.Fatalf("lockd disk production attachment payload mismatch row %d", row)
 			}
-			addMetricDuration(&metrics.attachmentNS, phaseStart)
+			addMetricPhaseDuration(&metrics.attachmentReadNS, &metrics.attachmentNS, phaseStart)
 			metrics.attachments++
 			metrics.reads++
 		}
@@ -983,6 +987,8 @@ func BenchmarkProductionLockdDiskNoCrypto(b *testing.B) {
 			}
 			b.ReportMetric(float64(metrics.staleNS), "stale-ns/op")
 			b.ReportMetric(float64(metrics.attachmentNS), "attachment-ns/op")
+			b.ReportMetric(float64(metrics.attachmentWriteNS), "attachment-write-ns/op")
+			b.ReportMetric(float64(metrics.attachmentReadNS), "attachment-read-ns/op")
 			b.ReportMetric(float64(metrics.queueNS), "queue-ns/op")
 			if metrics.queueMessages > 0 {
 				b.ReportMetric(float64(metrics.queueNS)/float64(metrics.queueMessages), "queue-one-ns/op")
