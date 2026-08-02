@@ -7,7 +7,15 @@ if(NOT DEFINED LOCKDC_ROOT)
 endif()
 
 set(lockdc_test_root "${LOCKDC_BINARY_DIR}/lua-release-package-test-artifacts")
-set(lockdc_dist_dir "${lockdc_test_root}/dist")
+if(DEFINED LOCKDC_USE_EXISTING_ARCHIVE AND LOCKDC_USE_EXISTING_ARCHIVE)
+    if(NOT DEFINED LOCKDC_DIST_DIR OR LOCKDC_DIST_DIR STREQUAL "")
+        message(FATAL_ERROR
+            "LOCKDC_DIST_DIR is required when LOCKDC_USE_EXISTING_ARCHIVE is enabled")
+    endif()
+    set(lockdc_dist_dir "${LOCKDC_DIST_DIR}")
+else()
+    set(lockdc_dist_dir "${lockdc_test_root}/dist")
+endif()
 
 if(NOT EXISTS "${LOCKDC_BINARY_DIR}/package-metadata.cmake")
     message(FATAL_ERROR "missing package metadata: ${LOCKDC_BINARY_DIR}/package-metadata.cmake")
@@ -54,48 +62,42 @@ set(lockdc_lua_inner_archive_path "${lockdc_lua_rock_extract_root}/lockdc-${LOCK
 set(lockdc_lua_inner_rockspec_path "${lockdc_lua_rock_extract_root}/lockdc-${LOCKDC_VERSION}-1.rockspec")
 
 file(REMOVE_RECURSE "${lockdc_test_root}")
-file(MAKE_DIRECTORY "${lockdc_dist_dir}")
+if(NOT (DEFINED LOCKDC_USE_EXISTING_ARCHIVE AND LOCKDC_USE_EXISTING_ARCHIVE))
+    file(MAKE_DIRECTORY "${lockdc_dist_dir}")
 
-execute_process(
-    COMMAND "${CMAKE_COMMAND}"
-        -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
-        -DLOCKDC_ROOT=${LOCKDC_ROOT}
-        -DLOCKDC_DIST_DIR=${lockdc_dist_dir}
-        -P "${LOCKDC_ROOT}/cmake/package_archive.cmake"
-    RESULT_VARIABLE package_archive_result
-    OUTPUT_VARIABLE package_archive_stdout
-    ERROR_VARIABLE package_archive_stderr
-)
-if(NOT package_archive_result EQUAL 0)
-    message(FATAL_ERROR
-        "failed to create C release archive for Lua package test
-"
-        "stdout:
-${package_archive_stdout}
-"
-        "stderr:
-${package_archive_stderr}")
-endif()
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}"
+            -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
+            -DLOCKDC_ROOT=${LOCKDC_ROOT}
+            -DLOCKDC_DIST_DIR=${lockdc_dist_dir}
+            -P "${LOCKDC_ROOT}/cmake/package_archive.cmake"
+        RESULT_VARIABLE package_archive_result
+        OUTPUT_VARIABLE package_archive_stdout
+        ERROR_VARIABLE package_archive_stderr
+    )
+    if(NOT package_archive_result EQUAL 0)
+        message(FATAL_ERROR
+            "failed to create C release archive for Lua package test\n"
+            "stdout:\n${package_archive_stdout}\n"
+            "stderr:\n${package_archive_stderr}")
+    endif()
 
-execute_process(
-    COMMAND "${CMAKE_COMMAND}"
-        -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
-        -DLOCKDC_ROOT=${LOCKDC_ROOT}
-        -DLOCKDC_DIST_DIR=${lockdc_dist_dir}
-        -P "${LOCKDC_ROOT}/cmake/package_lua_rock.cmake"
-    RESULT_VARIABLE package_lua_result
-    OUTPUT_VARIABLE package_lua_stdout
-    ERROR_VARIABLE package_lua_stderr
-)
-if(NOT package_lua_result EQUAL 0)
-    message(FATAL_ERROR
-        "failed to create standalone Lua release package
-"
-        "stdout:
-${package_lua_stdout}
-"
-        "stderr:
-${package_lua_stderr}")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}"
+            -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
+            -DLOCKDC_ROOT=${LOCKDC_ROOT}
+            -DLOCKDC_DIST_DIR=${lockdc_dist_dir}
+            -P "${LOCKDC_ROOT}/cmake/package_lua_rock.cmake"
+        RESULT_VARIABLE package_lua_result
+        OUTPUT_VARIABLE package_lua_stdout
+        ERROR_VARIABLE package_lua_stderr
+    )
+    if(NOT package_lua_result EQUAL 0)
+        message(FATAL_ERROR
+            "failed to create standalone Lua release package\n"
+            "stdout:\n${package_lua_stdout}\n"
+            "stderr:\n${package_lua_stderr}")
+    endif()
 endif()
 
 foreach(required_path

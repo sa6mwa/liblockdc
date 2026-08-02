@@ -123,7 +123,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__package __package-source __package-source-smoke __package-checksums __package-verify __verify-release-privacy __clean-dist \
 	__lua-rock __lua-test __lua-env __release-lua-artifacts \
 	__dev-up __dev-down __dev-reset __dev-ps __dev-logs __cross-build __cross-preset-test __cross-test \
-	__prerelease __prerelease-live __prerelease-hardening __lifecycle-version-contract __release __release-pipeline __release-matrix __clean \
+	__prerelease __prerelease-ordinary __prerelease-live __prerelease-hardening __lifecycle-version-contract __release __release-pipeline __release-matrix __clean \
 	deps-debug deps-release deps-cross \
 	build build-debug build-release build-e2e build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-all test-coverage \
@@ -202,9 +202,9 @@ help:
 		'make cross-build        Build all non-host cross release presets.' \
 		'make cross-preset-test  Run the host ASan/UBSan debug cross-preset packaging-isolation check.' \
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
-		'make prerelease         Run the release proof graph without the initial clean.' \
+		'make prerelease         Run deterministic pre-release confidence without an initial clean.' \
 		'make prerelease-live    Refuse without LOCKDC_PRERELEASE_LIVE=1; no live-provider checks are currently defined.' \
-		'make prerelease-hardening  Run prerelease plus full fuzzing and the Pouch Go parity gate.' \
+		'make prerelease-hardening  Run prerelease plus full fuzzing, Pouch Go parity, and the release matrix.' \
 		'make lifecycle-version-contract  Verify exact release tag semantics before clean release work.' \
 		'make print-release-version  Print the release version resolved by the Make-owned release surface.' \
 		'make release            Run the clean-slate final release workflow: version contract, clean, then the shared release proof graph.' \
@@ -648,7 +648,7 @@ lua-test:
 	$(TIMED) lua-test $(MAKE) __lua-test
 
 __lua-test: __build-debug
-	$(CTEST) --test-dir $(DEBUG_BUILD_DIR) -R '^lua_(binding_source_layout|external_sdk_contract|facade_unit|binding_core_smoke)_test$$' --output-on-failure
+	$(CTEST) --preset debug-lua
 
 lua-env:
 	$(TIMED) lua-env $(MAKE) __lua-env
@@ -698,7 +698,9 @@ release:
 prerelease:
 	$(TIMED) prerelease $(MAKE) __prerelease
 
-__prerelease: __finalize-slice __valgrind __fuzz-smoke __test-e2e __lua-test __bench-gate
+__prerelease-ordinary: __finalize-slice __valgrind __fuzz-smoke __test-e2e __bench-gate
+
+__prerelease: __prerelease-ordinary
 
 prerelease-live:
 	$(TIMED) prerelease-live $(MAKE) __prerelease-live

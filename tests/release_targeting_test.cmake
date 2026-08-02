@@ -58,8 +58,11 @@ endif()
 
 file(READ "${LOCKDC_ROOT}/scripts/run_linux_release_matrix.sh" matrix_script)
 foreach(expected_step
+    "unset LD_LIBRARY_PATH"
     "\"$make_bin\" __build-release"
-    "\"$make_bin\" __test-host"
+    "for preset in x86_64-linux-gnu-release x86_64-linux-musl-release"
+    "ctest --preset \"$preset\""
+    "-LE lifecycle-host"
     "bash \"$script_dir/cross_test.sh\" release"
     "bash \"$script_dir/run_linux_package_matrix.sh\""
 )

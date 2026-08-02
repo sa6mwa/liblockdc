@@ -4,54 +4,16 @@ set -euo pipefail
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 
-resolve_host_arch() {
-  local compiler triple
-
-  compiler=${CC:-cc}
-  triple=$("$compiler" -dumpmachine 2>/dev/null || true)
-
-  case "$triple" in
-    x86_64*-linux-musl*|x86_64*-linux-gnu*|x86_64*-linux)
-      printf '%s\n' x86_64
-      ;;
-    aarch64*-linux-musl*|aarch64*-linux-gnu*|aarch64*-linux)
-      printf '%s\n' aarch64
-      ;;
-    arm*-linux-musleabihf*|armv7*-linux-musleabihf*|arm*-linux-musl*|armv7*-linux-musl*|arm*-linux-gnueabihf*|armv7*-linux-gnueabihf*|arm*-linux-gnu*|armv7*-linux-gnu*)
-      printf '%s\n' armhf
-      ;;
-    *)
-      printf 'unsupported native host compiler triple for host tests: %s\n' "${triple:-unknown}" >&2
-      exit 1
-      ;;
-  esac
-}
-
-have_native_musl_toolchain() {
-  case "$1" in
-    x86_64)
-      command -v musl-gcc >/dev/null 2>&1
-      ;;
-    aarch64)
-      [ -x "$HOME/.local/cross/aarch64-linux-musl/bin/aarch64-linux-musl-gcc" ]
-      ;;
-    armhf)
-      [ -x "$HOME/.local/cross/arm-linux-musleabihf/bin/arm-linux-musleabihf-gcc" ]
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-arch=$(resolve_host_arch)
-presets=("${arch}-linux-gnu-release")
-deps_presets=(deps-host-debug)
-
-if have_native_musl_toolchain "$arch"; then
-  presets+=("${arch}-linux-musl-release")
-  deps_presets+=("deps-${arch}-linux-musl")
-fi
+# Host-executable release testing always uses the pinned Bootlin x86_64 Linux
+# targets. Do not select a compiler or dependency root from the ambient host.
+presets=(
+  x86_64-linux-gnu-release
+  x86_64-linux-musl-release
+)
+deps_presets=(
+  deps-x86_64-linux-gnu
+  deps-x86_64-linux-musl
+)
 
 unset LD_LIBRARY_PATH
 
@@ -75,5 +37,6 @@ done
 
 for preset in "${presets[@]}"; do
   "$script_dir/build.sh" "$preset"
-  ctest --preset "$preset" --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout"
+  ctest --preset "$preset" --output-on-failure --progress --stop-on-failure \
+    --timeout "$ctest_timeout" -LE lifecycle-host
 done

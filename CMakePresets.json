@@ -37,19 +37,15 @@
       }
     },
     {
+      "name": "debug-lua",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build/debug"
+    },
+    {
       "name": "e2e",
       "inherits": "debug",
       "cacheVariables": {
         "LOCKDC_BUILD_E2E_TESTS": "ON"
-      }
-    },
-    {
-      "name": "debug-lua",
-      "inherits": "debug",
-      "cacheVariables": {
-        "LOCKDC_BUILD_LUA_BINDINGS": "ON",
-        "LOCKDC_BUILD_EXAMPLES": "OFF",
-        "LOCKDC_BUILD_BENCHMARKS": "OFF"
       }
     },
     {
@@ -291,7 +287,7 @@
       "configurePreset": "debug-lua",
       "filter": {
         "include": {
-          "regex": "^lua_"
+          "name": "^lua_"
         }
       },
       "output": {

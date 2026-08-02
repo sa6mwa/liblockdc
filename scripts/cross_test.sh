@@ -39,7 +39,8 @@ run_cross_release_matrix() {
 
   for preset in "${cross_release_presets[@]}"; do
     require_release_build_tree "$preset"
-    LOCKDC_SLOW_TEST_RUNTIME=1 ctest --preset "$preset" --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout"
+    LOCKDC_SLOW_TEST_RUNTIME=1 ctest --preset "$preset" --output-on-failure --progress --stop-on-failure \
+      --timeout "$ctest_timeout" -LE lifecycle-host
   done
 }
 

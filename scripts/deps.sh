@@ -12,42 +12,7 @@ local_download_root=${LOCKDC_DOWNLOAD_ROOT:-$repo_root/.cache/downloads}
 lonejson_abi_version=${LOCKDC_LONEJSON_ABI_VERSION:-25}
 liblql_abi_version=${LOCKDC_LIBLQL_ABI_VERSION:-0}
 
-resolve_host_debug_preset() {
-  local compiler triple
-
-  compiler=${CC:-cc}
-  triple=$("$compiler" -dumpmachine 2>/dev/null || true)
-
-  case "$triple" in
-    x86_64*-linux-musl*)
-      printf '%s\n' "deps-x86_64-linux-musl"
-      ;;
-    x86_64*-linux-gnu*|x86_64*-linux)
-      printf '%s\n' "deps-x86_64-linux-gnu"
-      ;;
-    aarch64*-linux-musl*)
-      printf '%s\n' "deps-aarch64-linux-musl"
-      ;;
-    aarch64*-linux-gnu*|aarch64*-linux)
-      printf '%s\n' "deps-aarch64-linux-gnu"
-      ;;
-    arm*-linux-musleabihf*|armv7*-linux-musleabihf*|arm*-linux-musl*|armv7*-linux-musl*)
-      printf '%s\n' "deps-armhf-linux-musl"
-      ;;
-    arm*-linux-gnueabihf*|armv7*-linux-gnueabihf*|arm*-linux-gnu*|armv7*-linux-gnu*)
-      printf '%s\n' "deps-armhf-linux-gnu"
-      ;;
-    *)
-      printf 'unsupported native host compiler triple for deps-host-debug: %s\n' "${triple:-unknown}" >&2
-      exit 1
-      ;;
-  esac
-}
-
 case "$preset" in
-  deps-host-debug)
-    preset=$(resolve_host_debug_preset)
-    ;&
   deps-x86_64-linux-gnu)
     cmake_preset="x86_64-linux-gnu-release"
     deps_root="$repo_root/.cache/deps/x86_64-linux-gnu"
@@ -135,7 +100,7 @@ case "$preset" in
     )
     ;;
   *)
-    echo "usage: scripts/deps.sh [deps-x86_64-linux-gnu|deps-host-debug|deps-x86_64-linux-musl|deps-aarch64-linux-gnu|deps-aarch64-linux-musl|deps-armhf-linux-gnu|deps-armhf-linux-musl|deps-arm64-apple-darwin]" >&2
+    echo "usage: scripts/deps.sh [deps-x86_64-linux-gnu|deps-x86_64-linux-musl|deps-aarch64-linux-gnu|deps-aarch64-linux-musl|deps-armhf-linux-gnu|deps-armhf-linux-musl|deps-arm64-apple-darwin]" >&2
     exit 2
     ;;
 esac

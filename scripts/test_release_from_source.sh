@@ -15,41 +15,6 @@ smoke_root="$repo_root_arg/build/release-source-smoke"
 extract_root="$smoke_root/extract"
 build_root="$smoke_root/build"
 
-detect_host_release_preset() {
-    local cc_bin="${CC:-cc}"
-    local triple
-
-    if ! triple="$($cc_bin -dumpmachine 2>/dev/null)"; then
-        printf 'test_release_from_source.sh: failed to resolve native compiler triple with %s -dumpmachine\n' "$cc_bin" >&2
-        exit 1
-    fi
-
-    case "$triple" in
-        x86_64*-linux-musl*)
-            printf '%s\n' "x86_64-linux-musl"
-            ;;
-        x86_64*-linux-gnu*|x86_64*-linux)
-            printf '%s\n' "x86_64-linux-gnu"
-            ;;
-        aarch64*-linux-musl*)
-            printf '%s\n' "aarch64-linux-musl"
-            ;;
-        aarch64*-linux-gnu*|aarch64*-linux)
-            printf '%s\n' "aarch64-linux-gnu"
-            ;;
-        arm*-linux-musleabihf*|armv7*-linux-musleabihf*|arm*-linux-musl*|armv7*-linux-musl*)
-            printf '%s\n' "armhf-linux-musl"
-            ;;
-        arm*-linux-gnueabihf*|armv7*-linux-gnueabihf*|arm*-linux-gnu*|armv7*-linux-gnu*)
-            printf '%s\n' "armhf-linux-gnu"
-            ;;
-        *)
-            printf 'test_release_from_source.sh: unsupported native compiler triple: %s\n' "$triple" >&2
-            exit 1
-            ;;
-    esac
-}
-
 if [[ ! -f "$source_tarball" ]]; then
     printf 'test_release_from_source.sh: source tarball not found: %s\n' \
         "$source_tarball" >&2
@@ -84,16 +49,23 @@ if [[ ! "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
-host_target_id="$(detect_host_release_preset)"
+host_target_id=x86_64-linux-gnu
 external_root="$repo_root_arg/.cache/deps/$host_target_id"
 dependency_build_root="$repo_root_arg/.cache/deps-build/$host_target_id"
+toolchain_file="$source_root/cmake/toolchains/x86_64-linux-gnu.cmake"
 if [[ ! -d "$external_root" ]]; then
     printf 'test_release_from_source.sh: dependency root is missing: %s\n' "$external_root" >&2
     printf 'Run scripts/deps.sh deps-%s before source archive smoke validation.\n' "$host_target_id" >&2
     exit 1
 fi
+if [[ ! -f "$toolchain_file" ]]; then
+    printf 'test_release_from_source.sh: Bootlin toolchain file is missing: %s\n' \
+        "$toolchain_file" >&2
+    exit 1
+fi
 
 cmake -S "$source_root" -B "$build_root" -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE="$toolchain_file" \
     -DLOCKDC_BUILD_DEPENDENCIES=OFF \
     -DLOCKDC_BUILD_E2E_TESTS=OFF \
     -DLOCKDC_BUILD_FUZZERS=OFF \

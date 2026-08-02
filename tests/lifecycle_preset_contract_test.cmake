@@ -75,6 +75,15 @@ function(assert_test_preset name expected_configure)
     endif()
 endfunction()
 
+function(assert_test_filter name key expected)
+    find_named_object_index(index testPresets "${name}")
+    json_get(actual testPresets ${index} filter include ${key})
+    if(NOT actual STREQUAL expected)
+        message(FATAL_ERROR
+            "test preset ${name} include.${key} should be ${expected}, got ${actual}")
+    endif()
+endfunction()
+
 function(assert_configure_cache name key expected)
     find_named_object_index(index configurePresets "${name}")
     json_get(actual configurePresets ${index} cacheVariables ${key})
@@ -102,6 +111,15 @@ function(assert_configure_inherits name expected)
     endif()
 endfunction()
 
+function(assert_configure_binary_dir name expected)
+    find_named_object_index(index configurePresets "${name}")
+    json_get(actual configurePresets ${index} binaryDir)
+    if(NOT actual STREQUAL expected)
+        message(FATAL_ERROR
+            "configure preset ${name} binaryDir should be ${expected}, got ${actual}")
+    endif()
+endfunction()
+
 foreach(name
         base
         debug
@@ -120,7 +138,6 @@ endforeach()
 
 foreach(name
         debug
-        debug-lua
         valgrind
         fuzz
         x86_64-linux-gnu-release
@@ -133,6 +150,9 @@ foreach(name
     assert_build_preset("${name}" "${name}")
     assert_test_preset("${name}" "${name}")
 endforeach()
+assert_build_preset(debug-lua debug-lua)
+assert_test_preset(debug-lua debug-lua)
+assert_test_filter(debug-lua name "^lua_")
 
 assert_configure_cache(base CMAKE_EXPORT_COMPILE_COMMANDS ON)
 assert_configure_cache(base LOCKDC_BUILD_DEPENDENCIES OFF)
@@ -143,11 +163,11 @@ assert_configure_cache(base LOCKDC_INSTALL ON)
 assert_configure_cache(debug CMAKE_BUILD_TYPE Debug)
 assert_configure_cache(debug LOCKDC_BUILD_EXAMPLES ON)
 assert_configure_toolchain(debug "$\{sourceDir\}/cmake/toolchains/x86_64-linux-gnu.cmake")
-foreach(name e2e debug-lua asan coverage)
+assert_configure_inherits(debug-lua debug)
+assert_configure_binary_dir(debug-lua "$\{sourceDir\}/build/debug")
+foreach(name e2e asan coverage)
     assert_configure_inherits("${name}" debug)
 endforeach()
-assert_configure_cache(debug-lua LOCKDC_BUILD_LUA_BINDINGS ON)
-assert_configure_cache(debug-lua LOCKDC_BUILD_BENCHMARKS OFF)
 assert_configure_cache(valgrind CMAKE_C_FLAGS_DEBUG "-O1 -g -fno-omit-frame-pointer")
 assert_configure_cache(valgrind LOCKDC_BUILD_FUZZERS OFF)
 assert_configure_cache(valgrind LOCKDC_TARGET_ARCH x86_64)
@@ -187,5 +207,5 @@ file(READ "${LOCKDC_ROOT}/scripts/valgrind.sh" valgrind_script)
 assert_contains(valgrind_script "cmake --fresh --preset \"$preset\"" "Valgrind fresh configure")
 assert_contains(valgrind_script "LOCKDC_UNDER_VALGRIND=1 \"$valgrind_bin\"" "Valgrind test environment marker")
 assert_contains(lifecycle_ledger "Preset Surface" "migration ledger preset section")
-assert_contains(lifecycle_ledger "`debug-lua`" "migration ledger debug-lua entry")
+assert_contains(lifecycle_ledger "`debug` test tree" "migration ledger shared Lua debug-tree entry")
 assert_contains(lifecycle_ledger "`valgrind`" "migration ledger valgrind entry")

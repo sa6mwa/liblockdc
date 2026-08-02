@@ -873,7 +873,9 @@ if(LOCKDC_BUILD_TESTS)
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/package_script_targeting_test.cmake
     )
-    set_tests_properties(package_script_targeting_test PROPERTIES RUN_SERIAL TRUE)
+    set_tests_properties(package_script_targeting_test PROPERTIES
+        RUN_SERIAL TRUE
+        LABELS "lifecycle-host")
 
     add_test(NAME cross_test_targeting_test
         COMMAND ${CMAKE_COMMAND}

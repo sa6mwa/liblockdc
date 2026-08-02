@@ -23,41 +23,6 @@ require_build_tree() {
     fi
 }
 
-detect_host_release_preset() {
-    local cc_bin="${CC:-cc}"
-    local triple
-
-    if ! triple="$($cc_bin -dumpmachine 2>/dev/null)"; then
-        printf 'failed to resolve native compiler triple with %s -dumpmachine\n' "$cc_bin" >&2
-        exit 1
-    fi
-
-    case "$triple" in
-      x86_64*-linux-musl*)
-        printf '%s\n' "x86_64-linux-musl-release"
-        ;;
-      x86_64*-linux-gnu*|x86_64*-linux)
-        printf '%s\n' "x86_64-linux-gnu-release"
-        ;;
-      aarch64*-linux-musl*)
-        printf '%s\n' "aarch64-linux-musl-release"
-        ;;
-      aarch64*-linux-gnu*|aarch64*-linux)
-        printf '%s\n' "aarch64-linux-gnu-release"
-        ;;
-      arm*-linux-musleabihf*|armv7*-linux-musleabihf*|arm*-linux-musl*|armv7*-linux-musl*)
-        printf '%s\n' "armhf-linux-musl-release"
-        ;;
-      arm*-linux-gnueabihf*|armv7*-linux-gnueabihf*|arm*-linux-gnu*|armv7*-linux-gnu*)
-        printf '%s\n' "armhf-linux-gnu-release"
-        ;;
-      *)
-        printf 'unsupported native compiler triple for release tarball SDK test: %s\n' "$triple" >&2
-        exit 1
-        ;;
-    esac
-}
-
 package_target() {
     local preset="$1"
     local build_dir="$repo_root/build/$preset"
@@ -103,7 +68,9 @@ for release_preset in "${release_presets[@]}"; do
     fi
 done
 
-host_release_preset="$(detect_host_release_preset)"
+# Source and Lua artifacts are produced from the native, pinned Bootlin GNU
+# build; never select release artifacts from an ambient host compiler.
+host_release_preset=x86_64-linux-gnu-release
 cmake \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_BINARY_DIR="$repo_root/build/$host_release_preset" \
@@ -119,27 +86,30 @@ cmake \
     -DLOCKDC_BINARY_DIR="$repo_root/build/$host_release_preset" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
     -P "$repo_root/cmake/package_checksums.cmake"
-cmake \
-    -DLOCKDC_ROOT="$repo_root" \
-    -DLOCKDC_DIST_DIR="$repo_root/dist" \
-    -DLOCKDC_VERIFY_WORK_DIR="$repo_root/build/release-matrix-verify" \
-    -DLOCKDC_RELEASE_PRESETS="$release_preset_list" \
-    -P "$repo_root/tests/release_matrix_archives_test.cmake"
 bash "$repo_root/scripts/test_release_from_source.sh" "$repo_root" "$repo_root/dist/liblockdc-$(sed -n 's/^set(LOCKDC_VERSION "\(.*\)")$/\1/p' "$repo_root/build/$host_release_preset/package-metadata.cmake").tar.gz"
 cmake \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
+    -DLOCKDC_USE_EXISTING_ARCHIVE=ON \
     -DLOCKDC_RELEASE_PRESETS="$release_preset_list" \
     -P "$repo_root/tests/release_tarball_sdk_matrix_test.cmake"
 cmake \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_BINARY_DIR="$repo_root/build/$host_release_preset" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
+    -DLOCKDC_USE_EXISTING_ARCHIVE=ON \
     -P "$repo_root/tests/release_tarball_sdk_test.cmake"
 cmake \
     -DLOCKDC_ROOT="$repo_root" \
     -DLOCKDC_BINARY_DIR="$repo_root/build/$host_release_preset" \
     -DLOCKDC_DIST_DIR="$repo_root/dist" \
+    -DLOCKDC_USE_EXISTING_ARCHIVE=ON \
     -P "$repo_root/tests/lua_release_package_test.cmake"
+cmake \
+    -DLOCKDC_ROOT="$repo_root" \
+    -DLOCKDC_DIST_DIR="$repo_root/dist" \
+    -DLOCKDC_VERIFY_WORK_DIR="$repo_root/build/release-matrix-verify" \
+    -DLOCKDC_RELEASE_PRESETS="$release_preset_list" \
+    -P "$repo_root/tests/release_matrix_archives_test.cmake"
 
 printf '\nLinux release package matrix completed successfully.\n'

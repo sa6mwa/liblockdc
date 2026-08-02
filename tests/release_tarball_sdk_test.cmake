@@ -38,13 +38,25 @@ if(NOT DEFINED LOCKDC_RUN_DOWNSTREAM_BINARIES)
     set(LOCKDC_RUN_DOWNSTREAM_BINARIES ON)
 endif()
 
+if(NOT DEFINED LOCKDC_USE_EXISTING_ARCHIVE)
+    set(LOCKDC_USE_EXISTING_ARCHIVE OFF)
+endif()
+
 if(NOT EXISTS "${LOCKDC_BINARY_DIR}/package-metadata.cmake")
     message(FATAL_ERROR "missing package metadata: ${LOCKDC_BINARY_DIR}/package-metadata.cmake")
 endif()
 include("${LOCKDC_BINARY_DIR}/package-metadata.cmake")
 
 set(test_root "${LOCKDC_BINARY_DIR}/release-tarball-sdk-test")
-set(dist_dir "${test_root}/dist")
+if(LOCKDC_USE_EXISTING_ARCHIVE)
+    if(NOT DEFINED LOCKDC_DIST_DIR OR LOCKDC_DIST_DIR STREQUAL "")
+        message(FATAL_ERROR
+            "LOCKDC_DIST_DIR is required when LOCKDC_USE_EXISTING_ARCHIVE is enabled")
+    endif()
+    set(dist_dir "${LOCKDC_DIST_DIR}")
+else()
+    set(dist_dir "${test_root}/dist")
+endif()
 set(extract_root "${test_root}/release")
 set(consumer_src_dir "${test_root}/consumer")
 set(consumer_bin_dir "${test_root}/consumer-build")
@@ -53,25 +65,28 @@ set(release_archive "${dist_dir}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}
 set(release_prefix "${extract_root}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}")
 
 file(REMOVE_RECURSE "${test_root}")
-file(MAKE_DIRECTORY "${extract_root}" "${consumer_src_dir}" "${consumer_bin_dir}" "${dist_dir}")
+file(MAKE_DIRECTORY "${extract_root}" "${consumer_src_dir}" "${consumer_bin_dir}")
 
-file(REMOVE "${release_archive}")
+if(NOT LOCKDC_USE_EXISTING_ARCHIVE)
+    file(MAKE_DIRECTORY "${dist_dir}")
+    file(REMOVE "${release_archive}")
 
-execute_process(
-    COMMAND "${CMAKE_COMMAND}"
-        -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
-        -DLOCKDC_ROOT=${LOCKDC_ROOT}
-        -DLOCKDC_DIST_DIR=${dist_dir}
-        -P "${LOCKDC_ROOT}/cmake/package_archive.cmake"
-    RESULT_VARIABLE package_result
-    OUTPUT_VARIABLE package_stdout
-    ERROR_VARIABLE package_stderr
-)
-if(NOT package_result EQUAL 0)
-    message(FATAL_ERROR
-        "failed to build release archive for SDK test\n"
-        "stdout:\n${package_stdout}\n"
-        "stderr:\n${package_stderr}")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}"
+            -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
+            -DLOCKDC_ROOT=${LOCKDC_ROOT}
+            -DLOCKDC_DIST_DIR=${dist_dir}
+            -P "${LOCKDC_ROOT}/cmake/package_archive.cmake"
+        RESULT_VARIABLE package_result
+        OUTPUT_VARIABLE package_stdout
+        ERROR_VARIABLE package_stderr
+    )
+    if(NOT package_result EQUAL 0)
+        message(FATAL_ERROR
+            "failed to build release archive for SDK test\n"
+            "stdout:\n${package_stdout}\n"
+            "stderr:\n${package_stderr}")
+    endif()
 endif()
 
 if(NOT EXISTS "${release_archive}")
