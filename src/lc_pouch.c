@@ -30,10 +30,10 @@
 #include <poll.h>
 #include <sys/inotify.h>
 #include <sys/vfs.h>
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) ||     \
     defined(__OpenBSD__) || defined(__DragonFly__)
-#include <sys/mount.h>
 #include <strings.h>
+#include <sys/mount.h>
 #endif
 
 #include <openssl/rand.h>
@@ -44,14 +44,12 @@ static pthread_mutex_t lc_pouch_root_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define LC_POUCH_FSYNC_BATCH_DELAY_NS 0L
 #define LC_POUCH_EXCLUSIVE_WRITER_TOUCH_NS 1000000000L
-#define LC_POUCH_EXCLUSIVE_WRITER_TTL_NS \
-  ((int64_t)3 * (int64_t)1000000000)
+#define LC_POUCH_EXCLUSIVE_WRITER_TTL_NS ((int64_t)3 * (int64_t)1000000000)
 #define LC_POUCH_WRITER_PRESENCE_MISSING (-1001)
 
-static const uint64_t lc_pouch_fsync_batch_bounds
-    [LC_POUCH_FSYNC_BATCH_BOUND_COUNT] = {
-        1U,    2U,    4U,    8U,   16U,  32U,  64U,
-        128U, 256U, 512U, 1024U, 2048U, 4096U,
+static const uint64_t
+    lc_pouch_fsync_batch_bounds[LC_POUCH_FSYNC_BATCH_BOUND_COUNT] = {
+        1U, 2U, 4U, 8U, 16U, 32U, 64U, 128U, 256U, 512U, 1024U, 2048U, 4096U,
 };
 
 struct lc_pouch_fsync_request {
@@ -136,9 +134,8 @@ static uint64_t lc_pouch_elapsed_ns(const struct timespec *started,
   return seconds + nanos;
 }
 
-static void
-lc_pouch_fsync_record_batch_locked(lc_pouch_fsync_batcher *batcher,
-                                   size_t count, uint64_t sync_ns) {
+static void lc_pouch_fsync_record_batch_locked(lc_pouch_fsync_batcher *batcher,
+                                               size_t count, uint64_t sync_ns) {
   size_t bucket;
   size_t index;
 
@@ -188,8 +185,7 @@ static int lc_pouch_fsync_batch_seen(lc_pouch_fsync_batch_file *files,
 }
 
 static void lc_pouch_fsync_process_batch(lc_pouch_fsync_request *batch,
-                                         size_t count,
-                                         uint64_t *sync_ns_out) {
+                                         size_t count, uint64_t *sync_ns_out) {
   lc_pouch_fsync_batch_file inline_files[64];
   lc_pouch_fsync_batch_file *files;
   lc_pouch_fsync_request *request;
@@ -252,8 +248,7 @@ finish:
 }
 
 static lc_pouch_fsync_request *
-lc_pouch_fsync_take_batch(lc_pouch_fsync_batcher *batcher,
-                          size_t *out_count) {
+lc_pouch_fsync_take_batch(lc_pouch_fsync_batcher *batcher, size_t *out_count) {
   lc_pouch_fsync_request *batch;
   lc_pouch_fsync_request *tail;
   size_t count;
@@ -261,9 +256,8 @@ lc_pouch_fsync_take_batch(lc_pouch_fsync_batcher *batcher,
   batch = batcher->head;
   tail = NULL;
   count = 0U;
-  while (batcher->head != NULL &&
-         (batcher->batch_max_ops == 0U ||
-          (uint64_t)count < batcher->batch_max_ops)) {
+  while (batcher->head != NULL && (batcher->batch_max_ops == 0U ||
+                                   (uint64_t)count < batcher->batch_max_ops)) {
     tail = batcher->head;
     batcher->head = batcher->head->next;
     ++count;
@@ -504,7 +498,8 @@ int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
       return LC_OK;
     }
   }
-  if (pouch->compaction_namespace_count >= pouch->compaction_namespace_capacity) {
+  if (pouch->compaction_namespace_count >=
+      pouch->compaction_namespace_capacity) {
     next_capacity = pouch->compaction_namespace_capacity == 0U
                         ? 8U
                         : pouch->compaction_namespace_capacity * 2U;
@@ -531,11 +526,10 @@ int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
   if (name_copy == NULL) {
     pthread_mutex_unlock(&pouch->compaction_mutex);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to copy pouch compaction namespace", NULL,
-                        NULL, NULL);
+                        "failed to copy pouch compaction namespace", NULL, NULL,
+                        NULL);
   }
-  pouch->compaction_namespaces[pouch->compaction_namespace_count++] =
-      name_copy;
+  pouch->compaction_namespaces[pouch->compaction_namespace_count++] = name_copy;
   pthread_mutex_unlock(&pouch->compaction_mutex);
   return LC_OK;
 }
@@ -553,8 +547,8 @@ static int lc_pouch_compaction_copy_namespaces(lc_pouch *pouch,
   pthread_mutex_lock(&pouch->compaction_mutex);
   count = pouch->compaction_namespace_count;
   namespaces = count > 0U ? (char **)lc_calloc_with_allocator(
-                              &pouch->allocator, count, sizeof(*namespaces))
-                         : NULL;
+                                &pouch->allocator, count, sizeof(*namespaces))
+                          : NULL;
   if (count > 0U && namespaces == NULL) {
     pthread_mutex_unlock(&pouch->compaction_mutex);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -647,8 +641,8 @@ static int lc_pouch_track_root_namespaces(lc_pouch *pouch, lc_error *error) {
   }
   if (closedir(dir) != 0 && rc == LC_OK) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to close pouch namespaces", strerror(errno),
-                      NULL, "pouch");
+                      "failed to close pouch namespaces", strerror(errno), NULL,
+                      "pouch");
   }
   return rc;
 }
@@ -665,15 +659,15 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
     return;
   }
   lc_error_init(&error);
-  rc = lc_pouch_compaction_copy_namespaces(pouch, &namespaces,
-                                           &namespace_count, &error);
+  rc = lc_pouch_compaction_copy_namespaces(pouch, &namespaces, &namespace_count,
+                                           &error);
   if (rc != LC_OK) {
     pslog_field fields[2];
 
     fields[0] = lc_log_error_field("error", &error);
     fields[1] = lc_log_code_field(&error);
-    lc_log_warn(pouch->logger, "compaction.background.namespaces.error",
-                fields, 2U);
+    lc_log_warn(pouch->logger, "compaction.background.namespaces.error", fields,
+                2U);
     lc_error_cleanup(&error);
     return;
   }
@@ -809,8 +803,8 @@ static void lc_pouch_compaction_worker_close(lc_pouch *pouch) {
     pthread_mutex_destroy(&pouch->compaction_mutex);
     pouch->compaction_mutex_initialized = 0;
   }
-  lc_pouch_compaction_namespaces_cleanup(
-      pouch, pouch->compaction_namespaces, pouch->compaction_namespace_count);
+  lc_pouch_compaction_namespaces_cleanup(pouch, pouch->compaction_namespaces,
+                                         pouch->compaction_namespace_count);
   pouch->compaction_namespaces = NULL;
   pouch->compaction_namespace_count = 0U;
   pouch->compaction_namespace_capacity = 0U;
@@ -848,8 +842,8 @@ static void lc_pouch_janitor_run_pass(lc_pouch *pouch) {
   }
   cutoff = (lc_pouch_unix_seconds)((uint64_t)now - pouch->retention_seconds);
   lc_error_init(&error);
-  rc = lc_pouch_compaction_copy_namespaces(pouch, &namespaces,
-                                           &namespace_count, &error);
+  rc = lc_pouch_compaction_copy_namespaces(pouch, &namespaces, &namespace_count,
+                                           &error);
   if (rc != LC_OK) {
     pslog_field fields[2];
 
@@ -1000,14 +994,13 @@ int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error) {
   }
   if (pouch->aborted) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch fsync batcher is closed after abort", NULL,
-                        NULL, "pouch");
+                        "pouch fsync batcher is closed after abort", NULL, NULL,
+                        "pouch");
   }
   batcher = pouch->fsync_batcher;
   if (batcher == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch fsync batcher is closed", NULL, NULL,
-                        "pouch");
+                        "pouch fsync batcher is closed", NULL, NULL, "pouch");
   }
   memset(&request, 0, sizeof(request));
   request.fd = fd;
@@ -1090,7 +1083,7 @@ int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
     return -1;
   }
   namespace_path = lc_pouch_namespace_path(&pouch->allocator, pouch->root_path,
-                                            namespace_name);
+                                           namespace_name);
   notify_dir = namespace_path != NULL
                    ? lc_pouch_path_join(&pouch->allocator, namespace_path,
                                         "queue-notify")
@@ -1288,16 +1281,15 @@ static void lc_pouch_detect_filesystem_capabilities(lc_pouch *pouch) {
     pouch->filesystem_capabilities_known = 1;
     pouch->filesystem_is_nfs = st.f_type == 0x6969;
   }
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) ||     \
     defined(__OpenBSD__) || defined(__DragonFly__)
   struct statfs st;
 
   if (pouch != NULL && pouch->root_path != NULL &&
       statfs(pouch->root_path, &st) == 0) {
     pouch->filesystem_capabilities_known = 1;
-    pouch->filesystem_is_nfs =
-        strcasecmp(st.f_fstypename, "nfs") == 0 ||
-        strcasecmp(st.f_fstypename, "nfs4") == 0;
+    pouch->filesystem_is_nfs = strcasecmp(st.f_fstypename, "nfs") == 0 ||
+                               strcasecmp(st.f_fstypename, "nfs4") == 0;
   }
 #else
   (void)pouch;
@@ -2003,8 +1995,8 @@ static int lc_pouch_init_writer_marker(lc_pouch *pouch, lc_error *error) {
 
   if (RAND_bytes(writer_random, (int)sizeof(writer_random)) != 1) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to generate pouch writer identity", NULL,
-                        NULL, "pouch");
+                        "failed to generate pouch writer identity", NULL, NULL,
+                        "pouch");
   }
   for (index = 0U; index < sizeof(writer_random); ++index) {
     (void)snprintf(writer_hex + (index * 2U), 3U, "%02x", writer_random[index]);
@@ -2030,13 +2022,15 @@ static int lc_pouch_init_writer_marker(lc_pouch *pouch, lc_error *error) {
       lc_strdup_with_allocator(&pouch->allocator, presence_leaf);
   pouch->writer_presence_dir = lc_pouch_path_join(
       &pouch->allocator, pouch->root_path, "exclusive-writers");
-  pouch->writer_presence_path = pouch->writer_presence_dir != NULL
-                                    ? lc_pouch_path_join(&pouch->allocator,
-                                                         pouch->writer_presence_dir,
-                                                         presence_leaf)
-                                    : NULL;
-  if (pouch->writer_marker_leaf == NULL || pouch->writer_presence_leaf == NULL ||
-      pouch->writer_presence_dir == NULL || pouch->writer_presence_path == NULL) {
+  pouch->writer_presence_path =
+      pouch->writer_presence_dir != NULL
+          ? lc_pouch_path_join(&pouch->allocator, pouch->writer_presence_dir,
+                               presence_leaf)
+          : NULL;
+  if (pouch->writer_marker_leaf == NULL ||
+      pouch->writer_presence_leaf == NULL ||
+      pouch->writer_presence_dir == NULL ||
+      pouch->writer_presence_path == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch writer marker paths", NULL,
                         NULL, "pouch");
@@ -2092,8 +2086,7 @@ static int lc_pouch_writer_presence_now_ns(int64_t *out, lc_error *error) {
                         "pouch writer presence clock is out of range", NULL,
                         NULL, "pouch");
   }
-  *out = (int64_t)now.tv_sec * (int64_t)1000000000 +
-         (int64_t)now.tv_nsec;
+  *out = (int64_t)now.tv_sec * (int64_t)1000000000 + (int64_t)now.tv_nsec;
   return LC_OK;
 }
 
@@ -2105,8 +2098,8 @@ static int lc_pouch_writer_presence_touch(lc_pouch *pouch, lc_error *error) {
   if (pouch == NULL || pouch->writer_presence_dir == NULL ||
       pouch->writer_presence_path == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch writer presence is not initialized", NULL,
-                        NULL, "pouch");
+                        "pouch writer presence is not initialized", NULL, NULL,
+                        "pouch");
   }
   rc = lc_pouch_writer_presence_now_ns(&now_ns, error);
   if (rc != LC_OK) {
@@ -2114,8 +2107,8 @@ static int lc_pouch_writer_presence_touch(lc_pouch *pouch, lc_error *error) {
   }
   if (lc_i64_format_base10((lc_i64)now_ns, payload, sizeof(payload)) < 0 ||
       strlen(payload) + 2U > sizeof(payload) ||
-      snprintf(payload + strlen(payload),
-               sizeof(payload) - strlen(payload), "\n") < 0) {
+      snprintf(payload + strlen(payload), sizeof(payload) - strlen(payload),
+               "\n") < 0) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to format pouch writer heartbeat", NULL, NULL,
                         "pouch");
@@ -2127,7 +2120,7 @@ static int lc_pouch_writer_presence_touch(lc_pouch *pouch, lc_error *error) {
     return rc;
   }
   return lc_pouch_path_write_text_file_relaxed(pouch->writer_presence_path,
-                                                payload, error);
+                                               payload, error);
 }
 
 static void *lc_pouch_writer_presence_main(void *context) {
@@ -2171,8 +2164,8 @@ static int lc_pouch_writer_presence_start(lc_pouch *pouch, lc_error *error) {
   if (pouch == NULL || !pouch->writer_presence_mutex_initialized ||
       !pouch->writer_presence_cond_initialized) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch writer presence is not initialized", NULL,
-                        NULL, "pouch");
+                        "pouch writer presence is not initialized", NULL, NULL,
+                        "pouch");
   }
   pthread_mutex_lock(&pouch->writer_presence_mutex);
   if (pouch->writer_presence_thread_started) {
@@ -2202,7 +2195,7 @@ static int lc_pouch_writer_presence_start(lc_pouch *pouch, lc_error *error) {
 }
 
 static void lc_pouch_writer_presence_stop_internal(lc_pouch *pouch,
-                                                    int remove_marker) {
+                                                   int remove_marker) {
   int join_thread;
 
   if (pouch == NULL || !pouch->writer_presence_mutex_initialized) {
@@ -2410,8 +2403,8 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
         lc_log_bool_field("crypto", lc_pouch_crypto_enabled(pouch->crypto));
     fields[5] =
         lc_log_u64_field("segment_target_bytes", pouch->segment_target_bytes);
-    fields[6] =
-        lc_log_bool_field("single_writer", lc_pouch_single_writer_enabled(pouch));
+    fields[6] = lc_log_bool_field("single_writer",
+                                  lc_pouch_single_writer_enabled(pouch));
     fields[7] = lc_log_bool_field("background_compaction",
                                   pouch->background_compaction_enabled);
     fields[8] = lc_log_bool_field("durable_sync", pouch->durable_sync);
@@ -2526,9 +2519,10 @@ int lc_pouch_fsync_stats_read(lc_pouch *pouch, lc_pouch_fsync_stats *out,
   return LC_OK;
 }
 
-static int lc_pouch_backend_hash_derived(
-    lc_pouch *pouch, char out[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U],
-    lc_error *error) {
+static int
+lc_pouch_backend_hash_derived(lc_pouch *pouch,
+                              char out[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U],
+                              lc_error *error) {
   static const char hex[] = "0123456789abcdef";
   const char *root;
   char current_directory[PATH_MAX];
@@ -2550,8 +2544,8 @@ static int lc_pouch_backend_hash_derived(
   out[0] = '\0';
   root = pouch->root_path;
   root_len = strlen(root);
-  if (root[0] != '/' && getcwd(current_directory, sizeof(current_directory)) !=
-                            NULL) {
+  if (root[0] != '/' &&
+      getcwd(current_directory, sizeof(current_directory)) != NULL) {
     current_directory_len = strlen(current_directory);
     if (current_directory_len > SIZE_MAX - sizeof("pouch|/") ||
         root_len > SIZE_MAX - current_directory_len - sizeof("pouch|/")) {
@@ -2560,8 +2554,8 @@ static int lc_pouch_backend_hash_derived(
                           NULL, "pouch");
     }
     descriptor_len = current_directory_len + root_len + sizeof("pouch|/");
-    descriptor = (char *)lc_alloc_with_allocator(&pouch->allocator,
-                                                  descriptor_len);
+    descriptor =
+        (char *)lc_alloc_with_allocator(&pouch->allocator, descriptor_len);
     if (descriptor == NULL) {
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch backend hash descriptor",
@@ -2576,8 +2570,8 @@ static int lc_pouch_backend_hash_derived(
                           NULL, "pouch");
     }
     descriptor_len = root_len + sizeof("pouch|");
-    descriptor = (char *)lc_alloc_with_allocator(&pouch->allocator,
-                                                  descriptor_len);
+    descriptor =
+        (char *)lc_alloc_with_allocator(&pouch->allocator, descriptor_len);
     if (descriptor == NULL) {
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch backend hash descriptor",
@@ -2609,8 +2603,8 @@ static int lc_pouch_backend_hash_derived(
 }
 
 static int lc_pouch_backend_hash_marker_read(
-    lc_pouch *pouch, char out[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U],
-    int *found, lc_error *error) {
+    lc_pouch *pouch, char out[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U], int *found,
+    lc_error *error) {
   lc_pouch_state_read_result read_result;
   lc_sink *sink;
   const void *bytes;
@@ -2620,15 +2614,14 @@ static int lc_pouch_backend_hash_marker_read(
 
   if (pouch == NULL || out == NULL || found == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch backend hash marker requires inputs", NULL,
-                        NULL, "pouch");
+                        "pouch backend hash marker requires inputs", NULL, NULL,
+                        "pouch");
   }
   out[0] = '\0';
   *found = 0;
   memset(&read_result, 0, sizeof(read_result));
   sink = NULL;
-  rc = lc_pouch_state_read(pouch, ".lockd", "backend-id", &read_result,
-                           error);
+  rc = lc_pouch_state_read(pouch, ".lockd", "backend-id", &read_result, error);
   if (rc == LC_OK && read_result.found) {
     rc = lc_sink_to_memory(&sink, error);
   }
@@ -2648,8 +2641,7 @@ static int lc_pouch_backend_hash_marker_read(
       unsigned char value;
 
       value = ((const unsigned char *)bytes)[index];
-      if (!((value >= '0' && value <= '9') ||
-            (value >= 'a' && value <= 'f'))) {
+      if (!((value >= '0' && value <= '9') || (value >= 'a' && value <= 'f'))) {
         rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                           "pouch backend hash marker is not lowercase hex",
                           NULL, NULL, "pouch");
@@ -2669,8 +2661,8 @@ static int lc_pouch_backend_hash_marker_read(
 }
 
 static int lc_pouch_backend_hash_marker_write(
-    lc_pouch *pouch,
-    const char value[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U], lc_error *error) {
+    lc_pouch *pouch, const char value[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U],
+    lc_error *error) {
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
   lc_source *source;
@@ -2685,8 +2677,8 @@ static int lc_pouch_backend_hash_marker_write(
     options.content_type = "text/plain";
     options.create_if_absent = 1;
     options.object_record = 1;
-    rc = lc_pouch_state_write(pouch, ".lockd", "backend-id", source,
-                              &options, &result, error);
+    rc = lc_pouch_state_write(pouch, ".lockd", "backend-id", source, &options,
+                              &result, error);
   }
   if (source != NULL) {
     lc_source_close(source);
@@ -2701,9 +2693,9 @@ static int lc_pouch_backend_hash_create_collision(const lc_error *error) {
          strstr(error->message, "create-if-absent precondition failed") != NULL;
 }
 
-int lc_pouch_backend_hash(
-    lc_pouch *pouch, char out[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U],
-    lc_error *error) {
+int lc_pouch_backend_hash(lc_pouch *pouch,
+                          char out[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U],
+                          lc_error *error) {
   char derived[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
   int found;
   int rc;
@@ -2785,9 +2777,9 @@ int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
   return LC_OK;
 }
 
-static int lc_pouch_writer_presence_read(
-    const char *path, int64_t *heartbeat_ns, int *has_heartbeat,
-    lc_error *error) {
+static int lc_pouch_writer_presence_read(const char *path,
+                                         int64_t *heartbeat_ns,
+                                         int *has_heartbeat, lc_error *error) {
   char buffer[128];
   size_t length;
   int fd;
@@ -2881,9 +2873,9 @@ static int lc_pouch_writer_presence_mtime_ns(const struct stat *st,
   return 1;
 }
 
-int lc_pouch_probe_exclusive_writer(
-    lc_pouch *pouch, lc_pouch_exclusive_writer_presence *out,
-    lc_error *error) {
+int lc_pouch_probe_exclusive_writer(lc_pouch *pouch,
+                                    lc_pouch_exclusive_writer_presence *out,
+                                    lc_error *error) {
   DIR *dir;
   struct dirent *entry;
   int64_t now_ns = 0;
@@ -3000,13 +2992,10 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
   out->compaction_min_reclaimable_bytes =
       pouch->compaction_min_reclaimable_bytes;
   out->compaction_interval_seconds = pouch->compaction_interval_seconds;
-  out->compaction_delete_grace_seconds =
-      pouch->compaction_delete_grace_seconds;
-  out->compaction_max_io_bytes_per_sec =
-      pouch->compaction_max_io_bytes_per_sec;
+  out->compaction_delete_grace_seconds = pouch->compaction_delete_grace_seconds;
+  out->compaction_max_io_bytes_per_sec = pouch->compaction_max_io_bytes_per_sec;
   out->background_compaction_enabled = pouch->background_compaction_enabled;
-  out->compaction_throttling_disabled =
-      pouch->compaction_throttling_disabled;
+  out->compaction_throttling_disabled = pouch->compaction_throttling_disabled;
   out->retention_seconds = pouch->retention_seconds;
   out->janitor_interval_seconds = pouch->janitor_interval_seconds;
   out->janitor_running = pouch->janitor_thread_started;

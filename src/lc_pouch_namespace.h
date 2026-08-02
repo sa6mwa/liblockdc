@@ -77,8 +77,7 @@ int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
 int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
                                        const char *namespace_name,
                                        lc_pouch_namespace_manifest *manifest,
-                                       uint64_t segment_id,
-                                       lc_error *error);
+                                       uint64_t segment_id, lc_error *error);
 int lc_pouch_namespace_manifest_install_snapshot(
     const lc_allocator *allocator, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, const char *snapshot_leaf,

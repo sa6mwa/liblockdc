@@ -7,10 +7,10 @@
 #include <fcntl.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 #include <unistd.h>
 
 #include "lc_api_internal.h"
@@ -815,8 +815,9 @@ int lc_engine_write_bridge(void *context, const void *bytes, size_t count,
 
 lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
                        const char *key, const char *owner, const char *lease_id,
-                       const char *txn_id, long fencing_token, lc_version version,
-                       const char *state_etag, const char *queue_state_etag) {
+                       const char *txn_id, long fencing_token,
+                       lc_version version, const char *state_etag,
+                       const char *queue_state_etag) {
   lc_lease_handle *lease;
 
   lease = (lc_lease_handle *)lc_client_calloc(client, 1U, sizeof(*lease));
@@ -1115,11 +1116,11 @@ static int lc_pouch_endpoint_parse_boolean(const lc_allocator *allocator,
 
   if (out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch endpoint boolean output is required", NULL,
-                        NULL, "pouch");
+                        "pouch endpoint boolean output is required", NULL, NULL,
+                        "pouch");
   }
-  copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
-                                            option, error);
+  copy = lc_pouch_endpoint_decode_component(allocator, value, value_len, option,
+                                            error);
   if (copy == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
@@ -1147,11 +1148,11 @@ static int lc_pouch_endpoint_parse_u64(const lc_allocator *allocator,
 
   if (out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch endpoint integer output is required", NULL,
-                        NULL, "pouch");
+                        "pouch endpoint integer output is required", NULL, NULL,
+                        "pouch");
   }
-  copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
-                                            option, error);
+  copy = lc_pouch_endpoint_decode_component(allocator, value, value_len, option,
+                                            error);
   if (copy == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
@@ -1255,13 +1256,12 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "durable_sync") ||
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "durable_sync") ||
       lc_query_part_equal(decoded_key, strlen(decoded_key),
                           "pouch_durable_sync")) {
     rc = lc_pouch_endpoint_parse_boolean(allocator, value, value_len,
-                                         "durable_sync",
-                                         &options->durable_sync, error);
+                                         "durable_sync", &options->durable_sync,
+                                         error);
     lc_free_with_allocator(allocator, decoded_key);
     return rc;
   }
@@ -1314,8 +1314,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
                           "pouch_janitor_interval_seconds")) {
     rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
                                      "janitor_interval_seconds",
-                                     &options->janitor_interval_seconds,
-                                     error);
+                                     &options->janitor_interval_seconds, error);
     lc_free_with_allocator(allocator, decoded_key);
     return rc;
   }
@@ -1841,7 +1840,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
         pouch_endpoint_options.background_compaction_enabled_set;
     pouch_open_options.compaction_throttling_disabled =
         pouch_endpoint_options.compaction_throttling_disabled;
-    pouch_open_options.retention_seconds = pouch_endpoint_options.retention_seconds;
+    pouch_open_options.retention_seconds =
+        pouch_endpoint_options.retention_seconds;
     pouch_open_options.janitor_interval_seconds =
         pouch_endpoint_options.janitor_interval_seconds;
     pouch_open_options.query_engine = pouch_endpoint_options.query_engine;
@@ -1907,8 +1907,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
       lc_pouch_endpoint_options_cleanup(&config->allocator,
                                         &pouch_endpoint_options);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to copy pouch compression", NULL, NULL,
-                          NULL);
+                          "failed to copy pouch compression", NULL, NULL, NULL);
     }
     client->pouch_crypto_generate_key_file =
         pouch_open_options.crypto_generate_key_file;

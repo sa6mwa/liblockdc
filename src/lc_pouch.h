@@ -27,11 +27,14 @@ typedef struct lc_pouch_open_options {
   uint64_t compaction_delete_grace_seconds;
   uint64_t compaction_max_io_bytes_per_sec;
   int background_compaction_enabled;
-  /** Distinguishes an explicit compaction setting from the Go-compatible default. */
+  /** Distinguishes an explicit compaction setting from the Go-compatible
+   * default. */
   int background_compaction_enabled_set;
-  /** Leaves compaction IO unlimited instead of using the default 8 MiB/s throttle. */
+  /** Leaves compaction IO unlimited instead of using the default 8 MiB/s
+   * throttle. */
   int compaction_throttling_disabled;
-  /** Zero disables retention. Positive values delete state older than this duration. */
+  /** Zero disables retention. Positive values delete state older than this
+   * duration. */
   uint64_t retention_seconds;
   /** Zero uses the default one-hour retention sweep interval. */
   uint64_t janitor_interval_seconds;
@@ -48,18 +51,20 @@ typedef struct lc_pouch_open_options {
    * Defaults to zero, matching Go disk failover's NoSync policy.
    */
   int durable_sync;
-  /** Maximum fsync requests per group commit. Zero leaves the batch unbounded. */
+  /** Maximum fsync requests per group commit. Zero leaves the batch unbounded.
+   */
   uint64_t fsync_batch_max_ops;
   /** Enables filesystem queue notifications where the root supports them. */
   int queue_watch;
 } lc_pouch_open_options;
 
 #define LC_POUCH_FSYNC_BATCH_BOUND_COUNT 13U
-#define LC_POUCH_FSYNC_BATCH_BUCKET_COUNT \
+#define LC_POUCH_FSYNC_BATCH_BUCKET_COUNT                                      \
   (LC_POUCH_FSYNC_BATCH_BOUND_COUNT + 1U)
 #define LC_POUCH_BACKEND_HASH_HEX_BYTES 64U
 
-/** Aggregate group-commit diagnostics, using fixed-width counters on all targets. */
+/** Aggregate group-commit diagnostics, using fixed-width counters on all
+ * targets. */
 typedef struct lc_pouch_fsync_stats {
   uint64_t total_batches;
   uint64_t total_requests;
@@ -225,9 +230,9 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
 void lc_pouch_status_cleanup(const lc_allocator *allocator,
                              lc_pouch_status *status);
 int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error);
-int lc_pouch_probe_exclusive_writer(
-    lc_pouch *pouch, lc_pouch_exclusive_writer_presence *out,
-    lc_error *error);
+int lc_pouch_probe_exclusive_writer(lc_pouch *pouch,
+                                    lc_pouch_exclusive_writer_presence *out,
+                                    lc_error *error);
 int lc_pouch_maintenance_run(lc_pouch *pouch,
                              const lc_pouch_maintenance_options *options,
                              lc_pouch_maintenance_result *out, lc_error *error);

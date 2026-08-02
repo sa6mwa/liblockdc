@@ -104,7 +104,7 @@ int lc_i64_format_base10(lc_i64 value, char *buffer, size_t buffer_size) {
 }
 
 int lc_i64_format_base10_padded(lc_i64 value, size_t width, char *buffer,
-                                 size_t buffer_size) {
+                                size_t buffer_size) {
   char digits[32];
   size_t digit_count;
   size_t zero_count;
@@ -117,8 +117,7 @@ int lc_i64_format_base10_padded(lc_i64 value, size_t width, char *buffer,
   }
   digit_count = (size_t)formatted;
   zero_count = width > digit_count ? width - digit_count : 0U;
-  if (zero_count > buffer_size ||
-      digit_count > buffer_size - zero_count - 1U) {
+  if (zero_count > buffer_size || digit_count > buffer_size - zero_count - 1U) {
     return -1;
   }
   prefix = digits[0] == '-' ? 1U : 0U;
@@ -191,7 +190,7 @@ int lc_u64_format_base10(lc_u64 value, char *buffer, size_t buffer_size) {
 }
 
 int lc_u64_format_base10_padded(lc_u64 value, size_t width, char *buffer,
-                                 size_t buffer_size) {
+                                size_t buffer_size) {
   char digits[32];
   size_t digit_count;
   size_t zero_count;
@@ -216,7 +215,7 @@ int lc_u64_format_base10_padded(lc_u64 value, size_t width, char *buffer,
 }
 
 int lc_u64_format_base16_padded(lc_u64 value, size_t width, char *buffer,
-                                 size_t buffer_size) {
+                                size_t buffer_size) {
   static const char digits[] = "0123456789abcdef";
   char scratch[32];
   size_t digit_count;
@@ -232,8 +231,7 @@ int lc_u64_format_base16_padded(lc_u64 value, size_t width, char *buffer,
     value >>= 4U;
   } while (value != 0U);
   zero_count = width > digit_count ? width - digit_count : 0U;
-  if (zero_count > buffer_size ||
-      digit_count > buffer_size - zero_count - 1U) {
+  if (zero_count > buffer_size || digit_count > buffer_size - zero_count - 1U) {
     return -1;
   }
   for (i = 0U; i < zero_count; ++i) {

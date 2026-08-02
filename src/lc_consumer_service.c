@@ -1049,8 +1049,8 @@ static int lc_consumer_copy_base_config(lc_consumer_service_handle *service,
       lc_strdup_with_allocator(&service->allocator, client->pouch_compression);
   if (client->pouch_compression != NULL && service->pouch_compression == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to copy consumer pouch compression", NULL,
-                        NULL, NULL);
+                        "failed to copy consumer pouch compression", NULL, NULL,
+                        NULL);
   }
   service->pouch_crypto_generate_key_file =
       client->pouch_crypto_generate_key_file;

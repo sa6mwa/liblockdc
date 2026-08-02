@@ -30,7 +30,8 @@ typedef int64_t lc_version;
 typedef int64_t lc_unix_seconds;
 /** Query/index sequence. Mirrors lockd's unsigned uint64 value. */
 typedef uint64_t lc_index_seq;
-/** Transaction-coordinator leader term. Mirrors lockd's unsigned uint64 value. */
+/** Transaction-coordinator leader term. Mirrors lockd's unsigned uint64 value.
+ */
 typedef uint64_t lc_tc_term;
 
 /** Snapshot fetched by `acquire_for_update()` before invoking the handler. */

@@ -99,8 +99,8 @@ lc_lease_duplicate_get_metadata(const char *content_type, const char *etag,
 }
 
 static int lc_lease_refresh_state_view(lc_lease_handle *lease,
-                                       const char *state_etag, lc_version version,
-                                       long fencing_token,
+                                       const char *state_etag,
+                                       lc_version version, long fencing_token,
                                        lc_unix_seconds lease_expires_at_unix,
                                        lc_error *error) {
   char *state_etag_copy;

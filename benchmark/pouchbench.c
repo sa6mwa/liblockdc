@@ -2057,8 +2057,8 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   matched_rows = 0L;
   phase_start = lockdc_bench_now_ns();
   phase = "RangeHalf warm index keys";
-  rc = lockdc_bench_query(client, "RangeHalf", "index", 0, rows,
-                          &matched_rows, &error);
+  rc = lockdc_bench_query(client, "RangeHalf", "index", 0, rows, &matched_rows,
+                          &error);
   if (rc != LC_OK) {
     goto done;
   }

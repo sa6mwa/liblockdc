@@ -80,8 +80,7 @@ static int lc_pouch_index_term_parse_ulong_token(const char *token,
   return LC_OK;
 }
 
-static int lc_pouch_index_term_parse_u64_token(const char *token,
-                                               uint64_t *out,
+static int lc_pouch_index_term_parse_u64_token(const char *token, uint64_t *out,
                                                const char *message,
                                                lc_error *error) {
   lc_u64 parsed;
@@ -1740,8 +1739,8 @@ int lc_pouch_index_term_generation_decode(
                       NULL, "pouch");
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_index_term_generation_cursor_u64(
-        &cursor, &decoded.index_seq, error);
+    rc = lc_pouch_index_term_generation_cursor_u64(&cursor, &decoded.index_seq,
+                                                   error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_term_generation_cursor_ulong(
@@ -2288,9 +2287,9 @@ void lc_pouch_index_term_ranges_cleanup(const lc_allocator *allocator,
 int lc_pouch_index_term_fields_select_range(
     const lc_pouch_index_term_field *fields, size_t field_count,
     const char *field_hex, const lc_pouch_index_term_key *terms,
-    size_t term_count, unsigned long term_line_count,
-    uint64_t term_byte_count, unsigned long *first_line,
-    unsigned long *line_count, uint64_t *first_byte, uint64_t *byte_count) {
+    size_t term_count, unsigned long term_line_count, uint64_t term_byte_count,
+    unsigned long *first_line, unsigned long *line_count, uint64_t *first_byte,
+    uint64_t *byte_count) {
   unsigned long first;
   unsigned long count;
   unsigned long end;
@@ -2346,8 +2345,8 @@ int lc_pouch_index_term_fields_select_range(
               LC_U64_MAX - fields[field_index].first_byte) {
             return 0;
           }
-          byte_end = fields[field_index].first_byte +
-                     fields[field_index].byte_count;
+          byte_end =
+              fields[field_index].first_byte + fields[field_index].byte_count;
           if (!found || fields[field_index].first_byte < min_byte) {
             min_byte = fields[field_index].first_byte;
           }

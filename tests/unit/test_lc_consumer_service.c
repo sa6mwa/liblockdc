@@ -908,11 +908,13 @@ int __wrap_lc_client_open(const lc_client_config *config, lc_client **out,
   if (g_consumer_test_state == NULL) {
     return __real_lc_client_open(config, out, error);
   }
-  assert_true(config->pouch_compression == NULL ||
-              strlen(config->pouch_compression) <
-                  sizeof(g_consumer_test_state->last_client_open_pouch_compression));
+  assert_true(
+      config->pouch_compression == NULL ||
+      strlen(config->pouch_compression) <
+          sizeof(g_consumer_test_state->last_client_open_pouch_compression));
   snprintf(g_consumer_test_state->last_client_open_pouch_compression,
-           sizeof(g_consumer_test_state->last_client_open_pouch_compression), "%s",
+           sizeof(g_consumer_test_state->last_client_open_pouch_compression),
+           "%s",
            config->pouch_compression != NULL ? config->pouch_compression : "");
   client = (lc_client_handle *)lc_calloc_with_allocator(&config->allocator, 1U,
                                                         sizeof(*client));
@@ -2839,8 +2841,7 @@ test_consumer_service_worker_clone_preserves_pouch_compression(void **state) {
 
   rc = service->run(service, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(runtime_state.last_client_open_pouch_compression,
-                      "zlib");
+  assert_string_equal(runtime_state.last_client_open_pouch_compression, "zlib");
 
   service->close(service);
   g_consumer_test_state = NULL;

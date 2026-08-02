@@ -378,9 +378,9 @@ int lc_pouch_index_doc_table_append_sorted_unique(
 
 static int lc_pouch_index_doc_table_append_unique_impl(
     lc_pouch_index_doc_table *table, const char *key_hex, uint64_t version,
-    uint64_t bytes, int has_query_hidden, int query_hidden,
-    int copy_key_hex, int check_unique, unsigned long *doc_id,
-    const lc_allocator *allocator, lc_error *error) {
+    uint64_t bytes, int has_query_hidden, int query_hidden, int copy_key_hex,
+    int check_unique, unsigned long *doc_id, const lc_allocator *allocator,
+    lc_error *error) {
   lc_pouch_index_doc *doc;
   char *owned_key_hex;
   size_t index;
@@ -746,8 +746,8 @@ static int lc_pouch_index_doc_generation_header_ulong(const char *line,
 }
 
 static int lc_pouch_index_doc_generation_header_u64(const char *line,
-                                                     const char *prefix,
-                                                     uint64_t *out) {
+                                                    const char *prefix,
+                                                    uint64_t *out) {
   size_t prefix_len;
   lc_u64 value;
 
@@ -820,10 +820,9 @@ static char *lc_pouch_index_doc_generation_next_token(char **cursor) {
 }
 
 static int lc_pouch_index_doc_generation_parse_bytes(
-    const lc_allocator *allocator, char *bytes,
-    uint64_t expected_index_seq, unsigned long expected_row_count,
-    unsigned long expected_row_hash, lc_pouch_index_doc_table *table,
-    int *valid, lc_error *error) {
+    const lc_allocator *allocator, char *bytes, uint64_t expected_index_seq,
+    unsigned long expected_row_count, unsigned long expected_row_hash,
+    lc_pouch_index_doc_table *table, int *valid, lc_error *error) {
   char *cursor;
   char *line;
   uint64_t version;
@@ -902,7 +901,8 @@ static int lc_pouch_index_doc_generation_parse_bytes(
         !lc_pouch_index_doc_generation_header_u64(
             lc_pouch_index_doc_generation_next_token(&rest), "", &doc_bytes) ||
         !lc_pouch_index_doc_generation_parse_ulong(
-            lc_pouch_index_doc_generation_next_token(&rest), &parsed_has_hidden) ||
+            lc_pouch_index_doc_generation_next_token(&rest),
+            &parsed_has_hidden) ||
         !lc_pouch_index_doc_generation_parse_ulong(
             lc_pouch_index_doc_generation_next_token(&rest), &parsed_hidden) ||
         lc_pouch_index_doc_generation_next_token(&rest) != NULL ||
@@ -1070,7 +1070,8 @@ int lc_pouch_index_doc_table_generation_validate_file(
     return LC_OK;
   }
   line[strcspn(line, "\n")] = '\0';
-  if (!lc_pouch_index_doc_generation_header_u64(line, "index_seq=", &index_seq) ||
+  if (!lc_pouch_index_doc_generation_header_u64(line,
+                                                "index_seq=", &index_seq) ||
       index_seq != expected_index_seq) {
     fclose(fp);
     return LC_OK;

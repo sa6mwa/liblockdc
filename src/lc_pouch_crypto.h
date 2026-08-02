@@ -44,33 +44,31 @@ int lc_pouch_crypto_stream_to_file_relaxed_uncompressed(
     lc_source *body, uint64_t *plain_bytes, uint64_t *cipher_bytes,
     char **descriptor_out, lc_error *error);
 int lc_pouch_crypto_stream_to_fd(lc_pouch_crypto *crypto, const char *context,
-                                 int fd, lc_source *body,
-                                 uint64_t *plain_bytes,
-                                 uint64_t *cipher_bytes,
-                                 char **descriptor_out, lc_error *error);
-int lc_pouch_crypto_stream_to_fd_crc(
-    lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
-    uint64_t *plain_bytes, uint64_t *cipher_bytes,
-    unsigned long *stored_crc, char **descriptor_out, lc_error *error);
+                                 int fd, lc_source *body, uint64_t *plain_bytes,
+                                 uint64_t *cipher_bytes, char **descriptor_out,
+                                 lc_error *error);
+int lc_pouch_crypto_stream_to_fd_crc(lc_pouch_crypto *crypto,
+                                     const char *context, int fd,
+                                     lc_source *body, uint64_t *plain_bytes,
+                                     uint64_t *cipher_bytes,
+                                     unsigned long *stored_crc,
+                                     char **descriptor_out, lc_error *error);
 int lc_pouch_crypto_stream_to_fd_crc_with_compression(
     lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
-    uint64_t *plain_bytes, uint64_t *cipher_bytes,
-    unsigned long *stored_crc, char **descriptor_out, int allow_compression,
-    lc_error *error);
+    uint64_t *plain_bytes, uint64_t *cipher_bytes, unsigned long *stored_crc,
+    char **descriptor_out, int allow_compression, lc_error *error);
 int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
                                      const char *context, const char *path,
                                      const char *descriptor, lc_source **out,
                                      lc_error *error);
 int lc_pouch_crypto_source_from_file_span(lc_pouch_crypto *crypto,
                                           const char *context, const char *path,
-                                          uint64_t offset,
-                                          uint64_t length,
+                                          uint64_t offset, uint64_t length,
                                           const char *descriptor,
                                           lc_source **out, lc_error *error);
 int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
                                         const char *context, int fd,
-                                        uint64_t offset,
-                                        uint64_t length,
+                                        uint64_t offset, uint64_t length,
                                         const char *descriptor, lc_source **out,
                                         lc_error *error);
 
