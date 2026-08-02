@@ -7523,6 +7523,15 @@ static int lc_pouch_lease_precondition_check(void *context, lc_error *error) {
       precondition->key, NULL, error);
 }
 
+/* Preserve lockd's transport-visible failure for a required lease owner. */
+static int lc_pouch_client_validate_owner(const char *owner, lc_error *error) {
+  if (owner == NULL || owner[0] == '\0') {
+    return lc_error_set(error, LC_ERR_SERVER, 400L, "owner is required", NULL,
+                        "missing_owner", NULL);
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_queue_acquire_message_lease(
     lc_client_handle *client, const char *namespace_name,
     const lc_dequeue_req *req, const char *message_lease_key,
@@ -7549,6 +7558,10 @@ static int lc_pouch_queue_acquire_message_lease(
                         "pouch queue message lease acquire requires inputs",
                         NULL, NULL, "pouch");
   }
+  rc = lc_pouch_client_validate_owner(req->owner, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   memset(&lease_record, 0, sizeof(lease_record));
   memset(&write_result, 0, sizeof(write_result));
   rc = lc_pouch_read_lease_record(client, namespace_name, message_lease_key,
@@ -7564,7 +7577,7 @@ static int lc_pouch_queue_acquire_message_lease(
   fencing_token = lease_record.found && lease_record.fencing_token > 0L
                       ? lease_record.fencing_token + 1L
                       : 1L;
-  owner = req->owner != NULL && req->owner[0] != '\0' ? req->owner : "pouch";
+  owner = req->owner;
   txn_id = req->txn_id != NULL ? req->txn_id : "";
   rc = lc_pouch_write_lease_record(client, namespace_name, message_lease_key,
                                    owner, lease_id, txn_id, fencing_token,
@@ -10097,6 +10110,10 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   if (rc != LC_OK) {
     return rc;
   }
+  rc = lc_pouch_client_validate_owner(req->owner, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   if (req->ttl_seconds <= 0L) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch ttl_seconds must be positive", NULL, NULL, NULL);
@@ -12195,8 +12212,7 @@ static int lc_pouch_client_dequeue_once(lc_client_handle *client,
 
       lc_error_init(&rollback_error);
       (void)lc_pouch_write_lease_tombstone(
-          client, namespace_name, message_lease_key,
-          req->owner != NULL && req->owner[0] != '\0' ? req->owner : "pouch",
+          client, namespace_name, message_lease_key, req->owner,
           message_fencing_token, 0UL, &rollback_error);
       lc_error_cleanup(&rollback_error);
     }
@@ -12236,6 +12252,10 @@ int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
   if (req->queue == NULL || req->queue[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch dequeue requires queue", NULL, NULL, NULL);
+  }
+  rc = lc_pouch_client_validate_owner(req->owner, error);
+  if (rc != LC_OK) {
+    return rc;
   }
   client = (lc_client_handle *)self;
   rc = lc_pouch_client_public_namespace(client, req->namespace_name,
@@ -12429,6 +12449,10 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch dequeue_batch requires queue", NULL, NULL, NULL);
   }
+  rc = lc_pouch_client_validate_owner(req->owner, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   page_req = *req;
   limit = req->page_size > 0 ? req->page_size : 1;
   messages = NULL;
@@ -12523,8 +12547,7 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
 
         lc_error_init(&rollback_error);
         (void)lc_pouch_write_lease_tombstone(
-            client, namespace_name, message_lease_key,
-            req->owner != NULL && req->owner[0] != '\0' ? req->owner : "pouch",
+            client, namespace_name, message_lease_key, req->owner,
             message_fencing_token, 0UL, &rollback_error);
         lc_error_cleanup(&rollback_error);
       }
@@ -12640,6 +12663,14 @@ static int lc_pouch_client_subscribe_common(lc_client *self,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch subscribe requires self, req, and consumer",
                         NULL, NULL, NULL);
+  }
+  if (req->queue == NULL || req->queue[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch subscribe requires queue", NULL, NULL, NULL);
+  }
+  rc = lc_pouch_client_validate_owner(req->owner, error);
+  if (rc != LC_OK) {
+    return rc;
   }
   page_req = *req;
   page_req.start_after = NULL;

@@ -10946,6 +10946,7 @@ static void test_client_queue_dequeue_batch_returns_page(void **state) {
   assert_int_equal(rc, LC_OK);
 
   dequeue_req.queue = "batch";
+  dequeue_req.owner = "batch-worker";
   dequeue_req.page_size = 2;
   rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
   assert_int_equal(rc, LC_OK);
@@ -11014,6 +11015,7 @@ test_client_queue_dequeue_batch_preserves_fifo_payload_order(void **state) {
   }
 
   dequeue_req.queue = "batch-fifo";
+  dequeue_req.owner = "batch-fifo-worker";
   dequeue_req.page_size = 48;
   dequeue_req.visibility_timeout_seconds = 120L;
   rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
@@ -11102,6 +11104,7 @@ test_client_queue_dequeue_cursor_resumes_after_consumed_message(void **state) {
   assert_int_equal(rc, LC_OK);
 
   dequeue_req.queue = "cursor";
+  dequeue_req.owner = "cursor-worker";
   dequeue_req.visibility_timeout_seconds = 120L;
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
@@ -11360,6 +11363,7 @@ static void test_client_queue_ttl_and_retry_terminal_states(void **state) {
   assert_int_equal(rc, LC_OK);
 
   dequeue_req.queue = "retry";
+  dequeue_req.owner = "terminal-worker";
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(message);
@@ -11450,6 +11454,7 @@ static void test_client_queue_ttl_and_retry_terminal_states(void **state) {
 
   lc_dequeue_req_init(&dequeue_req);
   dequeue_req.queue = "ttl";
+  dequeue_req.owner = "terminal-worker";
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
   assert_null(message);
@@ -11538,6 +11543,7 @@ static void test_client_queue_max_durations_obey_timestamp_range(void **state) {
   assert_int_equal(rc, LC_OK);
 
   dequeue_req.queue = "overflow";
+  dequeue_req.owner = "overflow-worker";
   dequeue_req.visibility_timeout_seconds = LONG_MAX;
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   if (max_duration_overflows_timestamp) {
@@ -11671,6 +11677,7 @@ static void test_client_queue_subscribe_polling_paths(void **state) {
   assert_int_equal(rc, LC_OK);
 
   subscribe_req.queue = "subscribe";
+  subscribe_req.owner = "subscribe-worker";
   subscribe_req.page_size = 2;
   consumer.handle = pouch_subscribe_ack_handler;
   consumer.context = &capture;
@@ -11698,6 +11705,7 @@ static void test_client_queue_subscribe_polling_paths(void **state) {
 
   lc_dequeue_req_init(&subscribe_req);
   subscribe_req.queue = "state-subscribe";
+  subscribe_req.owner = "state-subscribe-worker";
   consumer.handle = pouch_subscribe_state_ack_handler;
   consumer.context = &capture;
   rc = client->subscribe_with_state(client, &subscribe_req, &consumer, &error);
@@ -11718,6 +11726,7 @@ static void test_client_queue_subscribe_polling_paths(void **state) {
 
   lc_dequeue_req_init(&subscribe_req);
   subscribe_req.queue = "missing-terminal";
+  subscribe_req.owner = "missing-terminal-worker";
   consumer.handle = pouch_subscribe_missing_terminal_handler;
   consumer.context = &capture;
   rc = client->subscribe(client, &subscribe_req, &consumer, &error);
@@ -11735,6 +11744,138 @@ static void test_client_queue_subscribe_polling_paths(void **state) {
   assert_int_equal(stats_res.available, 1);
   lc_queue_stats_res_cleanup(&stats_res);
 
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_client_rejects_missing_lease_and_queue_owners(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_message *message;
+  lc_acquire_req acquire_req;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_dequeue_batch_res batch;
+  lc_queue_stats_req stats_req;
+  lc_queue_stats_res stats_res;
+  lc_consumer consumer;
+  pouch_subscribe_capture capture;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  message = NULL;
+  lc_acquire_req_init(&acquire_req);
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  memset(&batch, 0, sizeof(batch));
+  lc_queue_stats_req_init(&stats_req);
+  memset(&stats_res, 0, sizeof(stats_res));
+  lc_consumer_init(&consumer);
+  memset(&capture, 0, sizeof(capture));
+  lc_error_init(&error);
+  make_root("client-missing-owner", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = "state/missing-owner";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_null(lease);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  acquire_req.owner = "";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_null(lease);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  /* A named owner proves neither rejected call persisted a claim. */
+  acquire_req.owner = "named-lease-owner";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  lease->close(lease);
+  lease = NULL;
+
+  enqueue_req.queue = "owner-required";
+  rc = lc_source_from_memory("job", strlen("job"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_req.queue = "owner-required";
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_null(message);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  dequeue_req.owner = "";
+  rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_null(batch.messages);
+  assert_int_equal(batch.count, 0U);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  dequeue_req.owner = NULL;
+  consumer.handle = pouch_subscribe_ack_handler;
+  consumer.context = &capture;
+  rc = client->subscribe(client, &dequeue_req, &consumer, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(capture.count, 0);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  dequeue_req.owner = "";
+  rc = client->subscribe_with_state(client, &dequeue_req, &consumer, &error);
+  assert_int_equal(rc, LC_ERR_SERVER);
+  assert_int_equal(capture.count, 0);
+  assert_int_equal(error.http_status, 400L);
+  assert_string_equal(error.server_code, "missing_owner");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  stats_req.queue = "owner-required";
+  rc = client->queue_stats(client, &stats_req, &stats_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(stats_res.available, 1);
+  lc_queue_stats_res_cleanup(&stats_res);
+
+  dequeue_req.owner = "named-queue-owner";
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  rc = message->ack(message, &error);
+  assert_int_equal(rc, LC_OK);
+  message = NULL;
+
+  lc_dequeue_batch_cleanup(&batch);
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_client_close(client);
   cleanup_root(root);
@@ -18942,6 +19083,7 @@ int main(void) {
       cmocka_unit_test(test_client_queue_ttl_and_retry_terminal_states),
       cmocka_unit_test(test_client_queue_max_durations_obey_timestamp_range),
       cmocka_unit_test(test_client_queue_subscribe_polling_paths),
+      cmocka_unit_test(test_client_rejects_missing_lease_and_queue_owners),
       cmocka_unit_test(test_client_queue_watch_polling_detects_change),
       cmocka_unit_test(test_client_queue_watch_detects_transaction_ack_commit),
       cmocka_unit_test(

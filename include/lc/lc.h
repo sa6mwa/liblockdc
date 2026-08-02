@@ -226,7 +226,7 @@ typedef struct lc_acquire_req {
   const char *namespace_name;
   /** Lease key to acquire. */
   const char *key;
-  /** Logical owner identifier recorded by the server. */
+  /** Non-empty logical owner identifier required for lease acquisition. */
   const char *owner;
   /** Requested lease TTL in seconds. */
   long ttl_seconds;
@@ -754,7 +754,10 @@ typedef struct lc_dequeue_req {
   const char *namespace_name;
   /** Queue name. */
   const char *queue;
-  /** Logical consumer/owner identifier recorded by the server. */
+  /**
+   * Non-empty logical consumer/owner identifier required for direct delivery.
+   * `lc_consumer_service` may synthesize this value from its configuration.
+   */
   const char *owner;
   /** Optional transaction identifier to bind the dequeue into. */
   const char *txn_id;
