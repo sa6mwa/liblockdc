@@ -61,7 +61,8 @@ struct lc_pouch_writer_root_lock_entry {
 
 static lc_pouch_writer_root_lock_entry *lc_pouch_writer_root_locks;
 
-#define LC_POUCH_FSYNC_BATCH_DELAY_NS 0L
+/* Match Go disk's bounded durable group-commit window. */
+#define LC_POUCH_FSYNC_BATCH_DELAY_NS 2000000L
 #define LC_POUCH_EXCLUSIVE_WRITER_TOUCH_NS 1000000000L
 #define LC_POUCH_EXCLUSIVE_WRITER_TTL_NS ((int64_t)3 * (int64_t)1000000000)
 #define LC_POUCH_WRITER_PRESENCE_MISSING (-1001)

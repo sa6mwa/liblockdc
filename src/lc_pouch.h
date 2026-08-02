@@ -62,7 +62,9 @@ typedef struct lc_pouch_open_options {
    * Defaults to zero, matching Go disk failover's NoSync policy.
    */
   int durable_sync;
-  /** Maximum fsync requests per group commit. Zero leaves the batch unbounded.
+  /** Maximum fsync requests per durable group commit. The worker commits when
+   * this limit is reached or after its two-millisecond coalescing window.
+   * Zero leaves the batch unbounded.
    */
   uint64_t fsync_batch_max_ops;
   /** Enables filesystem queue notifications where the root supports them. */

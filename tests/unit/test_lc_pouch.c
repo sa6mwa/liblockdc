@@ -3640,6 +3640,68 @@ static void test_pouch_durable_sync_policy(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_pouch_durable_sync_batches_parallel_writes(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_pouch_fsync_stats fsync_stats;
+  pouch_parallel_state_write writes[4];
+  pthread_barrier_t start;
+  pthread_t threads[4];
+  lc_error error;
+  char root[512];
+  size_t index;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&fsync_stats, 0, sizeof(fsync_stats));
+  memset(writes, 0, sizeof(writes));
+  lc_error_init(&error);
+  make_root("durable-sync-batch", root, sizeof(root));
+  cleanup_root(root);
+
+  options.durable_sync = 1;
+  options.fsync_batch_max_ops = 4U;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(pthread_barrier_init(&start, NULL, 4U), 0);
+  for (index = 0U; index < 4U; ++index) {
+    writes[index].pouch = pouch;
+    writes[index].start = &start;
+    writes[index].key = index == 0U   ? "durable-sync-batch/a"
+                        : index == 1U ? "durable-sync-batch/b"
+                        : index == 2U ? "durable-sync-batch/c"
+                                      : "durable-sync-batch/d";
+    writes[index].value = index == 0U   ? "a"
+                          : index == 1U ? "b"
+                          : index == 2U ? "c"
+                                        : "d";
+    assert_int_equal(pthread_create(&threads[index], NULL,
+                                    pouch_write_state_in_parallel,
+                                    &writes[index]),
+                     0);
+  }
+  for (index = 0U; index < 4U; ++index) {
+    assert_int_equal(pthread_join(threads[index], NULL), 0);
+  }
+  assert_int_equal(pthread_barrier_destroy(&start), 0);
+  for (index = 0U; index < 4U; ++index) {
+    assert_int_equal(writes[index].rc, LC_OK);
+    lc_pouch_state_write_result_cleanup(NULL, &writes[index].result);
+    lc_error_cleanup(&writes[index].error);
+  }
+  rc = lc_pouch_fsync_stats_read(pouch, &fsync_stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(fsync_stats.total_requests, 4U);
+  assert_true(fsync_stats.total_batches < fsync_stats.total_requests);
+  assert_true(fsync_stats.max_batch_size > 1U);
+
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   lc_client *client;
   lc_client_handle *handle;
@@ -19128,6 +19190,7 @@ int main(void) {
       cmocka_unit_test(test_single_writer_runtime_control_and_ha_probe),
       cmocka_unit_test(test_pouch_disk_runtime_controls),
       cmocka_unit_test(test_pouch_durable_sync_policy),
+      cmocka_unit_test(test_pouch_durable_sync_batches_parallel_writes),
       cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),
       cmocka_unit_test(test_pouch_defaults_and_post_mutation_janitor),
       cmocka_unit_test(test_exclusive_writer_probe_heartbeat_precedence),

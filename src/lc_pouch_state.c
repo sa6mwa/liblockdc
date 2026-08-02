@@ -341,9 +341,6 @@ static int lc_pouch_state_commit_group_end(lc_pouch_state_commit_group *group,
       }
     }
   }
-  if (rc != LC_OK) {
-    lc_pouch_state_cache_cleanup(group->pouch);
-  }
   lc_pouch_state_commit_group_free(group);
   return rc;
 }
@@ -400,21 +397,31 @@ static int lc_pouch_state_defer_fsync(lc_pouch *pouch, int fd,
 }
 
 static int
-lc_pouch_state_finish_commit_group(lc_pouch_state_commit_group *group,
-                                   int owned, int rc, lc_error *error) {
+lc_pouch_state_finish_commit_group_common(lc_pouch_state_commit_group *group,
+                                          int owned, int rc, int clear_cache,
+                                          lc_error *error) {
   lc_pouch *pouch;
   int commit_rc;
 
   pouch = group != NULL ? group->pouch : NULL;
-  commit_rc =
-      lc_pouch_state_commit_group_end(group, owned, rc == LC_OK ? error : NULL);
-  if (commit_rc != LC_OK && rc == LC_OK) {
-    return commit_rc;
+  commit_rc = LC_OK;
+  if (group != NULL) {
+    commit_rc = lc_pouch_state_commit_group_end(group, owned,
+                                                rc == LC_OK ? error : NULL);
   }
-  if (rc != LC_OK && pouch != NULL) {
+  if (commit_rc != LC_OK && rc == LC_OK) {
+    rc = commit_rc;
+  }
+  if (clear_cache && rc != LC_OK && pouch != NULL) {
     lc_pouch_state_cache_cleanup(pouch);
   }
   return rc;
+}
+
+static int
+lc_pouch_state_finish_commit_group(lc_pouch_state_commit_group *group,
+                                   int owned, int rc, lc_error *error) {
+  return lc_pouch_state_finish_commit_group_common(group, owned, rc, 1, error);
 }
 
 static int lc_pouch_state_mutex_init_recursive(pthread_mutex_t *mutex,
@@ -1648,6 +1655,29 @@ static void lc_pouch_state_key_mutation_end(lc_pouch *pouch,
   }
 }
 
+/* Keep the per-key lock through durable completion, but let independent keys
+ * append while this request waits for its root-scoped fsync group. The global
+ * mutex only protects mutation/cache changes, not durable completion. */
+static int lc_pouch_state_finish_commit_group_after_mutation(
+    lc_pouch *pouch, lc_pouch_state_key_lock *lock,
+    lc_pouch_state_commit_group *group, int owned, int rc, lc_error *error) {
+  int pthread_rc;
+
+  if (pouch != NULL && pouch->state_mutation_mutex_initialized) {
+    pthread_mutex_unlock(&pouch->state_mutation_mutex);
+  }
+  rc = lc_pouch_state_finish_commit_group_common(group, owned, rc, 0, error);
+  if (rc != LC_OK && pouch != NULL && pouch->state_mutation_mutex_initialized) {
+    pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
+    if (pthread_rc == 0) {
+      lc_pouch_state_cache_cleanup(pouch);
+      pthread_mutex_unlock(&pouch->state_mutation_mutex);
+    }
+  }
+  lc_pouch_state_key_lock_release(lock);
+  return rc;
+}
+
 int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,
                                        const char *namespace_name,
                                        lc_pouch_state_precondition_fn callback,
@@ -1706,10 +1736,11 @@ int lc_pouch_state_with_key_lock(lc_pouch *pouch, const char *namespace_name,
                                          &owns_commit_group, error);
   if (rc == LC_OK) {
     rc = callback(context, error);
-    rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
-                                            error);
+    rc = lc_pouch_state_finish_commit_group_after_mutation(
+        pouch, &lock, commit_group, owns_commit_group, rc, error);
+  } else {
+    lc_pouch_state_key_mutation_end(pouch, &lock);
   }
-  lc_pouch_state_key_mutation_end(pouch, &lock);
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }
@@ -9670,13 +9701,8 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
   }
   rc = lc_pouch_state_write_locked(pouch, namespace_name, key, body, options,
                                    out, error);
-  if (commit_group != NULL) {
-    rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
-                                            error);
-  } else if (rc != LC_OK) {
-    lc_pouch_state_cache_cleanup(pouch);
-  }
-  lc_pouch_state_key_mutation_end(pouch, &lock);
+  rc = lc_pouch_state_finish_commit_group_after_mutation(
+      pouch, &lock, commit_group, owns_commit_group, rc, error);
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }
@@ -9902,13 +9928,8 @@ int lc_pouch_state_update_metadata(lc_pouch *pouch, const char *namespace_name,
   }
   rc = lc_pouch_state_update_metadata_locked(pouch, namespace_name, key,
                                              options, out, error);
-  if (commit_group != NULL) {
-    rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
-                                            error);
-  } else if (rc != LC_OK) {
-    lc_pouch_state_cache_cleanup(pouch);
-  }
-  lc_pouch_state_key_mutation_end(pouch, &lock);
+  rc = lc_pouch_state_finish_commit_group_after_mutation(
+      pouch, &lock, commit_group, owns_commit_group, rc, error);
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }
@@ -10038,13 +10059,8 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
   }
   rc = lc_pouch_state_delete_locked(pouch, namespace_name, key, options, out,
                                     error);
-  if (commit_group != NULL) {
-    rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
-                                            error);
-  } else if (rc != LC_OK) {
-    lc_pouch_state_cache_cleanup(pouch);
-  }
-  lc_pouch_state_key_mutation_end(pouch, &lock);
+  rc = lc_pouch_state_finish_commit_group_after_mutation(
+      pouch, &lock, commit_group, owns_commit_group, rc, error);
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }
@@ -10268,9 +10284,8 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
   }
   rc = lc_pouch_state_promote_staged_locked(
       pouch, namespace_name, key, txn_id, expected_committed_etag, out, error);
-  rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
-                                          error);
-  lc_pouch_state_key_mutation_end(pouch, &lock);
+  rc = lc_pouch_state_finish_commit_group_after_mutation(
+      pouch, &lock, commit_group, owns_commit_group, rc, error);
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }
@@ -10427,9 +10442,8 @@ int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
   }
   rc = lc_pouch_state_commit_staged_locked(pouch, namespace_name, key, txn_id,
                                            out, error);
-  rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
-                                          error);
-  lc_pouch_state_key_mutation_end(pouch, &lock);
+  rc = lc_pouch_state_finish_commit_group_after_mutation(
+      pouch, &lock, commit_group, owns_commit_group, rc, error);
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }
@@ -10525,9 +10539,8 @@ int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
   }
   rc = lc_pouch_state_discard_staged_locked(pouch, namespace_name, key, txn_id,
                                             discarded, error);
-  rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
-                                          error);
-  lc_pouch_state_key_mutation_end(pouch, &lock);
+  rc = lc_pouch_state_finish_commit_group_after_mutation(
+      pouch, &lock, commit_group, owns_commit_group, rc, error);
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }

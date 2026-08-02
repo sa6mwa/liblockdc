@@ -663,10 +663,11 @@ default, relaxing durability, or omitting core operations from comparison.
   `fsync_batch_max_ops` is a `uint64_t` Pouch open option and a
   `pouch://...?fsync_batch_max_ops=<u64>` endpoint option; zero is unbounded,
   matching Go's `LogstoreCommitMaxOps`. `durable_sync` is available as both a
-  direct open option and `pouch://...?durable_sync=true`. The batcher drains
-  immediately and naturally combines requests already queued behind a sync;
-  it deliberately does not impose Go's fixed two-millisecond delay on direct
-  C callers. `lc_pouch_fsync_stats_read` reports fixed-width aggregate batch,
+  direct open option and `pouch://...?durable_sync=true`. The batcher collects
+  eligible requests for at most two milliseconds, or until
+  `fsync_batch_max_ops` is reached, matching Go disk's bounded group-commit
+  schedule. Every caller waits for its group's shared sync result.
+  `lc_pouch_fsync_stats_read` reports fixed-width aggregate batch,
   request, latency, bound, and bucket counters using Go's 1 through 4096
   histogram boundaries; they remain zero when durable sync is disabled.
 
@@ -1089,9 +1090,9 @@ finalized-record publication. Callers that require a stronger boundary opt in
 to `durable_sync=1`; on Linux that mode uses `fdatasync` with per-file
 deduplication inside a root-scoped commit group.
 
-Pouch's durable-sync batcher has no fixed delay: it drains requests immediately
-and combines requests already queued at that boundary. Its
-`fsync_batch_max_ops` setting is a `uint64_t`, defaults to zero for an
+Pouch's durable-sync batcher uses Go disk's bounded two-millisecond
+coalescing window and commits earlier when `fsync_batch_max_ops` is reached.
+Its `fsync_batch_max_ops` setting is a `uint64_t`, defaults to zero for an
 unbounded group, and is available on the direct Pouch open options and the
 `pouch://` endpoint. The batcher is part of the resident writer pipeline, not
 a reason to reopen descriptors or re-discover a healthy namespace.

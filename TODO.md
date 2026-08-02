@@ -117,9 +117,11 @@ Acceptance:
 - [x] Route state, lease, object, attachment, queue, and staged-transaction
   mutations through the serialized resident append path. Public completion
   still waits for its own finalized commit result.
-- [ ] Complete and measure Go disk-like group commit scheduling: combine
-  eligible durable requests without redundant syncs while preserving operation
-  order, failure propagation, and `durable_sync` semantics.
+- [x] Match Go disk group-commit scheduling: a durable group waits at most two
+  milliseconds or until its maximum request count, deduplicates file syncs,
+  and propagates the shared result to every waiting operation.
+- [ ] Measure durable-sync throughput and latency against Go disk under the
+  standard concurrency matrix.
 - [x] Route cached public reads, lease metadata reads, direct query reads, and
   scan-oriented query views through the resident projection in exclusive mode.
 - [x] Rotate without reopening healthy normal append descriptors; publish the
