@@ -384,6 +384,19 @@ static int lc_source_pub_reset(lc_source *self, lc_error *error) {
   return impl->reset_impl(impl, error);
 }
 
+int lc_source_is_resettable(const lc_source *source) {
+  const lc_source_impl *impl;
+
+  if (source == NULL || source->reset == NULL) {
+    return 0;
+  }
+  if (source->reset != lc_source_pub_reset) {
+    return 1;
+  }
+  impl = (const lc_source_impl *)source;
+  return impl->reset_impl != NULL;
+}
+
 static void lc_source_pub_close(lc_source *self) {
   lc_source_impl *impl;
 
@@ -524,12 +537,6 @@ static size_t lc_stream_source_read(lc_source_impl *self, void *buffer,
   pthread_cond_broadcast(&pipe->cond);
   lc_stream_pipe_release_locked(pipe);
   return count;
-}
-
-static int lc_stream_source_reset(lc_source_impl *self, lc_error *error) {
-  (void)self;
-  return lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "streamed payloads are not rewindable", NULL, NULL, NULL);
 }
 
 static void lc_stream_source_close(lc_source_impl *self) {
@@ -2195,7 +2202,7 @@ int lc_source_from_callbacks(lc_source_read_fn read, lc_source_reset_fn reset,
   source->base.pub.reset = lc_source_pub_reset;
   source->base.pub.close = lc_source_pub_close;
   source->base.read_impl = lc_callback_source_read;
-  source->base.reset_impl = lc_callback_source_reset;
+  source->base.reset_impl = reset != NULL ? lc_callback_source_reset : NULL;
   source->base.close_impl = lc_callback_source_close;
   source->read = read;
   source->reset = reset;
@@ -2776,7 +2783,7 @@ int lc_stream_pipe_open(size_t capacity, const lc_allocator *allocator,
   source->base.pub.reset = lc_source_pub_reset;
   source->base.pub.close = lc_source_pub_close;
   source->base.read_impl = lc_stream_source_read;
-  source->base.reset_impl = lc_stream_source_reset;
+  source->base.reset_impl = NULL;
   source->base.close_impl = lc_stream_source_close;
   *out = &source->base.pub;
   *pipe = state;

@@ -142,7 +142,7 @@ help:
 		'make build-e2e          Configure and build the e2e preset.' \
 		'make build-coverage     Configure and build the coverage preset.' \
 		'make build-fuzz         Configure and build the fuzz preset.' \
-		'make deps-debug         Provision the host-native release dependency tree used by debug/e2e/coverage/fuzz.' \
+		'make deps-debug         Provision the pinned x86_64 GNU Bootlin dependency tree used by debug/e2e/coverage/fuzz.' \
 		'make deps-release       Provision the shipped x86_64 GNU/musl release dependency trees.' \
 		'make deps-cross         Provision all non-host cross release dependency trees.' \
 		'make test-debug         Run the ASan/UBSan debug preset test suite.' \
@@ -217,7 +217,7 @@ deps-debug:
 	$(TIMED) deps-debug $(MAKE) __deps-debug
 
 __deps-debug:
-	bash ./scripts/deps.sh deps-host-debug
+	bash ./scripts/deps.sh deps-x86_64-linux-gnu
 
 deps-release:
 	$(TIMED) deps-release $(MAKE) __deps-release

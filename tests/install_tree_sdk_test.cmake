@@ -201,6 +201,14 @@ if(NOT LOCKDC_PKG_CONFIG_BIN)
     message(FATAL_ERROR "pkg-config is required for install-tree static SDK validation")
 endif()
 
+# Direct pkg-config consumers bypass CMake, so preserve the configured flags
+# required to compile and link against an instrumented installed library.
+set(lockdc_consumer_compile_and_link_flags "")
+if(DEFINED LOCKDC_ACTIVE_C_FLAGS AND NOT LOCKDC_ACTIVE_C_FLAGS STREQUAL "")
+    separate_arguments(lockdc_consumer_compile_and_link_flags NATIVE_COMMAND
+        "${LOCKDC_ACTIVE_C_FLAGS}")
+endif()
+
 execute_process(
     COMMAND "${CMAKE_COMMAND}" --build "${consumer_bin_dir}"
     RESULT_VARIABLE build_result
@@ -284,6 +292,7 @@ endif()
 
 execute_process(
     COMMAND "${LOCKDC_C_COMPILER}"
+        ${lockdc_consumer_compile_and_link_flags}
         ${lockdc_pkgconfig_shared_cflags_list}
         "${consumer_src_dir}/pkgconfig_shared_main.c"
         -Wl,-rpath,${install_prefix}/lib
@@ -360,6 +369,7 @@ if(NOT DEFINED LOCKDC_SANITIZER_INSTRUMENTED OR LOCKDC_SANITIZER_INSTRUMENTED ST
     set(lockdc_pkgconfig_static_consumer "${consumer_bin_dir}/lockdc_install_tree_pkgconfig_static")
     execute_process(
         COMMAND "${LOCKDC_C_COMPILER}"
+            ${lockdc_consumer_compile_and_link_flags}
             ${lockdc_pkgconfig_cflags_list}
             -static
             "${consumer_src_dir}/pkgconfig_static_main.c"

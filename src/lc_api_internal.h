@@ -191,6 +191,7 @@ int lc_stream_pipe_write(lc_stream_pipe *pipe, const void *bytes, size_t count,
                          lc_error *error);
 void lc_stream_pipe_finish(lc_stream_pipe *pipe);
 void lc_stream_pipe_fail(lc_stream_pipe *pipe, int code, const char *message);
+int lc_source_is_resettable(const lc_source *source);
 lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
                        const char *key, const char *owner, const char *lease_id,
                        const char *txn_id, long fencing_token,

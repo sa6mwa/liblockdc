@@ -18,7 +18,8 @@ else
     lc_unit_public_mock_usage
     lc_unit_runtime
     lc_unit_mutate_stream
-    lc_unit_pouch_client
+    # The unified Pouch target replaced the retired pouch-client test target.
+    lc_unit_pouch
   )
 fi
 

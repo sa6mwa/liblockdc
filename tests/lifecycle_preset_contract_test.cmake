@@ -93,6 +93,15 @@ function(assert_configure_toolchain name expected)
     endif()
 endfunction()
 
+function(assert_configure_inherits name expected)
+    find_named_object_index(index configurePresets "${name}")
+    json_get(actual configurePresets ${index} inherits)
+    if(NOT actual STREQUAL expected)
+        message(FATAL_ERROR
+            "configure preset ${name} should inherit ${expected}, got ${actual}")
+    endif()
+endfunction()
+
 foreach(name
         base
         debug
@@ -133,6 +142,10 @@ assert_configure_cache(base LOCKDC_INSTALL ON)
 
 assert_configure_cache(debug CMAKE_BUILD_TYPE Debug)
 assert_configure_cache(debug LOCKDC_BUILD_EXAMPLES ON)
+assert_configure_toolchain(debug "$\{sourceDir\}/cmake/toolchains/x86_64-linux-gnu.cmake")
+foreach(name e2e debug-lua asan coverage)
+    assert_configure_inherits("${name}" debug)
+endforeach()
 assert_configure_cache(debug-lua LOCKDC_BUILD_LUA_BINDINGS ON)
 assert_configure_cache(debug-lua LOCKDC_BUILD_BENCHMARKS OFF)
 assert_configure_cache(valgrind CMAKE_C_FLAGS_DEBUG "-O1 -g -fno-omit-frame-pointer")

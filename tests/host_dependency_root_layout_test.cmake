@@ -32,7 +32,7 @@ assert_contains(root_cmake "set(LOCKDC_DEPENDENCY_BUILD_ROOT \"\${CMAKE_SOURCE_D
 assert_contains(root_cmake "set(CPKT_DEPENDENCY_CACHE \"\${LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE}\" CACHE PATH" "shared dependency archive cache variable")
 assert_contains(root_cmake "set(LOCKDC_DOWNLOAD_ROOT \"\${CMAKE_SOURCE_DIR}/.cache/downloads\"" "repo-local download staging root")
 assert_contains(root_cmake "set(LOCKDC_DEPENDENCY_BUILD_TYPE \"Release\")" "release-only dependency build type")
-assert_contains(root_makefile "__deps-debug:\n\tbash ./scripts/deps.sh deps-host-debug" "debug dependency target uses host-native alias")
+assert_contains(root_makefile "__deps-debug:\n\tbash ./scripts/deps.sh deps-x86_64-linux-gnu" "debug dependency target uses pinned Bootlin target")
 assert_contains(root_makefile "__test-host:\n\tbash ./scripts/host_test.sh" "host test target delegates to host_test.sh")
 assert_contains(deps_script "resolve_host_debug_preset()" "host-native dependency preset resolver")
 assert_contains(deps_script "deps-aarch64-linux-gnu" "aarch64 host-native dependency mapping")

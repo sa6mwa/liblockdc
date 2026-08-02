@@ -133,6 +133,36 @@ endif()
 
 assert_tar_numeric_owner_group("${lockdc_lua_inner_archive_path}")
 
+set(lockdc_lua_source_unpack_root "${lockdc_lua_rock_extract_root}/source")
+file(MAKE_DIRECTORY "${lockdc_lua_source_unpack_root}")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar xf "${lockdc_lua_inner_archive_path}"
+    WORKING_DIRECTORY "${lockdc_lua_source_unpack_root}"
+    RESULT_VARIABLE source_extract_result
+    OUTPUT_VARIABLE source_extract_stdout
+    ERROR_VARIABLE source_extract_stderr
+)
+if(NOT source_extract_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to extract Lua source archive\n"
+        "stdout:\n${source_extract_stdout}\n"
+        "stderr:\n${source_extract_stderr}")
+endif()
+
+set(lockdc_lua_source_extract_root "${lockdc_lua_source_unpack_root}/lockdc-${LOCKDC_VERSION}-1")
+foreach(required_source
+    "src/lua/lockdc_lua.c"
+    "src/lc_api_internal.h"
+    "src/lc_engine_api.h"
+    "src/lc_intcompat.h"
+    "src/lc_pouch.h"
+    "scripts/build_lua_rock.sh"
+)
+    if(NOT EXISTS "${lockdc_lua_source_extract_root}/${required_source}")
+        message(FATAL_ERROR "Lua source rock is missing required source: ${required_source}")
+    endif()
+endforeach()
+
 file(READ "${lockdc_lua_inner_rockspec_path}" lockdc_lua_inner_rockspec_text)
 foreach(disallowed_path "${LOCKDC_ROOT}" "$ENV{HOME}")
     if(disallowed_path STREQUAL "")

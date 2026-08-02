@@ -10,6 +10,7 @@
 
 #include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
+#include "lc_api_internal.h"
 
 #define STREAMS_TMP_PREFIX "/tmp/liblockdc-streams-"
 
@@ -368,6 +369,55 @@ static void test_sink_memory_bytes_rejects_invalid_arguments(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_message_writes_single_pass_stream_payload(void **state) {
+  static const char payload[] = "stream payload";
+  lc_engine_dequeue_response delivery;
+  lc_stream_pipe *pipe;
+  lc_source *source;
+  lc_message *message;
+  lc_sink *sink;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  int rc;
+
+  (void)state;
+  pipe = NULL;
+  source = NULL;
+  message = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  memset(&delivery, 0, sizeof(delivery));
+  lc_error_init(&error);
+
+  rc = lc_stream_pipe_open(64U, NULL, &source, &pipe, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_stream_pipe_write(pipe, payload, sizeof(payload) - 1U, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_stream_pipe_finish(pipe);
+  pipe = NULL;
+
+  message = lc_message_new(NULL, &delivery, source, NULL);
+  assert_non_null(message);
+  source = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_message_write_payload(message, sink, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, sizeof(payload) - 1U);
+  assert_memory_equal(bytes, payload, sizeof(payload) - 1U);
+
+  rc = lc_message_rewind_payload(message, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+
+  lc_sink_close(sink);
+  lc_message_close(message);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_copy_memory_source_to_memory_sink),
@@ -381,6 +431,7 @@ int main(void) {
       cmocka_unit_test(test_close_helpers_accept_null),
       cmocka_unit_test(test_copy_rejects_null_endpoints),
       cmocka_unit_test(test_sink_memory_bytes_rejects_invalid_arguments),
+      cmocka_unit_test(test_message_writes_single_pass_stream_payload),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

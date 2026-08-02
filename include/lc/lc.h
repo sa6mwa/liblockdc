@@ -186,7 +186,8 @@ enum {
 };
 
 /**
- * Rewindable input stream used for uploads and generic byte transport.
+ * Input stream used for uploads and generic byte transport. A source may be
+ * single-pass; in that case `reset()` returns `LC_ERR_INVALID`.
  *
  * The source owns `impl` and releases it from `close()`.
  */
@@ -718,11 +719,14 @@ typedef struct lc_enqueue_req {
   const char *namespace_name;
   /** Queue name. */
   const char *queue;
-  /** Initial delivery delay in seconds. */
+  /** Initial delivery delay in seconds. The resulting Unix timestamp must fit
+   * in `lc_unix_seconds`. */
   long delay_seconds;
-  /** Visibility timeout granted to the consumer on dequeue. */
+  /** Visibility timeout granted to the consumer on dequeue. The resulting
+   * Unix timestamp must fit in `lc_unix_seconds`. */
   long visibility_timeout_seconds;
-  /** Message TTL in seconds. */
+  /** Message TTL in seconds. The resulting Unix timestamp must fit in
+   * `lc_unix_seconds`. */
   long ttl_seconds;
   /** Maximum delivery attempts before the server gives up. */
   int max_attempts;
@@ -754,7 +758,8 @@ typedef struct lc_dequeue_req {
   const char *owner;
   /** Optional transaction identifier to bind the dequeue into. */
   const char *txn_id;
-  /** Visibility timeout granted when a message is delivered. */
+  /** Visibility timeout granted when a message is delivered. The resulting
+   * Unix timestamp must fit in `lc_unix_seconds`. */
   long visibility_timeout_seconds;
   /** Long-poll wait in seconds before returning no message. */
   long wait_seconds;
@@ -786,7 +791,13 @@ typedef struct lc_queue_stats_res {
   char *correlation_id;
 } lc_queue_stats_res;
 
-/** Batch result returned by `dequeue_batch()`. */
+/**
+ * Batch result returned by `dequeue_batch()`.
+ *
+ * The result owns every message until `lc_dequeue_batch_cleanup()` is called.
+ * A terminal `ack()` or `nack()` on a batch message does not close that handle;
+ * the batch cleanup releases it.
+ */
 typedef struct lc_dequeue_batch_res {
   /** Delivered messages in dequeue order. */
   lc_message **messages;
@@ -864,7 +875,8 @@ typedef enum lc_nack_intent {
 
 /** Request used to negatively acknowledge and optionally requeue a message. */
 typedef struct lc_nack_req {
-  /** Delay in seconds before the message becomes visible again. */
+  /** Delay in seconds before the message becomes visible again. The resulting
+   * Unix timestamp must fit in `lc_unix_seconds`. */
   long delay_seconds;
   /**
    * Redelivery intent for the nack.
@@ -887,7 +899,8 @@ typedef struct lc_nack_req {
 /** Client-level nack operation on an existing queue message reference. */
 typedef struct lc_nack_op {
   lc_message_ref message;
-  /** Delay in seconds before the message becomes visible again. */
+  /** Delay in seconds before the message becomes visible again. The resulting
+   * Unix timestamp must fit in `lc_unix_seconds`. */
   long delay_seconds;
   /**
    * Redelivery intent for the nack.
@@ -915,13 +928,16 @@ typedef struct lc_nack_res {
 
 /** Request used to extend queue message visibility. */
 typedef struct lc_extend_req {
-  /** Additional visibility time in seconds. */
+  /** Additional visibility time in seconds. The resulting Unix timestamp must
+   * fit in `lc_unix_seconds`. */
   long extend_by_seconds;
 } lc_extend_req;
 
 /** Client-level extend operation on an existing queue message reference. */
 typedef struct lc_extend_op {
   lc_message_ref message;
+  /** Additional visibility time in seconds. The resulting Unix timestamp must
+   * fit in `lc_unix_seconds`. */
   long extend_by_seconds;
 } lc_extend_op;
 
@@ -1392,13 +1408,18 @@ struct lc_lease {
  */
 struct lc_message {
   /**
-   * Acknowledges the message and closes the handle on success.
+   * Acknowledges the message and closes a non-batch handle on success.
+   *
+   * Batch messages remain owned by their `lc_dequeue_batch_res` and are closed
+   * by `lc_dequeue_batch_cleanup()`.
    *
    * If this call fails, the handle remains valid and may be retried or closed.
    */
   int (*ack)(lc_message *self, lc_error *error);
   /**
-   * Negatively acknowledges the message and closes the handle on success.
+   * Negatively acknowledges the message and closes a non-batch handle on
+   * success. Batch messages remain owned by their `lc_dequeue_batch_res` and
+   * are closed by `lc_dequeue_batch_cleanup()`.
    *
    * `req->intent` selects whether the nack is treated as a processing
    * `failure` or an intentional `defer`. If this call fails, the handle
@@ -1430,8 +1451,8 @@ struct lc_message {
   /**
    * Copies the payload stream into `dst`.
    *
-   * Resettable payloads are rewound before copying. Single-pass payloads that
-   * do not expose `reset()` are copied from their current position.
+   * Resettable payloads are rewound before copying. Single-pass payloads are
+   * copied from their current position.
    */
   int (*write_payload)(lc_message *self, lc_sink *dst, size_t *written,
                        lc_error *error);
@@ -1962,6 +1983,7 @@ void lc_queue_stats_res_cleanup(lc_queue_stats_res *response);
 void lc_ack_res_cleanup(lc_ack_res *response);
 void lc_nack_res_cleanup(lc_nack_res *response);
 void lc_extend_res_cleanup(lc_extend_res *response);
+/** Closes every message still owned by a dequeue batch and clears it. */
 void lc_dequeue_batch_cleanup(lc_dequeue_batch_res *response);
 void lc_watch_event_cleanup(lc_watch_event *event);
 void lc_attachment_info_cleanup(lc_attachment_info *info);
@@ -2209,8 +2231,8 @@ int lc_message_rewind_payload(lc_message *message, lc_error *error);
 /**
  * Copies a bound message payload into `dst`.
  *
- * Resettable payloads are rewound before copying. Single-pass payloads that do
- * not expose `reset()` are copied from their current position.
+ * Resettable payloads are rewound before copying. Single-pass payloads are
+ * copied from their current position.
  */
 int lc_message_write_payload(lc_message *message, lc_sink *dst, size_t *written,
                              lc_error *error);

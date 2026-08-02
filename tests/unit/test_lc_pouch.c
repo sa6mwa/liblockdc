@@ -5740,17 +5740,17 @@ static void test_pouch_crypto_rejects_byte_counter_overflow(void **state) {
   (void)state;
   lc_error_init(&error);
 
-  rc = lc_pouch_crypto_test_check_byte_counter(ULONG_MAX - 1UL, 1U, &error);
+  rc = lc_pouch_crypto_test_check_byte_counter(LC_U64_MAX - 1U, 1U, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
 
   lc_error_init(&error);
-  rc = lc_pouch_crypto_test_check_byte_counter(ULONG_MAX - 1UL, 2U, &error);
+  rc = lc_pouch_crypto_test_check_byte_counter(LC_U64_MAX - 1U, 2U, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   lc_error_cleanup(&error);
 
   lc_error_init(&error);
-  rc = lc_pouch_crypto_test_check_byte_counter(ULONG_MAX, 1U, &error);
+  rc = lc_pouch_crypto_test_check_byte_counter(LC_U64_MAX, 1U, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   lc_error_cleanup(&error);
 }
@@ -10958,8 +10958,10 @@ static void test_client_queue_dequeue_batch_returns_page(void **state) {
   assert_true(batch.messages[1]->fencing_token > 0L);
   rc = batch.messages[0]->ack(batch.messages[0], &error);
   assert_int_equal(rc, LC_OK);
+  assert_non_null(batch.messages[0]);
   rc = batch.messages[1]->ack(batch.messages[1], &error);
   assert_int_equal(rc, LC_OK);
+  assert_non_null(batch.messages[1]);
 
   lc_dequeue_batch_cleanup(&batch);
   lc_enqueue_res_cleanup(&enqueue_res);
@@ -11458,7 +11460,7 @@ static void test_client_queue_ttl_and_retry_terminal_states(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_client_queue_rejects_overflowing_timestamps(void **state) {
+static void test_client_queue_max_durations_obey_timestamp_range(void **state) {
   lc_client *client;
   lc_source *source;
   lc_enqueue_req enqueue_req;
@@ -11469,6 +11471,7 @@ static void test_client_queue_rejects_overflowing_timestamps(void **state) {
   lc_nack_req nack_req;
   lc_error error;
   char root[512];
+  int max_duration_overflows_timestamp;
   int rc;
 
   (void)state;
@@ -11483,6 +11486,7 @@ static void test_client_queue_rejects_overflowing_timestamps(void **state) {
   lc_error_init(&error);
   make_root("client-queue-overflow", root, sizeof(root));
   cleanup_root(root);
+  max_duration_overflows_timestamp = sizeof(long) >= sizeof(lc_unix_seconds);
 
   open_pouch_client(root, &client, &error);
   enqueue_req.queue = "overflow";
@@ -11493,8 +11497,13 @@ static void test_client_queue_rejects_overflowing_timestamps(void **state) {
   rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_ERR_INVALID);
-  assert_non_null(strstr(error.message, "ttl_seconds"));
+  if (max_duration_overflows_timestamp) {
+    assert_int_equal(rc, LC_ERR_INVALID);
+    assert_non_null(strstr(error.message, "ttl_seconds"));
+  } else {
+    assert_int_equal(rc, LC_OK);
+  }
+  lc_enqueue_res_cleanup(&enqueue_res);
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
@@ -11508,8 +11517,13 @@ static void test_client_queue_rejects_overflowing_timestamps(void **state) {
   rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_ERR_INVALID);
-  assert_non_null(strstr(error.message, "delay_seconds"));
+  if (max_duration_overflows_timestamp) {
+    assert_int_equal(rc, LC_ERR_INVALID);
+    assert_non_null(strstr(error.message, "delay_seconds"));
+  } else {
+    assert_int_equal(rc, LC_OK);
+  }
+  lc_enqueue_res_cleanup(&enqueue_res);
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
@@ -11526,9 +11540,16 @@ static void test_client_queue_rejects_overflowing_timestamps(void **state) {
   dequeue_req.queue = "overflow";
   dequeue_req.visibility_timeout_seconds = LONG_MAX;
   rc = client->dequeue(client, &dequeue_req, &message, &error);
-  assert_int_equal(rc, LC_ERR_INVALID);
-  assert_null(message);
-  assert_non_null(strstr(error.message, "visibility_timeout_seconds"));
+  if (max_duration_overflows_timestamp) {
+    assert_int_equal(rc, LC_ERR_INVALID);
+    assert_null(message);
+    assert_non_null(strstr(error.message, "visibility_timeout_seconds"));
+  } else {
+    assert_int_equal(rc, LC_OK);
+    assert_non_null(message);
+    message->close(message);
+    message = NULL;
+  }
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
@@ -11539,17 +11560,26 @@ static void test_client_queue_rejects_overflowing_timestamps(void **state) {
 
   extend_req.extend_by_seconds = LONG_MAX;
   rc = message->extend(message, &extend_req, &error);
-  assert_int_equal(rc, LC_ERR_INVALID);
-  assert_non_null(strstr(error.message, "extend_by_seconds"));
+  if (max_duration_overflows_timestamp) {
+    assert_int_equal(rc, LC_ERR_INVALID);
+    assert_non_null(strstr(error.message, "extend_by_seconds"));
+  } else {
+    assert_int_equal(rc, LC_OK);
+  }
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
   nack_req.delay_seconds = LONG_MAX;
   nack_req.intent = LC_NACK_INTENT_DEFER;
   rc = message->nack(message, &nack_req, &error);
-  assert_int_equal(rc, LC_ERR_INVALID);
-  assert_non_null(strstr(error.message, "delay_seconds"));
-  message->close(message);
+  if (max_duration_overflows_timestamp) {
+    assert_int_equal(rc, LC_ERR_INVALID);
+    assert_non_null(strstr(error.message, "delay_seconds"));
+    message->close(message);
+  } else {
+    assert_int_equal(rc, LC_OK);
+    message = NULL;
+  }
 
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_client_close(client);
@@ -18910,7 +18940,7 @@ int main(void) {
       cmocka_unit_test(
           test_client_queue_dequeue_with_state_nack_releases_state_lease),
       cmocka_unit_test(test_client_queue_ttl_and_retry_terminal_states),
-      cmocka_unit_test(test_client_queue_rejects_overflowing_timestamps),
+      cmocka_unit_test(test_client_queue_max_durations_obey_timestamp_range),
       cmocka_unit_test(test_client_queue_subscribe_polling_paths),
       cmocka_unit_test(test_client_queue_watch_polling_detects_change),
       cmocka_unit_test(test_client_queue_watch_detects_transaction_ack_commit),

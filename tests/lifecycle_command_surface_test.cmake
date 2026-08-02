@@ -113,10 +113,10 @@ string(FIND "${valgrind_dry_run_stdout}" "preset=valgrind" valgrind_preset_match
 if(valgrind_preset_match EQUAL -1)
     message(FATAL_ERROR "Valgrind dry-run did not report preset=valgrind\nstdout:\n${valgrind_dry_run_stdout}")
 endif()
-string(FIND "${valgrind_dry_run_stdout}" "test=lc_unit_pouch_client" valgrind_test_match)
-if(valgrind_test_match EQUAL -1)
-    message(FATAL_ERROR "Valgrind dry-run did not include the pouch client unit target\nstdout:\n${valgrind_dry_run_stdout}")
-endif()
+assert_contains(valgrind_dry_run_stdout "test=lc_unit_pouch\n"
+    "unified Pouch Valgrind target")
+assert_not_contains(valgrind_dry_run_stdout "test=lc_unit_pouch_client"
+    "retired Pouch client Valgrind target")
 
 execute_process(
     COMMAND make help

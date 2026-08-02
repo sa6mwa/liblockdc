@@ -312,7 +312,7 @@ int lc_message_write_payload_method(lc_message *self, lc_sink *dst,
     }
     return LC_OK;
   }
-  if (message->payload->reset != NULL) {
+  if (lc_source_is_resettable(message->payload)) {
     int rc;
 
     rc = message->payload->reset(message->payload, error);
