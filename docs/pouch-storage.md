@@ -1,21 +1,24 @@
 # Pouch Storage Implementation Specification
 
-This document is the implementation authority for the initial Pouch storage
-engine. Pouch has not shipped, so there is no compatibility obligation for any
-pre-release layout, record format, manifest, transform descriptor, benchmark
-fixture, or transition name.
+This document is the implementation authority for Pouch storage. Pouch has
+not shipped, so there is no compatibility obligation for rejected pre-release
+layouts, runtime paths, benchmark fixtures, or transition names. The current
+cutover retains the authoritative Pouch record format while replacing the
+writer runtime beneath it.
 
 The implementation target is a real segmented logstore. Every namespace has a
-single numeric rolling active segment. Pouch is unreleased, so it accepts no
-superseded writer-scoped segment layout and has one writer/replay format. This
-is not Go-disk interoperability or a parallel runtime format.
+single numeric rolling active segment and one Pouch replay format. The target
+default runtime is an exclusive root writer with a resident namespace
+logstore. An explicit shared-root runtime is supported over that same format.
+This is not Go-disk interoperability or a parallel durable format.
 
 ## Reference Principle
 
-Go lockd disk is the reference for storage semantics because it has already
-solved the hard operational problems: append-only segment lifecycle, replay,
-manifest state, staged state promotion, payload span ownership, fsync grouping, scan
-summaries, compaction, and encryption placement.
+Go lockd disk is the reference for storage semantics and operational model
+because it has already solved append-only segment lifecycle, resident namespace
+indexes, active-writer ownership, replay, manifest state, staged state
+promotion, payload span ownership, append/fsync grouping, scan summaries,
+compaction, and encryption placement.
 
 Pouch is not Go lockd disk. It must remain a C storage engine with Pouch names,
 C-native structs, C error handling, and the dependencies available in
@@ -43,22 +46,19 @@ Relevant Go disk files:
 
 ### Audit Baseline
 
-This register was re-read against the current Pouch implementation and the Go
-disk sources named above on 2026-07-31. The sweep included disk locking, fsync
-support, queue-watch, NFS capability, copy, verification, staging, the core
-lease paths, and the concurrency benchmark harness. The audit is a
-source-level comparison; it does not claim that Pouch files can be opened by
-Go disk or that their public storage APIs are interchangeable.
+The 2026-08-03 source and production-benchmark sweep found a blocking
+operational alignment gap. Pouch's durable representation is substantially
+aligned: namespace locality, record families, fixed-width durable scalars,
+streamed payload spans, staged links, lease/queue metadata, and
+capture/validate/install compaction preserve their required storage property.
+The runtime is not yet aligned: an ordinary Pouch mutation still performs
+shared-root manifest/segment discovery, tail repair checks, descriptor churn,
+and synchronous commit work that Go disk confines to open, takeover, rotation,
+or its resident append pipeline.
 
-No unresolved correctness gap was found in the audited durable-logstore
-surface: namespace locality, record families, fixed-width durable scalars,
-streamed payload spans, staged links, optional grouped sync, and
-capture/validate/install compaction preserve the relevant Go disk property on
-every supported C ABI. Pouch deliberately exceeds Go disk's public
-single-writer capability with a shared-writer contract, while using the same
-rolling active-segment, pending-record, finalized-record-publication, and
-capture/validate/install-compaction model. None of this implies byte or public
-API compatibility.
+This is not an accepted divergence and Pouch must not be called fully aligned
+until the exclusive-writer cutover is complete. The source comparison does not
+claim Go/Pouch byte compatibility or interchangeable public storage APIs.
 
 ## Go Disk Alignment Contract
 
@@ -66,9 +66,10 @@ This section is a mandatory implementation checklist. Every item is either
 copied from Go disk semantics or is an explicitly accepted Pouch divergence.
 Broad implementation resemblance is not alignment. Pouch is aligned only when
 the same storage semantics, failure behavior, metadata authority, transaction
-participant model, compaction safety properties, and performance intent are
-preserved. C-native representation choices are allowed only when this document
-names them and explains why the Go disk property is still preserved.
+participant model, compaction safety properties, and exclusive-writer
+operational intent are preserved. C-native representation choices are allowed
+only when this document names them and explains why the Go disk property is
+still preserved.
 
 Pouch has no Go-disk compatibility contract. It must not keep Go record
 readers, Go/C format dispatch, byte-compatibility migrations, or superseded
@@ -536,6 +537,19 @@ Each difference from Go disk is classified below as representation/local
 implementation, operational/public API behavior, or a removed/rejected
 divergence.
 
+### Blocking Operational Gap
+
+The pre-cutover runtime is not an accepted implementation divergence. Its
+ordinary mutation path opens and parses the namespace manifest, checks or
+repairs the active tail, opens and closes the active segment, and follows
+shared-root append coordination even when the root has one writer. That work
+dominates acquire and other small lockstore mutations and is unlike Go disk's
+resident namespace logstore.
+
+The refactor must replace this with the mode contract below. It may not hide
+the gap by weakening the benchmark, making shared-root the undocumented
+default, relaxing durability, or omitting core operations from comparison.
+
 ### Representation And Local Implementation
 
 - Physical record bytes:
@@ -599,32 +613,39 @@ divergence.
   Pouch uses Pouch terminology in files, errors, events, and durable metadata.
   Reason: Pouch is not disk and must not expose Go disk identity.
 
-### Aligned Runtime Controls
+### Runtime Contract And Cutover Status
 
-- Writer coordination and HA fencing:
-  `lc_pouch_set_single_writer` toggles the mode at runtime, invalidates the
-  local mode-sensitive refresh path, and starts or stops a root-scoped
-  `exclusive-writers/` heartbeat. `lc_pouch_abort` stops Pouch-owned workers
-  without removing that marker, providing the same in-process crash simulation
-  lifecycle as Go disk's test-only `Abort`.
+- Exclusive writer is the post-cutover default contract:
+  a successful ordinary Pouch open will own one logical writer for the root. It
+  recovers its resident namespace state once, then keeps a projection, active
+  segment identity and offset, reusable append descriptor, and bounded
+  append/commit pipeline until close, abort, takeover, rotation, maintenance,
+  or I/O invalidation. An exclusive open that cannot obtain ownership fails
+  with an actionable error and must not silently use shared-root behavior.
+  `lc_pouch_abort` stops Pouch-owned workers without releasing its ownership
+  evidence so tests can exercise a crash/takeover path.
 
-- Shared-writer capability:
-  `lc_pouch_supports_concurrent_writes` and `lc_pouch_status` explicitly
-  report Pouch's supported shared-writer mode. Normal Pouch opens use
-  `single_writer=0`, and multiple liblockdc clients or processes may share a
-  root. A mutation holds an exact logical-key lock; independent keys proceed
-  concurrently until they enter the short namespace physical-append gate. A
-  short namespace sequence reservation assigns unique durable index values,
-  and a shared namespace maintenance barrier prevents a compaction or
-  retention pass from racing publication. The lock set has process-local
-  guards as well as `fcntl` files, because POSIX process locks alone do not
-  serialize separate descriptors in one process. In shared-writer mode a
-  lookup stats the active segment and replays only the newly appended tail;
-  the final, non-pending record header is the publication signal. Go disk reports
-  `SupportsConcurrentWrites=false` because its public disk backend has a
-  single append owner. The different reported value is deliberate: Pouch
-  reports its actual HA/shared-writer contract rather than inheriting Go's
-  cache-oriented capability advertisement.
+- Post-cutover default HA is active/passive:
+  one process owns the root; another process takes over only after clean
+  handoff or validated expiry/failure. It is not active-active writing. Go
+  disk's public storage backend likewise has one append owner.
+
+- Shared-root capability is an explicit post-cutover contract:
+  callers that intentionally place two or more active Pouch instances on one
+  root will select shared-writer mode. Each process retains its local
+  projection and batches normal mutations through a short cross-process append
+  authority. At each acquired batch it tails only the committed delta after its
+  cursor, appends and publishes the batch, performs the requested durability
+  work, advances its cursor, and releases authority. Exact-key locking,
+  namespace sequence allocation, writer epochs, and maintenance fencing remain
+  required. This is a supported Pouch extension, not the default
+  Go-disk-aligned performance path.
+
+- Mode transitions are lifecycle transitions:
+  they quiesce appends, resolve pending commit results, invalidate affected
+  descriptors/projections, establish the new ownership state, and replay only
+  as needed. Runtime mode is never inferred from workload and is never encoded
+  in user records.
 
 - Fsync batching and diagnostics:
   Pouch defaults to `durable_sync=0`, the same `NoSync` mutation boundary used
@@ -650,10 +671,10 @@ divergence.
 
 - Filesystem capability policy and queue wake-up:
   Pouch detects NFS on Linux and BSD-family targets and exposes both detection
-  state and queue-watch status through `lc_pouch_status`. Pouch closes each
-  append descriptor after it has duplicated the descriptor into the current
-  commit group, satisfying Go's NFS close-after-drained-commit requirement.
-  The `queue_watch` option and
+  state and queue-watch status through `lc_pouch_status`. The exclusive writer
+  retains its active append descriptor; a shared writer retains descriptors
+  only while its ownership/cursor remains valid. Rotation, recovery, takeover,
+  maintenance, and close invalidate them. The `queue_watch` option and
   `pouch://...?queue_watch=true` enable Linux inotify wake-ups only on a known
   non-NFS filesystem; unsupported or unknown filesystems report polling and
   retain the 100 ms polling fallback.
@@ -990,11 +1011,12 @@ integer overflow must fail.
 
 ## Append And Commit Pipeline
 
-Pouch writes through a rolling per-namespace logstore path. The current C
-implementation has exact-key locking, short namespace index reservation, a
-root-scoped physical append gate, rolling numeric active segments, streaming
-payload appends, pending-record finalization, and an opt-in root-scoped
-commit-group fsync batcher.
+Pouch writes through a rolling per-namespace logstore with a common resident
+namespace core. The current pre-cutover C path is not the target: it repeats
+shared-root discovery work for ordinary exclusive mutations and must be
+removed. The target path has a resident logical-key projection, durable index
+high-water sequence, active segment identity/offset, bounded source cache, and
+active append descriptor.
 
 Required behavior:
 
@@ -1004,9 +1026,19 @@ Required behavior:
 - take the shared maintenance barrier while a mutation is in progress;
 - reserve one or more `uint64_t` namespace index sequences under the short
   sequence lock before final record headers are written;
-- take the short root-scoped physical append gate, refresh the namespace
-  manifest, and append to its active numeric segment, rotating at the target
-  size when necessary;
+- in default exclusive mode, read current metadata from the resident
+  projection, append through the resident writer, and retain the active segment
+  descriptor across normal public operations. It must not rescan the manifest,
+  stat/repair the active tail, acquire a cross-process append gate, or reopen
+  the segment on a healthy normal mutation;
+- in explicit shared-root mode, acquire physical append authority once for a
+  bounded batch, replay only the committed delta after the writer cursor, then
+  append/publish the batch and release authority. A changed writer epoch,
+  active segment, manifest lifecycle state, or invalid cursor triggers bounded
+  refresh or recovery rather than a stale append;
+- rotate at the stored-byte target under the appropriate writer/maintenance
+  coordination, atomically publish the new numeric active segment, and replace
+  only the affected active descriptor/cursor;
 - append small records to that rolling active file;
 - stream large payload records directly from the caller-provided reader through
   transforms, hash/etag, and CRC into the active writer file without full
@@ -1034,6 +1066,12 @@ Required behavior:
 - propagate fsync/write failure to every operation in a durable-sync group;
   otherwise, propagate write and finalization failures.
 
+The public mutation completion rule is invariant in both modes: a caller sees
+success only after its record is finalized, its commit group has reached the
+requested sync boundary, and the resident projection has accepted the new
+ref. A writer pipeline may batch independent operations but may not
+acknowledge, reorder, or expose an operation before that point.
+
 Go disk's default failover path marks writes `NoSync` because a per-write fsync
 can dominate core lockd workloads. Pouch has the same default boundary:
 finalized records are visible to shared readers and safe to replay after a
@@ -1044,10 +1082,11 @@ to `durable_sync=1`; on Linux that mode uses `fdatasync` with per-file
 deduplication inside a root-scoped commit group.
 
 Pouch's durable-sync batcher has no fixed delay: it drains requests immediately
-and combines the requests already queued at that boundary. Its
+and combines requests already queued at that boundary. Its
 `fsync_batch_max_ops` setting is a `uint64_t`, defaults to zero for an
 unbounded group, and is available on the direct Pouch open options and the
-`pouch://` endpoint.
+`pouch://` endpoint. The batcher is part of the resident writer pipeline, not
+a reason to reopen descriptors or re-discover a healthy namespace.
 `lc_pouch_fsync_stats_read` exposes the same aggregate batch-size and
 sync-latency diagnostic shape as Go disk with fixed-width counters on every
 supported C ABI.
@@ -1090,10 +1129,13 @@ Replay rebuilds projections from installed snapshots and non-obsolete segments.
 
 Required behavior:
 
-- read namespace manifest incrementally using a persisted in-memory offset;
-- in shared-writer mode, stat the active segment and replay only bytes beyond
-  the verified tail offset; single-writer mode may reuse its projection until
-  the runtime mode changes;
+- recover and construct the namespace projection at exclusive open, shared
+  writer attachment, takeover, or explicit invalidation; do not reconstruct it
+  before an ordinary exclusive operation;
+- exclusive mode reuses its projection and verified active append offset until
+  rotation, maintenance, handoff, close/abort, or I/O failure;
+- shared-root mode validates its writer epoch/cursor under append authority and
+  replays only bytes beyond its verified committed tail offset;
 - order installed snapshot first, then live non-obsolete segments;
 - apply state/object records by public generation so stale payload writes
   cannot resurrect older state; use the durable namespace index sequence as
@@ -1103,9 +1145,9 @@ Required behavior:
 - require the durable per-record index sequence for every state, object,
   staged-link, delete, and decision record;
 - stop at an incomplete, pending, or truncated tail in the manifest's active
-  rolling segment, then let a later append-gate holder repair it; reject the
-  same condition in a sealed non-active segment or installed snapshot as
-  corruption;
+  rolling segment, then repair it once during writer acquisition/recovery
+  while holding append authority; reject the same condition in a sealed
+  non-active segment or installed snapshot as corruption;
 - never apply a partial record or bad-CRC payload;
 - validate link targets against manifested segment/snapshot state before
   installing linked refs;
@@ -1127,19 +1169,21 @@ Each namespace has a manifest recording at least:
 
 The current C manifest is a small rewritten text file with the installed
 snapshot, obsolete file sets, and numeric active-segment field. Validated
-numeric segment names are discovered from `segments/`; ordinary active appends
-do not rewrite the manifest. Rotation, snapshot install, and obsolete changes
-update it while the appropriate coordination gate is held. Snapshot install or
-obsolete changes reset the affected replay state so projections cannot keep
-stale refs. The manifest is namespace lifecycle metadata; hot
+numeric segment names are discovered from `segments/` at recovery or lifecycle
+transitions; ordinary active appends do not scan or rewrite the manifest.
+Rotation, snapshot install, and obsolete changes update it while the
+appropriate coordination gate is held. Snapshot install or obsolete changes
+invalidate only affected resident replay state so projections cannot keep stale
+refs. The manifest is namespace lifecycle metadata; hot
 state/object/queue/lease facts remain binary log records.
 
 Malformed manifest entries are ignored only where Go disk intentionally treats
 them as non-authoritative append noise. Any behavior here must be tested and
 documented in code comments because manifest policy is a durability decision.
 
-The active segment itself is the shared-writer refresh source. Pouch does not
-publish or poll per-writer state markers. Queue wake-up notifications remain
+The active segment and writer epoch are the shared-root refresh source.
+Exclusive mode does not poll either while it owns the root. Pouch does not use
+per-writer state markers as data authority. Queue wake-up notifications remain
 separate, advisory files under `queue-notify/`; they never establish state
 durability or projection visibility.
 
@@ -1363,13 +1407,15 @@ Coverage must include:
 
 ## Benchmarks
 
-Production benchmarks compare:
+Production benchmarks compare the following modes separately:
 
 - Pouch plaintext;
 - Pouch crypto;
 - Pouch compression where relevant;
 - Pouch crypto+compression where relevant;
-- Go lockd disk without crypto.
+- Go lockd disk using the declared scenario baseline. When a matching Go
+  transform configuration is unavailable, that limitation is recorded with the
+  result rather than hidden by comparing an unrelated diagnostic phase.
 
 Benchmarks must include realistic and abusive workloads:
 
@@ -1394,13 +1440,25 @@ timed region and verifies the exact match count for both Pouch and Go lockd
 disk, then records the timed query. Key-only query metrics are not warmed this
 way because they do not exercise document streaming.
 
-Acceptance target: Pouch plaintext and Pouch crypto beat Go lockd disk without
-crypto on every production metric unless a specific exception is explicitly
-accepted with evidence. Crypto overhead within Pouch should stay near the
-plaintext baseline for indexed and metadata-heavy operations. The
-`benchmark-pouch-go-parity-gate` target runs the production comparison matrix
-and fails when Pouch plaintext, crypto, compression, or crypto+compression is
-slower than Go disk on any reported production performance metric.
+The fixture must use deterministic incompressible data whenever a scenario
+asserts multi-segment rollover for a compression mode. It must not infer a
+format failure merely because compression correctly reduces stored bytes below
+the rollover threshold.
+
+The exclusive-writer comparison gate evaluates only comparable end-to-end core
+metrics: acquire, lease/public get, update, release, queue, attachment,
+scan/index/full-text query, and restart recovery. It records warm and cold
+query metrics explicitly. `reopen` and `flush-reopen` are implementation
+diagnostics, not independent cross-engine parity metrics, because Go disk
+eagerly restores state at server startup while Pouch can recover lazily.
+Aggregate `ns/op` must not hide a slower core operation.
+
+Acceptance target: exclusive Pouch must materially outperform Go lockd disk on
+every gated core metric in each supported Pouch transform configuration. The
+numeric release budget must be set from a stable baseline before this cutover
+is declared complete; strict-but-undefined "faster" is insufficient. Shared
+root has separate correctness, contention, handoff, and bounded-performance
+coverage and does not dilute the exclusive release target.
 
 ## Fuzzing And Failure Modes
 
