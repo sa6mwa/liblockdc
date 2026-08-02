@@ -7,6 +7,29 @@ BENCH_RE = re.compile(
     r"^(BenchmarkProduction(?:PouchPT|PouchCrypto|PouchCompression|PouchCryptoCompression|LockdDiskNoCrypto)/\S+?)(?:-\d+)?\s+"
 )
 
+# These are public end-to-end operations whose Pouch and Go disk measurements
+# have matching meanings. Aggregate wall time and lifecycle/flush diagnostics
+# remain in the report, but are not independent parity gates.
+CORE_METRICS = frozenset(
+    (
+        "acquire-one-ns/op",
+        "update-one-ns/op",
+        "release-one-ns/op",
+        "get-public-ns/op",
+        "get-lease-ns/op",
+        "attachment-ns/op",
+        "queue-one-ns/op",
+        "index-query-keys-ns/op",
+        "index-query-keys-warm-ns/op",
+        "index-query-docs-ns/op",
+        "scan-query-keys-ns/op",
+        "scan-query-docs-ns/op",
+        "full-text-index-keys-ns/op",
+        "full-text-scan-docs-ns/op",
+        "restart-recovery-ns/op",
+    )
+)
+
 
 def parse_float(value):
     try:
@@ -68,14 +91,6 @@ def parse(path):
     }
 
 
-def performance_metrics(metrics):
-    return {
-        key: value
-        for key, value in metrics.items()
-        if key == "ns/op" or key.endswith("-ns/op")
-    }
-
-
 def main(argv):
     if len(argv) != 2:
         print("usage: pouch_benchmark_parity.py <go-benchmark-output>", file=sys.stderr)
@@ -99,7 +114,14 @@ def main(argv):
             if pouch_metrics is None:
                 failures.append("%s missing scenario %s" % (pouch_variant, scenario))
                 continue
-            for metric, disk_value in sorted(performance_metrics(disk_metrics).items()):
+            for metric in sorted(CORE_METRICS):
+                disk_value = disk_metrics.get(metric)
+                if disk_value is None:
+                    failures.append(
+                        "LockdDiskNoCrypto/%s missing core metric %s"
+                        % (scenario, metric)
+                    )
+                    continue
                 pouch_value = pouch_metrics.get(metric)
                 if pouch_value is None:
                     failures.append(

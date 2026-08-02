@@ -125,6 +125,8 @@ LONEJSON_MAP_DEFINE(pouch_value_map, pouch_value_doc, pouch_value_fields);
 
 static void open_pouch_client(const char *root, lc_client **out,
                               lc_error *error);
+static void open_pouch_client_shared(const char *root, lc_client **out,
+                                     lc_error *error);
 static void open_pouch_client_endpoint(const char *endpoint, lc_client **out,
                                        lc_error *error);
 static void pouch_state_segment_path(const char *root,
@@ -3036,6 +3038,7 @@ static void
 test_marker_snapshots_treat_same_process_handles_as_peers(void **state) {
   lc_pouch *first;
   lc_pouch *second;
+  lc_pouch_open_options shared_options;
   lc_pouch_namespace_marker_snapshot first_view;
   lc_pouch_namespace_marker_snapshot second_view;
   lc_error error;
@@ -3047,15 +3050,18 @@ test_marker_snapshots_treat_same_process_handles_as_peers(void **state) {
   first = NULL;
   second = NULL;
   namespace_path = NULL;
+  memset(&shared_options, 0, sizeof(shared_options));
   memset(&first_view, 0, sizeof(first_view));
   memset(&second_view, 0, sizeof(second_view));
   lc_error_init(&error);
   make_root("marker-same-process", root, sizeof(root));
   cleanup_root(root);
 
-  rc = lc_pouch_open(root, NULL, NULL, &first, &error);
+  shared_options.single_writer_set = 1;
+  shared_options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &shared_options, &first, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_open(root, NULL, NULL, &second, &error);
+  rc = lc_pouch_open(root, NULL, &shared_options, &second, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(first->writer_marker_leaf);
   assert_non_null(second->writer_marker_leaf);
@@ -3372,6 +3378,7 @@ test_single_writer_acquire_preserves_projection_cache(void **state) {
 static void test_single_writer_runtime_control_and_ha_probe(void **state) {
   lc_pouch *writer;
   lc_pouch *peer;
+  lc_pouch_open_options shared_options;
   lc_pouch_status status;
   lc_pouch_exclusive_writer_presence presence;
   lc_error error;
@@ -3381,6 +3388,7 @@ static void test_single_writer_runtime_control_and_ha_probe(void **state) {
   (void)state;
   writer = NULL;
   peer = NULL;
+  memset(&shared_options, 0, sizeof(shared_options));
   memset(&status, 0, sizeof(status));
   memset(&presence, 0, sizeof(presence));
   lc_error_init(&error);
@@ -3389,39 +3397,49 @@ static void test_single_writer_runtime_control_and_ha_probe(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_open(root, NULL, NULL, &peer, &error);
-  assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_probe_exclusive_writer(writer, &presence, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_false(presence.present);
-
-  rc = lc_pouch_set_single_writer(writer, 1, &error);
-  assert_int_equal(rc, LC_OK);
   rc = lc_pouch_status_read(writer, &status, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(status.single_writer);
+  assert_false(status.supports_concurrent_writes);
   lc_pouch_status_cleanup(NULL, &status);
-  memset(&presence, 0, sizeof(presence));
-  rc = lc_pouch_probe_exclusive_writer(writer, &presence, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_false(presence.present);
-  rc = lc_pouch_probe_exclusive_writer(peer, &presence, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_true(presence.present);
-  assert_true(presence.expires_at_unix > 0);
+
+  rc = lc_pouch_open(root, NULL, NULL, &peer, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(peer);
+  assert_string_equal(error.message, "pouch root writer mode is already owned");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
 
   rc = lc_pouch_set_single_writer(writer, 0, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_status_read(writer, &status, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(status.single_writer);
+  assert_true(status.supports_concurrent_writes);
   lc_pouch_status_cleanup(NULL, &status);
+
+  shared_options.single_writer_set = 1;
+  shared_options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &shared_options, &peer, &error);
+  assert_int_equal(rc, LC_OK);
   memset(&presence, 0, sizeof(presence));
-  rc = lc_pouch_probe_exclusive_writer(peer, &presence, &error);
+  rc = lc_pouch_probe_exclusive_writer(writer, &presence, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(presence.present);
 
+  rc = lc_pouch_set_single_writer(writer, 1, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "pouch root has active shared writers");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
   lc_pouch_close(peer);
+  peer = NULL;
+  rc = lc_pouch_set_single_writer(writer, 1, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_probe_exclusive_writer(writer, &presence, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(presence.present);
   lc_pouch_close(writer);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -3433,7 +3451,6 @@ static void test_pouch_disk_runtime_controls(void **state) {
   lc_pouch_open_options options;
   lc_pouch_status status;
   lc_pouch_fsync_stats fsync_stats;
-  lc_pouch_exclusive_writer_presence presence;
   lc_pouch_state_write_result write_result;
   lc_source *source;
   lc_error error;
@@ -3450,23 +3467,23 @@ static void test_pouch_disk_runtime_controls(void **state) {
   memset(&options, 0, sizeof(options));
   memset(&status, 0, sizeof(status));
   memset(&fsync_stats, 0, sizeof(fsync_stats));
-  memset(&presence, 0, sizeof(presence));
   memset(&write_result, 0, sizeof(write_result));
   lc_error_init(&error);
   make_root("disk-runtime-controls", root, sizeof(root));
   cleanup_root(root);
 
+  options.single_writer_set = 1;
   options.single_writer = 1;
   options.fsync_batch_max_ops = 1U;
   options.queue_watch = 1;
   rc = lc_pouch_open(root, NULL, &options, &writer, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(lc_pouch_supports_concurrent_writes(writer));
+  assert_false(lc_pouch_supports_concurrent_writes(writer));
 
   rc = lc_pouch_status_read(writer, &status, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(status.single_writer);
-  assert_true(status.supports_concurrent_writes);
+  assert_false(status.supports_concurrent_writes);
   assert_false(status.durable_sync);
   assert_int_equal(status.fsync_batch_max_ops, 1U);
   queue_watch_enabled = status.queue_watch_enabled;
@@ -3540,16 +3557,6 @@ static void test_pouch_disk_runtime_controls(void **state) {
                    4096U);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 
-  rc = lc_pouch_open(root, NULL, NULL, &peer, &error);
-  assert_int_equal(rc, LC_OK);
-  memset(repeated_backend_hash, 0, sizeof(repeated_backend_hash));
-  rc = lc_pouch_backend_hash(peer, repeated_backend_hash, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_string_equal(backend_hash, repeated_backend_hash);
-  rc = lc_pouch_probe_exclusive_writer(peer, &presence, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_true(presence.present);
-
   rc = lc_pouch_abort(writer, &error);
   assert_int_equal(rc, LC_OK);
   lc_error_cleanup(&error);
@@ -3568,19 +3575,13 @@ static void test_pouch_disk_runtime_controls(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(status.aborted);
   lc_pouch_status_cleanup(NULL, &status);
-  memset(&presence, 0, sizeof(presence));
-  rc = lc_pouch_probe_exclusive_writer(peer, &presence, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_true(presence.present);
-
   lc_pouch_close(writer);
   writer = NULL;
-  memset(&presence, 0, sizeof(presence));
-  rc = lc_pouch_probe_exclusive_writer(peer, &presence, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_true(presence.present);
-
-  lc_pouch_close(peer);
+  rc = lc_pouch_open(root, NULL, NULL, &peer, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(peer);
+  assert_string_equal(error.message,
+                      "pouch root has an unexpired exclusive writer");
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -3909,6 +3910,7 @@ static void
 test_shared_state_projection_cache_refreshes_peer_active_tail(void **state) {
   lc_pouch *writer;
   lc_pouch *reader;
+  lc_pouch_open_options shared_options;
   lc_source *source;
   lc_pouch_state_write_result write_res;
   lc_pouch_state_read_result read_res;
@@ -3921,17 +3923,18 @@ test_shared_state_projection_cache_refreshes_peer_active_tail(void **state) {
   writer = NULL;
   reader = NULL;
   source = NULL;
+  memset(&shared_options, 0, sizeof(shared_options));
   memset(&write_res, 0, sizeof(write_res));
   memset(&read_res, 0, sizeof(read_res));
   lc_error_init(&error);
   make_root("shared-cache-active-tail", root, sizeof(root));
   cleanup_root(root);
 
-  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  shared_options.single_writer_set = 1;
+  shared_options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &shared_options, &writer, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_open(root, NULL, NULL, &reader, &error);
-  assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_set_single_writer(writer, 1, &error);
+  rc = lc_pouch_open(root, NULL, &shared_options, &reader, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
@@ -3997,6 +4000,7 @@ test_shared_state_projection_cache_refreshes_peer_active_tail(void **state) {
 static void test_shared_writers_append_one_rolling_segment(void **state) {
   lc_pouch *first_writer;
   lc_pouch *second_writer;
+  lc_pouch_open_options shared_open_options;
   lc_source *source;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result first_write;
@@ -4012,6 +4016,7 @@ static void test_shared_writers_append_one_rolling_segment(void **state) {
   first_writer = NULL;
   second_writer = NULL;
   source = NULL;
+  memset(&shared_open_options, 0, sizeof(shared_open_options));
   memset(&options, 0, sizeof(options));
   memset(&first_write, 0, sizeof(first_write));
   memset(&second_write, 0, sizeof(second_write));
@@ -4020,9 +4025,11 @@ static void test_shared_writers_append_one_rolling_segment(void **state) {
   make_root("shared-writer-segments", root, sizeof(root));
   cleanup_root(root);
 
-  rc = lc_pouch_open(root, NULL, NULL, &first_writer, &error);
+  shared_open_options.single_writer_set = 1;
+  shared_open_options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &shared_open_options, &first_writer, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_open(root, NULL, NULL, &second_writer, &error);
+  rc = lc_pouch_open(root, NULL, &shared_open_options, &second_writer, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(lc_pouch_supports_concurrent_writes(first_writer));
   assert_true(lc_pouch_supports_concurrent_writes(second_writer));
@@ -4073,6 +4080,7 @@ test_shared_writer_replay_orders_same_version_metadata_by_index(void **state) {
   lc_pouch *first_writer;
   lc_pouch *second_writer;
   lc_pouch *reader;
+  lc_pouch_open_options shared_open_options;
   lc_source *source;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result first_write;
@@ -4088,6 +4096,7 @@ test_shared_writer_replay_orders_same_version_metadata_by_index(void **state) {
   second_writer = NULL;
   reader = NULL;
   source = NULL;
+  memset(&shared_open_options, 0, sizeof(shared_open_options));
   memset(&options, 0, sizeof(options));
   memset(&first_write, 0, sizeof(first_write));
   memset(&second_write, 0, sizeof(second_write));
@@ -4096,9 +4105,11 @@ test_shared_writer_replay_orders_same_version_metadata_by_index(void **state) {
   make_root("shared-writer-index-replay", root, sizeof(root));
   cleanup_root(root);
 
-  rc = lc_pouch_open(root, NULL, NULL, &first_writer, &error);
+  shared_open_options.single_writer_set = 1;
+  shared_open_options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &shared_open_options, &first_writer, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_open(root, NULL, NULL, &second_writer, &error);
+  rc = lc_pouch_open(root, NULL, &shared_open_options, &second_writer, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("body", strlen("body"), &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -4147,6 +4158,7 @@ static void
 test_shared_writers_reserve_unique_indexes_in_parallel(void **state) {
   lc_pouch *first_writer;
   lc_pouch *second_writer;
+  lc_pouch_open_options shared_open_options;
   lc_pouch_state_read_result read_result;
   pouch_parallel_state_write first_write;
   pouch_parallel_state_write second_write;
@@ -4161,6 +4173,7 @@ test_shared_writers_reserve_unique_indexes_in_parallel(void **state) {
   (void)state;
   first_writer = NULL;
   second_writer = NULL;
+  memset(&shared_open_options, 0, sizeof(shared_open_options));
   memset(&first_write, 0, sizeof(first_write));
   memset(&second_write, 0, sizeof(second_write));
   memset(&read_result, 0, sizeof(read_result));
@@ -4168,9 +4181,11 @@ test_shared_writers_reserve_unique_indexes_in_parallel(void **state) {
   make_root("shared-writer-indexes", root, sizeof(root));
   cleanup_root(root);
 
-  rc = lc_pouch_open(root, NULL, NULL, &first_writer, &error);
+  shared_open_options.single_writer_set = 1;
+  shared_open_options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &shared_open_options, &first_writer, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_open(root, NULL, NULL, &second_writer, &error);
+  rc = lc_pouch_open(root, NULL, &shared_open_options, &second_writer, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(pthread_barrier_init(&start, NULL, 2U), 0);
   first_write.pouch = first_writer;
@@ -4239,8 +4254,8 @@ test_shared_clients_acquire_independent_keys_in_parallel(void **state) {
   make_root("shared-client-independent-leases", root, sizeof(root));
   cleanup_root(root);
 
-  open_pouch_client(root, &first_client, &error);
-  open_pouch_client(root, &second_client, &error);
+  open_pouch_client_shared(root, &first_client, &error);
+  open_pouch_client_shared(root, &second_client, &error);
   assert_int_equal(pthread_barrier_init(&start, NULL, 2U), 0);
   first_acquire.client = first_client;
   first_acquire.start = &start;
@@ -4293,6 +4308,17 @@ static void open_pouch_client(const char *root, lc_client **out,
   rc = lc_client_open(&config, out, error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(*out);
+}
+
+static void open_pouch_client_shared(const char *root, lc_client **out,
+                                     lc_error *error) {
+  char endpoint[600];
+  int written;
+
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?pouch_single_writer=false", root);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  open_pouch_client_endpoint(endpoint, out, error);
 }
 
 static void open_pouch_client_endpoint(const char *endpoint, lc_client **out,
@@ -4423,11 +4449,11 @@ static void test_pouch_root_path_aliases_share_store_identity(void **state) {
   ++leaf;
   written = snprintf(alias_root, sizeof(alias_root), "%s/../%s", root, leaf);
   assert_true(written > 0 && (size_t)written < sizeof(alias_root));
-  written = snprintf(alias_endpoint, sizeof(alias_endpoint), "pouch://%s",
-                     alias_root);
+  written = snprintf(alias_endpoint, sizeof(alias_endpoint),
+                     "pouch://%s?pouch_single_writer=false", alias_root);
   assert_true(written > 0 && (size_t)written < sizeof(alias_endpoint));
 
-  open_pouch_client(root, &canonical, &error);
+  open_pouch_client_shared(root, &canonical, &error);
   open_pouch_client_endpoint(alias_endpoint, &alias_client, &error);
   write_client_state(canonical, "alias/key", "{\"value\":1}", NULL, 0L, 0,
                      &first, &error);

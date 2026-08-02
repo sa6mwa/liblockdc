@@ -1009,6 +1009,7 @@ typedef struct lc_pouch_endpoint_options {
   char *crypto_key_file;
   char *compression;
   int crypto_generate_key_file;
+  int single_writer_set;
   int single_writer;
   int durable_sync;
   uint64_t segment_target_bytes;
@@ -1211,6 +1212,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
                           "pouch endpoint single_writer must be true or false",
                           NULL, NULL, NULL);
     }
+    options->single_writer_set = 1;
     lc_free_with_allocator(allocator, copy);
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
@@ -1834,6 +1836,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
       return rc;
     }
     memset(&pouch_open_options, 0, sizeof(pouch_open_options));
+    pouch_open_options.single_writer_set =
+        pouch_endpoint_options.single_writer_set;
     pouch_open_options.single_writer = pouch_endpoint_options.single_writer;
     pouch_open_options.durable_sync = pouch_endpoint_options.durable_sync;
     pouch_open_options.segment_target_bytes =

@@ -38,6 +38,17 @@ typedef struct lc_pouch_open_options {
   uint64_t retention_seconds;
   /** Zero uses the default one-hour retention sweep interval. */
   uint64_t janitor_interval_seconds;
+  /**
+   * Selects the writer mode explicitly. When unset, Pouch uses its default
+   * exclusive-root writer mode. Set this field before using `single_writer`
+   * to opt into either exclusive or shared-root operation deliberately.
+   */
+  int single_writer_set;
+  /**
+   * Writer mode selected when `single_writer_set` is nonzero. A nonzero value
+   * reserves this root for one writer; zero enables the slower shared-root
+   * coordination path.
+   */
   int single_writer;
   const char *query_engine;
   const char *query_fallback_engine;
@@ -214,9 +225,13 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                   const lc_pouch_open_options *options, lc_pouch **out,
                   lc_error *error);
 void lc_pouch_close(lc_pouch *pouch);
-/** Stops worker loops without removing exclusive-writer crash fencing state. */
+/**
+ * Stops Pouch-owned worker loops and releases its process-bound writer lock.
+ * The durable exclusive-writer heartbeat remains as crash fencing until its
+ * takeover expiry, so another exclusive opener cannot bypass recovery.
+ */
 int lc_pouch_abort(lc_pouch *pouch, lc_error *error);
-/** Returns whether independent handles may share this root for mutations. */
+/** Returns whether this handle uses shared-root mutation coordination. */
 int lc_pouch_supports_concurrent_writes(const lc_pouch *pouch);
 /** Copies aggregate group-commit diagnostics into `out`. */
 int lc_pouch_fsync_stats_read(lc_pouch *pouch, lc_pouch_fsync_stats *out,
@@ -229,6 +244,10 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
                          lc_error *error);
 void lc_pouch_status_cleanup(const lc_allocator *allocator,
                              lc_pouch_status *status);
+/**
+ * Changes this open handle between exclusive and shared-root operation.
+ * The transition fails while another incompatible root writer is active.
+ */
 int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error);
 int lc_pouch_probe_exclusive_writer(lc_pouch *pouch,
                                     lc_pouch_exclusive_writer_presence *out,

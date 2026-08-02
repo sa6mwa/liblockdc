@@ -109,27 +109,27 @@ Acceptance:
 
 ### 2. Cut Over Default Exclusive Writer Mode
 
-- [ ] Make exclusive root ownership the default direct-open and endpoint
-  behavior. Document the explicit shared-root opt-in and ownership error.
-- [ ] At exclusive open, recover the namespace logstore once, construct the
-  resident projection, open the active segment, and record the writer epoch.
-- [ ] Route all core mutations through a bounded in-process append queue or
-  equivalent serialized writer. Public completion waits for its own commit
-  result; it never acknowledges uncommitted data.
-- [ ] Retain Go disk-like group commit semantics: combine eligible durable
-  requests without redundant syncs while preserving public operation order,
-  failure propagation, and `durable_sync` semantics.
-- [ ] Direct cached public reads, lease metadata reads, and query/index
-  freshness checks to the resident projection in exclusive mode.
-- [ ] Rotate without reopening normal append descriptors; publish the new
-  manifest and active writer atomically with the required directory/file
-  durability order.
+- [x] Make exclusive root ownership the default direct-open and endpoint
+  behavior. Shared-root is an explicit opt-in and incompatible mode owners
+  fail before ordinary root setup can mutate the store.
+- [x] Establish a local writer-mode epoch and lazily construct each exclusive
+  namespace's resident projection, active descriptor, and cursor on first use.
+- [x] Route state, lease, object, attachment, queue, and staged-transaction
+  mutations through the serialized resident append path. Public completion
+  still waits for its own finalized commit result.
+- [ ] Complete and measure Go disk-like group commit scheduling: combine
+  eligible durable requests without redundant syncs while preserving operation
+  order, failure propagation, and `durable_sync` semantics.
+- [x] Route cached public reads, lease metadata reads, direct query reads, and
+  scan-oriented query views through the resident projection in exclusive mode.
+- [x] Rotate without reopening healthy normal append descriptors; publish the
+  new manifest and replace only the affected resident descriptor/cursor.
 
 Acceptance:
 
-- [ ] Normal exclusive mutations do not perform namespace directory scans,
-  manifest parsing, tail repair, cross-process lock acquisition, or active
-  segment open/close work.
+- [x] Normal exclusive state-core mutations do not perform namespace directory
+  scans, manifest parsing, tail repair, cross-process lock acquisition, or
+  active segment open/close work.
 - [ ] Acquire, get, update, release, queue, attachment, and query operations
   preserve the existing observable contract under plaintext, crypto,
   compression, and crypto+compression roots.
@@ -147,8 +147,6 @@ Acceptance:
   prevents a stale writer from appending after takeover.
 - [ ] Make mode transitions quiesce appenders, flush or fail pending work,
   invalidate projection/descriptor state, and rebuild only when required.
-- [ ] Keep shared-root throughput and contention diagnostics separate from the
-  exclusive release target. Do not weaken its correctness requirements.
 
 Acceptance:
 
@@ -210,13 +208,15 @@ Acceptance:
 - [ ] Repair production compressed fixtures using deterministic incompressible
   data where segment rollover is required. Do not weaken the multi-segment
   invariant because compression reduced the stored size.
-- [ ] Compare only semantically comparable end-to-end core metrics with Go
-  disk: acquire, lease/public get, update, release, queue, attachment,
-  scan/index/full-text query, and restart recovery.
-- [ ] Keep `reopen` and `flush-reopen` diagnostic only; they are not independent
-  cross-engine comparison metrics.
-- [ ] Add explicit per-operation attachment metrics and warm/cold query metrics
-  instead of allowing total benchmark time to hide a slow core operation.
+- [x] Compare only the explicit semantically comparable end-to-end core metric
+  allowlist with Go disk: acquire, lease/public get, update, release, queue,
+  attachment, scan/index/full-text query, and restart recovery.
+- [x] Keep `reopen`, `flush-reopen`, aggregate `ns/op`, and Pouch-only C timing
+  diagnostic only; they are not independent cross-engine comparison metrics.
+- [x] Record matching cold/warm indexed-key query metrics instead of allowing
+  total benchmark time to hide a slow query path.
+- [ ] Split the attachment roundtrip timing into independently comparable
+  attach and retrieve metrics.
 - [ ] Add bounded exclusive and shared-root microbenchmark commands suitable
   for development, plus the existing production comparison gate.
 - [ ] Set and document the numeric exclusive-mode release budget from a stable

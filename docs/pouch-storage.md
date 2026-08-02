@@ -51,10 +51,14 @@ operational alignment gap. Pouch's durable representation is substantially
 aligned: namespace locality, record families, fixed-width durable scalars,
 streamed payload spans, staged links, lease/queue metadata, and
 capture/validate/install compaction preserve their required storage property.
-The runtime is not yet aligned: an ordinary Pouch mutation still performs
-shared-root manifest/segment discovery, tail repair checks, descriptor churn,
-and synchronous commit work that Go disk confines to open, takeover, rotation,
-or its resident append pipeline.
+The exclusive state core is now in cutover: ordinary state, lease, object,
+attachment, queue, and staged-transaction mutations use the resident
+projection, active segment offset, and retained append descriptor. Direct and
+scan-oriented reads use the same projection after the first namespace warm.
+The remaining runtime alignment work is to complete resident group-commit
+scheduling and benchmark evidence across every public operation, and to keep
+recovery, takeover, rotation, maintenance, and explicit shared-root work off
+that healthy exclusive path.
 
 This is not an accepted divergence and Pouch must not be called fully aligned
 until the exclusive-writer cutover is complete. The source comparison does not
@@ -617,13 +621,15 @@ default, relaxing durability, or omitting core operations from comparison.
 
 - Exclusive writer is the post-cutover default contract:
   a successful ordinary Pouch open will own one logical writer for the root. It
-  recovers its resident namespace state once, then keeps a projection, active
+  establishes root ownership, then initializes each namespace's resident state
+  lazily on first use. The initialized namespace keeps a projection, active
   segment identity and offset, reusable append descriptor, and bounded
   append/commit pipeline until close, abort, takeover, rotation, maintenance,
   or I/O invalidation. An exclusive open that cannot obtain ownership fails
   with an actionable error and must not silently use shared-root behavior.
-  `lc_pouch_abort` stops Pouch-owned workers without releasing its ownership
-  evidence so tests can exercise a crash/takeover path.
+  `lc_pouch_abort` stops Pouch-owned workers and releases the process-bound
+  root lock as a crash would, while retaining the durable heartbeat marker as
+  takeover evidence until it expires.
 
 - Post-cutover default HA is active/passive:
   one process owns the root; another process takes over only after clean
@@ -640,6 +646,8 @@ default, relaxing durability, or omitting core operations from comparison.
   namespace sequence allocation, writer epochs, and maintenance fencing remain
   required. This is a supported Pouch extension, not the default
   Go-disk-aligned performance path.
+  Direct callers set `single_writer_set=1` and `single_writer=0`; endpoint
+  callers use `?single_writer=false` (or `?pouch_single_writer=false`).
 
 - Mode transitions are lifecycle transitions:
   they quiesce appends, resolve pending commit results, invalidate affected
@@ -1012,11 +1020,11 @@ integer overflow must fail.
 ## Append And Commit Pipeline
 
 Pouch writes through a rolling per-namespace logstore with a common resident
-namespace core. The current pre-cutover C path is not the target: it repeats
-shared-root discovery work for ordinary exclusive mutations and must be
-removed. The target path has a resident logical-key projection, durable index
-high-water sequence, active segment identity/offset, bounded source cache, and
-active append descriptor.
+namespace core. The default exclusive state path has a resident logical-key
+projection, durable index high-water sequence, active segment identity/offset,
+bounded source cache, and active append descriptor. Shared-root, recovery,
+takeover, rotation, maintenance, and I/O invalidation deliberately leave that
+path to coordinate or rebuild durable state.
 
 Required behavior:
 
@@ -1445,13 +1453,14 @@ asserts multi-segment rollover for a compression mode. It must not infer a
 format failure merely because compression correctly reduces stored bytes below
 the rollover threshold.
 
-The exclusive-writer comparison gate evaluates only comparable end-to-end core
-metrics: acquire, lease/public get, update, release, queue, attachment,
-scan/index/full-text query, and restart recovery. It records warm and cold
-query metrics explicitly. `reopen` and `flush-reopen` are implementation
-diagnostics, not independent cross-engine parity metrics, because Go disk
-eagerly restores state at server startup while Pouch can recover lazily.
-Aggregate `ns/op` must not hide a slower core operation.
+The exclusive-writer comparison gate has an explicit allowlist of comparable
+end-to-end core metrics: acquire, lease/public get, update, release, queue,
+attachment roundtrip, cold and warm indexed key queries, indexed document
+queries, scan/full-text queries, and restart recovery. Each metric must be
+reported by both engines. `reopen`, `flush-reopen`, aggregate `ns/op`, and
+Pouch-only C timing remain diagnostics, not independent cross-engine parity
+metrics, because Go disk eagerly restores state at server startup while Pouch
+can recover lazily. Aggregate timing must not hide a slower core operation.
 
 Acceptance target: exclusive Pouch must materially outperform Go lockd disk on
 every gated core metric in each supported Pouch transform configuration. The

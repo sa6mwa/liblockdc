@@ -24,6 +24,7 @@ typedef struct lc_pouch_query_index_manifest_trust_entry
     lc_pouch_query_index_manifest_trust_entry;
 typedef struct lc_pouch_fsync_request lc_pouch_fsync_request;
 typedef struct lc_pouch_fsync_batcher lc_pouch_fsync_batcher;
+typedef struct lc_pouch_writer_root_lock_entry lc_pouch_writer_root_lock_entry;
 
 typedef struct lc_pouch_state_change_visit_entry {
   const char *key;
@@ -91,6 +92,8 @@ struct lc_pouch {
   uint64_t single_writer_epoch;
   pthread_mutex_t single_writer_mutex;
   int single_writer_mutex_initialized;
+  lc_pouch_writer_root_lock_entry *writer_root_lock;
+  int writer_root_lock_mode;
   char *query_engine;
   char *query_fallback_engine;
   char *compression;

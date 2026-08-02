@@ -509,27 +509,28 @@ type productionMetrics struct {
 	segmentBytes  int64
 	bytes         int64
 
-	acquireNS           int64
-	updateNS            int64
-	releaseNS           int64
-	staleNS             int64
-	attachmentNS        int64
-	queueNS             int64
-	flushNS             int64
-	flushIntermediateNS int64
-	flushFinalNS        int64
-	flushNoopNS         int64
-	flushReopenNS       int64
-	reopenNS            int64
-	restartRecoveryNS   int64
-	getPublicNS         int64
-	getLeaseNS          int64
-	indexQueryKeysNS    int64
-	indexQueryDocsNS    int64
-	scanQueryKeysNS     int64
-	scanQueryDocsNS     int64
-	fullTextIndexKeysNS int64
-	fullTextScanDocsNS  int64
+	acquireNS            int64
+	updateNS             int64
+	releaseNS            int64
+	staleNS              int64
+	attachmentNS         int64
+	queueNS              int64
+	flushNS              int64
+	flushIntermediateNS  int64
+	flushFinalNS         int64
+	flushNoopNS          int64
+	flushReopenNS        int64
+	reopenNS             int64
+	restartRecoveryNS    int64
+	getPublicNS          int64
+	getLeaseNS           int64
+	indexQueryKeysNS     int64
+	indexQueryKeysWarmNS int64
+	indexQueryDocsNS     int64
+	scanQueryKeysNS      int64
+	scanQueryDocsNS      int64
+	fullTextIndexKeysNS  int64
+	fullTextScanDocsNS   int64
 }
 
 func addMetricDuration(dst *int64, start time.Time) {
@@ -781,6 +782,12 @@ func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes, seg
 		b.Fatalf("lockd disk production RangeHalf index query matched %d rows, want %d", matched, productionExpectedQueryMatches("RangeHalf", rows))
 	}
 	metrics.rows = int64(matched)
+	phaseStart = time.Now()
+	matched = runLockdDiskQuery(b, h, rows, "index", "RangeHalf", false)
+	addMetricDuration(&metrics.indexQueryKeysWarmNS, phaseStart)
+	if int64(matched) != productionExpectedQueryMatches("RangeHalf", rows) {
+		b.Fatalf("lockd disk production warm RangeHalf index query matched %d rows, want %d", matched, productionExpectedQueryMatches("RangeHalf", rows))
+	}
 	warmLockdDiskProductionQuery(b, h, rows, "index", "NarrativeSummary", true)
 	phaseStart = time.Now()
 	matched = runLockdDiskQuery(b, h, rows, "index", "NarrativeSummary", true)
@@ -934,6 +941,7 @@ func BenchmarkProductionLockdDiskNoCrypto(b *testing.B) {
 			b.ReportMetric(float64(metrics.getPublicNS), "get-public-ns/op")
 			b.ReportMetric(float64(metrics.getLeaseNS), "get-lease-ns/op")
 			b.ReportMetric(float64(metrics.indexQueryKeysNS), "index-query-keys-ns/op")
+			b.ReportMetric(float64(metrics.indexQueryKeysWarmNS), "index-query-keys-warm-ns/op")
 			b.ReportMetric(float64(metrics.indexQueryDocsNS), "index-query-docs-ns/op")
 			b.ReportMetric(float64(metrics.scanQueryKeysNS), "scan-query-keys-ns/op")
 			b.ReportMetric(float64(metrics.scanQueryDocsNS), "scan-query-docs-ns/op")

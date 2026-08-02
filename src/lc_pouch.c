@@ -41,11 +41,33 @@
 static uint64_t lc_pouch_next_writer_marker_id;
 static pthread_mutex_t lc_pouch_writer_marker_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t lc_pouch_root_manifest_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t lc_pouch_writer_root_lock_mutex =
+    PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * POSIX record locks belong to a process, rather than an individual file
+ * descriptor. One process therefore needs one retained descriptor and a
+ * local holder registry for each Pouch root; otherwise a second local open
+ * can accidentally upgrade a shared lock or release every lock on close.
+ */
+struct lc_pouch_writer_root_lock_entry {
+  dev_t device;
+  ino_t inode;
+  int fd;
+  unsigned long shared_holders;
+  unsigned long exclusive_holders;
+  struct lc_pouch_writer_root_lock_entry *next;
+};
+
+static lc_pouch_writer_root_lock_entry *lc_pouch_writer_root_locks;
 
 #define LC_POUCH_FSYNC_BATCH_DELAY_NS 0L
 #define LC_POUCH_EXCLUSIVE_WRITER_TOUCH_NS 1000000000L
 #define LC_POUCH_EXCLUSIVE_WRITER_TTL_NS ((int64_t)3 * (int64_t)1000000000)
 #define LC_POUCH_WRITER_PRESENCE_MISSING (-1001)
+#define LC_POUCH_WRITER_ROOT_LOCK_NONE 0
+#define LC_POUCH_WRITER_ROOT_LOCK_SHARED 1
+#define LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE 2
 
 static const uint64_t
     lc_pouch_fsync_batch_bounds[LC_POUCH_FSYNC_BATCH_BOUND_COUNT] = {
@@ -1256,7 +1278,9 @@ static void lc_pouch_init_options(lc_pouch *pouch,
       options != NULL && options->janitor_interval_seconds != 0U
           ? options->janitor_interval_seconds
           : LC_POUCH_DEFAULT_JANITOR_INTERVAL_SECONDS;
-  pouch->single_writer = options != NULL ? options->single_writer : 0;
+  pouch->single_writer = options != NULL && options->single_writer_set
+                             ? (options->single_writer != 0 ? 1 : 0)
+                             : 1;
   pouch->queue_watch_enabled = options != NULL ? options->queue_watch : 0;
   pouch->queue_watch_mode = "polling";
   pouch->queue_watch_reason = "config_disabled";
@@ -2038,6 +2062,261 @@ static int lc_pouch_init_writer_marker(lc_pouch *pouch, lc_error *error) {
   return LC_OK;
 }
 
+static lc_pouch_writer_root_lock_entry *
+lc_pouch_writer_root_lock_find(dev_t device, ino_t inode) {
+  lc_pouch_writer_root_lock_entry *entry;
+
+  entry = lc_pouch_writer_root_locks;
+  while (entry != NULL) {
+    if (entry->device == device && entry->inode == inode) {
+      return entry;
+    }
+    entry = entry->next;
+  }
+  return NULL;
+}
+
+static void lc_pouch_writer_root_lock_release(lc_pouch *pouch) {
+  lc_pouch_writer_root_lock_entry *entry;
+  lc_pouch_writer_root_lock_entry **link;
+  struct flock fl;
+
+  if (pouch == NULL || pouch->writer_root_lock == NULL) {
+    return;
+  }
+  pthread_mutex_lock(&lc_pouch_writer_root_lock_mutex);
+  entry = pouch->writer_root_lock;
+  if (pouch->writer_root_lock_mode == LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE) {
+    if (entry->exclusive_holders > 0UL) {
+      --entry->exclusive_holders;
+    }
+  } else if (pouch->writer_root_lock_mode == LC_POUCH_WRITER_ROOT_LOCK_SHARED &&
+             entry->shared_holders > 0UL) {
+    --entry->shared_holders;
+  }
+  pouch->writer_root_lock = NULL;
+  pouch->writer_root_lock_mode = LC_POUCH_WRITER_ROOT_LOCK_NONE;
+  if (entry->exclusive_holders == 0UL && entry->shared_holders == 0UL) {
+    link = &lc_pouch_writer_root_locks;
+    while (*link != NULL && *link != entry) {
+      link = &(*link)->next;
+    }
+    if (*link == entry) {
+      *link = entry->next;
+    }
+    memset(&fl, 0, sizeof(fl));
+    fl.l_type = F_UNLCK;
+    fl.l_whence = SEEK_SET;
+    (void)fcntl(entry->fd, F_SETLK, &fl);
+    (void)close(entry->fd);
+    free(entry);
+  }
+  pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+}
+
+static int lc_pouch_writer_root_lock_acquire(lc_pouch *pouch, int mode,
+                                             lc_error *error) {
+  char *path;
+  lc_pouch_writer_root_lock_entry *entry;
+  struct flock fl;
+  struct stat st;
+  int fd;
+  int saved_errno;
+
+  if (pouch == NULL || (mode != LC_POUCH_WRITER_ROOT_LOCK_SHARED &&
+                        mode != LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch writer root lock requires a valid mode", NULL,
+                        NULL, "pouch");
+  }
+  if (pouch->writer_root_lock != NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch writer root lock is already held", NULL, NULL,
+                        "pouch");
+  }
+  path = lc_pouch_path_join(&pouch->allocator, pouch->root_path,
+                            "writer-mode.lock");
+  if (path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch writer root lock path", NULL,
+                        NULL, "pouch");
+  }
+  pthread_mutex_lock(&lc_pouch_writer_root_lock_mutex);
+  if (stat(path, &st) == 0) {
+    entry = lc_pouch_writer_root_lock_find(st.st_dev, st.st_ino);
+    if (entry != NULL) {
+      if ((mode == LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE &&
+           (entry->exclusive_holders != 0UL || entry->shared_holders != 0UL)) ||
+          (mode == LC_POUCH_WRITER_ROOT_LOCK_SHARED &&
+           entry->exclusive_holders != 0UL)) {
+        pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+        lc_free_with_allocator(&pouch->allocator, path);
+        return lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch root writer mode is already owned", NULL,
+                            NULL, "pouch");
+      }
+      if (mode == LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE) {
+        ++entry->exclusive_holders;
+      } else {
+        ++entry->shared_holders;
+      }
+      pouch->writer_root_lock = entry;
+      pouch->writer_root_lock_mode = mode;
+      pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+      lc_free_with_allocator(&pouch->allocator, path);
+      return LC_OK;
+    }
+  } else if (errno != ENOENT) {
+    saved_errno = errno;
+    pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+    lc_free_with_allocator(&pouch->allocator, path);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to stat pouch writer root lock",
+                        strerror(saved_errno), NULL, "pouch");
+  }
+  fd = open(path, O_CREAT | O_RDWR, 0666);
+  lc_free_with_allocator(&pouch->allocator, path);
+  if (fd < 0) {
+    saved_errno = errno;
+    pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to open pouch writer root lock",
+                        strerror(saved_errno), NULL, "pouch");
+  }
+  if (fstat(fd, &st) != 0) {
+    saved_errno = errno;
+    (void)close(fd);
+    pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to stat pouch writer root lock",
+                        strerror(saved_errno), NULL, "pouch");
+  }
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type = mode == LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE ? F_WRLCK : F_RDLCK;
+  fl.l_whence = SEEK_SET;
+  while (fcntl(fd, F_SETLK, &fl) != 0) {
+    if (errno == EINTR) {
+      continue;
+    }
+    saved_errno = errno;
+    (void)close(fd);
+    pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+    if (saved_errno == EACCES || saved_errno == EAGAIN) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch root writer mode is already owned", NULL, NULL,
+                          "pouch");
+    }
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch writer root",
+                        strerror(saved_errno), NULL, "pouch");
+  }
+  entry = (lc_pouch_writer_root_lock_entry *)calloc(1U, sizeof(*entry));
+  if (entry == NULL) {
+    fl.l_type = F_UNLCK;
+    (void)fcntl(fd, F_SETLK, &fl);
+    (void)close(fd);
+    pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch writer root lock", NULL, NULL,
+                        "pouch");
+  }
+  entry->device = st.st_dev;
+  entry->inode = st.st_ino;
+  entry->fd = fd;
+  if (mode == LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE) {
+    entry->exclusive_holders = 1UL;
+  } else {
+    entry->shared_holders = 1UL;
+  }
+  entry->next = lc_pouch_writer_root_locks;
+  lc_pouch_writer_root_locks = entry;
+  pouch->writer_root_lock = entry;
+  pouch->writer_root_lock_mode = mode;
+  pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+  return LC_OK;
+}
+
+static int lc_pouch_writer_root_lock_change(lc_pouch *pouch, int mode,
+                                            lc_error *error) {
+  lc_pouch_writer_root_lock_entry *entry;
+  struct flock fl;
+  int saved_errno;
+
+  if (pouch == NULL || pouch->writer_root_lock == NULL ||
+      (mode != LC_POUCH_WRITER_ROOT_LOCK_SHARED &&
+       mode != LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch writer root lock cannot change mode", NULL, NULL,
+                        "pouch");
+  }
+  pthread_mutex_lock(&lc_pouch_writer_root_lock_mutex);
+  entry = pouch->writer_root_lock;
+  if (pouch->writer_root_lock_mode == mode) {
+    pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+    return LC_OK;
+  }
+  if (mode == LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE &&
+      (entry->exclusive_holders != 0UL || entry->shared_holders != 1UL)) {
+    pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch root has active shared writers", NULL, NULL,
+                        "pouch");
+  }
+  if (mode == LC_POUCH_WRITER_ROOT_LOCK_SHARED &&
+      (entry->exclusive_holders != 1UL || entry->shared_holders != 0UL)) {
+    pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch root writer lock state is inconsistent", NULL,
+                        NULL, "pouch");
+  }
+  memset(&fl, 0, sizeof(fl));
+  fl.l_type = mode == LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE ? F_WRLCK : F_RDLCK;
+  fl.l_whence = SEEK_SET;
+  while (fcntl(entry->fd, F_SETLK, &fl) != 0) {
+    if (errno == EINTR) {
+      continue;
+    }
+    saved_errno = errno;
+    pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+    if (saved_errno == EACCES || saved_errno == EAGAIN) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch root writer mode is already owned", NULL, NULL,
+                          "pouch");
+    }
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to change pouch writer root lock",
+                        strerror(saved_errno), NULL, "pouch");
+  }
+  if (mode == LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE) {
+    entry->shared_holders = 0UL;
+    entry->exclusive_holders = 1UL;
+  } else {
+    entry->exclusive_holders = 0UL;
+    entry->shared_holders = 1UL;
+  }
+  pouch->writer_root_lock_mode = mode;
+  pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
+  return LC_OK;
+}
+
+static int lc_pouch_writer_root_lock_check_presence(lc_pouch *pouch,
+                                                    lc_error *error) {
+  lc_pouch_exclusive_writer_presence presence;
+  int rc;
+
+  memset(&presence, 0, sizeof(presence));
+  rc = lc_pouch_probe_exclusive_writer(pouch, &presence, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (presence.present) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch root has an unexpired exclusive writer", NULL,
+                        NULL, "pouch");
+  }
+  return LC_OK;
+}
+
 int lc_pouch_single_writer_snapshot(lc_pouch *pouch, uint64_t *epoch_out) {
   int enabled;
 
@@ -2357,6 +2636,17 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     lc_pouch_close(pouch);
     return rc;
   }
+  rc = lc_pouch_path_ensure_directory(
+      pouch->root_path, "failed to create pouch root directory", error);
+  if (rc != LC_OK) {
+    lc_pouch_close(pouch);
+    return rc;
+  }
+  rc = lc_pouch_set_single_writer(pouch, requested_single_writer, error);
+  if (rc != LC_OK) {
+    lc_pouch_close(pouch);
+    return rc;
+  }
   rc = lc_pouch_ensure_root(pouch, error);
   if (rc != LC_OK) {
     lc_pouch_close(pouch);
@@ -2381,11 +2671,6 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     return rc;
   }
   rc = lc_pouch_janitor_worker_init(pouch, error);
-  if (rc != LC_OK) {
-    lc_pouch_close(pouch);
-    return rc;
-  }
-  rc = lc_pouch_set_single_writer(pouch, requested_single_writer, error);
   if (rc != LC_OK) {
     lc_pouch_close(pouch);
     return rc;
@@ -2437,6 +2722,7 @@ void lc_pouch_close(lc_pouch *pouch) {
   lc_pouch_state_cache_cleanup(pouch);
   lc_pouch_state_source_cache_cleanup(pouch);
   lc_pouch_query_index_cache_cleanup(pouch);
+  lc_pouch_writer_root_lock_release(pouch);
   lc_pouch_crypto_close(pouch->crypto);
   lc_free_with_allocator(&allocator, pouch->crypto_key_file);
   lc_free_with_allocator(&allocator, pouch->writer_presence_path);
@@ -2483,6 +2769,7 @@ int lc_pouch_abort(lc_pouch *pouch, lc_error *error) {
   lc_pouch_janitor_worker_close(pouch);
   lc_pouch_compaction_worker_close(pouch);
   lc_pouch_fsync_batcher_close(pouch);
+  lc_pouch_writer_root_lock_release(pouch);
   {
     pslog_field fields[1];
 
@@ -2493,7 +2780,10 @@ int lc_pouch_abort(lc_pouch *pouch, lc_error *error) {
 }
 
 int lc_pouch_supports_concurrent_writes(const lc_pouch *pouch) {
-  return pouch != NULL ? 1 : 0;
+  return pouch != NULL &&
+                 !lc_pouch_single_writer_snapshot((lc_pouch *)pouch, NULL)
+             ? 1
+             : 0;
 }
 
 int lc_pouch_fsync_stats_read(lc_pouch *pouch, lc_pouch_fsync_stats *out,
@@ -2733,6 +3023,8 @@ int lc_pouch_backend_hash(lc_pouch *pouch,
 }
 
 int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
+  lc_error restart_error;
+  int had_root_lock;
   int normalized;
   int rc;
 
@@ -2749,20 +3041,78 @@ int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
                         "pouch single-writer control is closed after abort",
                         NULL, NULL, "pouch");
   }
-  if (pouch->single_writer == normalized) {
+  had_root_lock = pouch->writer_root_lock != NULL;
+  if (pouch->single_writer == normalized && had_root_lock) {
     pthread_mutex_unlock(&pouch->single_writer_mutex);
     return LC_OK;
   }
-  if (normalized) {
+  if (!had_root_lock) {
+    rc = lc_pouch_writer_root_lock_acquire(
+        pouch,
+        normalized ? LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE
+                   : LC_POUCH_WRITER_ROOT_LOCK_SHARED,
+        error);
+    if (rc != LC_OK) {
+      pthread_mutex_unlock(&pouch->single_writer_mutex);
+      return rc;
+    }
+    rc = lc_pouch_writer_root_lock_check_presence(pouch, error);
+    if (rc != LC_OK) {
+      lc_pouch_writer_root_lock_release(pouch);
+      pthread_mutex_unlock(&pouch->single_writer_mutex);
+      return rc;
+    }
+    if (normalized) {
+      rc = lc_pouch_writer_presence_start(pouch, error);
+      if (rc != LC_OK) {
+        lc_pouch_writer_root_lock_release(pouch);
+        pthread_mutex_unlock(&pouch->single_writer_mutex);
+        return rc;
+      }
+    }
+    pouch->single_writer = normalized;
+  } else if (normalized) {
+    rc = lc_pouch_writer_root_lock_change(
+        pouch, LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE, error);
+    if (rc != LC_OK) {
+      pthread_mutex_unlock(&pouch->single_writer_mutex);
+      return rc;
+    }
+    rc = lc_pouch_writer_root_lock_check_presence(pouch, error);
+    if (rc != LC_OK) {
+      lc_error downgrade_error;
+
+      lc_error_init(&downgrade_error);
+      (void)lc_pouch_writer_root_lock_change(
+          pouch, LC_POUCH_WRITER_ROOT_LOCK_SHARED, &downgrade_error);
+      lc_error_cleanup(&downgrade_error);
+      pthread_mutex_unlock(&pouch->single_writer_mutex);
+      return rc;
+    }
     rc = lc_pouch_writer_presence_start(pouch, error);
     if (rc != LC_OK) {
+      lc_error downgrade_error;
+
+      lc_error_init(&downgrade_error);
+      (void)lc_pouch_writer_root_lock_change(
+          pouch, LC_POUCH_WRITER_ROOT_LOCK_SHARED, &downgrade_error);
+      lc_error_cleanup(&downgrade_error);
       pthread_mutex_unlock(&pouch->single_writer_mutex);
       return rc;
     }
     pouch->single_writer = 1;
   } else {
-    pouch->single_writer = 0;
     lc_pouch_writer_presence_stop(pouch);
+    rc = lc_pouch_writer_root_lock_change(
+        pouch, LC_POUCH_WRITER_ROOT_LOCK_SHARED, error);
+    if (rc != LC_OK) {
+      lc_error_init(&restart_error);
+      (void)lc_pouch_writer_presence_start(pouch, &restart_error);
+      lc_error_cleanup(&restart_error);
+      pthread_mutex_unlock(&pouch->single_writer_mutex);
+      return rc;
+    }
+    pouch->single_writer = 0;
   }
   if (pouch->single_writer_epoch != LC_U64_MAX) {
     ++pouch->single_writer_epoch;
