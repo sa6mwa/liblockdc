@@ -26,6 +26,7 @@ BENCH_ITERS ?= 0
 POUCH_GO_BENCH ?= .
 POUCH_GO_BENCHTIME ?= 3s
 POUCH_GO_BENCH_COUNT ?= 1
+POUCH_GO_TEST_RUN ?= ^$$
 POUCH_GO_SEED_ROWS ?= 10000
 POUCH_GO_TEST_TIMEOUT ?= 10m
 LOCKD_GO_VERSION ?= v0.9.0
@@ -510,7 +511,7 @@ __benchmark-pouch-go: __build-x86_64-linux-gnu-release
 	  CGO_CFLAGS="$(POUCH_GO_BENCH_CFLAGS) -DLOCKDC_BENCH_ARCHIVE_BUILD_ID=$$1" \
 	  CGO_LDFLAGS="$(POUCH_GO_BENCH_LDFLAGS)" \
 	  timeout --kill-after=5s '$(POUCH_GO_TEST_TIMEOUT)' \
-	    $(GO) test -run '^$$' -bench '$(POUCH_GO_BENCH)' -benchtime '$(POUCH_GO_BENCHTIME)' -count '$(POUCH_GO_BENCH_COUNT)' -timeout '$(POUCH_GO_TEST_TIMEOUT)'
+	    $(GO) test -run '$(POUCH_GO_TEST_RUN)' -bench '$(POUCH_GO_BENCH)' -benchtime '$(POUCH_GO_BENCHTIME)' -count '$(POUCH_GO_BENCH_COUNT)' -timeout '$(POUCH_GO_TEST_TIMEOUT)'
 
 benchmark-pouch-go-fast:
 	$(TIMED) benchmark-pouch-go-fast timeout --kill-after=5s \

@@ -207,9 +207,9 @@ Acceptance:
 
 ### Benchmark Contract
 
-- [ ] Repair production compressed fixtures using deterministic incompressible
-  data where segment rollover is required. Do not weaken the multi-segment
-  invariant because compression reduced the stored size.
+- [x] Use deterministic JSON-safe high-entropy production payloads and fixed
+  profiles large enough to retain the multi-segment rollover invariant under
+  compression. Custom profiles remain responsible for exceeding their target.
 - [x] Compare only the explicit semantically comparable end-to-end core metric
   allowlist with Go disk: acquire, lease/public get, update, release, queue,
   attachment, scan/index/full-text query, and restart recovery.

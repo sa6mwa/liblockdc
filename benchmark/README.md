@@ -50,6 +50,13 @@ explicit variants by default: `ProductionPouchPT`, `ProductionPouchCrypto`,
 metrics so index flush work can be attributed to intermediate write-churn
 flushes, final flush, no-op flush, and post-reopen flush.
 
+The fixed production profiles use deterministic, JSON-safe high-entropy payload
+tails and size each profile above the 64 MiB segment target after compression.
+This keeps the required multi-segment replay and rollover assertions meaningful
+for plaintext, crypto, compression, and crypto-plus-compression runs. Custom
+profiles remain responsible for supplying enough incompressible historical data
+to exceed their configured segment target.
+
 `make benchmark-pouch-go-production-bounded` is the routine full-matrix
 coverage target. It uses one iteration of 12 rows, two updates per key, a
 128 KiB historical payload, and a shared 16 KiB segment target. The target

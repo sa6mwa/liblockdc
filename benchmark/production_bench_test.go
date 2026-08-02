@@ -2,6 +2,7 @@ package benchmark
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -66,10 +67,14 @@ func productionScenarios() []productionScenario {
 			segmentTargetBytes: productionSegmentTargetBytes(),
 		}}
 	}
+	return defaultProductionScenarios()
+}
+
+func defaultProductionScenarios() []productionScenario {
 	return []productionScenario{
-		{name: "WideLarge", rows: 128, updatesPerKey: 3, payloadBytes: 256 * 1024, segmentTargetBytes: lockdDiskDefaultLogstoreSegmentSize},
-		{name: "DeepNested", rows: 384, updatesPerKey: 2, payloadBytes: 192 * 1024, segmentTargetBytes: lockdDiskDefaultLogstoreSegmentSize},
-		{name: "HotChurn", rows: 112, updatesPerKey: 6, payloadBytes: 128 * 1024, segmentTargetBytes: lockdDiskDefaultLogstoreSegmentSize},
+		{name: "WideLarge", rows: 128, updatesPerKey: 3, payloadBytes: 384 * 1024, segmentTargetBytes: lockdDiskDefaultLogstoreSegmentSize},
+		{name: "DeepNested", rows: 384, updatesPerKey: 2, payloadBytes: 256 * 1024, segmentTargetBytes: lockdDiskDefaultLogstoreSegmentSize},
+		{name: "HotChurn", rows: 112, updatesPerKey: 6, payloadBytes: 192 * 1024, segmentTargetBytes: lockdDiskDefaultLogstoreSegmentSize},
 	}
 }
 
@@ -189,6 +194,24 @@ func productionPayloadForGeneration(generation, updatesPerKey, payloadBytes int6
 	return currentPayloadBytes
 }
 
+const productionPayloadAlphabet = " !#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+func productionPayloadSnippet(row, generation int64) string {
+	return fmt.Sprintf(" audit remediation evidence workflow row %d gen %d;", row, generation)
+}
+
+func productionPayloadFill(payload []byte, row, generation int64) {
+	state := uint32(row) ^ uint32(generation)*0x9e3779b9 ^ 0xa5a5a5a5
+	snippet := productionPayloadSnippet(row, generation)
+	copy(payload, snippet)
+	for index := len(snippet); index < len(payload); index++ {
+		state ^= state << 13
+		state ^= state >> 17
+		state ^= state << 5
+		payload[index] = productionPayloadAlphabet[int(state%uint32(len(productionPayloadAlphabet)))]
+	}
+}
+
 func productionDocument(row, generation, payloadBytes int64) []byte {
 	target := payloadBytes
 	if target <= 0 {
@@ -241,14 +264,47 @@ func productionDocument(row, generation, payloadBytes int64) []byte {
 	out := make([]byte, 0, len(prefix)+len(payloadPrefix)+payloadLen+len(payloadSuffix))
 	out = append(out, prefix...)
 	out = append(out, payloadPrefix...)
-	for len(out)+len(payloadSuffix)+96 < cap(out) && len(out) < int(target) {
-		out = append(out, []byte(fmt.Sprintf(" audit remediation evidence workflow row %d gen %d;", row, generation))...)
-	}
-	for len(out)+len(payloadSuffix) < cap(out) {
-		out = append(out, ' ')
-	}
+	payload := make([]byte, payloadLen)
+	productionPayloadFill(payload, row, generation)
+	out = append(out, payload...)
 	out = append(out, payloadSuffix...)
 	return out
+}
+
+func TestProductionDocumentCompressionFixture(t *testing.T) {
+	body := productionDocument(17, 2, 256*1024)
+	compressedBytes := productionCompressedBytes(t, body)
+	if compressedBytes*100 < len(body)*75 {
+		t.Fatalf("production fixture compressed to %d of %d bytes; need high-entropy payload", compressedBytes, len(body))
+	}
+	validateProductionDocumentFields(t, body, 17, 2)
+}
+
+func TestProductionProfilesRetainCompressedRollover(t *testing.T) {
+	for _, scenario := range defaultProductionScenarios() {
+		historicalGenerations := scenario.updatesPerKey - 1
+		if historicalGenerations < 1 {
+			historicalGenerations = 1
+		}
+		compressedBytes := productionCompressedBytes(t, productionDocument(17, 0, scenario.payloadBytes))
+		storedBytes := int64(compressedBytes) * scenario.rows * historicalGenerations
+		if storedBytes <= scenario.segmentTargetBytes {
+			t.Fatalf("production profile %s retains only %d compressed historical bytes for %d-byte segment target", scenario.name, storedBytes, scenario.segmentTargetBytes)
+		}
+	}
+}
+
+func productionCompressedBytes(tb testing.TB, body []byte) int {
+	tb.Helper()
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := writer.Write(body); err != nil {
+		tb.Fatalf("compress production document: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		tb.Fatalf("finish production document compression: %v", err)
+	}
+	return compressed.Len()
 }
 
 func productionBucket(row int64) string {

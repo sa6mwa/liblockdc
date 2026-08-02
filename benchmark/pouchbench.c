@@ -22,6 +22,9 @@
 
 static const char lockdc_bench_concurrency_payload_prefix[] = "{\"payload\":\"";
 static const char lockdc_bench_concurrency_payload_suffix[] = "\"}";
+static const char lockdc_bench_production_payload_alphabet[] =
+    " !#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_`"
+    "abcdefghijklmnopqrstuvwxyz{|}~";
 
 typedef struct lockdc_bench_key_count {
   long rows;
@@ -35,6 +38,36 @@ struct lockdc_pouch_bench_fixture {
 
 static char *lockdc_bench_document(long row, long generation,
                                    long payload_bytes, size_t *out_len);
+
+static void lockdc_bench_fill_production_payload(char *payload,
+                                                 size_t payload_len, long row,
+                                                 long generation) {
+  char snippet[128];
+  size_t copied;
+  size_t index;
+  uint32_t state;
+  int written;
+
+  if (payload == NULL || payload_len == 0U) {
+    return;
+  }
+  written = snprintf(snippet, sizeof(snippet),
+                     " audit remediation evidence workflow row %ld gen %ld;",
+                     row, generation);
+  if (written <= 0 || (size_t)written >= sizeof(snippet)) {
+    return;
+  }
+  copied = (size_t)written < payload_len ? (size_t)written : payload_len;
+  memcpy(payload, snippet, copied);
+  state = (uint32_t)row ^ (uint32_t)generation * 0x9e3779b9U ^ 0xa5a5a5a5U;
+  for (index = copied; index < payload_len; ++index) {
+    state ^= state << 13U;
+    state ^= state >> 17U;
+    state ^= state << 5U;
+    payload[index] = lockdc_bench_production_payload_alphabet
+        [state % (sizeof(lockdc_bench_production_payload_alphabet) - 1U)];
+  }
+}
 
 static const char *lockdc_bench_tenant_tier(long row) {
   if ((row % 11L) == 0L) {
@@ -595,7 +628,6 @@ static char *lockdc_bench_document(long row, long generation,
   const char payload_prefix[] = ",\"payload\":\"";
   const char payload_suffix[] = "\"}";
   char prefix[4096];
-  char chunk[128];
   size_t target;
   size_t prefix_len;
   size_t payload_len;
@@ -603,7 +635,6 @@ static char *lockdc_bench_document(long row, long generation,
   size_t payload_prefix_len;
   size_t payload_suffix_len;
   size_t json_len;
-  size_t chunk_len;
   char *json;
   int written;
 
@@ -714,22 +745,9 @@ static char *lockdc_bench_document(long row, long generation,
   memcpy(json + json_len, payload_prefix, payload_prefix_len);
   json_len += payload_prefix_len;
   payload_end = json_len + payload_len;
-  written = snprintf(chunk, sizeof(chunk),
-                     " audit remediation evidence workflow row %ld gen %ld;",
-                     row, generation);
-  if (written <= 0 || (size_t)written >= sizeof(chunk)) {
-    free(json);
-    return NULL;
-  }
-  chunk_len = (size_t)written;
-  while (json_len + chunk_len <= payload_end) {
-    memcpy(json + json_len, chunk, chunk_len);
-    json_len += chunk_len;
-  }
-  if (json_len < payload_end) {
-    memset(json + json_len, ' ', payload_end - json_len);
-    json_len = payload_end;
-  }
+  lockdc_bench_fill_production_payload(json + json_len, payload_len, row,
+                                       generation);
+  json_len = payload_end;
   memcpy(json + json_len, payload_suffix, payload_suffix_len);
   json_len += payload_suffix_len;
   json[json_len] = '\0';

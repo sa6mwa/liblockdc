@@ -55,10 +55,9 @@ The exclusive state core is now in cutover: ordinary state, lease, object,
 attachment, queue, and staged-transaction mutations use the resident
 projection, active segment offset, and retained append descriptor. Direct and
 scan-oriented reads use the same projection after the first namespace warm.
-The remaining runtime alignment work is to complete resident group-commit
-scheduling and benchmark evidence across every public operation, and to keep
-recovery, takeover, rotation, maintenance, and explicit shared-root work off
-that healthy exclusive path.
+The remaining runtime alignment work is benchmark evidence across every public
+operation, and keeping recovery, takeover, rotation, maintenance, and explicit
+shared-root work off that healthy exclusive path.
 
 This is not an accepted divergence and Pouch must not be called fully aligned
 until the exclusive-writer cutover is complete. The source comparison does not
