@@ -156,12 +156,31 @@ typedef struct lc_pouch_maintenance_result {
 
 typedef int (*lc_pouch_state_precondition_fn)(void *context, lc_error *error);
 
+/* A target-key projection borrowed while a state mutation holds its authority.
+ * Fields remain valid only for the duration of the precondition callback. */
+typedef struct lc_pouch_state_precondition_view {
+  int found;
+  lc_pouch_generation version;
+  const unsigned char *metadata;
+  size_t metadata_length;
+  int has_query_hidden;
+  int query_hidden;
+  int has_body;
+} lc_pouch_state_precondition_view;
+
+typedef int (*lc_pouch_state_view_precondition_fn)(
+    const lc_pouch_state_precondition_view *current, void *context,
+    lc_error *error);
+
 typedef struct lc_pouch_state_write_options {
   const char *content_type;
   const char *expected_etag;
   const unsigned char *metadata;
   size_t metadata_length;
   int has_metadata;
+  /* Evaluates against the selected target-key projection without a reread. */
+  lc_pouch_state_view_precondition_fn view_precondition;
+  void *view_precondition_context;
   lc_pouch_state_precondition_fn precondition;
   void *precondition_context;
   lc_pouch_generation expected_version;

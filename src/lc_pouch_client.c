@@ -7747,18 +7747,22 @@ static int lc_pouch_validate_lease_metadata_view(
     const char *namespace_name, const char *key,
     const lc_pouch_state_metadata_view *state_view,
     lc_pouch_lease_record *record, lc_error *error) {
+  lc_pouch_lease_record local_record;
+  lc_pouch_lease_record *target;
   const char *lease_txn_id;
   const char *stored_txn_id;
   lc_pouch_unix_seconds now_seconds = 0L;
   int rc;
 
   if (client == NULL || lease == NULL || namespace_name == NULL ||
-      key == NULL || state_view == NULL || record == NULL) {
+      key == NULL || state_view == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch lease metadata validation requires context",
                         NULL, NULL, "pouch");
   }
-  memset(record, 0, sizeof(*record));
+  memset(&local_record, 0, sizeof(local_record));
+  target = record != NULL ? record : &local_record;
+  memset(target, 0, sizeof(*target));
   if (!lc_pouch_lease_ref_has_credentials(lease)) {
     return LC_OK;
   }
@@ -7769,27 +7773,29 @@ static int lc_pouch_validate_lease_metadata_view(
   }
   rc = lc_pouch_lease_record_parse(client, state_view->metadata,
                                    state_view->metadata_length,
-                                   state_view->version, record, error);
+                                   state_view->version, target, error);
   if (rc == LC_OK) {
     rc = lc_pouch_now_unix(&now_seconds, error);
   }
   if (rc == LC_OK &&
-      (!record->found || strcmp(record->namespace_name, namespace_name) != 0 ||
-       strcmp(record->key, key) != 0 ||
-       strcmp(record->lease_id, lease->lease_id) != 0 ||
-       record->fencing_token != lease->fencing_token ||
-       record->expires_at_unix <= now_seconds)) {
+      (!target->found || strcmp(target->namespace_name, namespace_name) != 0 ||
+       strcmp(target->key, key) != 0 ||
+       strcmp(target->lease_id, lease->lease_id) != 0 ||
+       target->fencing_token != lease->fencing_token ||
+       target->expires_at_unix <= now_seconds)) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch lease validation failed", NULL, NULL, NULL);
   }
   lease_txn_id = lease->txn_id != NULL ? lease->txn_id : "";
-  stored_txn_id = record->txn_id != NULL ? record->txn_id : "";
+  stored_txn_id = target->txn_id != NULL ? target->txn_id : "";
   if (rc == LC_OK && strcmp(stored_txn_id, lease_txn_id) != 0) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch lease validation failed", NULL, NULL, NULL);
   }
   if (rc != LC_OK) {
-    lc_pouch_lease_record_cleanup(record);
+    lc_pouch_lease_record_cleanup(target);
+  } else if (record == NULL) {
+    lc_pouch_lease_record_cleanup(&local_record);
   }
   return rc;
 }
@@ -7978,6 +7984,33 @@ static int lc_pouch_lease_precondition_check(void *context, lc_error *error) {
   return lc_pouch_validate_lease_record(
       precondition->client, precondition->lease, precondition->namespace_name,
       precondition->key, NULL, error);
+}
+
+/* Ordinary state mutations already hold the target key authority. Validate the
+ * lease against that projection rather than reading the same metadata again. */
+static int lc_pouch_lease_view_precondition_check(
+    const lc_pouch_state_precondition_view *current, void *context,
+    lc_error *error) {
+  lc_pouch_lease_precondition *precondition;
+  lc_pouch_state_metadata_view state_view;
+
+  precondition = (lc_pouch_lease_precondition *)context;
+  if (precondition == NULL || current == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease precondition requires current state", NULL,
+                        NULL, "pouch");
+  }
+  memset(&state_view, 0, sizeof(state_view));
+  state_view.found = current->found;
+  state_view.version = current->version;
+  state_view.metadata = current->metadata;
+  state_view.metadata_length = current->metadata_length;
+  state_view.has_query_hidden = current->has_query_hidden;
+  state_view.query_hidden = current->query_hidden;
+  state_view.has_body = current->has_body;
+  return lc_pouch_validate_lease_metadata_view(
+      precondition->client, precondition->lease, precondition->namespace_name,
+      precondition->key, &state_view, NULL, error);
 }
 
 /* Preserve lockd's transport-visible failure for a required lease owner. */
@@ -11513,10 +11546,12 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
-                                      req->lease.key, NULL, error);
-  if (rc != LC_OK) {
-    return rc;
+  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+    rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
+                                        req->lease.key, NULL, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
   }
   options.content_type =
       req->content_type != NULL ? req->content_type : "application/json";
@@ -11525,8 +11560,13 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
   lease_precondition.lease = &req->lease;
   lease_precondition.namespace_name = namespace_name;
   lease_precondition.key = req->lease.key;
-  options.precondition = lc_pouch_lease_precondition_check;
-  options.precondition_context = &lease_precondition;
+  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+    options.precondition = lc_pouch_lease_precondition_check;
+    options.precondition_context = &lease_precondition;
+  } else {
+    options.view_precondition = lc_pouch_lease_view_precondition_check;
+    options.view_precondition_context = &lease_precondition;
+  }
   if (req->has_if_version) {
     rc = lc_pouch_version_to_generation(req->if_version,
                                         &options.expected_version, error);
@@ -11732,18 +11772,12 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
     lc_pouch_state_write_result_cleanup(&client->allocator, &result);
     return rc;
   }
-  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
-                                      req->lease.key, NULL, error);
-  if (rc != LC_OK) {
-    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
-    return rc;
-  }
   lease_precondition.client = client;
   lease_precondition.lease = &req->lease;
   lease_precondition.namespace_name = namespace_name;
   lease_precondition.key = req->lease.key;
-  options.precondition = lc_pouch_lease_precondition_check;
-  options.precondition_context = &lease_precondition;
+  options.view_precondition = lc_pouch_lease_view_precondition_check;
+  options.view_precondition_context = &lease_precondition;
   rc = lc_pouch_state_update_metadata(client->pouch, namespace_name,
                                       req->lease.key, &options, &result, error);
   if (rc != LC_OK) {
@@ -11803,11 +11837,6 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
-                                      req->lease.key, NULL, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
   if (req->has_if_version) {
     rc = lc_pouch_version_to_generation(req->if_version,
                                         &options.expected_version, error);
@@ -11820,8 +11849,8 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
   lease_precondition.lease = &req->lease;
   lease_precondition.namespace_name = namespace_name;
   lease_precondition.key = req->lease.key;
-  options.precondition = lc_pouch_lease_precondition_check;
-  options.precondition_context = &lease_precondition;
+  options.view_precondition = lc_pouch_lease_view_precondition_check;
+  options.view_precondition_context = &lease_precondition;
   rc = lc_pouch_state_delete(client->pouch, namespace_name, req->lease.key,
                              &options, &result, error);
   if (rc == LC_OK) {

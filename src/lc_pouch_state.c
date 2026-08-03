@@ -805,6 +805,21 @@ struct lc_pouch_state_entry {
   unsigned char record_type;
 };
 
+static void lc_pouch_state_precondition_view_from_entry(
+    const lc_pouch_state_entry *entry, lc_pouch_state_precondition_view *out) {
+  memset(out, 0, sizeof(*out));
+  if (entry == NULL || !entry->found) {
+    return;
+  }
+  out->found = 1;
+  out->version = entry->version;
+  out->metadata = entry->metadata;
+  out->metadata_length = entry->metadata_length;
+  out->has_query_hidden = entry->has_query_hidden;
+  out->query_hidden = entry->query_hidden;
+  out->has_body = entry->payload_span.present;
+}
+
 typedef enum lc_pouch_state_record_type {
   LC_POUCH_STATE_RECORD_STATE_PUT = 1,
   LC_POUCH_STATE_RECORD_STATE_DELETE = 2,
@@ -9699,6 +9714,7 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   int use_materialized_record;
   uint64_t writer_mode_epoch;
   unsigned char put_record_type;
+  lc_pouch_state_precondition_view precondition_view;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
       key == NULL || key[0] == '\0' || body == NULL || out == NULL) {
@@ -9743,6 +9759,16 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
     return rc;
   }
   retain_active_append_fd = 0;
+  if (options != NULL && options->view_precondition != NULL) {
+    lc_pouch_state_precondition_view_from_entry(&current, &precondition_view);
+    rc = options->view_precondition(&precondition_view,
+                                    options->view_precondition_context, error);
+    if (rc != LC_OK) {
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      return rc;
+    }
+  }
   if (options != NULL && options->expected_etag != NULL) {
     if (!current.found || strcmp(current.etag, options->expected_etag) != 0) {
       lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
@@ -10768,6 +10794,7 @@ static int lc_pouch_state_update_metadata_from_current_locked(
   int has_query_hidden;
   int query_hidden;
   int rc;
+  lc_pouch_state_precondition_view precondition_view;
 
   if (pouch == NULL || namespace_name == NULL || key == NULL ||
       manifest == NULL || current == NULL || options == NULL || out == NULL) {
@@ -10776,6 +10803,14 @@ static int lc_pouch_state_update_metadata_from_current_locked(
                         NULL, "pouch");
   }
   memset(out, 0, sizeof(*out));
+  if (options->view_precondition != NULL) {
+    lc_pouch_state_precondition_view_from_entry(current, &precondition_view);
+    rc = options->view_precondition(&precondition_view,
+                                    options->view_precondition_context, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
   if (!current->found && !options->has_metadata) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch metadata update requires existing state", NULL,
@@ -10854,6 +10889,7 @@ static int lc_pouch_state_metadata_append_schedule_from_current_locked(
   int has_query_hidden;
   int query_hidden;
   int rc;
+  lc_pouch_state_precondition_view precondition_view;
 
   if (pouch == NULL || namespace_name == NULL || key == NULL ||
       current == NULL || options == NULL || out == NULL) {
@@ -10862,6 +10898,14 @@ static int lc_pouch_state_metadata_append_schedule_from_current_locked(
                         NULL, NULL, "pouch");
   }
   memset(out, 0, sizeof(*out));
+  if (options->view_precondition != NULL) {
+    lc_pouch_state_precondition_view_from_entry(current, &precondition_view);
+    rc = options->view_precondition(&precondition_view,
+                                    options->view_precondition_context, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
   if (!current->found && !options->has_metadata) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch metadata update requires existing state", NULL,
@@ -11076,6 +11120,7 @@ static int lc_pouch_state_delete_locked(
   lc_pouch_generation version;
   lc_pouch_unix_seconds updated_at_unix;
   int rc;
+  lc_pouch_state_precondition_view precondition_view;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
       key == NULL || key[0] == '\0' || out == NULL) {
@@ -11089,6 +11134,16 @@ static int lc_pouch_state_delete_locked(
       pouch, namespace_name, key, &manifest, &current, &max_version, error);
   if (rc != LC_OK) {
     return rc;
+  }
+  if (options != NULL && options->view_precondition != NULL) {
+    lc_pouch_state_precondition_view_from_entry(&current, &precondition_view);
+    rc = options->view_precondition(&precondition_view,
+                                    options->view_precondition_context, error);
+    if (rc != LC_OK) {
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      return rc;
+    }
   }
   if (options != NULL && options->expected_etag != NULL) {
     if (!current.found || strcmp(current.etag, options->expected_etag) != 0) {

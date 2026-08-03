@@ -13834,10 +13834,14 @@ static void test_pouch_lease_claim_and_credentials_are_durable(void **state) {
   rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"), &source,
                              &error);
   assert_int_equal(rc, LC_OK);
-  rc = lease->update(lease, source, NULL, &error);
+  update_req.lease.lease_id = lease->lease_id;
+  update_req.lease.txn_id = lease->txn_id;
+  update_req.lease.fencing_token = lease->fencing_token;
+  rc = client->update(client, &update_req, source, &update_res, &error);
   source->close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
+  lc_update_res_cleanup(&update_res);
   snprintf(released_lease_id, sizeof(released_lease_id), "%s", lease->lease_id);
   released_fencing_token = lease->fencing_token;
 
