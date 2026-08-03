@@ -7741,6 +7741,44 @@ static int lc_pouch_state_manifest_lookup_cached_borrowed(
       pouch, namespace_name, key, manifest, current, max_version_out, error);
 }
 
+/* Locked mutation callers retain their existing owned record cleanup, but do
+ * not need to allocate a manifest copy while the resident owner is stable. */
+static int lc_pouch_state_manifest_lookup_cached_for_mutation(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    lc_pouch_namespace_manifest *manifest, lc_pouch_state_entry *current,
+    lc_pouch_generation *max_version_out, lc_error *error) {
+  lc_pouch_namespace_logstore *cache;
+  uint64_t writer_mode_epoch;
+  int single_writer;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || key == NULL ||
+      manifest == NULL || current == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch mutation manifest lookup requires context", NULL,
+                        NULL, "pouch");
+  }
+  memset(manifest, 0, sizeof(*manifest));
+  memset(current, 0, sizeof(*current));
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
+  single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
+  if (single_writer && cache != NULL && cache->initialized &&
+      cache->writer_mode_epoch == writer_mode_epoch &&
+      cache->namespace_path != NULL && cache->active_segment_leaf != NULL) {
+    rc = lc_pouch_state_cache_manifest_borrow(pouch, cache, manifest, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    if (max_version_out != NULL) {
+      *max_version_out = cache->max_version;
+    }
+    return lc_pouch_state_entry_from_cache_record(
+        pouch, lc_pouch_state_cache_record_find(cache, key), current, error);
+  }
+  return lc_pouch_state_manifest_lookup_cached(
+      pouch, namespace_name, key, manifest, current, max_version_out, error);
+}
+
 /* Return a projection-backed manifest in exclusive mode; otherwise refresh. */
 static int lc_pouch_state_manifest_view(lc_pouch *pouch,
                                         const char *namespace_name,
@@ -11901,7 +11939,7 @@ static int lc_pouch_state_delete_locked(
                         NULL, NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
-  rc = lc_pouch_state_manifest_lookup_cached(
+  rc = lc_pouch_state_manifest_lookup_cached_for_mutation(
       pouch, namespace_name, key, &manifest, &current, &max_version, error);
   if (rc != LC_OK) {
     return rc;
@@ -12106,7 +12144,7 @@ static int lc_pouch_state_promote_staged_locked(
   memset(&manifest, 0, sizeof(manifest));
   memset(&committed, 0, sizeof(committed));
   memset(&staged, 0, sizeof(staged));
-  rc = lc_pouch_state_manifest_lookup_cached(
+  rc = lc_pouch_state_manifest_lookup_cached_for_mutation(
       pouch, namespace_name, key, &manifest, &committed, NULL, error);
   if (rc == LC_OK) {
     cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
@@ -12283,7 +12321,7 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   memset(&manifest, 0, sizeof(manifest));
   memset(&committed, 0, sizeof(committed));
   memset(&staged, 0, sizeof(staged));
-  rc = lc_pouch_state_manifest_lookup_cached(
+  rc = lc_pouch_state_manifest_lookup_cached_for_mutation(
       pouch, namespace_name, key, &manifest, &committed, NULL, error);
   if (rc == LC_OK) {
     cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
@@ -12439,8 +12477,8 @@ int lc_pouch_state_discard_staged_locked(lc_pouch *pouch,
   memset(&manifest, 0, sizeof(manifest));
   memset(&staged, 0, sizeof(staged));
   etag = NULL;
-  rc = lc_pouch_state_manifest_lookup_cached(pouch, namespace_name, staged_key,
-                                             &manifest, &staged, NULL, error);
+  rc = lc_pouch_state_manifest_lookup_cached_for_mutation(
+      pouch, namespace_name, staged_key, &manifest, &staged, NULL, error);
   if (rc == LC_OK && staged.found) {
     decision_version = staged.version + 1UL;
     tombstone_version = decision_version + 1UL;
