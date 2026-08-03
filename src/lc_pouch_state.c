@@ -49,12 +49,15 @@
 #ifdef LOCKDC_TEST_BUILD
 lc_pouch_test_hook lc_pouch_test_after_snapshot_write_hook = NULL;
 void *lc_pouch_test_after_snapshot_write_context = NULL;
+lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook = NULL;
+void *lc_pouch_test_metadata_append_context = NULL;
 #endif
 
 typedef struct lc_pouch_state_namespace_lock {
   int fd;
   struct lc_pouch_state_process_namespace_mutex *process_mutex;
   struct lc_pouch_state_process_namespace_guard *maintenance_guard;
+  lc_pouch_exclusive_append_gate *exclusive_append_gate;
   lc_pouch *pouch;
   const char *namespace_name;
   struct lc_pouch_state_namespace_lock *previous_namespace_lock;
@@ -66,6 +69,10 @@ typedef struct lc_pouch_state_key_lock {
   struct lc_pouch_state_process_namespace_mutex *process_mutex;
   struct lc_pouch_state_process_namespace_guard *maintenance_guard;
   pthread_mutex_t *exclusive_key_mutex;
+  lc_pouch *pouch;
+  const char *namespace_name;
+  int projection_uses_namespace_mutex;
+  struct lc_pouch_state_key_lock *previous_projection_lock;
 } lc_pouch_state_key_lock;
 
 typedef struct lc_pouch_state_append_lock {
@@ -124,6 +131,10 @@ static pthread_once_t lc_pouch_state_namespace_lock_key_once =
     PTHREAD_ONCE_INIT;
 static pthread_key_t lc_pouch_state_namespace_lock_key;
 static int lc_pouch_state_namespace_lock_key_status;
+static pthread_once_t lc_pouch_state_projection_lock_key_once =
+    PTHREAD_ONCE_INIT;
+static pthread_key_t lc_pouch_state_projection_lock_key;
+static int lc_pouch_state_projection_lock_key_status;
 
 typedef struct lc_pouch_state_entry lc_pouch_state_entry;
 
@@ -204,10 +215,18 @@ static int lc_pouch_state_cache_refresh_for_mode(
 static int lc_pouch_state_cache_matches_manifest(
     const lc_pouch_state_cache_namespace *cache,
     const lc_pouch_namespace_manifest *manifest);
+static void
+lc_pouch_state_cache_invalidate_namespace(lc_pouch *pouch,
+                                          const char *namespace_name);
 static int
 lc_pouch_state_manifest_materialize(lc_pouch *pouch, const char *namespace_name,
                                     lc_pouch_namespace_manifest *manifest,
                                     int *from_cache, lc_error *error);
+static int lc_pouch_state_process_namespace_mutex_lock(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_state_process_namespace_mutex **out, lc_error *error);
+static void lc_pouch_state_process_namespace_mutex_unlock(
+    lc_pouch_state_process_namespace_mutex **mutex);
 
 static void lc_pouch_state_commit_group_key_init(void) {
   (void)pthread_key_create(&lc_pouch_state_commit_group_key, NULL);
@@ -216,6 +235,11 @@ static void lc_pouch_state_commit_group_key_init(void) {
 static void lc_pouch_state_namespace_lock_key_init(void) {
   lc_pouch_state_namespace_lock_key_status =
       pthread_key_create(&lc_pouch_state_namespace_lock_key, NULL);
+}
+
+static void lc_pouch_state_projection_lock_key_init(void) {
+  lc_pouch_state_projection_lock_key_status =
+      pthread_key_create(&lc_pouch_state_projection_lock_key, NULL);
 }
 
 static int
@@ -247,6 +271,71 @@ lc_pouch_state_namespace_lock_track(lc_pouch_state_namespace_lock *lock,
                         strerror(pthread_rc), NULL, "pouch");
   }
   return LC_OK;
+}
+
+static int lc_pouch_state_projection_lock_track(lc_pouch_state_key_lock *lock,
+                                                lc_error *error) {
+  int pthread_rc;
+
+  if (lock == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch projection lock tracking requires lock", NULL,
+                        NULL, "pouch");
+  }
+  pthread_once(&lc_pouch_state_projection_lock_key_once,
+               lc_pouch_state_projection_lock_key_init);
+  if (lc_pouch_state_projection_lock_key_status != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch projection lock tracking",
+                        strerror(lc_pouch_state_projection_lock_key_status),
+                        NULL, "pouch");
+  }
+  lock->previous_projection_lock =
+      (lc_pouch_state_key_lock *)pthread_getspecific(
+          lc_pouch_state_projection_lock_key);
+  pthread_rc = pthread_setspecific(lc_pouch_state_projection_lock_key, lock);
+  if (pthread_rc != 0) {
+    lock->previous_projection_lock = NULL;
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to track pouch projection lock",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  return LC_OK;
+}
+
+static void
+lc_pouch_state_projection_lock_untrack(lc_pouch_state_key_lock *lock) {
+  if (lock == NULL) {
+    return;
+  }
+  pthread_once(&lc_pouch_state_projection_lock_key_once,
+               lc_pouch_state_projection_lock_key_init);
+  if (lc_pouch_state_projection_lock_key_status == 0) {
+    (void)pthread_setspecific(lc_pouch_state_projection_lock_key,
+                              lock->previous_projection_lock);
+  }
+  lock->previous_projection_lock = NULL;
+}
+
+static lc_pouch_state_key_lock *
+lc_pouch_state_projection_lock_current(lc_pouch *pouch,
+                                       const char *namespace_name) {
+  lc_pouch_state_key_lock *lock;
+
+  pthread_once(&lc_pouch_state_projection_lock_key_once,
+               lc_pouch_state_projection_lock_key_init);
+  if (lc_pouch_state_projection_lock_key_status != 0) {
+    return NULL;
+  }
+  lock = (lc_pouch_state_key_lock *)pthread_getspecific(
+      lc_pouch_state_projection_lock_key);
+  if (lock == NULL || lock->pouch != pouch || lock->namespace_name == NULL ||
+      lock->namespace_name[0] == '\0' || pouch == NULL ||
+      namespace_name == NULL ||
+      strcmp(lock->namespace_name, namespace_name) != 0) {
+    return NULL;
+  }
+  return lock;
 }
 
 static int lc_pouch_state_namespace_lock_is_held(lc_pouch *pouch,
@@ -434,12 +523,9 @@ static int lc_pouch_state_defer_fsync(lc_pouch *pouch, int fd,
 
 static int
 lc_pouch_state_finish_commit_group_common(lc_pouch_state_commit_group *group,
-                                          int owned, int rc, int clear_cache,
-                                          lc_error *error) {
-  lc_pouch *pouch;
+                                          int owned, int rc, lc_error *error) {
   int commit_rc;
 
-  pouch = group != NULL ? group->pouch : NULL;
   commit_rc = LC_OK;
   if (group != NULL) {
     commit_rc = lc_pouch_state_commit_group_end(group, owned,
@@ -448,16 +534,13 @@ lc_pouch_state_finish_commit_group_common(lc_pouch_state_commit_group *group,
   if (commit_rc != LC_OK && rc == LC_OK) {
     rc = commit_rc;
   }
-  if (clear_cache && rc != LC_OK && pouch != NULL) {
-    lc_pouch_state_cache_cleanup(pouch);
-  }
   return rc;
 }
 
 static int
 lc_pouch_state_finish_commit_group(lc_pouch_state_commit_group *group,
                                    int owned, int rc, lc_error *error) {
-  return lc_pouch_state_finish_commit_group_common(group, owned, rc, 1, error);
+  return lc_pouch_state_finish_commit_group_common(group, owned, rc, error);
 }
 
 static int lc_pouch_state_mutex_init_recursive(pthread_mutex_t *mutex,
@@ -717,6 +800,47 @@ static void lc_pouch_state_process_namespace_mutex_unlock(
   pthread_mutex_unlock(&lc_pouch_state_process_mutex_registry);
 }
 
+/* Default exclusive mode protects one namespace projection with the same
+ * in-process namespace mutex used by readers and maintenance. Shared mode
+ * retains the global projection mutex until its cross-process path has its own
+ * resident namespace owner. */
+static void lc_pouch_state_projection_mutex_unlock(lc_pouch *pouch,
+                                                   const char *namespace_name) {
+  lc_pouch_state_key_lock *lock;
+
+  if (lc_pouch_single_writer_enabled(pouch)) {
+    lock = lc_pouch_state_projection_lock_current(pouch, namespace_name);
+    if (lock != NULL && lock->process_mutex != NULL) {
+      lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+    }
+    return;
+  }
+  (void)pthread_mutex_unlock(&pouch->state_mutation_mutex);
+}
+
+static int lc_pouch_state_projection_mutex_lock(lc_pouch *pouch,
+                                                const char *namespace_name,
+                                                lc_error *error) {
+  lc_pouch_state_key_lock *lock;
+  int pthread_rc;
+
+  if (lc_pouch_single_writer_enabled(pouch)) {
+    lock = lc_pouch_state_projection_lock_current(pouch, namespace_name);
+    if (lock == NULL || lock->process_mutex != NULL) {
+      return LC_OK;
+    }
+    return lc_pouch_state_process_namespace_mutex_lock(
+        pouch, namespace_name, &lock->process_mutex, error);
+  }
+  pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to restore pouch mutation state",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_state_process_namespace_guard_lock(
     lc_pouch *pouch, const char *namespace_name, int exclusive,
     lc_pouch_state_process_namespace_guard **out, lc_error *error) {
@@ -964,9 +1088,11 @@ struct lc_pouch_state_metadata_append_batcher {
   pthread_cond_t cond;
   pthread_t thread;
   lc_pouch *pouch;
+  char *namespace_name;
   lc_pouch_state_metadata_append_request *head;
   lc_pouch_state_metadata_append_request *tail;
   int stop;
+  struct lc_pouch_state_metadata_append_batcher *next;
 };
 
 typedef struct lc_pouch_state_body_cache_entry {
@@ -1427,6 +1553,7 @@ static int lc_pouch_state_namespace_lock_acquire(
   lock->fd = -1;
   lock->process_mutex = NULL;
   lock->maintenance_guard = NULL;
+  lock->exclusive_append_gate = NULL;
   lock->pouch = NULL;
   lock->namespace_name = NULL;
   lock->previous_namespace_lock = NULL;
@@ -1435,8 +1562,21 @@ static int lc_pouch_state_namespace_lock_acquire(
     return error != NULL && error->code != LC_OK ? error->code
                                                  : LC_ERR_TRANSPORT;
   }
+  /* Namespace callbacks retain projection authority across multiple writes.
+   * Claim the physical gate before that projection so a metadata worker cannot
+   * hold the gate while waiting for this callback's namespace mutex. */
+  if (lc_pouch_single_writer_enabled(pouch)) {
+    if (lc_pouch_state_exclusive_append_gate_lock(pouch, namespace_name,
+                                                  &lock->exclusive_append_gate,
+                                                  error) != LC_OK) {
+      lc_pouch_state_process_namespace_guard_unlock(&lock->maintenance_guard);
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_TRANSPORT;
+    }
+  }
   if (lc_pouch_state_process_namespace_mutex_lock(
           pouch, namespace_name, &lock->process_mutex, error) != LC_OK) {
+    lc_pouch_state_exclusive_append_gate_unlock(&lock->exclusive_append_gate);
     lc_pouch_state_process_namespace_guard_unlock(&lock->maintenance_guard);
     return error != NULL && error->code != LC_OK ? error->code
                                                  : LC_ERR_TRANSPORT;
@@ -1445,6 +1585,7 @@ static int lc_pouch_state_namespace_lock_acquire(
     if (lc_pouch_state_namespace_lock_track(lock, pouch, namespace_name,
                                             error) != LC_OK) {
       lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+      lc_pouch_state_exclusive_append_gate_unlock(&lock->exclusive_append_gate);
       lc_pouch_state_process_namespace_guard_unlock(&lock->maintenance_guard);
       return error != NULL && error->code != LC_OK ? error->code
                                                    : LC_ERR_TRANSPORT;
@@ -1461,6 +1602,7 @@ static int lc_pouch_state_namespace_lock_acquire(
   lc_free_with_allocator(&pouch->allocator, namespace_path);
   if (lock_path == NULL) {
     lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+    lc_pouch_state_exclusive_append_gate_unlock(&lock->exclusive_append_gate);
     lc_pouch_state_process_namespace_guard_unlock(&lock->maintenance_guard);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch mutation lock path", NULL,
@@ -1470,6 +1612,7 @@ static int lc_pouch_state_namespace_lock_acquire(
   lc_free_with_allocator(&pouch->allocator, lock_path);
   if (fd < 0) {
     lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+    lc_pouch_state_exclusive_append_gate_unlock(&lock->exclusive_append_gate);
     lc_pouch_state_process_namespace_guard_unlock(&lock->maintenance_guard);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to open pouch mutation lock", strerror(errno),
@@ -1485,6 +1628,7 @@ static int lc_pouch_state_namespace_lock_acquire(
     }
     close(fd);
     lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+    lc_pouch_state_exclusive_append_gate_unlock(&lock->exclusive_append_gate);
     lc_pouch_state_process_namespace_guard_unlock(&lock->maintenance_guard);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to lock pouch mutation file", strerror(errno),
@@ -1517,6 +1661,7 @@ lc_pouch_state_namespace_lock_release(lc_pouch_state_namespace_lock *lock) {
     lock->fd = -1;
   }
   lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+  lc_pouch_state_exclusive_append_gate_unlock(&lock->exclusive_append_gate);
   lc_pouch_state_process_namespace_guard_unlock(&lock->maintenance_guard);
 }
 
@@ -1625,8 +1770,8 @@ static int lc_pouch_state_append_lock_enter_after_mutation(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_state_append_lock *lock, lc_error *error) {
   int namespace_locked;
-  int pthread_rc;
   int rc;
+  int restore_rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
       lock == NULL) {
@@ -1637,16 +1782,15 @@ static int lc_pouch_state_append_lock_enter_after_mutation(
   namespace_locked =
       lc_pouch_state_namespace_lock_is_held(pouch, namespace_name);
   if (!namespace_locked) {
-    (void)pthread_mutex_unlock(&pouch->state_mutation_mutex);
+    lc_pouch_state_projection_mutex_unlock(pouch, namespace_name);
   }
   rc = lc_pouch_state_append_lock_acquire(pouch, namespace_name, lock, error);
   if (!namespace_locked) {
-    pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
-    if (pthread_rc != 0 && rc == LC_OK) {
+    restore_rc =
+        lc_pouch_state_projection_mutex_lock(pouch, namespace_name, error);
+    if (restore_rc != LC_OK && rc == LC_OK) {
       lc_pouch_state_append_lock_release(lock);
-      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                          "failed to restore pouch mutation state",
-                          strerror(pthread_rc), NULL, "pouch");
+      return restore_rc;
     }
   }
   return rc;
@@ -1684,7 +1828,13 @@ static int lc_pouch_state_key_lock_acquire(lc_pouch *pouch,
   lock->process_mutex = NULL;
   lock->maintenance_guard = NULL;
   lock->exclusive_key_mutex = NULL;
+  lock->pouch = pouch;
+  lock->namespace_name = namespace_name;
+  lock->projection_uses_namespace_mutex = 0;
+  lock->previous_projection_lock = NULL;
   if (lc_pouch_state_namespace_lock_is_held(pouch, namespace_name)) {
+    lock->projection_uses_namespace_mutex =
+        lc_pouch_single_writer_enabled(pouch);
     return LC_OK;
   }
   canonical_key = strstr(key, "/.staging/");
@@ -1724,11 +1874,28 @@ static int lc_pouch_state_key_lock_acquire(lc_pouch *pouch,
                           "failed to lock pouch exclusive key mutex",
                           strerror(pthread_rc), NULL, "pouch");
     }
+    /*
+     * Maintenance takes its write guard before namespace projection.  Keep
+     * regular mutations in that order as well, otherwise recovery can hold
+     * the write guard while waiting for a projection mutex held by a writer
+     * waiting for the read guard.
+     */
     rc = lc_pouch_state_process_namespace_guard_lock(
         pouch, namespace_name, 0, &lock->maintenance_guard, error);
     if (rc != LC_OK) {
       (void)pthread_mutex_unlock(lock->exclusive_key_mutex);
       lock->exclusive_key_mutex = NULL;
+      return rc;
+    }
+    rc = lc_pouch_state_process_namespace_mutex_lock(
+        pouch, namespace_name, &lock->process_mutex, error);
+    if (rc != LC_OK) {
+      lc_pouch_state_process_namespace_guard_unlock(&lock->maintenance_guard);
+      (void)pthread_mutex_unlock(lock->exclusive_key_mutex);
+      lock->exclusive_key_mutex = NULL;
+    }
+    if (rc == LC_OK) {
+      lock->projection_uses_namespace_mutex = 1;
     }
     return rc;
   }
@@ -1904,6 +2071,9 @@ static void lc_pouch_state_key_lock_release(lc_pouch_state_key_lock *lock) {
     (void)pthread_mutex_unlock(lock->exclusive_key_mutex);
     lock->exclusive_key_mutex = NULL;
   }
+  lock->pouch = NULL;
+  lock->namespace_name = NULL;
+  lock->projection_uses_namespace_mutex = 0;
 }
 
 static int lc_pouch_state_key_mutation_begin(lc_pouch *pouch,
@@ -1940,8 +2110,18 @@ static int lc_pouch_state_key_mutation_begin(lc_pouch *pouch,
     lc_pouch_writer_mode_operation_end(pouch);
     return rc;
   }
+  rc = lc_pouch_state_projection_lock_track(lock, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_key_lock_release(lock);
+    lc_pouch_writer_mode_operation_end(pouch);
+    return rc;
+  }
+  if (lock->projection_uses_namespace_mutex) {
+    return LC_OK;
+  }
   pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
   if (pthread_rc != 0) {
+    lc_pouch_state_projection_lock_untrack(lock);
     lc_pouch_state_key_lock_release(lock);
     lc_pouch_writer_mode_operation_end(pouch);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -1953,32 +2133,54 @@ static int lc_pouch_state_key_mutation_begin(lc_pouch *pouch,
 
 static void lc_pouch_state_key_mutation_end(lc_pouch *pouch,
                                             lc_pouch_state_key_lock *lock) {
-  if (pouch != NULL && pouch->state_mutation_mutex_initialized) {
+  if (pouch != NULL && lock != NULL && !lock->projection_uses_namespace_mutex &&
+      pouch->state_mutation_mutex_initialized) {
     pthread_mutex_unlock(&pouch->state_mutation_mutex);
   }
+  lc_pouch_state_projection_lock_untrack(lock);
   lc_pouch_state_key_lock_release(lock);
   lc_pouch_writer_mode_operation_end(pouch);
 }
 
-/* Keep the per-key lock through durable completion, but let independent keys
- * append while this request waits for its root-scoped fsync group. The global
- * mutex only protects mutation/cache changes, not durable completion. */
+/* Keep the per-key lock through durable completion, but let independent
+ * namespace projections proceed while this request waits for its root-scoped
+ * fsync group. Shared mode retains its global projection mutex. */
 static int lc_pouch_state_finish_commit_group_after_mutation(
     lc_pouch *pouch, lc_pouch_state_key_lock *lock,
     lc_pouch_state_commit_group *group, int owned, int rc, lc_error *error) {
-  int pthread_rc;
+  int projection_released;
 
-  if (pouch != NULL && pouch->state_mutation_mutex_initialized) {
+  projection_released = 0;
+  if (pouch != NULL && lock != NULL && lock->projection_uses_namespace_mutex &&
+      lock->process_mutex != NULL) {
+    lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+    projection_released = 1;
+  } else if (pouch != NULL && lock != NULL &&
+             !lock->projection_uses_namespace_mutex &&
+             pouch->state_mutation_mutex_initialized) {
     pthread_mutex_unlock(&pouch->state_mutation_mutex);
   }
-  rc = lc_pouch_state_finish_commit_group_common(group, owned, rc, 0, error);
-  if (rc != LC_OK && pouch != NULL && pouch->state_mutation_mutex_initialized) {
-    pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
-    if (pthread_rc == 0) {
-      lc_pouch_state_cache_cleanup(pouch);
+  rc = lc_pouch_state_finish_commit_group_common(group, owned, rc, error);
+  if (rc != LC_OK && pouch != NULL && lock != NULL) {
+    if (lock->projection_uses_namespace_mutex) {
+      if (projection_released) {
+        if (lc_pouch_state_process_namespace_mutex_lock(
+                pouch, lock->namespace_name, &lock->process_mutex, NULL) !=
+            LC_OK) {
+          lc_pouch_state_projection_lock_untrack(lock);
+          lc_pouch_state_key_lock_release(lock);
+          lc_pouch_writer_mode_operation_end(pouch);
+          return rc;
+        }
+      }
+      lc_pouch_state_cache_invalidate_namespace(pouch, lock->namespace_name);
+    } else if (pouch->state_mutation_mutex_initialized &&
+               pthread_mutex_lock(&pouch->state_mutation_mutex) == 0) {
+      lc_pouch_state_cache_invalidate_namespace(pouch, lock->namespace_name);
       pthread_mutex_unlock(&pouch->state_mutation_mutex);
     }
   }
+  lc_pouch_state_projection_lock_untrack(lock);
   lc_pouch_state_key_lock_release(lock);
   lc_pouch_writer_mode_operation_end(pouch);
   return rc;
@@ -2020,6 +2222,9 @@ int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,
   rc = callback(context, error);
   rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
                                           error);
+  if (rc != LC_OK) {
+    lc_pouch_state_cache_invalidate_namespace(pouch, namespace_name);
+  }
   lc_pouch_state_namespace_lock_release(&lock);
   lc_pouch_writer_mode_operation_end(pouch);
   return rc;
@@ -2509,6 +2714,29 @@ static void lc_pouch_state_cache_namespace_clear_records(
   ns->namespace_path = NULL;
   ns->active_segment_offset = 0U;
   ns->active_segment_id = 0U;
+}
+
+/* The caller already owns the namespace projection or shared-mode mutation
+ * authority. Keep the namespace node stable so unrelated exclusive namespace
+ * operations cannot observe a freed cache-list entry after a failed commit. */
+static void
+lc_pouch_state_cache_invalidate_namespace(lc_pouch *pouch,
+                                          const char *namespace_name) {
+  lc_pouch_state_cache_namespace *cache;
+
+  if (pouch == NULL || namespace_name == NULL) {
+    return;
+  }
+  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  if (cache == NULL) {
+    return;
+  }
+  lc_pouch_state_cache_namespace_clear_records(&pouch->allocator, cache);
+  cache->max_segment_id = 0U;
+  cache->max_version = 0UL;
+  cache->writer_mode_epoch = 0U;
+  cache->initialized = 0;
+  cache->decision_recovery_checked = 0;
 }
 
 static void
@@ -3457,13 +3685,29 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
                                     int create, lc_error *error) {
   lc_pouch_state_cache_namespace *ns;
   int rc;
+  int pthread_rc;
 
+  if (pouch == NULL || namespace_name == NULL) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch state cache namespace requires context", NULL,
+                       NULL, "pouch");
+    return NULL;
+  }
+  pthread_rc = pthread_mutex_lock(&pouch->state_cache_mutex);
+  if (pthread_rc != 0) {
+    (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                       "failed to lock pouch state cache registry",
+                       strerror(pthread_rc), NULL, "pouch");
+    return NULL;
+  }
   for (ns = pouch->state_cache_namespaces; ns != NULL; ns = ns->next) {
     if (strcmp(ns->namespace_name, namespace_name) == 0) {
+      (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
       return ns;
     }
   }
   if (!create) {
+    (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
     return NULL;
   }
   ns = (lc_pouch_state_cache_namespace *)lc_calloc_with_allocator(
@@ -3472,6 +3716,7 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
     lc_error_set(error, LC_ERR_NOMEM, 0L,
                  "failed to allocate pouch state cache namespace", NULL, NULL,
                  NULL);
+    (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
     return NULL;
   }
   ns->namespace_name =
@@ -3481,6 +3726,7 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
     lc_error_set(error, LC_ERR_NOMEM, 0L,
                  "failed to allocate pouch state cache namespace name", NULL,
                  NULL, NULL);
+    (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
     return NULL;
   }
   ns->active_append_fd = -1;
@@ -3491,14 +3737,17 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
     pouch->state_cache_namespaces = ns->next;
     lc_free_with_allocator(&pouch->allocator, ns->namespace_name);
     lc_free_with_allocator(&pouch->allocator, ns);
+    (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
     return NULL;
   }
+  (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
   return ns;
 }
 
 int lc_pouch_state_compaction_track_cached_namespaces(lc_pouch *pouch,
                                                       lc_error *error) {
   lc_pouch_state_cache_namespace *ns;
+  int pthread_rc;
   int rc;
 
   if (pouch == NULL) {
@@ -3506,12 +3755,20 @@ int lc_pouch_state_compaction_track_cached_namespaces(lc_pouch *pouch,
                         "pouch compaction cache tracking requires pouch", NULL,
                         NULL, "pouch");
   }
+  pthread_rc = pthread_mutex_lock(&pouch->state_cache_mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch state cache registry",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
   for (ns = pouch->state_cache_namespaces; ns != NULL; ns = ns->next) {
     rc = lc_pouch_compaction_track_namespace(pouch, ns->namespace_name, error);
     if (rc != LC_OK) {
+      (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
       return rc;
     }
   }
+  (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
   return LC_OK;
 }
 
@@ -9532,6 +9789,9 @@ int lc_pouch_maintenance_run(lc_pouch *pouch,
   rc = lc_pouch_maintenance_run_locked(pouch, options, out, error);
   rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
                                           error);
+  if (rc != LC_OK) {
+    lc_pouch_state_cache_invalidate_namespace(pouch, namespace_name);
+  }
   lc_pouch_state_namespace_lock_release(&lock);
   lc_pouch_writer_mode_operation_end(pouch);
   return rc;
@@ -9974,7 +10234,7 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   int materialized_transform_ready;
   int namespace_locked;
   int streaming_projection_mutex_released;
-  int pthread_rc;
+  int projection_rc;
   uint64_t writer_mode_epoch;
   unsigned char put_record_type;
   lc_pouch_state_precondition_view precondition_view;
@@ -10144,7 +10404,7 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
     bytes = (uint64_t)materialized_plain_len;
     cipher_bytes = 0UL;
     stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
-    (void)pthread_mutex_unlock(&pouch->state_mutation_mutex);
+    lc_pouch_state_projection_mutex_unlock(pouch, namespace_name);
     rc = lc_pouch_crypto_transform_memory(
         pouch->crypto, payload_context, materialized_plain,
         materialized_plain_len,
@@ -10158,11 +10418,10 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
         rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
       }
     }
-    pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
-    if (pthread_rc != 0 && rc == LC_OK) {
-      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to restore pouch mutation state",
-                        strerror(pthread_rc), NULL, "pouch");
+    projection_rc =
+        lc_pouch_state_projection_mutex_lock(pouch, namespace_name, error);
+    if (projection_rc != LC_OK && rc == LC_OK) {
+      rc = projection_rc;
     }
     if (rc != LC_OK) {
       lc_free_with_allocator(&pouch->allocator, etag);
@@ -10522,7 +10781,7 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
      * metadata and prepare values while this source flows directly into the
      * segment; publication reacquires the projection mutex below. */
     if (!namespace_locked) {
-      (void)pthread_mutex_unlock(&pouch->state_mutation_mutex);
+      lc_pouch_state_projection_mutex_unlock(pouch, namespace_name);
       streaming_projection_mutex_released = 1;
     }
     rc = lc_pouch_crypto_stream_to_fd_crc_with_compression(
@@ -10543,12 +10802,11 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
     }
     EVP_MD_CTX_free(hash_ctx);
     if (streaming_projection_mutex_released) {
-      pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
+      projection_rc =
+          lc_pouch_state_projection_mutex_lock(pouch, namespace_name, error);
       streaming_projection_mutex_released = 0;
-      if (pthread_rc != 0 && rc == LC_OK) {
-        rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                          "failed to restore pouch mutation state",
-                          strerror(pthread_rc), NULL, "pouch");
+      if (projection_rc != LC_OK && rc == LC_OK) {
+        rc = projection_rc;
       }
     }
     updated_at_unix = lc_pouch_maintenance_now_seconds();
@@ -10840,33 +11098,58 @@ static void lc_pouch_state_metadata_append_fail(
 }
 
 static void lc_pouch_state_metadata_append_process(
-    lc_pouch_state_metadata_append_batcher *batcher,
-    lc_pouch_state_metadata_append_request **requests, size_t count) {
+    lc_pouch *pouch, lc_pouch_state_metadata_append_request **requests,
+    size_t count, int projection_held) {
   lc_pouch_state_binary_append_item
       items[LC_POUCH_STATE_METADATA_APPEND_BATCH_MAX];
   lc_pouch_namespace_manifest manifest;
+  lc_pouch_state_append_lock append_lock;
   lc_pouch_state_cache_namespace *cache;
-  lc_pouch *pouch;
+  lc_pouch_state_process_namespace_mutex *projection_mutex;
   size_t index;
   int cache_cleared;
+  int projection_locked;
   int rc;
+  int single_writer;
   lc_error batch_error;
 
-  if (batcher == NULL || requests == NULL || count == 0U) {
+  if (pouch == NULL || requests == NULL || count == 0U) {
     return;
   }
-  pouch = batcher->pouch;
   memset(items, 0, sizeof(items));
   memset(&manifest, 0, sizeof(manifest));
+  append_lock.fd = -1;
+  append_lock.process_mutex = NULL;
+  append_lock.exclusive_gate = NULL;
   lc_error_init(&batch_error);
   cache_cleared = 0;
   cache = NULL;
-  rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
-  if (rc != 0) {
+  projection_mutex = NULL;
+  projection_locked = 0;
+  single_writer = lc_pouch_single_writer_enabled(pouch);
+  rc = LC_OK;
+  if (!projection_held && single_writer) {
+    rc = lc_pouch_state_append_lock_acquire(pouch, requests[0]->namespace_name,
+                                            &append_lock, &batch_error);
+  }
+  if (!projection_held && rc == LC_OK && single_writer) {
+    rc = lc_pouch_state_process_namespace_mutex_lock(
+        pouch, requests[0]->namespace_name, &projection_mutex, &batch_error);
+    if (rc == LC_OK) {
+      projection_locked = 1;
+    }
+  } else if (!projection_held && !single_writer) {
+    rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
+    if (rc != 0) {
+      rc = LC_ERR_TRANSPORT;
+    }
+  }
+  if (rc != LC_OK) {
     for (index = 0U; index < count; ++index) {
       lc_pouch_state_metadata_append_fail(requests[index], LC_ERR_TRANSPORT,
                                           &batch_error);
     }
+    lc_pouch_state_append_lock_release(&append_lock);
     goto cleanup;
   }
   rc = lc_pouch_state_manifest_view(pouch, requests[0]->namespace_name,
@@ -10904,9 +11187,15 @@ static void lc_pouch_state_metadata_append_process(
     }
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_state_append_binary_records(
-        pouch, requests[0]->namespace_name, &manifest, items, count,
-        &batch_error);
+    if (single_writer) {
+      rc = lc_pouch_state_append_binary_records_locked(
+          pouch, requests[0]->namespace_name, &manifest, items, count,
+          &batch_error);
+    } else {
+      rc = lc_pouch_state_append_binary_records(
+          pouch, requests[0]->namespace_name, &manifest, items, count,
+          &batch_error);
+    }
   }
   if (rc == LC_OK) {
     for (index = 0U; index < count; ++index) {
@@ -10955,7 +11244,8 @@ static void lc_pouch_state_metadata_append_process(
       } else {
         lc_pouch_state_write_result_cleanup(&pouch->allocator, request->out);
         if (!cache_cleared) {
-          lc_pouch_state_cache_cleanup(pouch);
+          lc_pouch_state_cache_invalidate_namespace(pouch,
+                                                    request->namespace_name);
           cache_cleared = 1;
         }
         request->rc = result_rc;
@@ -10966,7 +11256,12 @@ static void lc_pouch_state_metadata_append_process(
       lc_pouch_state_metadata_append_fail(requests[index], rc, &batch_error);
     }
   }
-  pthread_mutex_unlock(&pouch->state_mutation_mutex);
+  if (projection_locked) {
+    lc_pouch_state_process_namespace_mutex_unlock(&projection_mutex);
+  } else if (!single_writer && !projection_held) {
+    (void)pthread_mutex_unlock(&pouch->state_mutation_mutex);
+  }
+  lc_pouch_state_append_lock_release(&append_lock);
 
 cleanup:
   for (index = 0U; index < count; ++index) {
@@ -10980,7 +11275,6 @@ static void *lc_pouch_state_metadata_append_worker(void *context) {
   lc_pouch_state_metadata_append_batcher *batcher;
   lc_pouch_state_metadata_append_request
       *requests[LC_POUCH_STATE_METADATA_APPEND_BATCH_MAX];
-  const char *namespace_name;
   size_t count;
 
   batcher = (lc_pouch_state_metadata_append_batcher *)context;
@@ -10994,10 +11288,8 @@ static void *lc_pouch_state_metadata_append_worker(void *context) {
       return NULL;
     }
     count = 0U;
-    namespace_name = batcher->head->namespace_name;
     while (batcher->head != NULL &&
-           count < LC_POUCH_STATE_METADATA_APPEND_BATCH_MAX &&
-           strcmp(batcher->head->namespace_name, namespace_name) == 0) {
+           count < LC_POUCH_STATE_METADATA_APPEND_BATCH_MAX) {
       requests[count] = batcher->head;
       batcher->head = batcher->head->next;
       requests[count]->next = NULL;
@@ -11007,17 +11299,125 @@ static void *lc_pouch_state_metadata_append_worker(void *context) {
       batcher->tail = NULL;
     }
     pthread_mutex_unlock(&batcher->mutex);
-    lc_pouch_state_metadata_append_process(batcher, requests, count);
+#ifdef LOCKDC_TEST_BUILD
+    if (lc_pouch_test_metadata_append_hook != NULL) {
+      lc_pouch_test_metadata_append_hook(lc_pouch_test_metadata_append_context,
+                                         batcher->namespace_name);
+    }
+#endif
+    lc_pouch_state_metadata_append_process(batcher->pouch, requests, count, 0);
     lc_pouch_state_metadata_append_complete(batcher, requests, count);
     pthread_mutex_lock(&batcher->mutex);
   }
 }
 
-int lc_pouch_state_metadata_append_worker_init(lc_pouch *pouch,
-                                               lc_error *error) {
+static void lc_pouch_state_metadata_append_batcher_stop(
+    lc_pouch_state_metadata_append_batcher *batcher) {
+  if (batcher == NULL) {
+    return;
+  }
+  pthread_mutex_lock(&batcher->mutex);
+  batcher->stop = 1;
+  pthread_cond_broadcast(&batcher->cond);
+  pthread_mutex_unlock(&batcher->mutex);
+}
+
+static void lc_pouch_state_metadata_append_batcher_destroy(
+    lc_pouch_state_metadata_append_batcher *batcher) {
+  if (batcher == NULL) {
+    return;
+  }
+  lc_pouch_state_metadata_append_batcher_stop(batcher);
+  (void)pthread_join(batcher->thread, NULL);
+  (void)pthread_cond_destroy(&batcher->cond);
+  (void)pthread_mutex_destroy(&batcher->mutex);
+  lc_free_with_allocator(&batcher->pouch->allocator, batcher->namespace_name);
+  lc_free_with_allocator(&batcher->pouch->allocator, batcher);
+}
+
+static int lc_pouch_state_metadata_append_batcher_get(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_state_metadata_append_batcher **out, lc_error *error) {
   lc_pouch_state_metadata_append_batcher *batcher;
   int cond_initialized;
   int mutex_initialized;
+  int pthread_rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      out == NULL || !pouch->state_metadata_append_registry_mutex_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata append queue requires namespace", NULL,
+                        NULL, "pouch");
+  }
+  *out = NULL;
+  pthread_rc = pthread_mutex_lock(&pouch->state_metadata_append_registry_mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch metadata append registry",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  for (batcher = pouch->state_metadata_append_batchers; batcher != NULL;
+       batcher = batcher->next) {
+    if (strcmp(batcher->namespace_name, namespace_name) == 0) {
+      (void)pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
+      *out = batcher;
+      return LC_OK;
+    }
+  }
+  batcher = (lc_pouch_state_metadata_append_batcher *)lc_calloc_with_allocator(
+      &pouch->allocator, 1U, sizeof(*batcher));
+  if (batcher == NULL) {
+    (void)pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch metadata append queue", NULL,
+                        NULL, "pouch");
+  }
+  batcher->pouch = pouch;
+  batcher->namespace_name =
+      lc_strdup_with_allocator(&pouch->allocator, namespace_name);
+  if (batcher->namespace_name == NULL) {
+    lc_free_with_allocator(&pouch->allocator, batcher);
+    (void)pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch metadata append namespace",
+                        NULL, NULL, "pouch");
+  }
+  mutex_initialized = 0;
+  cond_initialized = 0;
+  pthread_rc = pthread_mutex_init(&batcher->mutex, NULL);
+  if (pthread_rc == 0) {
+    mutex_initialized = 1;
+    pthread_rc = pthread_cond_init(&batcher->cond, NULL);
+    if (pthread_rc == 0) {
+      cond_initialized = 1;
+      pthread_rc =
+          pthread_create(&batcher->thread, NULL,
+                         lc_pouch_state_metadata_append_worker, batcher);
+    }
+  }
+  if (pthread_rc != 0) {
+    if (cond_initialized) {
+      (void)pthread_cond_destroy(&batcher->cond);
+    }
+    if (mutex_initialized) {
+      (void)pthread_mutex_destroy(&batcher->mutex);
+    }
+    lc_free_with_allocator(&pouch->allocator, batcher->namespace_name);
+    lc_free_with_allocator(&pouch->allocator, batcher);
+    (void)pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to start pouch metadata append queue",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  batcher->next = pouch->state_metadata_append_batchers;
+  pouch->state_metadata_append_batchers = batcher;
+  (void)pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
+  *out = batcher;
+  return LC_OK;
+}
+
+int lc_pouch_state_metadata_append_worker_init(lc_pouch *pouch,
+                                               lc_error *error) {
   int pthread_rc;
 
   if (pouch == NULL) {
@@ -11025,80 +11425,58 @@ int lc_pouch_state_metadata_append_worker_init(lc_pouch *pouch,
                         "pouch metadata append worker requires pouch", NULL,
                         NULL, "pouch");
   }
-  if (pouch->state_metadata_append_batcher != NULL) {
+  if (pouch->state_metadata_append_registry_mutex_initialized) {
     return LC_OK;
   }
-  batcher = (lc_pouch_state_metadata_append_batcher *)lc_calloc_with_allocator(
-      NULL, 1U, sizeof(*batcher));
-  if (batcher == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch metadata append worker", NULL,
-                        NULL, "pouch");
-  }
-  cond_initialized = 0;
-  mutex_initialized = 0;
-  pthread_rc = pthread_mutex_init(&batcher->mutex, NULL);
-  if (pthread_rc == 0) {
-    mutex_initialized = 1;
-  }
-  if (pthread_rc == 0) {
-    pthread_rc = pthread_cond_init(&batcher->cond, NULL);
-    if (pthread_rc == 0) {
-      cond_initialized = 1;
-    }
-  }
-  if (pthread_rc == 0) {
-    batcher->pouch = pouch;
-    pthread_rc = pthread_create(&batcher->thread, NULL,
-                                lc_pouch_state_metadata_append_worker, batcher);
-  }
+  pthread_rc =
+      pthread_mutex_init(&pouch->state_metadata_append_registry_mutex, NULL);
   if (pthread_rc != 0) {
-    if (cond_initialized) {
-      pthread_cond_destroy(&batcher->cond);
-    }
-    if (mutex_initialized) {
-      pthread_mutex_destroy(&batcher->mutex);
-    }
-    lc_free_with_allocator(NULL, batcher);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to start pouch metadata append worker",
+                        "failed to initialize pouch metadata append registry",
                         strerror(pthread_rc), NULL, "pouch");
   }
-  pouch->state_metadata_append_batcher = batcher;
+  pouch->state_metadata_append_registry_mutex_initialized = 1;
   return LC_OK;
 }
 
 void lc_pouch_state_metadata_append_worker_close(lc_pouch *pouch) {
   lc_pouch_state_metadata_append_batcher *batcher;
+  lc_pouch_state_metadata_append_batcher *next;
 
-  if (pouch == NULL || pouch->state_metadata_append_batcher == NULL) {
+  if (pouch == NULL ||
+      !pouch->state_metadata_append_registry_mutex_initialized) {
     return;
   }
-  batcher = pouch->state_metadata_append_batcher;
-  pouch->state_metadata_append_batcher = NULL;
-  pthread_mutex_lock(&batcher->mutex);
-  batcher->stop = 1;
-  pthread_cond_broadcast(&batcher->cond);
-  pthread_mutex_unlock(&batcher->mutex);
-  pthread_join(batcher->thread, NULL);
-  pthread_cond_destroy(&batcher->cond);
-  pthread_mutex_destroy(&batcher->mutex);
-  lc_free_with_allocator(NULL, batcher);
+  pthread_mutex_lock(&pouch->state_metadata_append_registry_mutex);
+  batcher = pouch->state_metadata_append_batchers;
+  pouch->state_metadata_append_batchers = NULL;
+  pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
+  for (next = batcher; next != NULL; next = next->next) {
+    lc_pouch_state_metadata_append_batcher_stop(next);
+  }
+  while (batcher != NULL) {
+    next = batcher->next;
+    lc_pouch_state_metadata_append_batcher_destroy(batcher);
+    batcher = next;
+  }
+  (void)pthread_mutex_destroy(&pouch->state_metadata_append_registry_mutex);
+  pouch->state_metadata_append_registry_mutex_initialized = 0;
 }
 
 static int lc_pouch_state_metadata_append_submit_locked(
     lc_pouch *pouch, lc_pouch_state_metadata_append_request *request,
     lc_error *error) {
   lc_pouch_state_metadata_append_batcher *batcher;
+  lc_pouch_state_metadata_append_request *inline_request[1];
   int pthread_rc;
+  int rc;
 
   if (pouch == NULL || request == NULL ||
-      pouch->state_metadata_append_batcher == NULL) {
+      !pouch->state_metadata_append_registry_mutex_initialized) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch metadata append worker is unavailable", NULL,
                         NULL, "pouch");
   }
-  batcher = pouch->state_metadata_append_batcher;
   pthread_rc = pthread_cond_init(&request->cond, NULL);
   if (pthread_rc != 0) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -11108,9 +11486,24 @@ static int lc_pouch_state_metadata_append_submit_locked(
   request->next = NULL;
   request->done = 0;
   request->rc = LC_OK;
-  /* The caller still owns its key lock. Release only the cache mutex while
-   * this bounded inline batch is appended and published by the worker. */
-  pthread_mutex_unlock(&pouch->state_mutation_mutex);
+  /* Namespace callbacks retain a stronger atomic authority. Their metadata
+   * records must stay on this thread so a worker cannot wait on that authority
+   * while the callback waits for its completion. */
+  if (lc_pouch_state_namespace_lock_is_held(pouch, request->namespace_name)) {
+    inline_request[0] = request;
+    lc_pouch_state_metadata_append_process(pouch, inline_request, 1U, 1);
+    pthread_cond_destroy(&request->cond);
+    return request->rc;
+  }
+  rc = lc_pouch_state_metadata_append_batcher_get(
+      pouch, request->namespace_name, &batcher, error);
+  if (rc != LC_OK) {
+    pthread_cond_destroy(&request->cond);
+    return rc;
+  }
+  /* The caller still owns its exact-key lock. Release projection ownership
+   * while the bounded inline batch is appended and published by the worker. */
+  lc_pouch_state_projection_mutex_unlock(pouch, request->namespace_name);
   pthread_mutex_lock(&batcher->mutex);
   if (batcher->tail != NULL) {
     batcher->tail->next = request;
@@ -11123,12 +11516,11 @@ static int lc_pouch_state_metadata_append_submit_locked(
     pthread_cond_wait(&request->cond, &batcher->mutex);
   }
   pthread_mutex_unlock(&batcher->mutex);
-  pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
+  rc = lc_pouch_state_projection_mutex_lock(pouch, request->namespace_name,
+                                            error);
   pthread_cond_destroy(&request->cond);
-  if (pthread_rc != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to restore pouch mutation state",
-                        strerror(pthread_rc), NULL, "pouch");
+  if (rc != LC_OK) {
+    return rc;
   }
   return request->rc;
 }
@@ -11328,14 +11720,14 @@ int lc_pouch_state_update_metadata_locked(
   memset(&current, 0, sizeof(current));
   memset(&manifest, 0, sizeof(manifest));
   current_is_borrowed = 0;
-  /* Submission releases the exact-key operation's cache mutex while the
-   * worker owns append authority. Namespace-scoped callbacks already hold
-   * namespace authority instead, so they append inline and never unlock a
-   * mutex they do not own. Shared-root key mutations retain their per-key file
-   * lock through the worker and are safe to coalesce with this handle's other
-   * independent keys. */
+  /* Submission releases the exact-key operation's projection ownership while
+   * its namespace worker owns append authority. Namespace-scoped callbacks
+   * already hold stronger namespace authority, so they append inline and
+   * never unlock a mutex they do not own. Shared-root key mutations retain
+   * their per-key file lock through the worker and are safe to coalesce with
+   * this handle's other independent keys. */
   use_metadata_batcher =
-      pouch->state_metadata_append_batcher != NULL &&
+      pouch->state_metadata_append_registry_mutex_initialized &&
       !lc_pouch_state_namespace_lock_is_held(pouch, namespace_name);
   if (use_metadata_batcher && lc_pouch_state_cache_borrow_exclusive_record(
                                   pouch, namespace_name, key, &current)) {
@@ -11390,9 +11782,9 @@ int lc_pouch_state_update_metadata_prepared_locked(
   memset(&options, 0, sizeof(options));
   current_is_borrowed = 0;
   /* See lc_pouch_state_update_metadata_locked: only exact-key operations
-   * transfer their cache mutex to the metadata append worker. */
+   * transfer projection ownership to the metadata append worker. */
   use_metadata_batcher =
-      pouch->state_metadata_append_batcher != NULL &&
+      pouch->state_metadata_append_registry_mutex_initialized &&
       !lc_pouch_state_namespace_lock_is_held(pouch, namespace_name);
   if (use_metadata_batcher && lc_pouch_state_cache_borrow_exclusive_record(
                                   pouch, namespace_name, key, &current)) {

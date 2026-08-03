@@ -2606,6 +2606,14 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         strerror(pthread_rc), NULL, "pouch");
   }
   pouch->state_mutation_mutex_initialized = 1;
+  pthread_rc = pthread_mutex_init(&pouch->state_cache_mutex, NULL);
+  if (pthread_rc != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch state cache mutex",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->state_cache_mutex_initialized = 1;
   pthread_rc = pthread_mutex_init(&pouch->exclusive_append_gate_mutex, NULL);
   if (pthread_rc != 0) {
     lc_pouch_close(pouch);
@@ -2840,6 +2848,9 @@ void lc_pouch_close(lc_pouch *pouch) {
   }
   if (pouch->state_mutation_mutex_initialized) {
     pthread_mutex_destroy(&pouch->state_mutation_mutex);
+  }
+  if (pouch->state_cache_mutex_initialized) {
+    pthread_mutex_destroy(&pouch->state_cache_mutex);
   }
   if (pouch->exclusive_append_gate_mutex_initialized) {
     pthread_mutex_destroy(&pouch->exclusive_append_gate_mutex);

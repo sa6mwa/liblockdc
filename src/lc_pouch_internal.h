@@ -149,15 +149,19 @@ struct lc_pouch {
   int root_identity_initialized;
   pthread_mutex_t state_mutation_mutex;
   int state_mutation_mutex_initialized;
+  pthread_mutex_t state_cache_mutex;
+  int state_cache_mutex_initialized;
   pthread_mutex_t exclusive_key_mutexes[LC_POUCH_EXCLUSIVE_KEY_STRIPE_COUNT];
   size_t exclusive_key_mutex_count;
   pthread_mutex_t exclusive_append_gate_mutex;
   int exclusive_append_gate_mutex_initialized;
   lc_pouch_exclusive_append_gate *exclusive_append_gates;
   lc_pouch_fsync_batcher *fsync_batcher;
-  /* Exclusive metadata mutations submit complete inline records here. The
-   * state implementation owns the worker and keeps streamed bodies direct. */
-  lc_pouch_state_metadata_append_batcher *state_metadata_append_batcher;
+  /* Each observed namespace owns one bounded metadata append queue. The state
+   * implementation owns these workers; streamed bodies stay direct. */
+  pthread_mutex_t state_metadata_append_registry_mutex;
+  int state_metadata_append_registry_mutex_initialized;
+  lc_pouch_state_metadata_append_batcher *state_metadata_append_batchers;
   pthread_mutex_t compaction_mutex;
   pthread_cond_t compaction_cond;
   pthread_t compaction_thread;
@@ -206,6 +210,10 @@ typedef void (*lc_pouch_test_after_acquire_claim_hook_fn)(void *context);
 extern lc_pouch_test_after_acquire_claim_hook_fn
     lc_pouch_test_after_acquire_claim_hook;
 extern void *lc_pouch_test_after_acquire_claim_context;
+typedef void (*lc_pouch_test_metadata_append_hook_fn)(
+    void *context, const char *namespace_name);
+extern lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook;
+extern void *lc_pouch_test_metadata_append_context;
 #endif
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);

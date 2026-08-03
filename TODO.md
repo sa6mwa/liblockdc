@@ -117,18 +117,24 @@ Acceptance:
   namespace's resident projection, active descriptor, and cursor on first use.
 - [x] Route state, lease, object, attachment, queue, and staged-transaction
   mutations through the resident append path. Default-exclusive metadata-only
-  state mutations use a bounded ordered append worker; bounded SDK memory
-  bodies use one complete-record append while all streaming bodies remain
-  direct, and public completion still waits for its own finalized commit
-  result.
+  state mutations use bounded ordered per-namespace append workers; bounded
+  SDK memory bodies use one complete-record append while all streaming bodies
+  remain direct, and public completion still waits for its own finalized
+  commit result.
 - [x] Split resident projection ownership from the physical per-handle/
   namespace appender: ordinary exact-key mutations acquire exact-key ownership
-  before resident projection ownership, then release projection ownership while
-  bounded caller-memory transforms run and while callback/file/fd sources
-  stream into their pending record. The append gate still serializes byte
-  ranges, and final sequence reservation plus projection publication occur
-  under resident state ownership. No path reads a full streaming value into a
-  hidden buffer.
+  and the maintenance read guard before their root-local namespace projection,
+  then release projection ownership while bounded caller-memory transforms run
+  and while callback/file/fd sources stream into their pending record. The
+  append gate still serializes byte ranges, and final sequence reservation plus
+  projection publication occur under that namespace ownership. The cache
+  registry is separately synchronized; the global mutation mutex remains only
+  for explicit shared-root projection. No path reads a full streaming value
+  into a hidden buffer.
+- [x] Make namespace-scoped compound mutations acquire their exclusive append
+  gate before namespace projection and execute nested metadata appends inline.
+  A metadata worker therefore never owns an append gate while waiting for a
+  namespace callback that is waiting for that worker.
 - [x] Match Go disk group-commit scheduling: a durable group waits at most two
   milliseconds or until its maximum request count, deduplicates file syncs,
   and propagates the shared result to every waiting operation.

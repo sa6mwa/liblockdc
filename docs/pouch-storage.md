@@ -1155,27 +1155,33 @@ Required behavior:
 - append small records to that rolling active file. In default exclusive mode,
   complete metadata-only state mutations (including lease acquire, keepalive,
   release, visibility updates, and queue delivery state) enter one resident,
-  bounded append queue per Pouch handle. The queue preserves submission order
-  within a namespace, processes at most 128 records in one append batch,
+  bounded append queue per Pouch handle and namespace. Each queue preserves
+  submission order within its namespace, processes at most 128 records in one
+  append batch,
   publishes each resulting projection entry before its caller is acknowledged,
-  and never accepts a payload source;
+  and never accepts a payload source. A namespace-scoped compound operation
+  already owns stronger namespace authority, so its metadata records execute
+  inline on that caller after it has claimed the namespace append gate; it
+  never waits for a worker that would need the same authority;
 - default-exclusive physical appends use one Pouch-handle/namespace-local gate
-  that is separate from the resident projection mutex. An exact-key mutation
-  first acquires its exact-key and maintenance ownership, then captures its
-  precondition from the projection. A conflicting exact-key wait therefore
-  never occupies resident projection ownership. It waits at the physical gate
-  without retaining the projection mutex. A bounded SDK-memory body hashes and
-  transforms before it claims the gate; a true streaming source claims the
-  gate, writes its pending record directly to the active segment, and releases
-  the projection mutex while source bytes flow. It reacquires the projection
-  only to reserve the final index sequence, finalize the record, and publish
-  the new reference. The exact-key, maintenance, and writer-mode guards remain
-  held throughout. This is Pouch's C implementation of Go disk's namespace
+  that is separate from resident projection ownership. An exact-key mutation
+  takes its maintenance read guard before the root-local namespace projection
+  mutex, then captures its precondition from that namespace's projection. This
+  order is also used by maintenance (write guard, then namespace projection),
+  so recovery cannot invert the two locks. A conflicting exact-key wait
+  therefore never occupies projection ownership. The mutation releases the
+  namespace projection while it waits at the physical gate, while a bounded
+  SDK-memory body transforms, and while a true streaming source writes its
+  pending record directly to the active segment. It reacquires projection only
+  to reserve the final index sequence, finalize the record, and publish the
+  new reference. Exact-key, maintenance, and writer-mode guards remain held
+  throughout. This is Pouch's C implementation of Go disk's namespace
   metadata/write-gate split, not a second writer or a buffered payload path.
   The gate is allocated once per Pouch handle and namespace, survives cache
   invalidation until close, and does not perform a root stat, shared-mode
   process registry lookup, or file-lock operation on a healthy exclusive
-  mutation;
+  mutation. The cache namespace registry has its own short-lived mutex and
+  does not use shared-root mutation ownership;
 - for an SDK-owned `lc_source_from_memory` state or object body no larger than
   64 KiB, Pouch may hash and transform the already-materialized unread range
   in bounded memory, then append one complete finalized record with one
@@ -1194,8 +1200,9 @@ Required behavior:
 - when `durable_sync=1`, group independent commit requests through a
   root-scoped fsync batcher. Direct mutation paths defer active-file syncs
   through duplicate fds held by the current state commit group; the exclusive
-  metadata append queue owns the same sync boundary in its worker, and every
-  waiting public caller drains that result before completion;
+  metadata append queue for each namespace owns the same sync boundary in its
+  worker, and every waiting public caller drains that result before
+  completion;
 - make the finalized active-record header the shared-reader publication point;
   shared readers compare the active file size with their verified offset and
   replay only the new complete tail;
