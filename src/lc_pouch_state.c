@@ -22,6 +22,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 #include <zlib.h>
@@ -3928,12 +3929,13 @@ lc_pouch_state_decode_unix_seconds(uint64_t value) {
   return -1 - (lc_pouch_unix_seconds)(LC_U64_MAX - value);
 }
 
-static int lc_pouch_state_record_write_header(
-    int fd, unsigned char type, const void *key, size_t key_len,
+static int lc_pouch_state_record_header_encode(
+    unsigned char type, const void *key, size_t key_len,
     const unsigned char *meta, size_t meta_len, uint64_t payload_len,
-    unsigned long payload_crc, unsigned long flags, lc_error *error) {
+    unsigned long payload_crc, unsigned long flags,
+    unsigned char encoded[LC_POUCH_STATE_RECORD_HEADER_BYTES],
+    lc_error *error) {
   lc_pouch_record_header header;
-  unsigned char encoded[LC_POUCH_STATE_RECORD_HEADER_BYTES];
 
   if ((key_len > 0U && key == NULL) || (meta_len > 0U && meta == NULL) ||
       key_len > 0xFFFFFFFFUL || meta_len > 0xFFFFFFFFUL) {
@@ -3949,32 +3951,104 @@ static int lc_pouch_state_record_write_header(
   header.payload_len = payload_len;
   header.payload_crc = payload_crc;
   lc_pouch_record_header_encode(&header, encoded);
+  return LC_OK;
+}
+
+static int lc_pouch_state_record_write_header(
+    int fd, unsigned char type, const void *key, size_t key_len,
+    const unsigned char *meta, size_t meta_len, uint64_t payload_len,
+    unsigned long payload_crc, unsigned long flags, lc_error *error) {
+  unsigned char encoded[LC_POUCH_STATE_RECORD_HEADER_BYTES];
+  int rc;
+
+  rc = lc_pouch_state_record_header_encode(type, key, key_len, meta, meta_len,
+                                           payload_len, payload_crc, flags,
+                                           encoded, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   return lc_pouch_state_write_all(fd, encoded, sizeof(encoded), error);
+}
+
+static int lc_pouch_state_writev_all(int fd, const struct iovec *parts,
+                                     int part_count, lc_error *error) {
+  struct iovec pending[3];
+  int pending_count;
+  int index;
+
+  if (parts == NULL || part_count <= 0 || part_count > 3) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch vectored state write requires valid parts", NULL,
+                        NULL, "pouch");
+  }
+  for (index = 0; index < part_count; ++index) {
+    pending[index] = parts[index];
+  }
+  index = 0;
+  pending_count = part_count;
+  while (pending_count > 0) {
+    ssize_t written;
+    size_t consumed;
+
+    written = writev(fd, pending + index, pending_count);
+    if (written < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to write pouch state record", strerror(errno),
+                          NULL, "pouch");
+    }
+    if (written == 0) {
+      errno = EIO;
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to write pouch state record", strerror(errno),
+                          NULL, "pouch");
+    }
+    consumed = (size_t)written;
+    while (pending_count > 0 && consumed >= pending[index].iov_len) {
+      consumed -= pending[index].iov_len;
+      ++index;
+      --pending_count;
+    }
+    if (pending_count > 0 && consumed > 0U) {
+      pending[index].iov_base = (char *)pending[index].iov_base + consumed;
+      pending[index].iov_len -= consumed;
+    }
+  }
+  return LC_OK;
 }
 
 static int lc_pouch_state_record_write_prefix(
     int fd, unsigned char type, const void *key, size_t key_len,
     const unsigned char *meta, size_t meta_len, uint64_t payload_len,
     unsigned long payload_crc, unsigned long flags, lc_error *error) {
+  unsigned char encoded[LC_POUCH_STATE_RECORD_HEADER_BYTES];
+  struct iovec parts[3];
+  int part_count;
   int rc;
 
-  rc = lc_pouch_state_record_write_header(fd, type, key, key_len, meta,
-                                          meta_len, payload_len, payload_crc,
-                                          flags, error);
+  rc = lc_pouch_state_record_header_encode(type, key, key_len, meta, meta_len,
+                                           payload_len, payload_crc, flags,
+                                           encoded, error);
   if (rc != LC_OK) {
     return rc;
   }
-  if (key_len > 0U &&
-      lc_pouch_state_write_all(fd, key, key_len, error) != LC_OK) {
-    return error != NULL && error->code != LC_OK ? error->code
-                                                 : LC_ERR_TRANSPORT;
+  part_count = 0;
+  parts[part_count].iov_base = encoded;
+  parts[part_count].iov_len = sizeof(encoded);
+  ++part_count;
+  if (key_len > 0U) {
+    parts[part_count].iov_base = (void *)key;
+    parts[part_count].iov_len = key_len;
+    ++part_count;
   }
-  if (meta_len > 0U &&
-      lc_pouch_state_write_all(fd, meta, meta_len, error) != LC_OK) {
-    return error != NULL && error->code != LC_OK ? error->code
-                                                 : LC_ERR_TRANSPORT;
+  if (meta_len > 0U) {
+    parts[part_count].iov_base = (void *)meta;
+    parts[part_count].iov_len = meta_len;
+    ++part_count;
   }
-  return LC_OK;
+  return lc_pouch_state_writev_all(fd, parts, part_count, error);
 }
 
 /* Publish the final header last so active-log readers only see complete data.
@@ -3983,6 +4057,8 @@ static int lc_pouch_state_record_finalize(
     int fd, uint64_t record_offset, unsigned char type, const void *key,
     size_t key_len, const unsigned char *meta, size_t meta_len,
     uint64_t payload_len, unsigned long payload_crc, lc_error *error) {
+  struct iovec parts[2];
+  int part_count;
   int rc;
 
   if ((key_len > 0U && key == NULL) || (meta_len > 0U && meta == NULL) ||
@@ -3995,11 +4071,19 @@ static int lc_pouch_state_record_finalize(
   rc = lc_pouch_state_fd_seek(
       fd, record_offset + LC_POUCH_STATE_RECORD_HEADER_BYTES,
       "failed to rewrite pouch state record metadata", error);
-  if (rc == LC_OK && key_len > 0U) {
-    rc = lc_pouch_state_write_all(fd, key, key_len, error);
+  part_count = 0;
+  if (key_len > 0U) {
+    parts[part_count].iov_base = (void *)key;
+    parts[part_count].iov_len = key_len;
+    ++part_count;
   }
-  if (rc == LC_OK && meta_len > 0U) {
-    rc = lc_pouch_state_write_all(fd, meta, meta_len, error);
+  if (meta_len > 0U) {
+    parts[part_count].iov_base = (void *)meta;
+    parts[part_count].iov_len = meta_len;
+    ++part_count;
+  }
+  if (rc == LC_OK && part_count > 0) {
+    rc = lc_pouch_state_writev_all(fd, parts, part_count, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_state_fd_seek(fd, record_offset,
