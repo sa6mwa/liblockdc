@@ -721,8 +721,9 @@ the public API or durable format.
   or I/O invalidation. An exclusive open that cannot obtain ownership fails
   with an actionable error and must not silently use shared-root behavior.
   `lc_pouch_abort` stops Pouch-owned workers and releases the process-bound
-  root lock as a crash would, while retaining the durable heartbeat marker as
-  takeover evidence until it expires.
+  root lock as a crash would. Before that release it closes resident append and
+  source descriptors and clears derived query state, while retaining the
+  durable heartbeat marker as takeover evidence until it expires.
 
 - Post-cutover default HA is active/passive:
   one process owns the root; another process takes over only after clean

@@ -2878,6 +2878,12 @@ int lc_pouch_abort(lc_pouch *pouch, lc_error *error) {
   lc_pouch_compaction_worker_close(pouch);
   lc_pouch_state_metadata_append_worker_close(pouch);
   lc_pouch_fsync_batcher_close(pouch);
+  /* Abort mirrors Go disk logstore close before ownership is released: no
+   * resident append/read descriptor or derived cache may outlive this writer.
+   */
+  lc_pouch_state_cache_cleanup(pouch);
+  lc_pouch_state_source_cache_cleanup(pouch);
+  lc_pouch_query_index_cache_cleanup(pouch);
   lc_pouch_writer_root_lock_release(pouch);
   {
     pslog_field fields[1];

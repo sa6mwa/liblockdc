@@ -4468,6 +4468,8 @@ static void test_pouch_disk_runtime_controls(void **state) {
 
   rc = lc_pouch_abort(writer, &error);
   assert_int_equal(rc, LC_OK);
+  assert_null(writer->namespace_logstores);
+  assert_null(writer->source_cache_entries);
   lc_error_cleanup(&error);
   lc_error_init(&error);
   rc = lc_source_from_memory("after-abort", strlen("after-abort"), &source,

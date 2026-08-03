@@ -222,8 +222,11 @@ Acceptance:
 - [x] Preserve sync foreground operations and the existing background janitor
   contract: maintenance is signaled only after a completed foreground mutation
   and runs outside that operation's completion path.
-- [ ] Close descriptors, stop workers, release ownership, and clean all cache
+- [x] Close descriptors, stop workers, release ownership, and clean all cache
   state correctly on close, abort, failed open, and fork-sensitive test paths.
+  Abort now closes the resident logstore/source/query caches before root-lock
+  release; failed open uses the same close path and fork tests open handles
+  only after forking or execing.
 
 Acceptance:
 

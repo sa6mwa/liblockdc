@@ -258,9 +258,10 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                   lc_error *error);
 void lc_pouch_close(lc_pouch *pouch);
 /**
- * Stops Pouch-owned worker loops and releases its process-bound writer lock.
- * The durable exclusive-writer heartbeat remains as crash fencing until its
- * takeover expiry, so another exclusive opener cannot bypass recovery.
+ * Stops Pouch-owned worker loops, closes resident descriptor and derived-cache
+ * state, and releases its process-bound writer lock. The durable
+ * exclusive-writer heartbeat remains as crash fencing until its takeover
+ * expiry, so another exclusive opener cannot bypass recovery.
  */
 int lc_pouch_abort(lc_pouch *pouch, lc_error *error);
 /** Returns whether this handle uses shared-root mutation coordination. */
