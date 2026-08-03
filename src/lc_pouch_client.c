@@ -169,6 +169,15 @@ typedef struct lc_pouch_release_context {
   lc_pouch_state_write_result write_result;
 } lc_pouch_release_context;
 
+typedef struct lc_pouch_keepalive_context {
+  lc_client_handle *client;
+  const lc_keepalive_op *req;
+  const char *namespace_name;
+  lc_pouch_unix_seconds lease_expires_at_unix;
+  lc_pouch_txn_buffer lease_metadata;
+  lc_pouch_state_write_result write_result;
+} lc_pouch_keepalive_context;
+
 typedef struct lc_pouch_tc_endpoint_list {
   char **items;
   size_t count;
@@ -7462,6 +7471,61 @@ static int lc_pouch_client_validate_lease_key(const lc_lease_ref *lease,
                                              error);
 }
 
+/* Validate the lease against the metadata selected by an exact-key mutation.
+ * This keeps the decision and the following metadata replacement under one
+ * authority in both exclusive and shared-root modes. */
+static int lc_pouch_validate_lease_metadata_view(
+    lc_client_handle *client, const lc_lease_ref *lease,
+    const char *namespace_name, const char *key,
+    const lc_pouch_state_metadata_view *state_view,
+    lc_pouch_lease_record *record, lc_error *error) {
+  const char *lease_txn_id;
+  const char *stored_txn_id;
+  lc_pouch_unix_seconds now_seconds = 0L;
+  int rc;
+
+  if (client == NULL || lease == NULL || namespace_name == NULL ||
+      key == NULL || state_view == NULL || record == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease metadata validation requires context",
+                        NULL, NULL, "pouch");
+  }
+  memset(record, 0, sizeof(*record));
+  if (!lc_pouch_lease_ref_has_credentials(lease)) {
+    return LC_OK;
+  }
+  if (lease->fencing_token <= 0L) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease validation requires fencing_token", NULL,
+                        NULL, NULL);
+  }
+  rc = lc_pouch_lease_record_parse(client, state_view->metadata,
+                                   state_view->metadata_length,
+                                   state_view->version, record, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_now_unix(&now_seconds, error);
+  }
+  if (rc == LC_OK &&
+      (!record->found || strcmp(record->namespace_name, namespace_name) != 0 ||
+       strcmp(record->key, key) != 0 ||
+       strcmp(record->lease_id, lease->lease_id) != 0 ||
+       record->fencing_token != lease->fencing_token ||
+       record->expires_at_unix <= now_seconds)) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch lease validation failed", NULL, NULL, NULL);
+  }
+  lease_txn_id = lease->txn_id != NULL ? lease->txn_id : "";
+  stored_txn_id = record->txn_id != NULL ? record->txn_id : "";
+  if (rc == LC_OK && strcmp(stored_txn_id, lease_txn_id) != 0) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch lease validation failed", NULL, NULL, NULL);
+  }
+  if (rc != LC_OK) {
+    lc_pouch_lease_record_cleanup(record);
+  }
+  return rc;
+}
+
 static int lc_pouch_validate_lease_record(lc_client_handle *client,
                                           const lc_lease_ref *lease,
                                           const char *namespace_name,
@@ -7470,9 +7534,8 @@ static int lc_pouch_validate_lease_record(lc_client_handle *client,
                                           lc_error *error) {
   lc_pouch_lease_record local_record;
   lc_pouch_lease_record *target;
-  const char *lease_txn_id;
-  const char *stored_txn_id;
-  lc_pouch_unix_seconds now_seconds = 0;
+  lc_pouch_state_metadata_view state_view;
+  lc_pouch_state_read_result read_result;
   int rc;
 
   if (!lc_pouch_lease_ref_has_credentials(lease)) {
@@ -7487,37 +7550,31 @@ static int lc_pouch_validate_lease_record(lc_client_handle *client,
                         NULL, NULL);
   }
   memset(&local_record, 0, sizeof(local_record));
+  memset(&read_result, 0, sizeof(read_result));
   target = record != NULL ? record : &local_record;
   memset(target, 0, sizeof(*target));
-  rc = lc_pouch_read_lease_record(client, namespace_name, key, target, error);
-  if (rc != LC_OK) {
-    return rc;
+  rc = lc_pouch_state_read_metadata(client->pouch, namespace_name, key,
+                                    &read_result, error);
+  if (rc == LC_OK) {
+    memset(&state_view, 0, sizeof(state_view));
+    state_view.found = read_result.found;
+    state_view.version = read_result.version;
+    state_view.metadata = read_result.metadata;
+    state_view.metadata_length = read_result.metadata_length;
+    state_view.has_query_hidden = read_result.has_query_hidden;
+    state_view.query_hidden = read_result.query_hidden;
+    rc = lc_pouch_validate_lease_metadata_view(client, lease, namespace_name,
+                                               key, &state_view, target, error);
+    if (rc == LC_OK && target->found) {
+      target->has_query_hidden = read_result.has_query_hidden;
+      target->query_hidden = read_result.query_hidden;
+    }
   }
-  rc = lc_pouch_now_unix(&now_seconds, error);
-  if (rc != LC_OK) {
-    lc_pouch_lease_record_cleanup(target);
-    return rc;
-  }
-  if (!target->found || strcmp(target->namespace_name, namespace_name) != 0 ||
-      strcmp(target->key, key) != 0 ||
-      strcmp(target->lease_id, lease->lease_id) != 0 ||
-      target->fencing_token != lease->fencing_token ||
-      target->expires_at_unix <= now_seconds) {
-    lc_pouch_lease_record_cleanup(target);
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch lease validation failed", NULL, NULL, NULL);
-  }
-  lease_txn_id = lease->txn_id != NULL ? lease->txn_id : "";
-  stored_txn_id = target->txn_id != NULL ? target->txn_id : "";
-  if (strcmp(stored_txn_id, lease_txn_id) != 0) {
-    lc_pouch_lease_record_cleanup(target);
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch lease validation failed", NULL, NULL, NULL);
-  }
-  if (record == NULL) {
+  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  if (rc == LC_OK && record == NULL) {
     lc_pouch_lease_record_cleanup(&local_record);
   }
-  return LC_OK;
+  return rc;
 }
 
 static int lc_pouch_lease_precondition_check(void *context, lc_error *error) {
@@ -10981,16 +11038,16 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
   return rc;
 }
 
+static int lc_pouch_keepalive_locked(void *context, lc_error *error);
+
 int lc_pouch_client_keepalive_method(lc_client *self,
                                      const lc_keepalive_op *req,
                                      lc_keepalive_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_pouch_state_read_result read_result;
-  lc_pouch_state_write_result lease_write_result;
-  lc_pouch_lease_record lease_record;
+  lc_pouch_keepalive_context keepalive_context;
   const char *namespace_name = NULL;
   lc_pouch_unix_seconds lease_expires_at_unix = 0;
-  char *state_etag;
+  char *state_etag = NULL;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -11017,50 +11074,119 @@ int lc_pouch_client_keepalive_method(lc_client *self,
   if (rc != LC_OK) {
     return rc;
   }
-  memset(&read_result, 0, sizeof(read_result));
-  memset(&lease_write_result, 0, sizeof(lease_write_result));
+  memset(&keepalive_context, 0, sizeof(keepalive_context));
+  keepalive_context.client = client;
+  keepalive_context.req = req;
+  keepalive_context.namespace_name = namespace_name;
+  keepalive_context.lease_expires_at_unix = lease_expires_at_unix;
+  rc = lc_pouch_state_with_key_lock(client->pouch, namespace_name,
+                                    req->lease.key, lc_pouch_keepalive_locked,
+                                    &keepalive_context, error);
+  if (rc == LC_OK && keepalive_context.write_result.etag != NULL) {
+    state_etag = lc_strdup_local(keepalive_context.write_result.etag);
+  }
+  if (rc == LC_OK && keepalive_context.write_result.etag != NULL &&
+      state_etag == NULL) {
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to allocate pouch keepalive state etag", NULL,
+                      NULL, NULL);
+  }
+  if (rc == LC_OK) {
+    memset(out, 0, sizeof(*out));
+    out->lease_expires_at_unix = lease_expires_at_unix;
+    rc = lc_pouch_generation_to_version(keepalive_context.write_result.version,
+                                        &out->version, error);
+  }
+  if (rc == LC_OK) {
+    out->state_etag = state_etag;
+    state_etag = NULL;
+  }
+  lc_free_with_allocator(NULL, state_etag);
+  lc_pouch_txn_buffer_cleanup(&keepalive_context.lease_metadata);
+  lc_pouch_state_write_result_cleanup(&client->allocator,
+                                      &keepalive_context.write_result);
+  return rc;
+}
+
+static int lc_pouch_keepalive_prepare_metadata(
+    const lc_pouch_state_metadata_view *state_view, void *context,
+    lc_pouch_state_write_options *options, int *apply, lc_error *error) {
+  lc_pouch_keepalive_context *ctx;
+  lc_pouch_lease_record lease_record;
+  int rc;
+
+  ctx = (lc_pouch_keepalive_context *)context;
+  if (ctx == NULL || ctx->client == NULL || ctx->req == NULL ||
+      ctx->namespace_name == NULL || state_view == NULL || options == NULL ||
+      apply == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch keepalive metadata preparation requires context",
+                        NULL, NULL, "pouch");
+  }
   memset(&lease_record, 0, sizeof(lease_record));
-  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
-                                      req->lease.key, &lease_record, error);
-  if (rc != LC_OK) {
-    return rc;
+  memset(options, 0, sizeof(*options));
+  *apply = 1;
+  rc = lc_pouch_validate_lease_metadata_view(
+      ctx->client, &ctx->req->lease, ctx->namespace_name, ctx->req->lease.key,
+      state_view, &lease_record, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_bytes(
+        &ctx->lease_metadata, LC_POUCH_LEASE_RECORD_MAGIC,
+        strlen(LC_POUCH_LEASE_RECORD_MAGIC), error);
   }
-  rc = lc_pouch_write_lease_record(
-      client, namespace_name, req->lease.key, lease_record.owner,
-      lease_record.lease_id, lease_record.txn_id, lease_record.fencing_token,
-      lease_expires_at_unix, lease_record.version, &lease_write_result, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata,
+                                           ctx->namespace_name, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata,
+                                           ctx->req->lease.key, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata,
+                                           lease_record.owner, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata,
+                                           lease_record.lease_id, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata,
+                                           lease_record.txn_id, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_i64(
+        &ctx->lease_metadata, (int64_t)lease_record.fencing_token, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_i64(&ctx->lease_metadata,
+                                        ctx->lease_expires_at_unix, error);
+  }
+  if (rc == LC_OK) {
+    options->content_type = LC_POUCH_LEASE_CONTENT_TYPE;
+    options->has_expected_version = lease_record.version > 0UL;
+    options->expected_version = lease_record.version;
+    options->has_metadata = 1;
+    options->metadata = (const unsigned char *)ctx->lease_metadata.bytes;
+    options->metadata_length = ctx->lease_metadata.length;
+  }
   lc_pouch_lease_record_cleanup(&lease_record);
-  lc_pouch_state_write_result_cleanup(&client->allocator, &lease_write_result);
-  if (rc != LC_OK) {
-    return rc;
+  return rc;
+}
+
+static int lc_pouch_keepalive_locked(void *context, lc_error *error) {
+  lc_pouch_keepalive_context *ctx;
+
+  ctx = (lc_pouch_keepalive_context *)context;
+  if (ctx == NULL || ctx->client == NULL || ctx->req == NULL ||
+      ctx->namespace_name == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch keepalive lock requires context", NULL, NULL,
+                        NULL);
   }
-  rc = lc_pouch_state_read_metadata(client->pouch, namespace_name,
-                                    req->lease.key, &read_result, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  state_etag =
-      read_result.etag != NULL ? lc_strdup_local(read_result.etag) : NULL;
-  if (read_result.etag != NULL && state_etag == NULL) {
-    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch keepalive state etag", NULL,
-                        NULL, NULL);
-  }
-  memset(out, 0, sizeof(*out));
-  out->lease_expires_at_unix = lease_expires_at_unix;
-  if (read_result.found) {
-    rc = lc_pouch_generation_to_version(read_result.version, &out->version,
-                                        error);
-    if (rc != LC_OK) {
-      lc_free_with_allocator(NULL, state_etag);
-      lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
-      return rc;
-    }
-  }
-  out->state_etag = state_etag;
-  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
-  return LC_OK;
+  return lc_pouch_state_update_metadata_prepared_locked(
+      ctx->client->pouch, ctx->namespace_name, ctx->req->lease.key,
+      lc_pouch_keepalive_prepare_metadata, ctx, &ctx->write_result, error);
 }
 
 static int lc_pouch_release_prepare_metadata(
@@ -11068,9 +11194,6 @@ static int lc_pouch_release_prepare_metadata(
     lc_pouch_state_write_options *options, int *apply, lc_error *error) {
   lc_pouch_release_context *ctx;
   lc_pouch_lease_record lease_record;
-  const char *lease_txn_id;
-  const char *stored_txn_id;
-  lc_pouch_unix_seconds now_seconds = 0L;
   int rc;
 
   ctx = (lc_pouch_release_context *)context;
@@ -11081,36 +11204,12 @@ static int lc_pouch_release_prepare_metadata(
                         "pouch release metadata preparation requires context",
                         NULL, NULL, "pouch");
   }
-  if (ctx->req->lease.fencing_token <= 0L) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch lease validation requires fencing_token", NULL,
-                        NULL, NULL);
-  }
   memset(&lease_record, 0, sizeof(lease_record));
   memset(options, 0, sizeof(*options));
   *apply = 1;
-  rc = lc_pouch_lease_record_parse(ctx->client, state_view->metadata,
-                                   state_view->metadata_length,
-                                   state_view->version, &lease_record, error);
-  if (rc == LC_OK) {
-    rc = lc_pouch_now_unix(&now_seconds, error);
-  }
-  if (rc == LC_OK &&
-      (!lease_record.found ||
-       strcmp(lease_record.namespace_name, ctx->namespace_name) != 0 ||
-       strcmp(lease_record.key, ctx->req->lease.key) != 0 ||
-       strcmp(lease_record.lease_id, ctx->req->lease.lease_id) != 0 ||
-       lease_record.fencing_token != ctx->req->lease.fencing_token ||
-       lease_record.expires_at_unix <= now_seconds)) {
-    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch lease validation failed", NULL, NULL, NULL);
-  }
-  lease_txn_id = ctx->req->lease.txn_id != NULL ? ctx->req->lease.txn_id : "";
-  stored_txn_id = lease_record.txn_id != NULL ? lease_record.txn_id : "";
-  if (rc == LC_OK && strcmp(stored_txn_id, lease_txn_id) != 0) {
-    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch lease validation failed", NULL, NULL, NULL);
-  }
+  rc = lc_pouch_validate_lease_metadata_view(
+      ctx->client, &ctx->req->lease, ctx->namespace_name, ctx->req->lease.key,
+      state_view, &lease_record, error);
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_bytes(
         &ctx->lease_metadata, LC_POUCH_LEASE_RECORD_MAGIC,
