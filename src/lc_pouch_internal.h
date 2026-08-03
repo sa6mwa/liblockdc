@@ -144,6 +144,9 @@ struct lc_pouch {
   int writer_presence_cond_initialized;
   int writer_presence_thread_started;
   int writer_presence_stop;
+  uint64_t root_device;
+  uint64_t root_inode;
+  int root_identity_initialized;
   pthread_mutex_t state_mutation_mutex;
   int state_mutation_mutex_initialized;
   pthread_mutex_t exclusive_key_mutexes[LC_POUCH_EXCLUSIVE_KEY_STRIPE_COUNT];

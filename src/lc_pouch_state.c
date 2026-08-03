@@ -580,47 +580,46 @@ void lc_pouch_state_exclusive_append_gates_cleanup(lc_pouch *pouch) {
   }
 }
 
-static int lc_pouch_state_process_mutex_identity(const char *root_path,
+static int lc_pouch_state_process_mutex_identity(lc_pouch *pouch,
                                                  const char *namespace_name,
                                                  char **out, lc_error *error) {
-  struct stat st;
-  char root_identity[128];
-  int root_identity_len;
+  char root_identity[34];
+  char device_hex[17];
+  char inode_hex[17];
   size_t namespace_len;
   char *identity;
 
-  if (root_path == NULL || namespace_name == NULL || out == NULL) {
+  if (pouch == NULL || namespace_name == NULL || out == NULL ||
+      !pouch->root_identity_initialized) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch namespace mutex identity requires root, "
+                        "pouch namespace mutex identity requires pouch, "
                         "namespace, and output",
                         NULL, NULL, NULL);
   }
   *out = NULL;
-  if (stat(root_path, &st) != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to stat pouch root for namespace mutex",
-                        strerror(errno), NULL, "pouch");
-  }
-  root_identity_len =
-      snprintf(root_identity, sizeof(root_identity), "%lu:%lu",
-               (unsigned long)st.st_dev, (unsigned long)st.st_ino);
-  if (root_identity_len < 0 ||
-      (size_t)root_identity_len >= sizeof(root_identity)) {
+  if (lc_u64_format_base16_padded((lc_u64)pouch->root_device, 16U, device_hex,
+                                  sizeof(device_hex)) < 0 ||
+      lc_u64_format_base16_padded((lc_u64)pouch->root_inode, 16U, inode_hex,
+                                  sizeof(inode_hex)) < 0) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch namespace mutex identity is too large", NULL,
                         NULL, "pouch");
   }
+  memcpy(root_identity, device_hex, 16U);
+  root_identity[16] = ':';
+  memcpy(root_identity + 17U, inode_hex, 16U);
+  root_identity[33] = '\0';
   namespace_len = strlen(namespace_name);
-  identity = (char *)lc_alloc_with_allocator(NULL, (size_t)root_identity_len +
-                                                       namespace_len + 2U);
+  identity = (char *)lc_alloc_with_allocator(NULL, sizeof(root_identity) +
+                                                       namespace_len + 1U);
   if (identity == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch namespace mutex identity",
                         NULL, NULL, NULL);
   }
-  memcpy(identity, root_identity, (size_t)root_identity_len);
-  identity[root_identity_len] = '\n';
-  memcpy(identity + root_identity_len + 1U, namespace_name, namespace_len + 1U);
+  memcpy(identity, root_identity, sizeof(root_identity) - 1U);
+  identity[sizeof(root_identity) - 1U] = '\n';
+  memcpy(identity + sizeof(root_identity), namespace_name, namespace_len + 1U);
   *out = identity;
   return LC_OK;
 }
@@ -643,8 +642,8 @@ static int lc_pouch_state_process_namespace_mutex_lock(
   }
   *out = NULL;
   identity = NULL;
-  rc = lc_pouch_state_process_mutex_identity(pouch->root_path, namespace_name,
-                                             &identity, error);
+  rc = lc_pouch_state_process_mutex_identity(pouch, namespace_name, &identity,
+                                             error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -735,8 +734,8 @@ static int lc_pouch_state_process_namespace_guard_lock(
   }
   *out = NULL;
   identity = NULL;
-  rc = lc_pouch_state_process_mutex_identity(pouch->root_path, namespace_name,
-                                             &identity, error);
+  rc = lc_pouch_state_process_mutex_identity(pouch, namespace_name, &identity,
+                                             error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -1933,27 +1932,31 @@ static int lc_pouch_state_key_mutation_begin(lc_pouch *pouch,
   if (rc != LC_OK) {
     return rc;
   }
+  /* Exact-key ownership is independent of the resident projection. Take it
+   * first so a conflicting key/file lock never occupies the short projection
+   * mutex; this also gives maintenance a clear key/namespace barrier. */
+  rc = lc_pouch_state_key_lock_acquire(pouch, namespace_name, key, lock, error);
+  if (rc != LC_OK) {
+    lc_pouch_writer_mode_operation_end(pouch);
+    return rc;
+  }
   pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
   if (pthread_rc != 0) {
+    lc_pouch_state_key_lock_release(lock);
     lc_pouch_writer_mode_operation_end(pouch);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to lock pouch mutation state",
                         strerror(pthread_rc), NULL, "pouch");
   }
-  rc = lc_pouch_state_key_lock_acquire(pouch, namespace_name, key, lock, error);
-  if (rc != LC_OK) {
-    pthread_mutex_unlock(&pouch->state_mutation_mutex);
-    lc_pouch_writer_mode_operation_end(pouch);
-  }
-  return rc;
+  return LC_OK;
 }
 
 static void lc_pouch_state_key_mutation_end(lc_pouch *pouch,
                                             lc_pouch_state_key_lock *lock) {
-  lc_pouch_state_key_lock_release(lock);
   if (pouch != NULL && pouch->state_mutation_mutex_initialized) {
     pthread_mutex_unlock(&pouch->state_mutation_mutex);
   }
+  lc_pouch_state_key_lock_release(lock);
   lc_pouch_writer_mode_operation_end(pouch);
 }
 

@@ -2556,6 +2556,7 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
   int pthread_rc;
   int rc;
   size_t key_mutex_index;
+  struct stat root_stat;
 
   if (root_path == NULL || root_path[0] == '\0' || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -2730,6 +2731,15 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     lc_pouch_close(pouch);
     return rc;
   }
+  if (stat(pouch->root_path, &root_stat) != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to identify pouch root", strerror(errno), NULL,
+                        "pouch");
+  }
+  pouch->root_device = (uint64_t)root_stat.st_dev;
+  pouch->root_inode = (uint64_t)root_stat.st_ino;
+  pouch->root_identity_initialized = 1;
   lc_pouch_configure_filesystem_capabilities(pouch);
   if (pouch->durable_sync) {
     rc = lc_pouch_fsync_batcher_init(pouch, error);

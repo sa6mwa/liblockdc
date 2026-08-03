@@ -17028,10 +17028,8 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
     memset(&options, 0, sizeof(options));
     memset(&write_result, 0, sizeof(write_result));
     state_key = lc_pouch_lease_state_storage_key(lease);
-    rc = lc_pouch_lease_validate_private_read(lease, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
+    /* The write precondition validates this lease from the resident record
+     * while the exact key is owned. Do not add a stale pre-read before it. */
     options.content_type = opts != NULL && opts->content_type != NULL
                                ? opts->content_type
                                : "application/json";
@@ -17307,10 +17305,8 @@ int lc_pouch_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
       }
       options.has_expected_version = 1;
     }
-    rc = lc_pouch_lease_validate_private_read(lease, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
+    /* Metadata mutation performs the same lease validation under its exact
+     * key authority; a pre-read would only duplicate resident lookup work. */
     lc_lease_ref_init(&lease_ref);
     lease_ref.namespace_name = lease->namespace_name;
     lease_ref.key = lease->key;
@@ -17406,10 +17402,7 @@ int lc_pouch_lease_remove_method(lc_lease *self, const lc_remove_req *req,
       }
       options.has_expected_version = 1;
     }
-    rc = lc_pouch_lease_validate_private_read(lease, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
+    /* Delete validates the lease through this in-lock precondition. */
     lc_lease_ref_init(&lease_ref);
     lease_ref.namespace_name = lease->namespace_name;
     lease_ref.key = lease->key;

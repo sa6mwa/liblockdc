@@ -227,8 +227,10 @@ Implementation obligations:
   can grant conflicting shared-root leases when a metadata-only record has
   generation zero, renew an expired or replaced delivery lease, or clear a
   newer delivery lease;
-- update/mutate validates the target metadata lease before staging or writing
-  state;
+- update/mutate, metadata, and delete validate the target metadata lease once
+  from the resident projection while exact-key mutation authority is held,
+  before staging or writing state. They do not pre-read the lease and then
+  validate it again in the mutation path;
 - metadata CAS must use etag/generation behavior matching Go disk for missing
   keys, stale etags, pending same-group writes, and conflicting pending writes;
 - projections cache hot lease and summary fields so lock paths do not parse
@@ -1157,10 +1159,12 @@ Required behavior:
   within a namespace, processes at most 128 records in one append batch,
   publishes each resulting projection entry before its caller is acknowledged,
   and never accepts a payload source;
-- default-exclusive physical appends use one root/namespace-local gate that is
-  separate from the resident projection mutex. An exact-key mutation captures
-  its precondition from the projection, then waits at that gate without
-  retaining the projection mutex. A bounded SDK-memory body hashes and
+- default-exclusive physical appends use one Pouch-handle/namespace-local gate
+  that is separate from the resident projection mutex. An exact-key mutation
+  first acquires its exact-key and maintenance ownership, then captures its
+  precondition from the projection. A conflicting exact-key wait therefore
+  never occupies resident projection ownership. It waits at the physical gate
+  without retaining the projection mutex. A bounded SDK-memory body hashes and
   transforms before it claims the gate; a true streaming source claims the
   gate, writes its pending record directly to the active segment, and releases
   the projection mutex while source bytes flow. It reacquires the projection

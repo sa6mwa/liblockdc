@@ -121,8 +121,9 @@ Acceptance:
   bodies use one complete-record append while all streaming bodies remain
   direct, and public completion still waits for its own finalized commit
   result.
-- [x] Split resident projection ownership from the physical root/namespace
-  appender: ordinary exact-key mutations release projection ownership while
+- [x] Split resident projection ownership from the physical per-handle/
+  namespace appender: ordinary exact-key mutations acquire exact-key ownership
+  before resident projection ownership, then release projection ownership while
   bounded caller-memory transforms run and while callback/file/fd sources
   stream into their pending record. The append gate still serializes byte
   ranges, and final sequence reservation plus projection publication occur
@@ -216,8 +217,11 @@ Acceptance:
 
 - [ ] Delete per-mutation manifest scan/reopen/tail-repair behavior from the
   exclusive path.
-- [ ] Delete duplicate lease validation reads where mutation authority already
-  holds the target-key lock and cached projection.
+- [x] Delete duplicate lease validation reads where mutation authority already
+  holds the target-key lock and cached projection. Queue-state lease update,
+  metadata, and delete now validate only through their exact-key mutation
+  precondition; private describe/get/load retain their required read-time
+  validation.
 - [ ] Delete tests, comments, benchmark assumptions, and diagnostics that
   define shared-root work as the ordinary default write path.
 - [ ] Do not keep an unused compatibility implementation after the cutover.
