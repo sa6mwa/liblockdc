@@ -149,6 +149,16 @@ typedef struct pouch_mode_transition_context {
   lc_error transition_error;
 } pouch_mode_transition_context;
 
+typedef struct pouch_maintenance_barrier_context {
+  lc_pouch *pouch;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+  int started;
+  int finished;
+  int rc;
+  lc_error error;
+} pouch_maintenance_barrier_context;
+
 static const lonejson_field pouch_value_fields[] = {
     LONEJSON_FIELD_I64(pouch_value_doc, value, "value")};
 
@@ -284,6 +294,33 @@ static void *pouch_mode_transition_change_mode(void *context) {
   transition->transition_finished = 1;
   (void)pthread_cond_broadcast(&transition->cond);
   (void)pthread_mutex_unlock(&transition->mutex);
+  return NULL;
+}
+
+static void *pouch_maintenance_wait_for_key(void *context) {
+  pouch_maintenance_barrier_context *maintenance;
+  lc_pouch_maintenance_options options;
+
+  maintenance = (pouch_maintenance_barrier_context *)context;
+  memset(&options, 0, sizeof(options));
+  options.namespace_name = "default";
+  options.cleanup_only = 1;
+  lc_error_init(&maintenance->error);
+  if (pthread_mutex_lock(&maintenance->mutex) != 0) {
+    maintenance->rc = LC_ERR_TRANSPORT;
+    return NULL;
+  }
+  maintenance->started = 1;
+  (void)pthread_cond_broadcast(&maintenance->cond);
+  (void)pthread_mutex_unlock(&maintenance->mutex);
+  maintenance->rc = lc_pouch_maintenance_run(maintenance->pouch, &options, NULL,
+                                             &maintenance->error);
+  if (pthread_mutex_lock(&maintenance->mutex) != 0) {
+    return NULL;
+  }
+  maintenance->finished = 1;
+  (void)pthread_cond_broadcast(&maintenance->cond);
+  (void)pthread_mutex_unlock(&maintenance->mutex);
   return NULL;
 }
 
@@ -3663,6 +3700,85 @@ test_single_writer_transition_waits_for_active_append_operation(void **state) {
   lc_error_cleanup(&transition.key_lock_error);
   assert_int_equal(pthread_cond_destroy(&transition.cond), 0);
   assert_int_equal(pthread_mutex_destroy(&transition.mutex), 0);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_maintenance_waits_for_active_key_operation(void **state) {
+  lc_pouch *pouch;
+  pouch_mode_transition_context key_operation;
+  pouch_maintenance_barrier_context maintenance;
+  pthread_t key_thread;
+  pthread_t maintenance_thread;
+  struct timespec deadline;
+  lc_error error;
+  char root[512];
+  int wait_rc;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  memset(&key_operation, 0, sizeof(key_operation));
+  memset(&maintenance, 0, sizeof(maintenance));
+  lc_error_init(&error);
+  make_root("maintenance-key-barrier", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  key_operation.pouch = pouch;
+  maintenance.pouch = pouch;
+  assert_int_equal(pthread_mutex_init(&key_operation.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&key_operation.cond, NULL), 0);
+  assert_int_equal(pthread_mutex_init(&maintenance.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&maintenance.cond, NULL), 0);
+  assert_int_equal(pthread_create(&key_thread, NULL,
+                                  pouch_mode_transition_hold_key,
+                                  &key_operation),
+                   0);
+  assert_int_equal(pthread_mutex_lock(&key_operation.mutex), 0);
+  while (!key_operation.key_lock_entered) {
+    assert_int_equal(
+        pthread_cond_wait(&key_operation.cond, &key_operation.mutex), 0);
+  }
+  assert_int_equal(pthread_mutex_unlock(&key_operation.mutex), 0);
+  assert_int_equal(pthread_create(&maintenance_thread, NULL,
+                                  pouch_maintenance_wait_for_key, &maintenance),
+                   0);
+  assert_int_equal(pthread_mutex_lock(&maintenance.mutex), 0);
+  while (!maintenance.started) {
+    assert_int_equal(pthread_cond_wait(&maintenance.cond, &maintenance.mutex),
+                     0);
+  }
+  assert_int_equal(clock_gettime(CLOCK_REALTIME, &deadline), 0);
+  deadline.tv_nsec += 100L * 1000L * 1000L;
+  if (deadline.tv_nsec >= 1000000000L) {
+    deadline.tv_sec += 1;
+    deadline.tv_nsec -= 1000000000L;
+  }
+  wait_rc = 0;
+  while (!maintenance.finished && wait_rc == 0) {
+    wait_rc = pthread_cond_timedwait(&maintenance.cond, &maintenance.mutex,
+                                     &deadline);
+  }
+  assert_int_equal(wait_rc, ETIMEDOUT);
+  assert_false(maintenance.finished);
+  assert_int_equal(pthread_mutex_unlock(&maintenance.mutex), 0);
+  assert_int_equal(pthread_mutex_lock(&key_operation.mutex), 0);
+  key_operation.allow_key_lock_exit = 1;
+  assert_int_equal(pthread_cond_broadcast(&key_operation.cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&key_operation.mutex), 0);
+  assert_int_equal(pthread_join(key_thread, NULL), 0);
+  assert_int_equal(pthread_join(maintenance_thread, NULL), 0);
+  assert_int_equal(key_operation.key_lock_rc, LC_OK);
+  assert_int_equal(maintenance.rc, LC_OK);
+  lc_error_cleanup(&maintenance.error);
+  lc_error_cleanup(&key_operation.key_lock_error);
+  assert_int_equal(pthread_cond_destroy(&maintenance.cond), 0);
+  assert_int_equal(pthread_mutex_destroy(&maintenance.mutex), 0);
+  assert_int_equal(pthread_cond_destroy(&key_operation.cond), 0);
+  assert_int_equal(pthread_mutex_destroy(&key_operation.mutex), 0);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -21261,6 +21377,7 @@ int main(void) {
       cmocka_unit_test(test_single_writer_runtime_control_and_ha_probe),
       cmocka_unit_test(
           test_single_writer_transition_waits_for_active_append_operation),
+      cmocka_unit_test(test_maintenance_waits_for_active_key_operation),
       cmocka_unit_test(test_pouch_disk_runtime_controls),
       cmocka_unit_test(test_pouch_durable_sync_policy),
       cmocka_unit_test(test_pouch_durable_sync_batches_parallel_writes),

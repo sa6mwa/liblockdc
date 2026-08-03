@@ -184,9 +184,9 @@ Acceptance:
 
 ### 4. Maintenance, Recovery, And Resource Lifecycle
 
-- [ ] Make compaction/retention take a writer epoch or maintenance barrier,
-  drain affected append work, capture/validate/install, then invalidate only
-  changed namespace resources.
+- [x] Make compaction/retention take the writer-mode and namespace-maintenance
+  barriers, drain affected key/append work, capture/validate/install, then
+  invalidate only changed namespace resources.
 - [ ] Tail repair is a takeover/recovery operation. Do not invoke it on a
   healthy resident exclusive append path.
 - [ ] Preserve sync foreground operations and the existing background janitor
