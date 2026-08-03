@@ -4890,6 +4890,57 @@ test_parallel_state_writes_keep_query_projection_consistent(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_shared_query_index_flush_retires_pending_projection(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_source *source;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_query_index_flush_result flush_result;
+  lc_pouch_generation state_index_seq;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_error_init(&error);
+  make_root("shared-query-pending-retire", root, sizeof(root));
+  cleanup_root(root);
+
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "query-pending/shared", source,
+                            NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  state_index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(pouch, "default", &state_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(lc_pouch_query_index_has_pending(pouch, "default"));
+  rc = lc_pouch_query_index_flush(pouch, "default", state_index_seq,
+                                  &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, state_index_seq);
+  assert_false(lc_pouch_query_index_has_pending(pouch, "default"));
+
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_parallel_query_flush_preserves_later_write(void **state) {
   lc_pouch *pouch;
   lc_source *source;
@@ -5218,7 +5269,9 @@ static void test_exclusive_writer_probe_heartbeat_precedence(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(
       snprintf(directory, sizeof(directory), "%s/exclusive-writers", root) > 0);
-  assert_int_equal(mkdir(directory, 0777), 0);
+  /* Opening the default exclusive writer creates this directory. */
+  rc = mkdir(directory, 0777);
+  assert_true(rc == 0 || (rc == -1 && errno == EEXIST));
   assert_true(
       snprintf(marker, sizeof(marker), "%s/foreign.presence", directory) > 0);
 
@@ -16648,8 +16701,8 @@ test_client_queue_watch_detects_peer_transaction_ack_commit(void **state) {
   make_root("client-queue-watch-peer-txn", root, sizeof(root));
   cleanup_root(root);
 
-  open_pouch_client(root, &watcher, &error);
-  open_pouch_client(root, &actor, &error);
+  open_pouch_client_shared(root, &watcher, &error);
+  open_pouch_client_shared(root, &actor, &error);
   enqueue_req.queue = "watch-peer-txn";
   enqueue_req.visibility_timeout_seconds = 120L;
   rc = lc_source_from_memory("watch-peer-txn", strlen("watch-peer-txn"),
@@ -21508,6 +21561,7 @@ static void test_query_documents_index_uses_scalar_postings(void **state) {
 static void test_flush_index_reports_projection_high_water(void **state) {
   lc_client *client;
   lc_pouch *writer;
+  lc_pouch_open_options shared_options;
   lc_source *source;
   lc_pouch_state_write_options hidden_options;
   lc_pouch_state_write_result write_result;
@@ -21542,6 +21596,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   source = NULL;
   namespace_path = NULL;
   memset(&hidden_options, 0, sizeof(hidden_options));
+  memset(&shared_options, 0, sizeof(shared_options));
   memset(&write_result, 0, sizeof(write_result));
   memset(&live_result, 0, sizeof(live_result));
   memset(&hidden_result, 0, sizeof(hidden_result));
@@ -21559,9 +21614,11 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   handler.end = pouch_query_key_end;
   make_root("flush-index", root, sizeof(root));
   cleanup_root(root);
+  shared_options.single_writer_set = 1;
+  shared_options.single_writer = 0;
 
-  open_pouch_client(root, &client, &error);
-  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  open_pouch_client_shared(root, &client, &error);
+  rc = lc_pouch_open(root, NULL, &shared_options, &writer, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("{\"kind\":\"flush\",\"n\":1}",
                              strlen("{\"kind\":\"flush\",\"n\":1}"), &source,
@@ -21730,12 +21787,12 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   lc_query_res_cleanup(&query_res);
   lc_client_close(client);
   client = NULL;
-  open_pouch_client(root, &client, &error);
+  open_pouch_client_shared(root, &client, &error);
 
   newest_query_index_path(namespace_path, "query.index.lcpdtg", doc_table_path,
                           sizeof(doc_table_path));
   write_text_file(doc_table_path, "broken\n");
-  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  rc = lc_pouch_open(root, NULL, &shared_options, &writer, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("{\"kind\":\"flush\",\"n\":4}",
                              strlen("{\"kind\":\"flush\",\"n\":4}"), &source,
@@ -21820,6 +21877,7 @@ test_flush_index_external_accept_invalidates_cached_summary(void **state) {
   lc_client *cached_client;
   lc_client *external_client;
   lc_pouch *writer;
+  lc_pouch_open_options shared_options;
   lc_index_flush_req flush_req;
   lc_index_flush_res flush_res;
   lc_query_req query_req;
@@ -21836,6 +21894,7 @@ test_flush_index_external_accept_invalidates_cached_summary(void **state) {
   external_client = NULL;
   writer = NULL;
   namespace_path = NULL;
+  memset(&shared_options, 0, sizeof(shared_options));
   lc_index_flush_req_init(&flush_req);
   memset(&flush_res, 0, sizeof(flush_res));
   lc_query_req_init(&query_req);
@@ -21845,9 +21904,11 @@ test_flush_index_external_accept_invalidates_cached_summary(void **state) {
   lc_error_init(&error);
   make_root("flush-index-external-accept", root, sizeof(root));
   cleanup_root(root);
+  shared_options.single_writer_set = 1;
+  shared_options.single_writer = 0;
 
-  open_pouch_client(root, &cached_client, &error);
-  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  open_pouch_client_shared(root, &cached_client, &error);
+  rc = lc_pouch_open(root, NULL, &shared_options, &writer, &error);
   assert_int_equal(rc, LC_OK);
   pouch_write_json_state(writer, "docs/external-accept", "doc/a",
                          "{\"category\":\"alpha\"}", NULL, &error);
@@ -21861,14 +21922,14 @@ test_flush_index_external_accept_invalidates_cached_summary(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_index_flush_res_cleanup(&flush_res);
 
-  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  rc = lc_pouch_open(root, NULL, &shared_options, &writer, &error);
   assert_int_equal(rc, LC_OK);
   pouch_write_json_state(writer, "docs/external-accept", "doc/b",
                          "{\"category\":\"beta\"}", NULL, &error);
   lc_pouch_close(writer);
   writer = NULL;
 
-  open_pouch_client(root, &external_client, &error);
+  open_pouch_client_shared(root, &external_client, &error);
   flush_req.mode = "sync";
   rc = external_client->flush_index(external_client, &flush_req, &flush_res,
                                     &error);
@@ -21882,7 +21943,7 @@ test_flush_index_external_accept_invalidates_cached_summary(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_index_flush_res_cleanup(&flush_res);
 
-  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  rc = lc_pouch_open(root, NULL, &shared_options, &writer, &error);
   assert_int_equal(rc, LC_OK);
   pouch_write_json_state(writer, "docs/external-accept", "doc/c",
                          "{\"category\":\"gamma\"}", NULL, &error);
@@ -22323,6 +22384,7 @@ test_flush_index_rebuilds_incomplete_summary_after_document_fix(void **state) {
       "{\"eq\":{\"field\":\"/category\",\"value\":\"fixed\"}}";
   lc_client *client;
   lc_pouch *writer;
+  lc_pouch_open_options shared_options;
   lc_index_flush_req flush_req;
   lc_index_flush_res flush_res;
   lc_query_req query_req;
@@ -22338,6 +22400,7 @@ test_flush_index_rebuilds_incomplete_summary_after_document_fix(void **state) {
   client = NULL;
   writer = NULL;
   namespace_path = NULL;
+  memset(&shared_options, 0, sizeof(shared_options));
   lc_index_flush_req_init(&flush_req);
   memset(&flush_res, 0, sizeof(flush_res));
   lc_query_req_init(&query_req);
@@ -22347,9 +22410,11 @@ test_flush_index_rebuilds_incomplete_summary_after_document_fix(void **state) {
   lc_error_init(&error);
   make_root("flush-index-incomplete-fix", root, sizeof(root));
   cleanup_root(root);
+  shared_options.single_writer_set = 1;
+  shared_options.single_writer = 0;
 
-  open_pouch_client(root, &client, &error);
-  rc = lc_pouch_open(root, NULL, NULL, &writer, &error);
+  open_pouch_client_shared(root, &client, &error);
+  rc = lc_pouch_open(root, NULL, &shared_options, &writer, &error);
   assert_int_equal(rc, LC_OK);
   pouch_write_json_state(writer, "docs/incomplete-fix", "doc/bad", "{", NULL,
                          &error);
@@ -24208,6 +24273,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_durable_sync_batches_parallel_writes),
       cmocka_unit_test(
           test_parallel_state_writes_keep_query_projection_consistent),
+      cmocka_unit_test(
+          test_shared_query_index_flush_retires_pending_projection),
       cmocka_unit_test(test_parallel_query_flush_preserves_later_write),
       cmocka_unit_test(test_parallel_query_flushes_publish_one_valid_index),
       cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),

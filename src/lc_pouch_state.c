@@ -13300,6 +13300,13 @@ static int lc_pouch_state_read_internal(lc_pouch *pouch,
   }
   memset(out, 0, sizeof(*out));
   process_mutex = NULL;
+  /* Decision records are durable transaction state. Recover them before the
+   * read mutex so a direct read observes the same committed view as scans and
+   * mutations, without recursively acquiring the read coordination. */
+  rc = lc_pouch_ensure_namespace(pouch, namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_state_process_namespace_mutex_lock(pouch, namespace_name,
                                                    &process_mutex, error);
   if (rc != LC_OK) {

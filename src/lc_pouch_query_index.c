@@ -11902,19 +11902,20 @@ static int lc_pouch_query_index_flush_segmented(
   pending_incomplete = pouch->query_pending_index_incomplete;
   pending_fast_path_allowed =
       lc_pouch_single_writer_enabled(pouch) && !pending_incomplete;
-  if (pending_fast_path_allowed) {
-    pending_entries = lc_pouch_query_index_pending_detach_namespace(
-        pouch, namespace_name, &pending_count);
-    pending_segment = lc_pouch_query_index_pending_segment_detach_namespace(
-        pouch, namespace_name);
-  }
+  /* A successful flush covers this local snapshot in every writer mode.
+   * Shared roots still rebuild from durable state, but must retire their local
+   * projection so concurrent writers do not leave it resident indefinitely. */
+  pending_entries = lc_pouch_query_index_pending_detach_namespace(
+      pouch, namespace_name, &pending_count);
+  pending_segment = lc_pouch_query_index_pending_segment_detach_namespace(
+      pouch, namespace_name);
   lc_pouch_query_index_pending_unlock(pouch);
   query_pending_locked = 0;
   if (full_rebuild) {
     retired_manifest = manifest;
     memset(&manifest, 0, sizeof(manifest));
     segment_base_index_seq = 0UL;
-    if (pending_count > 0U) {
+    if (pending_fast_path_allowed && pending_count > 0U) {
       size_t pending_visible_count;
       size_t state_visible_count;
 
@@ -11961,14 +11962,16 @@ static int lc_pouch_query_index_flush_segmented(
     }
   } else {
     segment_base_index_seq = manifest.index_seq;
-    if (pending_count > 0U && pending_segment == NULL) {
+    if (pending_fast_path_allowed && pending_count > 0U &&
+        pending_segment == NULL) {
       pending_segment = lc_pouch_query_index_pending_segment_build_entries(
           pouch, namespace_name, pending_entries, pending_count, error);
       if (pending_segment == NULL) {
         rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
       }
     }
-    if (rc == LC_OK && pending_count > 0U && pending_segment != NULL) {
+    if (rc == LC_OK && pending_fast_path_allowed && pending_count > 0U &&
+        pending_segment != NULL) {
       use_pending_segment = 1;
       segment_row_count = (unsigned long)pending_segment->doc_table.count;
       rc = lc_pouch_query_index_pending_segment_encode(
@@ -11980,7 +11983,7 @@ static int lc_pouch_query_index_flush_segmented(
           &text_term_generation, &text_term_generation_length,
           &trigram_term_generation, &trigram_term_generation_length,
           &temporal_term_generation, &temporal_term_generation_length, error);
-    } else if (pending_count > 0U) {
+    } else if (pending_fast_path_allowed && pending_count > 0U) {
       use_pending_entries = 1;
       rc = lc_pouch_query_index_pending_entries_build_summary(
           &pouch->allocator, pending_entries, &summary, &deletes, &delete_count,
