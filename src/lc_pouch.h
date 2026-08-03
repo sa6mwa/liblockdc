@@ -248,7 +248,10 @@ void lc_pouch_status_cleanup(const lc_allocator *allocator,
                              lc_pouch_status *status);
 /**
  * Changes this open handle between exclusive and shared-root operation.
- * The transition fails while another incompatible root writer is active.
+ * The transition waits for this handle's active append-capable operations to
+ * resolve their durable result, invalidates their append descriptors through
+ * the writer-mode epoch, then changes root ownership. It fails while another
+ * incompatible root writer is active.
  */
 int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error);
 int lc_pouch_probe_exclusive_writer(lc_pouch *pouch,

@@ -1627,22 +1627,30 @@ static int lc_pouch_state_key_mutation_begin(lc_pouch *pouch,
                         "pouch mutation requires an open pouch", NULL, NULL,
                         "pouch");
   }
-  pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
-  if (pthread_rc != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to lock pouch mutation state",
-                        strerror(pthread_rc), NULL, "pouch");
-  }
+  /* Recovery has its own mutation authority. Complete it first so this
+   * operation can pin one writer mode through append and durable completion. */
   rc = lc_pouch_state_namespace_lock_is_held(pouch, namespace_name)
            ? LC_OK
            : lc_pouch_state_recover_staged_decisions(pouch, namespace_name,
                                                      error);
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_key_lock_acquire(pouch, namespace_name, key, lock,
-                                         error);
+  if (rc != LC_OK) {
+    return rc;
   }
+  rc = lc_pouch_writer_mode_operation_begin(pouch, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
+  if (pthread_rc != 0) {
+    lc_pouch_writer_mode_operation_end(pouch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch mutation state",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  rc = lc_pouch_state_key_lock_acquire(pouch, namespace_name, key, lock, error);
   if (rc != LC_OK) {
     pthread_mutex_unlock(&pouch->state_mutation_mutex);
+    lc_pouch_writer_mode_operation_end(pouch);
   }
   return rc;
 }
@@ -1653,6 +1661,7 @@ static void lc_pouch_state_key_mutation_end(lc_pouch *pouch,
   if (pouch != NULL && pouch->state_mutation_mutex_initialized) {
     pthread_mutex_unlock(&pouch->state_mutation_mutex);
   }
+  lc_pouch_writer_mode_operation_end(pouch);
 }
 
 /* Keep the per-key lock through durable completion, but let independent keys
@@ -1675,6 +1684,7 @@ static int lc_pouch_state_finish_commit_group_after_mutation(
     }
   }
   lc_pouch_state_key_lock_release(lock);
+  lc_pouch_writer_mode_operation_end(pouch);
   return rc;
 }
 
@@ -1694,21 +1704,28 @@ int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,
                         "pouch namespace lock requires callback", NULL, NULL,
                         NULL);
   }
+  rc = lc_pouch_writer_mode_operation_begin(pouch, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_state_lock_namespace_for_mutation(pouch, namespace_name, &lock,
                                                   error);
   if (rc != LC_OK) {
+    lc_pouch_writer_mode_operation_end(pouch);
     return rc;
   }
   rc = lc_pouch_state_commit_group_begin(pouch, &commit_group,
                                          &owns_commit_group, error);
   if (rc != LC_OK) {
     lc_pouch_state_namespace_lock_release(&lock);
+    lc_pouch_writer_mode_operation_end(pouch);
     return rc;
   }
   rc = callback(context, error);
   rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
                                           error);
   lc_pouch_state_namespace_lock_release(&lock);
+  lc_pouch_writer_mode_operation_end(pouch);
   return rc;
 }
 
@@ -6330,7 +6347,15 @@ static int lc_pouch_state_cache_refresh(
   int rebuild;
   int rc;
 
-  (void)force;
+  /* A writer-mode epoch change cannot reuse an exclusive append descriptor.
+   * The projection remains valid until the normal manifest/tail validation
+   * below says otherwise, so this does not turn a mode transition into a full
+   * namespace replay. */
+  if (force && cache->active_append_fd_owned && cache->active_append_fd >= 0) {
+    (void)close(cache->active_append_fd);
+    cache->active_append_fd = -1;
+    cache->active_append_fd_owned = 0;
+  }
 
   if (lc_pouch_state_cache_matches_manifest(cache, manifest)) {
     rc = lc_pouch_state_cache_tail_active(pouch, cache, manifest, &rebuild,
@@ -8710,21 +8735,28 @@ int lc_pouch_maintenance_run(lc_pouch *pouch,
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
     return lc_pouch_maintenance_run_locked(pouch, options, out, error);
   }
+  rc = lc_pouch_writer_mode_operation_begin(pouch, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_state_lock_namespace_for_mutation(pouch, namespace_name, &lock,
                                                   error);
   if (rc != LC_OK) {
+    lc_pouch_writer_mode_operation_end(pouch);
     return rc;
   }
   rc = lc_pouch_state_commit_group_begin(pouch, &commit_group,
                                          &owns_commit_group, error);
   if (rc != LC_OK) {
     lc_pouch_state_namespace_lock_release(&lock);
+    lc_pouch_writer_mode_operation_end(pouch);
     return rc;
   }
   rc = lc_pouch_maintenance_run_locked(pouch, options, out, error);
   rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
                                           error);
   lc_pouch_state_namespace_lock_release(&lock);
+  lc_pouch_writer_mode_operation_end(pouch);
   return rc;
 }
 

@@ -146,8 +146,11 @@ Acceptance:
   retain exact-key ownership and namespace maintenance coordination.
 - [ ] Define and implement a durable writer epoch/ownership transition that
   prevents a stale writer from appending after takeover.
-- [ ] Make mode transitions quiesce appenders, flush or fail pending work,
-  invalidate projection/descriptor state, and rebuild only when required.
+- [x] Make an in-process mode transition quiesce append-capable operations
+  through durable completion, then advance the local epoch so active append
+  descriptors are closed and projections validate/replay only when required.
+  Cross-process takeover remains covered by the durable writer-epoch item
+  above.
 
 Acceptance:
 

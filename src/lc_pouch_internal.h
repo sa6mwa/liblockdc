@@ -92,6 +92,11 @@ struct lc_pouch {
   uint64_t single_writer_epoch;
   pthread_mutex_t single_writer_mutex;
   int single_writer_mutex_initialized;
+  /* Readers cover append-capable work. A mode transition takes this writer
+   * lock so no operation can append using the mode it observed before the
+   * root ownership handoff. */
+  pthread_rwlock_t writer_mode_guard;
+  int writer_mode_guard_initialized;
   lc_pouch_writer_root_lock_entry *writer_root_lock;
   int writer_root_lock_mode;
   char *query_engine;
@@ -167,6 +172,12 @@ extern void *lc_pouch_test_after_acquire_claim_context;
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);
 int lc_pouch_single_writer_snapshot(lc_pouch *pouch, uint64_t *epoch_out);
 int lc_pouch_single_writer_enabled(lc_pouch *pouch);
+/**
+ * Pins writer mode for an append-capable operation until its durable result is
+ * resolved. Internal callers must pair each successful begin with end.
+ */
+int lc_pouch_writer_mode_operation_begin(lc_pouch *pouch, lc_error *error);
+void lc_pouch_writer_mode_operation_end(lc_pouch *pouch);
 /**
  * Starts a fresh idle-compaction delay after a successful mutation. The worker
  * does not compact at open or while successful mutations keep arriving.

@@ -648,11 +648,15 @@ default, relaxing durability, or omitting core operations from comparison.
   Direct callers set `single_writer_set=1` and `single_writer=0`; endpoint
   callers use `?single_writer=false` (or `?pouch_single_writer=false`).
 
-- Mode transitions are lifecycle transitions:
-  they quiesce appends, resolve pending commit results, invalidate affected
-  descriptors/projections, establish the new ownership state, and replay only
-  as needed. Runtime mode is never inferred from workload and is never encoded
-  in user records.
+- Mode transitions are lifecycle transitions. Pouch takes a writer-mode
+  transition barrier that stops new append-capable operations and waits for
+  existing ones through their durable completion before changing root
+  ownership. The incremented writer-mode epoch closes an exclusive append
+  descriptor on its next projection validation; the projection then tails or
+  rebuilds only when the manifest requires it. Runtime mode is never inferred
+  from workload and is never encoded in user records. The barrier is local to
+  one Pouch handle; cross-process shared-root takeover still requires the
+  durable writer-epoch protocol described in the remaining work.
 
 - Fsync batching and diagnostics:
   Pouch defaults to `durable_sync=0`, the same `NoSync` mutation boundary used

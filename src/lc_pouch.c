@@ -2346,6 +2346,29 @@ int lc_pouch_single_writer_enabled(lc_pouch *pouch) {
   return lc_pouch_single_writer_snapshot(pouch, NULL);
 }
 
+int lc_pouch_writer_mode_operation_begin(lc_pouch *pouch, lc_error *error) {
+  int pthread_rc;
+
+  if (pouch == NULL || !pouch->writer_mode_guard_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch writer mode operation requires an open pouch",
+                        NULL, NULL, "pouch");
+  }
+  pthread_rc = pthread_rwlock_rdlock(&pouch->writer_mode_guard);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch writer mode operation",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  return LC_OK;
+}
+
+void lc_pouch_writer_mode_operation_end(lc_pouch *pouch) {
+  if (pouch != NULL && pouch->writer_mode_guard_initialized) {
+    (void)pthread_rwlock_unlock(&pouch->writer_mode_guard);
+  }
+}
+
 static int lc_pouch_writer_presence_now_ns(int64_t *out, lc_error *error) {
   struct timespec now;
 
@@ -2541,6 +2564,14 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         strerror(pthread_rc), NULL, "pouch");
   }
   pouch->single_writer_mutex_initialized = 1;
+  pthread_rc = pthread_rwlock_init(&pouch->writer_mode_guard, NULL);
+  if (pthread_rc != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch writer mode guard",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->writer_mode_guard_initialized = 1;
   pthread_rc = pthread_mutex_init(&pouch->writer_presence_mutex, NULL);
   if (pthread_rc != 0) {
     lc_pouch_close(pouch);
@@ -2746,6 +2777,9 @@ void lc_pouch_close(lc_pouch *pouch) {
   }
   if (pouch->state_mutation_mutex_initialized) {
     pthread_mutex_destroy(&pouch->state_mutation_mutex);
+  }
+  if (pouch->writer_mode_guard_initialized) {
+    (void)pthread_rwlock_destroy(&pouch->writer_mode_guard);
   }
   if (pouch->single_writer_mutex_initialized) {
     pthread_mutex_destroy(&pouch->single_writer_mutex);
@@ -3026,6 +3060,7 @@ int lc_pouch_backend_hash(lc_pouch *pouch,
 int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
   lc_error restart_error;
   int had_root_lock;
+  int mode_changed;
   int normalized;
   int rc;
 
@@ -3035,9 +3070,22 @@ int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
                         NULL, NULL, "pouch");
   }
   normalized = enabled != 0 ? 1 : 0;
+  if (!pouch->writer_mode_guard_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch single-writer control requires a mode guard",
+                        NULL, NULL, "pouch");
+  }
+  rc = pthread_rwlock_wrlock(&pouch->writer_mode_guard);
+  if (rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch writer mode transition",
+                        strerror(rc), NULL, "pouch");
+  }
+  mode_changed = 0;
   pthread_mutex_lock(&pouch->single_writer_mutex);
   if (pouch->aborted) {
     pthread_mutex_unlock(&pouch->single_writer_mutex);
+    (void)pthread_rwlock_unlock(&pouch->writer_mode_guard);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch single-writer control is closed after abort",
                         NULL, NULL, "pouch");
@@ -3045,6 +3093,7 @@ int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
   had_root_lock = pouch->writer_root_lock != NULL;
   if (pouch->single_writer == normalized && had_root_lock) {
     pthread_mutex_unlock(&pouch->single_writer_mutex);
+    (void)pthread_rwlock_unlock(&pouch->writer_mode_guard);
     return LC_OK;
   }
   if (!had_root_lock) {
@@ -3055,12 +3104,14 @@ int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
         error);
     if (rc != LC_OK) {
       pthread_mutex_unlock(&pouch->single_writer_mutex);
+      (void)pthread_rwlock_unlock(&pouch->writer_mode_guard);
       return rc;
     }
     rc = lc_pouch_writer_root_lock_check_presence(pouch, error);
     if (rc != LC_OK) {
       lc_pouch_writer_root_lock_release(pouch);
       pthread_mutex_unlock(&pouch->single_writer_mutex);
+      (void)pthread_rwlock_unlock(&pouch->writer_mode_guard);
       return rc;
     }
     if (normalized) {
@@ -3068,15 +3119,18 @@ int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
       if (rc != LC_OK) {
         lc_pouch_writer_root_lock_release(pouch);
         pthread_mutex_unlock(&pouch->single_writer_mutex);
+        (void)pthread_rwlock_unlock(&pouch->writer_mode_guard);
         return rc;
       }
     }
     pouch->single_writer = normalized;
+    mode_changed = 1;
   } else if (normalized) {
     rc = lc_pouch_writer_root_lock_change(
         pouch, LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE, error);
     if (rc != LC_OK) {
       pthread_mutex_unlock(&pouch->single_writer_mutex);
+      (void)pthread_rwlock_unlock(&pouch->writer_mode_guard);
       return rc;
     }
     rc = lc_pouch_writer_root_lock_check_presence(pouch, error);
@@ -3088,6 +3142,7 @@ int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
           pouch, LC_POUCH_WRITER_ROOT_LOCK_SHARED, &downgrade_error);
       lc_error_cleanup(&downgrade_error);
       pthread_mutex_unlock(&pouch->single_writer_mutex);
+      (void)pthread_rwlock_unlock(&pouch->writer_mode_guard);
       return rc;
     }
     rc = lc_pouch_writer_presence_start(pouch, error);
@@ -3099,9 +3154,11 @@ int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
           pouch, LC_POUCH_WRITER_ROOT_LOCK_SHARED, &downgrade_error);
       lc_error_cleanup(&downgrade_error);
       pthread_mutex_unlock(&pouch->single_writer_mutex);
+      (void)pthread_rwlock_unlock(&pouch->writer_mode_guard);
       return rc;
     }
     pouch->single_writer = 1;
+    mode_changed = 1;
   } else {
     lc_pouch_writer_presence_stop(pouch);
     rc = lc_pouch_writer_root_lock_change(
@@ -3111,14 +3168,17 @@ int lc_pouch_set_single_writer(lc_pouch *pouch, int enabled, lc_error *error) {
       (void)lc_pouch_writer_presence_start(pouch, &restart_error);
       lc_error_cleanup(&restart_error);
       pthread_mutex_unlock(&pouch->single_writer_mutex);
+      (void)pthread_rwlock_unlock(&pouch->writer_mode_guard);
       return rc;
     }
     pouch->single_writer = 0;
+    mode_changed = 1;
   }
-  if (pouch->single_writer_epoch != LC_U64_MAX) {
+  if (mode_changed && pouch->single_writer_epoch != LC_U64_MAX) {
     ++pouch->single_writer_epoch;
   }
   pthread_mutex_unlock(&pouch->single_writer_mutex);
+  (void)pthread_rwlock_unlock(&pouch->writer_mode_guard);
   {
     pslog_field fields[1];
 

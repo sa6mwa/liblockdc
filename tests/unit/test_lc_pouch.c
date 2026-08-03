@@ -118,6 +118,20 @@ typedef struct pouch_parallel_lease_acquire {
   int rc;
 } pouch_parallel_lease_acquire;
 
+typedef struct pouch_mode_transition_context {
+  lc_pouch *pouch;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+  int key_lock_entered;
+  int allow_key_lock_exit;
+  int transition_started;
+  int transition_finished;
+  int key_lock_rc;
+  int transition_rc;
+  lc_error key_lock_error;
+  lc_error transition_error;
+} pouch_mode_transition_context;
+
 static const lonejson_field pouch_value_fields[] = {
     LONEJSON_FIELD_I64(pouch_value_doc, value, "value")};
 
@@ -170,6 +184,66 @@ static void *pouch_write_state_in_parallel(void *context) {
   if (source != NULL) {
     lc_source_close(source);
   }
+  return NULL;
+}
+
+static int pouch_mode_transition_hold_key_lock(void *context, lc_error *error) {
+  pouch_mode_transition_context *transition;
+  int pthread_rc;
+
+  transition = (pouch_mode_transition_context *)context;
+  pthread_rc = pthread_mutex_lock(&transition->mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock mode transition callback",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  transition->key_lock_entered = 1;
+  (void)pthread_cond_broadcast(&transition->cond);
+  while (!transition->allow_key_lock_exit) {
+    pthread_rc = pthread_cond_wait(&transition->cond, &transition->mutex);
+    if (pthread_rc != 0) {
+      (void)pthread_mutex_unlock(&transition->mutex);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to wait for mode transition callback",
+                          strerror(pthread_rc), NULL, "pouch");
+    }
+  }
+  (void)pthread_mutex_unlock(&transition->mutex);
+  return LC_OK;
+}
+
+static void *pouch_mode_transition_hold_key(void *context) {
+  pouch_mode_transition_context *transition;
+
+  transition = (pouch_mode_transition_context *)context;
+  lc_error_init(&transition->key_lock_error);
+  transition->key_lock_rc = lc_pouch_state_with_key_lock(
+      transition->pouch, "default", "mode-transition/key",
+      pouch_mode_transition_hold_key_lock, transition,
+      &transition->key_lock_error);
+  return NULL;
+}
+
+static void *pouch_mode_transition_change_mode(void *context) {
+  pouch_mode_transition_context *transition;
+
+  transition = (pouch_mode_transition_context *)context;
+  if (pthread_mutex_lock(&transition->mutex) != 0) {
+    return NULL;
+  }
+  transition->transition_started = 1;
+  (void)pthread_cond_broadcast(&transition->cond);
+  (void)pthread_mutex_unlock(&transition->mutex);
+  lc_error_init(&transition->transition_error);
+  transition->transition_rc = lc_pouch_set_single_writer(
+      transition->pouch, 0, &transition->transition_error);
+  if (pthread_mutex_lock(&transition->mutex) != 0) {
+    return NULL;
+  }
+  transition->transition_finished = 1;
+  (void)pthread_cond_broadcast(&transition->cond);
+  (void)pthread_mutex_unlock(&transition->mutex);
   return NULL;
 }
 
@@ -3441,6 +3515,86 @@ static void test_single_writer_runtime_control_and_ha_probe(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_false(presence.present);
   lc_pouch_close(writer);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_single_writer_transition_waits_for_active_append_operation(void **state) {
+  lc_pouch *pouch;
+  pouch_mode_transition_context transition;
+  lc_pouch_status status;
+  pthread_t key_thread;
+  pthread_t transition_thread;
+  struct timespec deadline;
+  lc_error error;
+  char root[512];
+  int wait_rc;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  memset(&transition, 0, sizeof(transition));
+  memset(&status, 0, sizeof(status));
+  lc_error_init(&error);
+  make_root("single-writer-transition-barrier", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  transition.pouch = pouch;
+  assert_int_equal(pthread_mutex_init(&transition.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&transition.cond, NULL), 0);
+  assert_int_equal(pthread_create(&key_thread, NULL,
+                                  pouch_mode_transition_hold_key, &transition),
+                   0);
+  assert_int_equal(pthread_mutex_lock(&transition.mutex), 0);
+  while (!transition.key_lock_entered) {
+    assert_int_equal(pthread_cond_wait(&transition.cond, &transition.mutex), 0);
+  }
+  assert_int_equal(pthread_mutex_unlock(&transition.mutex), 0);
+
+  /* The active callback has pinned the old writer mode through completion. */
+  assert_int_equal(pthread_rwlock_trywrlock(&pouch->writer_mode_guard), EBUSY);
+  assert_int_equal(pthread_create(&transition_thread, NULL,
+                                  pouch_mode_transition_change_mode,
+                                  &transition),
+                   0);
+  assert_int_equal(pthread_mutex_lock(&transition.mutex), 0);
+  while (!transition.transition_started) {
+    assert_int_equal(pthread_cond_wait(&transition.cond, &transition.mutex), 0);
+  }
+  assert_int_equal(clock_gettime(CLOCK_REALTIME, &deadline), 0);
+  deadline.tv_nsec += 100L * 1000L * 1000L;
+  if (deadline.tv_nsec >= 1000000000L) {
+    deadline.tv_sec += 1;
+    deadline.tv_nsec -= 1000000000L;
+  }
+  wait_rc = 0;
+  while (!transition.transition_finished && wait_rc == 0) {
+    wait_rc =
+        pthread_cond_timedwait(&transition.cond, &transition.mutex, &deadline);
+  }
+  assert_int_equal(wait_rc, ETIMEDOUT);
+  assert_false(transition.transition_finished);
+  transition.allow_key_lock_exit = 1;
+  assert_int_equal(pthread_cond_broadcast(&transition.cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&transition.mutex), 0);
+
+  assert_int_equal(pthread_join(key_thread, NULL), 0);
+  assert_int_equal(pthread_join(transition_thread, NULL), 0);
+  assert_int_equal(transition.key_lock_rc, LC_OK);
+  assert_int_equal(transition.transition_rc, LC_OK);
+  rc = lc_pouch_status_read(pouch, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(status.single_writer);
+  assert_true(status.supports_concurrent_writes);
+  lc_pouch_status_cleanup(NULL, &status);
+  lc_error_cleanup(&transition.transition_error);
+  lc_error_cleanup(&transition.key_lock_error);
+  assert_int_equal(pthread_cond_destroy(&transition.cond), 0);
+  assert_int_equal(pthread_mutex_destroy(&transition.mutex), 0);
+  lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -19188,6 +19342,8 @@ int main(void) {
       cmocka_unit_test(test_single_writer_state_read_uses_projection_cache),
       cmocka_unit_test(test_single_writer_acquire_preserves_projection_cache),
       cmocka_unit_test(test_single_writer_runtime_control_and_ha_probe),
+      cmocka_unit_test(
+          test_single_writer_transition_waits_for_active_append_operation),
       cmocka_unit_test(test_pouch_disk_runtime_controls),
       cmocka_unit_test(test_pouch_durable_sync_policy),
       cmocka_unit_test(test_pouch_durable_sync_batches_parallel_writes),
