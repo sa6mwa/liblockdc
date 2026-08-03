@@ -10051,8 +10051,11 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   }
   payload_offset = segment_size + LC_POUCH_STATE_RECORD_HEADER_BYTES +
                    (uint64_t)strlen(key) + (uint64_t)meta_len;
+  /* A bounded in-memory source is already materialized by its caller. Both
+   * writer modes hold append authority here, so they can publish one complete
+   * record without the pending streaming prefix/finalization protocol. Other
+   * sources retain the real streaming path below. */
   use_materialized_record =
-      single_writer &&
       lc_source_memory_view(body, &materialized_plain,
                             &materialized_plain_len) &&
       materialized_plain_len <= LC_POUCH_CRYPTO_MEMORY_TRANSFORM_MAX_BYTES;

@@ -156,6 +156,9 @@ Acceptance:
 - [x] Batch independent metadata-only shared mutations per local writer while
   holding each request's exact key ownership; tail only the delta while the
   shared append gate is held.
+- [x] Let shared writers append an already bounded SDK memory body as one
+  complete record under append authority. Callback, file, fd, and oversized
+  sources retain the real pending streaming path.
 - [ ] Extend bounded shared append-gate batching to eligible body and
   multi-record mutations without materializing streaming payloads or widening
   exact-key ownership.
