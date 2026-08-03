@@ -126,6 +126,15 @@ typedef struct pouch_parallel_lease_acquire {
   int rc;
 } pouch_parallel_lease_acquire;
 
+typedef struct pouch_parallel_queue_dequeue {
+  lc_client *client;
+  pthread_barrier_t *start;
+  const char *owner;
+  lc_message *message;
+  lc_error error;
+  int rc;
+} pouch_parallel_queue_dequeue;
+
 typedef struct pouch_mode_transition_context {
   lc_pouch *pouch;
   pthread_mutex_t mutex;
@@ -317,6 +326,29 @@ static void *pouch_acquire_lease_in_parallel(void *context) {
       }
     }
   }
+  return NULL;
+}
+
+static void *pouch_dequeue_queue_message_in_parallel(void *context) {
+  pouch_parallel_queue_dequeue *dequeue;
+  lc_dequeue_req request;
+  int barrier_rc;
+
+  dequeue = (pouch_parallel_queue_dequeue *)context;
+  lc_error_init(&dequeue->error);
+  lc_dequeue_req_init(&request);
+  request.queue = "jobs";
+  request.owner = dequeue->owner;
+  request.visibility_timeout_seconds = 60L;
+  barrier_rc = pthread_barrier_wait(dequeue->start);
+  if (barrier_rc != 0 && barrier_rc != PTHREAD_BARRIER_SERIAL_THREAD) {
+    dequeue->rc = lc_error_set(&dequeue->error, LC_ERR_TRANSPORT, 0L,
+                               "parallel pouch dequeue barrier failed", NULL,
+                               NULL, "pouch");
+    return NULL;
+  }
+  dequeue->rc = dequeue->client->dequeue(dequeue->client, &request,
+                                         &dequeue->message, &dequeue->error);
   return NULL;
 }
 
@@ -4735,6 +4767,84 @@ test_shared_clients_acquire_independent_keys_in_parallel(void **state) {
 
   lc_error_cleanup(&second_acquire.error);
   lc_error_cleanup(&first_acquire.error);
+  lc_client_close(second_client);
+  lc_client_close(first_client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_shared_clients_dequeue_one_message_once(void **state) {
+  lc_client *first_client;
+  lc_client *second_client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  pouch_parallel_queue_dequeue first_dequeue;
+  pouch_parallel_queue_dequeue second_dequeue;
+  pthread_barrier_t start;
+  pthread_t first_thread;
+  pthread_t second_thread;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  first_client = NULL;
+  second_client = NULL;
+  source = NULL;
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  memset(&first_dequeue, 0, sizeof(first_dequeue));
+  memset(&second_dequeue, 0, sizeof(second_dequeue));
+  lc_enqueue_req_init(&enqueue_req);
+  lc_error_init(&error);
+  make_root("shared-queue-delivery", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client_shared(root, &first_client, &error);
+  open_pouch_client_shared(root, &second_client, &error);
+  enqueue_req.queue = "jobs";
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 60L;
+  rc = lc_source_from_memory("job", strlen("job"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = first_client->enqueue(first_client, &enqueue_req, source, &enqueue_res,
+                             &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  assert_int_equal(pthread_barrier_init(&start, NULL, 2U), 0);
+  first_dequeue.client = first_client;
+  first_dequeue.start = &start;
+  first_dequeue.owner = "first-worker";
+  second_dequeue.client = second_client;
+  second_dequeue.start = &start;
+  second_dequeue.owner = "second-worker";
+  assert_int_equal(pthread_create(&first_thread, NULL,
+                                  pouch_dequeue_queue_message_in_parallel,
+                                  &first_dequeue),
+                   0);
+  assert_int_equal(pthread_create(&second_thread, NULL,
+                                  pouch_dequeue_queue_message_in_parallel,
+                                  &second_dequeue),
+                   0);
+  assert_int_equal(pthread_join(first_thread, NULL), 0);
+  assert_int_equal(pthread_join(second_thread, NULL), 0);
+  assert_int_equal(pthread_barrier_destroy(&start), 0);
+  assert_int_equal(first_dequeue.rc, LC_OK);
+  assert_int_equal(second_dequeue.rc, LC_OK);
+  assert_true((first_dequeue.message != NULL) !=
+              (second_dequeue.message != NULL));
+
+  if (first_dequeue.message != NULL) {
+    first_dequeue.message->close(first_dequeue.message);
+  }
+  if (second_dequeue.message != NULL) {
+    second_dequeue.message->close(second_dequeue.message);
+  }
+  lc_error_cleanup(&second_dequeue.error);
+  lc_error_cleanup(&first_dequeue.error);
+  lc_enqueue_res_cleanup(&enqueue_res);
   lc_client_close(second_client);
   lc_client_close(first_client);
   cleanup_root(root);
@@ -19733,6 +19843,7 @@ int main(void) {
           test_exclusive_client_acquire_independent_keys_in_parallel),
       cmocka_unit_test(
           test_shared_clients_acquire_independent_keys_in_parallel),
+      cmocka_unit_test(test_shared_clients_dequeue_one_message_once),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(test_lease_private_reads_reject_stale_handle),
       cmocka_unit_test(test_pouch_lease_claim_and_credentials_are_durable),

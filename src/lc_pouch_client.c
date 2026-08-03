@@ -178,6 +178,21 @@ typedef struct lc_pouch_keepalive_context {
   lc_pouch_state_write_result write_result;
 } lc_pouch_keepalive_context;
 
+typedef struct lc_pouch_queue_lease_acquire_context {
+  lc_client_handle *client;
+  const lc_dequeue_req *req;
+  const char *namespace_name;
+  const char *lease_key;
+  const char *lease_id;
+  lc_pouch_unix_seconds lease_expires_at_unix;
+  lc_pouch_unix_seconds now_seconds;
+  lc_pouch_txn_buffer lease_metadata;
+  lc_pouch_state_write_result write_result;
+  long fencing_token;
+  int acquired;
+  int write_prepared;
+} lc_pouch_queue_lease_acquire_context;
+
 typedef struct lc_pouch_tc_endpoint_list {
   char **items;
   size_t count;
@@ -7595,18 +7610,118 @@ static int lc_pouch_client_validate_owner(const char *owner, lc_error *error) {
   return LC_OK;
 }
 
+static int lc_pouch_queue_lease_acquire_prepare_metadata(
+    const lc_pouch_state_metadata_view *state_view, void *context,
+    lc_pouch_state_write_options *options, int *apply, lc_error *error) {
+  lc_pouch_queue_lease_acquire_context *ctx;
+  lc_pouch_lease_record lease_record;
+  const char *txn_id;
+  int rc;
+
+  ctx = (lc_pouch_queue_lease_acquire_context *)context;
+  if (ctx == NULL || ctx->client == NULL || ctx->req == NULL ||
+      ctx->namespace_name == NULL || ctx->lease_key == NULL ||
+      ctx->lease_id == NULL || state_view == NULL || options == NULL ||
+      apply == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue lease acquisition requires context", NULL,
+                        NULL, "pouch");
+  }
+  memset(&lease_record, 0, sizeof(lease_record));
+  memset(options, 0, sizeof(*options));
+  ctx->write_prepared = 0;
+  *apply = 1;
+  rc = lc_pouch_lease_record_parse(ctx->client, state_view->metadata,
+                                   state_view->metadata_length,
+                                   state_view->version, &lease_record, error);
+  if (rc == LC_OK && lease_record.found &&
+      lease_record.expires_at_unix > ctx->now_seconds) {
+    *apply = 0;
+  }
+  if (rc == LC_OK && *apply && lease_record.found &&
+      lease_record.fencing_token == LONG_MAX) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch queue lease fencing token exceeds long range",
+                      NULL, NULL, "pouch");
+  }
+  if (rc == LC_OK && *apply) {
+    ctx->fencing_token = lease_record.found && lease_record.fencing_token > 0L
+                             ? lease_record.fencing_token + 1L
+                             : 1L;
+    txn_id = ctx->req->txn_id != NULL ? ctx->req->txn_id : "";
+    rc = lc_pouch_txn_buffer_append_bytes(
+        &ctx->lease_metadata, LC_POUCH_LEASE_RECORD_MAGIC,
+        strlen(LC_POUCH_LEASE_RECORD_MAGIC), error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata,
+                                             ctx->namespace_name, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata,
+                                             ctx->lease_key, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata,
+                                             ctx->req->owner, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata,
+                                             ctx->lease_id, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata, txn_id,
+                                             error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_txn_buffer_append_i64(&ctx->lease_metadata,
+                                          (int64_t)ctx->fencing_token, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_txn_buffer_append_i64(&ctx->lease_metadata,
+                                          ctx->lease_expires_at_unix, error);
+    }
+    if (rc == LC_OK) {
+      options->content_type = LC_POUCH_LEASE_CONTENT_TYPE;
+      options->has_expected_version = lease_record.version > 0UL;
+      options->expected_version = lease_record.version;
+      options->has_metadata = 1;
+      options->metadata = (const unsigned char *)ctx->lease_metadata.bytes;
+      options->metadata_length = ctx->lease_metadata.length;
+      ctx->write_prepared = 1;
+    }
+  }
+  lc_pouch_lease_record_cleanup(&lease_record);
+  return rc;
+}
+
+static int lc_pouch_queue_lease_acquire_locked(void *context, lc_error *error) {
+  lc_pouch_queue_lease_acquire_context *ctx;
+  int rc;
+
+  ctx = (lc_pouch_queue_lease_acquire_context *)context;
+  if (ctx == NULL || ctx->client == NULL || ctx->namespace_name == NULL ||
+      ctx->lease_key == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue lease lock requires context", NULL, NULL,
+                        "pouch");
+  }
+  rc = lc_pouch_state_update_metadata_prepared_locked(
+      ctx->client->pouch, ctx->namespace_name, ctx->lease_key,
+      lc_pouch_queue_lease_acquire_prepare_metadata, ctx, &ctx->write_result,
+      error);
+  if (rc == LC_OK && ctx->write_prepared) {
+    ctx->acquired = 1;
+  }
+  return rc;
+}
+
 static int lc_pouch_queue_acquire_message_lease(
     lc_client_handle *client, const char *namespace_name,
     const lc_dequeue_req *req, const char *message_lease_key,
     const char *lease_id, lc_pouch_unix_seconds lease_expires_at_unix,
     lc_pouch_unix_seconds now_seconds, long *fencing_token_out,
     int *acquired_out, lc_error *error) {
-  lc_pouch_lease_record lease_record;
-  lc_pouch_state_write_result write_result;
-  lc_pouch_generation expected_version;
-  long fencing_token;
-  const char *owner;
-  const char *txn_id;
+  lc_pouch_queue_lease_acquire_context acquire_context;
   int rc;
 
   if (fencing_token_out != NULL) {
@@ -7625,37 +7740,28 @@ static int lc_pouch_queue_acquire_message_lease(
   if (rc != LC_OK) {
     return rc;
   }
-  memset(&lease_record, 0, sizeof(lease_record));
-  memset(&write_result, 0, sizeof(write_result));
-  rc = lc_pouch_read_lease_record(client, namespace_name, message_lease_key,
-                                  &lease_record, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  if (lease_record.found && lease_record.expires_at_unix > now_seconds) {
-    lc_pouch_lease_record_cleanup(&lease_record);
-    return LC_OK;
-  }
-  expected_version = lease_record.found ? lease_record.version : 0UL;
-  fencing_token = lease_record.found && lease_record.fencing_token > 0L
-                      ? lease_record.fencing_token + 1L
-                      : 1L;
-  owner = req->owner;
-  txn_id = req->txn_id != NULL ? req->txn_id : "";
-  rc = lc_pouch_write_lease_record(client, namespace_name, message_lease_key,
-                                   owner, lease_id, txn_id, fencing_token,
-                                   lease_expires_at_unix, expected_version,
-                                   &write_result, error);
-  if (rc == LC_OK) {
+  memset(&acquire_context, 0, sizeof(acquire_context));
+  acquire_context.client = client;
+  acquire_context.req = req;
+  acquire_context.namespace_name = namespace_name;
+  acquire_context.lease_key = message_lease_key;
+  acquire_context.lease_id = lease_id;
+  acquire_context.lease_expires_at_unix = lease_expires_at_unix;
+  acquire_context.now_seconds = now_seconds;
+  rc = lc_pouch_state_with_key_lock(
+      client->pouch, namespace_name, message_lease_key,
+      lc_pouch_queue_lease_acquire_locked, &acquire_context, error);
+  if (rc == LC_OK && acquire_context.acquired) {
     if (fencing_token_out != NULL) {
-      *fencing_token_out = fencing_token;
+      *fencing_token_out = acquire_context.fencing_token;
     }
     if (acquired_out != NULL) {
       *acquired_out = 1;
     }
   }
-  lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
-  lc_pouch_lease_record_cleanup(&lease_record);
+  lc_pouch_txn_buffer_cleanup(&acquire_context.lease_metadata);
+  lc_pouch_state_write_result_cleanup(&client->allocator,
+                                      &acquire_context.write_result);
   return rc;
 }
 

@@ -220,6 +220,12 @@ Implementation obligations:
 - release reads the same metadata, validates lease id/txn id/fencing token,
   commits or rolls back staged fields, clears the lease, and writes the same
   target metadata record;
+- acquire, keepalive, release's lease-metadata replacement, and queue-delivery
+  message-lease claims evaluate the current metadata and publish their
+  replacement while holding that exact key's mutation authority. A separate
+  read followed by a later key mutation is not permitted because it can grant
+  conflicting shared-root leases when a metadata-only record has generation
+  zero;
 - update/mutate validates the target metadata lease before staging or writing
   state;
 - metadata CAS must use etag/generation behavior matching Go disk for missing
