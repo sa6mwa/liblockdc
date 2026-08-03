@@ -415,6 +415,11 @@ Queue delivery obligations:
   error, and DLQ behavior match the supported Go queue behavior;
 - ack/nack/extend validate active lease id, fencing token, txn id, status, and
   expiry;
+- extend persists the message metadata CAS decision before renewing the
+  message lease and then the optional state lease. These are distinct durable
+  metadata updates, so a later lease validation failure may leave the earlier
+  message visibility update, matching Go disk's write ordering; Pouch must not
+  renew a delivery lease before the message CAS succeeds;
 - non-transactional ack deletes queue state when a state lease/state etag is
   present, deletes message metadata, deletes message payload, clears message
   lease metadata, and clears state lease metadata; it must not leave an

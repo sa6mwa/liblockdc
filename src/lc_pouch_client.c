@@ -12338,6 +12338,10 @@ int lc_pouch_client_queue_extend_method(lc_client *self,
   }
   if (rc == LC_OK) {
     record.visibility_timeout_seconds = req->extend_by_seconds;
+    rc = lc_pouch_queue_write_or_stage_record(client, &record,
+                                              req->message.txn_id, error);
+  }
+  if (rc == LC_OK) {
     rc = lc_pouch_queue_extend_message_lease(
         client, &req->message, record.not_visible_until_unix, error);
   }
@@ -12345,10 +12349,6 @@ int lc_pouch_client_queue_extend_method(lc_client *self,
     rc = lc_pouch_queue_extend_state_lease(
         client, &req->message, record.not_visible_until_unix,
         &out->state_lease_expires_at_unix, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_queue_write_or_stage_record(client, &record,
-                                              req->message.txn_id, error);
   }
   if (rc == LC_OK) {
     out->lease_expires_at_unix = record.not_visible_until_unix;
