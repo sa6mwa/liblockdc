@@ -1636,6 +1636,13 @@ Coverage must include:
 - crypto, compression, and crypto+compression roots;
 - multi-segment production-size datasets using default segment size.
 
+The focused exclusive-mode transform matrix runs acquire, keepalive, update,
+mutate, lease and public get, attachment roundtrip, queue enqueue/dequeue/ack,
+transaction commit, scan, indexed query, and full-text query against plaintext,
+crypto, compression, and crypto+compression roots. Focused transition tests
+separately cover ownership, shared mode, takeover, tail recovery, rotation,
+durable grouping, and descriptor lifecycle.
+
 ## Benchmarks
 
 Production benchmarks compare the following modes separately:

@@ -160,9 +160,10 @@ Acceptance:
 - [x] Normal exclusive state-core mutations do not perform namespace directory
   scans, manifest parsing, tail repair, cross-process lock acquisition, or
   active segment open/close work.
-- [ ] Acquire, get, update, release, queue, attachment, and query operations
+- [x] Acquire, get, update, release, queue, attachment, and query operations
   preserve the existing observable contract under plaintext, crypto,
-  compression, and crypto+compression roots.
+  compression, and crypto+compression roots. The focused exclusive-mode public
+  matrix proves these paths against all four root transforms.
 - [x] A crash or explicit abort followed by reopen recovers the last published
   record and rejects malformed sealed data exactly as specified. Focused active
   crash-tail, sealed corruption, and explicit shared-root abort/reopen tests
@@ -269,13 +270,15 @@ Acceptance:
 
 ### Behavioural Proof
 
-- [ ] Add focused unit tests before or with each irreversible state transition:
+- [x] Add focused unit tests before or with each irreversible state transition:
   ownership default, explicit shared mode, writer takeover, cached mutation
   freshness, crash tails, rotation, grouped durable failure, and descriptor
-  lifecycle.
-- [ ] Add public API coverage for acquire, keepalive, release, get, update,
+  lifecycle. The focused ownership/process/tail/rotation/durable-sync and
+  resident-descriptor regressions cover those transitions.
+- [x] Add public API coverage for acquire, keepalive, release, get, update,
   mutate, attachments, queue lifecycle, transactions, scan, indexed query,
-  full-text query, crypto, and compression in exclusive mode.
+  full-text query, crypto, and compression in exclusive mode. One focused
+  four-transform matrix covers every listed public category.
 - [x] Add multi-process shared-root tests for non-conflicting writes,
   conflicting CAS/lease writes, queue delivery ownership, active append tail
   refresh, rotation, maintenance, and stale-writer rejection. The focused

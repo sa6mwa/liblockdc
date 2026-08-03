@@ -6946,6 +6946,25 @@ static void open_pouch_client_crypto_compressed(const char *root,
   open_pouch_client_endpoint(endpoint, out, error);
 }
 
+static void pouch_open_transform_client(const char *root, unsigned int mode,
+                                        const char *crypto_key, lc_client **out,
+                                        lc_error *error) {
+  switch (mode) {
+  case 0U:
+    open_pouch_client(root, out, error);
+    return;
+  case 1U:
+    open_pouch_client_crypto(root, crypto_key, out, error);
+    return;
+  case 2U:
+    open_pouch_client_compressed(root, out, error);
+    return;
+  default:
+    open_pouch_client_crypto_compressed(root, crypto_key, out, error);
+    return;
+  }
+}
+
 static char *pouch_test_hex_encode(const char *text) {
   static const char hex[] = "0123456789abcdef";
   const unsigned char *src;
@@ -6986,6 +7005,256 @@ static void write_client_state(lc_client *client, const char *key,
   rc = client->update(client, &update_req, source, out, error);
   source->close(source);
   assert_int_equal(rc, LC_OK);
+}
+
+static void test_public_core_contract_roundtrips_all_transforms(void **state) {
+  static const char *const mode_names[] = {"plain", "crypto", "zlib",
+                                           "crypto-zlib"};
+  static const char state_json[] =
+      "{\"category\":\"planning\",\"summary\":\"matrix full text\","
+      "\"rank\":1}";
+  static const char txn_json[] =
+      "{\"category\":\"transaction\",\"summary\":\"matrix txn\"}";
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire_req;
+  lc_keepalive_req keepalive_req;
+  lc_mutate_req mutate_req;
+  lc_get_opts public_get_opts;
+  lc_get_res get_res;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_get_req attachment_get_req;
+  lc_attachment_get_res attachment_get_res;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_message *message;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler query_handler;
+  pouch_query_key_capture query_capture;
+  lc_error error;
+  const char *mutations[1];
+  const void *bytes;
+  size_t length;
+  char *crypto_key;
+  char root[512];
+  unsigned int mode;
+  int rc;
+
+  (void)state;
+  crypto_key = NULL;
+  lc_error_init(&error);
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  for (mode = 0U; mode < 4U; ++mode) {
+    client = NULL;
+    lease = NULL;
+    source = NULL;
+    sink = NULL;
+    message = NULL;
+    bytes = NULL;
+    length = 0U;
+    lc_acquire_req_init(&acquire_req);
+    lc_keepalive_req_init(&keepalive_req);
+    lc_mutate_req_init(&mutate_req);
+    lc_get_opts_init(&public_get_opts);
+    memset(&get_res, 0, sizeof(get_res));
+    lc_attach_req_init(&attach_req);
+    memset(&attach_res, 0, sizeof(attach_res));
+    lc_attachment_get_req_init(&attachment_get_req);
+    memset(&attachment_get_res, 0, sizeof(attachment_get_res));
+    lc_enqueue_req_init(&enqueue_req);
+    memset(&enqueue_res, 0, sizeof(enqueue_res));
+    lc_dequeue_req_init(&dequeue_req);
+    memset(&participant, 0, sizeof(participant));
+    lc_txn_decision_req_init(&decision_req);
+    memset(&decision_res, 0, sizeof(decision_res));
+    lc_query_req_init(&query_req);
+    memset(&query_res, 0, sizeof(query_res));
+    memset(&query_handler, 0, sizeof(query_handler));
+    memset(&query_capture, 0, sizeof(query_capture));
+    make_root(mode_names[mode], root, sizeof(root));
+    cleanup_root(root);
+    pouch_open_transform_client(root, mode, crypto_key, &client, &error);
+
+    acquire_req.key = "doc/core";
+    acquire_req.owner = "matrix-owner";
+    acquire_req.ttl_seconds = 30L;
+    rc = client->acquire(client, &acquire_req, &lease, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_source_from_memory(state_json, strlen(state_json), &source, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lease->update(lease, source, NULL, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_source_close(source);
+    source = NULL;
+    keepalive_req.ttl_seconds = 45L;
+    rc = lease->keepalive(lease, &keepalive_req, &error);
+    assert_int_equal(rc, LC_OK);
+    mutations[0] = "/rank++";
+    mutate_req.mutations = mutations;
+    mutate_req.mutation_count = 1U;
+    rc = lease->mutate(lease, &mutate_req, &error);
+    assert_int_equal(rc, LC_OK);
+
+    rc = lc_sink_to_memory(&sink, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lease->get(lease, sink, NULL, &get_res, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(bytes_contain_text(bytes, length, "\"rank\":2"));
+    lc_sink_close(sink);
+    sink = NULL;
+    lc_get_res_cleanup(&get_res);
+
+    public_get_opts.public_read = 1;
+    rc = lc_sink_to_memory(&sink, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = client->get(client, "doc/core", &public_get_opts, sink, &get_res,
+                     &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(bytes_contain_text(bytes, length, "\"rank\":2"));
+    lc_sink_close(sink);
+    sink = NULL;
+    lc_get_res_cleanup(&get_res);
+
+    attach_req.name = "matrix.txt";
+    attach_req.content_type = "text/plain";
+    rc = lc_source_from_memory("attachment", strlen("attachment"), &source,
+                               &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_source_close(source);
+    source = NULL;
+    lc_attach_res_cleanup(&attach_res);
+    attachment_get_req.selector.name = "matrix.txt";
+    rc = lc_sink_to_memory(&sink, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lease->get_attachment(lease, &attachment_get_req, sink,
+                               &attachment_get_res, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_int_equal(length, strlen("attachment"));
+    assert_memory_equal(bytes, "attachment", length);
+    lc_sink_close(sink);
+    sink = NULL;
+    lc_attachment_get_res_cleanup(&attachment_get_res);
+
+    rc = lease->release(lease, NULL, &error);
+    assert_int_equal(rc, LC_OK);
+    lease = NULL;
+
+    enqueue_req.queue = "matrix";
+    enqueue_req.visibility_timeout_seconds = 30L;
+    rc = lc_source_from_memory("queue", strlen("queue"), &source, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_source_close(source);
+    source = NULL;
+    lc_enqueue_res_cleanup(&enqueue_res);
+    dequeue_req.queue = "matrix";
+    dequeue_req.owner = "matrix-worker";
+    dequeue_req.visibility_timeout_seconds = 30L;
+    rc = client->dequeue(client, &dequeue_req, &message, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_non_null(message);
+    rc = lc_sink_to_memory(&sink, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = message->write_payload(message, sink, NULL, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_int_equal(length, strlen("queue"));
+    assert_memory_equal(bytes, "queue", length);
+    lc_sink_close(sink);
+    sink = NULL;
+    rc = message->ack(message, &error);
+    assert_int_equal(rc, LC_OK);
+    message = NULL;
+
+    lc_acquire_req_init(&acquire_req);
+    acquire_req.key = "doc/txn";
+    acquire_req.owner = "matrix-txn-owner";
+    acquire_req.ttl_seconds = 30L;
+    acquire_req.txn_id = "matrix-txn";
+    rc = client->acquire(client, &acquire_req, &lease, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_source_from_memory(txn_json, strlen(txn_json), &source, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lease->update(lease, source, NULL, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_source_close(source);
+    source = NULL;
+    participant.namespace_name = "default";
+    participant.key = "doc/txn";
+    decision_req.txn_id = "matrix-txn";
+    decision_req.participants = &participant;
+    decision_req.participant_count = 1U;
+    rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_txn_decision_res_cleanup(&decision_res);
+    lc_lease_close(lease);
+    lease = NULL;
+
+    query_handler.begin = pouch_query_key_begin;
+    query_handler.chunk = pouch_query_key_chunk;
+    query_handler.end = pouch_query_key_end;
+    query_req.selector_json =
+        "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
+    query_req.engine = "scan";
+    rc = client->query_keys(client, &query_req, &query_handler, &query_capture,
+                            &query_res, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_int_equal(query_capture.count, 1U);
+    assert_true(pouch_query_capture_has(&query_capture, "doc/core"));
+    lc_query_res_cleanup(&query_res);
+
+    memset(&query_capture, 0, sizeof(query_capture));
+    lc_query_req_init(&query_req);
+    query_req.selector_json =
+        "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
+    query_req.engine = "index";
+    query_req.refresh = "wait_for";
+    rc = client->query_keys(client, &query_req, &query_handler, &query_capture,
+                            &query_res, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_int_equal(query_capture.count, 1U);
+    assert_true(pouch_query_capture_has(&query_capture, "doc/core"));
+    lc_query_res_cleanup(&query_res);
+
+    memset(&query_capture, 0, sizeof(query_capture));
+    lc_query_req_init(&query_req);
+    query_req.selector_json =
+        "{\"icontains\":{\"field\":\"/...\",\"value\":\"MATRIX FULL\"}}";
+    query_req.engine = "index";
+    query_req.refresh = "wait_for";
+    rc = client->query_keys(client, &query_req, &query_handler, &query_capture,
+                            &query_res, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_int_equal(query_capture.count, 1U);
+    assert_true(pouch_query_capture_has(&query_capture, "doc/core"));
+
+    lc_query_res_cleanup(&query_res);
+    lc_client_close(client);
+    cleanup_root(root);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+  }
+  lc_pouch_crypto_key_string_free(crypto_key);
+  lc_error_cleanup(&error);
 }
 
 static void test_pouch_root_path_aliases_share_store_identity(void **state) {
@@ -23332,6 +23601,7 @@ int main(void) {
           test_pouch_namespace_config_persists_and_routes_implicit_queries),
       cmocka_unit_test(test_pouch_public_api_rejects_reserved_lockd_namespaces),
       cmocka_unit_test(test_pouch_tc_surface_persists_local_single_node_state),
+      cmocka_unit_test(test_public_core_contract_roundtrips_all_transforms),
       cmocka_unit_test(test_state_etag_is_plaintext_sha256_content_hash),
       cmocka_unit_test(test_state_write_read_replays_segment_after_reopen),
       cmocka_unit_test(test_state_compression_streams_segment_payloads),
