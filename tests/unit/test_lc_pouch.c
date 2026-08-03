@@ -1,5 +1,4 @@
 #include <errno.h>
-#include <inttypes.h>
 #include <limits.h>
 #include <pthread.h>
 #include <setjmp.h>
@@ -3058,12 +3057,18 @@ static uint64_t read_marker_sequence(const char *path, size_t *size) {
   }
   fp = fopen(path, "rb");
   assert_non_null(fp);
-  sequence = UINT64_C(0);
+  sequence = (uint64_t)0U;
   found = 0;
   while (fgets(line, sizeof(line), fp) != NULL) {
     uint64_t parsed;
+    size_t value_length;
 
-    if (sscanf(line, "sequence=%" SCNu64, &parsed) == 1) {
+    if (strncmp(line, "sequence=", sizeof("sequence=") - 1U) == 0) {
+      value_length = strcspn(line + sizeof("sequence=") - 1U, "\r\n");
+      line[sizeof("sequence=") - 1U + value_length] = '\0';
+    }
+    if (strncmp(line, "sequence=", sizeof("sequence=") - 1U) == 0 &&
+        lc_u64_parse_base10(line + sizeof("sequence=") - 1U, &parsed)) {
       sequence = parsed;
       found = 1;
       break;
@@ -6187,7 +6192,7 @@ static void test_pouch_public_size_rejects_unrepresentable_u64(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(public_size, LONG_MAX);
 
-  oversized = (uint64_t)LONG_MAX + UINT64_C(1);
+  oversized = (uint64_t)LONG_MAX + (uint64_t)1U;
   rc = lc_pouch_size_to_public_long(oversized, &public_size, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(error.message, "pouch size exceeds public API limit");
@@ -6387,6 +6392,7 @@ static void test_namespace_manifest_uses_u64_snapshot_ids(void **state) {
   char *snapshots_path;
   char *snapshot_leaf;
   char *snapshot_path;
+  lc_pouch_generation large_snapshot_id;
   int fd;
   int rc;
 
@@ -6397,6 +6403,7 @@ static void test_namespace_manifest_uses_u64_snapshot_ids(void **state) {
   snapshots_path = NULL;
   snapshot_leaf = NULL;
   snapshot_path = NULL;
+  large_snapshot_id = ((lc_pouch_generation)1U << 32U);
   memset(&manifest, 0, sizeof(manifest));
   lc_error_init(&error);
   make_root("manifest-u64-snapshot", root, sizeof(root));
@@ -6415,7 +6422,7 @@ static void test_namespace_manifest_uses_u64_snapshot_ids(void **state) {
   assert_non_null(manifest_path);
   snapshots_path = lc_pouch_path_join(NULL, namespace_path, "snapshots");
   assert_non_null(snapshots_path);
-  snapshot_leaf = lc_pouch_namespace_snapshot_leaf(NULL, UINT64_C(4294967296));
+  snapshot_leaf = lc_pouch_namespace_snapshot_leaf(NULL, large_snapshot_id);
   assert_non_null(snapshot_leaf);
   assert_string_equal(snapshot_leaf, "snapshot-00000000004294967296.log");
   snapshot_path = lc_pouch_path_join(NULL, snapshots_path, snapshot_leaf);
@@ -6428,9 +6435,9 @@ static void test_namespace_manifest_uses_u64_snapshot_ids(void **state) {
   rc = lc_pouch_namespace_manifest_open(NULL, root, "team/alpha", &manifest,
                                         NULL, NULL, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(manifest.latest_snapshot_segment_id, UINT64_C(4294967296));
-  assert_int_equal(manifest.active_segment_id, UINT64_C(4294967297));
-  assert_int_equal(manifest.max_segment_id, UINT64_C(4294967297));
+  assert_int_equal(manifest.latest_snapshot_segment_id, large_snapshot_id);
+  assert_int_equal(manifest.active_segment_id, large_snapshot_id + 1U);
+  assert_int_equal(manifest.max_segment_id, large_snapshot_id + 1U);
 
   lc_pouch_namespace_manifest_cleanup(NULL, &manifest);
   lc_free_with_allocator(NULL, snapshot_path);
@@ -12374,7 +12381,7 @@ test_client_queue_mutations_touch_notification_marker(void **state) {
                          sizeof(marker_path));
   assert_file_contains(marker_path, "queue=jobs-main");
   enqueue_sequence = read_marker_sequence(marker_path, NULL);
-  assert_true(enqueue_sequence > UINT64_C(0));
+  assert_true(enqueue_sequence > (uint64_t)0U);
 
   dequeue_req.namespace_name = "team/notify";
   dequeue_req.queue = "jobs-main";
