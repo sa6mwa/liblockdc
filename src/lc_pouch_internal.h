@@ -210,6 +210,10 @@ typedef void (*lc_pouch_test_metadata_append_hook_fn)(
     void *context, const char *namespace_name);
 extern lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook;
 extern void *lc_pouch_test_metadata_append_context;
+typedef void (*lc_pouch_test_body_append_hook_fn)(void *context,
+                                                  const char *namespace_name);
+extern lc_pouch_test_body_append_hook_fn lc_pouch_test_body_append_hook;
+extern void *lc_pouch_test_body_append_context;
 typedef void (*lc_pouch_test_tail_repair_hook_fn)(void *context,
                                                   const char *reason,
                                                   const char *segment);

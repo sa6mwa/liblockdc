@@ -734,15 +734,21 @@ the public API or durable format.
   mutation; recovery, manifest lifecycle invalidation, or a new projection
   performs that historical validation. Exact-key locking, namespace sequence
   allocation, the local mode epoch, and maintenance fencing remain required. The
-  current implementation coalesces independent metadata-only mutations from
-  one local shared writer into a bounded append-gate batch while every request
-  retains its exact key lock. Streaming bodies and multi-record decisions keep
-  one authority window per operation. A shared handle retains a root-wide
-  process read lock for its lifetime; exclusive mode requires the conflicting
-  write lock. A live shared writer therefore cannot be overtaken, and a crashed
-  writer loses its kernel lock before recovery/takeover. Pouch deliberately
-  does not add a second durable writer epoch as data authority. This is a
-  supported Pouch extension, not the default Go-disk-aligned performance path.
+  current implementation coalesces independent metadata-only mutations and
+  bounded SDK-memory body mutations from one local shared writer into append
+  batches while every request retains its exact key lock and commit group. The
+  body worker holds one physical append authority window for its batch, then
+  invokes the normal finalized-record path for each request; it neither copies
+  nor materializes a source. Callback, file, fd, and oversized-memory bodies
+  keep one authority window per operation. Compound staged decisions already
+  encode their 3-record promotion or 2-record discard group through one binary
+  append batch; they are never mixed with unrelated mutations. A shared handle
+  retains a root-wide process read lock for its lifetime; exclusive mode
+  requires the conflicting write lock. A live shared writer therefore cannot
+  be overtaken, and a crashed writer loses its kernel lock before
+  recovery/takeover. Pouch deliberately does not add a second durable writer
+  epoch as data authority. This is a supported Pouch extension, not the
+  default Go-disk-aligned performance path.
   Direct callers set `single_writer_set=1` and `single_writer=0`; endpoint
   callers use `?single_writer=false` (or `?pouch_single_writer=false`).
 
@@ -1141,11 +1147,13 @@ artifacts remain derived and rebuildable from its projection. Shared-root,
 recovery, takeover, rotation, maintenance, and I/O invalidation deliberately
 leave that path to coordinate or rebuild durable state.
 
-Each resident namespace owner also retains its exclusive append gate and its
-bounded metadata append worker for the Pouch lifetime. This keeps the
-projection, descriptor, byte-range gate, and metadata queue in one namespace
-ownership domain. The process-level namespace guard remains separate because
-it intentionally coordinates Pouch handles that resolve to the same root.
+Each resident namespace owner also retains its exclusive append gate, bounded
+metadata append worker, and shared-mode bounded-body append worker for the
+Pouch lifetime. This keeps the projection, descriptor, byte-range gate, and
+append queues in one namespace ownership domain. The body worker accepts only
+an already bounded SDK memory source and owns no full-document staging buffer.
+The process-level namespace guard remains separate because it intentionally
+coordinates Pouch handles that resolve to the same root.
 
 The bounded source cache retains at most 64 open segment descriptors. A public
 stream receives a duplicate descriptor with its own read cursor, so compaction
@@ -1183,6 +1191,14 @@ Required behavior:
   transition, not a historic replay. A changed writer epoch, active segment,
   manifest lifecycle state, invalid cursor, or any other segment topology
   change triggers bounded refresh or recovery rather than a stale append;
+- shared bounded-memory body writes retain the caller's exact-key lock and
+  commit group while a namespace worker owns one physical append-authority
+  window for the bounded queue. The worker calls the normal complete-record
+  path for every request, so finalization, index reservation, cache
+  publication, and source consumption remain the direct-write behavior;
+- staged promotion and discard encode their complete decision group into one
+  binary append batch. They retain one authority window and are not coalesced
+  with unrelated body or metadata requests, preserving transaction order;
 - rotate at the stored-byte target under the appropriate writer/maintenance
   coordination, atomically publish the new numeric active segment, and replace
   only the affected active descriptor/cursor;

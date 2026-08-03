@@ -179,9 +179,12 @@ Acceptance:
 - [x] Let shared writers append an already bounded SDK memory body as one
   complete record under append authority. Callback, file, fd, and oversized
   sources retain the real pending streaming path.
-- [ ] Extend bounded shared append-gate batching to eligible body and
+- [x] Extend bounded shared append-gate batching to eligible body and
   multi-record mutations without materializing streaming payloads or widening
-  exact-key ownership.
+  exact-key ownership. Bounded SDK-memory bodies retain their caller commit
+  group while a namespace worker holds one physical authority window; staged
+  promotion/discard records are encoded as one 3-/2-record binary append batch.
+  Callback, file, fd, and oversized sources remain direct streaming.
 - [x] Fence shared/exclusive ownership with the root-wide process lock: every
   live shared writer holds its read lock for its lifetime, and exclusive mode
   requires the conflicting write lock. A crashed process loses that lock before

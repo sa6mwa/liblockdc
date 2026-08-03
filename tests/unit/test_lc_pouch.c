@@ -5113,6 +5113,22 @@ test_shared_writer_repairs_unseen_truncated_tail_from_cursor(void **state) {
   lc_error_cleanup(&error);
 }
 
+typedef struct pouch_body_append_capture {
+  unsigned long calls;
+  const char *namespace_name;
+} pouch_body_append_capture;
+
+static void pouch_body_append_capture_hook(void *context,
+                                           const char *namespace_name) {
+  pouch_body_append_capture *capture;
+
+  capture = (pouch_body_append_capture *)context;
+  if (capture != NULL) {
+    capture->calls += 1UL;
+    capture->namespace_name = namespace_name;
+  }
+}
+
 static void test_shared_writers_append_one_rolling_segment(void **state) {
   lc_pouch *first_writer;
   lc_pouch *second_writer;
@@ -5122,6 +5138,7 @@ static void test_shared_writers_append_one_rolling_segment(void **state) {
   lc_pouch_state_write_result first_write;
   lc_pouch_state_write_result second_write;
   lc_pouch_state_read_result read_result;
+  pouch_body_append_capture body_append;
   lc_error error;
   char root[512];
   char segment_path[1024];
@@ -5137,6 +5154,7 @@ static void test_shared_writers_append_one_rolling_segment(void **state) {
   memset(&first_write, 0, sizeof(first_write));
   memset(&second_write, 0, sizeof(second_write));
   memset(&read_result, 0, sizeof(read_result));
+  memset(&body_append, 0, sizeof(body_append));
   lc_error_init(&error);
   make_root("shared-writer-segments", root, sizeof(root));
   cleanup_root(root);
@@ -5149,6 +5167,8 @@ static void test_shared_writers_append_one_rolling_segment(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(lc_pouch_supports_concurrent_writes(first_writer));
   assert_true(lc_pouch_supports_concurrent_writes(second_writer));
+  lc_pouch_test_body_append_hook = pouch_body_append_capture_hook;
+  lc_pouch_test_body_append_context = &body_append;
 
   rc = lc_source_from_memory("one", strlen("one"), &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -5168,6 +5188,8 @@ static void test_shared_writers_append_one_rolling_segment(void **state) {
   source = NULL;
   assert_true(second_write.index_seq > first_write.index_seq);
   assert_int_equal(second_write.version, 2UL);
+  assert_int_equal(body_append.calls, 2UL);
+  assert_string_equal(body_append.namespace_name, "default");
 
   assert_int_equal(pouch_state_segment_count(root, "default"), 1UL);
   pouch_state_segment_path(root, "default", 1UL, segment_path,
@@ -5185,6 +5207,8 @@ static void test_shared_writers_append_one_rolling_segment(void **state) {
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_state_write_result_cleanup(NULL, &second_write);
   lc_pouch_state_write_result_cleanup(NULL, &first_write);
+  lc_pouch_test_body_append_hook = NULL;
+  lc_pouch_test_body_append_context = NULL;
   lc_pouch_close(second_writer);
   lc_pouch_close(first_writer);
   cleanup_root(root);
@@ -5517,6 +5541,64 @@ test_shared_clients_acquire_independent_keys_in_parallel(void **state) {
   lc_error_cleanup(&first_acquire.error);
   lc_client_close(second_client);
   lc_client_close(first_client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_shared_writer_batches_parallel_memory_bodies(void **state) {
+  lc_pouch *writer;
+  lc_pouch_open_options shared_open_options;
+  pouch_parallel_state_write first_write;
+  pouch_parallel_state_write second_write;
+  pthread_barrier_t start;
+  pthread_t first_thread;
+  pthread_t second_thread;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  writer = NULL;
+  memset(&shared_open_options, 0, sizeof(shared_open_options));
+  memset(&first_write, 0, sizeof(first_write));
+  memset(&second_write, 0, sizeof(second_write));
+  lc_error_init(&error);
+  make_root("shared-body-batch", root, sizeof(root));
+  cleanup_root(root);
+
+  shared_open_options.single_writer_set = 1;
+  shared_open_options.single_writer = 0;
+  shared_open_options.durable_sync = 1;
+  rc = lc_pouch_open(root, NULL, &shared_open_options, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(pthread_barrier_init(&start, NULL, 2U), 0);
+  first_write.pouch = writer;
+  first_write.start = &start;
+  first_write.key = "state/batch-a";
+  first_write.value = "alpha";
+  second_write.pouch = writer;
+  second_write.start = &start;
+  second_write.key = "state/batch-b";
+  second_write.value = "bravo";
+  assert_int_equal(pthread_create(&first_thread, NULL,
+                                  pouch_write_state_in_parallel, &first_write),
+                   0);
+  assert_int_equal(pthread_create(&second_thread, NULL,
+                                  pouch_write_state_in_parallel, &second_write),
+                   0);
+  assert_int_equal(pthread_join(first_thread, NULL), 0);
+  assert_int_equal(pthread_join(second_thread, NULL), 0);
+  assert_int_equal(pthread_barrier_destroy(&start), 0);
+  assert_int_equal(first_write.rc, LC_OK);
+  assert_int_equal(second_write.rc, LC_OK);
+  assert_int_not_equal(first_write.result.index_seq,
+                       second_write.result.index_seq);
+
+  lc_pouch_state_write_result_cleanup(NULL, &second_write.result);
+  lc_pouch_state_write_result_cleanup(NULL, &first_write.result);
+  lc_error_cleanup(&second_write.error);
+  lc_error_cleanup(&first_write.error);
+  lc_pouch_close(writer);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -22890,6 +22972,7 @@ int main(void) {
       cmocka_unit_test(
           test_shared_writer_replay_orders_same_version_metadata_by_index),
       cmocka_unit_test(test_shared_writers_reserve_unique_indexes_in_parallel),
+      cmocka_unit_test(test_shared_writer_batches_parallel_memory_bodies),
       cmocka_unit_test(
           test_exclusive_client_acquire_independent_keys_in_parallel),
       cmocka_unit_test(test_shared_client_acquire_independent_keys_in_parallel),
