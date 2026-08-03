@@ -113,8 +113,10 @@ Acceptance:
   record families.
 - [ ] A successful mutation is visible only at the documented finalized-record
   and durable-sync boundary.
-- [ ] A failed append or commit leaves no published cache/index entry and uses
-  the existing crash-tail recovery rules.
+- [x] A failed append or commit leaves no published cache/index entry and uses
+  the existing crash-tail recovery rules. The callback-source failure
+  regression proves that a partial streaming append preserves the resident and
+  replayed prior value.
 
 ### 2. Cut Over Default Exclusive Writer Mode
 

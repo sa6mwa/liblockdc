@@ -1276,7 +1276,10 @@ Required behavior:
 - make staged/pending refs visible only through explicit same-operation
   promotion paths, matching the supported C-local state-link semantics;
 - propagate fsync/write failure to every operation in a durable-sync group;
-  otherwise, propagate write and finalization failures.
+  otherwise, propagate write and finalization failures. A failed streaming
+  append truncates its active pending suffix before releasing append authority;
+  it neither replaces a previously published projection entry nor becomes
+  visible after replay.
 
 The public mutation completion rule is invariant in both modes: a caller sees
 success only after its record is finalized, its commit group has reached the

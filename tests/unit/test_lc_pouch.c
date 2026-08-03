@@ -115,6 +115,13 @@ typedef struct pouch_chunked_source {
   size_t read_count;
 } pouch_chunked_source;
 
+typedef struct pouch_failing_source {
+  const unsigned char *bytes;
+  size_t length;
+  size_t offset;
+  int failed;
+} pouch_failing_source;
+
 typedef struct pouch_tail_repair_capture {
   unsigned long count;
   char reason[32];
@@ -272,6 +279,35 @@ static size_t pouch_chunked_source_read(void *context, void *buffer,
   source->offset += count;
   source->read_count += 1U;
   return count;
+}
+
+static size_t pouch_failing_source_read(void *context, void *buffer,
+                                        size_t count, lc_error *error) {
+  pouch_failing_source *source;
+  size_t available;
+
+  source = (pouch_failing_source *)context;
+  if (source == NULL) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch failing source requires context", NULL, NULL,
+                       NULL);
+    return 0U;
+  }
+  if (source->offset < source->length) {
+    available = source->length - source->offset;
+    if (count > available) {
+      count = available;
+    }
+    memcpy(buffer, source->bytes + source->offset, count);
+    source->offset += count;
+    return count;
+  }
+  if (!source->failed) {
+    source->failed = 1;
+    (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L, "pouch test source failed",
+                       NULL, NULL, "pouch");
+  }
+  return 0U;
 }
 
 static size_t pouch_stream_overlap_read(void *context, void *buffer,
@@ -8788,6 +8824,82 @@ static void test_state_callback_source_retains_streaming_path(void **state) {
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   lc_pouch_crypto_key_string_free(crypto_key);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_state_stream_failure_keeps_published_projection_and_replay(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_state_write_result published;
+  lc_pouch_state_write_result failed;
+  lc_pouch_state_read_result read_result;
+  pouch_failing_source failing;
+  lc_error error;
+  char root[512];
+  char bytes[64];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  memset(&published, 0, sizeof(published));
+  memset(&failed, 0, sizeof(failed));
+  memset(&read_result, 0, sizeof(read_result));
+  memset(&failing, 0, sizeof(failing));
+  lc_error_init(&error);
+  make_root("state-stream-failure", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("published", strlen("published"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/current", body, NULL,
+                            &published, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+
+  failing.bytes = (const unsigned char *)"unpublished";
+  failing.length = strlen((const char *)failing.bytes);
+  rc = lc_source_from_callbacks(pouch_failing_source_read, NULL, NULL, &failing,
+                                &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/current", body, NULL,
+                            &failed, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_true(failing.failed);
+  assert_string_equal(error.message, "pouch test source failed");
+  lc_source_close(body);
+  body = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_state_read(pouch, "default", "state/current", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_string_equal(bytes, "published");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "default", "state/current", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_string_equal(bytes, "published");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &failed);
+  lc_pouch_state_write_result_cleanup(NULL, &published);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -22910,6 +23022,8 @@ int main(void) {
       cmocka_unit_test(test_state_crypto_compression_round_trips),
       cmocka_unit_test(test_state_memory_source_appends_finalized_record),
       cmocka_unit_test(test_state_callback_source_retains_streaming_path),
+      cmocka_unit_test(
+          test_state_stream_failure_keeps_published_projection_and_replay),
       cmocka_unit_test(
           test_exclusive_streaming_write_releases_projection_for_independent_key),
       cmocka_unit_test(
