@@ -228,6 +228,7 @@ typedef void (*lc_pouch_test_tail_repair_hook_fn)(void *context,
                                                   const char *segment);
 extern lc_pouch_test_tail_repair_hook_fn lc_pouch_test_tail_repair_hook;
 extern void *lc_pouch_test_tail_repair_context;
+size_t lc_pouch_test_resident_descriptor_count(lc_pouch *pouch);
 #endif
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);

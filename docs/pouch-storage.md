@@ -766,11 +766,12 @@ the public API or durable format.
 - Mode transitions are lifecycle transitions. Pouch takes a writer-mode
   transition barrier that stops new append-capable operations and waits for
   existing ones through their durable completion before changing root
-  ownership. The incremented writer-mode epoch closes an exclusive append
-  descriptor on its next projection validation; the projection then tails or
-  rebuilds only when the manifest requires it. Runtime mode is never inferred
-  from workload and is never encoded in user records. The barrier is local to
-  one Pouch handle. Cross-process handoff is fenced by the root process lock:
+  ownership. The incremented writer-mode epoch fences an exclusive append
+  descriptor immediately; the next projection validation closes it and then
+  tails or rebuilds only when the manifest requires it. Runtime mode is never
+  inferred from workload and is never encoded in user records. The barrier is
+  local to one Pouch handle. Cross-process handoff is fenced by the root
+  process lock:
   exclusive mode cannot take ownership while any live shared handle retains its
   read lock, and a crashed handle's kernel lock is released before recovery.
 
@@ -810,7 +811,8 @@ the public API or durable format.
   state and queue-watch status through `lc_pouch_status`. The exclusive writer
   retains its active append descriptor; a shared writer retains descriptors
   only while its ownership/cursor remains valid. Rotation, recovery, takeover,
-  maintenance, and close invalidate them. The `queue_watch` option and
+  maintenance, mode transition, close, and abort invalidate them. The
+  `queue_watch` option and
   `pouch://...?queue_watch=true` enable Linux inotify wake-ups only on a known
   non-NFS filesystem; unsupported or unknown filesystems report polling and
   retain the 100 ms polling fallback.

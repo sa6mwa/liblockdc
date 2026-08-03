@@ -2601,6 +2601,43 @@ struct lc_pouch_namespace_logstore {
   struct lc_pouch_namespace_logstore *next;
 };
 
+#ifdef LOCKDC_TEST_BUILD
+size_t lc_pouch_test_resident_descriptor_count(lc_pouch *pouch) {
+  lc_pouch_namespace_logstore *ns;
+  lc_pouch_source_cache_entry *source;
+  size_t count;
+
+  if (pouch == NULL) {
+    return 0U;
+  }
+  count = 0U;
+  if (pouch->state_cache_mutex_initialized) {
+    (void)pthread_mutex_lock(&pouch->state_cache_mutex);
+  }
+  for (ns = pouch->namespace_logstores; ns != NULL; ns = ns->next) {
+    if (ns->active_append_fd_owned && ns->active_append_fd >= 0) {
+      ++count;
+    }
+  }
+  if (pouch->state_cache_mutex_initialized) {
+    (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
+  }
+  if (pouch->source_cache_mutex_initialized) {
+    (void)pthread_mutex_lock(&pouch->source_cache_mutex);
+  }
+  for (source = pouch->source_cache_entries; source != NULL;
+       source = source->next) {
+    if (source->fd >= 0) {
+      ++count;
+    }
+  }
+  if (pouch->source_cache_mutex_initialized) {
+    (void)pthread_mutex_unlock(&pouch->source_cache_mutex);
+  }
+  return count;
+}
+#endif
+
 static unsigned long lc_pouch_state_namespace_hash(const char *namespace_name) {
   const unsigned char *cursor;
   unsigned long hash;

@@ -236,8 +236,11 @@ Acceptance:
 
 Acceptance:
 
-- [ ] Rotation, compaction, retention, close, abort, and writer handoff do not
-  leak descriptors or leave stale cache references.
+- [x] Rotation, compaction, retention, close, abort, and writer handoff do not
+  leak descriptors or leave stale cache references. Test-only resident
+  descriptor accounting proves rollover and maintenance remain bounded, writer
+  handoff closes the epoch-fenced cache on next validation, and abort releases
+  every retained descriptor.
 - [x] Compaction cannot remove a span reachable by state, object, staged, or
   attachment references in either writer mode. A forced multi-segment
   compaction/reopen regression reloads every reference class in both exclusive

@@ -4533,6 +4533,106 @@ static void test_pouch_disk_runtime_controls(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_resident_descriptors_stay_bounded_across_lifecycle(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_source *source;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_error_init(&error);
+  make_root("resident-descriptor-lifecycle", root, sizeof(root));
+  cleanup_root(root);
+
+  options.segment_target_bytes = 1U;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("first", strlen("first"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/first", source, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  assert_int_equal(lc_pouch_test_resident_descriptor_count(pouch), 1U);
+
+  rc = lc_source_from_memory("second", strlen("second"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/second", source, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  assert_int_equal(lc_pouch_test_resident_descriptor_count(pouch), 1U);
+
+  maintenance_options.namespace_name = "default";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.compacted);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  assert_true(lc_pouch_test_resident_descriptor_count(pouch) <= 1U);
+
+  rc = lc_source_from_memory("handoff", strlen("handoff"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/handoff", source, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  assert_int_equal(lc_pouch_test_resident_descriptor_count(pouch), 1U);
+
+  rc = lc_pouch_set_single_writer(pouch, 0, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(lc_pouch_test_resident_descriptor_count(pouch) <= 1U);
+  rc = lc_source_from_memory("shared", strlen("shared"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/shared", source, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  assert_int_equal(lc_pouch_test_resident_descriptor_count(pouch), 0U);
+  rc = lc_pouch_set_single_writer(pouch, 1, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lc_pouch_test_resident_descriptor_count(pouch), 0U);
+
+  rc = lc_source_from_memory("third", strlen("third"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/third", source, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  assert_int_equal(lc_pouch_test_resident_descriptor_count(pouch), 1U);
+
+  rc = lc_pouch_abort(pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lc_pouch_test_resident_descriptor_count(pouch), 0U);
+
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_pouch_durable_sync_policy(void **state) {
   lc_pouch *pouch;
   lc_pouch_open_options options;
@@ -23355,6 +23455,7 @@ int main(void) {
           test_single_writer_transition_waits_for_active_append_operation),
       cmocka_unit_test(test_maintenance_waits_for_active_key_operation),
       cmocka_unit_test(test_pouch_disk_runtime_controls),
+      cmocka_unit_test(test_resident_descriptors_stay_bounded_across_lifecycle),
       cmocka_unit_test(test_pouch_durable_sync_policy),
       cmocka_unit_test(test_pouch_durable_sync_batches_parallel_writes),
       cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),
