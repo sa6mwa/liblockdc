@@ -7349,12 +7349,12 @@ static int lc_pouch_write_lease_record_locked(void *context, lc_error *error) {
                                                ctx->options, ctx->out, error);
 }
 
-static int lc_pouch_write_lease_record_with_lock_state(
+static int lc_pouch_write_lease_record_with_visibility(
     lc_client_handle *client, const char *namespace_name, const char *key,
     const char *owner, const char *lease_id, const char *txn_id,
     long fencing_token, lc_pouch_unix_seconds expires_at_unix,
-    lc_pouch_generation expected_version, int state_locked,
-    int force_query_hidden, lc_pouch_state_write_result *out, lc_error *error) {
+    lc_pouch_generation expected_version, int force_query_hidden,
+    lc_pouch_state_write_result *out, lc_error *error) {
   lc_pouch_txn_buffer buffer;
   lc_pouch_lease_write_context lock_context;
   lc_pouch_state_write_options options;
@@ -7404,13 +7404,9 @@ static int lc_pouch_write_lease_record_with_lock_state(
     lock_context.key = key;
     lock_context.options = &options;
     lock_context.out = out;
-    if (state_locked) {
-      rc = lc_pouch_write_lease_record_locked(&lock_context, error);
-    } else {
-      rc = lc_pouch_state_with_key_lock(client->pouch, namespace_name, key,
-                                        lc_pouch_write_lease_record_locked,
-                                        &lock_context, error);
-    }
+    rc = lc_pouch_state_with_key_lock(client->pouch, namespace_name, key,
+                                      lc_pouch_write_lease_record_locked,
+                                      &lock_context, error);
   }
   lc_pouch_txn_buffer_cleanup(&buffer);
   return rc;
@@ -7422,9 +7418,9 @@ static int lc_pouch_write_lease_record(
     long fencing_token, lc_pouch_unix_seconds expires_at_unix,
     lc_pouch_generation expected_version, lc_pouch_state_write_result *out,
     lc_error *error) {
-  return lc_pouch_write_lease_record_with_lock_state(
+  return lc_pouch_write_lease_record_with_visibility(
       client, namespace_name, key, owner, lease_id, txn_id, fencing_token,
-      expires_at_unix, expected_version, 0, 0, out, error);
+      expires_at_unix, expected_version, 0, out, error);
 }
 
 static int lc_pouch_write_lease_tombstone(lc_client_handle *client,
@@ -12545,10 +12541,10 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
   state_fencing_token = lease_record.found && lease_record.fencing_token > 0L
                             ? lease_record.fencing_token + 1L
                             : 1L;
-  rc = lc_pouch_write_lease_record_with_lock_state(
+  rc = lc_pouch_write_lease_record_with_visibility(
       client, handle->namespace_name, state_key, req->owner, state_lease_id,
       handle->txn_id, state_fencing_token, handle->not_visible_until_unix,
-      lease_record.found ? lease_record.version : 0UL, 0,
+      lease_record.found ? lease_record.version : 0UL,
       !lease_record.has_query_hidden, &lease_write_result, error);
   if (rc != LC_OK) {
     goto cleanup;
