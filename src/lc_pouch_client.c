@@ -153,6 +153,7 @@ typedef struct lc_pouch_acquire_context {
   lc_pouch_unix_seconds held_until_unix;
   long fencing_token;
   lc_pouch_generation version;
+  int state_found;
   int has_query_hidden;
   int query_hidden;
   int acquired;
@@ -9945,6 +9946,7 @@ static void lc_pouch_acquire_context_cleanup(lc_pouch_acquire_context *ctx) {
   ctx->held_until_unix = 0L;
   ctx->fencing_token = 0L;
   ctx->version = 0UL;
+  ctx->state_found = 0;
   ctx->has_query_hidden = 0;
   ctx->query_hidden = 0;
   ctx->acquired = 0;
@@ -10008,6 +10010,7 @@ lc_pouch_rollback_acquire_claim_after_failure(lc_pouch_acquire_context *ctx,
 static int lc_pouch_acquire_locked(void *context, lc_error *error) {
   lc_pouch_acquire_context *ctx;
   lc_pouch_lease_record lease_record;
+  lc_pouch_state_metadata_view state_view;
   lc_pouch_generation expected_lease_version;
   lc_pouch_unix_seconds now_seconds = 0;
   int rc;
@@ -10020,26 +10023,28 @@ static int lc_pouch_acquire_locked(void *context, lc_error *error) {
                         NULL);
   }
   memset(&lease_record, 0, sizeof(lease_record));
-  rc = lc_pouch_state_read_metadata_locked(ctx->client->pouch,
-                                           ctx->namespace_name, ctx->req->key,
-                                           &ctx->read_result, error);
+  memset(&state_view, 0, sizeof(state_view));
+  rc = lc_pouch_state_read_metadata_view_locked(
+      ctx->client->pouch, ctx->namespace_name, ctx->req->key, &state_view,
+      &ctx->read_result, error);
   if (rc != LC_OK) {
     return rc;
   }
-  if (ctx->req->if_not_exists && ctx->read_result.has_body) {
+  if (ctx->req->if_not_exists && state_view.has_body) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch acquire if_not_exists precondition failed", NULL,
                         NULL, NULL);
   }
-  ctx->version = ctx->read_result.found ? ctx->read_result.version : 0UL;
-  ctx->has_query_hidden = ctx->read_result.has_query_hidden;
-  ctx->query_hidden = ctx->read_result.query_hidden;
-  rc = lc_pouch_lease_record_parse(
-      ctx->client, ctx->read_result.metadata, ctx->read_result.metadata_length,
-      ctx->read_result.version, &lease_record, error);
+  ctx->state_found = state_view.found;
+  ctx->version = state_view.found ? state_view.version : 0UL;
+  ctx->has_query_hidden = state_view.has_query_hidden;
+  ctx->query_hidden = state_view.query_hidden;
+  rc = lc_pouch_lease_record_parse(ctx->client, state_view.metadata,
+                                   state_view.metadata_length,
+                                   state_view.version, &lease_record, error);
   if (rc == LC_OK && lease_record.found) {
-    lease_record.has_query_hidden = ctx->read_result.has_query_hidden;
-    lease_record.query_hidden = ctx->read_result.query_hidden;
+    lease_record.has_query_hidden = state_view.has_query_hidden;
+    lease_record.query_hidden = state_view.query_hidden;
   }
   if (rc != LC_OK) {
     return rc;
@@ -10198,8 +10203,8 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   lease = lc_lease_new(
       client, namespace_name, req->key, req->owner, acquire_context.lease_id,
       req->txn_id, acquire_context.fencing_token, acquired_version,
-      acquire_context.read_result.found ? acquire_context.read_result.etag
-                                        : NULL,
+      acquire_context.state_found ? acquire_context.lease_write_result.etag
+                                  : NULL,
       NULL);
   if (lease == NULL) {
     int rollback_rc;

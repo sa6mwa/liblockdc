@@ -62,6 +62,17 @@ typedef struct lc_pouch_state_scan_summaries_result {
   char *next_start_after;
 } lc_pouch_state_scan_summaries_result;
 
+/* A transient state projection view used while a key mutation lock is held. */
+typedef struct lc_pouch_state_metadata_view {
+  int found;
+  lc_pouch_generation version;
+  const unsigned char *metadata;
+  size_t metadata_length;
+  int has_query_hidden;
+  int query_hidden;
+  int has_body;
+} lc_pouch_state_metadata_view;
+
 typedef int (*lc_pouch_state_scan_summary_visit_fn)(
     const lc_pouch_state_scan_summary_entry *entry, void *context,
     lc_error *error);
@@ -198,6 +209,17 @@ int lc_pouch_state_read_metadata_locked(lc_pouch *pouch,
                                         const char *key,
                                         lc_pouch_state_read_result *out,
                                         lc_error *error);
+/**
+ * Reads metadata while the caller holds the key mutation lock. On a current
+ * exclusive-writer projection, `out` borrows its fields directly from that
+ * projection. Those fields must be consumed before the next state mutation or
+ * release of the key mutation lock. Shared and cold paths populate
+ * `owned_fallback`, whose lifetime is managed by the caller.
+ */
+int lc_pouch_state_read_metadata_view_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    lc_pouch_state_metadata_view *out,
+    lc_pouch_state_read_result *owned_fallback, lc_error *error);
 int lc_pouch_state_update_metadata_locked(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const lc_pouch_state_write_options *options,

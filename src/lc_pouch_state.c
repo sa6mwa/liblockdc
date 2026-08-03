@@ -3667,6 +3667,36 @@ static int lc_pouch_state_entry_from_cache_record(
   return LC_OK;
 }
 
+/* The caller owns the cache lifetime and must not clean up this view. */
+static void lc_pouch_state_entry_borrow_cache_record(
+    const lc_pouch_state_cache_record *record, lc_pouch_state_entry *out) {
+  memset(out, 0, sizeof(*out));
+  if (record == NULL) {
+    return;
+  }
+  out->key = record->key;
+  out->content_type = record->content_type;
+  out->etag = record->etag;
+  out->payload_span = record->payload_span;
+  out->record_container_leaf = record->record_container_leaf;
+  out->record_offset = record->record_offset;
+  out->has_record_ref = record->has_record_ref;
+  out->payload_context = record->payload_context;
+  out->descriptor = record->descriptor;
+  out->metadata = record->metadata;
+  out->metadata_length = record->metadata_length;
+  out->index_seq = record->index_seq;
+  out->version = record->version;
+  out->bytes = record->bytes;
+  out->cipher_bytes = record->cipher_bytes;
+  out->updated_at_unix = record->updated_at_unix;
+  out->has_query_hidden = record->has_query_hidden;
+  out->query_hidden = record->query_hidden;
+  out->seen = 1;
+  out->found = record->found;
+  out->record_type = record->record_type;
+}
+
 static char *lc_pouch_state_child_path(const lc_allocator *allocator,
                                        const char *namespace_path,
                                        const char *child, const char *leaf) {
@@ -6712,6 +6742,46 @@ static int lc_pouch_state_manifest_lookup_cached(
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, manifest);
   }
   return rc;
+}
+
+/* Returns a borrowed record only while exclusive mutation serialization holds.
+ */
+static int lc_pouch_state_manifest_lookup_cached_borrowed(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    lc_pouch_namespace_manifest *manifest, lc_pouch_state_entry *current,
+    lc_pouch_generation *max_version_out, int *current_is_borrowed,
+    lc_error *error) {
+  lc_pouch_state_cache_namespace *cache;
+  uint64_t writer_mode_epoch;
+  int single_writer;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || key == NULL ||
+      manifest == NULL || current == NULL || current_is_borrowed == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch borrowed manifest lookup requires context", NULL,
+                        NULL, "pouch");
+  }
+  *current_is_borrowed = 0;
+  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
+  if (single_writer && cache != NULL && cache->initialized &&
+      cache->writer_mode_epoch == writer_mode_epoch &&
+      cache->namespace_path != NULL && cache->active_segment_leaf != NULL) {
+    rc = lc_pouch_state_cache_manifest_copy(pouch, cache, manifest, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    if (max_version_out != NULL) {
+      *max_version_out = cache->max_version;
+    }
+    lc_pouch_state_entry_borrow_cache_record(
+        lc_pouch_state_cache_record_find(cache, key), current);
+    *current_is_borrowed = 1;
+    return LC_OK;
+  }
+  return lc_pouch_state_manifest_lookup_cached(
+      pouch, namespace_name, key, manifest, current, max_version_out, error);
 }
 
 /* Return a projection-backed manifest in exclusive mode; otherwise refresh. */
@@ -9836,6 +9906,55 @@ void lc_pouch_state_write_result_cleanup(const lc_allocator *allocator,
   memset(result, 0, sizeof(*result));
 }
 
+static int lc_pouch_state_metadata_write_result_build(
+    lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
+    const lc_pouch_state_entry *current,
+    const lc_pouch_state_write_options *options, lc_pouch_generation version,
+    lc_pouch_unix_seconds updated_at_unix, int has_query_hidden,
+    int query_hidden, lc_pouch_state_write_result *out, lc_error *error) {
+  const unsigned char *metadata;
+  size_t metadata_length;
+
+  out->etag = lc_strdup_with_allocator(
+      &pouch->allocator, current->etag != NULL ? current->etag : "");
+  if (out->etag == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch metadata state etag", NULL,
+                        NULL, NULL);
+  }
+  out->index_seq = manifest->state_max_version;
+  out->version = version;
+  out->bytes = current->bytes;
+  out->cipher_bytes = current->cipher_bytes;
+  if (current->descriptor != NULL) {
+    out->descriptor =
+        lc_strdup_with_allocator(&pouch->allocator, current->descriptor);
+    if (out->descriptor == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch metadata descriptor", NULL,
+                          NULL, NULL);
+    }
+  }
+  metadata = options->has_metadata ? options->metadata : current->metadata;
+  metadata_length = options->has_metadata ? options->metadata_length
+                                          : current->metadata_length;
+  if (metadata_length > 0U) {
+    out->metadata = (unsigned char *)lc_alloc_with_allocator(&pouch->allocator,
+                                                             metadata_length);
+    if (out->metadata == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch metadata result blob", NULL,
+                          NULL, NULL);
+    }
+    memcpy(out->metadata, metadata, metadata_length);
+    out->metadata_length = metadata_length;
+  }
+  out->updated_at_unix = updated_at_unix;
+  out->has_query_hidden = has_query_hidden;
+  out->query_hidden = query_hidden;
+  return LC_OK;
+}
+
 int lc_pouch_state_update_metadata_locked(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const lc_pouch_state_write_options *options,
@@ -9848,6 +9967,7 @@ int lc_pouch_state_update_metadata_locked(
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  int current_is_borrowed;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -9858,13 +9978,17 @@ int lc_pouch_state_update_metadata_locked(
                         NULL, NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
-  rc = lc_pouch_state_manifest_lookup_cached(
-      pouch, namespace_name, key, &manifest, &current, &max_version, error);
+  current_is_borrowed = 0;
+  rc = lc_pouch_state_manifest_lookup_cached_borrowed(
+      pouch, namespace_name, key, &manifest, &current, &max_version,
+      &current_is_borrowed, error);
   if (rc != LC_OK) {
     return rc;
   }
   if (!current.found && !options->has_metadata) {
-    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+    if (!current_is_borrowed) {
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+    }
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch metadata update requires existing state", NULL,
@@ -9874,7 +9998,9 @@ int lc_pouch_state_update_metadata_locked(
       current.found && current.payload_span.present ? current.version : 0UL;
   if (options->has_expected_version &&
       logical_version != options->expected_version) {
-    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+    if (!current_is_borrowed) {
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+    }
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch metadata version precondition failed", NULL,
@@ -9883,7 +10009,9 @@ int lc_pouch_state_update_metadata_locked(
   if (options->precondition != NULL) {
     rc = options->precondition(options->precondition_context, error);
     if (rc != LC_OK) {
-      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      if (!current_is_borrowed) {
+        lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      }
       lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
       return rc;
     }
@@ -9912,6 +10040,9 @@ int lc_pouch_state_update_metadata_locked(
       version, current.bytes, current.cipher_bytes, current.descriptor,
       updated_at_unix, has_query_hidden, query_hidden, error);
   if (rc == LC_OK) {
+    rc = lc_pouch_state_metadata_write_result_build(
+        pouch, &manifest, &current, options, version, updated_at_unix,
+        has_query_hidden, query_hidden, out, error);
     (void)lc_pouch_state_cache_apply_write(
         pouch, namespace_name, &manifest, key,
         current.content_type != NULL ? current.content_type
@@ -9925,58 +10056,12 @@ int lc_pouch_state_update_metadata_locked(
         updated_at_unix, has_query_hidden, query_hidden, 1,
         LC_POUCH_STATE_RECORD_STATE_META);
   }
-  if (rc == LC_OK) {
-    out->etag = lc_strdup_with_allocator(
-        &pouch->allocator, current.etag != NULL ? current.etag : "");
-    if (out->etag == NULL) {
-      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch metadata state etag", NULL,
-                        NULL, NULL);
-    }
-  }
-  if (rc == LC_OK) {
-    out->index_seq = manifest.state_max_version;
-    out->version = version;
-    out->bytes = current.bytes;
-    out->cipher_bytes = current.cipher_bytes;
-    if (current.descriptor != NULL) {
-      out->descriptor =
-          lc_strdup_with_allocator(&pouch->allocator, current.descriptor);
-      if (out->descriptor == NULL) {
-        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch metadata descriptor", NULL,
-                          NULL, NULL);
-      }
-    }
-    if ((options->has_metadata ? options->metadata_length
-                               : current.metadata_length) > 0U) {
-      const unsigned char *out_metadata;
-      size_t out_metadata_length;
-
-      out_metadata =
-          options->has_metadata ? options->metadata : current.metadata;
-      out_metadata_length = options->has_metadata ? options->metadata_length
-                                                  : current.metadata_length;
-      out->metadata = (unsigned char *)lc_alloc_with_allocator(
-          &pouch->allocator, out_metadata_length);
-      if (out->metadata == NULL) {
-        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch metadata result blob", NULL,
-                          NULL, NULL);
-      } else {
-        memcpy(out->metadata, out_metadata, out_metadata_length);
-        out->metadata_length = out_metadata_length;
-      }
-    }
-  }
-  if (rc == LC_OK) {
-    out->updated_at_unix = updated_at_unix;
-    out->has_query_hidden = has_query_hidden;
-    out->query_hidden = query_hidden;
-  } else {
+  if (rc != LC_OK) {
     lc_pouch_state_write_result_cleanup(&pouch->allocator, out);
   }
-  lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+  if (!current_is_borrowed) {
+    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+  }
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
   return rc;
 }
@@ -10781,6 +10866,56 @@ int lc_pouch_state_read_metadata_locked(lc_pouch *pouch,
   }
   lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  return rc;
+}
+
+int lc_pouch_state_read_metadata_view_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    lc_pouch_state_metadata_view *out,
+    lc_pouch_state_read_result *owned_fallback, lc_error *error) {
+  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_state_cache_record *record;
+  uint64_t writer_mode_epoch;
+  int single_writer;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      key == NULL || key[0] == '\0' || out == NULL || owned_fallback == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state metadata view requires pouch, namespace, "
+                        "key, view and fallback",
+                        NULL, NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  memset(owned_fallback, 0, sizeof(*owned_fallback));
+  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
+  if (single_writer && cache != NULL && cache->initialized &&
+      cache->writer_mode_epoch == writer_mode_epoch &&
+      cache->namespace_path != NULL && cache->active_segment_leaf != NULL) {
+    record = lc_pouch_state_cache_record_find(cache, key);
+    if (record != NULL && record->found) {
+      out->found = 1;
+      out->version = record->version;
+      out->metadata = record->metadata;
+      out->metadata_length = record->metadata_length;
+      out->has_query_hidden = record->has_query_hidden;
+      out->query_hidden = record->query_hidden;
+      out->has_body = record->payload_span.present;
+    }
+    return LC_OK;
+  }
+  rc = lc_pouch_state_read_metadata_locked(pouch, namespace_name, key,
+                                           owned_fallback, error);
+  if (rc == LC_OK && owned_fallback->found) {
+    out->found = 1;
+    out->version = owned_fallback->version;
+    out->metadata = owned_fallback->metadata;
+    out->metadata_length = owned_fallback->metadata_length;
+    out->has_query_hidden = owned_fallback->has_query_hidden;
+    out->query_hidden = owned_fallback->query_hidden;
+    out->has_body = owned_fallback->has_body;
+  }
   return rc;
 }
 

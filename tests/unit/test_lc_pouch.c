@@ -13009,6 +13009,22 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_null(lease);
 
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = key;
+  acquire_req.owner = "lc-unit-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  assert_int_equal(lease->version, 1L);
+  assert_sha256_text_etag(lease->state_etag, "{\"value\":7}");
+
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
   lc_client_close(client);
   client = NULL;
 
