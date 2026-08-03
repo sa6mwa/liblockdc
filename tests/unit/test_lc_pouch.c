@@ -5032,8 +5032,19 @@ static void test_shared_clients_dequeue_one_message_once(void **state) {
 /* These helpers intentionally open Pouch only after fork. The parent test
  * never has a live Pouch worker while it forks, so this validates real
  * cross-process locks without re-entering a threaded client in a child. */
+static int pouch_shared_process_write_with_segment_target(
+    const char *root, const char *key, const char *value, int start_fd,
+    uint64_t segment_target_bytes);
+
 static int pouch_shared_process_write(const char *root, const char *key,
                                       const char *value, int start_fd) {
+  return pouch_shared_process_write_with_segment_target(root, key, value,
+                                                        start_fd, 0U);
+}
+
+static int pouch_shared_process_write_with_segment_target(
+    const char *root, const char *key, const char *value, int start_fd,
+    uint64_t segment_target_bytes) {
   lc_pouch *pouch;
   lc_pouch_open_options options;
   lc_pouch_state_write_result write_result;
@@ -5051,6 +5062,7 @@ static int pouch_shared_process_write(const char *root, const char *key,
   (void)close(start_fd);
   options.single_writer_set = 1;
   options.single_writer = 0;
+  options.segment_target_bytes = segment_target_bytes;
   if (rc == LC_OK) {
     rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
   }
@@ -5492,6 +5504,76 @@ static void test_process_writer_modes_and_shared_writes(void **state) {
   assert_int_equal(waitpid(holder_pid, &status, 0), holder_pid);
   assert_true(WIFEXITED(status));
   assert_int_equal(WEXITSTATUS(status), 0);
+
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_shared_process_writers_rotate_segments(void **state) {
+  lc_pouch *reader;
+  char root[512];
+  char first_value[768];
+  char second_value[768];
+  int first_start[2];
+  int second_start[2];
+  pid_t first_pid;
+  pid_t second_pid;
+  lc_error error;
+  int status;
+  int rc;
+
+  (void)state;
+  reader = NULL;
+  first_pid = -1;
+  second_pid = -1;
+  memset(first_value, 'a', sizeof(first_value) - 1U);
+  first_value[sizeof(first_value) - 1U] = '\0';
+  memset(second_value, 'b', sizeof(second_value) - 1U);
+  second_value[sizeof(second_value) - 1U] = '\0';
+  lc_error_init(&error);
+  make_root("process-shared-rotation", root, sizeof(root));
+  cleanup_root(root);
+
+  assert_int_equal(pipe(first_start), 0);
+  first_pid = fork();
+  assert_true(first_pid >= 0);
+  if (first_pid == 0) {
+    (void)close(first_start[1]);
+    _exit(pouch_shared_process_write_with_segment_target(
+              root, "state/process-rotation-first", first_value, first_start[0],
+              512U) == LC_OK
+              ? 0
+              : 1);
+  }
+  assert_int_equal(pipe(second_start), 0);
+  second_pid = fork();
+  assert_true(second_pid >= 0);
+  if (second_pid == 0) {
+    (void)close(first_start[0]);
+    (void)close(first_start[1]);
+    (void)close(second_start[1]);
+    _exit(pouch_shared_process_write_with_segment_target(
+              root, "state/process-rotation-second", second_value,
+              second_start[0], 512U) == LC_OK
+              ? 0
+              : 1);
+  }
+  (void)close(first_start[0]);
+  (void)close(second_start[0]);
+  assert_int_equal(write(first_start[1], "1", 1U), 1);
+  assert_int_equal(write(second_start[1], "1", 1U), 1);
+  (void)close(first_start[1]);
+  (void)close(second_start[1]);
+  assert_int_equal(waitpid(first_pid, &status, 0), first_pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+  assert_int_equal(waitpid(second_pid, &status, 0), second_pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+  rc = lc_pouch_open(root, NULL, NULL, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(pouch_state_segment_count(root, "default") >= 2UL);
+  lc_pouch_close(reader);
 
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -21403,6 +21485,7 @@ int main(void) {
           test_shared_clients_acquire_independent_keys_in_parallel),
       cmocka_unit_test(test_shared_clients_dequeue_one_message_once),
       cmocka_unit_test(test_process_writer_modes_and_shared_writes),
+      cmocka_unit_test(test_shared_process_writers_rotate_segments),
       cmocka_unit_test(test_shared_process_lease_conflict_and_handoff),
       cmocka_unit_test(test_shared_process_queue_delivers_once),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),

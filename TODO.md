@@ -165,8 +165,8 @@ Acceptance:
   takeover, while the per-handle mode epoch invalidates local descriptors.
 - [x] Cover fork-safe shared-process state writes, conflicting lease rejection,
   fencing-token handoff, single queue delivery, and root-lock crash handoff.
-  Process-level transaction, rotation, compaction, and maintenance contention
-  coverage remains required.
+  Process-level rotation is also covered. Transaction, compaction, and
+  maintenance contention coverage remains required.
 - [x] Make an in-process mode transition quiesce append-capable operations
   through durable completion, then advance the local epoch so active append
   descriptors are closed and projections validate/replay only when required.
