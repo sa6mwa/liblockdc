@@ -232,6 +232,15 @@ int lc_pouch_state_read_metadata_locked(lc_pouch *pouch,
                                         lc_pouch_state_read_result *out,
                                         lc_error *error);
 /**
+ * Reads a full state record while the caller holds namespace mutation
+ * authority. This avoids attempting to recursively acquire the namespace
+ * process mutex while transaction application validates and updates paired
+ * queue records.
+ */
+int lc_pouch_state_read_locked(lc_pouch *pouch, const char *namespace_name,
+                               const char *key, lc_pouch_state_read_result *out,
+                               lc_error *error);
+/**
  * Reads metadata while the caller holds the key mutation lock. On a current
  * exclusive-writer projection, `out` borrows its fields directly from that
  * projection. Those fields must be consumed before the next state mutation or

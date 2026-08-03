@@ -204,6 +204,15 @@ typedef struct lc_pouch_lease_replace_context {
   lc_pouch_state_write_result write_result;
 } lc_pouch_lease_replace_context;
 
+typedef struct lc_pouch_txn_queue_participant_context {
+  lc_client_handle *client;
+  const char *namespace_name;
+  const char *lease_key;
+  const char *txn_id;
+  const char *state;
+  int state_participant;
+} lc_pouch_txn_queue_participant_context;
+
 typedef struct lc_pouch_tc_endpoint_list {
   char **items;
   size_t count;
@@ -9798,8 +9807,8 @@ static int lc_pouch_txn_commit_queue_stage(lc_client_handle *client,
   if (staged_key == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  rc = lc_pouch_state_read(client->pouch, namespace_name, staged_key, &staged,
-                           error);
+  rc = lc_pouch_state_read_locked(client->pouch, namespace_name, staged_key,
+                                  &staged, error);
   if (rc == LC_OK && staged.found) {
     rc = lc_pouch_queue_record_parse(client, &staged, staged_key, &record,
                                      error);
@@ -9842,16 +9851,31 @@ static int lc_pouch_txn_commit_queue_stage(lc_client_handle *client,
   return rc;
 }
 
-static int lc_pouch_queue_clear_lease_key(lc_client_handle *client,
-                                          const char *namespace_name,
-                                          const char *lease_key,
-                                          lc_error *error) {
+/* The caller holds namespace mutation authority while the selected lease is
+ * read and cleared. Transaction application changes the paired queue document
+ * in that same authority window, so a shared writer cannot install a newer
+ * delivery lease between these two operations. */
+static int lc_pouch_queue_clear_lease_key_locked(lc_client_handle *client,
+                                                 const char *namespace_name,
+                                                 const char *lease_key,
+                                                 lc_error *error) {
   lc_pouch_lease_record lease_record;
   int rc;
 
   memset(&lease_record, 0, sizeof(lease_record));
-  rc = lc_pouch_read_lease_record(client, namespace_name, lease_key,
-                                  &lease_record, error);
+  {
+    lc_pouch_state_read_result read_result;
+
+    memset(&read_result, 0, sizeof(read_result));
+    rc = lc_pouch_state_read_metadata_locked(client->pouch, namespace_name,
+                                             lease_key, &read_result, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_lease_record_parse(
+          client, read_result.metadata, read_result.metadata_length,
+          read_result.version, &lease_record, error);
+    }
+    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  }
   if (rc == LC_OK && lease_record.found) {
     rc = lc_pouch_write_lease_tombstone(
         client, namespace_name, lease_key, lease_record.owner,
@@ -9863,7 +9887,6 @@ static int lc_pouch_queue_clear_lease_key(lc_client_handle *client,
 
 static int lc_pouch_txn_rollback_queue_message(lc_client_handle *client,
                                                const char *namespace_name,
-                                               const char *message_lease_key,
                                                const char *metadata_key,
                                                const char *txn_id,
                                                lc_error *error) {
@@ -9878,8 +9901,8 @@ static int lc_pouch_txn_rollback_queue_message(lc_client_handle *client,
   rc = lc_pouch_state_discard_staged(client->pouch, namespace_name,
                                      metadata_key, txn_id, &discarded, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_state_read(client->pouch, namespace_name, metadata_key,
-                             &read_result, error);
+    rc = lc_pouch_state_read_locked(client->pouch, namespace_name, metadata_key,
+                                    &read_result, error);
   }
   if (rc == LC_OK && read_result.found) {
     rc = lc_pouch_queue_record_parse(client, &read_result, metadata_key,
@@ -9900,12 +9923,214 @@ static int lc_pouch_txn_rollback_queue_message(lc_client_handle *client,
                                         record.queue);
     }
   }
-  if (rc == LC_OK) {
-    rc = lc_pouch_queue_clear_lease_key(client, namespace_name,
-                                        message_lease_key, error);
-  }
   lc_pouch_queue_record_cleanup(&record);
   lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+  return rc;
+}
+
+/* Go lockd disk validates the queue document and its lease metadata together
+ * before applying a transactional decision. Namespace mutation authority
+ * keeps this validation and the following staged change atomic across shared
+ * Pouch writers. */
+static int lc_pouch_txn_validate_queue_message_lease(
+    const lc_pouch_queue_record *record,
+    const lc_pouch_lease_record *lease_record, const char *txn_id,
+    const char *state, lc_error *error) {
+  int lease_missing;
+
+  if (record == NULL || lease_record == NULL || txn_id == NULL ||
+      state == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue transaction lease validation requires "
+                        "context",
+                        NULL, NULL, "pouch");
+  }
+  lease_missing = record->lease_id == NULL || record->lease_id[0] == '\0';
+  lease_missing =
+      lease_missing &&
+      (record->lease_txn_id == NULL || record->lease_txn_id[0] == '\0') &&
+      record->lease_fencing_token == 0L;
+  if (strcmp(state, "commit") == 0 &&
+      (record->lease_txn_id == NULL ||
+       strcmp(record->lease_txn_id, txn_id) != 0)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue transaction lease mismatch", NULL, NULL,
+                        "pouch");
+  }
+  if (lease_missing) {
+    if (strcmp(state, "commit") == 0) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch queue transaction lease missing", NULL, NULL,
+                          "pouch");
+    }
+    return LC_OK;
+  }
+  if (!lease_record->found) {
+    if (strcmp(state, "commit") == 0) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch queue transaction lease missing", NULL, NULL,
+                          "pouch");
+    }
+    if (record->lease_txn_id == NULL || record->lease_txn_id[0] == '\0') {
+      return LC_OK;
+    }
+    if (strcmp(record->lease_txn_id, txn_id) != 0) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch queue transaction lease mismatch", NULL, NULL,
+                          "pouch");
+    }
+    return LC_OK;
+  }
+  if (strcmp(lease_record->txn_id, txn_id) != 0 || record->lease_id == NULL ||
+      strcmp(record->lease_id, lease_record->lease_id) != 0 ||
+      record->lease_fencing_token != lease_record->fencing_token ||
+      record->lease_txn_id == NULL ||
+      strcmp(record->lease_txn_id, txn_id) != 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue transaction lease mismatch", NULL, NULL,
+                        "pouch");
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_txn_apply_queue_participant_locked(void *context,
+                                                       lc_error *error) {
+  lc_pouch_txn_queue_participant_context *ctx;
+  lc_pouch_lease_record lease_record;
+  lc_pouch_queue_record queue_record;
+  char *metadata_key;
+  char *state_object_key;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  lc_pouch_unix_seconds now;
+  int discarded;
+  int rc;
+
+  ctx = (lc_pouch_txn_queue_participant_context *)context;
+  if (ctx == NULL || ctx->client == NULL || ctx->namespace_name == NULL ||
+      ctx->lease_key == NULL || ctx->txn_id == NULL || ctx->state == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue transaction participant requires context",
+                        NULL, NULL, "pouch");
+  }
+  memset(&lease_record, 0, sizeof(lease_record));
+  memset(&queue_record, 0, sizeof(queue_record));
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  metadata_key = NULL;
+  state_object_key = NULL;
+  discarded = 0;
+  now = 0L;
+  {
+    lc_pouch_state_read_result read_result;
+
+    memset(&read_result, 0, sizeof(read_result));
+    rc = lc_pouch_state_read_metadata_locked(
+        ctx->client->pouch, ctx->namespace_name, ctx->lease_key, &read_result,
+        error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_lease_record_parse(
+          ctx->client, read_result.metadata, read_result.metadata_length,
+          read_result.version, &lease_record, error);
+    }
+    lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &read_result);
+  }
+  if (rc == LC_OK && lease_record.found &&
+      strcmp(lease_record.txn_id, ctx->txn_id) != 0) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch queue transaction lease mismatch", NULL, NULL,
+                      "pouch");
+  }
+  if (rc == LC_OK && !ctx->state_participant && lease_record.found &&
+      strcmp(ctx->state, "commit") == 0) {
+    rc = lc_pouch_now_unix(&now, error);
+    if (rc == LC_OK && lease_record.expires_at_unix <= now) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue transaction lease expired", NULL, NULL,
+                        "pouch");
+    }
+  }
+  if (rc == LC_OK && !ctx->state_participant) {
+    metadata_key =
+        lc_pouch_queue_message_meta_key_from_lease_key(ctx->lease_key, error);
+    if (metadata_key == NULL) {
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+  }
+  if (rc == LC_OK && !ctx->state_participant) {
+    lc_pouch_state_read_result read_result;
+
+    memset(&read_result, 0, sizeof(read_result));
+    rc = lc_pouch_state_read_locked(ctx->client->pouch, ctx->namespace_name,
+                                    metadata_key, &read_result, error);
+    if (rc == LC_OK && read_result.found) {
+      rc = lc_pouch_queue_record_parse(ctx->client, &read_result, metadata_key,
+                                       &queue_record, error);
+    }
+    lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &read_result);
+  }
+  if (rc == LC_OK && !ctx->state_participant &&
+      queue_record.storage_key != NULL) {
+    rc = lc_pouch_txn_validate_queue_message_lease(
+        &queue_record, &lease_record, ctx->txn_id, ctx->state, error);
+  }
+  if (rc == LC_OK && !ctx->state_participant &&
+      queue_record.storage_key != NULL && strcmp(ctx->state, "commit") == 0) {
+    if (queue_record.not_visible_until_unix <= now) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch queue transaction lease expired", NULL, NULL,
+                        "pouch");
+    }
+  }
+  if (rc == LC_OK && !ctx->state_participant &&
+      queue_record.storage_key != NULL && strcmp(ctx->state, "commit") == 0) {
+    rc = lc_pouch_txn_commit_queue_stage(ctx->client, ctx->namespace_name,
+                                         metadata_key, ctx->txn_id, error);
+  } else if (rc == LC_OK && !ctx->state_participant &&
+             queue_record.storage_key != NULL &&
+             strcmp(ctx->state, "rollback") == 0) {
+    rc = lc_pouch_txn_rollback_queue_message(ctx->client, ctx->namespace_name,
+                                             metadata_key, ctx->txn_id, error);
+  } else if (rc == LC_OK && !ctx->state_participant &&
+             queue_record.storage_key != NULL) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch transaction state is unsupported", NULL, NULL,
+                      NULL);
+  }
+  if (rc == LC_OK && ctx->state_participant) {
+    state_object_key =
+        lc_pouch_queue_state_object_key_from_lease_key(ctx->lease_key, error);
+    if (state_object_key == NULL) {
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+  }
+  if (rc == LC_OK && ctx->state_participant) {
+    options.has_query_hidden = 1;
+    options.query_hidden = 1;
+    options.object_record = 1;
+    if (strcmp(ctx->state, "commit") == 0) {
+      rc = lc_pouch_state_delete(ctx->client->pouch, ctx->namespace_name,
+                                 state_object_key, &options, &result, error);
+    } else if (strcmp(ctx->state, "rollback") == 0) {
+      rc = lc_pouch_state_discard_staged(ctx->client->pouch,
+                                         ctx->namespace_name, state_object_key,
+                                         ctx->txn_id, &discarded, error);
+    } else {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction state is unsupported", NULL, NULL,
+                        NULL);
+    }
+  }
+  if (rc == LC_OK &&
+      (ctx->state_participant || queue_record.storage_key != NULL)) {
+    rc = lc_pouch_queue_clear_lease_key_locked(ctx->client, ctx->namespace_name,
+                                               ctx->lease_key, error);
+  }
+  lc_pouch_state_write_result_cleanup(&ctx->client->allocator, &result);
+  lc_free_with_allocator(NULL, state_object_key);
+  lc_free_with_allocator(NULL, metadata_key);
+  lc_pouch_queue_record_cleanup(&queue_record);
+  lc_pouch_lease_record_cleanup(&lease_record);
   return rc;
 }
 
@@ -9913,73 +10138,35 @@ static int lc_pouch_txn_apply_queue_message_participant(
     lc_client_handle *client, const char *namespace_name,
     const char *message_lease_key, const char *txn_id, const char *state,
     lc_error *error) {
-  char *metadata_key;
-  int rc;
+  lc_pouch_txn_queue_participant_context context;
 
-  metadata_key =
-      lc_pouch_queue_message_meta_key_from_lease_key(message_lease_key, error);
-  if (metadata_key == NULL) {
-    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
-  }
-  if (strcmp(state, "commit") == 0) {
-    rc = lc_pouch_txn_commit_queue_stage(client, namespace_name, metadata_key,
-                                         txn_id, error);
-    if (rc == LC_OK) {
-      rc = lc_pouch_queue_clear_lease_key(client, namespace_name,
-                                          message_lease_key, error);
-    }
-  } else if (strcmp(state, "rollback") == 0) {
-    rc = lc_pouch_txn_rollback_queue_message(
-        client, namespace_name, message_lease_key, metadata_key, txn_id, error);
-  } else {
-    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch transaction state is unsupported", NULL, NULL,
-                      NULL);
-  }
-  lc_free_with_allocator(NULL, metadata_key);
-  return rc;
+  memset(&context, 0, sizeof(context));
+  context.client = client;
+  context.namespace_name = namespace_name;
+  context.lease_key = message_lease_key;
+  context.txn_id = txn_id;
+  context.state = state;
+  return lc_pouch_state_with_namespace_lock(
+      client->pouch, namespace_name,
+      lc_pouch_txn_apply_queue_participant_locked, &context, error);
 }
 
 static int lc_pouch_txn_apply_queue_state_participant(
     lc_client_handle *client, const char *namespace_name,
     const char *state_lease_key, const char *txn_id, const char *state,
     lc_error *error) {
-  lc_pouch_state_write_options options;
-  lc_pouch_state_write_result result;
-  char *state_object_key;
-  int discarded;
-  int rc;
+  lc_pouch_txn_queue_participant_context context;
 
-  state_object_key =
-      lc_pouch_queue_state_object_key_from_lease_key(state_lease_key, error);
-  if (state_object_key == NULL) {
-    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
-  }
-  memset(&options, 0, sizeof(options));
-  memset(&result, 0, sizeof(result));
-  options.has_query_hidden = 1;
-  options.query_hidden = 1;
-  options.object_record = 1;
-  discarded = 0;
-  if (strcmp(state, "commit") == 0) {
-    rc = lc_pouch_state_delete(client->pouch, namespace_name, state_object_key,
-                               &options, &result, error);
-  } else if (strcmp(state, "rollback") == 0) {
-    rc = lc_pouch_state_discard_staged(client->pouch, namespace_name,
-                                       state_object_key, txn_id, &discarded,
-                                       error);
-  } else {
-    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch transaction state is unsupported", NULL, NULL,
-                      NULL);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_queue_clear_lease_key(client, namespace_name, state_lease_key,
-                                        error);
-  }
-  lc_pouch_state_write_result_cleanup(&client->allocator, &result);
-  lc_free_with_allocator(NULL, state_object_key);
-  return rc;
+  memset(&context, 0, sizeof(context));
+  context.client = client;
+  context.namespace_name = namespace_name;
+  context.lease_key = state_lease_key;
+  context.txn_id = txn_id;
+  context.state = state;
+  context.state_participant = 1;
+  return lc_pouch_state_with_namespace_lock(
+      client->pouch, namespace_name,
+      lc_pouch_txn_apply_queue_participant_locked, &context, error);
 }
 
 static int lc_pouch_txn_apply_participants(lc_client_handle *client,

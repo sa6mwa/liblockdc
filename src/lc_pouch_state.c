@@ -11831,6 +11831,34 @@ int lc_pouch_state_read_metadata_locked(lc_pouch *pouch,
   return rc;
 }
 
+int lc_pouch_state_read_locked(lc_pouch *pouch, const char *namespace_name,
+                               const char *key, lc_pouch_state_read_result *out,
+                               lc_error *error) {
+  lc_pouch_state_entry current;
+  lc_pouch_namespace_manifest manifest;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      key == NULL || key[0] == '\0' || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "lc_pouch_state_read_locked requires pouch, namespace, "
+                        "key and out",
+                        NULL, NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  memset(&current, 0, sizeof(current));
+  memset(&manifest, 0, sizeof(manifest));
+  rc = lc_pouch_state_manifest_lookup_cached(pouch, namespace_name, key,
+                                             &manifest, &current, NULL, error);
+  if (rc == LC_OK && current.found && current.payload_span.present) {
+    rc = lc_pouch_state_read_result_from_entry(pouch, namespace_name, &manifest,
+                                               &current, 1, out, error);
+  }
+  lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  return rc;
+}
+
 int lc_pouch_state_read_metadata_view_locked(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     lc_pouch_state_metadata_view *out,

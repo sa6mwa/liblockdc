@@ -11199,6 +11199,120 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_txn_queue_decision_rejects_newer_delivery_lease(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_ack_op ack_op;
+  lc_ack_res ack_res;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_pouch_state_read_result read_result;
+  lc_message *first_message;
+  lc_message *second_message;
+  lc_error error;
+  char root[512];
+  char participant_key[256];
+  char participant_namespace[128];
+  char metadata_key[256];
+  long first_fencing_token;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  first_message = NULL;
+  second_message = NULL;
+  first_fencing_token = 0L;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  memset(&ack_op, 0, sizeof(ack_op));
+  memset(&ack_res, 0, sizeof(ack_res));
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("txn-queue-newer-lease", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "txn-stale";
+  rc = lc_source_from_memory("job", strlen("job"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_req.queue = "txn-stale";
+  dequeue_req.owner = "first-worker";
+  dequeue_req.txn_id = "txn-first";
+  dequeue_req.visibility_timeout_seconds = 1L;
+  rc = client->dequeue(client, &dequeue_req, &first_message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first_message);
+  first_fencing_token = first_message->fencing_token;
+
+  ack_op.message.namespace_name = first_message->namespace_name;
+  ack_op.message.queue = first_message->queue;
+  ack_op.message.message_id = first_message->message_id;
+  ack_op.message.lease_id = first_message->lease_id;
+  ack_op.message.txn_id = first_message->txn_id;
+  ack_op.message.fencing_token = first_message->fencing_token;
+  ack_op.message.meta_etag = first_message->meta_etag;
+  rc = client->queue_ack(client, &ack_op, &ack_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(ack_res.acked);
+  lc_ack_res_cleanup(&ack_res);
+  pouch_queue_message_participant_key(first_message, participant_key,
+                                      sizeof(participant_key));
+  snprintf(participant_namespace, sizeof(participant_namespace), "%s",
+           first_message->namespace_name);
+  snprintf(metadata_key, sizeof(metadata_key), "q/txn-stale/msg/%s.meta",
+           first_message->message_id);
+
+  sleep(2U);
+  dequeue_req.owner = "second-worker";
+  dequeue_req.txn_id = "txn-second";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = client->dequeue(client, &dequeue_req, &second_message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(second_message);
+  assert_string_equal(second_message->message_id, first_message->message_id);
+  assert_true(second_message->fencing_token > first_fencing_token);
+
+  participant.namespace_name = participant_namespace;
+  participant.key = participant_key;
+  participant.backend_hash = "pouch-queue";
+  decision_req.txn_id = "txn-first";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "pouch queue transaction lease mismatch");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default",
+                           metadata_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  second_message->close(second_message);
+  first_message->close(first_message);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   static const char selector[] =
@@ -19764,6 +19878,7 @@ int main(void) {
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
       cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
       cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
+      cmocka_unit_test(test_txn_queue_decision_rejects_newer_delivery_lease),
       cmocka_unit_test(test_client_queue_dequeue_honors_wait_seconds),
       cmocka_unit_test(
           test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout),
