@@ -70,6 +70,15 @@ static lc_pouch_writer_root_lock_entry *lc_pouch_writer_root_locks;
 #define LC_POUCH_WRITER_ROOT_LOCK_NONE 0
 #define LC_POUCH_WRITER_ROOT_LOCK_SHARED 1
 #define LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE 2
+/* Match Go disk's default index writer batching policy. */
+#define LC_POUCH_INDEXER_FLUSH_DOCS 2000U
+#define LC_POUCH_INDEXER_FLUSH_INTERVAL_SECONDS 10U
+
+struct lc_pouch_indexer_pending_namespace {
+  char *namespace_name;
+  uint64_t write_count;
+  struct lc_pouch_indexer_pending_namespace *next;
+};
 
 static const uint64_t
     lc_pouch_fsync_batch_bounds[LC_POUCH_FSYNC_BATCH_BOUND_COUNT] = {
@@ -871,6 +880,269 @@ void lc_pouch_compaction_note_mutation(lc_pouch *pouch) {
   pouch->compaction_pending = 1;
   pthread_cond_signal(&pouch->compaction_cond);
   pthread_mutex_unlock(&pouch->compaction_mutex);
+}
+
+static void lc_pouch_indexer_deadline(struct timespec *deadline) {
+  if (deadline == NULL) {
+    return;
+  }
+  clock_gettime(CLOCK_REALTIME, deadline);
+  if (deadline->tv_sec >
+      LONG_MAX - (time_t)LC_POUCH_INDEXER_FLUSH_INTERVAL_SECONDS) {
+    deadline->tv_sec = LONG_MAX;
+  } else {
+    deadline->tv_sec += (time_t)LC_POUCH_INDEXER_FLUSH_INTERVAL_SECONDS;
+  }
+}
+
+static void lc_pouch_indexer_pending_namespaces_cleanup(
+    lc_pouch *pouch, lc_pouch_indexer_pending_namespace *namespaces) {
+  while (namespaces != NULL) {
+    lc_pouch_indexer_pending_namespace *next;
+
+    next = namespaces->next;
+    lc_free_with_allocator(&pouch->allocator, namespaces->namespace_name);
+    lc_free_with_allocator(&pouch->allocator, namespaces);
+    namespaces = next;
+  }
+}
+
+static int lc_pouch_indexer_queue_namespace_locked(lc_pouch *pouch,
+                                                   const char *namespace_name) {
+  lc_pouch_indexer_pending_namespace *entry;
+
+  for (entry = pouch->indexer_pending_namespaces; entry != NULL;
+       entry = entry->next) {
+    if (strcmp(entry->namespace_name, namespace_name) == 0) {
+      if (entry->write_count != LC_U64_MAX) {
+        ++entry->write_count;
+      }
+      return LC_OK;
+    }
+  }
+  entry = (lc_pouch_indexer_pending_namespace *)lc_calloc_with_allocator(
+      &pouch->allocator, 1U, sizeof(*entry));
+  if (entry == NULL) {
+    return LC_ERR_NOMEM;
+  }
+  entry->namespace_name =
+      lc_strdup_with_allocator(&pouch->allocator, namespace_name);
+  if (entry->namespace_name == NULL) {
+    lc_free_with_allocator(&pouch->allocator, entry);
+    return LC_ERR_NOMEM;
+  }
+  entry->write_count = 1U;
+  entry->next = pouch->indexer_pending_namespaces;
+  pouch->indexer_pending_namespaces = entry;
+  return LC_OK;
+}
+
+static int lc_pouch_indexer_flush_limit_reached_locked(lc_pouch *pouch) {
+  lc_pouch_indexer_pending_namespace *entry;
+
+  for (entry = pouch->indexer_pending_namespaces; entry != NULL;
+       entry = entry->next) {
+    if (entry->write_count >= (uint64_t)LC_POUCH_INDEXER_FLUSH_DOCS) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void lc_pouch_indexer_requeue(lc_pouch *pouch,
+                                     lc_pouch_indexer_pending_namespace *list) {
+  while (list != NULL) {
+    lc_pouch_indexer_pending_namespace *next;
+    lc_pouch_indexer_pending_namespace *entry;
+
+    next = list->next;
+    for (entry = pouch->indexer_pending_namespaces; entry != NULL;
+         entry = entry->next) {
+      if (strcmp(entry->namespace_name, list->namespace_name) == 0) {
+        if (entry->write_count > LC_U64_MAX - list->write_count) {
+          entry->write_count = LC_U64_MAX;
+        } else {
+          entry->write_count += list->write_count;
+        }
+        lc_free_with_allocator(&pouch->allocator, list->namespace_name);
+        lc_free_with_allocator(&pouch->allocator, list);
+        list = next;
+        break;
+      }
+    }
+    if (entry == NULL) {
+      list->next = pouch->indexer_pending_namespaces;
+      pouch->indexer_pending_namespaces = list;
+      list = next;
+    }
+  }
+}
+
+static void
+lc_pouch_indexer_run_batch(lc_pouch *pouch,
+                           lc_pouch_indexer_pending_namespace *batch) {
+  lc_pouch_indexer_pending_namespace *failed;
+  lc_pouch_indexer_pending_namespace *entry;
+
+  failed = NULL;
+  entry = batch;
+  while (entry != NULL) {
+    lc_pouch_indexer_pending_namespace *next;
+    lc_pouch_query_index_flush_result flush_result;
+    lc_pouch_generation state_index_seq;
+    lc_error error;
+    int rc;
+
+    next = entry->next;
+    entry->next = NULL;
+    memset(&flush_result, 0, sizeof(flush_result));
+    state_index_seq = 0UL;
+    lc_error_init(&error);
+    rc = lc_pouch_state_index_seq(pouch, entry->namespace_name,
+                                  &state_index_seq, &error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_flush(pouch, entry->namespace_name,
+                                      state_index_seq, &flush_result, &error);
+    }
+    if (rc != LC_OK) {
+      pslog_field fields[3];
+
+      fields[0] = lc_log_str_field("ns", entry->namespace_name);
+      fields[1] = lc_log_error_field("error", &error);
+      fields[2] = lc_log_code_field(&error);
+      lc_log_warn(pouch->logger, "index.background.error", fields, 3U);
+      entry->next = failed;
+      failed = entry;
+    } else {
+      lc_free_with_allocator(&pouch->allocator, entry->namespace_name);
+      lc_free_with_allocator(&pouch->allocator, entry);
+    }
+    lc_error_cleanup(&error);
+    entry = next;
+  }
+  if (failed != NULL) {
+    pthread_mutex_lock(&pouch->indexer_mutex);
+    lc_pouch_indexer_requeue(pouch, failed);
+    pthread_cond_signal(&pouch->indexer_cond);
+    pthread_mutex_unlock(&pouch->indexer_mutex);
+  }
+}
+
+static void *lc_pouch_indexer_worker(void *arg) {
+  lc_pouch *pouch;
+
+  pouch = (lc_pouch *)arg;
+  pthread_mutex_lock(&pouch->indexer_mutex);
+  while (!pouch->indexer_stop) {
+    lc_pouch_indexer_pending_namespace *batch;
+    struct timespec deadline;
+    int wait_rc;
+
+    while (!pouch->indexer_stop && pouch->indexer_pending_namespaces == NULL) {
+      (void)pthread_cond_wait(&pouch->indexer_cond, &pouch->indexer_mutex);
+    }
+    if (pouch->indexer_stop) {
+      break;
+    }
+    lc_pouch_indexer_deadline(&deadline);
+    wait_rc = 0;
+    while (!pouch->indexer_stop &&
+           !lc_pouch_indexer_flush_limit_reached_locked(pouch) &&
+           wait_rc != ETIMEDOUT) {
+      wait_rc = pthread_cond_timedwait(&pouch->indexer_cond,
+                                       &pouch->indexer_mutex, &deadline);
+    }
+    if (pouch->indexer_stop) {
+      break;
+    }
+    batch = pouch->indexer_pending_namespaces;
+    pouch->indexer_pending_namespaces = NULL;
+    pthread_mutex_unlock(&pouch->indexer_mutex);
+    lc_pouch_indexer_run_batch(pouch, batch);
+    pthread_mutex_lock(&pouch->indexer_mutex);
+  }
+  pthread_mutex_unlock(&pouch->indexer_mutex);
+  return NULL;
+}
+
+static int lc_pouch_indexer_worker_init(lc_pouch *pouch, lc_error *error) {
+  int pthread_rc;
+
+  if (pouch == NULL) {
+    return LC_OK;
+  }
+  pthread_rc = pthread_mutex_init(&pouch->indexer_mutex, NULL);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch indexer mutex",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->indexer_mutex_initialized = 1;
+  pthread_rc = pthread_cond_init(&pouch->indexer_cond, NULL);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch indexer condition",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->indexer_cond_initialized = 1;
+  pthread_rc = pthread_create(&pouch->indexer_thread, NULL,
+                              lc_pouch_indexer_worker, pouch);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to start pouch indexer worker",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->indexer_thread_started = 1;
+  return LC_OK;
+}
+
+static void lc_pouch_indexer_worker_close(lc_pouch *pouch) {
+  if (pouch == NULL) {
+    return;
+  }
+  if (pouch->indexer_thread_started) {
+    pthread_mutex_lock(&pouch->indexer_mutex);
+    pouch->indexer_stop = 1;
+    pthread_cond_broadcast(&pouch->indexer_cond);
+    pthread_mutex_unlock(&pouch->indexer_mutex);
+    pthread_join(pouch->indexer_thread, NULL);
+    pouch->indexer_thread_started = 0;
+  }
+  if (pouch->indexer_cond_initialized) {
+    pthread_cond_destroy(&pouch->indexer_cond);
+    pouch->indexer_cond_initialized = 0;
+  }
+  if (pouch->indexer_mutex_initialized) {
+    lc_pouch_indexer_pending_namespaces_cleanup(
+        pouch, pouch->indexer_pending_namespaces);
+    pouch->indexer_pending_namespaces = NULL;
+    pthread_mutex_destroy(&pouch->indexer_mutex);
+    pouch->indexer_mutex_initialized = 0;
+  }
+}
+
+void lc_pouch_indexer_note_mutation(lc_pouch *pouch,
+                                    const char *namespace_name) {
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      pouch->aborted || !pouch->indexer_thread_started) {
+    return;
+  }
+  pthread_mutex_lock(&pouch->indexer_mutex);
+  rc = pouch->indexer_stop
+           ? LC_ERR_INVALID
+           : lc_pouch_indexer_queue_namespace_locked(pouch, namespace_name);
+  if (rc == LC_OK) {
+    pthread_cond_signal(&pouch->indexer_cond);
+  }
+  pthread_mutex_unlock(&pouch->indexer_mutex);
+  if (rc != LC_OK && rc != LC_ERR_INVALID) {
+    pslog_field fields[1];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    lc_log_warn(pouch->logger, "index.background.queue.error", fields, 1U);
+  }
 }
 
 static void lc_pouch_janitor_run_pass(lc_pouch *pouch) {
@@ -2628,14 +2900,6 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         strerror(pthread_rc), NULL, "pouch");
   }
   pouch->state_cache_mutex_initialized = 1;
-  pthread_rc = pthread_mutex_init(&pouch->query_pending_mutex, NULL);
-  if (pthread_rc != 0) {
-    lc_pouch_close(pouch);
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to initialize pouch pending query mutex",
-                        strerror(pthread_rc), NULL, "pouch");
-  }
-  pouch->query_pending_mutex_initialized = 1;
   pthread_rc = pthread_mutex_init(&pouch->query_flush_mutex, NULL);
   if (pthread_rc != 0) {
     lc_pouch_close(pouch);
@@ -2793,6 +3057,11 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     lc_pouch_close(pouch);
     return rc;
   }
+  rc = lc_pouch_indexer_worker_init(pouch, error);
+  if (rc != LC_OK) {
+    lc_pouch_close(pouch);
+    return rc;
+  }
   rc = lc_pouch_janitor_worker_init(pouch, error);
   if (rc != LC_OK) {
     lc_pouch_close(pouch);
@@ -2840,6 +3109,7 @@ void lc_pouch_close(lc_pouch *pouch) {
     lc_pouch_writer_presence_stop(pouch);
   }
   lc_pouch_janitor_worker_close(pouch);
+  lc_pouch_indexer_worker_close(pouch);
   lc_pouch_compaction_worker_close(pouch);
   lc_pouch_state_metadata_append_worker_close(pouch);
   lc_pouch_fsync_batcher_close(pouch);
@@ -2872,9 +3142,6 @@ void lc_pouch_close(lc_pouch *pouch) {
   }
   if (pouch->state_cache_mutex_initialized) {
     pthread_mutex_destroy(&pouch->state_cache_mutex);
-  }
-  if (pouch->query_pending_mutex_initialized) {
-    pthread_mutex_destroy(&pouch->query_pending_mutex);
   }
   if (pouch->query_flush_mutex_initialized) {
     pthread_mutex_destroy(&pouch->query_flush_mutex);
@@ -2911,6 +3178,7 @@ int lc_pouch_abort(lc_pouch *pouch, lc_error *error) {
   pthread_mutex_unlock(&pouch->single_writer_mutex);
   lc_pouch_writer_presence_stop_abrupt(pouch);
   lc_pouch_janitor_worker_close(pouch);
+  lc_pouch_indexer_worker_close(pouch);
   lc_pouch_compaction_worker_close(pouch);
   lc_pouch_state_metadata_append_worker_close(pouch);
   lc_pouch_fsync_batcher_close(pouch);

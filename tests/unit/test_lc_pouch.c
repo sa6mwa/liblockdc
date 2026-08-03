@@ -4936,7 +4936,7 @@ test_parallel_state_writes_keep_query_projection_consistent(void **state) {
 }
 
 static void
-test_shared_query_index_flush_retires_pending_projection(void **state) {
+test_shared_query_index_flush_catches_up_durable_state(void **state) {
   lc_pouch *pouch;
   lc_pouch_open_options options;
   lc_source *source;
@@ -4986,8 +4986,7 @@ test_shared_query_index_flush_retires_pending_projection(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void
-test_shared_query_index_fast_flush_retires_peer_projection(void **state) {
+static void test_shared_query_index_flush_catches_up_peer_state(void **state) {
   lc_pouch *pouch;
   lc_pouch *peer;
   lc_pouch_open_options options;
@@ -5216,7 +5215,7 @@ static void test_parallel_query_flushes_publish_one_valid_index(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_shared_query_flush_rebuilds_incomplete_capture(void **state) {
+static void test_shared_query_flush_observes_peer_streamed_state(void **state) {
   lc_pouch *pouch;
   lc_pouch *peer;
   lc_source *source;
@@ -5299,7 +5298,9 @@ static void test_shared_query_flush_rebuilds_incomplete_capture(void **state) {
                                   &flush_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(flush_result.index_seq, state_index_seq);
-  assert_true(flush_result.repaired);
+  /* The peer already published the durable streamed write. Foreground writes
+   * retain no capture overlay that this handle must repair. */
+  assert_false(flush_result.repaired);
   assert_false(lc_pouch_query_index_has_pending(pouch, "default"));
 
   memset(&flush_result, 0, sizeof(flush_result));
@@ -5321,7 +5322,7 @@ static void test_shared_query_flush_rebuilds_incomplete_capture(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_query_incomplete_capture_is_namespace_scoped(void **state) {
+static void test_query_index_staleness_is_namespace_scoped(void **state) {
   lc_pouch *pouch;
   lc_source *source;
   lc_pouch_open_options options;
@@ -19323,7 +19324,7 @@ test_query_keys_index_summary_uses_artifact_header_rows(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_query_index_pending_flush_uses_public_writes(void **state) {
+static void test_query_index_sync_flush_uses_durable_state(void **state) {
   static const char namespace_name[] = "docs/query-index-pending";
   static const char live_json[] =
       "{\"value\":42,"
@@ -19502,8 +19503,10 @@ static void test_query_index_pending_flush_uses_public_writes(void **state) {
 
   namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
   assert_non_null(namespace_path);
+  /* Flush indexes the authoritative current projection, not historical
+   * per-mutation overlays. Only doc/live and doc/a remain visible here. */
   assert_query_index_segment_contains(namespace_path, "query.index",
-                                      "row_count=4");
+                                      "row_count=2");
   assert_query_index_segment_contains(namespace_path, "query.index.lcpdel",
                                       "646f632f72656d6f766564");
   assert_query_index_segment_contains(namespace_path, "query.index.lcpttg",
@@ -24570,14 +24573,12 @@ int main(void) {
       cmocka_unit_test(test_pouch_durable_sync_batches_parallel_writes),
       cmocka_unit_test(
           test_parallel_state_writes_keep_query_projection_consistent),
-      cmocka_unit_test(
-          test_shared_query_index_flush_retires_pending_projection),
-      cmocka_unit_test(
-          test_shared_query_index_fast_flush_retires_peer_projection),
+      cmocka_unit_test(test_shared_query_index_flush_catches_up_durable_state),
+      cmocka_unit_test(test_shared_query_index_flush_catches_up_peer_state),
       cmocka_unit_test(test_parallel_query_flush_preserves_later_write),
       cmocka_unit_test(test_parallel_query_flushes_publish_one_valid_index),
-      cmocka_unit_test(test_shared_query_flush_rebuilds_incomplete_capture),
-      cmocka_unit_test(test_query_incomplete_capture_is_namespace_scoped),
+      cmocka_unit_test(test_shared_query_flush_observes_peer_streamed_state),
+      cmocka_unit_test(test_query_index_staleness_is_namespace_scoped),
       cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),
       cmocka_unit_test(test_pouch_defaults_and_post_mutation_janitor),
       cmocka_unit_test(test_exclusive_writer_probe_heartbeat_precedence),
@@ -24632,7 +24633,7 @@ int main(void) {
       cmocka_unit_test(test_query_keys_callback_can_reenter_pouch_public_api),
       cmocka_unit_test(test_query_keys_enforces_lockd_limit_contract),
       cmocka_unit_test(test_query_keys_index_summary_uses_artifact_header_rows),
-      cmocka_unit_test(test_query_index_pending_flush_uses_public_writes),
+      cmocka_unit_test(test_query_index_sync_flush_uses_durable_state),
       cmocka_unit_test(
           test_query_keys_index_summary_preserves_callback_failure),
       cmocka_unit_test(

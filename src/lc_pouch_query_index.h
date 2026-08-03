@@ -61,6 +61,8 @@ int lc_pouch_query_index_flush_validated(lc_pouch *pouch,
                                          lc_pouch_generation state_index_seq,
                                          lc_pouch_query_index_flush_result *out,
                                          lc_error *error);
+/** Returns whether the durable state sequence is newer than its index
+ * manifest, or freshness cannot be read safely. */
 int lc_pouch_query_index_has_pending(lc_pouch *pouch,
                                      const char *namespace_name);
 int lc_pouch_query_index_manifest_seq(lc_pouch *pouch,

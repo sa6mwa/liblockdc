@@ -1299,22 +1299,30 @@ requested sync boundary, and the resident projection has accepted the new
 ref. A writer pipeline may batch independent operations but may not
 acknowledge, reorder, or expose an operation before that point.
 
-The pending query-index overlay is derived from that accepted projection. Each
-writer prepares its own derived entry independently, then serializes only the
-overlay publication. A flush captures its overlay epoch and detaches the local
-entries before artifact I/O, so later writers publish into the next epoch
-without being stalled by derived work. An unreplayable source capture marks
-only its namespace incomplete; its next successful flush rebuilds that
-namespace from the authoritative log before the marker is cleared. The overlay
-therefore never becomes a second mutation authority.
+Pouch follows Go disk's asynchronous index-writer boundary. After a successful
+state mutation, the foreground path records only a small namespace marker on
+the opened Pouch handle. It never parses the document again, constructs
+postings, or retains a document body for later indexing. That handle's pthread
+indexer coalesces its markers and incrementally replays the authoritative state
+log for a namespace after 2,000 mutations for that namespace or ten seconds
+from its first unflushed mutation. The deadline is not restarted by later
+writes. Shared-root handles can each run an indexer, but still serialize
+publication through the durable namespace lock below.
+
+The durable state-index sequence is the sole index freshness boundary. A query
+or explicit `flush_index` compares it with the manifest sequence; on a
+mismatch, it performs the same incremental replay synchronously when the
+background indexer has not yet published. Process exit can therefore leave
+only derived artifacts behind: the next synchronous query/flush repairs them
+from durable state without any lost document or in-memory body dependency.
 
 Exclusive roots serialize derived artifact publication with a root-local flush
 mutex. Shared roots instead hold the namespace's durable cross-process write
 authority from the high-water sequence sample through artifact and manifest
 publication. This serializes competing Pouch handles and processes, so their
 read-modify-write manifest updates and derived artifact writes cannot race.
-The pending-overlay mutex is still released before artifact I/O and never
-participates in public mutation completion.
+The indexer's queue is local scheduling state only and never participates in
+public mutation completion.
 
 Go disk's default failover path marks writes `NoSync` because a per-write fsync
 can dominate core lockd workloads. Pouch has the same default boundary:
@@ -1458,7 +1466,9 @@ Required behavior:
 Public state scans must also exclude internal user-namespace key prefixes such
 as `q/`, `state/<key>/attachments/`, `state/<key>/.staging/`, and
 `config/namespace` unless a future public API deliberately exposes those
-surfaces. This applies equally to pending and persisted query-index rows, so a
+transaction's staged record cannot become queryable before its decision.
+surfaces. This applies equally to derived and persisted query-index rows, so a
+transaction's staged record cannot become queryable before its decision.
 transaction's staged record cannot become queryable before its decision.
 Hiding must be enforced by metadata and prefix policy, not merely by placing
 records in a different namespace.

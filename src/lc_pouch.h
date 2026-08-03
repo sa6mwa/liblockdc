@@ -247,7 +247,10 @@ typedef int (*lc_pouch_state_read_many_fn)(
     lc_error *error);
 
 /**
- * Opens a Pouch root and starts its owned worker threads.
+ * Opens a Pouch root and starts its owned worker threads. Its indexer batches
+ * derived-index replay from durable state after 2,000 namespace mutations or
+ * 10 seconds, so mutation completion neither parses nor retains document
+ * bodies for index construction.
  *
  * A process must fork before opening Pouch, or exec before using Pouch in the
  * child. Re-entering an inherited Pouch handle after fork is unsupported:

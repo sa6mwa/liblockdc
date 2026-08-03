@@ -14604,7 +14604,6 @@ int lc_pouch_client_flush_index_method(lc_client *self,
                                               index_seq, &index_result, error);
   } else {
     lc_pouch_generation manifest_seq;
-    int has_pending;
 
     rc = lc_pouch_state_index_seq(client->pouch, namespace_name, &index_seq,
                                   error);
@@ -14617,9 +14616,7 @@ int lc_pouch_client_flush_index_method(lc_client *self,
     if (rc != LC_OK) {
       return rc;
     }
-    has_pending =
-        lc_pouch_query_index_has_pending(client->pouch, namespace_name);
-    if (!has_pending && manifest_seq == index_seq) {
+    if (manifest_seq == index_seq) {
       index_result.index_seq = index_seq;
     } else {
       rc = lc_pouch_query_index_flush(client->pouch, namespace_name, index_seq,

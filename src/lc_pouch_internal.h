@@ -16,12 +16,6 @@ typedef struct lc_pouch_query_index_artifact_cache_entry
     lc_pouch_query_index_artifact_cache_entry;
 typedef struct lc_pouch_query_index_packed_cache_entry
     lc_pouch_query_index_packed_cache_entry;
-typedef struct lc_pouch_query_index_pending_entry
-    lc_pouch_query_index_pending_entry;
-typedef struct lc_pouch_query_index_pending_segment
-    lc_pouch_query_index_pending_segment;
-typedef struct lc_pouch_query_index_pending_incomplete_namespace
-    lc_pouch_query_index_pending_incomplete_namespace;
 typedef struct lc_pouch_query_index_manifest_trust_entry
     lc_pouch_query_index_manifest_trust_entry;
 typedef struct lc_pouch_fsync_request lc_pouch_fsync_request;
@@ -29,6 +23,8 @@ typedef struct lc_pouch_fsync_batcher lc_pouch_fsync_batcher;
 typedef struct lc_pouch_state_metadata_append_batcher
     lc_pouch_state_metadata_append_batcher;
 typedef struct lc_pouch_writer_root_lock_entry lc_pouch_writer_root_lock_entry;
+typedef struct lc_pouch_indexer_pending_namespace
+    lc_pouch_indexer_pending_namespace;
 
 /* Exclusive roots have one in-process writer. These bounded stripes retain
  * conflicting-key serialization through durable completion without shared
@@ -164,9 +160,6 @@ struct lc_pouch {
   int state_mutation_mutex_initialized;
   pthread_mutex_t state_cache_mutex;
   int state_cache_mutex_initialized;
-  /* Serializes the rebuildable pending query projection and flush snapshots. */
-  pthread_mutex_t query_pending_mutex;
-  int query_pending_mutex_initialized;
   /* Serializes query artifact publication without stalling pending writers. */
   pthread_mutex_t query_flush_mutex;
   int query_flush_mutex_initialized;
@@ -184,6 +177,15 @@ struct lc_pouch {
   char **compaction_namespaces;
   size_t compaction_namespace_count;
   size_t compaction_namespace_capacity;
+  /* Go disk's indexer batches durable-state replay away from mutations. */
+  pthread_mutex_t indexer_mutex;
+  pthread_cond_t indexer_cond;
+  pthread_t indexer_thread;
+  int indexer_mutex_initialized;
+  int indexer_cond_initialized;
+  int indexer_thread_started;
+  int indexer_stop;
+  lc_pouch_indexer_pending_namespace *indexer_pending_namespaces;
   pthread_mutex_t janitor_mutex;
   pthread_cond_t janitor_cond;
   pthread_t janitor_thread;
@@ -208,17 +210,6 @@ struct lc_pouch {
   size_t query_artifact_cache_count;
   lc_pouch_query_index_packed_cache_entry *query_packed_cache;
   size_t query_packed_cache_count;
-  lc_pouch_query_index_pending_entry *query_pending_index;
-  size_t query_pending_index_count;
-  /* Allocation-failure fallback for an incomplete pending capture. */
-  int query_pending_index_incomplete;
-  /* Namespace-scoped capture failures require a durable rebuild before the
-   * corresponding derived index can be trusted again. */
-  lc_pouch_query_index_pending_incomplete_namespace
-      *query_pending_incomplete_namespaces;
-  /* Lets a flush preserve publications that arrived after its capture. */
-  uint64_t query_pending_epoch;
-  lc_pouch_query_index_pending_segment *query_pending_segments;
   lc_pouch_query_index_manifest_trust_entry *query_manifest_trust;
 };
 
@@ -263,6 +254,10 @@ void lc_pouch_writer_mode_operation_end(lc_pouch *pouch);
  * does not compact at open or while successful mutations keep arriving.
  */
 void lc_pouch_compaction_note_mutation(lc_pouch *pouch);
+/** Schedules asynchronous incremental index publication after a mutation.
+ * This queues only the namespace and never retains a document body. */
+void lc_pouch_indexer_note_mutation(lc_pouch *pouch,
+                                    const char *namespace_name);
 void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch);
 int lc_pouch_state_metadata_append_worker_init(lc_pouch *pouch,
                                                lc_error *error);
