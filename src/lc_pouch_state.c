@@ -36,6 +36,8 @@
 #define LC_POUCH_STATE_BODY_CACHE_MAX_BYTES (128U * 1024U * 1024U)
 #define LC_POUCH_STATE_BODY_CACHE_RECORD_MAX_BYTES (1024U * 1024U)
 #define LC_POUCH_STATE_SOURCE_CACHE_MAX_FILES 64U
+#define LC_POUCH_STATE_WRITEV_MAX_PARTS 15
+#define LC_POUCH_STATE_WRITEV_BATCH_RECORDS 5U
 #define LC_POUCH_STATE_DECISION_COMMITTED "committed"
 #define LC_POUCH_STATE_DECISION_DISCARDED "discarded"
 #define LC_POUCH_STATE_HIGH_WATER_KEY ".lockd/high-water"
@@ -3974,11 +3976,12 @@ static int lc_pouch_state_record_write_header(
 
 static int lc_pouch_state_writev_all(int fd, const struct iovec *parts,
                                      int part_count, lc_error *error) {
-  struct iovec pending[3];
+  struct iovec pending[LC_POUCH_STATE_WRITEV_MAX_PARTS];
   int pending_count;
   int index;
 
-  if (parts == NULL || part_count <= 0 || part_count > 3) {
+  if (parts == NULL || part_count <= 0 ||
+      part_count > LC_POUCH_STATE_WRITEV_MAX_PARTS) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch vectored state write requires valid parts", NULL,
                         NULL, "pouch");
@@ -4051,6 +4054,66 @@ static int lc_pouch_state_record_write_prefix(
     ++part_count;
   }
   return lc_pouch_state_writev_all(fd, parts, part_count, error);
+}
+
+/* Batch only already-encoded inline records. Streaming payload records retain
+ * their pending-header lifecycle and never enter this materialization-free
+ * vectored path. Fifteen iovecs stays below the POSIX minimum IOV_MAX. */
+static int lc_pouch_state_record_write_prefix_batch(
+    int fd, const lc_pouch_state_binary_append_item *items, size_t item_count,
+    lc_error *error) {
+  unsigned char headers[LC_POUCH_STATE_WRITEV_BATCH_RECORDS]
+                       [LC_POUCH_STATE_RECORD_HEADER_BYTES];
+  struct iovec parts[LC_POUCH_STATE_WRITEV_MAX_PARTS];
+  size_t batch_count;
+  size_t index;
+  size_t item_index;
+  int part_count;
+  int rc;
+
+  if (items == NULL || item_count == 0U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch vectored record batch requires items", NULL,
+                        NULL, "pouch");
+  }
+  index = 0U;
+  while (index < item_count) {
+    batch_count = item_count - index;
+    if (batch_count > LC_POUCH_STATE_WRITEV_BATCH_RECORDS) {
+      batch_count = LC_POUCH_STATE_WRITEV_BATCH_RECORDS;
+    }
+    part_count = 0;
+    for (item_index = 0U; item_index < batch_count; ++item_index) {
+      const lc_pouch_state_binary_append_item *item;
+
+      item = &items[index + item_index];
+      rc = lc_pouch_state_record_header_encode(
+          item->record_type, item->key, item->key_len, item->meta,
+          item->meta_len, 0U, 0UL, 0UL, headers[item_index], error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+      parts[part_count].iov_base = headers[item_index];
+      parts[part_count].iov_len = LC_POUCH_STATE_RECORD_HEADER_BYTES;
+      ++part_count;
+      if (item->key_len > 0U) {
+        parts[part_count].iov_base = (void *)item->key;
+        parts[part_count].iov_len = item->key_len;
+        ++part_count;
+      }
+      if (item->meta_len > 0U) {
+        parts[part_count].iov_base = item->meta;
+        parts[part_count].iov_len = item->meta_len;
+        ++part_count;
+      }
+    }
+    rc = lc_pouch_state_writev_all(fd, parts, part_count, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    index += batch_count;
+  }
+  return LC_OK;
 }
 
 /* Publish the final header last so active-log readers only see complete data.
@@ -4646,10 +4709,8 @@ lc_pouch_state_append_binary_records(lc_pouch *pouch,
                         NULL, "pouch");
     }
   }
-  for (index = 0U; rc == LC_OK && index < item_count; ++index) {
-    rc = lc_pouch_state_record_write_prefix(
-        fd, items[index].record_type, items[index].key, items[index].key_len,
-        items[index].meta, items[index].meta_len, 0U, 0UL, 0UL, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_record_write_prefix_batch(fd, items, item_count, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_state_defer_fsync(pouch, fd, error);
