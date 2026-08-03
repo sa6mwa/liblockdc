@@ -344,9 +344,6 @@ typedef struct lc_pouch_txn_stage_write_context {
   const char *namespace_name;
   const char *key;
   const char *txn_id;
-  lc_source *source;
-  lc_pouch_state_write_options *options;
-  lc_pouch_state_write_result *out;
 } lc_pouch_txn_stage_write_context;
 
 typedef struct lc_pouch_counting_source {
@@ -8000,122 +7997,61 @@ static int lc_pouch_lease_view_precondition_check(
       precondition->key, &state_view, NULL, error);
 }
 
-/* Namespace-scoped transaction staging must make its lease decision and
- * staging precondition from one committed projection. The generic stage write
- * then appends under the already-held namespace authority, avoiding a public
- * pre-read followed by a second lease read in the write callback. */
-static int lc_pouch_client_prepare_txn_stage_options_locked(
-    lc_client_handle *client, const char *namespace_name, const char *key,
-    const char *txn_id, const lc_pouch_state_read_result *committed,
+/* The state layer supplies all three resident views while namespace mutation
+ * authority is held. The client owns only transport-level lease policy. */
+static int lc_pouch_client_prepare_txn_stage_write(
+    const lc_pouch_state_metadata_view *committed,
+    const lc_pouch_state_metadata_view *staged,
+    const lc_pouch_state_metadata_view *lease_state, void *context,
     lc_pouch_state_write_options *options, lc_error *error) {
-  lc_pouch_state_read_result staged;
-  const lc_pouch_state_read_result *precondition_source;
-  char *staged_key;
-  int rc;
-
-  if (client == NULL || namespace_name == NULL || key == NULL ||
-      !lc_pouch_txn_id_present(txn_id) || committed == NULL ||
-      options == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch locked transaction stage requires context", NULL,
-                        NULL, "pouch");
-  }
-  memset(&staged, 0, sizeof(staged));
-  staged_key = lc_pouch_staged_storage_key(key, txn_id, error);
-  if (staged_key == NULL) {
-    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
-  }
-  rc = lc_pouch_state_read_metadata_locked(client->pouch, namespace_name,
-                                           staged_key, &staged, error);
-  precondition_source = staged.found ? &staged : committed;
-  if (rc == LC_OK && options->expected_etag != NULL) {
-    if (!precondition_source->found ||
-        strcmp(precondition_source->etag, options->expected_etag) != 0) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch state etag precondition failed", NULL, NULL,
-                        NULL);
-    }
-  }
-  if (rc == LC_OK && options->has_expected_version) {
-    if (!precondition_source->found ||
-        precondition_source->version != options->expected_version) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch state version precondition failed", NULL, NULL,
-                        NULL);
-    }
-  }
-  /* Lease-only metadata must not hide its first body write. */
-  if (rc == LC_OK && !options->has_query_hidden && precondition_source->found &&
-      precondition_source->has_body && precondition_source->has_query_hidden) {
-    options->has_query_hidden = 1;
-    options->query_hidden = precondition_source->query_hidden;
-  }
-  if (rc == LC_OK && !staged.found) {
-    options->expected_etag = NULL;
-    options->has_expected_version = 0;
-    options->expected_version = 0UL;
-  }
-  lc_free_with_allocator(NULL, staged_key);
-  lc_pouch_state_read_result_cleanup(&client->allocator, &staged);
-  return rc;
-}
-
-static int lc_pouch_client_stage_transaction_write_locked(void *context,
-                                                          lc_error *error) {
   lc_pouch_txn_stage_write_context *stage;
-  lc_pouch_state_read_result committed;
-  lc_pouch_state_read_result lease_state;
-  const lc_pouch_state_read_result *lease_source;
-  lc_pouch_state_metadata_view state_view;
+  const lc_pouch_state_metadata_view *precondition_source;
   int rc;
 
   stage = (lc_pouch_txn_stage_write_context *)context;
   if (stage == NULL || stage->client == NULL || stage->lease == NULL ||
       stage->namespace_name == NULL || stage->key == NULL ||
       stage->lease->key == NULL || stage->lease->key[0] == '\0' ||
-      !lc_pouch_txn_id_present(stage->txn_id) || stage->source == NULL ||
-      stage->options == NULL || stage->out == NULL) {
+      !lc_pouch_txn_id_present(stage->txn_id) || committed == NULL ||
+      staged == NULL || lease_state == NULL || options == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch transaction stage write requires context", NULL,
-                        NULL, "pouch");
+                        "pouch transaction stage preparation requires context",
+                        NULL, NULL, "pouch");
   }
-  memset(&committed, 0, sizeof(committed));
-  memset(&lease_state, 0, sizeof(lease_state));
-  memset(&state_view, 0, sizeof(state_view));
-  rc = lc_pouch_state_read_metadata_locked(stage->client->pouch,
-                                           stage->namespace_name, stage->key,
-                                           &committed, error);
-  lease_source = &committed;
-  if (rc == LC_OK && strcmp(stage->lease->key, stage->key) != 0) {
-    rc = lc_pouch_state_read_metadata_locked(
-        stage->client->pouch, stage->namespace_name, stage->lease->key,
-        &lease_state, error);
-    lease_source = &lease_state;
+  rc = lc_pouch_validate_lease_metadata_view(
+      stage->client, stage->lease, stage->namespace_name, stage->lease->key,
+      lease_state, NULL, error);
+  if (rc == LC_OK) {
+    precondition_source = staged->found ? staged : committed;
+    if (options->expected_etag != NULL &&
+        (!precondition_source->found || precondition_source->etag == NULL ||
+         strcmp(precondition_source->etag, options->expected_etag) != 0)) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state etag precondition failed", NULL, NULL,
+                        NULL);
+    }
   }
   if (rc == LC_OK) {
-    state_view.found = lease_source->found;
-    state_view.version = lease_source->version;
-    state_view.metadata = lease_source->metadata;
-    state_view.metadata_length = lease_source->metadata_length;
-    state_view.has_query_hidden = lease_source->has_query_hidden;
-    state_view.query_hidden = lease_source->query_hidden;
-    state_view.has_body = lease_source->has_body;
-    rc = lc_pouch_validate_lease_metadata_view(
-        stage->client, stage->lease, stage->namespace_name, stage->lease->key,
-        &state_view, NULL, error);
+    precondition_source = staged->found ? staged : committed;
+    if (options->has_expected_version &&
+        (!precondition_source->found ||
+         precondition_source->version != options->expected_version)) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch state version precondition failed", NULL, NULL,
+                        NULL);
+    }
   }
-  if (rc == LC_OK) {
-    rc = lc_pouch_client_prepare_txn_stage_options_locked(
-        stage->client, stage->namespace_name, stage->key, stage->txn_id,
-        &committed, stage->options, error);
+  /* Lease-only metadata must not hide its first staged body write. */
+  if (rc == LC_OK && !options->has_query_hidden && precondition_source->found &&
+      precondition_source->has_body && precondition_source->has_query_hidden) {
+    options->has_query_hidden = 1;
+    options->query_hidden = precondition_source->query_hidden;
   }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_stage_write(stage->client->pouch, stage->namespace_name,
-                                    stage->key, stage->txn_id, stage->source,
-                                    stage->options, stage->out, error);
+  if (rc == LC_OK && !staged->found) {
+    options->expected_etag = NULL;
+    options->has_expected_version = 0;
+    options->expected_version = 0UL;
   }
-  lc_pouch_state_read_result_cleanup(&stage->client->allocator, &lease_state);
-  lc_pouch_state_read_result_cleanup(&stage->client->allocator, &committed);
   return rc;
 }
 
@@ -8132,12 +8068,10 @@ static int lc_pouch_client_stage_transaction_write(
   context.namespace_name = namespace_name;
   context.key = key;
   context.txn_id = txn_id;
-  context.source = source;
-  context.options = options;
-  context.out = out;
-  return lc_pouch_state_with_namespace_lock(
-      client != NULL ? client->pouch : NULL, namespace_name,
-      lc_pouch_client_stage_transaction_write_locked, &context, error);
+  return lc_pouch_state_stage_write_prepared(
+      client != NULL ? client->pouch : NULL, namespace_name, key, txn_id,
+      lease != NULL ? lease->key : NULL, source, options,
+      lc_pouch_client_prepare_txn_stage_write, &context, out, error);
 }
 
 /* Preserve lockd's transport-visible failure for a required lease owner. */

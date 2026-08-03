@@ -492,6 +492,12 @@ committed key and its `<key>/.staging/<txn>` companion form one transaction
 decision even though ordinary non-transactional writes retain exact-key
 concurrency.
 
+The state layer owns that full stage decision. It passes the resolved staged
+projection and manifest directly to its append path, so the append does not
+perform a second staged-key lookup after CAS and lease validation. Client code
+may provide lease-policy validation only; it must not read Pouch state to
+prepare a staged write.
+
 A stateful queue delivery is the deliberate distinct-key exception. Its lease
 metadata lives at `q/<queue>/state/<id>.lease`, while the state body lives at
 `q/<queue>/state/<id>`. A transaction-bound update reads both records under

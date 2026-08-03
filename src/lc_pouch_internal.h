@@ -75,6 +75,7 @@ typedef struct lc_pouch_state_scan_summaries_result {
 /* A transient state projection view used while a key mutation lock is held. */
 typedef struct lc_pouch_state_metadata_view {
   int found;
+  const char *etag;
   lc_pouch_generation version;
   const unsigned char *metadata;
   size_t metadata_length;
@@ -89,6 +90,14 @@ typedef struct lc_pouch_state_metadata_view {
 typedef int (*lc_pouch_state_metadata_prepare_fn)(
     const lc_pouch_state_metadata_view *current, void *context,
     lc_pouch_state_write_options *options, int *apply, lc_error *error);
+
+/* Builds one staged state write from the committed, staged, and lease
+ * projections while one namespace mutation authority is held. */
+typedef int (*lc_pouch_state_stage_prepare_fn)(
+    const lc_pouch_state_metadata_view *committed,
+    const lc_pouch_state_metadata_view *staged,
+    const lc_pouch_state_metadata_view *lease_state, void *context,
+    lc_pouch_state_write_options *options, lc_error *error);
 
 typedef int (*lc_pouch_state_scan_summary_visit_fn)(
     const lc_pouch_state_scan_summary_entry *entry, void *context,
@@ -301,6 +310,16 @@ int lc_pouch_state_update_metadata_locked(
 int lc_pouch_state_update_metadata_prepared_locked(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     lc_pouch_state_metadata_prepare_fn prepare, void *prepare_context,
+    lc_pouch_state_write_result *out, lc_error *error);
+/**
+ * Stages a body after one namespace-atomic committed/staged/lease decision.
+ * `lease_key` may differ from `key` for queue-state lease updates.
+ */
+int lc_pouch_state_stage_write_prepared(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *txn_id, const char *lease_key, lc_source *body,
+    lc_pouch_state_write_options *options,
+    lc_pouch_state_stage_prepare_fn prepare, void *prepare_context,
     lc_pouch_state_write_result *out, lc_error *error);
 int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_generation after_version,

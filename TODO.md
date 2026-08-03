@@ -96,9 +96,11 @@ user data records.
 - [x] Hold reusable descriptors for the active append segment and bounded read
   sources. Invalidate them only at rotation, recovery, maintenance, mode
   transition, I/O failure, or Pouch close/abort.
-- [ ] Replace duplicated client pre-read plus state-layer reread paths with one
-  mutation authority that reads cached metadata, evaluates CAS/lease state,
-  appends, commits, and publishes the updated projection atomically.
+- [x] Replace duplicated client pre-read plus state-layer reread paths with one
+  mutation authority that reads cached committed, staged, and lease metadata,
+  evaluates CAS/lease state, appends from the resolved staged projection,
+  commits, and publishes atomically. The client supplies only lease policy;
+  queue-state's distinct lease key remains part of that same authority.
 - [x] Preserve real streaming. Large and all non-memory values flow from source
   through compression/encryption, hashing, CRC, pending-record finalization,
   and the active descriptor without whole-value materialization. Only the
