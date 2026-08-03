@@ -27,7 +27,6 @@ typedef struct lc_pouch_fsync_batcher lc_pouch_fsync_batcher;
 typedef struct lc_pouch_state_metadata_append_batcher
     lc_pouch_state_metadata_append_batcher;
 typedef struct lc_pouch_writer_root_lock_entry lc_pouch_writer_root_lock_entry;
-typedef struct lc_pouch_exclusive_append_gate lc_pouch_exclusive_append_gate;
 
 /* Exclusive roots have one in-process writer. These bounded stripes retain
  * conflicting-key serialization through durable completion without shared
@@ -156,17 +155,7 @@ struct lc_pouch {
   int state_cache_mutex_initialized;
   pthread_mutex_t exclusive_key_mutexes[LC_POUCH_EXCLUSIVE_KEY_STRIPE_COUNT];
   size_t exclusive_key_mutex_count;
-  pthread_mutex_t exclusive_append_gate_mutex;
-  int exclusive_append_gate_mutex_initialized;
-  lc_pouch_exclusive_append_gate *exclusive_append_gates;
   lc_pouch_fsync_batcher *fsync_batcher;
-  /* Each observed namespace owns one bounded metadata append queue. The state
-   * implementation owns these workers; streamed bodies stay direct. */
-  pthread_mutex_t state_metadata_append_registry_mutex;
-  int state_metadata_append_registry_mutex_initialized;
-  lc_pouch_state_metadata_append_batcher *state_metadata_append_batchers;
-  lc_pouch_state_metadata_append_batcher *state_metadata_append_batcher_buckets
-      [LC_POUCH_NAMESPACE_REGISTRY_BUCKET_COUNT];
   pthread_mutex_t compaction_mutex;
   pthread_cond_t compaction_cond;
   pthread_t compaction_thread;
@@ -241,7 +230,6 @@ void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch);
 int lc_pouch_state_metadata_append_worker_init(lc_pouch *pouch,
                                                lc_error *error);
 void lc_pouch_state_metadata_append_worker_close(lc_pouch *pouch);
-void lc_pouch_state_exclusive_append_gates_cleanup(lc_pouch *pouch);
 void lc_pouch_query_index_cache_cleanup(lc_pouch *pouch);
 int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,
                                        const char *namespace_name,

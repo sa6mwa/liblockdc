@@ -82,6 +82,10 @@ user data records.
 
 ### 1. Establish The Common Namespace Logstore Core
 
+- [x] Bind each resident namespace's projection, active descriptor, exclusive
+  append gate, and metadata append worker to one stable namespace owner. The
+  process-level namespace guard remains separately registered because it must
+  coordinate aliases of the same root across Pouch handles.
 - [ ] Design one internal namespace-logstore owner used by all state, object,
   metadata, lease, queue, attachment, transaction, and index mutations.
 - [ ] Keep a resident logical record index keyed by normalized key, durable

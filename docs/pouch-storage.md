@@ -1113,6 +1113,12 @@ bounded source cache, and active append descriptor. Shared-root, recovery,
 takeover, rotation, maintenance, and I/O invalidation deliberately leave that
 path to coordinate or rebuild durable state.
 
+Each resident namespace owner also retains its exclusive append gate and its
+bounded metadata append worker for the Pouch lifetime. This keeps the
+projection, descriptor, byte-range gate, and metadata queue in one namespace
+ownership domain. The process-level namespace guard remains separate because
+it intentionally coordinates Pouch handles that resolve to the same root.
+
 The bounded source cache retains at most 64 open segment descriptors. A public
 stream receives a duplicate descriptor with its own read cursor, so compaction
 or LRU invalidation can close only the cache entry without invalidating an

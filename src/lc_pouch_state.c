@@ -57,7 +57,7 @@ typedef struct lc_pouch_state_namespace_lock {
   int fd;
   struct lc_pouch_state_process_namespace_mutex *process_mutex;
   struct lc_pouch_state_process_namespace_guard *maintenance_guard;
-  lc_pouch_exclusive_append_gate *exclusive_append_gate;
+  pthread_mutex_t *exclusive_append_gate;
   lc_pouch *pouch;
   const char *namespace_name;
   struct lc_pouch_state_namespace_lock *previous_namespace_lock;
@@ -78,7 +78,7 @@ typedef struct lc_pouch_state_key_lock {
 typedef struct lc_pouch_state_append_lock {
   int fd;
   struct lc_pouch_state_process_namespace_mutex *process_mutex;
-  lc_pouch_exclusive_append_gate *exclusive_gate;
+  pthread_mutex_t *exclusive_gate;
 } lc_pouch_state_append_lock;
 
 typedef struct lc_pouch_state_deferred_fsync {
@@ -101,12 +101,6 @@ typedef struct lc_pouch_state_process_namespace_mutex {
   unsigned long refcount;
   struct lc_pouch_state_process_namespace_mutex *next;
 } lc_pouch_state_process_namespace_mutex;
-
-struct lc_pouch_exclusive_append_gate {
-  char *namespace_name;
-  pthread_mutex_t mutex;
-  struct lc_pouch_exclusive_append_gate *next;
-};
 
 typedef struct lc_pouch_state_process_namespace_guard {
   char *identity;
@@ -227,6 +221,11 @@ static int lc_pouch_state_process_namespace_mutex_lock(
     lc_pouch_state_process_namespace_mutex **out, lc_error *error);
 static void lc_pouch_state_process_namespace_mutex_unlock(
     lc_pouch_state_process_namespace_mutex **mutex);
+static int lc_pouch_state_exclusive_append_gate_lock(lc_pouch *pouch,
+                                                     const char *namespace_name,
+                                                     pthread_mutex_t **out,
+                                                     lc_error *error);
+static void lc_pouch_state_exclusive_append_gate_unlock(pthread_mutex_t **gate);
 
 static void lc_pouch_state_commit_group_key_init(void) {
   (void)pthread_key_create(&lc_pouch_state_commit_group_key, NULL);
@@ -565,102 +564,6 @@ static int lc_pouch_state_mutex_init_recursive(pthread_mutex_t *mutex,
                         strerror(pthread_rc), NULL, NULL);
   }
   return LC_OK;
-}
-
-static int lc_pouch_state_exclusive_append_gate_lock(
-    lc_pouch *pouch, const char *namespace_name,
-    lc_pouch_exclusive_append_gate **out, lc_error *error) {
-  lc_pouch_exclusive_append_gate *gate;
-  lc_pouch_exclusive_append_gate *created;
-  int pthread_rc;
-  int rc;
-
-  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      out == NULL || !pouch->exclusive_append_gate_mutex_initialized) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch exclusive append gate requires namespace", NULL,
-                        NULL, "pouch");
-  }
-  *out = NULL;
-  pthread_rc = pthread_mutex_lock(&pouch->exclusive_append_gate_mutex);
-  if (pthread_rc != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to lock pouch append gate registry",
-                        strerror(pthread_rc), NULL, "pouch");
-  }
-  for (gate = pouch->exclusive_append_gates; gate != NULL; gate = gate->next) {
-    if (strcmp(gate->namespace_name, namespace_name) == 0) {
-      break;
-    }
-  }
-  if (gate == NULL) {
-    created = (lc_pouch_exclusive_append_gate *)lc_calloc_with_allocator(
-        &pouch->allocator, 1U, sizeof(*created));
-    if (created == NULL) {
-      (void)pthread_mutex_unlock(&pouch->exclusive_append_gate_mutex);
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch append gate", NULL, NULL,
-                          "pouch");
-    }
-    created->namespace_name =
-        lc_strdup_with_allocator(&pouch->allocator, namespace_name);
-    if (created->namespace_name == NULL) {
-      lc_free_with_allocator(&pouch->allocator, created);
-      (void)pthread_mutex_unlock(&pouch->exclusive_append_gate_mutex);
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch append gate namespace",
-                          NULL, NULL, "pouch");
-    }
-    rc = lc_pouch_state_mutex_init_recursive(&created->mutex, error);
-    if (rc != LC_OK) {
-      lc_free_with_allocator(&pouch->allocator, created->namespace_name);
-      lc_free_with_allocator(&pouch->allocator, created);
-      (void)pthread_mutex_unlock(&pouch->exclusive_append_gate_mutex);
-      return rc;
-    }
-    created->next = pouch->exclusive_append_gates;
-    pouch->exclusive_append_gates = created;
-    gate = created;
-  }
-  (void)pthread_mutex_unlock(&pouch->exclusive_append_gate_mutex);
-  pthread_rc = pthread_mutex_lock(&gate->mutex);
-  if (pthread_rc != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to lock pouch exclusive append gate",
-                        strerror(pthread_rc), NULL, "pouch");
-  }
-  *out = gate;
-  return LC_OK;
-}
-
-static void lc_pouch_state_exclusive_append_gate_unlock(
-    lc_pouch_exclusive_append_gate **gate) {
-  if (gate == NULL || *gate == NULL) {
-    return;
-  }
-  (void)pthread_mutex_unlock(&(*gate)->mutex);
-  *gate = NULL;
-}
-
-void lc_pouch_state_exclusive_append_gates_cleanup(lc_pouch *pouch) {
-  lc_pouch_exclusive_append_gate *gate;
-
-  if (pouch == NULL || !pouch->exclusive_append_gate_mutex_initialized) {
-    return;
-  }
-  (void)pthread_mutex_lock(&pouch->exclusive_append_gate_mutex);
-  gate = pouch->exclusive_append_gates;
-  pouch->exclusive_append_gates = NULL;
-  (void)pthread_mutex_unlock(&pouch->exclusive_append_gate_mutex);
-  while (gate != NULL) {
-    lc_pouch_exclusive_append_gate *next;
-
-    next = gate->next;
-    (void)pthread_mutex_destroy(&gate->mutex);
-    lc_free_with_allocator(&pouch->allocator, gate->namespace_name);
-    lc_free_with_allocator(&pouch->allocator, gate);
-    gate = next;
-  }
 }
 
 static int lc_pouch_state_process_mutex_identity(lc_pouch *pouch,
@@ -1089,11 +992,9 @@ struct lc_pouch_state_metadata_append_batcher {
   pthread_t thread;
   lc_pouch *pouch;
   char *namespace_name;
-  unsigned long namespace_hash;
   lc_pouch_state_metadata_append_request *head;
   lc_pouch_state_metadata_append_request *tail;
   int stop;
-  struct lc_pouch_state_metadata_append_batcher *hash_next;
   struct lc_pouch_state_metadata_append_batcher *next;
 };
 
@@ -2466,6 +2367,9 @@ typedef struct lc_pouch_state_compaction_capture {
 struct lc_pouch_state_cache_namespace {
   char *namespace_name;
   unsigned long namespace_hash;
+  pthread_mutex_t exclusive_append_gate;
+  int exclusive_append_gate_initialized;
+  lc_pouch_state_metadata_append_batcher *metadata_append_batcher;
   char *namespace_path;
   char *active_segment_leaf;
   char *latest_snapshot_leaf;
@@ -3518,6 +3422,9 @@ void lc_pouch_state_cache_cleanup(lc_pouch *pouch) {
     lc_pouch_state_cache_namespace *next;
 
     next = ns->next;
+    if (ns->exclusive_append_gate_initialized) {
+      (void)pthread_mutex_destroy(&ns->exclusive_append_gate);
+    }
     lc_free_with_allocator(&pouch->allocator, ns->namespace_name);
     lc_pouch_state_cache_namespace_clear_records(&pouch->allocator, ns);
     lc_free_with_allocator(&pouch->allocator, ns);
@@ -3773,6 +3680,64 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
   }
   (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
   return ns;
+}
+
+static int lc_pouch_state_exclusive_append_gate_lock(lc_pouch *pouch,
+                                                     const char *namespace_name,
+                                                     pthread_mutex_t **out,
+                                                     lc_error *error) {
+  lc_pouch_state_cache_namespace *cache;
+  pthread_mutex_t *gate;
+  int pthread_rc;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      out == NULL || !pouch->state_cache_mutex_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch exclusive append gate requires namespace", NULL,
+                        NULL, "pouch");
+  }
+  *out = NULL;
+  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+  if (cache == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  pthread_rc = pthread_mutex_lock(&pouch->state_cache_mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch namespace owner registry",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  rc = LC_OK;
+  if (!cache->exclusive_append_gate_initialized) {
+    rc = lc_pouch_state_mutex_init_recursive(&cache->exclusive_append_gate,
+                                             error);
+    if (rc == LC_OK) {
+      cache->exclusive_append_gate_initialized = 1;
+    }
+  }
+  gate = rc == LC_OK ? &cache->exclusive_append_gate : NULL;
+  (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  pthread_rc = pthread_mutex_lock(gate);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch exclusive append gate",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  *out = gate;
+  return LC_OK;
+}
+
+static void
+lc_pouch_state_exclusive_append_gate_unlock(pthread_mutex_t **gate) {
+  if (gate == NULL || *gate == NULL) {
+    return;
+  }
+  (void)pthread_mutex_unlock(*gate);
+  *gate = NULL;
 }
 
 int lc_pouch_state_compaction_track_cached_namespaces(lc_pouch *pouch,
@@ -11370,53 +11335,48 @@ static int lc_pouch_state_metadata_append_batcher_get(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_state_metadata_append_batcher **out, lc_error *error) {
   lc_pouch_state_metadata_append_batcher *batcher;
-  unsigned long namespace_hash;
-  size_t bucket_index;
+  lc_pouch_state_cache_namespace *cache;
   int cond_initialized;
   int mutex_initialized;
   int pthread_rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      out == NULL || !pouch->state_metadata_append_registry_mutex_initialized) {
+      out == NULL || !pouch->state_cache_mutex_initialized) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch metadata append queue requires namespace", NULL,
                         NULL, "pouch");
   }
   *out = NULL;
-  namespace_hash = lc_pouch_state_namespace_hash(namespace_name);
-  bucket_index =
-      (size_t)(namespace_hash %
-               (unsigned long)LC_POUCH_NAMESPACE_REGISTRY_BUCKET_COUNT);
-  pthread_rc = pthread_mutex_lock(&pouch->state_metadata_append_registry_mutex);
+  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+  if (cache == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  pthread_rc = pthread_mutex_lock(&pouch->state_cache_mutex);
   if (pthread_rc != 0) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to lock pouch metadata append registry",
+                        "failed to lock pouch namespace owner registry",
                         strerror(pthread_rc), NULL, "pouch");
   }
-  for (batcher = pouch->state_metadata_append_batcher_buckets[bucket_index];
-       batcher != NULL; batcher = batcher->hash_next) {
-    if (batcher->namespace_hash == namespace_hash &&
-        strcmp(batcher->namespace_name, namespace_name) == 0) {
-      (void)pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
-      *out = batcher;
-      return LC_OK;
-    }
+  batcher = cache->metadata_append_batcher;
+  if (batcher != NULL) {
+    (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
+    *out = batcher;
+    return LC_OK;
   }
   batcher = (lc_pouch_state_metadata_append_batcher *)lc_calloc_with_allocator(
       &pouch->allocator, 1U, sizeof(*batcher));
   if (batcher == NULL) {
-    (void)pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
+    (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch metadata append queue", NULL,
                         NULL, "pouch");
   }
   batcher->pouch = pouch;
-  batcher->namespace_hash = namespace_hash;
   batcher->namespace_name =
       lc_strdup_with_allocator(&pouch->allocator, namespace_name);
   if (batcher->namespace_name == NULL) {
     lc_free_with_allocator(&pouch->allocator, batcher);
-    (void)pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
+    (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch metadata append namespace",
                         NULL, NULL, "pouch");
@@ -11443,58 +11403,46 @@ static int lc_pouch_state_metadata_append_batcher_get(
     }
     lc_free_with_allocator(&pouch->allocator, batcher->namespace_name);
     lc_free_with_allocator(&pouch->allocator, batcher);
-    (void)pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
+    (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to start pouch metadata append queue",
                         strerror(pthread_rc), NULL, "pouch");
   }
-  batcher->next = pouch->state_metadata_append_batchers;
-  pouch->state_metadata_append_batchers = batcher;
-  batcher->hash_next =
-      pouch->state_metadata_append_batcher_buckets[bucket_index];
-  pouch->state_metadata_append_batcher_buckets[bucket_index] = batcher;
-  (void)pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
+  cache->metadata_append_batcher = batcher;
+  (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
   *out = batcher;
   return LC_OK;
 }
 
 int lc_pouch_state_metadata_append_worker_init(lc_pouch *pouch,
                                                lc_error *error) {
-  int pthread_rc;
-
   if (pouch == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch metadata append worker requires pouch", NULL,
                         NULL, "pouch");
   }
-  if (pouch->state_metadata_append_registry_mutex_initialized) {
-    return LC_OK;
-  }
-  pthread_rc =
-      pthread_mutex_init(&pouch->state_metadata_append_registry_mutex, NULL);
-  if (pthread_rc != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to initialize pouch metadata append registry",
-                        strerror(pthread_rc), NULL, "pouch");
-  }
-  pouch->state_metadata_append_registry_mutex_initialized = 1;
   return LC_OK;
 }
 
 void lc_pouch_state_metadata_append_worker_close(lc_pouch *pouch) {
   lc_pouch_state_metadata_append_batcher *batcher;
   lc_pouch_state_metadata_append_batcher *next;
+  lc_pouch_state_cache_namespace *cache;
 
-  if (pouch == NULL ||
-      !pouch->state_metadata_append_registry_mutex_initialized) {
+  if (pouch == NULL || !pouch->state_cache_mutex_initialized) {
     return;
   }
-  pthread_mutex_lock(&pouch->state_metadata_append_registry_mutex);
-  batcher = pouch->state_metadata_append_batchers;
-  pouch->state_metadata_append_batchers = NULL;
-  memset(pouch->state_metadata_append_batcher_buckets, 0,
-         sizeof(pouch->state_metadata_append_batcher_buckets));
-  pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
+  batcher = NULL;
+  pthread_mutex_lock(&pouch->state_cache_mutex);
+  for (cache = pouch->state_cache_namespaces; cache != NULL;
+       cache = cache->next) {
+    if (cache->metadata_append_batcher != NULL) {
+      cache->metadata_append_batcher->next = batcher;
+      batcher = cache->metadata_append_batcher;
+      cache->metadata_append_batcher = NULL;
+    }
+  }
+  pthread_mutex_unlock(&pouch->state_cache_mutex);
   for (next = batcher; next != NULL; next = next->next) {
     lc_pouch_state_metadata_append_batcher_stop(next);
   }
@@ -11503,8 +11451,6 @@ void lc_pouch_state_metadata_append_worker_close(lc_pouch *pouch) {
     lc_pouch_state_metadata_append_batcher_destroy(batcher);
     batcher = next;
   }
-  (void)pthread_mutex_destroy(&pouch->state_metadata_append_registry_mutex);
-  pouch->state_metadata_append_registry_mutex_initialized = 0;
 }
 
 static int lc_pouch_state_metadata_append_submit_locked(
@@ -11515,8 +11461,7 @@ static int lc_pouch_state_metadata_append_submit_locked(
   int pthread_rc;
   int rc;
 
-  if (pouch == NULL || request == NULL ||
-      !pouch->state_metadata_append_registry_mutex_initialized) {
+  if (pouch == NULL || request == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch metadata append worker is unavailable", NULL,
                         NULL, "pouch");
@@ -11771,7 +11716,6 @@ int lc_pouch_state_update_metadata_locked(
    * their per-key file lock through the worker and are safe to coalesce with
    * this handle's other independent keys. */
   use_metadata_batcher =
-      pouch->state_metadata_append_registry_mutex_initialized &&
       !lc_pouch_state_namespace_lock_is_held(pouch, namespace_name);
   if (use_metadata_batcher && lc_pouch_state_cache_borrow_exclusive_record(
                                   pouch, namespace_name, key, &current)) {
@@ -11828,7 +11772,6 @@ int lc_pouch_state_update_metadata_prepared_locked(
   /* See lc_pouch_state_update_metadata_locked: only exact-key operations
    * transfer projection ownership to the metadata append worker. */
   use_metadata_batcher =
-      pouch->state_metadata_append_registry_mutex_initialized &&
       !lc_pouch_state_namespace_lock_is_held(pouch, namespace_name);
   if (use_metadata_batcher && lc_pouch_state_cache_borrow_exclusive_record(
                                   pouch, namespace_name, key, &current)) {
