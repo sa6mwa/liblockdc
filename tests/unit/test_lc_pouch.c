@@ -14281,6 +14281,67 @@ test_client_queue_dequeue_with_state_uses_pouch_lease(void **state) {
 }
 
 static void
+test_client_queue_state_lease_transaction_update_uses_distinct_lease_key(
+    void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_message *message;
+  lc_lease *state_lease;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  message = NULL;
+  state_lease = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_error_init(&error);
+  make_root("client-queue-state-txn", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "jobs";
+  rc = lc_source_from_memory("job", strlen("job"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "worker-state-txn";
+  dequeue_req.txn_id = "txn-queue-state";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = client->dequeue_with_state(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  state_lease = message->state(message);
+  assert_non_null(state_lease);
+  rc = lc_source_from_memory("{\"handled\":true}", strlen("{\"handled\":true}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = state_lease->update(state_lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(state_lease->version, 1L);
+
+  message->close(message);
+  message = NULL;
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_client_queue_dequeue_with_state_nack_releases_state_lease(void **state) {
   lc_client *client;
   lc_source *source;
@@ -22782,6 +22843,8 @@ int main(void) {
       cmocka_unit_test(
           test_client_queue_dequeue_cursor_resumes_after_consumed_message),
       cmocka_unit_test(test_client_queue_dequeue_with_state_uses_pouch_lease),
+      cmocka_unit_test(
+          test_client_queue_state_lease_transaction_update_uses_distinct_lease_key),
       cmocka_unit_test(
           test_client_queue_dequeue_with_state_nack_releases_state_lease),
       cmocka_unit_test(test_client_queue_ttl_and_retry_terminal_states),

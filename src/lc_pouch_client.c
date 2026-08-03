@@ -5764,69 +5764,6 @@ static char *lc_pouch_staged_storage_key(const char *key, const char *txn_id,
   return staged_key;
 }
 
-static int lc_pouch_client_prepare_txn_stage_options(
-    lc_client_handle *client, const char *namespace_name, const char *key,
-    const char *txn_id, lc_pouch_state_write_options *options,
-    lc_error *error) {
-  lc_pouch_state_read_result committed;
-  lc_pouch_state_read_result staged;
-  const lc_pouch_state_read_result *precondition_source;
-  char *staged_key;
-  int rc;
-
-  if (client == NULL || namespace_name == NULL || key == NULL ||
-      !lc_pouch_txn_id_present(txn_id) || options == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch transaction stage options require client, "
-                        "namespace, key, txn_id, and options",
-                        NULL, NULL, NULL);
-  }
-  memset(&committed, 0, sizeof(committed));
-  memset(&staged, 0, sizeof(staged));
-  staged_key = lc_pouch_staged_storage_key(key, txn_id, error);
-  if (staged_key == NULL) {
-    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
-  }
-  rc = lc_pouch_state_read_metadata(client->pouch, namespace_name, key,
-                                    &committed, error);
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_read_metadata(client->pouch, namespace_name, staged_key,
-                                      &staged, error);
-  }
-  precondition_source = staged.found ? &staged : &committed;
-  if (rc == LC_OK && options->expected_etag != NULL) {
-    if (!precondition_source->found ||
-        strcmp(precondition_source->etag, options->expected_etag) != 0) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch state etag precondition failed", NULL, NULL,
-                        NULL);
-    }
-  }
-  if (rc == LC_OK && options->has_expected_version) {
-    if (!precondition_source->found ||
-        precondition_source->version != options->expected_version) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch state version precondition failed", NULL, NULL,
-                        NULL);
-    }
-  }
-  /* Lease-only metadata must not hide its first body write. */
-  if (rc == LC_OK && !options->has_query_hidden && precondition_source->found &&
-      precondition_source->has_body && precondition_source->has_query_hidden) {
-    options->has_query_hidden = 1;
-    options->query_hidden = precondition_source->query_hidden;
-  }
-  if (rc == LC_OK && !staged.found) {
-    options->expected_etag = NULL;
-    options->has_expected_version = 0;
-    options->expected_version = 0UL;
-  }
-  lc_free_with_allocator(NULL, staged_key);
-  lc_pouch_state_read_result_cleanup(&client->allocator, &staged);
-  lc_pouch_state_read_result_cleanup(&client->allocator, &committed);
-  return rc;
-}
-
 static int lc_pouch_client_prepare_txn_mutation_file(
     lc_client_handle *client, const char *namespace_name, const char *key,
     const char *txn_id, const char *const *mutations, size_t mutation_count,
@@ -8137,12 +8074,15 @@ static int lc_pouch_client_stage_transaction_write_locked(void *context,
                                                           lc_error *error) {
   lc_pouch_txn_stage_write_context *stage;
   lc_pouch_state_read_result committed;
+  lc_pouch_state_read_result lease_state;
+  const lc_pouch_state_read_result *lease_source;
   lc_pouch_state_metadata_view state_view;
   int rc;
 
   stage = (lc_pouch_txn_stage_write_context *)context;
   if (stage == NULL || stage->client == NULL || stage->lease == NULL ||
       stage->namespace_name == NULL || stage->key == NULL ||
+      stage->lease->key == NULL || stage->lease->key[0] == '\0' ||
       !lc_pouch_txn_id_present(stage->txn_id) || stage->source == NULL ||
       stage->options == NULL || stage->out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -8150,20 +8090,28 @@ static int lc_pouch_client_stage_transaction_write_locked(void *context,
                         NULL, "pouch");
   }
   memset(&committed, 0, sizeof(committed));
+  memset(&lease_state, 0, sizeof(lease_state));
   memset(&state_view, 0, sizeof(state_view));
   rc = lc_pouch_state_read_metadata_locked(stage->client->pouch,
                                            stage->namespace_name, stage->key,
                                            &committed, error);
+  lease_source = &committed;
+  if (rc == LC_OK && strcmp(stage->lease->key, stage->key) != 0) {
+    rc = lc_pouch_state_read_metadata_locked(
+        stage->client->pouch, stage->namespace_name, stage->lease->key,
+        &lease_state, error);
+    lease_source = &lease_state;
+  }
   if (rc == LC_OK) {
-    state_view.found = committed.found;
-    state_view.version = committed.version;
-    state_view.metadata = committed.metadata;
-    state_view.metadata_length = committed.metadata_length;
-    state_view.has_query_hidden = committed.has_query_hidden;
-    state_view.query_hidden = committed.query_hidden;
-    state_view.has_body = committed.has_body;
+    state_view.found = lease_source->found;
+    state_view.version = lease_source->version;
+    state_view.metadata = lease_source->metadata;
+    state_view.metadata_length = lease_source->metadata_length;
+    state_view.has_query_hidden = lease_source->has_query_hidden;
+    state_view.query_hidden = lease_source->query_hidden;
+    state_view.has_body = lease_source->has_body;
     rc = lc_pouch_validate_lease_metadata_view(
-        stage->client, stage->lease, stage->namespace_name, stage->key,
+        stage->client, stage->lease, stage->namespace_name, stage->lease->key,
         &state_view, NULL, error);
   }
   if (rc == LC_OK) {
@@ -8176,6 +8124,7 @@ static int lc_pouch_client_stage_transaction_write_locked(void *context,
                                     stage->key, stage->txn_id, stage->source,
                                     stage->options, stage->out, error);
   }
+  lc_pouch_state_read_result_cleanup(&stage->client->allocator, &lease_state);
   lc_pouch_state_read_result_cleanup(&stage->client->allocator, &committed);
   return rc;
 }
@@ -17169,23 +17118,18 @@ int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
     lease_ref.lease_id = lease->lease_id;
     lease_ref.txn_id = lease->txn_id;
     lease_ref.fencing_token = lease->fencing_token;
-    lease_precondition.client = lease->client;
-    lease_precondition.lease = &lease_ref;
-    lease_precondition.namespace_name = lease->namespace_name;
-    lease_precondition.key = lease->key;
-    options.precondition = lc_pouch_lease_precondition_check;
-    options.precondition_context = &lease_precondition;
     if (lc_pouch_txn_id_present(lease->txn_id)) {
       stage_txn_id = lease->txn_id;
-      rc = lc_pouch_client_prepare_txn_stage_options(
-          lease->client, lease->namespace_name, state_key, stage_txn_id,
-          &options, error);
-      if (rc == LC_OK) {
-        rc = lc_pouch_state_stage_write(
-            lease->client->pouch, lease->namespace_name, state_key,
-            stage_txn_id, src, &options, &write_result, error);
-      }
+      rc = lc_pouch_client_stage_transaction_write(
+          lease->client, &lease_ref, lease->namespace_name, state_key,
+          stage_txn_id, src, &options, &write_result, error);
     } else {
+      lease_precondition.client = lease->client;
+      lease_precondition.lease = &lease_ref;
+      lease_precondition.namespace_name = lease->namespace_name;
+      lease_precondition.key = lease->key;
+      options.precondition = lc_pouch_lease_precondition_check;
+      options.precondition_context = &lease_precondition;
       rc = lc_pouch_state_write(lease->client->pouch, lease->namespace_name,
                                 state_key, src, &options, &write_result, error);
     }

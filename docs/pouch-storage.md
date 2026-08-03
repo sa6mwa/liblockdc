@@ -492,6 +492,14 @@ committed key and its `<key>/.staging/<txn>` companion form one transaction
 decision even though ordinary non-transactional writes retain exact-key
 concurrency.
 
+A stateful queue delivery is the deliberate distinct-key exception. Its lease
+metadata lives at `q/<queue>/state/<id>.lease`, while the state body lives at
+`q/<queue>/state/<id>`. A transaction-bound update reads both records under
+the same namespace authority: the lease record authorizes the caller, and the
+state record plus its staged companion determine CAS and query visibility. It
+must not treat the empty state object as a missing lease or use the lease
+record as the staged object precondition.
+
 ### Transactions
 
 Go disk uses reserved control namespaces for transaction records/decision
