@@ -169,7 +169,8 @@ Acceptance:
 - [x] Cover fork-safe shared-process state writes, conflicting lease rejection,
   fencing-token handoff, single queue delivery, and root-lock crash handoff.
   Process-level rotation and concurrent staged-transaction promotion are also
-  covered. Compaction and maintenance contention coverage remains required.
+  covered. Process-level compaction holds the namespace barrier through
+  snapshot validation before a competing shared writer can commit.
 - [x] Make an in-process mode transition quiesce append-capable operations
   through durable completion, then advance the local epoch so active append
   descriptors are closed and projections validate/replay only when required.

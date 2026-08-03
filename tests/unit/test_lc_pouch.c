@@ -2472,6 +2472,11 @@ typedef struct pouch_compaction_drift_hook_state {
   int called;
 } pouch_compaction_drift_hook_state;
 
+typedef struct pouch_compaction_process_hook_state {
+  int ready_fd;
+  int resume_fd;
+} pouch_compaction_process_hook_state;
+
 static void flip_file_byte(const char *path, uint64_t offset);
 
 static int pouch_compaction_drift_hook(void *context, lc_error *error) {
@@ -2506,6 +2511,19 @@ static int pouch_compaction_drift_hook(void *context, lc_error *error) {
   }
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   return rc;
+}
+
+static int pouch_compaction_process_wait_hook(void *context, lc_error *error) {
+  pouch_compaction_process_hook_state *state;
+  char signal;
+
+  (void)error;
+  state = (pouch_compaction_process_hook_state *)context;
+  if (state == NULL || write(state->ready_fd, "1", 1U) != 1 ||
+      read(state->resume_fd, &signal, 1U) != 1) {
+    return LC_ERR_TRANSPORT;
+  }
+  return LC_OK;
 }
 
 typedef struct test_binary_buffer {
@@ -5434,6 +5452,55 @@ static int pouch_shared_process_commit_transaction(const char *root,
   return rc;
 }
 
+static int pouch_shared_process_compact_after_snapshot(const char *root,
+                                                       int ready_fd,
+                                                       int resume_fd) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  pouch_compaction_process_hook_state hook_state;
+  lc_error error;
+  int rc;
+
+  pouch = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&hook_state, 0, sizeof(hook_state));
+  lc_error_init(&error);
+  open_options.single_writer_set = 1;
+  open_options.single_writer = 0;
+  open_options.segment_target_bytes = 512U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  hook_state.ready_fd = ready_fd;
+  hook_state.resume_fd = resume_fd;
+  if (rc == LC_OK) {
+    lc_pouch_test_after_snapshot_write_hook =
+        pouch_compaction_process_wait_hook;
+    lc_pouch_test_after_snapshot_write_context = &hook_state;
+    maintenance_options.namespace_name = "default";
+    maintenance_options.force = 1;
+    rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                  &maintenance_result, &error);
+    lc_pouch_test_after_snapshot_write_hook = NULL;
+    lc_pouch_test_after_snapshot_write_context = NULL;
+  }
+  if (rc == LC_OK && !maintenance_result.compacted) {
+    rc = LC_ERR_INVALID;
+  }
+  (void)close(ready_fd);
+  (void)close(resume_fd);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  if (pouch != NULL) {
+    lc_pouch_close(pouch);
+  }
+  lc_error_cleanup(&error);
+  return rc;
+}
+
 static void test_process_writer_modes_and_shared_writes(void **state) {
   lc_pouch *reader;
   lc_pouch_state_read_result first_read;
@@ -5888,6 +5955,142 @@ static void test_shared_process_transaction_stages_and_commits(void **state) {
   lc_pouch_state_read_result_cleanup(NULL, &second_read);
   lc_pouch_state_read_result_cleanup(NULL, &first_read);
   lc_pouch_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_shared_process_maintenance_serializes_writer(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result first_read;
+  lc_pouch_state_read_result second_read;
+  lc_pouch_state_read_result third_read;
+  lc_source *source;
+  lc_error error;
+  char first_value[768];
+  char second_value[768];
+  char body[768];
+  char root[512];
+  char signal;
+  int snapshot_ready[2];
+  int snapshot_resume[2];
+  int writer_start[2];
+  pid_t compaction_pid;
+  pid_t writer_pid;
+  int status;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  compaction_pid = -1;
+  writer_pid = -1;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&first_read, 0, sizeof(first_read));
+  memset(&second_read, 0, sizeof(second_read));
+  memset(&third_read, 0, sizeof(third_read));
+  memset(first_value, 'a', sizeof(first_value) - 1U);
+  first_value[sizeof(first_value) - 1U] = '\0';
+  memset(second_value, 'b', sizeof(second_value) - 1U);
+  second_value[sizeof(second_value) - 1U] = '\0';
+  lc_error_init(&error);
+  make_root("process-shared-maintenance", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 512U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory(first_value, strlen(first_value), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/maintenance-first", source,
+                            NULL, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_source_from_memory(second_value, strlen(second_value), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/maintenance-second",
+                            source, NULL, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  assert_int_equal(pipe(snapshot_ready), 0);
+  assert_int_equal(pipe(snapshot_resume), 0);
+  compaction_pid = fork();
+  assert_true(compaction_pid >= 0);
+  if (compaction_pid == 0) {
+    (void)close(snapshot_ready[0]);
+    (void)close(snapshot_resume[1]);
+    _exit(pouch_shared_process_compact_after_snapshot(
+              root, snapshot_ready[1], snapshot_resume[0]) == LC_OK
+              ? 0
+              : 1);
+  }
+  (void)close(snapshot_ready[1]);
+  (void)close(snapshot_resume[0]);
+  assert_int_equal(read(snapshot_ready[0], &signal, 1U), 1);
+  (void)close(snapshot_ready[0]);
+
+  assert_int_equal(pipe(writer_start), 0);
+  writer_pid = fork();
+  assert_true(writer_pid >= 0);
+  if (writer_pid == 0) {
+    (void)close(snapshot_resume[1]);
+    (void)close(writer_start[1]);
+    _exit(pouch_shared_process_write_with_segment_target(
+              root, "state/maintenance-third", "third", writer_start[0],
+              512U) == LC_OK
+              ? 0
+              : 1);
+  }
+  (void)close(writer_start[0]);
+  assert_int_equal(write(writer_start[1], "1", 1U), 1);
+  (void)close(writer_start[1]);
+  assert_int_equal(write(snapshot_resume[1], "1", 1U), 1);
+  (void)close(snapshot_resume[1]);
+
+  assert_int_equal(waitpid(compaction_pid, &status, 0), compaction_pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+  assert_int_equal(waitpid(writer_pid, &status, 0), writer_pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "default", "state/maintenance-first",
+                           &first_read, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(first_read.found);
+  read_source_to_string(first_read.body, body, sizeof(body));
+  assert_string_equal(body, first_value);
+  rc = lc_pouch_state_read(pouch, "default", "state/maintenance-second",
+                           &second_read, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(second_read.found);
+  read_source_to_string(second_read.body, body, sizeof(body));
+  assert_string_equal(body, second_value);
+  rc = lc_pouch_state_read(pouch, "default", "state/maintenance-third",
+                           &third_read, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(third_read.found);
+  read_source_to_string(third_read.body, body, sizeof(body));
+  assert_string_equal(body, "third");
+
+  lc_pouch_state_read_result_cleanup(NULL, &third_read);
+  lc_pouch_state_read_result_cleanup(NULL, &second_read);
+  lc_pouch_state_read_result_cleanup(NULL, &first_read);
+  lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -21659,6 +21862,7 @@ int main(void) {
       cmocka_unit_test(test_shared_process_lease_conflict_and_handoff),
       cmocka_unit_test(test_shared_process_queue_delivers_once),
       cmocka_unit_test(test_shared_process_transaction_stages_and_commits),
+      cmocka_unit_test(test_shared_process_maintenance_serializes_writer),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(test_lease_private_reads_reject_stale_handle),
       cmocka_unit_test(test_pouch_lease_claim_and_credentials_are_durable),
