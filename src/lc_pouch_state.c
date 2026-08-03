@@ -71,6 +71,7 @@ typedef struct lc_pouch_state_key_lock {
 typedef struct lc_pouch_state_append_lock {
   int fd;
   struct lc_pouch_state_process_namespace_mutex *process_mutex;
+  lc_pouch_exclusive_append_gate *exclusive_gate;
 } lc_pouch_state_append_lock;
 
 typedef struct lc_pouch_state_deferred_fsync {
@@ -93,6 +94,12 @@ typedef struct lc_pouch_state_process_namespace_mutex {
   unsigned long refcount;
   struct lc_pouch_state_process_namespace_mutex *next;
 } lc_pouch_state_process_namespace_mutex;
+
+struct lc_pouch_exclusive_append_gate {
+  char *namespace_name;
+  pthread_mutex_t mutex;
+  struct lc_pouch_exclusive_append_gate *next;
+};
 
 typedef struct lc_pouch_state_process_namespace_guard {
   char *identity;
@@ -475,6 +482,102 @@ static int lc_pouch_state_mutex_init_recursive(pthread_mutex_t *mutex,
                         strerror(pthread_rc), NULL, NULL);
   }
   return LC_OK;
+}
+
+static int lc_pouch_state_exclusive_append_gate_lock(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_exclusive_append_gate **out, lc_error *error) {
+  lc_pouch_exclusive_append_gate *gate;
+  lc_pouch_exclusive_append_gate *created;
+  int pthread_rc;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      out == NULL || !pouch->exclusive_append_gate_mutex_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch exclusive append gate requires namespace", NULL,
+                        NULL, "pouch");
+  }
+  *out = NULL;
+  pthread_rc = pthread_mutex_lock(&pouch->exclusive_append_gate_mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch append gate registry",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  for (gate = pouch->exclusive_append_gates; gate != NULL; gate = gate->next) {
+    if (strcmp(gate->namespace_name, namespace_name) == 0) {
+      break;
+    }
+  }
+  if (gate == NULL) {
+    created = (lc_pouch_exclusive_append_gate *)lc_calloc_with_allocator(
+        &pouch->allocator, 1U, sizeof(*created));
+    if (created == NULL) {
+      (void)pthread_mutex_unlock(&pouch->exclusive_append_gate_mutex);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch append gate", NULL, NULL,
+                          "pouch");
+    }
+    created->namespace_name =
+        lc_strdup_with_allocator(&pouch->allocator, namespace_name);
+    if (created->namespace_name == NULL) {
+      lc_free_with_allocator(&pouch->allocator, created);
+      (void)pthread_mutex_unlock(&pouch->exclusive_append_gate_mutex);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch append gate namespace",
+                          NULL, NULL, "pouch");
+    }
+    rc = lc_pouch_state_mutex_init_recursive(&created->mutex, error);
+    if (rc != LC_OK) {
+      lc_free_with_allocator(&pouch->allocator, created->namespace_name);
+      lc_free_with_allocator(&pouch->allocator, created);
+      (void)pthread_mutex_unlock(&pouch->exclusive_append_gate_mutex);
+      return rc;
+    }
+    created->next = pouch->exclusive_append_gates;
+    pouch->exclusive_append_gates = created;
+    gate = created;
+  }
+  (void)pthread_mutex_unlock(&pouch->exclusive_append_gate_mutex);
+  pthread_rc = pthread_mutex_lock(&gate->mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch exclusive append gate",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  *out = gate;
+  return LC_OK;
+}
+
+static void lc_pouch_state_exclusive_append_gate_unlock(
+    lc_pouch_exclusive_append_gate **gate) {
+  if (gate == NULL || *gate == NULL) {
+    return;
+  }
+  (void)pthread_mutex_unlock(&(*gate)->mutex);
+  *gate = NULL;
+}
+
+void lc_pouch_state_exclusive_append_gates_cleanup(lc_pouch *pouch) {
+  lc_pouch_exclusive_append_gate *gate;
+
+  if (pouch == NULL || !pouch->exclusive_append_gate_mutex_initialized) {
+    return;
+  }
+  (void)pthread_mutex_lock(&pouch->exclusive_append_gate_mutex);
+  gate = pouch->exclusive_append_gates;
+  pouch->exclusive_append_gates = NULL;
+  (void)pthread_mutex_unlock(&pouch->exclusive_append_gate_mutex);
+  while (gate != NULL) {
+    lc_pouch_exclusive_append_gate *next;
+
+    next = gate->next;
+    (void)pthread_mutex_destroy(&gate->mutex);
+    lc_free_with_allocator(&pouch->allocator, gate->namespace_name);
+    lc_free_with_allocator(&pouch->allocator, gate);
+    gate = next;
+  }
 }
 
 static int lc_pouch_state_process_mutex_identity(const char *root_path,
@@ -1418,8 +1521,12 @@ lc_pouch_state_namespace_lock_release(lc_pouch_state_namespace_lock *lock) {
   lc_pouch_state_process_namespace_guard_unlock(&lock->maintenance_guard);
 }
 
-/* Shared roots serialize physical appends here. Exclusive mutations already
- * hold their root-local mutation or namespace authority through the append. */
+/* Every exclusive Pouch owns stable per-namespace physical append gates for
+ * its full lifetime. Shared roots add the process-local and cross-process
+ * gates below it. This gives the exclusive path the same split as Go disk:
+ * callers may prepare a value concurrently, but only one finalized byte range
+ * is appended at a time, without filesystem discovery on a healthy mutation.
+ */
 static int lc_pouch_state_append_lock_acquire(lc_pouch *pouch,
                                               const char *namespace_name,
                                               lc_pouch_state_append_lock *lock,
@@ -1438,8 +1545,10 @@ static int lc_pouch_state_append_lock_acquire(lc_pouch *pouch,
   }
   lock->fd = -1;
   lock->process_mutex = NULL;
+  lock->exclusive_gate = NULL;
   if (lc_pouch_single_writer_enabled(pouch)) {
-    return LC_OK;
+    return lc_pouch_state_exclusive_append_gate_lock(
+        pouch, namespace_name, &lock->exclusive_gate, error);
   }
   rc = lc_pouch_state_process_namespace_mutex_lock(pouch, namespace_name,
                                                    &lock->process_mutex, error);
@@ -1502,7 +1611,46 @@ lc_pouch_state_append_lock_release(lc_pouch_state_append_lock *lock) {
     (void)close(lock->fd);
     lock->fd = -1;
   }
+  lc_pouch_state_exclusive_append_gate_unlock(&lock->exclusive_gate);
   lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+}
+
+/* Normal exact-key mutations arrive with the projection mutex held. Take the
+ * physical appender first, then restore the projection mutex before reading or
+ * publishing cache state. This ordering lets a streaming owner drop only the
+ * projection mutex while retaining its exact-key and append ownership; other
+ * writers prepare or wait at the append gate without deadlocking publication.
+ * Namespace callbacks already own stronger namespace authority and never own
+ * the projection mutex through this helper. */
+static int lc_pouch_state_append_lock_enter_after_mutation(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_state_append_lock *lock, lc_error *error) {
+  int namespace_locked;
+  int pthread_rc;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      lock == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch append transition requires namespace", NULL,
+                        NULL, "pouch");
+  }
+  namespace_locked =
+      lc_pouch_state_namespace_lock_is_held(pouch, namespace_name);
+  if (!namespace_locked) {
+    (void)pthread_mutex_unlock(&pouch->state_mutation_mutex);
+  }
+  rc = lc_pouch_state_append_lock_acquire(pouch, namespace_name, lock, error);
+  if (!namespace_locked) {
+    pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
+    if (pthread_rc != 0 && rc == LC_OK) {
+      lc_pouch_state_append_lock_release(lock);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to restore pouch mutation state",
+                          strerror(pthread_rc), NULL, "pouch");
+    }
+  }
+  return rc;
 }
 
 static int lc_pouch_state_key_lock_acquire(lc_pouch *pouch,
@@ -4871,14 +5019,12 @@ cleanup:
   return rc;
 }
 
-static int
-lc_pouch_state_append_binary_records(lc_pouch *pouch,
-                                     const char *namespace_name,
-                                     lc_pouch_namespace_manifest *manifest,
-                                     lc_pouch_state_binary_append_item *items,
-                                     size_t item_count, lc_error *error) {
+static int lc_pouch_state_append_binary_records_locked(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_namespace_manifest *manifest,
+    lc_pouch_state_binary_append_item *items, size_t item_count,
+    lc_error *error) {
   char *segment_path;
-  lc_pouch_state_append_lock append_lock;
   lc_pouch_state_cache_namespace *cache;
   int fd;
   int rc;
@@ -4897,8 +5043,6 @@ lc_pouch_state_append_binary_records(lc_pouch *pouch,
                         NULL, NULL, "pouch");
   }
   segment_path = NULL;
-  append_lock.fd = -1;
-  append_lock.process_mutex = NULL;
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
   single_writer = lc_pouch_single_writer_enabled(pouch);
   manifest_from_cache =
@@ -4909,6 +5053,7 @@ lc_pouch_state_append_binary_records(lc_pouch *pouch,
   retain_active_append_fd = 0;
   first_index = 0UL;
   record_size = 0U;
+  rc = LC_OK;
   for (index = 0U; index < item_count; ++index) {
     if ((items[index].key_len > 0U && items[index].key == NULL) ||
         (items[index].meta_len > 0U && items[index].meta == NULL) ||
@@ -4929,12 +5074,7 @@ lc_pouch_state_append_binary_records(lc_pouch *pouch,
                    (uint64_t)items[index].key_len +
                    (uint64_t)items[index].meta_len;
   }
-  rc = lc_pouch_state_append_lock_acquire(pouch, namespace_name, &append_lock,
-                                          error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  if (!manifest_from_cache) {
+  if (rc == LC_OK && !manifest_from_cache) {
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, manifest);
     memset(manifest, 0, sizeof(*manifest));
     rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
@@ -5056,6 +5196,31 @@ lc_pouch_state_append_binary_records(lc_pouch *pouch,
     lc_pouch_state_append_fd_rollback(fd, segment_size, 1);
   }
   lc_free_with_allocator(&pouch->allocator, segment_path);
+  return rc;
+}
+
+/* The physical append gate must precede the projection mutex. Every ordinary
+ * caller enters under an exact-key mutation and therefore returns with that
+ * mutex restored; namespace callbacks retain their stronger authority and use
+ * the same in-process append gate recursively. */
+static int
+lc_pouch_state_append_binary_records(lc_pouch *pouch,
+                                     const char *namespace_name,
+                                     lc_pouch_namespace_manifest *manifest,
+                                     lc_pouch_state_binary_append_item *items,
+                                     size_t item_count, lc_error *error) {
+  lc_pouch_state_append_lock append_lock;
+  int rc;
+
+  append_lock.fd = -1;
+  append_lock.process_mutex = NULL;
+  append_lock.exclusive_gate = NULL;
+  rc = lc_pouch_state_append_lock_enter_after_mutation(pouch, namespace_name,
+                                                       &append_lock, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_append_binary_records_locked(
+        pouch, namespace_name, manifest, items, item_count, error);
+  }
   lc_pouch_state_append_lock_release(&append_lock);
   return rc;
 }
@@ -9803,6 +9968,10 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   int retain_active_append_fd;
   int single_writer;
   int use_materialized_record;
+  int materialized_transform_ready;
+  int namespace_locked;
+  int streaming_projection_mutex_released;
+  int pthread_rc;
   uint64_t writer_mode_epoch;
   unsigned char put_record_type;
   lc_pouch_state_precondition_view precondition_view;
@@ -9819,6 +9988,8 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   memset(&current, 0, sizeof(current));
   cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
   single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
+  namespace_locked =
+      lc_pouch_state_namespace_lock_is_held(pouch, namespace_name);
   manifest_from_cache = single_writer && cache != NULL && cache->initialized &&
                         cache->writer_mode_epoch == writer_mode_epoch &&
                         cache->namespace_path != NULL &&
@@ -9908,9 +10079,11 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
                 : 1UL;
   updated_at_unix = lc_pouch_maintenance_now_seconds();
   etag = NULL;
+  descriptor = NULL;
   segment_path = NULL;
   append_lock.fd = -1;
   append_lock.process_mutex = NULL;
+  append_lock.exclusive_gate = NULL;
   payload_context = NULL;
   memset(&payload_span, 0, sizeof(payload_span));
   meta = NULL;
@@ -9920,7 +10093,12 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   materialized_plain_len = 0U;
   materialized_stored_len = 0U;
   record_end = 0UL;
-  use_materialized_record = 0;
+  use_materialized_record =
+      lc_source_memory_view(body, &materialized_plain,
+                            &materialized_plain_len) &&
+      materialized_plain_len <= LC_POUCH_CRYPTO_MEMORY_TRANSFORM_MAX_BYTES;
+  materialized_transform_ready = 0;
+  streaming_projection_mutex_released = 0;
   content_type = options != NULL && options->content_type != NULL
                      ? options->content_type
                      : "application/octet-stream";
@@ -9954,15 +10132,75 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
                         "failed to allocate pouch state payload context", NULL,
                         NULL, NULL);
   }
-  rc = lc_pouch_state_append_lock_acquire(pouch, namespace_name, &append_lock,
-                                          error);
+  /* A bounded SDK memory source has already been materialized by its caller.
+   * Its compression/encryption and etag work neither observes nor mutates the
+   * resident projection, so exclusive exact-key mutations perform it before
+   * claiming the physical appender. Streaming sources deliberately stay out of
+   * this path and retain direct source-to-segment flow below. */
+  if (use_materialized_record && single_writer && !namespace_locked) {
+    bytes = (uint64_t)materialized_plain_len;
+    cipher_bytes = 0UL;
+    stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
+    (void)pthread_mutex_unlock(&pouch->state_mutation_mutex);
+    rc = lc_pouch_crypto_transform_memory(
+        pouch->crypto, payload_context, materialized_plain,
+        materialized_plain_len,
+        options == NULL || !options->disable_compression, &materialized_stored,
+        &materialized_stored_len, &stored_crc, &descriptor, error);
+    if (rc == LC_OK) {
+      cipher_bytes = (uint64_t)materialized_stored_len;
+      etag = lc_pouch_state_hash_bytes(&pouch->allocator, materialized_plain,
+                                       materialized_plain_len, error);
+      if (etag == NULL) {
+        rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+      }
+    }
+    pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
+    if (pthread_rc != 0 && rc == LC_OK) {
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to restore pouch mutation state",
+                        strerror(pthread_rc), NULL, "pouch");
+    }
+    if (rc != LC_OK) {
+      lc_free_with_allocator(&pouch->allocator, etag);
+      lc_free_with_allocator(&pouch->allocator, descriptor);
+      lc_free_with_allocator(&pouch->allocator, materialized_stored);
+      lc_free_with_allocator(&pouch->allocator, payload_context);
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      return rc;
+    }
+    materialized_transform_ready = 1;
+  }
+  rc = lc_pouch_state_append_lock_enter_after_mutation(pouch, namespace_name,
+                                                       &append_lock, error);
   if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, etag);
+    lc_free_with_allocator(&pouch->allocator, descriptor);
+    lc_free_with_allocator(&pouch->allocator, materialized_stored);
     lc_free_with_allocator(&pouch->allocator, payload_context);
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return rc;
   }
-  if (!manifest_from_cache) {
+  /* Waiting behind another exclusive append may have advanced or rotated the
+   * resident writer. Refresh the borrowed manifest after the append gate is
+   * held, while the exact-key precondition remains protected by its key lock.
+   */
+  if (single_writer) {
+    cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+    if (cache != NULL && cache->initialized &&
+        cache->writer_mode_epoch == writer_mode_epoch &&
+        cache->namespace_path != NULL && cache->active_segment_leaf != NULL) {
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      memset(&manifest, 0, sizeof(manifest));
+      rc = lc_pouch_state_cache_manifest_copy(pouch, cache, &manifest, error);
+      manifest_from_cache = rc == LC_OK ? 1 : 0;
+    } else {
+      manifest_from_cache = 0;
+    }
+  }
+  if (rc == LC_OK && !manifest_from_cache) {
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     memset(&manifest, 0, sizeof(manifest));
     rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
@@ -10146,26 +10384,25 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
    * writer modes hold append authority here, so they can publish one complete
    * record without the pending streaming prefix/finalization protocol. Other
    * sources retain the real streaming path below. */
-  use_materialized_record =
-      lc_source_memory_view(body, &materialized_plain,
-                            &materialized_plain_len) &&
-      materialized_plain_len <= LC_POUCH_CRYPTO_MEMORY_TRANSFORM_MAX_BYTES;
   if (use_materialized_record) {
-    bytes = (uint64_t)materialized_plain_len;
-    cipher_bytes = 0UL;
-    stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
-    descriptor = NULL;
-    rc = lc_pouch_crypto_transform_memory(
-        pouch->crypto, payload_context, materialized_plain,
-        materialized_plain_len,
-        options == NULL || !options->disable_compression, &materialized_stored,
-        &materialized_stored_len, &stored_crc, &descriptor, error);
-    if (rc == LC_OK) {
-      cipher_bytes = (uint64_t)materialized_stored_len;
-      etag = lc_pouch_state_hash_bytes(&pouch->allocator, materialized_plain,
-                                       materialized_plain_len, error);
-      if (etag == NULL) {
-        rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    if (!materialized_transform_ready) {
+      bytes = (uint64_t)materialized_plain_len;
+      cipher_bytes = 0UL;
+      stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
+      rc = lc_pouch_crypto_transform_memory(
+          pouch->crypto, payload_context, materialized_plain,
+          materialized_plain_len,
+          options == NULL || !options->disable_compression,
+          &materialized_stored, &materialized_stored_len, &stored_crc,
+          &descriptor, error);
+      if (rc == LC_OK) {
+        cipher_bytes = (uint64_t)materialized_stored_len;
+        etag = lc_pouch_state_hash_bytes(&pouch->allocator, materialized_plain,
+                                         materialized_plain_len, error);
+        if (etag == NULL) {
+          rc = error != NULL && error->code != LC_OK ? error->code
+                                                     : LC_ERR_NOMEM;
+        }
       }
     }
     updated_at_unix = lc_pouch_maintenance_now_seconds();
@@ -10278,6 +10515,13 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
                           "failed to allocate pouch state crypto context", NULL,
                           NULL, NULL);
     }
+    /* The append gate owns this byte range. Let independent keys capture
+     * metadata and prepare values while this source flows directly into the
+     * segment; publication reacquires the projection mutex below. */
+    if (!namespace_locked) {
+      (void)pthread_mutex_unlock(&pouch->state_mutation_mutex);
+      streaming_projection_mutex_released = 1;
+    }
     rc = lc_pouch_crypto_stream_to_fd_crc_with_compression(
         pouch->crypto, crypto_context, fd, &hash_source.pub, &bytes,
         &cipher_bytes, &stored_crc, &descriptor,
@@ -10295,6 +10539,15 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
       }
     }
     EVP_MD_CTX_free(hash_ctx);
+    if (streaming_projection_mutex_released) {
+      pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
+      streaming_projection_mutex_released = 0;
+      if (pthread_rc != 0 && rc == LC_OK) {
+        rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to restore pouch mutation state",
+                          strerror(pthread_rc), NULL, "pouch");
+      }
+    }
     updated_at_unix = lc_pouch_maintenance_now_seconds();
     if (rc == LC_OK) {
       lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);

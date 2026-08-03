@@ -121,6 +121,13 @@ Acceptance:
   bodies use one complete-record append while all streaming bodies remain
   direct, and public completion still waits for its own finalized commit
   result.
+- [x] Split resident projection ownership from the physical root/namespace
+  appender: ordinary exact-key mutations release projection ownership while
+  bounded caller-memory transforms run and while callback/file/fd sources
+  stream into their pending record. The append gate still serializes byte
+  ranges, and final sequence reservation plus projection publication occur
+  under resident state ownership. No path reads a full streaming value into a
+  hidden buffer.
 - [x] Match Go disk group-commit scheduling: a durable group waits at most two
   milliseconds or until its maximum request count, deduplicates file syncs,
   and propagates the shared result to every waiting operation.

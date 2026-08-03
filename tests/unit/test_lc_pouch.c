@@ -115,6 +115,24 @@ typedef struct pouch_chunked_source {
   size_t read_count;
 } pouch_chunked_source;
 
+typedef struct pouch_stream_overlap {
+  lc_pouch *pouch;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+  const unsigned char *stream_bytes;
+  size_t stream_length;
+  size_t stream_offset;
+  const char *second_namespace;
+  int stream_entered;
+  int release_stream;
+  int second_precondition_entered;
+  int second_finished;
+  int first_rc;
+  int second_rc;
+  lc_error first_error;
+  lc_error second_error;
+} pouch_stream_overlap;
+
 typedef struct pouch_parallel_lease_acquire {
   lc_client *client;
   pthread_barrier_t *start;
@@ -207,6 +225,136 @@ static size_t pouch_chunked_source_read(void *context, void *buffer,
   source->offset += count;
   source->read_count += 1U;
   return count;
+}
+
+static size_t pouch_stream_overlap_read(void *context, void *buffer,
+                                        size_t count, lc_error *error) {
+  pouch_stream_overlap *overlap;
+  size_t available;
+
+  (void)error;
+  overlap = (pouch_stream_overlap *)context;
+  if (overlap == NULL) {
+    return 0U;
+  }
+  assert_int_equal(pthread_mutex_lock(&overlap->mutex), 0);
+  if (!overlap->stream_entered) {
+    overlap->stream_entered = 1;
+    assert_int_equal(pthread_cond_broadcast(&overlap->cond), 0);
+    while (!overlap->release_stream) {
+      assert_int_equal(pthread_cond_wait(&overlap->cond, &overlap->mutex), 0);
+    }
+  }
+  if (overlap->stream_offset >= overlap->stream_length) {
+    assert_int_equal(pthread_mutex_unlock(&overlap->mutex), 0);
+    return 0U;
+  }
+  available = overlap->stream_length - overlap->stream_offset;
+  if (count > 127U) {
+    count = 127U;
+  }
+  if (count > available) {
+    count = available;
+  }
+  memcpy(buffer, overlap->stream_bytes + overlap->stream_offset, count);
+  overlap->stream_offset += count;
+  assert_int_equal(pthread_mutex_unlock(&overlap->mutex), 0);
+  return count;
+}
+
+static int pouch_stream_overlap_precondition(void *context, lc_error *error) {
+  pouch_stream_overlap *overlap;
+
+  (void)error;
+  overlap = (pouch_stream_overlap *)context;
+  if (overlap == NULL) {
+    return LC_ERR_INVALID;
+  }
+  assert_int_equal(pthread_mutex_lock(&overlap->mutex), 0);
+  overlap->second_precondition_entered = 1;
+  assert_int_equal(pthread_cond_broadcast(&overlap->cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&overlap->mutex), 0);
+  return LC_OK;
+}
+
+static void *pouch_stream_overlap_first_write(void *context) {
+  pouch_stream_overlap *overlap;
+  lc_source *body;
+  lc_pouch_state_write_result result;
+
+  overlap = (pouch_stream_overlap *)context;
+  body = NULL;
+  memset(&result, 0, sizeof(result));
+  lc_error_init(&overlap->first_error);
+  overlap->first_rc =
+      lc_source_from_callbacks(pouch_stream_overlap_read, NULL, NULL, overlap,
+                               &body, &overlap->first_error);
+  if (overlap->first_rc == LC_OK) {
+    overlap->first_rc =
+        lc_pouch_state_write(overlap->pouch, "default", "overlap/stream", body,
+                             NULL, &result, &overlap->first_error);
+  }
+  if (body != NULL) {
+    lc_source_close(body);
+  }
+  lc_pouch_state_write_result_cleanup(NULL, &result);
+  return NULL;
+}
+
+static void *pouch_stream_overlap_second_write(void *context) {
+  pouch_stream_overlap *overlap;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  lc_source *body;
+
+  overlap = (pouch_stream_overlap *)context;
+  body = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  lc_error_init(&overlap->second_error);
+  options.precondition = pouch_stream_overlap_precondition;
+  options.precondition_context = overlap;
+  overlap->second_rc =
+      lc_source_from_memory("second", 6U, &body, &overlap->second_error);
+  if (overlap->second_rc == LC_OK) {
+    overlap->second_rc = lc_pouch_state_write(
+        overlap->pouch,
+        overlap->second_namespace != NULL ? overlap->second_namespace
+                                          : "default",
+        "overlap/second", body, &options, &result, &overlap->second_error);
+  }
+  if (body != NULL) {
+    lc_source_close(body);
+  }
+  lc_pouch_state_write_result_cleanup(NULL, &result);
+  assert_int_equal(pthread_mutex_lock(&overlap->mutex), 0);
+  overlap->second_finished = 1;
+  assert_int_equal(pthread_cond_broadcast(&overlap->cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&overlap->mutex), 0);
+  return NULL;
+}
+
+static int pouch_stream_overlap_wait(pouch_stream_overlap *overlap, int *flag) {
+  struct timespec deadline;
+  int wait_rc;
+  int ready;
+
+  if (overlap == NULL || flag == NULL) {
+    return 0;
+  }
+  if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+    return 0;
+  }
+  deadline.tv_sec += 1;
+  wait_rc = 0;
+  assert_int_equal(pthread_mutex_lock(&overlap->mutex), 0);
+  while (!*flag && wait_rc == 0) {
+    wait_rc =
+        pthread_cond_timedwait(&overlap->cond, &overlap->mutex, &deadline);
+  }
+  ready = *flag;
+  assert_int_equal(pthread_mutex_unlock(&overlap->mutex), 0);
+  return ready;
 }
 
 static void *pouch_write_state_in_parallel(void *context) {
@@ -8167,6 +8315,91 @@ static void test_state_callback_source_retains_streaming_path(void **state) {
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   lc_pouch_crypto_key_string_free(crypto_key);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_exclusive_streaming_write_releases_projection_for_independent_key(
+    void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  pouch_stream_overlap overlap;
+  pthread_t first_thread;
+  pthread_t second_thread;
+  lc_error error;
+  char root[512];
+  char payload[8192];
+  int first_started;
+  int second_started;
+  int stream_entered;
+  int precondition_entered;
+  int second_finished;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&overlap, 0, sizeof(overlap));
+  lc_error_init(&error);
+  make_root("exclusive-stream-overlap", root, sizeof(root));
+  cleanup_root(root);
+  fill_repeated_payload(payload, sizeof(payload));
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(pthread_mutex_init(&overlap.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&overlap.cond, NULL), 0);
+  overlap.pouch = pouch;
+  overlap.stream_bytes = (const unsigned char *)payload;
+  overlap.stream_length = strlen(payload);
+  overlap.second_namespace = "other";
+  overlap.first_rc = LC_ERR_INVALID;
+  overlap.second_rc = LC_ERR_INVALID;
+  first_started =
+      pthread_create(&first_thread, NULL, pouch_stream_overlap_first_write,
+                     &overlap) == 0;
+  stream_entered =
+      first_started
+          ? pouch_stream_overlap_wait(&overlap, &overlap.stream_entered)
+          : 0;
+  second_started = 0;
+  precondition_entered = 0;
+  second_finished = 0;
+  if (stream_entered) {
+    second_started =
+        pthread_create(&second_thread, NULL, pouch_stream_overlap_second_write,
+                       &overlap) == 0;
+    if (second_started) {
+      precondition_entered = pouch_stream_overlap_wait(
+          &overlap, &overlap.second_precondition_entered);
+      second_finished =
+          pouch_stream_overlap_wait(&overlap, &overlap.second_finished);
+    }
+  }
+  assert_int_equal(pthread_mutex_lock(&overlap.mutex), 0);
+  overlap.release_stream = 1;
+  assert_int_equal(pthread_cond_broadcast(&overlap.cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&overlap.mutex), 0);
+  if (first_started) {
+    assert_int_equal(pthread_join(first_thread, NULL), 0);
+  }
+  if (second_started) {
+    assert_int_equal(pthread_join(second_thread, NULL), 0);
+  }
+
+  assert_true(first_started);
+  assert_true(stream_entered);
+  assert_true(second_started);
+  assert_true(precondition_entered);
+  assert_true(second_finished);
+  assert_int_equal(overlap.first_rc, LC_OK);
+  assert_int_equal(overlap.second_rc, LC_OK);
+
+  lc_error_cleanup(&overlap.first_error);
+  lc_error_cleanup(&overlap.second_error);
+  assert_int_equal(pthread_cond_destroy(&overlap.cond), 0);
+  assert_int_equal(pthread_mutex_destroy(&overlap.mutex), 0);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -21796,6 +22029,8 @@ int main(void) {
       cmocka_unit_test(test_state_crypto_compression_round_trips),
       cmocka_unit_test(test_state_memory_source_appends_finalized_record),
       cmocka_unit_test(test_state_callback_source_retains_streaming_path),
+      cmocka_unit_test(
+          test_exclusive_streaming_write_releases_projection_for_independent_key),
       cmocka_unit_test(test_pouch_crypto_compression_leases_skip_zlib),
       cmocka_unit_test(test_pouch_compression_leases_skip_zlib),
       cmocka_unit_test(test_state_replay_rejects_corrupt_binary_header),

@@ -1157,6 +1157,21 @@ Required behavior:
   within a namespace, processes at most 128 records in one append batch,
   publishes each resulting projection entry before its caller is acknowledged,
   and never accepts a payload source;
+- default-exclusive physical appends use one root/namespace-local gate that is
+  separate from the resident projection mutex. An exact-key mutation captures
+  its precondition from the projection, then waits at that gate without
+  retaining the projection mutex. A bounded SDK-memory body hashes and
+  transforms before it claims the gate; a true streaming source claims the
+  gate, writes its pending record directly to the active segment, and releases
+  the projection mutex while source bytes flow. It reacquires the projection
+  only to reserve the final index sequence, finalize the record, and publish
+  the new reference. The exact-key, maintenance, and writer-mode guards remain
+  held throughout. This is Pouch's C implementation of Go disk's namespace
+  metadata/write-gate split, not a second writer or a buffered payload path.
+  The gate is allocated once per Pouch handle and namespace, survives cache
+  invalidation until close, and does not perform a root stat, shared-mode
+  process registry lookup, or file-lock operation on a healthy exclusive
+  mutation;
 - for an SDK-owned `lc_source_from_memory` state or object body no larger than
   64 KiB, Pouch may hash and transform the already-materialized unread range
   in bounded memory, then append one complete finalized record with one
