@@ -20,6 +20,8 @@ typedef struct lc_pouch_query_index_pending_entry
     lc_pouch_query_index_pending_entry;
 typedef struct lc_pouch_query_index_pending_segment
     lc_pouch_query_index_pending_segment;
+typedef struct lc_pouch_query_index_pending_incomplete_namespace
+    lc_pouch_query_index_pending_incomplete_namespace;
 typedef struct lc_pouch_query_index_manifest_trust_entry
     lc_pouch_query_index_manifest_trust_entry;
 typedef struct lc_pouch_fsync_request lc_pouch_fsync_request;
@@ -208,7 +210,12 @@ struct lc_pouch {
   size_t query_packed_cache_count;
   lc_pouch_query_index_pending_entry *query_pending_index;
   size_t query_pending_index_count;
+  /* Allocation-failure fallback for an incomplete pending capture. */
   int query_pending_index_incomplete;
+  /* Namespace-scoped capture failures require a durable rebuild before the
+   * corresponding derived index can be trusted again. */
+  lc_pouch_query_index_pending_incomplete_namespace
+      *query_pending_incomplete_namespaces;
   /* Lets a flush preserve publications that arrived after its capture. */
   uint64_t query_pending_epoch;
   lc_pouch_query_index_pending_segment *query_pending_segments;

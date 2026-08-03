@@ -5138,7 +5138,9 @@ static void test_parallel_query_flush_preserves_later_write(void **state) {
 
 static void test_parallel_query_flushes_publish_one_valid_index(void **state) {
   lc_pouch *pouch;
+  lc_pouch *peer;
   lc_source *source;
+  lc_pouch_open_options options;
   lc_pouch_state_write_result state_write;
   pouch_parallel_query_flush flushes[2];
   pthread_barrier_t start;
@@ -5153,14 +5155,20 @@ static void test_parallel_query_flushes_publish_one_valid_index(void **state) {
 
   (void)state;
   pouch = NULL;
+  peer = NULL;
   source = NULL;
+  memset(&options, 0, sizeof(options));
   memset(&state_write, 0, sizeof(state_write));
   memset(flushes, 0, sizeof(flushes));
   lc_error_init(&error);
   make_root("parallel-query-flushes", root, sizeof(root));
   cleanup_root(root);
 
-  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_open(root, NULL, &options, &peer, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
                              &error);
@@ -5178,7 +5186,7 @@ static void test_parallel_query_flushes_publish_one_valid_index(void **state) {
 
   assert_int_equal(pthread_barrier_init(&start, NULL, 2U), 0);
   for (index = 0U; index < 2U; ++index) {
-    flushes[index].pouch = pouch;
+    flushes[index].pouch = index == 0U ? pouch : peer;
     flushes[index].start = &start;
     flushes[index].state_index_seq = state_index_seq;
     assert_int_equal(pthread_create(&threads[index], NULL,
@@ -5201,6 +5209,184 @@ static void test_parallel_query_flushes_publish_one_valid_index(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(query_index_seq, state_index_seq);
   assert_int_equal(row_count, 1U);
+
+  lc_pouch_close(peer);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_shared_query_flush_rebuilds_incomplete_capture(void **state) {
+  lc_pouch *pouch;
+  lc_pouch *peer;
+  lc_source *source;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_result first_write;
+  lc_pouch_state_write_result streamed_write;
+  lc_pouch_query_index_flush_result flush_result;
+  pouch_chunked_source chunked;
+  lc_pouch_generation first_seq;
+  lc_pouch_generation state_index_seq;
+  lc_pouch_generation query_index_seq;
+  lc_error error;
+  char root[512];
+  size_t row_count;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  peer = NULL;
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&first_write, 0, sizeof(first_write));
+  memset(&streamed_write, 0, sizeof(streamed_write));
+  memset(&flush_result, 0, sizeof(flush_result));
+  memset(&chunked, 0, sizeof(chunked));
+  lc_error_init(&error);
+  make_root("shared-query-incomplete-capture", root, sizeof(root));
+  cleanup_root(root);
+
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_open(root, NULL, &options, &peer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "query-incomplete/first", source,
+                            NULL, &first_write, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &first_write);
+
+  first_seq = 0UL;
+  rc = lc_pouch_state_index_seq(pouch, "default", &first_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_flush(pouch, "default", first_seq, &flush_result,
+                                  &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, first_seq);
+
+  memset(&flush_result, 0, sizeof(flush_result));
+  chunked.bytes = (const unsigned char *)"{\"value\":2}";
+  chunked.length = strlen((const char *)chunked.bytes);
+  chunked.max_chunk = 3U;
+  rc = lc_source_from_callbacks(pouch_chunked_source_read, NULL, NULL, &chunked,
+                                &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "query-incomplete/second", source,
+                            NULL, &streamed_write, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &streamed_write);
+  assert_true(lc_pouch_query_index_has_pending(pouch, "default"));
+
+  state_index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(pouch, "default", &state_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(state_index_seq > first_seq);
+  rc = lc_pouch_query_index_flush(peer, "default", state_index_seq,
+                                  &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, state_index_seq);
+
+  memset(&flush_result, 0, sizeof(flush_result));
+  rc = lc_pouch_query_index_flush(pouch, "default", state_index_seq,
+                                  &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, state_index_seq);
+  assert_true(flush_result.repaired);
+  assert_false(lc_pouch_query_index_has_pending(pouch, "default"));
+
+  memset(&flush_result, 0, sizeof(flush_result));
+  rc = lc_pouch_query_index_flush(pouch, "default", first_seq, &flush_result,
+                                  &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, state_index_seq);
+  row_count = 0U;
+  query_index_seq = 0UL;
+  rc = lc_pouch_query_index_visit(pouch, "default", pouch_query_index_count_row,
+                                  &row_count, &query_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(query_index_seq, state_index_seq);
+  assert_int_equal(row_count, 2U);
+
+  lc_pouch_close(peer);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_query_incomplete_capture_is_namespace_scoped(void **state) {
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_query_index_flush_result flush_result;
+  pouch_chunked_source chunked;
+  lc_pouch_generation state_index_seq;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&flush_result, 0, sizeof(flush_result));
+  memset(&chunked, 0, sizeof(chunked));
+  lc_error_init(&error);
+  make_root("query-incomplete-namespace", root, sizeof(root));
+  cleanup_root(root);
+
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "query/default", source, NULL,
+                            &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  state_index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(pouch, "default", &state_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_flush(pouch, "default", state_index_seq,
+                                  &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+
+  memset(&flush_result, 0, sizeof(flush_result));
+  chunked.bytes = (const unsigned char *)"{\"value\":2}";
+  chunked.length = strlen((const char *)chunked.bytes);
+  chunked.max_chunk = 3U;
+  rc = lc_source_from_callbacks(pouch_chunked_source_read, NULL, NULL, &chunked,
+                                &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "secondary", "query/secondary", source, NULL,
+                            &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  assert_true(lc_pouch_query_index_has_pending(pouch, "secondary"));
+
+  state_index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(pouch, "default", &state_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_flush(pouch, "default", state_index_seq,
+                                  &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(flush_result.repaired);
+  assert_true(lc_pouch_query_index_has_pending(pouch, "secondary"));
 
   lc_pouch_close(pouch);
   cleanup_root(root);
@@ -24390,6 +24576,8 @@ int main(void) {
           test_shared_query_index_fast_flush_retires_peer_projection),
       cmocka_unit_test(test_parallel_query_flush_preserves_later_write),
       cmocka_unit_test(test_parallel_query_flushes_publish_one_valid_index),
+      cmocka_unit_test(test_shared_query_flush_rebuilds_incomplete_capture),
+      cmocka_unit_test(test_query_incomplete_capture_is_namespace_scoped),
       cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),
       cmocka_unit_test(test_pouch_defaults_and_post_mutation_janitor),
       cmocka_unit_test(test_exclusive_writer_probe_heartbeat_precedence),

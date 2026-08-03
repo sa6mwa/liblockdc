@@ -1301,14 +1301,20 @@ acknowledge, reorder, or expose an operation before that point.
 
 The pending query-index overlay is derived from that accepted projection. Each
 writer prepares its own derived entry independently, then serializes only the
-overlay publication. An index flush holds that same short ownership boundary
-only to capture its overlay epoch and detach the entries it owns; it releases
-the mutex before index artifact I/O. A later writer publishes into the next
-epoch, so the flush cannot corrupt the overlay, discard that writer's entry,
-or stall public completion on index work. The overlay remains rebuildable from
-the authoritative log and never becomes a second mutation authority. A
-separate root-local flush mutex serializes competing artifact publications; it
-does not participate in the mutation path.
+overlay publication. A flush captures its overlay epoch and detaches the local
+entries before artifact I/O, so later writers publish into the next epoch
+without being stalled by derived work. An unreplayable source capture marks
+only its namespace incomplete; its next successful flush rebuilds that
+namespace from the authoritative log before the marker is cleared. The overlay
+therefore never becomes a second mutation authority.
+
+Exclusive roots serialize derived artifact publication with a root-local flush
+mutex. Shared roots instead hold the namespace's durable cross-process write
+authority from the high-water sequence sample through artifact and manifest
+publication. This serializes competing Pouch handles and processes, so their
+read-modify-write manifest updates and derived artifact writes cannot race.
+The pending-overlay mutex is still released before artifact I/O and never
+participates in public mutation completion.
 
 Go disk's default failover path marks writes `NoSync` because a per-write fsync
 can dominate core lockd workloads. Pouch has the same default boundary:
@@ -1493,10 +1499,10 @@ Indexed query requirements:
   the packed artifact. The manifest's `delete_count=0` and empty-set hash are
   the authoritative empty value; non-empty delete components must match the
   manifest count and hash;
-- query-index segment artifacts and their manifest may be written directly
-  without fsync because they are derived files. Recovery validates the manifest,
-  header, and packed artifact signatures and rebuilds from the logstore if any
-  derived write was interrupted or torn;
+- query-index segment artifacts and their manifest are installed by same-
+  directory temporary-file rename without fsync because they are derived files.
+  Recovery validates the manifest, header, and packed artifact signatures and
+  rebuilds from the logstore if any derived write was interrupted or torn;
 - normal append flushes do not sweep the index directory for orphaned derived
   artifacts. Full rebuild, repair/validated flush, and retired-segment cleanup
   paths perform orphan cleanup, so foreground append flush latency is not tied

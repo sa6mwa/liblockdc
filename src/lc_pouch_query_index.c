@@ -476,11 +476,28 @@ struct lc_pouch_query_index_pending_segment {
   struct lc_pouch_query_index_pending_segment *next;
 };
 
+/* A capture failure applies to one namespace. Keeping this distinct from the
+ * allocation-failure fallback prevents an unrelated flush from trusting an
+ * index whose source stream could not be replayed. */
+struct lc_pouch_query_index_pending_incomplete_namespace {
+  char *namespace_name;
+  struct lc_pouch_query_index_pending_incomplete_namespace *next;
+};
+
 static void lc_pouch_query_index_pending_segment_cleanup(
     const lc_allocator *allocator,
     lc_pouch_query_index_pending_segment *segment);
 static void lc_pouch_query_index_pending_segment_remove_namespace(
     lc_pouch *pouch, const char *namespace_name);
+static int lc_pouch_query_index_pending_incomplete_namespace_present(
+    const lc_pouch *pouch, const char *namespace_name);
+static void lc_pouch_query_index_pending_incomplete_namespace_mark(
+    lc_pouch *pouch, const char *namespace_name);
+static void lc_pouch_query_index_pending_incomplete_namespace_clear(
+    lc_pouch *pouch, const char *namespace_name);
+static void lc_pouch_query_index_pending_incomplete_namespaces_cleanup(
+    const lc_allocator *allocator,
+    lc_pouch_query_index_pending_incomplete_namespace *namespaces);
 static lc_pouch_query_index_pending_segment *
 lc_pouch_query_index_pending_segment_detach_namespace(
     lc_pouch *pouch, const char *namespace_name);
@@ -1820,15 +1837,100 @@ static void lc_pouch_query_index_flush_unlock(lc_pouch *pouch) {
   }
 }
 
+static int lc_pouch_query_index_pending_incomplete_namespace_present(
+    const lc_pouch *pouch, const char *namespace_name) {
+  lc_pouch_query_index_pending_incomplete_namespace *entry;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return 0;
+  }
+  for (entry = pouch->query_pending_incomplete_namespaces; entry != NULL;
+       entry = entry->next) {
+    if (entry->namespace_name != NULL &&
+        strcmp(entry->namespace_name, namespace_name) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void lc_pouch_query_index_pending_incomplete_namespace_mark(
+    lc_pouch *pouch, const char *namespace_name) {
+  lc_pouch_query_index_pending_incomplete_namespace *entry;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return;
+  }
+  if (!lc_pouch_query_index_pending_incomplete_namespace_present(
+          pouch, namespace_name)) {
+    entry = (lc_pouch_query_index_pending_incomplete_namespace *)
+        lc_calloc_with_allocator(&pouch->allocator, 1U, sizeof(*entry));
+    if (entry == NULL) {
+      /* A missing marker must fail closed: every later flush will rebuild. */
+      pouch->query_pending_index_incomplete = 1;
+    } else {
+      entry->namespace_name =
+          lc_strdup_with_allocator(&pouch->allocator, namespace_name);
+      if (entry->namespace_name == NULL) {
+        lc_free_with_allocator(&pouch->allocator, entry);
+        pouch->query_pending_index_incomplete = 1;
+      } else {
+        entry->next = pouch->query_pending_incomplete_namespaces;
+        pouch->query_pending_incomplete_namespaces = entry;
+      }
+    }
+  }
+  ++pouch->query_pending_epoch;
+  lc_pouch_query_index_pending_segment_remove_namespace(pouch, namespace_name);
+}
+
+static void lc_pouch_query_index_pending_incomplete_namespace_clear(
+    lc_pouch *pouch, const char *namespace_name) {
+  lc_pouch_query_index_pending_incomplete_namespace *entry;
+  lc_pouch_query_index_pending_incomplete_namespace *previous;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return;
+  }
+  previous = NULL;
+  entry = pouch->query_pending_incomplete_namespaces;
+  while (entry != NULL) {
+    if (entry->namespace_name != NULL &&
+        strcmp(entry->namespace_name, namespace_name) == 0) {
+      if (previous != NULL) {
+        previous->next = entry->next;
+      } else {
+        pouch->query_pending_incomplete_namespaces = entry->next;
+      }
+      lc_free_with_allocator(&pouch->allocator, entry->namespace_name);
+      lc_free_with_allocator(&pouch->allocator, entry);
+      return;
+    }
+    previous = entry;
+    entry = entry->next;
+  }
+}
+
+static void lc_pouch_query_index_pending_incomplete_namespaces_cleanup(
+    const lc_allocator *allocator,
+    lc_pouch_query_index_pending_incomplete_namespace *namespaces) {
+  while (namespaces != NULL) {
+    lc_pouch_query_index_pending_incomplete_namespace *next;
+
+    next = namespaces->next;
+    lc_free_with_allocator(allocator, namespaces->namespace_name);
+    lc_free_with_allocator(allocator, namespaces);
+    namespaces = next;
+  }
+}
+
 static void
 lc_pouch_query_index_pending_mark_incomplete(lc_pouch *pouch,
                                              const char *namespace_name) {
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '.') {
     return;
   }
-  pouch->query_pending_index_incomplete = 1;
-  ++pouch->query_pending_epoch;
-  lc_pouch_query_index_pending_segment_remove_namespace(pouch, namespace_name);
+  lc_pouch_query_index_pending_incomplete_namespace_mark(pouch, namespace_name);
 }
 
 static void lc_pouch_query_index_pending_mark_incomplete_safely(
@@ -2126,7 +2228,9 @@ int lc_pouch_query_index_has_pending(lc_pouch *pouch,
     return 1;
   }
   pending = 0;
-  if (pouch->query_pending_index_incomplete) {
+  if (pouch->query_pending_index_incomplete ||
+      lc_pouch_query_index_pending_incomplete_namespace_present(
+          pouch, namespace_name)) {
     pending = 1;
   }
   for (entry = pouch->query_pending_index; !pending && entry != NULL;
@@ -4259,58 +4363,14 @@ static int lc_pouch_query_index_write_bytes_direct_relaxed(const char *path,
                                                            const char *bytes,
                                                            size_t length,
                                                            lc_error *error) {
-  const char *cursor;
-  size_t remaining;
-  int fd;
-  int rc;
-
   if (path == NULL || (bytes == NULL && length > 0U)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index artifact write requires path and "
                         "bytes",
                         NULL, NULL, NULL);
   }
-  fd = open(path, O_CREAT | O_TRUNC | O_WRONLY, 0666);
-  if (fd < 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to create pouch query-index artifact",
-                        strerror(errno), NULL, "pouch");
-  }
-  cursor = bytes != NULL ? bytes : "";
-  remaining = length;
-  rc = LC_OK;
-  while (remaining > 0U) {
-    ssize_t written;
-
-    written = write(fd, cursor, remaining);
-    if (written < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to write pouch query-index artifact",
-                        strerror(errno), NULL, "pouch");
-      break;
-    }
-    if (written == 0) {
-      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to make progress writing pouch query-index "
-                        "artifact",
-                        NULL, NULL, "pouch");
-      break;
-    }
-    cursor += (size_t)written;
-    remaining -= (size_t)written;
-  }
-  if (close(fd) != 0 && rc == LC_OK) {
-    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to close pouch query-index artifact",
-                      strerror(errno), NULL, "pouch");
-  }
-  if (rc != LC_OK) {
-    (void)unlink(path);
-  }
-  return rc;
+  return lc_pouch_path_write_bytes_file_relaxed(
+      path, bytes != NULL ? bytes : "", length, error);
 }
 
 static void lc_pouch_query_index_put_u64_le(unsigned char *out,
@@ -5109,12 +5169,73 @@ static int lc_pouch_query_index_read_packed_component_bytes(
   return LC_OK;
 }
 
+static int
+lc_pouch_query_index_open_temp_artifact(const lc_allocator *allocator,
+                                        const char *path, char **temp_path_out,
+                                        int *fd_out, lc_error *error) {
+  size_t path_length;
+  unsigned int attempt;
+  int fd;
+
+  if (path == NULL || temp_path_out == NULL || fd_out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index temp artifact requires path and "
+                        "outputs",
+                        NULL, NULL, NULL);
+  }
+  *temp_path_out = NULL;
+  *fd_out = -1;
+  path_length = strlen(path);
+  for (attempt = 0U; attempt < 100U; ++attempt) {
+    char suffix[64];
+    char *temp_path;
+    int written;
+
+    written = snprintf(suffix, sizeof(suffix), ".tmp.%ld.%u", (long)getpid(),
+                       attempt);
+    if (written < 0 || (size_t)written >= sizeof(suffix) ||
+        path_length > (size_t)-1 - (size_t)written - 1U) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch query-index temp artifact path exceeds local "
+                          "limit",
+                          NULL, NULL, NULL);
+    }
+    temp_path = (char *)lc_alloc_with_allocator(
+        allocator, path_length + (size_t)written + 1U);
+    if (temp_path == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch query-index temp artifact "
+                          "path",
+                          NULL, NULL, NULL);
+    }
+    memcpy(temp_path, path, path_length);
+    memcpy(temp_path + path_length, suffix, (size_t)written + 1U);
+    fd = open(temp_path, O_CREAT | O_EXCL | O_WRONLY, 0666);
+    if (fd >= 0) {
+      *temp_path_out = temp_path;
+      *fd_out = fd;
+      return LC_OK;
+    }
+    lc_free_with_allocator(allocator, temp_path);
+    if (errno != EEXIST) {
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to create pouch query-index temp artifact",
+                          strerror(errno), NULL, "pouch");
+    }
+  }
+  return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to allocate a unique pouch query-index temp "
+                      "artifact",
+                      NULL, NULL, "pouch");
+}
+
 static int lc_pouch_query_index_write_artifact_bytes(
     lc_pouch *pouch, const char *namespace_name, const char *path,
     const char *bytes, size_t length, lc_error *error) {
   lc_source *source;
   char *context;
   char *descriptor;
+  char *temp_path;
   uint64_t plain_bytes;
   uint64_t cipher_bytes;
   int fd;
@@ -5138,16 +5259,13 @@ static int lc_pouch_query_index_write_artifact_bytes(
   }
   source = NULL;
   descriptor = NULL;
+  temp_path = NULL;
   fd = -1;
   rc =
       lc_source_from_memory(bytes != NULL ? bytes : "", length, &source, error);
   if (rc == LC_OK) {
-    fd = open(path, O_CREAT | O_TRUNC | O_WRONLY, 0666);
-    if (fd < 0) {
-      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to create pouch query-index artifact",
-                        strerror(errno), NULL, "pouch");
-    }
+    rc = lc_pouch_query_index_open_temp_artifact(&pouch->allocator, path,
+                                                 &temp_path, &fd, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_crypto_stream_to_fd_crc_with_compression(
@@ -5165,9 +5283,15 @@ static int lc_pouch_query_index_write_artifact_bytes(
                       "failed to close pouch encrypted query-index artifact",
                       strerror(errno), NULL, "pouch");
   }
-  if (rc != LC_OK) {
-    unlink(path);
+  if (rc == LC_OK && rename(temp_path, path) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to install pouch encrypted query-index artifact",
+                      strerror(errno), NULL, "pouch");
   }
+  if (rc != LC_OK && temp_path != NULL) {
+    (void)unlink(temp_path);
+  }
+  lc_free_with_allocator(&pouch->allocator, temp_path);
   lc_free_with_allocator(&pouch->allocator, descriptor);
   lc_free_with_allocator(&pouch->allocator, context);
   return rc;
@@ -11900,19 +12024,23 @@ static int lc_pouch_query_index_flush_segmented(
   }
   query_pending_locked = 1;
   pending_epoch = pouch->query_pending_epoch;
-  pending_incomplete = pouch->query_pending_index_incomplete;
+  pending_incomplete =
+      pouch->query_pending_index_incomplete ||
+      lc_pouch_query_index_pending_incomplete_namespace_present(pouch,
+                                                                namespace_name);
   pending_fast_path_allowed =
       lc_pouch_single_writer_enabled(pouch) && !pending_incomplete;
-  /* Every successful flush, including a current-manifest fast return, covers
-   * this local snapshot. Shared roots still rebuild from durable state, but
-   * must retire their local projection so concurrent writers do not leave it
-   * resident indefinitely. */
+  /* A capture failure can only be repaired by rebuilding from durable state.
+   * Shared roots still retire their local projection here so peer-flushed
+   * writes cannot leave it resident indefinitely. */
   pending_entries = lc_pouch_query_index_pending_detach_namespace(
       pouch, namespace_name, &pending_count);
   pending_segment = lc_pouch_query_index_pending_segment_detach_namespace(
       pouch, namespace_name);
-  if (manifest_current) {
-    pouch->query_pending_index_incomplete = 0;
+  if (pending_incomplete) {
+    manifest_current = 0;
+    full_rebuild = 1;
+    cleanup_unreferenced = 1;
   }
   lc_pouch_query_index_pending_unlock(pouch);
   query_pending_locked = 0;
@@ -12142,8 +12270,9 @@ static int lc_pouch_query_index_flush_segmented(
     rc = lc_pouch_query_index_pending_lock(pouch, error);
     if (rc == LC_OK) {
       query_pending_locked = 1;
-      if (pouch->query_pending_epoch == pending_epoch) {
-        pouch->query_pending_index_incomplete = 0;
+      if (pending_incomplete && pouch->query_pending_epoch == pending_epoch) {
+        lc_pouch_query_index_pending_incomplete_namespace_clear(pouch,
+                                                                namespace_name);
       }
       lc_pouch_query_index_pending_unlock(pouch);
       query_pending_locked = 0;
@@ -12222,12 +12351,66 @@ cleanup:
   return rc;
 }
 
+typedef struct lc_pouch_query_index_flush_context {
+  lc_pouch *pouch;
+  const char *namespace_name;
+  int validate_existing_segments;
+  lc_pouch_query_index_flush_result *out;
+} lc_pouch_query_index_flush_context;
+
+static int lc_pouch_query_index_flush_current_locked(void *context,
+                                                     lc_error *error) {
+  lc_pouch_query_index_flush_context *flush;
+  lc_pouch_generation state_index_seq;
+  int rc;
+
+  flush = (lc_pouch_query_index_flush_context *)context;
+  state_index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(flush->pouch, flush->namespace_name,
+                                &state_index_seq, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  return lc_pouch_query_index_flush_segmented(
+      flush->pouch, flush->namespace_name, state_index_seq,
+      flush->validate_existing_segments, flush->out, error);
+}
+
+/* Shared roots must serialize the state snapshot, derived artifacts, and
+ * manifest publication under the namespace's cross-process write authority.
+ * Exclusive roots retain their lower-overhead per-handle artifact mutex. */
+static int lc_pouch_query_index_flush_coordinated(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_generation requested_state_index_seq,
+    int validate_existing_segments, lc_pouch_query_index_flush_result *out,
+    lc_error *error) {
+  lc_pouch_query_index_flush_context flush;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      out == NULL) {
+    return lc_pouch_query_index_flush_segmented(
+        pouch, namespace_name, requested_state_index_seq,
+        validate_existing_segments, out, error);
+  }
+  memset(&flush, 0, sizeof(flush));
+  flush.pouch = pouch;
+  flush.namespace_name = namespace_name;
+  flush.validate_existing_segments = validate_existing_segments;
+  flush.out = out;
+  if (!lc_pouch_single_writer_enabled(pouch)) {
+    return lc_pouch_state_with_namespace_lock(
+        pouch, namespace_name, lc_pouch_query_index_flush_current_locked,
+        &flush, error);
+  }
+  return lc_pouch_query_index_flush_current_locked(&flush, error);
+}
+
 int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_generation state_index_seq,
                                lc_pouch_query_index_flush_result *out,
                                lc_error *error) {
-  return lc_pouch_query_index_flush_segmented(pouch, namespace_name,
-                                              state_index_seq, 0, out, error);
+  return lc_pouch_query_index_flush_coordinated(pouch, namespace_name,
+                                                state_index_seq, 0, out, error);
 }
 
 int lc_pouch_query_index_flush_validated(lc_pouch *pouch,
@@ -12235,8 +12418,8 @@ int lc_pouch_query_index_flush_validated(lc_pouch *pouch,
                                          lc_pouch_generation state_index_seq,
                                          lc_pouch_query_index_flush_result *out,
                                          lc_error *error) {
-  return lc_pouch_query_index_flush_segmented(pouch, namespace_name,
-                                              state_index_seq, 1, out, error);
+  return lc_pouch_query_index_flush_coordinated(pouch, namespace_name,
+                                                state_index_seq, 1, out, error);
 }
 
 int lc_pouch_query_index_manifest_seq(lc_pouch *pouch,
@@ -13227,6 +13410,9 @@ void lc_pouch_query_index_cache_cleanup(lc_pouch *pouch) {
   pouch->query_pending_index = NULL;
   pouch->query_pending_index_count = 0U;
   pouch->query_pending_index_incomplete = 0;
+  lc_pouch_query_index_pending_incomplete_namespaces_cleanup(
+      &pouch->allocator, pouch->query_pending_incomplete_namespaces);
+  pouch->query_pending_incomplete_namespaces = NULL;
   pending_segment = pouch->query_pending_segments;
   while (pending_segment != NULL) {
     lc_pouch_query_index_pending_segment *next;
