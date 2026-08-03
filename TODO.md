@@ -169,8 +169,7 @@ Acceptance:
 - [x] Make an in-process mode transition quiesce append-capable operations
   through durable completion, then advance the local epoch so active append
   descriptors are closed and projections validate/replay only when required.
-  Cross-process takeover remains covered by the durable writer-epoch item
-  above.
+  Cross-process takeover remains covered by the root process-lock fence above.
 
 Acceptance:
 
