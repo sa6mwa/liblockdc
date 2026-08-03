@@ -171,6 +171,8 @@ struct lc_pouch {
   int janitor_stop;
   int janitor_pending;
   lc_pouch_state_cache_namespace *state_cache_namespaces;
+  pthread_mutex_t source_cache_mutex;
+  int source_cache_mutex_initialized;
   lc_pouch_source_cache_entry *source_cache_entries;
   size_t source_cache_count;
   unsigned long source_cache_tick;

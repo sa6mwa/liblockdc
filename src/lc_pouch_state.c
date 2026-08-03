@@ -3136,6 +3136,9 @@ void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch) {
   if (pouch == NULL) {
     return;
   }
+  if (pouch->source_cache_mutex_initialized) {
+    (void)pthread_mutex_lock(&pouch->source_cache_mutex);
+  }
   entry = pouch->source_cache_entries;
   while (entry != NULL) {
     lc_pouch_source_cache_entry *next;
@@ -3151,6 +3154,9 @@ void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch) {
   pouch->source_cache_entries = NULL;
   pouch->source_cache_count = 0U;
   pouch->source_cache_tick = 0UL;
+  if (pouch->source_cache_mutex_initialized) {
+    (void)pthread_mutex_unlock(&pouch->source_cache_mutex);
+  }
 }
 
 static void lc_pouch_state_source_cache_evict_one(lc_pouch *pouch) {
@@ -3191,6 +3197,8 @@ static int lc_pouch_state_source_cache_dup_fd(lc_pouch *pouch, const char *path,
                                               int *out_fd, lc_error *error) {
   lc_pouch_source_cache_entry *entry;
   int fd;
+  int pthread_rc;
+  int rc;
 
   if (pouch == NULL || path == NULL || out_fd == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -3198,18 +3206,31 @@ static int lc_pouch_state_source_cache_dup_fd(lc_pouch *pouch, const char *path,
                         NULL, NULL, "pouch");
   }
   *out_fd = -1;
+  if (!pouch->source_cache_mutex_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch source cache mutex is unavailable", NULL, NULL,
+                        "pouch");
+  }
+  pthread_rc = pthread_mutex_lock(&pouch->source_cache_mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch source cache",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  rc = LC_OK;
   for (entry = pouch->source_cache_entries; entry != NULL;
        entry = entry->next) {
     if (strcmp(entry->path, path) == 0) {
       entry->last_used = ++pouch->source_cache_tick;
       fd = dup(entry->fd);
       if (fd < 0) {
-        return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                            "failed to duplicate pouch source descriptor",
-                            strerror(errno), NULL, "pouch");
+        rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to duplicate pouch source descriptor",
+                          strerror(errno), NULL, "pouch");
+      } else {
+        *out_fd = fd;
       }
-      *out_fd = fd;
-      return LC_OK;
+      goto cleanup;
     }
   }
   while (pouch->source_cache_count >= LC_POUCH_STATE_SOURCE_CACHE_MAX_FILES) {
@@ -3218,24 +3239,27 @@ static int lc_pouch_state_source_cache_dup_fd(lc_pouch *pouch, const char *path,
   entry = (lc_pouch_source_cache_entry *)lc_calloc_with_allocator(
       &pouch->allocator, 1U, sizeof(*entry));
   if (entry == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch source cache entry", NULL,
-                        NULL, "pouch");
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to allocate pouch source cache entry", NULL, NULL,
+                      "pouch");
+    goto cleanup;
   }
   entry->path = lc_strdup_with_allocator(&pouch->allocator, path);
   if (entry->path == NULL) {
     lc_free_with_allocator(&pouch->allocator, entry);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to copy pouch source cache path", NULL, NULL,
-                        "pouch");
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to copy pouch source cache path", NULL, NULL,
+                      "pouch");
+    goto cleanup;
   }
   entry->fd = open(path, O_RDONLY);
   if (entry->fd < 0) {
     lc_free_with_allocator(&pouch->allocator, entry->path);
     lc_free_with_allocator(&pouch->allocator, entry);
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to open pouch source cache file",
-                        strerror(errno), NULL, "pouch");
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to open pouch source cache file", strerror(errno),
+                      NULL, "pouch");
+    goto cleanup;
   }
   entry->last_used = ++pouch->source_cache_tick;
   entry->next = pouch->source_cache_entries;
@@ -3243,12 +3267,15 @@ static int lc_pouch_state_source_cache_dup_fd(lc_pouch *pouch, const char *path,
   ++pouch->source_cache_count;
   fd = dup(entry->fd);
   if (fd < 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to duplicate pouch source descriptor",
-                        strerror(errno), NULL, "pouch");
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to duplicate pouch source descriptor",
+                      strerror(errno), NULL, "pouch");
+    goto cleanup;
   }
   *out_fd = fd;
-  return LC_OK;
+cleanup:
+  (void)pthread_mutex_unlock(&pouch->source_cache_mutex);
+  return rc;
 }
 
 static int

@@ -1111,6 +1111,13 @@ bounded source cache, and active append descriptor. Shared-root, recovery,
 takeover, rotation, maintenance, and I/O invalidation deliberately leave that
 path to coordinate or rebuild durable state.
 
+The bounded source cache retains at most 64 open segment descriptors. A public
+stream receives a duplicate descriptor with its own read cursor, so compaction
+or LRU invalidation can close only the cache entry without invalidating an
+already returned source. Source-cache lookup, eviction, and invalidation are
+serialized independently of state mutation so concurrent reads and maintenance
+cannot race the descriptor list.
+
 Required behavior:
 
 - lock the canonical logical key for its full CAS/read/append/publication
