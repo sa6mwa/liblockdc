@@ -166,9 +166,10 @@ Acceptance:
 
 ### 3. Retain Shared-Root As An Explicit Mode
 
-- [ ] Keep separate Pouch instances against one root correct for independent
+- [x] Keep separate Pouch instances against one root correct for independent
   and conflicting keys, lease fencing, queue delivery, transactions, segment
-  rotation, compaction, and failover.
+  rotation, compaction, and failover. Focused process tests cover each case,
+  including crash lock handoff and maintenance/snapshot serialization.
 - [x] Retain each shared writer's verified projection cursor after a successful
   local append; under append authority, replay only peer bytes beyond that
   cursor before the next local append. First materialization of the selected
@@ -203,10 +204,11 @@ Acceptance:
 
 Acceptance:
 
-- [ ] Two or more explicit shared-root clients pass process-level contention,
+- [x] Two or more explicit shared-root clients pass process-level contention,
   key-conflict, lease-fencing, and crash-handoff tests.
-- [ ] Shared mode refresh work is proportional to the unseen committed tail,
-  not the total namespace history.
+- [x] Shared mode refresh work is proportional to the unseen committed tail,
+  not the total namespace history. Focused peer-tail, retained-cursor, and
+  unseen-truncation regressions prove the bounded refresh behavior.
 - [x] Opening two default exclusive clients against one root fails
   deterministically and does not mutate the root, including independent
   processes rather than only two handles in one process.
@@ -265,9 +267,10 @@ Acceptance:
 - [ ] Add public API coverage for acquire, keepalive, release, get, update,
   mutate, attachments, queue lifecycle, transactions, scan, indexed query,
   full-text query, crypto, and compression in exclusive mode.
-- [ ] Add multi-process shared-root tests for non-conflicting writes,
+- [x] Add multi-process shared-root tests for non-conflicting writes,
   conflicting CAS/lease writes, queue delivery ownership, active append tail
-  refresh, rotation, maintenance, and stale-writer rejection.
+  refresh, rotation, maintenance, and stale-writer rejection. The focused
+  process matrix and shared-tail regressions cover these paths.
 - [ ] Run only focused checks while refactoring. Run the configured full test
   and release gates after the coherent cutover is complete.
 
