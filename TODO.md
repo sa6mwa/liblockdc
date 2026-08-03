@@ -142,6 +142,10 @@ Acceptance:
 - [ ] Keep separate Pouch instances against one root correct for independent
   and conflicting keys, lease fencing, queue delivery, transactions, segment
   rotation, compaction, and failover.
+- [x] Retain each shared writer's verified projection cursor after a successful
+  local append; under append authority, replay only peer bytes beyond that
+  cursor before the next local append. Historical-byte validation remains a
+  recovery or manifest-invalidation operation, not a healthy hot-path scan.
 - [ ] Batch the physical append gate and tail only the delta while holding it;
   retain exact-key ownership and namespace maintenance coordination.
 - [ ] Define and implement a durable writer epoch/ownership transition that

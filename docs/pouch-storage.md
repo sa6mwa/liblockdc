@@ -638,12 +638,18 @@ default, relaxing durability, or omitting core operations from comparison.
 - Shared-root capability is an explicit post-cutover contract:
   callers that intentionally place two or more active Pouch instances on one
   root will select shared-writer mode. Each process retains its local
-  projection and batches normal mutations through a short cross-process append
-  authority. At each acquired batch it tails only the committed delta after its
-  cursor, appends and publishes the batch, performs the requested durability
-  work, advances its cursor, and releases authority. Exact-key locking,
-  namespace sequence allocation, writer epochs, and maintenance fencing remain
-  required. This is a supported Pouch extension, not the default
+  projection and serializes normal mutations through a short cross-process
+  append authority. At each acquired authority window it tails only the
+  committed delta after its cursor, appends and publishes the record family,
+  performs the requested durability work, advances its cursor, and releases
+  authority. A healthy writer does not
+  reread or revalidate bytes at or before that verified cursor on each normal
+  mutation; recovery, manifest lifecycle invalidation, or a new projection
+  performs that historical validation. Exact-key locking, namespace sequence
+  allocation, writer epochs, and maintenance fencing remain required. The
+  current implementation does not yet coalesce independent shared mutations
+  into one append-gate batch. This is a supported Pouch extension, not the
+  default
   Go-disk-aligned performance path.
   Direct callers set `single_writer_set=1` and `single_writer=0`; endpoint
   callers use `?single_writer=false` (or `?pouch_single_writer=false`).

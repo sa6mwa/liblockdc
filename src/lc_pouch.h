@@ -47,7 +47,10 @@ typedef struct lc_pouch_open_options {
   /**
    * Writer mode selected when `single_writer_set` is nonzero. A nonzero value
    * reserves this root for one writer; zero enables the slower shared-root
-   * coordination path.
+   * coordination path. Shared writers retain a local projection and, under
+   * append authority, replay only the peer tail after its verified cursor.
+   * Historical bytes are revalidated on recovery or projection invalidation,
+   * not before every healthy shared mutation.
    */
   int single_writer;
   const char *query_engine;

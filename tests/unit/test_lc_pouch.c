@@ -4213,6 +4213,95 @@ test_shared_state_projection_cache_refreshes_peer_active_tail(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_shared_writer_retains_projection_cursor_after_local_append(void **state) {
+  lc_pouch *writer;
+  lc_pouch *reopened;
+  lc_pouch_open_options shared_options;
+  lc_source *source;
+  lc_pouch_state_write_result write_res;
+  lc_pouch_state_read_result read_res;
+  lc_error error;
+  struct stat segment_stat;
+  char root[512];
+  char segment_path[1024];
+  char body[32];
+  int rc;
+
+  (void)state;
+  writer = NULL;
+  reopened = NULL;
+  source = NULL;
+  memset(&shared_options, 0, sizeof(shared_options));
+  memset(&write_res, 0, sizeof(write_res));
+  memset(&read_res, 0, sizeof(read_res));
+  lc_error_init(&error);
+  make_root("shared-cache-local-cursor", root, sizeof(root));
+  cleanup_root(root);
+
+  shared_options.single_writer_set = 1;
+  shared_options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &shared_options, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("first", strlen("first"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(writer, "default", "state/first", source, NULL,
+                            &write_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_res);
+
+  pouch_state_segment_path(root, "default", 1UL, segment_path,
+                           sizeof(segment_path));
+  assert_int_equal(stat(segment_path, &segment_stat), 0);
+  assert_true(segment_stat.st_size > 0);
+
+  rc = lc_source_from_memory("second", strlen("second"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(writer, "default", "state/second", source, NULL,
+                            &write_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_res);
+
+  /* The first physical active segment changes discovered topology once. After
+   * that refresh, a healthy shared writer trusts its local append cursor and
+   * tails only later peer bytes; recovery validates history from the start. */
+  flip_file_byte(segment_path, (uint64_t)segment_stat.st_size);
+
+  rc = lc_source_from_memory("third", strlen("third"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(writer, "default", "state/third", source, NULL,
+                            &write_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_res);
+
+  rc = lc_pouch_state_read(writer, "default", "state/third", &read_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_res.found);
+  read_source_to_string(read_res.body, body, sizeof(body));
+  assert_string_equal(body, "third");
+  lc_pouch_state_read_result_cleanup(NULL, &read_res);
+
+  lc_pouch_close(writer);
+  writer = NULL;
+  rc = lc_pouch_open(root, NULL, &shared_options, &reopened, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(reopened, "default", "state/third", &read_res,
+                           &error);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_string_equal(error.message, "pouch record magic mismatch");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_res);
+  lc_pouch_close(reopened);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_shared_writers_append_one_rolling_segment(void **state) {
   lc_pouch *first_writer;
   lc_pouch *second_writer;
@@ -19354,6 +19443,8 @@ int main(void) {
           test_single_writer_transition_invalidates_query_index_trust),
       cmocka_unit_test(
           test_shared_state_projection_cache_refreshes_peer_active_tail),
+      cmocka_unit_test(
+          test_shared_writer_retains_projection_cursor_after_local_append),
       cmocka_unit_test(test_shared_writers_append_one_rolling_segment),
       cmocka_unit_test(
           test_shared_writer_replay_orders_same_version_metadata_by_index),
