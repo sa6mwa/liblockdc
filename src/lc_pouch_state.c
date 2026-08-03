@@ -10658,6 +10658,79 @@ static int lc_pouch_state_update_metadata_from_current_locked(
   return rc;
 }
 
+/* Queue only complete metadata records. The caller keeps its exact-key lock
+ * while waiting, so the copied current entry remains the CAS decision for this
+ * request even though independent keys may advance the append projection. */
+static int lc_pouch_state_metadata_append_schedule_from_current_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    lc_pouch_state_entry *current, int current_is_borrowed,
+    const lc_pouch_state_write_options *options,
+    lc_pouch_state_write_result *out, lc_error *error) {
+  lc_pouch_state_metadata_append_request request;
+  lc_pouch_state_entry scheduled_current;
+  lc_pouch_generation logical_version;
+  int has_query_hidden;
+  int query_hidden;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || key == NULL ||
+      current == NULL || options == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata append scheduling requires inputs",
+                        NULL, NULL, "pouch");
+  }
+  memset(out, 0, sizeof(*out));
+  if (!current->found && !options->has_metadata) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata update requires existing state", NULL,
+                        NULL, NULL);
+  }
+  logical_version =
+      current->found && current->payload_span.present ? current->version : 0UL;
+  if (options->has_expected_version &&
+      logical_version != options->expected_version) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata version precondition failed", NULL,
+                        NULL, NULL);
+  }
+  if (options->precondition != NULL) {
+    rc = options->precondition(options->precondition_context, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  has_query_hidden = current->has_query_hidden;
+  query_hidden = current->query_hidden;
+  if (options->has_query_hidden) {
+    has_query_hidden = 1;
+    query_hidden = options->query_hidden;
+  } else if (!current->found) {
+    has_query_hidden = 1;
+    query_hidden = 1;
+  }
+  memset(&request, 0, sizeof(request));
+  memset(&scheduled_current, 0, sizeof(scheduled_current));
+  if (current_is_borrowed) {
+    rc = lc_pouch_state_metadata_append_entry_copy(pouch, current,
+                                                   &scheduled_current, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  request.namespace_name = namespace_name;
+  request.key = key;
+  request.current = current_is_borrowed ? &scheduled_current : current;
+  request.options = *options;
+  request.version = logical_version;
+  request.has_query_hidden = has_query_hidden;
+  request.query_hidden = query_hidden;
+  request.out = out;
+  request.error = error;
+  rc = lc_pouch_state_metadata_append_submit_locked(pouch, &request, error);
+  lc_pouch_state_entry_cleanup(&pouch->allocator, &scheduled_current);
+  return rc;
+}
+
 int lc_pouch_state_update_metadata_locked(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const lc_pouch_state_write_options *options,
@@ -10682,8 +10755,15 @@ int lc_pouch_state_update_metadata_locked(
       pouch, namespace_name, key, &manifest, &current, &max_version,
       &current_is_borrowed, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_state_update_metadata_from_current_locked(
-        pouch, namespace_name, key, &manifest, &current, options, out, error);
+    if (lc_pouch_single_writer_enabled(pouch) &&
+        pouch->state_metadata_append_batcher != NULL) {
+      rc = lc_pouch_state_metadata_append_schedule_from_current_locked(
+          pouch, namespace_name, key, &current, current_is_borrowed, options,
+          out, error);
+    } else {
+      rc = lc_pouch_state_update_metadata_from_current_locked(
+          pouch, namespace_name, key, &manifest, &current, options, out, error);
+    }
   }
   if (!current_is_borrowed) {
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
@@ -10700,12 +10780,7 @@ int lc_pouch_state_update_metadata_prepared_locked(
   lc_pouch_state_metadata_view view;
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_write_options options;
-  lc_pouch_state_metadata_append_request request;
-  lc_pouch_state_entry scheduled_current;
   lc_pouch_generation max_version;
-  lc_pouch_generation logical_version;
-  int has_query_hidden;
-  int query_hidden;
   int apply;
   int current_is_borrowed;
   int rc;
@@ -10721,8 +10796,6 @@ int lc_pouch_state_update_metadata_prepared_locked(
   memset(&manifest, 0, sizeof(manifest));
   memset(&view, 0, sizeof(view));
   memset(&options, 0, sizeof(options));
-  memset(&request, 0, sizeof(request));
-  memset(&scheduled_current, 0, sizeof(scheduled_current));
   current_is_borrowed = 0;
   rc = lc_pouch_state_manifest_lookup_cached_borrowed(
       pouch, namespace_name, key, &manifest, &current, &max_version,
@@ -10738,58 +10811,18 @@ int lc_pouch_state_update_metadata_prepared_locked(
     apply = 1;
     rc = prepare(&view, prepare_context, &options, &apply, error);
     if (rc == LC_OK && apply) {
-      logical_version =
-          current.found && current.payload_span.present ? current.version : 0UL;
-      if (!current.found && !options.has_metadata) {
-        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch metadata update requires existing state", NULL,
-                          NULL, NULL);
-      } else if (options.has_expected_version &&
-                 logical_version != options.expected_version) {
-        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch metadata version precondition failed", NULL,
-                          NULL, NULL);
-      } else if (options.precondition != NULL) {
-        rc = options.precondition(options.precondition_context, error);
-      }
-      has_query_hidden = current.has_query_hidden;
-      query_hidden = current.query_hidden;
-      if (rc == LC_OK && options.has_query_hidden) {
-        has_query_hidden = 1;
-        query_hidden = options.query_hidden;
-      } else if (rc == LC_OK && !current.found) {
-        has_query_hidden = 1;
-        query_hidden = 1;
-      }
-      if (rc == LC_OK && lc_pouch_single_writer_enabled(pouch) &&
+      if (lc_pouch_single_writer_enabled(pouch) &&
           pouch->state_metadata_append_batcher != NULL) {
-        if (current_is_borrowed) {
-          rc = lc_pouch_state_metadata_append_entry_copy(
-              pouch, &current, &scheduled_current, error);
-        }
-        if (rc != LC_OK) {
-          goto cleanup;
-        }
-        request.namespace_name = namespace_name;
-        request.key = key;
-        request.current = current_is_borrowed ? &scheduled_current : &current;
-        request.options = options;
-        request.version = logical_version;
-        request.has_query_hidden = has_query_hidden;
-        request.query_hidden = query_hidden;
-        request.out = out;
-        request.error = error;
-        rc = lc_pouch_state_metadata_append_submit_locked(pouch, &request,
-                                                          error);
-      } else if (rc == LC_OK) {
+        rc = lc_pouch_state_metadata_append_schedule_from_current_locked(
+            pouch, namespace_name, key, &current, current_is_borrowed, &options,
+            out, error);
+      } else {
         rc = lc_pouch_state_update_metadata_from_current_locked(
             pouch, namespace_name, key, &manifest, &current, &options, out,
             error);
       }
     }
   }
-cleanup:
-  lc_pouch_state_entry_cleanup(&pouch->allocator, &scheduled_current);
   if (!current_is_borrowed) {
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
   }

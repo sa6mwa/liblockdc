@@ -1060,11 +1060,12 @@ Required behavior:
   coordination, atomically publish the new numeric active segment, and replace
   only the affected active descriptor/cursor;
 - append small records to that rolling active file. In default exclusive mode,
-  complete metadata-only mutations (including lease acquire, keepalive, and
-  release) enter one resident, bounded append queue per Pouch handle. The
-  queue preserves submission order within a namespace, processes at most 128
-  records in one append batch, publishes each resulting projection entry
-  before its caller is acknowledged, and never accepts a payload source;
+  complete metadata-only state mutations (including lease acquire, keepalive,
+  release, visibility updates, and queue delivery state) enter one resident,
+  bounded append queue per Pouch handle. The queue preserves submission order
+  within a namespace, processes at most 128 records in one append batch,
+  publishes each resulting projection entry before its caller is acknowledged,
+  and never accepts a payload source;
 - stream large payload records directly from the caller-provided reader through
   transforms, hash/etag, and CRC into the active writer file without full
   materialization;
