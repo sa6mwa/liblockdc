@@ -38,6 +38,7 @@
 #define LC_POUCH_STATE_SOURCE_CACHE_MAX_FILES 64U
 #define LC_POUCH_STATE_WRITEV_MAX_PARTS 15
 #define LC_POUCH_STATE_WRITEV_BATCH_RECORDS 5U
+#define LC_POUCH_STATE_INLINE_APPEND_BATCH_MAX_BYTES (256U * 1024U)
 #define LC_POUCH_STATE_METADATA_APPEND_BATCH_MAX 128U
 #define LC_POUCH_STATE_DECISION_COMMITTED "committed"
 #define LC_POUCH_STATE_DECISION_DISCARDED "discarded"
@@ -4292,15 +4293,21 @@ static int lc_pouch_state_record_write_complete(
   return lc_pouch_state_writev_all(fd, parts, part_count, error);
 }
 
-/* Batch only already-encoded inline records. Streaming payload records retain
- * their pending-header lifecycle and never enter this materialization-free
- * vectored path. Fifteen iovecs stays below the POSIX minimum IOV_MAX. */
+/* Batch only already-encoded inline metadata records. A bounded aggregate
+ * uses one contiguous append to avoid a syscall per five records; larger
+ * batches retain the vectored fallback. Streaming payload records retain their
+ * pending-header lifecycle and never enter either path. Fifteen iovecs stays
+ * below the POSIX minimum IOV_MAX. */
 static int lc_pouch_state_record_write_prefix_batch(
     int fd, const lc_pouch_state_binary_append_item *items, size_t item_count,
     lc_error *error) {
   unsigned char headers[LC_POUCH_STATE_WRITEV_BATCH_RECORDS]
                        [LC_POUCH_STATE_RECORD_HEADER_BYTES];
   struct iovec parts[LC_POUCH_STATE_WRITEV_MAX_PARTS];
+  unsigned char *inline_bytes;
+  size_t inline_length;
+  size_t inline_offset;
+  size_t item_size;
   size_t batch_count;
   size_t index;
   size_t item_index;
@@ -4311,6 +4318,60 @@ static int lc_pouch_state_record_write_prefix_batch(
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch vectored record batch requires items", NULL,
                         NULL, "pouch");
+  }
+  inline_bytes = NULL;
+  inline_length = 0U;
+  if (item_count > 1U) {
+    for (index = 0U; index < item_count; ++index) {
+      if (items[index].key_len >
+              (size_t)-1 - LC_POUCH_STATE_RECORD_HEADER_BYTES ||
+          items[index].meta_len > (size_t)-1 -
+                                      LC_POUCH_STATE_RECORD_HEADER_BYTES -
+                                      items[index].key_len) {
+        inline_length = LC_POUCH_STATE_INLINE_APPEND_BATCH_MAX_BYTES + 1U;
+        break;
+      }
+      item_size = LC_POUCH_STATE_RECORD_HEADER_BYTES + items[index].key_len +
+                  items[index].meta_len;
+      if (item_size >
+          LC_POUCH_STATE_INLINE_APPEND_BATCH_MAX_BYTES - inline_length) {
+        inline_length = LC_POUCH_STATE_INLINE_APPEND_BATCH_MAX_BYTES + 1U;
+        break;
+      }
+      inline_length += item_size;
+    }
+  }
+  if (inline_length > 0U &&
+      inline_length <= LC_POUCH_STATE_INLINE_APPEND_BATCH_MAX_BYTES) {
+    inline_bytes =
+        (unsigned char *)lc_alloc_with_allocator(NULL, inline_length);
+    if (inline_bytes != NULL) {
+      inline_offset = 0U;
+      for (index = 0U; index < item_count; ++index) {
+        const lc_pouch_state_binary_append_item *item;
+
+        item = &items[index];
+        rc = lc_pouch_state_record_header_encode(
+            item->record_type, item->key, item->key_len, item->meta,
+            item->meta_len, 0U, 0UL, 0UL, inline_bytes + inline_offset, error);
+        if (rc != LC_OK) {
+          lc_free_with_allocator(NULL, inline_bytes);
+          return rc;
+        }
+        inline_offset += LC_POUCH_STATE_RECORD_HEADER_BYTES;
+        if (item->key_len > 0U) {
+          memcpy(inline_bytes + inline_offset, item->key, item->key_len);
+          inline_offset += item->key_len;
+        }
+        if (item->meta_len > 0U) {
+          memcpy(inline_bytes + inline_offset, item->meta, item->meta_len);
+          inline_offset += item->meta_len;
+        }
+      }
+      rc = lc_pouch_state_write_all(fd, inline_bytes, inline_length, error);
+      lc_free_with_allocator(NULL, inline_bytes);
+      return rc;
+    }
   }
   index = 0U;
   while (index < item_count) {

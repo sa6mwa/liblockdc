@@ -1129,7 +1129,10 @@ Required behavior:
   projection, append through the resident writer, and retain the active segment
   descriptor across normal public operations. It must not rescan the manifest,
   stat/repair the active tail, acquire a cross-process append gate, or reopen
-  the segment on a healthy normal mutation;
+  the segment on a healthy normal mutation. A metadata-only batch whose
+  headers, keys, and metadata total at most 256 KiB may use one bounded
+  contiguous append buffer; it never contains document, queue-payload, or
+  attachment bytes. Larger metadata batches retain the vectored append path;
 - in explicit shared-root mode, acquire physical append authority once for a
   bounded batch, replay only the committed delta after the writer cursor, then
   append/publish the batch and release authority. Discovery of the first
