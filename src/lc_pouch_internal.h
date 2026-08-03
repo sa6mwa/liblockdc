@@ -78,6 +78,13 @@ typedef struct lc_pouch_state_metadata_view {
   int has_body;
 } lc_pouch_state_metadata_view;
 
+/* Builds a metadata mutation from the current key projection while the key
+ * mutation lock is held. Set `apply` to zero for a successful read-only
+ * decision such as a lease already being held. */
+typedef int (*lc_pouch_state_metadata_prepare_fn)(
+    const lc_pouch_state_metadata_view *current, void *context,
+    lc_pouch_state_write_options *options, int *apply, lc_error *error);
+
 typedef int (*lc_pouch_state_scan_summary_visit_fn)(
     const lc_pouch_state_scan_summary_entry *entry, void *context,
     lc_error *error);
@@ -230,6 +237,14 @@ int lc_pouch_state_read_metadata_view_locked(
 int lc_pouch_state_update_metadata_locked(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const lc_pouch_state_write_options *options,
+    lc_pouch_state_write_result *out, lc_error *error);
+/**
+ * Prepares and applies one metadata mutation from one locked resident view.
+ * The caller must already hold the key mutation lock.
+ */
+int lc_pouch_state_update_metadata_prepared_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    lc_pouch_state_metadata_prepare_fn prepare, void *prepare_context,
     lc_pouch_state_write_result *out, lc_error *error);
 int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_generation after_version,

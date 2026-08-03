@@ -109,6 +109,22 @@ static pthread_mutex_t lc_pouch_fsync_batcher_registry_mutex =
     PTHREAD_MUTEX_INITIALIZER;
 static lc_pouch_fsync_batcher *lc_pouch_fsync_batchers;
 
+static int lc_pouch_mutex_init_recursive(pthread_mutex_t *mutex) {
+  pthread_mutexattr_t attr;
+  int rc;
+
+  rc = pthread_mutexattr_init(&attr);
+  if (rc != 0) {
+    return rc;
+  }
+  rc = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  if (rc == 0) {
+    rc = pthread_mutex_init(mutex, &attr);
+  }
+  (void)pthread_mutexattr_destroy(&attr);
+  return rc;
+}
+
 static int lc_pouch_sync_fd(int fd) {
 #ifdef __linux__
   return fdatasync(fd);
@@ -2592,8 +2608,8 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
   for (key_mutex_index = 0U;
        key_mutex_index < LC_POUCH_EXCLUSIVE_KEY_STRIPE_COUNT;
        ++key_mutex_index) {
-    pthread_rc = pthread_mutex_init(
-        &pouch->exclusive_key_mutexes[key_mutex_index], NULL);
+    pthread_rc = lc_pouch_mutex_init_recursive(
+        &pouch->exclusive_key_mutexes[key_mutex_index]);
     if (pthread_rc != 0) {
       lc_pouch_close(pouch);
       return lc_error_set(error, LC_ERR_TRANSPORT, 0L,

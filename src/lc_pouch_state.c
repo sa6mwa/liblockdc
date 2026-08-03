@@ -10143,6 +10143,89 @@ static int lc_pouch_state_metadata_write_result_build(
   return LC_OK;
 }
 
+static int lc_pouch_state_update_metadata_from_current_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    lc_pouch_namespace_manifest *manifest, lc_pouch_state_entry *current,
+    const lc_pouch_state_write_options *options,
+    lc_pouch_state_write_result *out, lc_error *error) {
+  lc_pouch_generation logical_version;
+  lc_pouch_generation version;
+  lc_pouch_unix_seconds updated_at_unix;
+  int has_query_hidden;
+  int query_hidden;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || key == NULL ||
+      manifest == NULL || current == NULL || options == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata update current state is invalid", NULL,
+                        NULL, "pouch");
+  }
+  memset(out, 0, sizeof(*out));
+  if (!current->found && !options->has_metadata) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata update requires existing state", NULL,
+                        NULL, NULL);
+  }
+  logical_version =
+      current->found && current->payload_span.present ? current->version : 0UL;
+  if (options->has_expected_version &&
+      logical_version != options->expected_version) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata version precondition failed", NULL,
+                        NULL, NULL);
+  }
+  if (options->precondition != NULL) {
+    rc = options->precondition(options->precondition_context, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  has_query_hidden = current->has_query_hidden;
+  query_hidden = current->query_hidden;
+  if (options->has_query_hidden) {
+    has_query_hidden = 1;
+    query_hidden = options->query_hidden;
+  } else if (!current->found) {
+    has_query_hidden = 1;
+    query_hidden = 1;
+  }
+  version = logical_version;
+  updated_at_unix = lc_pouch_maintenance_now_seconds();
+  rc = lc_pouch_state_append_record(
+      pouch, namespace_name, manifest, LC_POUCH_STATE_RECORD_STATE_META, key,
+      current->content_type != NULL ? current->content_type
+                                    : "application/octet-stream",
+      current->etag != NULL ? current->etag : "", &current->payload_span,
+      current->payload_context,
+      options->has_metadata ? options->metadata : current->metadata,
+      options->has_metadata ? options->metadata_length
+                            : current->metadata_length,
+      version, current->bytes, current->cipher_bytes, current->descriptor,
+      updated_at_unix, has_query_hidden, query_hidden, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_metadata_write_result_build(
+        pouch, manifest, current, options, version, updated_at_unix,
+        has_query_hidden, query_hidden, out, error);
+    (void)lc_pouch_state_cache_apply_write(
+        pouch, namespace_name, manifest, key,
+        current->content_type != NULL ? current->content_type
+                                      : "application/octet-stream",
+        current->etag != NULL ? current->etag : "", &current->payload_span,
+        current->payload_context,
+        options->has_metadata ? options->metadata : current->metadata,
+        options->has_metadata ? options->metadata_length
+                              : current->metadata_length,
+        version, current->bytes, current->cipher_bytes, current->descriptor,
+        updated_at_unix, has_query_hidden, query_hidden, 1,
+        LC_POUCH_STATE_RECORD_STATE_META);
+  }
+  if (rc != LC_OK) {
+    lc_pouch_state_write_result_cleanup(&pouch->allocator, out);
+  }
+  return rc;
+}
+
 int lc_pouch_state_update_metadata_locked(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const lc_pouch_state_write_options *options,
@@ -10150,11 +10233,6 @@ int lc_pouch_state_update_metadata_locked(
   lc_pouch_state_entry current;
   lc_pouch_namespace_manifest manifest;
   lc_pouch_generation max_version;
-  lc_pouch_generation logical_version;
-  lc_pouch_generation version;
-  lc_pouch_unix_seconds updated_at_unix;
-  int has_query_hidden;
-  int query_hidden;
   int current_is_borrowed;
   int rc;
 
@@ -10165,87 +10243,66 @@ int lc_pouch_state_update_metadata_locked(
                         "namespace, key, options, and out",
                         NULL, NULL, NULL);
   }
-  memset(out, 0, sizeof(*out));
+  memset(&current, 0, sizeof(current));
+  memset(&manifest, 0, sizeof(manifest));
   current_is_borrowed = 0;
   rc = lc_pouch_state_manifest_lookup_cached_borrowed(
       pouch, namespace_name, key, &manifest, &current, &max_version,
       &current_is_borrowed, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  if (!current.found && !options->has_metadata) {
-    if (!current_is_borrowed) {
-      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-    }
-    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch metadata update requires existing state", NULL,
-                        NULL, NULL);
-  }
-  logical_version =
-      current.found && current.payload_span.present ? current.version : 0UL;
-  if (options->has_expected_version &&
-      logical_version != options->expected_version) {
-    if (!current_is_borrowed) {
-      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-    }
-    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch metadata version precondition failed", NULL,
-                        NULL, NULL);
-  }
-  if (options->precondition != NULL) {
-    rc = options->precondition(options->precondition_context, error);
-    if (rc != LC_OK) {
-      if (!current_is_borrowed) {
-        lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-      }
-      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-      return rc;
-    }
-  }
-  has_query_hidden = current.has_query_hidden;
-  query_hidden = current.query_hidden;
-  if (options->has_query_hidden) {
-    has_query_hidden = 1;
-    query_hidden = options->query_hidden;
-  } else if (!current.found) {
-    has_query_hidden = 1;
-    query_hidden = 1;
-  }
-  (void)max_version;
-  version = logical_version;
-  updated_at_unix = lc_pouch_maintenance_now_seconds();
-  rc = lc_pouch_state_append_record(
-      pouch, namespace_name, &manifest, LC_POUCH_STATE_RECORD_STATE_META, key,
-      current.content_type != NULL ? current.content_type
-                                   : "application/octet-stream",
-      current.etag != NULL ? current.etag : "", &current.payload_span,
-      current.payload_context,
-      options->has_metadata ? options->metadata : current.metadata,
-      options->has_metadata ? options->metadata_length
-                            : current.metadata_length,
-      version, current.bytes, current.cipher_bytes, current.descriptor,
-      updated_at_unix, has_query_hidden, query_hidden, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_state_metadata_write_result_build(
-        pouch, &manifest, &current, options, version, updated_at_unix,
-        has_query_hidden, query_hidden, out, error);
-    (void)lc_pouch_state_cache_apply_write(
-        pouch, namespace_name, &manifest, key,
-        current.content_type != NULL ? current.content_type
-                                     : "application/octet-stream",
-        current.etag != NULL ? current.etag : "", &current.payload_span,
-        current.payload_context,
-        options->has_metadata ? options->metadata : current.metadata,
-        options->has_metadata ? options->metadata_length
-                              : current.metadata_length,
-        version, current.bytes, current.cipher_bytes, current.descriptor,
-        updated_at_unix, has_query_hidden, query_hidden, 1,
-        LC_POUCH_STATE_RECORD_STATE_META);
+    rc = lc_pouch_state_update_metadata_from_current_locked(
+        pouch, namespace_name, key, &manifest, &current, options, out, error);
   }
-  if (rc != LC_OK) {
-    lc_pouch_state_write_result_cleanup(&pouch->allocator, out);
+  if (!current_is_borrowed) {
+    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+  }
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  return rc;
+}
+
+int lc_pouch_state_update_metadata_prepared_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    lc_pouch_state_metadata_prepare_fn prepare, void *prepare_context,
+    lc_pouch_state_write_result *out, lc_error *error) {
+  lc_pouch_state_entry current;
+  lc_pouch_state_metadata_view view;
+  lc_pouch_namespace_manifest manifest;
+  lc_pouch_state_write_options options;
+  lc_pouch_generation max_version;
+  int apply;
+  int current_is_borrowed;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      key == NULL || key[0] == '\0' || prepare == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch prepared metadata update requires valid inputs",
+                        NULL, NULL, "pouch");
+  }
+  memset(out, 0, sizeof(*out));
+  memset(&current, 0, sizeof(current));
+  memset(&manifest, 0, sizeof(manifest));
+  memset(&view, 0, sizeof(view));
+  memset(&options, 0, sizeof(options));
+  current_is_borrowed = 0;
+  rc = lc_pouch_state_manifest_lookup_cached_borrowed(
+      pouch, namespace_name, key, &manifest, &current, &max_version,
+      &current_is_borrowed, error);
+  if (rc == LC_OK) {
+    view.found = current.found;
+    view.version = current.version;
+    view.metadata = current.metadata;
+    view.metadata_length = current.metadata_length;
+    view.has_query_hidden = current.has_query_hidden;
+    view.query_hidden = current.query_hidden;
+    view.has_body = current.payload_span.present;
+    apply = 1;
+    rc = prepare(&view, prepare_context, &options, &apply, error);
+    if (rc == LC_OK && apply) {
+      rc = lc_pouch_state_update_metadata_from_current_locked(
+          pouch, namespace_name, key, &manifest, &current, &options, out,
+          error);
+    }
   }
   if (!current_is_borrowed) {
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
