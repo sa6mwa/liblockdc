@@ -5005,6 +5005,149 @@ static int pouch_shared_process_hold(const char *root, int ready_fd,
   return rc;
 }
 
+static int pouch_shared_process_open_client(const char *root, lc_client **out,
+                                            lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+  char endpoint[600];
+  int rc;
+  int written;
+
+  if (root == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "shared process client requires root and out", NULL,
+                        NULL, "pouch");
+  }
+  *out = NULL;
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?pouch_single_writer=false", root);
+  if (written <= 0 || (size_t)written >= sizeof(endpoint)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "shared process pouch endpoint is invalid", NULL, NULL,
+                        "pouch");
+  }
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  rc = lc_client_open(&config, out, error);
+  return rc;
+}
+
+static int pouch_shared_process_hold_lease(const char *root, int ready_fd,
+                                           int release_fd) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire_request;
+  lc_release_req release_request;
+  lc_error error;
+  char signal;
+  int rc;
+
+  client = NULL;
+  lease = NULL;
+  lc_acquire_req_init(&acquire_request);
+  lc_release_req_init(&release_request);
+  lc_error_init(&error);
+  acquire_request.key = "state/process-shared-lease";
+  acquire_request.owner = "process-holder";
+  acquire_request.ttl_seconds = 30L;
+  rc = pouch_shared_process_open_client(root, &client, &error);
+  if (rc == LC_OK) {
+    rc = client->acquire(client, &acquire_request, &lease, &error);
+  }
+  if (rc == LC_OK && write(ready_fd, "1", 1U) != 1) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (rc == LC_OK && read(release_fd, &signal, 1U) != 1) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (rc == LC_OK) {
+    rc = lease->release(lease, &release_request, &error);
+    if (rc == LC_OK) {
+      lease = NULL;
+    }
+  }
+  (void)close(ready_fd);
+  (void)close(release_fd);
+  if (lease != NULL) {
+    lease->close(lease);
+  }
+  if (client != NULL) {
+    lc_client_close(client);
+  }
+  lc_error_cleanup(&error);
+  return rc;
+}
+
+static int pouch_shared_process_acquire_after_handoff(const char *root,
+                                                      int blocked_fd,
+                                                      int proceed_fd) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire_request;
+  lc_release_req release_request;
+  lc_error error;
+  char signal;
+  int rc;
+
+  client = NULL;
+  lease = NULL;
+  lc_acquire_req_init(&acquire_request);
+  lc_release_req_init(&release_request);
+  lc_error_init(&error);
+  acquire_request.key = "state/process-shared-lease";
+  acquire_request.owner = "process-contender";
+  acquire_request.ttl_seconds = 30L;
+  rc = pouch_shared_process_open_client(root, &client, &error);
+  if (rc == LC_OK) {
+    rc = client->acquire(client, &acquire_request, &lease, &error);
+    if (rc != LC_ERR_INVALID || lease != NULL) {
+      if (rc == LC_OK && lease != NULL) {
+        lease->close(lease);
+        lease = NULL;
+      }
+      rc = LC_ERR_INVALID;
+    } else {
+      lc_error_cleanup(&error);
+      lc_error_init(&error);
+      rc = LC_OK;
+    }
+  }
+  if (rc == LC_OK && write(blocked_fd, "1", 1U) != 1) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (rc == LC_OK && read(proceed_fd, &signal, 1U) != 1) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (rc == LC_OK) {
+    rc = client->acquire(client, &acquire_request, &lease, &error);
+  }
+  if (rc == LC_OK && (lease == NULL || lease->fencing_token != 2L)) {
+    if (lease != NULL) {
+      lease->close(lease);
+      lease = NULL;
+    }
+    rc = LC_ERR_INVALID;
+  }
+  if (rc == LC_OK) {
+    rc = lease->release(lease, &release_request, &error);
+    if (rc == LC_OK) {
+      lease = NULL;
+    }
+  }
+  (void)close(blocked_fd);
+  (void)close(proceed_fd);
+  if (lease != NULL) {
+    lease->close(lease);
+  }
+  if (client != NULL) {
+    lc_client_close(client);
+  }
+  lc_error_cleanup(&error);
+  return rc;
+}
+
 static void test_process_writer_modes_and_shared_writes(void **state) {
   lc_pouch *reader;
   lc_pouch_state_read_result first_read;
@@ -5152,6 +5295,72 @@ static void test_process_writer_modes_and_shared_writes(void **state) {
 
   cleanup_root(root);
   lc_error_cleanup(&error);
+}
+
+static void test_shared_process_lease_conflict_and_handoff(void **state) {
+  char root[512];
+  char signal;
+  int holder_ready[2];
+  int holder_release[2];
+  int contender_blocked[2];
+  int contender_proceed[2];
+  pid_t holder_pid;
+  pid_t contender_pid;
+  int status;
+
+  (void)state;
+  holder_pid = -1;
+  contender_pid = -1;
+  make_root("process-shared-lease", root, sizeof(root));
+  cleanup_root(root);
+
+  assert_int_equal(pipe(holder_ready), 0);
+  assert_int_equal(pipe(holder_release), 0);
+  holder_pid = fork();
+  assert_true(holder_pid >= 0);
+  if (holder_pid == 0) {
+    (void)close(holder_ready[0]);
+    (void)close(holder_release[1]);
+    _exit(pouch_shared_process_hold_lease(root, holder_ready[1],
+                                          holder_release[0]) == LC_OK
+              ? 0
+              : 1);
+  }
+  (void)close(holder_ready[1]);
+  (void)close(holder_release[0]);
+  assert_int_equal(read(holder_ready[0], &signal, 1U), 1);
+  (void)close(holder_ready[0]);
+
+  assert_int_equal(pipe(contender_blocked), 0);
+  assert_int_equal(pipe(contender_proceed), 0);
+  contender_pid = fork();
+  assert_true(contender_pid >= 0);
+  if (contender_pid == 0) {
+    (void)close(holder_release[1]);
+    (void)close(contender_blocked[0]);
+    (void)close(contender_proceed[1]);
+    _exit(pouch_shared_process_acquire_after_handoff(
+              root, contender_blocked[1], contender_proceed[0]) == LC_OK
+              ? 0
+              : 1);
+  }
+  (void)close(contender_blocked[1]);
+  (void)close(contender_proceed[0]);
+  assert_int_equal(read(contender_blocked[0], &signal, 1U), 1);
+  (void)close(contender_blocked[0]);
+
+  assert_int_equal(write(holder_release[1], "1", 1U), 1);
+  (void)close(holder_release[1]);
+  assert_int_equal(waitpid(holder_pid, &status, 0), holder_pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+  assert_int_equal(write(contender_proceed[1], "1", 1U), 1);
+  (void)close(contender_proceed[1]);
+  assert_int_equal(waitpid(contender_pid, &status, 0), contender_pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+
+  cleanup_root(root);
 }
 
 static void open_pouch_client(const char *root, lc_client **out,
@@ -20888,6 +21097,7 @@ int main(void) {
           test_shared_clients_acquire_independent_keys_in_parallel),
       cmocka_unit_test(test_shared_clients_dequeue_one_message_once),
       cmocka_unit_test(test_process_writer_modes_and_shared_writes),
+      cmocka_unit_test(test_shared_process_lease_conflict_and_handoff),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(test_lease_private_reads_reject_stale_handle),
       cmocka_unit_test(test_pouch_lease_claim_and_credentials_are_durable),
