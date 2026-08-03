@@ -16894,6 +16894,7 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
                                                const lc_update_opts *opts,
                                                lc_error *error) {
   lc_lease_handle *lease;
+  lc_lease_ref lease_ref;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
   const char *stage_txn_id;
@@ -16914,6 +16915,12 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
   stage_txn_id = lease->txn_id != NULL && lease->txn_id[0] != '\0'
                      ? lease->txn_id
                      : lease->lease_id;
+  lc_lease_ref_init(&lease_ref);
+  lease_ref.namespace_name = lease->namespace_name;
+  lease_ref.key = lease->key;
+  lease_ref.lease_id = lease->lease_id;
+  lease_ref.txn_id = lease->txn_id;
+  lease_ref.fencing_token = lease->fencing_token;
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
   options.content_type = "application/json";
@@ -16951,9 +16958,10 @@ static int lc_pouch_lease_staged_update_method(lc_lease *self, lc_source *src,
     }
     options.has_expected_version = 1;
   }
-  rc = lc_pouch_state_stage_write(lease->client->pouch, lease->namespace_name,
-                                  lc_pouch_lease_state_storage_key(lease),
-                                  stage_txn_id, src, &options, &result, error);
+  rc = lc_pouch_client_stage_transaction_write(
+      lease->client, &lease_ref, lease->namespace_name,
+      lc_pouch_lease_state_storage_key(lease), stage_txn_id, src, &options,
+      &result, error);
   if (rc == LC_OK) {
     etag_copy = lc_client_strdup(lease->client, result.etag);
     if (etag_copy == NULL) {
