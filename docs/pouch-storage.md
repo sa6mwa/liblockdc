@@ -956,8 +956,8 @@ root/
         seg-<20-digit-u64-id>.log          # rolling active or sealed
       snapshots/
         snapshot-<20-digit-u64-id>.log
-      sequence
-      sequence.lock
+      sequence                              # shared-root advisory allocator
+      sequence.lock                         # shared-root allocator fence
       write.lock
       locks/
       index/
@@ -1117,8 +1117,14 @@ Required behavior:
   window; staged and destination keys for the same logical key share that
   lock;
 - take the shared maintenance barrier while a mutation is in progress;
-- reserve one or more `uint64_t` namespace index sequences under the short
-  sequence lock before final record headers are written;
+- reserve one or more `uint64_t` namespace index sequences before final record
+  headers are written. Default exclusive mode reserves from its resident
+  projection high-water mark and does not read, write, or lock the advisory
+  `sequence` file on healthy mutations. Explicit shared-root mode reserves
+  under `sequence.lock` so independent processes cannot reuse a sequence. A
+  close, abort, or recovery rebuilds the exclusive high-water mark from
+  finalized durable records; a stale or missing advisory file therefore cannot
+  change exclusive record ordering;
 - in default exclusive mode, read current metadata from the resident
   projection, append through the resident writer, and retain the active segment
   descriptor across normal public operations. It must not rescan the manifest,

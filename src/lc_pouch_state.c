@@ -4636,7 +4636,10 @@ static int lc_pouch_state_reserve_index_records(
       if (first_index_out != NULL) {
         *first_index_out = base + 1UL;
       }
-      /* Recovery derives a missing advisory sequence file from durable logs. */
+      /* The exclusive owner has one resident allocator, so its projection is
+       * authoritative while live. After close, abort, or recovery, replay
+       * derives the high-water mark from finalized records. The sequence file
+       * remains an advisory cross-process allocator for shared-root mode. */
       return LC_OK;
     }
   }

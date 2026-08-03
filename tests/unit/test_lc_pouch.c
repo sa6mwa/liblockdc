@@ -3573,6 +3573,66 @@ test_single_writer_acquire_preserves_projection_cache(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_single_writer_rebuilds_index_without_advisory_sequence(void **state) {
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_pouch_state_write_result first_write;
+  lc_pouch_state_write_result second_write;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char *sequence_path;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  namespace_path = NULL;
+  sequence_path = NULL;
+  memset(&first_write, 0, sizeof(first_write));
+  memset(&second_write, 0, sizeof(second_write));
+  lc_error_init(&error);
+  make_root("single-writer-index-recovery", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("first", strlen("first"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/index-first", source, NULL,
+                            &first_write, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "default");
+  assert_non_null(namespace_path);
+  sequence_path = lc_pouch_path_join(NULL, namespace_path, "sequence");
+  assert_non_null(sequence_path);
+  write_text_file(sequence_path, "max=999999\n");
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("second", strlen("second"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/index-second", source,
+                            NULL, &second_write, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(second_write.index_seq, first_write.index_seq + 1UL);
+
+  lc_source_close(source);
+  lc_pouch_state_write_result_cleanup(NULL, &second_write);
+  lc_pouch_state_write_result_cleanup(NULL, &first_write);
+  lc_pouch_close(pouch);
+  lc_free_with_allocator(NULL, sequence_path);
+  lc_free_with_allocator(NULL, namespace_path);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_single_writer_runtime_control_and_ha_probe(void **state) {
   lc_pouch *writer;
   lc_pouch *peer;
@@ -21829,6 +21889,8 @@ int main(void) {
       cmocka_unit_test(test_marker_refresh_uses_directory_fast_path_and_force),
       cmocka_unit_test(test_single_writer_state_read_uses_projection_cache),
       cmocka_unit_test(test_single_writer_acquire_preserves_projection_cache),
+      cmocka_unit_test(
+          test_single_writer_rebuilds_index_without_advisory_sequence),
       cmocka_unit_test(test_single_writer_runtime_control_and_ha_probe),
       cmocka_unit_test(
           test_single_writer_transition_waits_for_active_append_operation),
