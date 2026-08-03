@@ -1051,9 +1051,11 @@ Required behavior:
   the segment on a healthy normal mutation;
 - in explicit shared-root mode, acquire physical append authority once for a
   bounded batch, replay only the committed delta after the writer cursor, then
-  append/publish the batch and release authority. A changed writer epoch,
-  active segment, manifest lifecycle state, or invalid cursor triggers bounded
-  refresh or recovery rather than a stale append;
+  append/publish the batch and release authority. Discovery of the first
+  physical file for the already-selected active leaf is a cursor-preserving
+  transition, not a historic replay. A changed writer epoch, active segment,
+  manifest lifecycle state, invalid cursor, or any other segment topology
+  change triggers bounded refresh or recovery rather than a stale append;
 - rotate at the stored-byte target under the appropriate writer/maintenance
   coordination, atomically publish the new numeric active segment, and replace
   only the affected active descriptor/cursor;
@@ -1073,9 +1075,10 @@ Required behavior:
   replay only the new complete tail;
 - treat an active pending or incomplete tail, including a truncated encrypted
   payload frame, as an unpublished crash tail: readers stop before it and a
-  later appender repairs it while holding the physical append gate. Sealed
-  segments and snapshots do not receive this recovery treatment and reject
-  truncation or authentication failure;
+  later appender repairs only the unseen suffix after its verified cursor while
+  holding the physical append gate. Sealed segments and snapshots do not
+  receive this recovery treatment and reject truncation or authentication
+  failure;
 - make refs visible in projections after finalized-record publication and, when
   `durable_sync=1`, only after the commit group succeeds at the public boundary;
   explicit same-operation staged visibility remains supported;
@@ -1153,7 +1156,9 @@ Required behavior:
 - exclusive mode reuses its projection and verified active append offset until
   rotation, maintenance, handoff, close/abort, or I/O failure;
 - shared-root mode validates its writer epoch/cursor under append authority and
-  replays only bytes beyond its verified committed tail offset;
+  replays only bytes beyond its verified committed tail offset. The initial
+  directory discovery of that known active leaf is treated as such a tail
+  transition; it does not revalidate the pre-cursor history;
 - order installed snapshot first, then live non-obsolete segments;
 - apply state/object records by public generation so stale payload writes
   cannot resurrect older state; use the durable namespace index sequence as

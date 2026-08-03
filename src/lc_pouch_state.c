@@ -127,6 +127,23 @@ static int lc_pouch_state_manifest_segment_visible(
   return 1;
 }
 
+static int
+lc_pouch_state_manifest_has_segment(const lc_pouch_namespace_manifest *manifest,
+                                    const char *leaf) {
+  unsigned long index;
+
+  if (manifest == NULL || leaf == NULL || manifest->segment_leaves == NULL) {
+    return 0;
+  }
+  for (index = 0UL; index < manifest->segment_count; ++index) {
+    if (manifest->segment_leaves[index] != NULL &&
+        strcmp(manifest->segment_leaves[index], leaf) == 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int lc_pouch_state_manifest_segment_allows_tail_repair(
     const lc_pouch_namespace_manifest *manifest, const char *leaf) {
   if (manifest == NULL || leaf == NULL) {
@@ -171,6 +188,9 @@ lc_pouch_state_cache_lookup(lc_pouch *pouch, const char *namespace_name,
 static int lc_pouch_state_cache_refresh_for_mode(
     lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
     const lc_pouch_namespace_manifest *manifest, lc_error *error);
+static int lc_pouch_state_cache_matches_manifest(
+    const lc_pouch_state_cache_namespace *cache,
+    const lc_pouch_namespace_manifest *manifest);
 static int
 lc_pouch_state_manifest_materialize(lc_pouch *pouch, const char *namespace_name,
                                     lc_pouch_namespace_manifest *manifest,
@@ -5633,7 +5653,7 @@ static int lc_pouch_state_repair_active_tail_locked(
   if (cache != NULL && cache->initialized &&
       cache->active_segment_leaf != NULL &&
       strcmp(cache->active_segment_leaf, segment_leaf) == 0 &&
-      cache->segment_count == manifest->segment_count) {
+      lc_pouch_state_cache_matches_manifest(cache, manifest)) {
     start_offset = cache->active_segment_offset;
   }
   memset(&current, 0, sizeof(current));
@@ -6289,17 +6309,31 @@ static int lc_pouch_state_cache_matches_manifest(
     const lc_pouch_namespace_manifest *manifest) {
   if (cache == NULL || manifest == NULL || !cache->initialized ||
       cache->max_segment_id != manifest->max_segment_id ||
-      cache->segment_count != manifest->segment_count ||
       cache->active_segment_leaf == NULL || manifest->active_segment == NULL ||
       strcmp(cache->active_segment_leaf, manifest->active_segment) != 0) {
     return 0;
   }
   if (cache->latest_snapshot_leaf == NULL ||
       manifest->latest_snapshot == NULL) {
-    return cache->latest_snapshot_leaf == NULL &&
-           manifest->latest_snapshot == NULL;
+    if (cache->latest_snapshot_leaf != NULL ||
+        manifest->latest_snapshot != NULL) {
+      return 0;
+    }
+  } else if (strcmp(cache->latest_snapshot_leaf, manifest->latest_snapshot) !=
+             0) {
+    return 0;
   }
-  return strcmp(cache->latest_snapshot_leaf, manifest->latest_snapshot) == 0;
+  if (cache->segment_count == manifest->segment_count) {
+    return 1;
+  }
+  /* A namespace starts with no physical active segment. Its first append makes
+   * only the already-known active leaf visible to manifest discovery. The
+   * cache can safely tail that leaf from its verified cursor; any other
+   * topology change remains a full projection rebuild. */
+  return cache->segment_count < ULONG_MAX &&
+         manifest->segment_count == cache->segment_count + 1UL &&
+         lc_pouch_state_manifest_has_segment(manifest,
+                                             manifest->active_segment);
 }
 
 static int

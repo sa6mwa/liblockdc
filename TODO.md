@@ -144,8 +144,10 @@ Acceptance:
   rotation, compaction, and failover.
 - [x] Retain each shared writer's verified projection cursor after a successful
   local append; under append authority, replay only peer bytes beyond that
-  cursor before the next local append. Historical-byte validation remains a
-  recovery or manifest-invalidation operation, not a healthy hot-path scan.
+  cursor before the next local append. First materialization of the selected
+  active leaf and repair of an incomplete unseen suffix retain that cursor.
+  Historical-byte validation remains a recovery or manifest-invalidation
+  operation, not a healthy hot-path scan.
 - [ ] Batch the physical append gate and tail only the delta while holding it;
   retain exact-key ownership and namespace maintenance coordination.
 - [ ] Define and implement a durable writer epoch/ownership transition that
