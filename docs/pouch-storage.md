@@ -515,6 +515,14 @@ later expiry, requires a monotonic TC term, and applies the resulting durable
 decision. A direct decision must never replace an already-prepared participant
 list with the smaller list supplied by a later request.
 
+Generic state participants execute under the namespace mutation authority.
+Pouch applies their staged state and attachments, then clears the matching
+transaction lease before releasing that authority. A current active lease with
+another transaction id supersedes the old participant, so Pouch skips the state
+and attachment decision without disturbing that newer lease. Consequently, a
+lease used by a successful transaction decision is no longer releasable;
+callers close its local handle rather than issuing a second release.
+
 ### Compaction
 
 Go disk compaction captures live refs from per-namespace projections, excludes

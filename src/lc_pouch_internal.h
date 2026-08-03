@@ -246,6 +246,17 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
                                 const lc_pouch_state_write_options *options,
                                 lc_pouch_state_write_result *out,
                                 lc_error *error);
+/** Commits staged state under target mutation authority. */
+int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
+                                        const char *namespace_name,
+                                        const char *key, const char *txn_id,
+                                        lc_pouch_state_write_result *out,
+                                        lc_error *error);
+/** Discards staged state under target mutation authority. */
+int lc_pouch_state_discard_staged_locked(lc_pouch *pouch,
+                                         const char *namespace_name,
+                                         const char *key, const char *txn_id,
+                                         int *discarded, lc_error *error);
 /**
  * Reads metadata while the caller holds the key mutation lock. On a current
  * exclusive-writer projection, `out` borrows its fields directly from that

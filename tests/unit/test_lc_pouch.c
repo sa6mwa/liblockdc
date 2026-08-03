@@ -14523,10 +14523,11 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   lc_lease *lease;
   lc_source *source;
   lc_acquire_req acquire_req;
-  lc_release_req release_req;
   lc_txn_participant participant;
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
+  lc_describe_req describe_req;
+  lc_describe_res describe_res;
   lc_query_req query_req;
   lc_query_res query_res;
   lc_query_key_handler handler;
@@ -14542,10 +14543,11 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   lease = NULL;
   source = NULL;
   lc_acquire_req_init(&acquire_req);
-  lc_release_req_init(&release_req);
   memset(&participant, 0, sizeof(participant));
   lc_txn_decision_req_init(&decision_req);
   memset(&decision_res, 0, sizeof(decision_res));
+  lc_describe_req_init(&describe_req);
+  memset(&describe_res, 0, sizeof(describe_res));
   lc_query_req_init(&query_req);
   memset(&query_res, 0, sizeof(query_res));
   memset(&handler, 0, sizeof(handler));
@@ -14586,6 +14588,15 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
 
+  describe_req.namespace_name = acquire_req.namespace_name;
+  describe_req.key = key;
+  rc = client->describe(client, &describe_req, &describe_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_null(describe_res.owner);
+  assert_null(describe_res.lease_id);
+  assert_null(describe_res.txn_id);
+  lc_describe_res_cleanup(&describe_res);
+
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
@@ -14608,9 +14619,185 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   assert_true(pouch_query_capture_has(&index_capture, key));
   lc_query_res_cleanup(&query_res);
 
-  rc = lease->release(lease, &release_req, &error);
-  assert_int_equal(rc, LC_OK);
+  lc_lease_close(lease);
   lease = NULL;
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_transaction_bound_lease_rollback_clears_matching_lease(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_describe_req describe_req;
+  lc_describe_res describe_res;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char key[96];
+  char staged_key[160];
+  int written;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  lc_acquire_req_init(&acquire_req);
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  lc_describe_req_init(&describe_req);
+  memset(&describe_res, 0, sizeof(describe_res));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("lease-txn-rollback", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "doc/lease-txn-rollback/%ld", (long)getpid());
+  written = snprintf(staged_key, sizeof(staged_key), "%s/.staging/%s", key,
+                     "txn-lease-rollback");
+  assert_true(written > 0 && (size_t)written < sizeof(staged_key));
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "txn-owner";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "txn-lease-rollback";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("rolled-back", strlen("rolled-back"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  participant.namespace_name = "default";
+  participant.key = key;
+  participant.backend_hash = "pouch-state";
+  decision_req.txn_id = acquire_req.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  describe_req.key = key;
+  rc = client->describe(client, &describe_req, &describe_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_null(describe_res.owner);
+  assert_null(describe_res.lease_id);
+  assert_null(describe_res.txn_id);
+  lc_describe_res_cleanup(&describe_res);
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default", key,
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default",
+                           staged_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  lc_lease_close(lease);
+  lease = NULL;
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_txn_decision_skips_newer_state_lease(void **state) {
+  lc_client *client;
+  lc_lease *old_lease;
+  lc_lease *new_lease;
+  lc_source *source;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_describe_req describe_req;
+  lc_describe_res describe_res;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  old_lease = NULL;
+  new_lease = NULL;
+  source = NULL;
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  lc_describe_req_init(&describe_req);
+  memset(&describe_res, 0, sizeof(describe_res));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("txn-newer-state-lease", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/txn-newer-state-lease/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "old-owner";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "txn-old";
+  rc = client->acquire(client, &acquire_req, &old_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("old", strlen("old"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = old_lease->update(old_lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = old_lease->release(old_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  old_lease = NULL;
+
+  acquire_req.owner = "new-owner";
+  acquire_req.txn_id = "txn-new";
+  rc = client->acquire(client, &acquire_req, &new_lease, &error);
+  assert_int_equal(rc, LC_OK);
+
+  participant.namespace_name = "default";
+  participant.key = key;
+  participant.backend_hash = "pouch-state";
+  decision_req.txn_id = "txn-old";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  describe_req.key = key;
+  rc = client->describe(client, &describe_req, &describe_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(describe_res.owner, "new-owner");
+  assert_string_equal(describe_res.txn_id, "txn-new");
+  lc_describe_res_cleanup(&describe_res);
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default", key,
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  release_req.rollback = 1;
+  rc = new_lease->release(new_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  new_lease = NULL;
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -20351,6 +20538,9 @@ int main(void) {
       cmocka_unit_test(test_transaction_bound_lease_requires_transaction_id),
       cmocka_unit_test(
           test_transaction_bound_lease_commit_makes_first_body_queryable),
+      cmocka_unit_test(
+          test_transaction_bound_lease_rollback_clears_matching_lease),
+      cmocka_unit_test(test_txn_decision_skips_newer_state_lease),
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),
       cmocka_unit_test(test_query_keys_scan_uses_liblql_and_query_hidden),

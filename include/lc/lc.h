@@ -1661,10 +1661,12 @@ struct lc_client {
   /** Prepares a transaction decision. */
   int (*txn_prepare)(lc_client *self, const lc_txn_decision_req *req,
                      lc_txn_decision_res *out, lc_error *error);
-  /** Commits a transaction decision. */
+  /** Commits and applies a durable transaction decision. Matching participant
+   * leases are released as part of the decision. */
   int (*txn_commit)(lc_client *self, const lc_txn_decision_req *req,
                     lc_txn_decision_res *out, lc_error *error);
-  /** Rolls back a transaction decision. */
+  /** Rolls back and applies a durable transaction decision. Matching
+   * participant leases are released as part of the decision. */
   int (*txn_rollback)(lc_client *self, const lc_txn_decision_req *req,
                       lc_txn_decision_res *out, lc_error *error);
   /** Acquires a TC lease. */
@@ -2097,10 +2099,12 @@ int lc_txn_replay(lc_client *client, const lc_txn_replay_req *req,
 /** Prepares a transaction decision. */
 int lc_txn_prepare(lc_client *client, const lc_txn_decision_req *req,
                    lc_txn_decision_res *out, lc_error *error);
-/** Commits a transaction decision. */
+/** Commits and applies a durable transaction decision. Matching participant
+ * leases are released as part of the decision. */
 int lc_txn_commit(lc_client *client, const lc_txn_decision_req *req,
                   lc_txn_decision_res *out, lc_error *error);
-/** Rolls back a transaction decision. */
+/** Rolls back and applies a durable transaction decision. Matching participant
+ * leases are released as part of the decision. */
 int lc_txn_rollback(lc_client *client, const lc_txn_decision_req *req,
                     lc_txn_decision_res *out, lc_error *error);
 /** Acquires a TC lease. */
