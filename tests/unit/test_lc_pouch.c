@@ -4714,6 +4714,62 @@ test_exclusive_client_acquire_independent_keys_in_parallel(void **state) {
 }
 
 static void
+test_shared_client_acquire_independent_keys_in_parallel(void **state) {
+  lc_client *client;
+  pouch_parallel_lease_acquire first_acquire;
+  pouch_parallel_lease_acquire second_acquire;
+  pthread_barrier_t start;
+  pthread_t first_thread;
+  pthread_t second_thread;
+  lc_error error;
+  char root[512];
+
+  (void)state;
+  client = NULL;
+  memset(&first_acquire, 0, sizeof(first_acquire));
+  memset(&second_acquire, 0, sizeof(second_acquire));
+  lc_error_init(&error);
+  make_root("shared-client-local-batch", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client_shared(root, &client, &error);
+  assert_int_equal(pthread_barrier_init(&start, NULL, 2U), 0);
+  first_acquire.client = client;
+  first_acquire.start = &start;
+  first_acquire.key = "state/shared-local-lease-a";
+  first_acquire.attempts = 8U;
+  second_acquire.client = client;
+  second_acquire.start = &start;
+  second_acquire.key = "state/shared-local-lease-b";
+  second_acquire.attempts = 8U;
+  assert_int_equal(pthread_create(&first_thread, NULL,
+                                  pouch_acquire_lease_in_parallel,
+                                  &first_acquire),
+                   0);
+  assert_int_equal(pthread_create(&second_thread, NULL,
+                                  pouch_acquire_lease_in_parallel,
+                                  &second_acquire),
+                   0);
+  assert_int_equal(pthread_join(first_thread, NULL), 0);
+  assert_int_equal(pthread_join(second_thread, NULL), 0);
+  assert_int_equal(pthread_barrier_destroy(&start), 0);
+  assert_int_equal(first_acquire.rc, LC_OK);
+  assert_int_equal(second_acquire.rc, LC_OK);
+  assert_int_equal(first_acquire.completed, first_acquire.attempts);
+  assert_int_equal(second_acquire.completed, second_acquire.attempts);
+  assert_int_equal(first_acquire.last_fencing_token,
+                   (long)first_acquire.attempts);
+  assert_int_equal(second_acquire.last_fencing_token,
+                   (long)second_acquire.attempts);
+
+  lc_error_cleanup(&second_acquire.error);
+  lc_error_cleanup(&first_acquire.error);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_shared_clients_acquire_independent_keys_in_parallel(void **state) {
   lc_client *first_client;
   lc_client *second_client;
@@ -20762,6 +20818,7 @@ int main(void) {
       cmocka_unit_test(test_shared_writers_reserve_unique_indexes_in_parallel),
       cmocka_unit_test(
           test_exclusive_client_acquire_independent_keys_in_parallel),
+      cmocka_unit_test(test_shared_client_acquire_independent_keys_in_parallel),
       cmocka_unit_test(
           test_shared_clients_acquire_independent_keys_in_parallel),
       cmocka_unit_test(test_shared_clients_dequeue_one_message_once),

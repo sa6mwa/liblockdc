@@ -10978,8 +10978,15 @@ int lc_pouch_state_update_metadata_locked(
   memset(&current, 0, sizeof(current));
   memset(&manifest, 0, sizeof(manifest));
   current_is_borrowed = 0;
-  use_metadata_batcher = lc_pouch_single_writer_enabled(pouch) &&
-                         pouch->state_metadata_append_batcher != NULL;
+  /* Submission releases the exact-key operation's cache mutex while the
+   * worker owns append authority. Namespace-scoped callbacks already hold
+   * namespace authority instead, so they append inline and never unlock a
+   * mutex they do not own. Shared-root key mutations retain their per-key file
+   * lock through the worker and are safe to coalesce with this handle's other
+   * independent keys. */
+  use_metadata_batcher =
+      pouch->state_metadata_append_batcher != NULL &&
+      !lc_pouch_state_namespace_lock_is_held(pouch, namespace_name);
   if (use_metadata_batcher && lc_pouch_state_cache_borrow_exclusive_record(
                                   pouch, namespace_name, key, &current)) {
     current_is_borrowed = 1;
@@ -11032,8 +11039,11 @@ int lc_pouch_state_update_metadata_prepared_locked(
   memset(&view, 0, sizeof(view));
   memset(&options, 0, sizeof(options));
   current_is_borrowed = 0;
-  use_metadata_batcher = lc_pouch_single_writer_enabled(pouch) &&
-                         pouch->state_metadata_append_batcher != NULL;
+  /* See lc_pouch_state_update_metadata_locked: only exact-key operations
+   * transfer their cache mutex to the metadata append worker. */
+  use_metadata_batcher =
+      pouch->state_metadata_append_batcher != NULL &&
+      !lc_pouch_state_namespace_lock_is_held(pouch, namespace_name);
   if (use_metadata_batcher && lc_pouch_state_cache_borrow_exclusive_record(
                                   pouch, namespace_name, key, &current)) {
     current_is_borrowed = 1;

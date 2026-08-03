@@ -708,10 +708,11 @@ default, relaxing durability, or omitting core operations from comparison.
   mutation; recovery, manifest lifecycle invalidation, or a new projection
   performs that historical validation. Exact-key locking, namespace sequence
   allocation, writer epochs, and maintenance fencing remain required. The
-  current implementation does not yet coalesce independent shared mutations
-  into one append-gate batch. This is a supported Pouch extension, not the
-  default
-  Go-disk-aligned performance path.
+  current implementation coalesces independent metadata-only mutations from
+  one local shared writer into a bounded append-gate batch while every request
+  retains its exact key lock. Streaming bodies and multi-record decisions keep
+  one authority window per operation. This is a supported Pouch extension, not
+  the default Go-disk-aligned performance path.
   Direct callers set `single_writer_set=1` and `single_writer=0`; endpoint
   callers use `?single_writer=false` (or `?pouch_single_writer=false`).
 
