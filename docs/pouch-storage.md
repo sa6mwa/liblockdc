@@ -707,12 +707,16 @@ default, relaxing durability, or omitting core operations from comparison.
   reread or revalidate bytes at or before that verified cursor on each normal
   mutation; recovery, manifest lifecycle invalidation, or a new projection
   performs that historical validation. Exact-key locking, namespace sequence
-  allocation, writer epochs, and maintenance fencing remain required. The
+  allocation, the local mode epoch, and maintenance fencing remain required. The
   current implementation coalesces independent metadata-only mutations from
   one local shared writer into a bounded append-gate batch while every request
   retains its exact key lock. Streaming bodies and multi-record decisions keep
-  one authority window per operation. This is a supported Pouch extension, not
-  the default Go-disk-aligned performance path.
+  one authority window per operation. A shared handle retains a root-wide
+  process read lock for its lifetime; exclusive mode requires the conflicting
+  write lock. A live shared writer therefore cannot be overtaken, and a crashed
+  writer loses its kernel lock before recovery/takeover. Pouch deliberately
+  does not add a second durable writer epoch as data authority. This is a
+  supported Pouch extension, not the default Go-disk-aligned performance path.
   Direct callers set `single_writer_set=1` and `single_writer=0`; endpoint
   callers use `?single_writer=false` (or `?pouch_single_writer=false`).
 
@@ -723,8 +727,9 @@ default, relaxing durability, or omitting core operations from comparison.
   descriptor on its next projection validation; the projection then tails or
   rebuilds only when the manifest requires it. Runtime mode is never inferred
   from workload and is never encoded in user records. The barrier is local to
-  one Pouch handle; cross-process shared-root takeover still requires the
-  durable writer-epoch protocol described in the remaining work.
+  one Pouch handle. Cross-process handoff is fenced by the root process lock:
+  exclusive mode cannot take ownership while any live shared handle retains its
+  read lock, and a crashed handle's kernel lock is released before recovery.
 
 - Fsync batching and diagnostics:
   Pouch defaults to `durable_sync=0`, the same `NoSync` mutation boundary used

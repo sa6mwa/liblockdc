@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <setjmp.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -4975,6 +4976,35 @@ static int pouch_exclusive_process_hold(const char *root, int ready_fd,
   return rc;
 }
 
+static int pouch_shared_process_hold(const char *root, int ready_fd,
+                                     int release_fd) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_error error;
+  char signal;
+  int rc;
+
+  pouch = NULL;
+  memset(&options, 0, sizeof(options));
+  lc_error_init(&error);
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  if (rc == LC_OK && write(ready_fd, "1", 1U) != 1) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (rc == LC_OK && read(release_fd, &signal, 1U) != 1) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  (void)close(ready_fd);
+  (void)close(release_fd);
+  if (pouch != NULL) {
+    lc_pouch_close(pouch);
+  }
+  lc_error_cleanup(&error);
+  return rc;
+}
+
 static void test_process_writer_modes_and_shared_writes(void **state) {
   lc_pouch *reader;
   lc_pouch_state_read_result first_read;
@@ -4985,6 +5015,8 @@ static void test_process_writer_modes_and_shared_writes(void **state) {
   char signal;
   int first_start[2];
   int second_start[2];
+  int shared_ready[2];
+  int shared_release[2];
   int ready[2];
   int release[2];
   pid_t first_pid;
@@ -5055,6 +5087,39 @@ static void test_process_writer_modes_and_shared_writes(void **state) {
   assert_string_equal(body, "second");
   lc_pouch_state_read_result_cleanup(NULL, &second_read);
   lc_pouch_state_read_result_cleanup(NULL, &first_read);
+  lc_pouch_close(reader);
+  reader = NULL;
+
+  assert_int_equal(pipe(shared_ready), 0);
+  assert_int_equal(pipe(shared_release), 0);
+  holder_pid = fork();
+  assert_true(holder_pid >= 0);
+  if (holder_pid == 0) {
+    (void)close(shared_ready[0]);
+    (void)close(shared_release[1]);
+    _exit(pouch_shared_process_hold(root, shared_ready[1], shared_release[0]) ==
+                  LC_OK
+              ? 0
+              : 1);
+  }
+  (void)close(shared_ready[1]);
+  (void)close(shared_release[0]);
+  assert_int_equal(read(shared_ready[0], &signal, 1U), 1);
+  (void)close(shared_ready[0]);
+  rc = lc_pouch_open(root, NULL, NULL, &reader, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(reader);
+  assert_string_equal(error.message, "pouch root writer mode is already owned");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(kill(holder_pid, SIGKILL), 0);
+  (void)close(shared_release[1]);
+  assert_int_equal(waitpid(holder_pid, &status, 0), holder_pid);
+  assert_true(WIFSIGNALED(status));
+  assert_int_equal(WTERMSIG(status), SIGKILL);
+  holder_pid = -1;
+  rc = lc_pouch_open(root, NULL, NULL, &reader, &error);
+  assert_int_equal(rc, LC_OK);
   lc_pouch_close(reader);
   reader = NULL;
 

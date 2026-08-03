@@ -159,8 +159,10 @@ Acceptance:
 - [ ] Extend bounded shared append-gate batching to eligible body and
   multi-record mutations without materializing streaming payloads or widening
   exact-key ownership.
-- [ ] Define and implement a durable writer epoch/ownership transition that
-  prevents a stale writer from appending after takeover.
+- [x] Fence shared/exclusive ownership with the root-wide process lock: every
+  live shared writer holds its read lock for its lifetime, and exclusive mode
+  requires the conflicting write lock. A crashed process loses that lock before
+  takeover, while the per-handle mode epoch invalidates local descriptors.
 - [x] Make an in-process mode transition quiesce append-capable operations
   through durable completion, then advance the local epoch so active append
   descriptors are closed and projections validate/replay only when required.
