@@ -38,6 +38,7 @@
 #define LC_POUCH_STATE_SOURCE_CACHE_MAX_FILES 64U
 #define LC_POUCH_STATE_WRITEV_MAX_PARTS 15
 #define LC_POUCH_STATE_WRITEV_BATCH_RECORDS 5U
+#define LC_POUCH_STATE_METADATA_APPEND_BATCH_MAX 128U
 #define LC_POUCH_STATE_DECISION_COMMITTED "committed"
 #define LC_POUCH_STATE_DECISION_DISCARDED "discarded"
 #define LC_POUCH_STATE_HIGH_WATER_KEY ".lockd/high-water"
@@ -822,6 +823,33 @@ typedef struct lc_pouch_state_binary_append_item {
   unsigned char *meta;
   size_t meta_len;
 } lc_pouch_state_binary_append_item;
+
+typedef struct lc_pouch_state_metadata_append_request {
+  const char *namespace_name;
+  const char *key;
+  lc_pouch_state_entry *current;
+  lc_pouch_state_write_options options;
+  lc_pouch_generation version;
+  lc_pouch_unix_seconds updated_at_unix;
+  int has_query_hidden;
+  int query_hidden;
+  lc_pouch_state_write_result *out;
+  lc_error *error;
+  int rc;
+  int done;
+  pthread_cond_t cond;
+  struct lc_pouch_state_metadata_append_request *next;
+} lc_pouch_state_metadata_append_request;
+
+struct lc_pouch_state_metadata_append_batcher {
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+  pthread_t thread;
+  lc_pouch *pouch;
+  lc_pouch_state_metadata_append_request *head;
+  lc_pouch_state_metadata_append_request *tail;
+  int stop;
+};
 
 typedef struct lc_pouch_state_body_cache_entry {
   unsigned char *bytes;
@@ -2069,6 +2097,83 @@ static void lc_pouch_state_entry_cleanup(const lc_allocator *allocator,
   lc_free_with_allocator(allocator, entry->metadata);
   lc_free_with_allocator(allocator, entry->decision);
   memset(entry, 0, sizeof(*entry));
+}
+
+/* The metadata append worker only needs fields that describe the existing
+ * durable value. Copy these while the caller still holds mutation authority;
+ * the worker then owns no borrowed projection pointers. */
+static int lc_pouch_state_metadata_append_entry_copy(
+    lc_pouch *pouch, const lc_pouch_state_entry *source,
+    lc_pouch_state_entry *destination, lc_error *error) {
+  int rc;
+
+  if (pouch == NULL || source == NULL || destination == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata append entry copy requires inputs",
+                        NULL, NULL, "pouch");
+  }
+  memset(destination, 0, sizeof(*destination));
+  destination->found = source->found;
+  destination->version = source->version;
+  destination->bytes = source->bytes;
+  destination->cipher_bytes = source->cipher_bytes;
+  destination->has_query_hidden = source->has_query_hidden;
+  destination->query_hidden = source->query_hidden;
+  if (source->content_type != NULL) {
+    destination->content_type =
+        lc_strdup_with_allocator(&pouch->allocator, source->content_type);
+  }
+  if (source->etag != NULL) {
+    destination->etag =
+        lc_strdup_with_allocator(&pouch->allocator, source->etag);
+  }
+  if (source->payload_context != NULL) {
+    destination->payload_context =
+        lc_strdup_with_allocator(&pouch->allocator, source->payload_context);
+  }
+  if (source->descriptor != NULL) {
+    destination->descriptor =
+        lc_strdup_with_allocator(&pouch->allocator, source->descriptor);
+  }
+  if ((source->content_type != NULL && destination->content_type == NULL) ||
+      (source->etag != NULL && destination->etag == NULL) ||
+      (source->payload_context != NULL &&
+       destination->payload_context == NULL) ||
+      (source->descriptor != NULL && destination->descriptor == NULL)) {
+    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "failed to copy pouch metadata append entry", NULL, NULL,
+                      "pouch");
+    goto cleanup;
+  }
+  rc =
+      lc_pouch_state_payload_span_copy(&pouch->allocator, &source->payload_span,
+                                       &destination->payload_span, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  if (source->metadata_length > 0U && source->metadata == NULL) {
+    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                      "pouch metadata append source is malformed", NULL, NULL,
+                      "pouch");
+    goto cleanup;
+  }
+  if (source->metadata_length > 0U) {
+    destination->metadata = (unsigned char *)lc_alloc_with_allocator(
+        &pouch->allocator, source->metadata_length);
+    if (destination->metadata == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy pouch metadata append blob", NULL, NULL,
+                        "pouch");
+      goto cleanup;
+    }
+    memcpy(destination->metadata, source->metadata, source->metadata_length);
+    destination->metadata_length = source->metadata_length;
+  }
+  return LC_OK;
+
+cleanup:
+  lc_pouch_state_entry_cleanup(&pouch->allocator, destination);
+  return rc;
 }
 
 static void lc_pouch_state_decision_cleanup(const lc_allocator *allocator,
@@ -10143,6 +10248,333 @@ static int lc_pouch_state_metadata_write_result_build(
   return LC_OK;
 }
 
+static void lc_pouch_state_metadata_append_complete(
+    lc_pouch_state_metadata_append_batcher *batcher,
+    lc_pouch_state_metadata_append_request **requests, size_t count) {
+  size_t index;
+
+  if (batcher == NULL || requests == NULL) {
+    return;
+  }
+  pthread_mutex_lock(&batcher->mutex);
+  for (index = 0U; index < count; ++index) {
+    if (requests[index] != NULL) {
+      requests[index]->done = 1;
+      pthread_cond_signal(&requests[index]->cond);
+    }
+  }
+  pthread_mutex_unlock(&batcher->mutex);
+}
+
+static void lc_pouch_state_metadata_append_fail(
+    lc_pouch_state_metadata_append_request *request, int rc,
+    const lc_error *cause) {
+  const char *message;
+
+  if (request == NULL) {
+    return;
+  }
+  message = cause != NULL && cause->message != NULL
+                ? cause->message
+                : "pouch metadata append batch failed";
+  request->rc =
+      lc_error_set(request->error, rc, 0L, message, NULL, NULL, "pouch");
+}
+
+static void lc_pouch_state_metadata_append_process(
+    lc_pouch_state_metadata_append_batcher *batcher,
+    lc_pouch_state_metadata_append_request **requests, size_t count) {
+  lc_pouch_state_binary_append_item
+      items[LC_POUCH_STATE_METADATA_APPEND_BATCH_MAX];
+  lc_pouch_namespace_manifest manifest;
+  lc_pouch_state_cache_namespace *cache;
+  lc_pouch *pouch;
+  size_t index;
+  int cache_cleared;
+  int rc;
+  lc_error batch_error;
+
+  if (batcher == NULL || requests == NULL || count == 0U) {
+    return;
+  }
+  pouch = batcher->pouch;
+  memset(items, 0, sizeof(items));
+  memset(&manifest, 0, sizeof(manifest));
+  lc_error_init(&batch_error);
+  cache_cleared = 0;
+  cache = NULL;
+  rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
+  if (rc != 0) {
+    for (index = 0U; index < count; ++index) {
+      lc_pouch_state_metadata_append_fail(requests[index], LC_ERR_TRANSPORT,
+                                          &batch_error);
+    }
+    goto cleanup;
+  }
+  rc = lc_pouch_state_manifest_view(pouch, requests[0]->namespace_name,
+                                    &manifest, &cache, &batch_error);
+  if (rc == LC_OK) {
+    for (index = 0U; index < count; ++index) {
+      lc_pouch_state_metadata_append_request *request;
+      const unsigned char *metadata;
+      size_t metadata_length;
+
+      request = requests[index];
+      request->updated_at_unix = lc_pouch_maintenance_now_seconds();
+      metadata = request->options.has_metadata ? request->options.metadata
+                                               : request->current->metadata;
+      metadata_length = request->options.has_metadata
+                            ? request->options.metadata_length
+                            : request->current->metadata_length;
+      rc = lc_pouch_state_encode_payload_meta(
+          &pouch->allocator, request->version, request->updated_at_unix,
+          request->current->bytes, request->current->cipher_bytes,
+          request->current->content_type != NULL
+              ? request->current->content_type
+              : "application/octet-stream",
+          request->current->etag != NULL ? request->current->etag : "",
+          request->current->descriptor, &request->current->payload_span,
+          request->current->payload_context, metadata, metadata_length, 0U,
+          request->has_query_hidden, request->query_hidden, &items[index].meta,
+          &items[index].meta_len, &batch_error);
+      if (rc != LC_OK) {
+        break;
+      }
+      items[index].record_type = LC_POUCH_STATE_RECORD_STATE_META;
+      items[index].key = request->key;
+      items[index].key_len = strlen(request->key);
+    }
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_append_binary_records(
+        pouch, requests[0]->namespace_name, &manifest, items, count,
+        &batch_error);
+  }
+  if (rc == LC_OK) {
+    for (index = 0U; index < count; ++index) {
+      lc_pouch_state_metadata_append_request *request;
+      lc_pouch_namespace_manifest result_manifest;
+      lc_pouch_generation index_seq;
+      int result_rc;
+
+      request = requests[index];
+      index_seq = 0UL;
+      result_rc = lc_pouch_state_meta_index_seq(
+          items[index].meta, items[index].meta_len, &index_seq, request->error);
+      if (result_rc == LC_OK) {
+        result_manifest = manifest;
+        result_manifest.state_max_version = index_seq;
+        result_rc = lc_pouch_state_metadata_write_result_build(
+            pouch, &result_manifest, request->current, &request->options,
+            request->version, request->updated_at_unix,
+            request->has_query_hidden, request->query_hidden, request->out,
+            request->error);
+      }
+      if (result_rc == LC_OK) {
+        const unsigned char *metadata;
+        size_t metadata_length;
+
+        metadata = request->options.has_metadata ? request->options.metadata
+                                                 : request->current->metadata;
+        metadata_length = request->options.has_metadata
+                              ? request->options.metadata_length
+                              : request->current->metadata_length;
+        result_manifest = manifest;
+        result_manifest.state_max_version = index_seq;
+        (void)lc_pouch_state_cache_apply_write(
+            pouch, request->namespace_name, &result_manifest, request->key,
+            request->current->content_type != NULL
+                ? request->current->content_type
+                : "application/octet-stream",
+            request->current->etag != NULL ? request->current->etag : "",
+            &request->current->payload_span, request->current->payload_context,
+            metadata, metadata_length, request->version,
+            request->current->bytes, request->current->cipher_bytes,
+            request->current->descriptor, request->out->updated_at_unix,
+            request->has_query_hidden, request->query_hidden, 1,
+            LC_POUCH_STATE_RECORD_STATE_META);
+        request->rc = LC_OK;
+      } else {
+        lc_pouch_state_write_result_cleanup(&pouch->allocator, request->out);
+        if (!cache_cleared) {
+          lc_pouch_state_cache_cleanup(pouch);
+          cache_cleared = 1;
+        }
+        request->rc = result_rc;
+      }
+    }
+  } else {
+    for (index = 0U; index < count; ++index) {
+      lc_pouch_state_metadata_append_fail(requests[index], rc, &batch_error);
+    }
+  }
+  pthread_mutex_unlock(&pouch->state_mutation_mutex);
+
+cleanup:
+  for (index = 0U; index < count; ++index) {
+    lc_free_with_allocator(&pouch->allocator, items[index].meta);
+  }
+  lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  lc_error_cleanup(&batch_error);
+}
+
+static void *lc_pouch_state_metadata_append_worker(void *context) {
+  lc_pouch_state_metadata_append_batcher *batcher;
+  lc_pouch_state_metadata_append_request
+      *requests[LC_POUCH_STATE_METADATA_APPEND_BATCH_MAX];
+  const char *namespace_name;
+  size_t count;
+
+  batcher = (lc_pouch_state_metadata_append_batcher *)context;
+  pthread_mutex_lock(&batcher->mutex);
+  for (;;) {
+    while (batcher->head == NULL && !batcher->stop) {
+      pthread_cond_wait(&batcher->cond, &batcher->mutex);
+    }
+    if (batcher->head == NULL && batcher->stop) {
+      pthread_mutex_unlock(&batcher->mutex);
+      return NULL;
+    }
+    count = 0U;
+    namespace_name = batcher->head->namespace_name;
+    while (batcher->head != NULL &&
+           count < LC_POUCH_STATE_METADATA_APPEND_BATCH_MAX &&
+           strcmp(batcher->head->namespace_name, namespace_name) == 0) {
+      requests[count] = batcher->head;
+      batcher->head = batcher->head->next;
+      requests[count]->next = NULL;
+      ++count;
+    }
+    if (batcher->head == NULL) {
+      batcher->tail = NULL;
+    }
+    pthread_mutex_unlock(&batcher->mutex);
+    lc_pouch_state_metadata_append_process(batcher, requests, count);
+    lc_pouch_state_metadata_append_complete(batcher, requests, count);
+    pthread_mutex_lock(&batcher->mutex);
+  }
+}
+
+int lc_pouch_state_metadata_append_worker_init(lc_pouch *pouch,
+                                               lc_error *error) {
+  lc_pouch_state_metadata_append_batcher *batcher;
+  int cond_initialized;
+  int mutex_initialized;
+  int pthread_rc;
+
+  if (pouch == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata append worker requires pouch", NULL,
+                        NULL, "pouch");
+  }
+  if (pouch->state_metadata_append_batcher != NULL) {
+    return LC_OK;
+  }
+  batcher = (lc_pouch_state_metadata_append_batcher *)lc_calloc_with_allocator(
+      NULL, 1U, sizeof(*batcher));
+  if (batcher == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch metadata append worker", NULL,
+                        NULL, "pouch");
+  }
+  cond_initialized = 0;
+  mutex_initialized = 0;
+  pthread_rc = pthread_mutex_init(&batcher->mutex, NULL);
+  if (pthread_rc == 0) {
+    mutex_initialized = 1;
+  }
+  if (pthread_rc == 0) {
+    pthread_rc = pthread_cond_init(&batcher->cond, NULL);
+    if (pthread_rc == 0) {
+      cond_initialized = 1;
+    }
+  }
+  if (pthread_rc == 0) {
+    batcher->pouch = pouch;
+    pthread_rc = pthread_create(&batcher->thread, NULL,
+                                lc_pouch_state_metadata_append_worker, batcher);
+  }
+  if (pthread_rc != 0) {
+    if (cond_initialized) {
+      pthread_cond_destroy(&batcher->cond);
+    }
+    if (mutex_initialized) {
+      pthread_mutex_destroy(&batcher->mutex);
+    }
+    lc_free_with_allocator(NULL, batcher);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to start pouch metadata append worker",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->state_metadata_append_batcher = batcher;
+  return LC_OK;
+}
+
+void lc_pouch_state_metadata_append_worker_close(lc_pouch *pouch) {
+  lc_pouch_state_metadata_append_batcher *batcher;
+
+  if (pouch == NULL || pouch->state_metadata_append_batcher == NULL) {
+    return;
+  }
+  batcher = pouch->state_metadata_append_batcher;
+  pouch->state_metadata_append_batcher = NULL;
+  pthread_mutex_lock(&batcher->mutex);
+  batcher->stop = 1;
+  pthread_cond_broadcast(&batcher->cond);
+  pthread_mutex_unlock(&batcher->mutex);
+  pthread_join(batcher->thread, NULL);
+  pthread_cond_destroy(&batcher->cond);
+  pthread_mutex_destroy(&batcher->mutex);
+  lc_free_with_allocator(NULL, batcher);
+}
+
+static int lc_pouch_state_metadata_append_submit_locked(
+    lc_pouch *pouch, lc_pouch_state_metadata_append_request *request,
+    lc_error *error) {
+  lc_pouch_state_metadata_append_batcher *batcher;
+  int pthread_rc;
+
+  if (pouch == NULL || request == NULL ||
+      pouch->state_metadata_append_batcher == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata append worker is unavailable", NULL,
+                        NULL, "pouch");
+  }
+  batcher = pouch->state_metadata_append_batcher;
+  pthread_rc = pthread_cond_init(&request->cond, NULL);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch metadata append request",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  request->next = NULL;
+  request->done = 0;
+  request->rc = LC_OK;
+  /* The caller still owns its key lock. Release only the cache mutex while
+   * this bounded inline batch is appended and published by the worker. */
+  pthread_mutex_unlock(&pouch->state_mutation_mutex);
+  pthread_mutex_lock(&batcher->mutex);
+  if (batcher->tail != NULL) {
+    batcher->tail->next = request;
+  } else {
+    batcher->head = request;
+  }
+  batcher->tail = request;
+  pthread_cond_signal(&batcher->cond);
+  while (!request->done) {
+    pthread_cond_wait(&request->cond, &batcher->mutex);
+  }
+  pthread_mutex_unlock(&batcher->mutex);
+  pthread_rc = pthread_mutex_lock(&pouch->state_mutation_mutex);
+  pthread_cond_destroy(&request->cond);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to restore pouch mutation state",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  return request->rc;
+}
+
 static int lc_pouch_state_update_metadata_from_current_locked(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     lc_pouch_namespace_manifest *manifest, lc_pouch_state_entry *current,
@@ -10268,7 +10700,12 @@ int lc_pouch_state_update_metadata_prepared_locked(
   lc_pouch_state_metadata_view view;
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_write_options options;
+  lc_pouch_state_metadata_append_request request;
+  lc_pouch_state_entry scheduled_current;
   lc_pouch_generation max_version;
+  lc_pouch_generation logical_version;
+  int has_query_hidden;
+  int query_hidden;
   int apply;
   int current_is_borrowed;
   int rc;
@@ -10284,6 +10721,8 @@ int lc_pouch_state_update_metadata_prepared_locked(
   memset(&manifest, 0, sizeof(manifest));
   memset(&view, 0, sizeof(view));
   memset(&options, 0, sizeof(options));
+  memset(&request, 0, sizeof(request));
+  memset(&scheduled_current, 0, sizeof(scheduled_current));
   current_is_borrowed = 0;
   rc = lc_pouch_state_manifest_lookup_cached_borrowed(
       pouch, namespace_name, key, &manifest, &current, &max_version,
@@ -10299,11 +10738,58 @@ int lc_pouch_state_update_metadata_prepared_locked(
     apply = 1;
     rc = prepare(&view, prepare_context, &options, &apply, error);
     if (rc == LC_OK && apply) {
-      rc = lc_pouch_state_update_metadata_from_current_locked(
-          pouch, namespace_name, key, &manifest, &current, &options, out,
-          error);
+      logical_version =
+          current.found && current.payload_span.present ? current.version : 0UL;
+      if (!current.found && !options.has_metadata) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch metadata update requires existing state", NULL,
+                          NULL, NULL);
+      } else if (options.has_expected_version &&
+                 logical_version != options.expected_version) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch metadata version precondition failed", NULL,
+                          NULL, NULL);
+      } else if (options.precondition != NULL) {
+        rc = options.precondition(options.precondition_context, error);
+      }
+      has_query_hidden = current.has_query_hidden;
+      query_hidden = current.query_hidden;
+      if (rc == LC_OK && options.has_query_hidden) {
+        has_query_hidden = 1;
+        query_hidden = options.query_hidden;
+      } else if (rc == LC_OK && !current.found) {
+        has_query_hidden = 1;
+        query_hidden = 1;
+      }
+      if (rc == LC_OK && lc_pouch_single_writer_enabled(pouch) &&
+          pouch->state_metadata_append_batcher != NULL) {
+        if (current_is_borrowed) {
+          rc = lc_pouch_state_metadata_append_entry_copy(
+              pouch, &current, &scheduled_current, error);
+        }
+        if (rc != LC_OK) {
+          goto cleanup;
+        }
+        request.namespace_name = namespace_name;
+        request.key = key;
+        request.current = current_is_borrowed ? &scheduled_current : &current;
+        request.options = options;
+        request.version = logical_version;
+        request.has_query_hidden = has_query_hidden;
+        request.query_hidden = query_hidden;
+        request.out = out;
+        request.error = error;
+        rc = lc_pouch_state_metadata_append_submit_locked(pouch, &request,
+                                                          error);
+      } else if (rc == LC_OK) {
+        rc = lc_pouch_state_update_metadata_from_current_locked(
+            pouch, namespace_name, key, &manifest, &current, &options, out,
+            error);
+      }
     }
   }
+cleanup:
+  lc_pouch_state_entry_cleanup(&pouch->allocator, &scheduled_current);
   if (!current_is_borrowed) {
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
   }

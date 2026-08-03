@@ -2722,6 +2722,11 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
       return rc;
     }
   }
+  rc = lc_pouch_state_metadata_append_worker_init(pouch, error);
+  if (rc != LC_OK) {
+    lc_pouch_close(pouch);
+    return rc;
+  }
   rc = lc_pouch_warm_transformed_namespaces(pouch, error);
   if (rc != LC_OK) {
     lc_pouch_close(pouch);
@@ -2780,6 +2785,7 @@ void lc_pouch_close(lc_pouch *pouch) {
   }
   lc_pouch_janitor_worker_close(pouch);
   lc_pouch_compaction_worker_close(pouch);
+  lc_pouch_state_metadata_append_worker_close(pouch);
   lc_pouch_fsync_batcher_close(pouch);
   lc_pouch_state_cache_cleanup(pouch);
   lc_pouch_state_source_cache_cleanup(pouch);
@@ -2838,6 +2844,7 @@ int lc_pouch_abort(lc_pouch *pouch, lc_error *error) {
   lc_pouch_writer_presence_stop_abrupt(pouch);
   lc_pouch_janitor_worker_close(pouch);
   lc_pouch_compaction_worker_close(pouch);
+  lc_pouch_state_metadata_append_worker_close(pouch);
   lc_pouch_fsync_batcher_close(pouch);
   lc_pouch_writer_root_lock_release(pouch);
   {

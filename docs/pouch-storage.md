@@ -1059,7 +1059,12 @@ Required behavior:
 - rotate at the stored-byte target under the appropriate writer/maintenance
   coordination, atomically publish the new numeric active segment, and replace
   only the affected active descriptor/cursor;
-- append small records to that rolling active file;
+- append small records to that rolling active file. In default exclusive mode,
+  complete metadata-only mutations (including lease acquire, keepalive, and
+  release) enter one resident, bounded append queue per Pouch handle. The
+  queue preserves submission order within a namespace, processes at most 128
+  records in one append batch, publishes each resulting projection entry
+  before its caller is acknowledged, and never accepts a payload source;
 - stream large payload records directly from the caller-provided reader through
   transforms, hash/etag, and CRC into the active writer file without full
   materialization;
@@ -1067,9 +1072,10 @@ Required behavior:
   header remains pending, then publish the finalized header last after final
   stored lengths, descriptor, hash/etag, and CRC are known;
 - when `durable_sync=1`, group independent commit requests through a
-  root-scoped fsync batcher, defer active-file syncs through duplicate fds held
-  by the current state commit group, and drain them at the public mutation
-  boundary;
+  root-scoped fsync batcher. Direct mutation paths defer active-file syncs
+  through duplicate fds held by the current state commit group; the exclusive
+  metadata append queue owns the same sync boundary in its worker, and every
+  waiting public caller drains that result before completion;
 - make the finalized active-record header the shared-reader publication point;
   shared readers compare the active file size with their verified offset and
   replay only the new complete tail;

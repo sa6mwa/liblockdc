@@ -24,6 +24,8 @@ typedef struct lc_pouch_query_index_manifest_trust_entry
     lc_pouch_query_index_manifest_trust_entry;
 typedef struct lc_pouch_fsync_request lc_pouch_fsync_request;
 typedef struct lc_pouch_fsync_batcher lc_pouch_fsync_batcher;
+typedef struct lc_pouch_state_metadata_append_batcher
+    lc_pouch_state_metadata_append_batcher;
 typedef struct lc_pouch_writer_root_lock_entry lc_pouch_writer_root_lock_entry;
 
 /* Exclusive roots have one in-process writer. These bounded stripes retain
@@ -146,6 +148,9 @@ struct lc_pouch {
   pthread_mutex_t exclusive_key_mutexes[LC_POUCH_EXCLUSIVE_KEY_STRIPE_COUNT];
   size_t exclusive_key_mutex_count;
   lc_pouch_fsync_batcher *fsync_batcher;
+  /* Exclusive metadata mutations submit complete inline records here. The
+   * state implementation owns the worker and keeps streamed bodies direct. */
+  lc_pouch_state_metadata_append_batcher *state_metadata_append_batcher;
   pthread_mutex_t compaction_mutex;
   pthread_cond_t compaction_cond;
   pthread_t compaction_thread;
@@ -209,6 +214,9 @@ void lc_pouch_writer_mode_operation_end(lc_pouch *pouch);
  */
 void lc_pouch_compaction_note_mutation(lc_pouch *pouch);
 void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch);
+int lc_pouch_state_metadata_append_worker_init(lc_pouch *pouch,
+                                               lc_error *error);
+void lc_pouch_state_metadata_append_worker_close(lc_pouch *pouch);
 void lc_pouch_query_index_cache_cleanup(lc_pouch *pouch);
 int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,
                                        const char *namespace_name,

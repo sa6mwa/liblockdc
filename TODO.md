@@ -114,8 +114,10 @@ Acceptance:
 - [x] Establish a local writer-mode epoch and lazily construct each exclusive
   namespace's resident projection, active descriptor, and cursor on first use.
 - [x] Route state, lease, object, attachment, queue, and staged-transaction
-  mutations through the serialized resident append path. Public completion
-  still waits for its own finalized commit result.
+  mutations through the resident append path. Default-exclusive lease metadata
+  mutations use a bounded ordered append worker; streaming state and object
+  bodies remain direct and public completion still waits for its own finalized
+  commit result.
 - [x] Match Go disk group-commit scheduling: a durable group waits at most two
   milliseconds or until its maximum request count, deduplicates file syncs,
   and propagates the shared result to every waiting operation.
