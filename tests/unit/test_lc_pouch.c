@@ -8905,6 +8905,61 @@ test_state_stream_failure_keeps_published_projection_and_replay(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_shared_abort_reopen_recovers_published_record(void **state) {
+  lc_pouch *writer;
+  lc_pouch *reader;
+  lc_pouch_open_options options;
+  lc_source *body;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char bytes[64];
+  int rc;
+
+  (void)state;
+  writer = NULL;
+  reader = NULL;
+  body = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("shared-abort-reopen", root, sizeof(root));
+  cleanup_root(root);
+
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &options, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("published", strlen("published"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(writer, "default", "state/abort", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  rc = lc_pouch_abort(writer, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_close(writer);
+  writer = NULL;
+
+  rc = lc_pouch_open(root, NULL, &options, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(reader, "default", "state/abort", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_string_equal(bytes, "published");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_exclusive_streaming_write_releases_projection_for_independent_key(
     void **state) {
@@ -23024,6 +23079,7 @@ int main(void) {
       cmocka_unit_test(test_state_callback_source_retains_streaming_path),
       cmocka_unit_test(
           test_state_stream_failure_keeps_published_projection_and_replay),
+      cmocka_unit_test(test_shared_abort_reopen_recovers_published_record),
       cmocka_unit_test(
           test_exclusive_streaming_write_releases_projection_for_independent_key),
       cmocka_unit_test(

@@ -163,8 +163,10 @@ Acceptance:
 - [ ] Acquire, get, update, release, queue, attachment, and query operations
   preserve the existing observable contract under plaintext, crypto,
   compression, and crypto+compression roots.
-- [ ] A crash or explicit abort followed by reopen recovers the last published
-  record and rejects malformed sealed data exactly as specified.
+- [x] A crash or explicit abort followed by reopen recovers the last published
+  record and rejects malformed sealed data exactly as specified. Focused active
+  crash-tail, sealed corruption, and explicit shared-root abort/reopen tests
+  cover the two writer-mode recovery boundaries.
 
 ### 3. Retain Shared-Root As An Explicit Mode
 
