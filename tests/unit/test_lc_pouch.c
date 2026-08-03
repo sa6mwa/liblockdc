@@ -5148,6 +5148,85 @@ static int pouch_shared_process_acquire_after_handoff(const char *root,
   return rc;
 }
 
+static int pouch_shared_process_enqueue(const char *root) {
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req request;
+  lc_enqueue_res result;
+  lc_error error;
+  int rc;
+
+  client = NULL;
+  source = NULL;
+  memset(&result, 0, sizeof(result));
+  lc_enqueue_req_init(&request);
+  lc_error_init(&error);
+  request.queue = "jobs";
+  request.content_type = "text/plain";
+  request.visibility_timeout_seconds = 60L;
+  rc = pouch_shared_process_open_client(root, &client, &error);
+  if (rc == LC_OK) {
+    rc = lc_source_from_memory("job", strlen("job"), &source, &error);
+  }
+  if (rc == LC_OK) {
+    rc = client->enqueue(client, &request, source, &result, &error);
+  }
+  if (source != NULL) {
+    source->close(source);
+  }
+  lc_enqueue_res_cleanup(&result);
+  if (client != NULL) {
+    lc_client_close(client);
+  }
+  lc_error_cleanup(&error);
+  return rc;
+}
+
+static int pouch_shared_process_dequeue(const char *root, const char *owner,
+                                        int ready_fd, int start_fd,
+                                        int result_fd) {
+  lc_client *client;
+  lc_message *message;
+  lc_dequeue_req request;
+  lc_error error;
+  char signal;
+  char delivered;
+  int rc;
+
+  client = NULL;
+  message = NULL;
+  lc_dequeue_req_init(&request);
+  lc_error_init(&error);
+  request.queue = "jobs";
+  request.owner = owner;
+  request.visibility_timeout_seconds = 60L;
+  rc = pouch_shared_process_open_client(root, &client, &error);
+  if (rc == LC_OK && write(ready_fd, "1", 1U) != 1) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (rc == LC_OK && read(start_fd, &signal, 1U) != 1) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (rc == LC_OK) {
+    rc = client->dequeue(client, &request, &message, &error);
+  }
+  delivered = message != NULL ? '1' : '0';
+  if (rc == LC_OK && write(result_fd, &delivered, 1U) != 1) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  (void)close(ready_fd);
+  (void)close(start_fd);
+  (void)close(result_fd);
+  if (message != NULL) {
+    message->close(message);
+  }
+  if (client != NULL) {
+    lc_client_close(client);
+  }
+  lc_error_cleanup(&error);
+  return rc;
+}
+
 static void test_process_writer_modes_and_shared_writes(void **state) {
   lc_pouch *reader;
   lc_pouch_state_read_result first_read;
@@ -5357,6 +5436,83 @@ static void test_shared_process_lease_conflict_and_handoff(void **state) {
   assert_int_equal(write(contender_proceed[1], "1", 1U), 1);
   (void)close(contender_proceed[1]);
   assert_int_equal(waitpid(contender_pid, &status, 0), contender_pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+
+  cleanup_root(root);
+}
+
+static void test_shared_process_queue_delivers_once(void **state) {
+  char root[512];
+  char signal;
+  char first_delivery;
+  char second_delivery;
+  int ready[2];
+  int start[2];
+  int delivery[2];
+  pid_t enqueue_pid;
+  pid_t first_pid;
+  pid_t second_pid;
+  int status;
+
+  (void)state;
+  enqueue_pid = -1;
+  first_pid = -1;
+  second_pid = -1;
+  make_root("process-shared-queue", root, sizeof(root));
+  cleanup_root(root);
+
+  enqueue_pid = fork();
+  assert_true(enqueue_pid >= 0);
+  if (enqueue_pid == 0) {
+    _exit(pouch_shared_process_enqueue(root) == LC_OK ? 0 : 1);
+  }
+  assert_int_equal(waitpid(enqueue_pid, &status, 0), enqueue_pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+
+  assert_int_equal(pipe(ready), 0);
+  assert_int_equal(pipe(start), 0);
+  assert_int_equal(pipe(delivery), 0);
+  first_pid = fork();
+  assert_true(first_pid >= 0);
+  if (first_pid == 0) {
+    (void)close(ready[0]);
+    (void)close(start[1]);
+    (void)close(delivery[0]);
+    _exit(pouch_shared_process_dequeue(root, "process-first", ready[1],
+                                       start[0], delivery[1]) == LC_OK
+              ? 0
+              : 1);
+  }
+  second_pid = fork();
+  assert_true(second_pid >= 0);
+  if (second_pid == 0) {
+    (void)close(ready[0]);
+    (void)close(start[1]);
+    (void)close(delivery[0]);
+    _exit(pouch_shared_process_dequeue(root, "process-second", ready[1],
+                                       start[0], delivery[1]) == LC_OK
+              ? 0
+              : 1);
+  }
+  (void)close(ready[1]);
+  (void)close(start[0]);
+  (void)close(delivery[1]);
+  assert_int_equal(read(ready[0], &signal, 1U), 1);
+  assert_int_equal(read(ready[0], &signal, 1U), 1);
+  (void)close(ready[0]);
+  assert_int_equal(write(start[1], "12", 2U), 2);
+  (void)close(start[1]);
+  assert_int_equal(read(delivery[0], &first_delivery, 1U), 1);
+  assert_int_equal(read(delivery[0], &second_delivery, 1U), 1);
+  (void)close(delivery[0]);
+  assert_true((first_delivery == '1' && second_delivery == '0') ||
+              (first_delivery == '0' && second_delivery == '1'));
+  assert_int_equal(waitpid(first_pid, &status, 0), first_pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+  assert_int_equal(waitpid(second_pid, &status, 0), second_pid);
   assert_true(WIFEXITED(status));
   assert_int_equal(WEXITSTATUS(status), 0);
 
@@ -21098,6 +21254,7 @@ int main(void) {
       cmocka_unit_test(test_shared_clients_dequeue_one_message_once),
       cmocka_unit_test(test_process_writer_modes_and_shared_writes),
       cmocka_unit_test(test_shared_process_lease_conflict_and_handoff),
+      cmocka_unit_test(test_shared_process_queue_delivers_once),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(test_lease_private_reads_reject_stale_handle),
       cmocka_unit_test(test_pouch_lease_claim_and_credentials_are_durable),

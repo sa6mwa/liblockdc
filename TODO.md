@@ -164,8 +164,9 @@ Acceptance:
   requires the conflicting write lock. A crashed process loses that lock before
   takeover, while the per-handle mode epoch invalidates local descriptors.
 - [x] Cover fork-safe shared-process state writes, conflicting lease rejection,
-  fencing-token handoff, and root-lock crash handoff. Process-level queue,
-  rotation, compaction, and maintenance contention coverage remains required.
+  fencing-token handoff, single queue delivery, and root-lock crash handoff.
+  Process-level transaction, rotation, compaction, and maintenance contention
+  coverage remains required.
 - [x] Make an in-process mode transition quiesce append-capable operations
   through durable completion, then advance the local epoch so active append
   descriptors are closed and projections validate/replay only when required.
