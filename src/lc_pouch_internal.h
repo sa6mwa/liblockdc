@@ -33,6 +33,9 @@ typedef struct lc_pouch_exclusive_append_gate lc_pouch_exclusive_append_gate;
  * conflicting-key serialization through durable completion without shared
  * mode's registry allocation or cross-process lock work. */
 #define LC_POUCH_EXCLUSIVE_KEY_STRIPE_COUNT 97U
+/* Stable owner lists remain available for lifecycle traversal; hot namespace
+ * lookup uses these fixed buckets instead of scanning those lists. */
+#define LC_POUCH_NAMESPACE_REGISTRY_BUCKET_COUNT 127U
 
 typedef struct lc_pouch_state_change_visit_entry {
   const char *key;
@@ -162,6 +165,8 @@ struct lc_pouch {
   pthread_mutex_t state_metadata_append_registry_mutex;
   int state_metadata_append_registry_mutex_initialized;
   lc_pouch_state_metadata_append_batcher *state_metadata_append_batchers;
+  lc_pouch_state_metadata_append_batcher *state_metadata_append_batcher_buckets
+      [LC_POUCH_NAMESPACE_REGISTRY_BUCKET_COUNT];
   pthread_mutex_t compaction_mutex;
   pthread_cond_t compaction_cond;
   pthread_t compaction_thread;
@@ -182,6 +187,8 @@ struct lc_pouch {
   int janitor_stop;
   int janitor_pending;
   lc_pouch_state_cache_namespace *state_cache_namespaces;
+  lc_pouch_state_cache_namespace
+      *state_cache_namespace_buckets[LC_POUCH_NAMESPACE_REGISTRY_BUCKET_COUNT];
   pthread_mutex_t source_cache_mutex;
   int source_cache_mutex_initialized;
   lc_pouch_source_cache_entry *source_cache_entries;

@@ -1089,9 +1089,11 @@ struct lc_pouch_state_metadata_append_batcher {
   pthread_t thread;
   lc_pouch *pouch;
   char *namespace_name;
+  unsigned long namespace_hash;
   lc_pouch_state_metadata_append_request *head;
   lc_pouch_state_metadata_append_request *tail;
   int stop;
+  struct lc_pouch_state_metadata_append_batcher *hash_next;
   struct lc_pouch_state_metadata_append_batcher *next;
 };
 
@@ -2463,6 +2465,7 @@ typedef struct lc_pouch_state_compaction_capture {
 
 struct lc_pouch_state_cache_namespace {
   char *namespace_name;
+  unsigned long namespace_hash;
   char *namespace_path;
   char *active_segment_leaf;
   char *latest_snapshot_leaf;
@@ -2481,8 +2484,22 @@ struct lc_pouch_state_cache_namespace {
   size_t record_bucket_count;
   size_t record_count;
   size_t body_cache_bytes;
+  struct lc_pouch_state_cache_namespace *hash_next;
   struct lc_pouch_state_cache_namespace *next;
 };
+
+static unsigned long lc_pouch_state_namespace_hash(const char *namespace_name) {
+  const unsigned char *cursor;
+  unsigned long hash;
+
+  hash = 2166136261UL;
+  for (cursor = (const unsigned char *)namespace_name;
+       cursor != NULL && *cursor != '\0'; ++cursor) {
+    hash ^= (unsigned long)*cursor;
+    hash *= 16777619UL;
+  }
+  return hash;
+}
 
 static void lc_pouch_state_entry_cleanup(const lc_allocator *allocator,
                                          lc_pouch_state_entry *entry) {
@@ -3507,6 +3524,8 @@ void lc_pouch_state_cache_cleanup(lc_pouch *pouch) {
     ns = next;
   }
   pouch->state_cache_namespaces = NULL;
+  memset(pouch->state_cache_namespace_buckets, 0,
+         sizeof(pouch->state_cache_namespace_buckets));
 }
 
 void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch) {
@@ -3684,6 +3703,8 @@ static lc_pouch_state_cache_namespace *
 lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
                                     int create, lc_error *error) {
   lc_pouch_state_cache_namespace *ns;
+  unsigned long namespace_hash;
+  size_t bucket_index;
   int rc;
   int pthread_rc;
 
@@ -3693,6 +3714,10 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
                        NULL, "pouch");
     return NULL;
   }
+  namespace_hash = lc_pouch_state_namespace_hash(namespace_name);
+  bucket_index =
+      (size_t)(namespace_hash %
+               (unsigned long)LC_POUCH_NAMESPACE_REGISTRY_BUCKET_COUNT);
   pthread_rc = pthread_mutex_lock(&pouch->state_cache_mutex);
   if (pthread_rc != 0) {
     (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -3700,8 +3725,10 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
                        strerror(pthread_rc), NULL, "pouch");
     return NULL;
   }
-  for (ns = pouch->state_cache_namespaces; ns != NULL; ns = ns->next) {
-    if (strcmp(ns->namespace_name, namespace_name) == 0) {
+  for (ns = pouch->state_cache_namespace_buckets[bucket_index]; ns != NULL;
+       ns = ns->hash_next) {
+    if (ns->namespace_hash == namespace_hash &&
+        strcmp(ns->namespace_name, namespace_name) == 0) {
       (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
       return ns;
     }
@@ -3730,11 +3757,15 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
     return NULL;
   }
   ns->active_append_fd = -1;
+  ns->namespace_hash = namespace_hash;
+  ns->hash_next = pouch->state_cache_namespace_buckets[bucket_index];
+  pouch->state_cache_namespace_buckets[bucket_index] = ns;
   ns->next = pouch->state_cache_namespaces;
   pouch->state_cache_namespaces = ns;
   rc = lc_pouch_compaction_track_namespace(pouch, ns->namespace_name, error);
   if (rc != LC_OK) {
     pouch->state_cache_namespaces = ns->next;
+    pouch->state_cache_namespace_buckets[bucket_index] = ns->hash_next;
     lc_free_with_allocator(&pouch->allocator, ns->namespace_name);
     lc_free_with_allocator(&pouch->allocator, ns);
     (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
@@ -11339,6 +11370,8 @@ static int lc_pouch_state_metadata_append_batcher_get(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_state_metadata_append_batcher **out, lc_error *error) {
   lc_pouch_state_metadata_append_batcher *batcher;
+  unsigned long namespace_hash;
+  size_t bucket_index;
   int cond_initialized;
   int mutex_initialized;
   int pthread_rc;
@@ -11350,15 +11383,20 @@ static int lc_pouch_state_metadata_append_batcher_get(
                         NULL, "pouch");
   }
   *out = NULL;
+  namespace_hash = lc_pouch_state_namespace_hash(namespace_name);
+  bucket_index =
+      (size_t)(namespace_hash %
+               (unsigned long)LC_POUCH_NAMESPACE_REGISTRY_BUCKET_COUNT);
   pthread_rc = pthread_mutex_lock(&pouch->state_metadata_append_registry_mutex);
   if (pthread_rc != 0) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to lock pouch metadata append registry",
                         strerror(pthread_rc), NULL, "pouch");
   }
-  for (batcher = pouch->state_metadata_append_batchers; batcher != NULL;
-       batcher = batcher->next) {
-    if (strcmp(batcher->namespace_name, namespace_name) == 0) {
+  for (batcher = pouch->state_metadata_append_batcher_buckets[bucket_index];
+       batcher != NULL; batcher = batcher->hash_next) {
+    if (batcher->namespace_hash == namespace_hash &&
+        strcmp(batcher->namespace_name, namespace_name) == 0) {
       (void)pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
       *out = batcher;
       return LC_OK;
@@ -11373,6 +11411,7 @@ static int lc_pouch_state_metadata_append_batcher_get(
                         NULL, "pouch");
   }
   batcher->pouch = pouch;
+  batcher->namespace_hash = namespace_hash;
   batcher->namespace_name =
       lc_strdup_with_allocator(&pouch->allocator, namespace_name);
   if (batcher->namespace_name == NULL) {
@@ -11411,6 +11450,9 @@ static int lc_pouch_state_metadata_append_batcher_get(
   }
   batcher->next = pouch->state_metadata_append_batchers;
   pouch->state_metadata_append_batchers = batcher;
+  batcher->hash_next =
+      pouch->state_metadata_append_batcher_buckets[bucket_index];
+  pouch->state_metadata_append_batcher_buckets[bucket_index] = batcher;
   (void)pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
   *out = batcher;
   return LC_OK;
@@ -11450,6 +11492,8 @@ void lc_pouch_state_metadata_append_worker_close(lc_pouch *pouch) {
   pthread_mutex_lock(&pouch->state_metadata_append_registry_mutex);
   batcher = pouch->state_metadata_append_batchers;
   pouch->state_metadata_append_batchers = NULL;
+  memset(pouch->state_metadata_append_batcher_buckets, 0,
+         sizeof(pouch->state_metadata_append_batcher_buckets));
   pthread_mutex_unlock(&pouch->state_metadata_append_registry_mutex);
   for (next = batcher; next != NULL; next = next->next) {
     lc_pouch_state_metadata_append_batcher_stop(next);
