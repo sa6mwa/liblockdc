@@ -10588,11 +10588,16 @@ int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
                         NULL);
   }
   memset(&lease_record, 0, sizeof(lease_record));
-  rc = lc_pouch_read_lease_record(client, namespace_name, req->key,
-                                  &lease_record, error);
+  rc = lc_pouch_lease_record_parse(client, read_result.metadata,
+                                   read_result.metadata_length,
+                                   read_result.version, &lease_record, error);
   if (rc != LC_OK) {
     lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
     return rc;
+  }
+  if (lease_record.found) {
+    lease_record.has_query_hidden = read_result.has_query_hidden;
+    lease_record.query_hidden = read_result.query_hidden;
   }
   out->namespace_name = lc_strdup_local(namespace_name);
   out->key = lc_strdup_local(req->key);
