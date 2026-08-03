@@ -12124,6 +12124,168 @@ static void test_attachment_rejects_missing_timestamp_metadata(void **state) {
   cleanup_root(root);
 }
 
+static void
+test_compaction_preserves_reachable_spans_in_writer_modes(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_sink *sink;
+  lc_pouch_state_write_options object_options;
+  lc_pouch_state_write_result state_write;
+  lc_pouch_state_write_result object_write;
+  lc_pouch_state_write_result staged_write;
+  lc_pouch_state_read_result read_result;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_attach_op attach_op;
+  lc_attach_res attach_res;
+  lc_attachment_get_op get_op;
+  lc_attachment_get_res get_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char endpoint[1024];
+  char payload[64];
+  char root[512];
+  int shared;
+  int written;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_error_init(&error);
+  for (shared = 0; shared < 2; ++shared) {
+    memset(&object_options, 0, sizeof(object_options));
+    memset(&state_write, 0, sizeof(state_write));
+    memset(&object_write, 0, sizeof(object_write));
+    memset(&staged_write, 0, sizeof(staged_write));
+    memset(&read_result, 0, sizeof(read_result));
+    memset(&maintenance_options, 0, sizeof(maintenance_options));
+    memset(&maintenance_result, 0, sizeof(maintenance_result));
+    lc_attach_op_init(&attach_op);
+    memset(&attach_res, 0, sizeof(attach_res));
+    lc_attachment_get_op_init(&get_op);
+    memset(&get_res, 0, sizeof(get_res));
+    make_root(shared ? "compaction-spans-shared" : "compaction-spans-exclusive",
+              root, sizeof(root));
+    cleanup_root(root);
+    written = snprintf(endpoint, sizeof(endpoint),
+                       shared ? "pouch://%s?segment_target_bytes=1&"
+                                "pouch_single_writer=false"
+                              : "pouch://%s?segment_target_bytes=1",
+                       root);
+    assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+    open_pouch_client_endpoint(endpoint, &client, &error);
+    handle = (lc_client_handle *)client;
+    pouch = handle->pouch;
+
+    rc = lc_source_from_memory("state", strlen("state"), &source, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_pouch_state_write(pouch, "refs", "state/current", source, NULL,
+                              &state_write, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_source_close(source);
+    source = NULL;
+
+    object_options.object_record = 1;
+    rc = lc_source_from_memory("object", strlen("object"), &source, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_pouch_state_write(pouch, "refs", "object/current", source,
+                              &object_options, &object_write, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_source_close(source);
+    source = NULL;
+
+    rc = lc_source_from_memory("staged", strlen("staged"), &source, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_pouch_state_stage_write(pouch, "refs", "state/staged", "txn-spans",
+                                    source, NULL, &staged_write, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_source_close(source);
+    source = NULL;
+
+    attach_op.lease.namespace_name = "refs";
+    attach_op.lease.key = "state/attachment";
+    attach_op.name = "payload.txt";
+    attach_op.content_type = "text/plain";
+    rc = lc_source_from_memory("attachment", strlen("attachment"), &source,
+                               &error);
+    assert_int_equal(rc, LC_OK);
+    rc = client->attach(client, &attach_op, source, &attach_res, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_source_close(source);
+    source = NULL;
+    lc_attach_res_cleanup(&attach_res);
+
+    maintenance_options.namespace_name = "refs";
+    maintenance_options.force = 1;
+    rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                  &maintenance_result, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(maintenance_result.compacted);
+    lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+
+    lc_client_close(client);
+    client = NULL;
+    open_pouch_client_endpoint(endpoint, &client, &error);
+    pouch = ((lc_client_handle *)client)->pouch;
+    rc = lc_pouch_state_read(pouch, "refs", "state/current", &read_result,
+                             &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(read_result.found);
+    read_source_to_string(read_result.body, payload, sizeof(payload));
+    assert_string_equal(payload, "state");
+    lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+    rc = lc_pouch_state_read(pouch, "refs", "object/current", &read_result,
+                             &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(read_result.found);
+    read_source_to_string(read_result.body, payload, sizeof(payload));
+    assert_string_equal(payload, "object");
+    lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+    rc = lc_pouch_state_read(pouch, "refs", "state/staged/.staging/txn-spans",
+                             &read_result, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(read_result.found);
+    read_source_to_string(read_result.body, payload, sizeof(payload));
+    assert_string_equal(payload, "staged");
+    lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+    get_op.lease.namespace_name = "refs";
+    get_op.lease.key = "state/attachment";
+    get_op.selector.name = "payload.txt";
+    get_op.public_read = 1;
+    rc = lc_sink_to_memory(&sink, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_int_equal(length, strlen("attachment"));
+    assert_memory_equal(bytes, "attachment", length);
+    lc_sink_close(sink);
+    sink = NULL;
+    lc_attachment_get_res_cleanup(&get_res);
+
+    lc_pouch_state_write_result_cleanup(NULL, &staged_write);
+    lc_pouch_state_write_result_cleanup(NULL, &object_write);
+    lc_pouch_state_write_result_cleanup(NULL, &state_write);
+    lc_client_close(client);
+    client = NULL;
+    cleanup_root(root);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+  }
+  lc_error_cleanup(&error);
+}
+
 static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   lc_client *client;
   lc_source *source;
@@ -23126,6 +23288,8 @@ int main(void) {
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
       cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
       cmocka_unit_test(test_attachment_rejects_missing_timestamp_metadata),
+      cmocka_unit_test(
+          test_compaction_preserves_reachable_spans_in_writer_modes),
       cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
       cmocka_unit_test(test_txn_queue_decision_rejects_newer_delivery_lease),
       cmocka_unit_test(test_client_queue_dequeue_honors_wait_seconds),

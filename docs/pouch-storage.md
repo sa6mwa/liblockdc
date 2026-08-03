@@ -1589,8 +1589,10 @@ Required behavior:
   chunks; `0` leaves compaction unthrottled;
 - detect live state links that point into candidate files and protect those
   files until the links can be rewritten safely;
-- capture current refs from meta, state, and object projections in deterministic
-  key order;
+- capture current refs from metadata, committed state, staged state, object,
+  and attachment projections in deterministic key order; staged and attachment
+  payload spans are live until their durable decision or deletion record makes
+  them unreachable;
 - build a temp snapshot from captured refs using streaming payload readers;
 - copy stored payload bytes where transform descriptors remain valid;
 - fsync the snapshot file;

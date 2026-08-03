@@ -238,8 +238,10 @@ Acceptance:
 
 - [ ] Rotation, compaction, retention, close, abort, and writer handoff do not
   leak descriptors or leave stale cache references.
-- [ ] Compaction cannot remove a span reachable by state, object, staged, or
-  attachment references in either writer mode.
+- [x] Compaction cannot remove a span reachable by state, object, staged, or
+  attachment references in either writer mode. A forced multi-segment
+  compaction/reopen regression reloads every reference class in both exclusive
+  and explicit shared-root modes.
 
 ### 5. Remove The Superseded Hot Path
 
