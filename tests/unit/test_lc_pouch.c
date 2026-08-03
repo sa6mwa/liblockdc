@@ -5360,6 +5360,80 @@ static int pouch_shared_process_dequeue(const char *root, const char *owner,
   return rc;
 }
 
+static int pouch_shared_process_stage_write(const char *root, const char *key,
+                                            const char *value,
+                                            const char *txn_id, int start_fd) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_result write_result;
+  lc_source *source;
+  lc_error error;
+  char start;
+  int rc;
+
+  pouch = NULL;
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_error_init(&error);
+  rc = read(start_fd, &start, 1U) == 1 ? LC_OK : LC_ERR_TRANSPORT;
+  (void)close(start_fd);
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  if (rc == LC_OK) {
+    rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_source_from_memory(value, strlen(value), &source, &error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_stage_write(pouch, "default", key, txn_id, source, NULL,
+                                    &write_result, &error);
+  }
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  if (pouch != NULL) {
+    lc_pouch_close(pouch);
+  }
+  lc_error_cleanup(&error);
+  return rc;
+}
+
+static int pouch_shared_process_commit_transaction(const char *root,
+                                                   const char *txn_id) {
+  lc_client *client;
+  lc_txn_participant participants[2];
+  lc_txn_decision_req request;
+  lc_txn_decision_res result;
+  lc_error error;
+  int rc;
+
+  client = NULL;
+  memset(participants, 0, sizeof(participants));
+  lc_txn_decision_req_init(&request);
+  memset(&result, 0, sizeof(result));
+  lc_error_init(&error);
+  participants[0].namespace_name = "default";
+  participants[0].key = "state/process-txn-first";
+  participants[1].namespace_name = "default";
+  participants[1].key = "state/process-txn-second";
+  request.txn_id = txn_id;
+  request.participants = participants;
+  request.participant_count = 2U;
+  rc = pouch_shared_process_open_client(root, &client, &error);
+  if (rc == LC_OK) {
+    rc = client->txn_commit(client, &request, &result, &error);
+  }
+  lc_txn_decision_res_cleanup(&result);
+  if (client != NULL) {
+    lc_client_close(client);
+  }
+  lc_error_cleanup(&error);
+  return rc;
+}
+
 static void test_process_writer_modes_and_shared_writes(void **state) {
   lc_pouch *reader;
   lc_pouch_state_read_result first_read;
@@ -5720,6 +5794,102 @@ static void test_shared_process_queue_delivers_once(void **state) {
   assert_int_equal(WEXITSTATUS(status), 0);
 
   cleanup_root(root);
+}
+
+static void test_shared_process_transaction_stages_and_commits(void **state) {
+  lc_pouch *reader;
+  lc_pouch_state_read_result first_read;
+  lc_pouch_state_read_result second_read;
+  lc_error error;
+  char body[32];
+  char root[512];
+  int first_start[2];
+  int second_start[2];
+  pid_t first_pid;
+  pid_t second_pid;
+  pid_t commit_pid;
+  int status;
+  int rc;
+
+  (void)state;
+  reader = NULL;
+  first_pid = -1;
+  second_pid = -1;
+  commit_pid = -1;
+  memset(&first_read, 0, sizeof(first_read));
+  memset(&second_read, 0, sizeof(second_read));
+  lc_error_init(&error);
+  make_root("process-shared-transaction", root, sizeof(root));
+  cleanup_root(root);
+
+  assert_int_equal(pipe(first_start), 0);
+  first_pid = fork();
+  assert_true(first_pid >= 0);
+  if (first_pid == 0) {
+    (void)close(first_start[1]);
+    _exit(pouch_shared_process_stage_write(root, "state/process-txn-first",
+                                           "first", "process-txn",
+                                           first_start[0]) == LC_OK
+              ? 0
+              : 1);
+  }
+  assert_int_equal(pipe(second_start), 0);
+  second_pid = fork();
+  assert_true(second_pid >= 0);
+  if (second_pid == 0) {
+    (void)close(first_start[0]);
+    (void)close(first_start[1]);
+    (void)close(second_start[1]);
+    _exit(pouch_shared_process_stage_write(root, "state/process-txn-second",
+                                           "second", "process-txn",
+                                           second_start[0]) == LC_OK
+              ? 0
+              : 1);
+  }
+  (void)close(first_start[0]);
+  (void)close(second_start[0]);
+  assert_int_equal(write(first_start[1], "1", 1U), 1);
+  assert_int_equal(write(second_start[1], "1", 1U), 1);
+  (void)close(first_start[1]);
+  (void)close(second_start[1]);
+  assert_int_equal(waitpid(first_pid, &status, 0), first_pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+  assert_int_equal(waitpid(second_pid, &status, 0), second_pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+
+  commit_pid = fork();
+  assert_true(commit_pid >= 0);
+  if (commit_pid == 0) {
+    _exit(pouch_shared_process_commit_transaction(root, "process-txn") == LC_OK
+              ? 0
+              : 1);
+  }
+  assert_int_equal(waitpid(commit_pid, &status, 0), commit_pid);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+
+  rc = lc_pouch_open(root, NULL, NULL, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(reader, "default", "state/process-txn-first",
+                           &first_read, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(first_read.found);
+  read_source_to_string(first_read.body, body, sizeof(body));
+  assert_string_equal(body, "first");
+  rc = lc_pouch_state_read(reader, "default", "state/process-txn-second",
+                           &second_read, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(second_read.found);
+  read_source_to_string(second_read.body, body, sizeof(body));
+  assert_string_equal(body, "second");
+
+  lc_pouch_state_read_result_cleanup(NULL, &second_read);
+  lc_pouch_state_read_result_cleanup(NULL, &first_read);
+  lc_pouch_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
 }
 
 static void open_pouch_client(const char *root, lc_client **out,
@@ -21488,6 +21658,7 @@ int main(void) {
       cmocka_unit_test(test_shared_process_writers_rotate_segments),
       cmocka_unit_test(test_shared_process_lease_conflict_and_handoff),
       cmocka_unit_test(test_shared_process_queue_delivers_once),
+      cmocka_unit_test(test_shared_process_transaction_stages_and_commits),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
       cmocka_unit_test(test_lease_private_reads_reject_stale_handle),
       cmocka_unit_test(test_pouch_lease_claim_and_credentials_are_durable),
