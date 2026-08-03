@@ -41,14 +41,18 @@ exported Go client and full-form LQL expressions. The pouch side measures the
 C query path directly through `selector_lql` and reports C-side query time so
 the cgo bridge is excluded from pouch latency metrics.
 
-`make benchmark-pouch-go-production` runs the production workload for five
+`make benchmark-pouch-go-production` runs the production workload for six
 explicit variants by default: `ProductionPouchPT`, `ProductionPouchCrypto`,
 `ProductionPouchCompression`, `ProductionPouchCryptoCompression`, and
-`ProductionLockdDiskNoCrypto`. Pouch crypto is enabled through the public
-`pouch_crypto_key` endpoint option; the Go lockd disk server is started with
-`--disable-storage-encryption`. The production target reports split flush
-metrics so index flush work can be attributed to intermediate write-churn
-flushes, final flush, no-op flush, and post-reopen flush.
+`ProductionLockdDiskNoCrypto`, plus `ProductionLockdDiskCrypto`. Pouch crypto
+is enabled through the public `pouch_crypto_key` endpoint option; the Go disk
+variants run with storage encryption disabled and enabled respectively. The
+parity gate compares plaintext and crypto runs only to their matching Go disk
+configuration. Go disk has no matching compression mode, so compression runs
+remain reported Pouch diagnostics rather than mismatched parity inputs. The
+production target reports split flush metrics so index flush work can be
+attributed to intermediate write-churn flushes, final flush, no-op flush, and
+post-reopen flush.
 Attachment output separates `attachment-write-ns/op` from
 `attachment-read-ns/op`; the legacy combined `attachment-ns/op` remains a
 diagnostic only.

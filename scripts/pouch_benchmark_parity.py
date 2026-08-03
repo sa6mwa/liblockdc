@@ -4,7 +4,7 @@ import sys
 
 
 BENCH_RE = re.compile(
-    r"^(BenchmarkProduction(?:PouchPT|PouchCrypto|PouchCompression|PouchCryptoCompression|LockdDiskNoCrypto)/\S+?)(?:-\d+)?\s+"
+    r"^(BenchmarkProduction(?:PouchPT|PouchCrypto|PouchCompression|PouchCryptoCompression|LockdDiskNoCrypto|LockdDiskCrypto)/\S+?)(?:-\d+)?\s+"
 )
 
 # These are public end-to-end operations whose Pouch and Go disk measurements
@@ -55,6 +55,7 @@ def parse(path):
         "PouchCompression": {},
         "PouchCryptoCompression": {},
         "LockdDiskNoCrypto": {},
+        "LockdDiskCrypto": {},
     }
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
@@ -98,15 +99,17 @@ def main(argv):
         return 2
     variants = parse(argv[1])
     failures = []
-    disk = variants["LockdDiskNoCrypto"]
-    if not disk:
-        failures.append("missing LockdDiskNoCrypto production benchmark results")
-    for pouch_variant in (
-        "PouchPT",
-        "PouchCrypto",
-        "PouchCompression",
-        "PouchCryptoCompression",
-    ):
+    # Go disk has no compression mode. Keep those Pouch variants in the
+    # production report, but gate only transform-equivalent comparisons.
+    comparisons = (
+        ("PouchPT", "LockdDiskNoCrypto"),
+        ("PouchCrypto", "LockdDiskCrypto"),
+    )
+    for pouch_variant, disk_variant in comparisons:
+        disk = variants[disk_variant]
+        if not disk:
+            failures.append("missing %s production benchmark results" % disk_variant)
+            continue
         if not variants[pouch_variant]:
             failures.append("missing %s production benchmark results" % pouch_variant)
             continue
@@ -119,8 +122,8 @@ def main(argv):
                 disk_value = disk_metrics.get(metric)
                 if disk_value is None:
                     failures.append(
-                        "LockdDiskNoCrypto/%s missing core metric %s"
-                        % (scenario, metric)
+                        "%s/%s missing core metric %s"
+                        % (disk_variant, scenario, metric)
                     )
                     continue
                 pouch_value = pouch_metrics.get(metric)

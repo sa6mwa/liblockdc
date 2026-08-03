@@ -1530,9 +1530,10 @@ Production benchmarks compare the following modes separately:
 - Pouch crypto;
 - Pouch compression where relevant;
 - Pouch crypto+compression where relevant;
-- Go lockd disk using the declared scenario baseline. When a matching Go
-  transform configuration is unavailable, that limitation is recorded with the
-  result rather than hidden by comparing an unrelated diagnostic phase.
+- Go lockd disk plaintext for Pouch plaintext, and Go lockd disk crypto for
+  Pouch crypto. Go disk has no matching compression mode, so Pouch compression
+  and crypto+compression are reported separately and are not cross-engine
+  parity-gated against a mismatched transform configuration.
 
 Benchmarks must include realistic and abusive workloads:
 
@@ -1571,10 +1572,11 @@ Pouch-only C timing remain diagnostics, not independent cross-engine parity
 metrics, because Go disk eagerly restores state at server startup while Pouch
 can recover lazily. Aggregate timing must not hide a slower core operation.
 
-Acceptance target: exclusive Pouch must materially outperform Go lockd disk on
-every gated core metric in each supported Pouch transform configuration. The
+Acceptance target: exclusive Pouch must materially outperform the matching Go
+lockd disk plaintext or crypto configuration on every gated core metric. The
 numeric release budget must be set from a stable baseline before this cutover
-is declared complete; strict-but-undefined "faster" is insufficient. Shared
+is declared complete; strict-but-undefined "faster" is insufficient. Pouch
+compression variants retain their own reported performance evidence. Shared
 root has separate correctness, contention, handoff, and bounded-performance
 coverage and does not dilute the exclusive release target.
 

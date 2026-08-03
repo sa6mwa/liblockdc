@@ -609,10 +609,10 @@ func warmLockdDiskProductionQuery(b *testing.B, h *lockdDiskHarness, rows int64,
 	}
 }
 
-func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes, segmentTargetBytes int64) productionMetrics {
+func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes, segmentTargetBytes int64, cryptoEnabled bool) productionMetrics {
 	b.Helper()
 
-	h := startLockdDiskHarnessWithSegmentTarget(b, segmentTargetBytes)
+	h := startLockdDiskHarnessWithOptions(b, cryptoEnabled, segmentTargetBytes)
 	metrics := productionMetrics{}
 	for row := int64(0); row < rows; row++ {
 		phaseStart := time.Now()
@@ -955,60 +955,78 @@ func BenchmarkProductionPouchCryptoCompression(b *testing.B) {
 	}
 }
 
+func reportLockdDiskProductionMetrics(b *testing.B, metrics productionMetrics) {
+	b.Helper()
+	b.ReportMetric(float64(metrics.rows), "rows/op")
+	b.ReportMetric(float64(metrics.writes), "writes/op")
+	b.ReportMetric(float64(metrics.reads), "reads/op")
+	b.ReportMetric(float64(metrics.attachments), "attachments/op")
+	b.ReportMetric(float64(metrics.queueMessages), "queue-msgs/op")
+	b.ReportMetric(float64(metrics.staleFailures), "stale-failures/op")
+	b.ReportMetric(float64(metrics.segments), "segments/op")
+	b.ReportMetric(float64(metrics.segmentBytes), "segment-target-bytes/op")
+	b.ReportMetric(float64(metrics.bytes), "bytes/op")
+
+	b.ReportMetric(float64(metrics.acquireNS), "acquire-ns/op")
+	if metrics.rows > 0 {
+		b.ReportMetric(float64(metrics.acquireNS)/float64(metrics.rows), "acquire-one-ns/op")
+	}
+	b.ReportMetric(float64(metrics.updateNS), "update-ns/op")
+	if metrics.writes > 0 {
+		b.ReportMetric(float64(metrics.updateNS)/float64(metrics.writes), "update-one-ns/op")
+	}
+	b.ReportMetric(float64(metrics.releaseNS), "release-ns/op")
+	if metrics.rows > 0 {
+		b.ReportMetric(float64(metrics.releaseNS)/float64(metrics.rows), "release-one-ns/op")
+	}
+	b.ReportMetric(float64(metrics.staleNS), "stale-ns/op")
+	b.ReportMetric(float64(metrics.attachmentNS), "attachment-ns/op")
+	b.ReportMetric(float64(metrics.attachmentWriteNS), "attachment-write-ns/op")
+	b.ReportMetric(float64(metrics.attachmentReadNS), "attachment-read-ns/op")
+	b.ReportMetric(float64(metrics.queueNS), "queue-ns/op")
+	if metrics.queueMessages > 0 {
+		b.ReportMetric(float64(metrics.queueNS)/float64(metrics.queueMessages), "queue-one-ns/op")
+	}
+	b.ReportMetric(float64(metrics.flushNS), "flush-ns/op")
+	b.ReportMetric(float64(metrics.flushIntermediateNS), "flush-intermediate-ns/op")
+	b.ReportMetric(float64(metrics.flushFinalNS), "flush-final-ns/op")
+	b.ReportMetric(float64(metrics.flushNoopNS), "flush-noop-ns/op")
+	b.ReportMetric(float64(metrics.flushReopenNS), "flush-reopen-ns/op")
+	b.ReportMetric(float64(metrics.reopenNS), "reopen-ns/op")
+	b.ReportMetric(float64(metrics.restartRecoveryNS), "restart-recovery-ns/op")
+	b.ReportMetric(float64(metrics.getPublicNS), "get-public-ns/op")
+	b.ReportMetric(float64(metrics.getLeaseNS), "get-lease-ns/op")
+	b.ReportMetric(float64(metrics.indexQueryKeysNS), "index-query-keys-ns/op")
+	b.ReportMetric(float64(metrics.indexQueryKeysWarmNS), "index-query-keys-warm-ns/op")
+	b.ReportMetric(float64(metrics.indexQueryDocsNS), "index-query-docs-ns/op")
+	b.ReportMetric(float64(metrics.scanQueryKeysNS), "scan-query-keys-ns/op")
+	b.ReportMetric(float64(metrics.scanQueryDocsNS), "scan-query-docs-ns/op")
+	b.ReportMetric(float64(metrics.fullTextIndexKeysNS), "full-text-index-keys-ns/op")
+	b.ReportMetric(float64(metrics.fullTextScanDocsNS), "full-text-scan-docs-ns/op")
+}
+
 func BenchmarkProductionLockdDiskNoCrypto(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
 			var metrics productionMetrics
 			for i := 0; i < b.N; i++ {
-				metrics = runLockdDiskProduction(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes)
+				metrics = runLockdDiskProduction(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, false)
 			}
-			b.ReportMetric(float64(metrics.rows), "rows/op")
-			b.ReportMetric(float64(metrics.writes), "writes/op")
-			b.ReportMetric(float64(metrics.reads), "reads/op")
-			b.ReportMetric(float64(metrics.attachments), "attachments/op")
-			b.ReportMetric(float64(metrics.queueMessages), "queue-msgs/op")
-			b.ReportMetric(float64(metrics.staleFailures), "stale-failures/op")
-			b.ReportMetric(float64(metrics.segments), "segments/op")
-			b.ReportMetric(float64(metrics.segmentBytes), "segment-target-bytes/op")
-			b.ReportMetric(float64(metrics.bytes), "bytes/op")
+			reportLockdDiskProductionMetrics(b, metrics)
+		})
+	}
+}
 
-			b.ReportMetric(float64(metrics.acquireNS), "acquire-ns/op")
-			if metrics.rows > 0 {
-				b.ReportMetric(float64(metrics.acquireNS)/float64(metrics.rows), "acquire-one-ns/op")
+func BenchmarkProductionLockdDiskCrypto(b *testing.B) {
+	for _, scenario := range productionScenarios() {
+		scenario := scenario
+		b.Run(productionBenchName(scenario), func(b *testing.B) {
+			var metrics productionMetrics
+			for i := 0; i < b.N; i++ {
+				metrics = runLockdDiskProduction(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, true)
 			}
-			b.ReportMetric(float64(metrics.updateNS), "update-ns/op")
-			if metrics.writes > 0 {
-				b.ReportMetric(float64(metrics.updateNS)/float64(metrics.writes), "update-one-ns/op")
-			}
-			b.ReportMetric(float64(metrics.releaseNS), "release-ns/op")
-			if metrics.rows > 0 {
-				b.ReportMetric(float64(metrics.releaseNS)/float64(metrics.rows), "release-one-ns/op")
-			}
-			b.ReportMetric(float64(metrics.staleNS), "stale-ns/op")
-			b.ReportMetric(float64(metrics.attachmentNS), "attachment-ns/op")
-			b.ReportMetric(float64(metrics.attachmentWriteNS), "attachment-write-ns/op")
-			b.ReportMetric(float64(metrics.attachmentReadNS), "attachment-read-ns/op")
-			b.ReportMetric(float64(metrics.queueNS), "queue-ns/op")
-			if metrics.queueMessages > 0 {
-				b.ReportMetric(float64(metrics.queueNS)/float64(metrics.queueMessages), "queue-one-ns/op")
-			}
-			b.ReportMetric(float64(metrics.flushNS), "flush-ns/op")
-			b.ReportMetric(float64(metrics.flushIntermediateNS), "flush-intermediate-ns/op")
-			b.ReportMetric(float64(metrics.flushFinalNS), "flush-final-ns/op")
-			b.ReportMetric(float64(metrics.flushNoopNS), "flush-noop-ns/op")
-			b.ReportMetric(float64(metrics.flushReopenNS), "flush-reopen-ns/op")
-			b.ReportMetric(float64(metrics.reopenNS), "reopen-ns/op")
-			b.ReportMetric(float64(metrics.restartRecoveryNS), "restart-recovery-ns/op")
-			b.ReportMetric(float64(metrics.getPublicNS), "get-public-ns/op")
-			b.ReportMetric(float64(metrics.getLeaseNS), "get-lease-ns/op")
-			b.ReportMetric(float64(metrics.indexQueryKeysNS), "index-query-keys-ns/op")
-			b.ReportMetric(float64(metrics.indexQueryKeysWarmNS), "index-query-keys-warm-ns/op")
-			b.ReportMetric(float64(metrics.indexQueryDocsNS), "index-query-docs-ns/op")
-			b.ReportMetric(float64(metrics.scanQueryKeysNS), "scan-query-keys-ns/op")
-			b.ReportMetric(float64(metrics.scanQueryDocsNS), "scan-query-docs-ns/op")
-			b.ReportMetric(float64(metrics.fullTextIndexKeysNS), "full-text-index-keys-ns/op")
-			b.ReportMetric(float64(metrics.fullTextScanDocsNS), "full-text-scan-docs-ns/op")
+			reportLockdDiskProductionMetrics(b, metrics)
 		})
 	}
 }
