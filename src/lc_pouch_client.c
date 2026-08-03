@@ -193,6 +193,17 @@ typedef struct lc_pouch_queue_lease_acquire_context {
   int write_prepared;
 } lc_pouch_queue_lease_acquire_context;
 
+typedef struct lc_pouch_lease_replace_context {
+  lc_client_handle *client;
+  const lc_lease_ref *lease;
+  const char *namespace_name;
+  const char *key;
+  lc_pouch_unix_seconds expires_at_unix;
+  int clear_lease;
+  lc_pouch_txn_buffer lease_metadata;
+  lc_pouch_state_write_result write_result;
+} lc_pouch_lease_replace_context;
+
 typedef struct lc_pouch_tc_endpoint_list {
   char **items;
   size_t count;
@@ -7592,6 +7603,132 @@ static int lc_pouch_validate_lease_record(lc_client_handle *client,
   return rc;
 }
 
+/* Replace one verified lease while the exact target-key mutation authority is
+ * held. Queue delivery leases use this instead of a stale read followed by a
+ * later metadata write, which is unsafe when shared roots interleave writers.
+ */
+static int lc_pouch_replace_lease_prepare_metadata(
+    const lc_pouch_state_metadata_view *state_view, void *context,
+    lc_pouch_state_write_options *options, int *apply, lc_error *error) {
+  lc_pouch_lease_replace_context *ctx;
+  lc_pouch_lease_record lease_record;
+  const char *lease_id;
+  const char *txn_id;
+  lc_pouch_unix_seconds expires_at_unix;
+  int rc;
+
+  ctx = (lc_pouch_lease_replace_context *)context;
+  if (ctx == NULL || ctx->client == NULL || ctx->lease == NULL ||
+      ctx->namespace_name == NULL || ctx->key == NULL || state_view == NULL ||
+      options == NULL || apply == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease replacement requires context", NULL, NULL,
+                        "pouch");
+  }
+  memset(&lease_record, 0, sizeof(lease_record));
+  memset(options, 0, sizeof(*options));
+  *apply = 1;
+  rc = lc_pouch_validate_lease_metadata_view(ctx->client, ctx->lease,
+                                             ctx->namespace_name, ctx->key,
+                                             state_view, &lease_record, error);
+  lease_id = ctx->clear_lease ? "" : lease_record.lease_id;
+  txn_id = ctx->clear_lease ? "" : lease_record.txn_id;
+  expires_at_unix = ctx->clear_lease ? 0L : ctx->expires_at_unix;
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_bytes(
+        &ctx->lease_metadata, LC_POUCH_LEASE_RECORD_MAGIC,
+        strlen(LC_POUCH_LEASE_RECORD_MAGIC), error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata,
+                                           ctx->namespace_name, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata, ctx->key,
+                                           error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata,
+                                           lease_record.owner, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata, lease_id,
+                                           error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_string(&ctx->lease_metadata, txn_id, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_i64(
+        &ctx->lease_metadata, (int64_t)lease_record.fencing_token, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_buffer_append_i64(&ctx->lease_metadata, expires_at_unix,
+                                        error);
+  }
+  if (rc == LC_OK) {
+    options->content_type = LC_POUCH_LEASE_CONTENT_TYPE;
+    options->has_expected_version = lease_record.version > 0UL;
+    options->expected_version = lease_record.version;
+    options->has_metadata = 1;
+    options->metadata = (const unsigned char *)ctx->lease_metadata.bytes;
+    options->metadata_length = ctx->lease_metadata.length;
+  }
+  lc_pouch_lease_record_cleanup(&lease_record);
+  return rc;
+}
+
+static int lc_pouch_replace_lease_locked(void *context, lc_error *error) {
+  lc_pouch_lease_replace_context *ctx;
+
+  ctx = (lc_pouch_lease_replace_context *)context;
+  if (ctx == NULL || ctx->client == NULL || ctx->lease == NULL ||
+      ctx->namespace_name == NULL || ctx->key == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease replacement lock requires context", NULL,
+                        NULL, "pouch");
+  }
+  return lc_pouch_state_update_metadata_prepared_locked(
+      ctx->client->pouch, ctx->namespace_name, ctx->key,
+      lc_pouch_replace_lease_prepare_metadata, ctx, &ctx->write_result, error);
+}
+
+static int lc_pouch_replace_lease_record(
+    lc_client_handle *client, const lc_lease_ref *lease,
+    const char *namespace_name, const char *key,
+    lc_pouch_unix_seconds expires_at_unix, int clear_lease,
+    lc_pouch_state_write_result *out, lc_error *error) {
+  lc_pouch_lease_replace_context replace_context;
+  int rc;
+
+  if (client == NULL || lease == NULL || namespace_name == NULL ||
+      key == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease replacement requires inputs", NULL, NULL,
+                        "pouch");
+  }
+  memset(out, 0, sizeof(*out));
+  memset(&replace_context, 0, sizeof(replace_context));
+  replace_context.client = client;
+  replace_context.lease = lease;
+  replace_context.namespace_name = namespace_name;
+  replace_context.key = key;
+  replace_context.expires_at_unix = expires_at_unix;
+  replace_context.clear_lease = clear_lease;
+  rc = lc_pouch_state_with_key_lock(client->pouch, namespace_name, key,
+                                    lc_pouch_replace_lease_locked,
+                                    &replace_context, error);
+  if (rc == LC_OK) {
+    *out = replace_context.write_result;
+    memset(&replace_context.write_result, 0,
+           sizeof(replace_context.write_result));
+  }
+  lc_pouch_txn_buffer_cleanup(&replace_context.lease_metadata);
+  lc_pouch_state_write_result_cleanup(&client->allocator,
+                                      &replace_context.write_result);
+  return rc;
+}
+
 static int lc_pouch_lease_precondition_check(void *context, lc_error *error) {
   lc_pouch_lease_precondition *precondition;
 
@@ -7784,7 +7921,8 @@ lc_pouch_queue_message_lease_key_from_ref(const lc_message_ref *message,
 static int lc_pouch_queue_clear_message_lease(lc_client_handle *client,
                                               const lc_message_ref *message,
                                               lc_error *error) {
-  lc_pouch_lease_record lease_record;
+  lc_lease_ref lease_ref;
+  lc_pouch_state_write_result write_result;
   char *message_lease_key;
   int rc;
 
@@ -7797,15 +7935,17 @@ static int lc_pouch_queue_clear_message_lease(lc_client_handle *client,
   if (message_lease_key == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  memset(&lease_record, 0, sizeof(lease_record));
-  rc = lc_pouch_read_lease_record(client, message->namespace_name,
-                                  message_lease_key, &lease_record, error);
-  if (rc == LC_OK && lease_record.found) {
-    rc = lc_pouch_write_lease_tombstone(
-        client, message->namespace_name, message_lease_key, lease_record.owner,
-        lease_record.fencing_token, lease_record.version, error);
-  }
-  lc_pouch_lease_record_cleanup(&lease_record);
+  memset(&lease_ref, 0, sizeof(lease_ref));
+  memset(&write_result, 0, sizeof(write_result));
+  lease_ref.namespace_name = message->namespace_name;
+  lease_ref.key = message_lease_key;
+  lease_ref.lease_id = message->lease_id;
+  lease_ref.txn_id = message->txn_id;
+  lease_ref.fencing_token = message->fencing_token;
+  rc = lc_pouch_replace_lease_record(client, &lease_ref,
+                                     message->namespace_name, message_lease_key,
+                                     0L, 1, &write_result, error);
+  lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
   lc_free_with_allocator(NULL, message_lease_key);
   return rc;
 }
@@ -7813,7 +7953,7 @@ static int lc_pouch_queue_clear_message_lease(lc_client_handle *client,
 static int lc_pouch_queue_extend_message_lease(
     lc_client_handle *client, const lc_message_ref *message,
     lc_pouch_unix_seconds lease_expires_at_unix, lc_error *error) {
-  lc_pouch_lease_record lease_record;
+  lc_lease_ref lease_ref;
   lc_pouch_state_write_result write_result;
   char *message_lease_key;
   int rc;
@@ -7822,25 +7962,17 @@ static int lc_pouch_queue_extend_message_lease(
   if (message_lease_key == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  memset(&lease_record, 0, sizeof(lease_record));
+  memset(&lease_ref, 0, sizeof(lease_ref));
   memset(&write_result, 0, sizeof(write_result));
-  rc = lc_pouch_read_lease_record(client, message->namespace_name,
-                                  message_lease_key, &lease_record, error);
-  if (rc == LC_OK && (!lease_record.found ||
-                      strcmp(lease_record.lease_id, message->lease_id) != 0 ||
-                      lease_record.fencing_token != message->fencing_token)) {
-    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch queue message lease validation failed", NULL, NULL,
-                      "pouch");
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_write_lease_record(
-        client, message->namespace_name, message_lease_key, lease_record.owner,
-        lease_record.lease_id, lease_record.txn_id, lease_record.fencing_token,
-        lease_expires_at_unix, lease_record.version, &write_result, error);
-  }
+  lease_ref.namespace_name = message->namespace_name;
+  lease_ref.key = message_lease_key;
+  lease_ref.lease_id = message->lease_id;
+  lease_ref.txn_id = message->txn_id;
+  lease_ref.fencing_token = message->fencing_token;
+  rc = lc_pouch_replace_lease_record(
+      client, &lease_ref, message->namespace_name, message_lease_key,
+      lease_expires_at_unix, 0, &write_result, error);
   lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
-  lc_pouch_lease_record_cleanup(&lease_record);
   lc_free_with_allocator(NULL, message_lease_key);
   return rc;
 }
@@ -9021,9 +9153,13 @@ static int lc_pouch_queue_release_state_lease(lc_client_handle *client,
                                        &discarded, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_write_lease_tombstone(
-        client, message->namespace_name, state_key, lease_record.owner,
-        lease_record.fencing_token, lease_record.version, error);
+    lc_pouch_state_write_result write_result;
+
+    memset(&write_result, 0, sizeof(write_result));
+    rc = lc_pouch_replace_lease_record(client, &lease_ref,
+                                       message->namespace_name, state_key, 0L,
+                                       1, &write_result, error);
+    lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
   }
   lc_pouch_lease_record_cleanup(&lease_record);
   lc_free_with_allocator(NULL, state_object_key);
@@ -9036,7 +9172,6 @@ static int lc_pouch_queue_extend_state_lease(
     lc_pouch_unix_seconds lease_expires_at_unix,
     lc_pouch_unix_seconds *state_lease_expires_at_unix, lc_error *error) {
   lc_lease_ref lease_ref;
-  lc_pouch_lease_record lease_record;
   lc_pouch_state_write_result write_result;
   char *state_key;
   int rc;
@@ -9051,23 +9186,15 @@ static int lc_pouch_queue_extend_state_lease(
   if (state_key == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  memset(&lease_record, 0, sizeof(lease_record));
   memset(&write_result, 0, sizeof(write_result));
   lc_pouch_queue_state_lease_ref_from_message(message, state_key, &lease_ref);
-  rc = lc_pouch_validate_lease_record(client, &lease_ref,
-                                      message->namespace_name, state_key,
-                                      &lease_record, error);
-  if (rc == LC_OK) {
-    rc = lc_pouch_write_lease_record(
-        client, message->namespace_name, state_key, lease_record.owner,
-        lease_record.lease_id, lease_record.txn_id, lease_record.fencing_token,
-        lease_expires_at_unix, lease_record.version, &write_result, error);
-  }
+  rc = lc_pouch_replace_lease_record(
+      client, &lease_ref, message->namespace_name, state_key,
+      lease_expires_at_unix, 0, &write_result, error);
   if (rc == LC_OK && state_lease_expires_at_unix != NULL) {
     *state_lease_expires_at_unix = lease_expires_at_unix;
   }
   lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
-  lc_pouch_lease_record_cleanup(&lease_record);
   lc_free_with_allocator(NULL, state_key);
   return rc;
 }
