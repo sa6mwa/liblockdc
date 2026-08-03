@@ -7851,7 +7851,7 @@ static int pouch_child_public_update(const char *root, const char *key,
   client = NULL;
   memset(&update_res, 0, sizeof(update_res));
   lc_error_init(&error);
-  open_pouch_client(root, &client, &error);
+  open_pouch_client_shared(root, &client, &error);
   write_client_state(client, key, json, NULL, 0L, 0, &update_res, &error);
   lc_update_res_cleanup(&update_res);
   lc_client_close(client);
@@ -12575,9 +12575,12 @@ static void test_client_update_waits_for_namespace_mutation_lock(void **state) {
   make_root("client-mutation-lock", root, sizeof(root));
   cleanup_root(root);
 
-  /* The child opens Pouch after fork, so keep the parent single-threaded. */
+  /* The child opens Pouch after fork, so keep the parent single-threaded.
+   * Both handles use shared mode because this test exercises write.lock. */
   assert_true(snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?background_compaction=false", root) > 0);
+                       "pouch://%s?background_compaction=false&"
+                       "pouch_single_writer=false",
+                       root) > 0);
   open_pouch_client_endpoint(endpoint, &client, &error);
   write_client_state(client, "state/locked", "{\"value\":1}", NULL, 0L, 0,
                      &update_res, &error);
