@@ -19058,6 +19058,104 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_txn_decision_merges_durable_participants(void **state) {
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_txn_participant participants[2];
+  lc_txn_decision_req prepare_req;
+  lc_txn_decision_req commit_req;
+  lc_txn_decision_res decision_res;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char body[64];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  memset(participants, 0, sizeof(participants));
+  lc_txn_decision_req_init(&prepare_req);
+  lc_txn_decision_req_init(&commit_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("txn-merge-participants", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  pouch = ((lc_client_handle *)client)->pouch;
+  participants[0].namespace_name = "default";
+  participants[0].key = "state/txn-merge-first";
+  participants[0].backend_hash = "pouch-state";
+  participants[1].namespace_name = "default";
+  participants[1].key = "state/txn-merge-second";
+  participants[1].backend_hash = "pouch-state";
+  rc = lc_source_from_memory("first", strlen("first"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, participants[0].namespace_name,
+                                  participants[0].key, "txn-merge", source,
+                                  NULL, &write_result, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_source_from_memory("second", strlen("second"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, participants[1].namespace_name,
+                                  participants[1].key, "txn-merge", source,
+                                  NULL, &write_result, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  prepare_req.txn_id = "txn-merge";
+  prepare_req.participants = &participants[0];
+  prepare_req.participant_count = 1U;
+  prepare_req.expires_at_unix = 100L;
+  prepare_req.tc_term = 3U;
+  prepare_req.target_backend_hash = "pouch-state";
+  rc = client->txn_prepare(client, &prepare_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "prepare");
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  commit_req.txn_id = "txn-merge";
+  commit_req.participants = &participants[1];
+  commit_req.participant_count = 1U;
+  commit_req.expires_at_unix = 10L;
+  commit_req.tc_term = 3U;
+  commit_req.target_backend_hash = "pouch-state";
+  rc = client->txn_commit(client, &commit_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "commit");
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  rc = lc_pouch_state_read(pouch, participants[0].namespace_name,
+                           participants[0].key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, body, sizeof(body));
+  assert_string_equal(body, "first");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(pouch, participants[1].namespace_name,
+                           participants[1].key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, body, sizeof(body));
+  assert_string_equal(body, "second");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   lc_client *client;
   lc_source *source;
@@ -20291,6 +20389,7 @@ int main(void) {
           test_flush_index_rebuilds_incomplete_summary_after_document_fix),
       cmocka_unit_test(test_txn_decisions_persist_participant_records),
       cmocka_unit_test(test_txn_replay_applies_durable_decision),
+      cmocka_unit_test(test_txn_decision_merges_durable_participants),
       cmocka_unit_test(test_txn_decisions_apply_attachment_side_effects),
       cmocka_unit_test(test_txn_recovery_applies_attachment_side_effects),
       cmocka_unit_test(

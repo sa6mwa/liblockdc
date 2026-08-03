@@ -508,6 +508,13 @@ mismatches during replay or startup recovery mean that a newer delivery has
 superseded the old participant: Pouch skips only that participant and does not
 delete or clear the newer queue state.
 
+`txn_prepare`, `txn_commit`, and `txn_rollback` read and update the transaction
+control record while holding that record's exact key mutation authority. Each
+request merges new participants into the durable participant set, retains the
+later expiry, requires a monotonic TC term, and applies the resulting durable
+decision. A direct decision must never replace an already-prepared participant
+list with the smaller list supplied by a later request.
+
 ### Compaction
 
 Go disk compaction captures live refs from per-namespace projections, excludes

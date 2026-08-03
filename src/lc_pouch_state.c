@@ -9649,11 +9649,11 @@ int lc_pouch_state_recover_staged_decisions(lc_pouch *pouch,
   return rc;
 }
 
-static int
-lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
-                            const char *key, lc_source *body,
-                            const lc_pouch_state_write_options *options,
-                            lc_pouch_state_write_result *out, lc_error *error) {
+int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
+                                const char *key, lc_source *body,
+                                const lc_pouch_state_write_options *options,
+                                lc_pouch_state_write_result *out,
+                                lc_error *error) {
   lc_pouch_state_entry current;
   lc_pouch_state_cache_namespace *cache;
   lc_pouch_namespace_manifest manifest;

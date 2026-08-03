@@ -240,6 +240,12 @@ int lc_pouch_state_read_metadata_locked(lc_pouch *pouch,
 int lc_pouch_state_read_locked(lc_pouch *pouch, const char *namespace_name,
                                const char *key, lc_pouch_state_read_result *out,
                                lc_error *error);
+/** Writes a full state record while the caller holds the key mutation lock. */
+int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
+                                const char *key, lc_source *body,
+                                const lc_pouch_state_write_options *options,
+                                lc_pouch_state_write_result *out,
+                                lc_error *error);
 /**
  * Reads metadata while the caller holds the key mutation lock. On a current
  * exclusive-writer projection, `out` borrows its fields directly from that
