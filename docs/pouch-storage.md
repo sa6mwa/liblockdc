@@ -1289,8 +1289,10 @@ Required behavior:
 Public state scans must also exclude internal user-namespace key prefixes such
 as `q/`, `state/<key>/attachments/`, `state/<key>/.staging/`, and
 `config/namespace` unless a future public API deliberately exposes those
-surfaces. Hiding must be enforced by metadata and prefix policy, not merely by
-placing records in a different namespace.
+surfaces. This applies equally to pending and persisted query-index rows, so a
+transaction's staged record cannot become queryable before its decision.
+Hiding must be enforced by metadata and prefix policy, not merely by placing
+records in a different namespace.
 
 ## Scan And Query
 

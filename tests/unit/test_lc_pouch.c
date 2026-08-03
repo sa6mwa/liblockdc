@@ -11670,6 +11670,11 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   assert_int_equal(stats_res.pending_candidates, 0);
   lc_queue_stats_res_cleanup(&stats_res);
 
+  message->close(message);
+  message = NULL;
+  /* Release the exclusive client before opening the raw durable-state probe. */
+  lc_client_close(client);
+  client = NULL;
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_read(pouch, "docs/txn-index", "doc/txn", &read_result,
@@ -11684,8 +11689,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_close(pouch);
   pouch = NULL;
-  message->close(message);
-  message = NULL;
+  open_pouch_client(root, &client, &error);
 
   lc_update_req_init(&update_req);
   update_req.lease.namespace_name = "docs/txn-index";
@@ -13778,9 +13782,12 @@ static void test_pouch_lease_claim_and_credentials_are_durable(void **state) {
   lc_source *source;
   lc_acquire_req acquire_req;
   lc_release_req release_req;
+  lc_mutate_op mutate_op;
+  lc_mutate_res mutate_res;
   lc_update_req update_req;
   lc_update_res update_res;
   lc_error error;
+  const char *mutations[1];
   char root[512];
   char released_lease_id[160];
   long released_fencing_token;
@@ -13796,6 +13803,8 @@ static void test_pouch_lease_claim_and_credentials_are_durable(void **state) {
   lc_error_init(&error);
   lc_acquire_req_init(&acquire_req);
   lc_release_req_init(&release_req);
+  lc_mutate_op_init(&mutate_op);
+  memset(&mutate_res, 0, sizeof(mutate_res));
   lc_update_req_init(&update_req);
   memset(&update_res, 0, sizeof(update_res));
   make_root("lease-claim", root, sizeof(root));
@@ -13842,6 +13851,17 @@ static void test_pouch_lease_claim_and_credentials_are_durable(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_update_res_cleanup(&update_res);
+
+  mutations[0] = "/value=3";
+  mutate_op.lease.key = update_req.lease.key;
+  mutate_op.lease.lease_id = lease->lease_id;
+  mutate_op.lease.txn_id = lease->txn_id;
+  mutate_op.lease.fencing_token = lease->fencing_token;
+  mutate_op.mutations = mutations;
+  mutate_op.mutation_count = 1U;
+  rc = client->mutate(client, &mutate_op, &mutate_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_mutate_res_cleanup(&mutate_res);
   snprintf(released_lease_id, sizeof(released_lease_id), "%s", lease->lease_id);
   released_fencing_token = lease->fencing_token;
 
@@ -13873,6 +13893,7 @@ static void test_pouch_lease_claim_and_credentials_are_durable(void **state) {
   second_lease = NULL;
 
   lc_update_res_cleanup(&update_res);
+  lc_mutate_res_cleanup(&mutate_res);
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);

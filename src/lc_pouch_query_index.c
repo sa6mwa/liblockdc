@@ -1857,6 +1857,13 @@ lc_pouch_query_index_pending_mark_incomplete(lc_pouch *pouch,
   lc_pouch_query_index_pending_segment_remove_namespace(pouch, namespace_name);
 }
 
+/* Transaction staging is durable recovery state, never public query state. */
+static int lc_pouch_query_index_key_is_staged(const char *key) {
+  return key != NULL &&
+         (strncmp(key, ".staging/", sizeof(".staging/") - 1U) == 0 ||
+          strstr(key, "/.staging/") != NULL);
+}
+
 void lc_pouch_query_index_note_state_write(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *content_type, lc_source *body,
@@ -1873,6 +1880,9 @@ void lc_pouch_query_index_note_state_write(
     return;
   }
   if (namespace_name[0] == '.') {
+    return;
+  }
+  if (lc_pouch_query_index_key_is_staged(key)) {
     return;
   }
   query_hidden =
@@ -1999,6 +2009,9 @@ void lc_pouch_query_index_note_state_delete(
     return;
   }
   if (namespace_name[0] == '.') {
+    return;
+  }
+  if (lc_pouch_query_index_key_is_staged(key)) {
     return;
   }
   if (key == NULL || result == NULL) {

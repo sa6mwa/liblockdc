@@ -2664,6 +2664,10 @@ lc_pouch_query_index_summary_visit(const lc_pouch_query_index_row_view *row,
   if (row->has_query_hidden && row->query_hidden) {
     return LC_OK;
   }
+  if (strncmp(row->key, ".staging/", sizeof(".staging/") - 1U) == 0 ||
+      strstr(row->key, "/.staging/") != NULL) {
+    return LC_OK;
+  }
   lc_pouch_query_track_index_seq(context, row->version);
   context->candidate_key = row->key;
   active = 0;
@@ -11643,10 +11647,12 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
   if (rc != LC_OK) {
     goto cleanup;
   }
-  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
-                                      req->lease.key, NULL, error);
-  if (rc != LC_OK) {
-    goto cleanup;
+  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+    rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
+                                        req->lease.key, NULL, error);
+    if (rc != LC_OK) {
+      goto cleanup;
+    }
   }
 
   if (lc_pouch_txn_id_present(req->lease.txn_id)) {
@@ -11683,8 +11689,13 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
   lease_precondition.lease = &req->lease;
   lease_precondition.namespace_name = namespace_name;
   lease_precondition.key = req->lease.key;
-  options.precondition = lc_pouch_lease_precondition_check;
-  options.precondition_context = &lease_precondition;
+  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+    options.precondition = lc_pouch_lease_precondition_check;
+    options.precondition_context = &lease_precondition;
+  } else {
+    options.view_precondition = lc_pouch_lease_view_precondition_check;
+    options.view_precondition_context = &lease_precondition;
+  }
   if (req->has_if_version) {
     rc = lc_pouch_version_to_generation(req->if_version,
                                         &options.expected_version, error);
