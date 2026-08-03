@@ -488,6 +488,14 @@ Applying a decision mutates the participant's namespace-local metadata/state.
 Queue participant lease markers are recognized by the queue message/state key
 shape and applied to the paired key.
 
+A nonempty participant backend hash identifies one resource manager. Pouch
+applies that participant only when it equals the root's persisted
+`.lockd/backend-id`; a foreign participant remains staged for delivery to its
+own resource manager. An empty hash is the compatibility wildcard and is
+applied locally. Decision records retain every participant regardless of its
+backend so the coordinator can deliver the same durable decision to each
+resource manager.
+
 Pouch obligations:
 
 - keep transaction decision/control records only in documented control

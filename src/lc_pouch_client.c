@@ -10581,14 +10581,39 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
                                            const char *state,
                                            int tolerate_queue_lease_mismatch,
                                            lc_error *error) {
+  char local_backend_hash[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
   size_t i;
+  int requires_backend_hash;
+  int rc;
 
   if (strcmp(state, "prepare") == 0) {
     return LC_OK;
   }
+  requires_backend_hash = 0;
   for (i = 0U; i < req->participant_count; ++i) {
+    if (req->participants[i].backend_hash != NULL &&
+        req->participants[i].backend_hash[0] != '\0') {
+      requires_backend_hash = 1;
+      break;
+    }
+  }
+  if (requires_backend_hash) {
+    rc = lc_pouch_backend_hash(client->pouch, local_backend_hash, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  for (i = 0U; i < req->participant_count; ++i) {
+    const char *participant_backend_hash;
     const char *namespace_name = NULL;
-    int rc;
+
+    participant_backend_hash = req->participants[i].backend_hash != NULL
+                                   ? req->participants[i].backend_hash
+                                   : "";
+    if (participant_backend_hash[0] != '\0' &&
+        strcmp(participant_backend_hash, local_backend_hash) != 0) {
+      continue;
+    }
 
     if (!lc_pouch_queue_is_message_lease_key(req->participants[i].key) &&
         !lc_pouch_queue_is_state_lease_key(req->participants[i].key)) {

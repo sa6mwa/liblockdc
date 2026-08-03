@@ -10491,7 +10491,7 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   assert_int_equal(rc, LC_OK);
   participant.namespace_name = "default";
   participant.key = "crypto/txn-state";
-  participant.backend_hash = "crypto-backend";
+  participant.backend_hash = NULL;
   decision_req.txn_id = "crypto-txn";
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
@@ -11278,7 +11278,7 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
            message->namespace_name);
   participant.namespace_name = participant_namespace;
   participant.key = participant_key;
-  participant.backend_hash = "pouch-queue";
+  participant.backend_hash = NULL;
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
@@ -11340,7 +11340,7 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
                                       sizeof(participant_key));
   participant.namespace_name = message->namespace_name;
   participant.key = participant_key;
-  participant.backend_hash = "pouch-queue";
+  participant.backend_hash = NULL;
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
   rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
@@ -11470,7 +11470,7 @@ static void test_txn_queue_decision_rejects_newer_delivery_lease(void **state) {
 
   participant.namespace_name = participant_namespace;
   participant.key = participant_key;
-  participant.backend_hash = "pouch-queue";
+  participant.backend_hash = NULL;
   decision_req.txn_id = "txn-first";
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
@@ -11646,10 +11646,10 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
                                       sizeof(queue_participant_key));
   participants[0].namespace_name = "docs/txn-index";
   participants[0].key = "doc/txn";
-  participants[0].backend_hash = "backend-state";
+  participants[0].backend_hash = NULL;
   participants[1].namespace_name = message->namespace_name;
   participants[1].key = queue_participant_key;
-  participants[1].backend_hash = "backend-queue";
+  participants[1].backend_hash = NULL;
   decision_req.txn_id = "txn-state-index";
   decision_req.participants = participants;
   decision_req.participant_count = 2U;
@@ -11708,7 +11708,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
 
   participants[0].namespace_name = "docs/txn-index";
   participants[0].key = "doc/rollback";
-  participants[0].backend_hash = "backend-state";
+  participants[0].backend_hash = NULL;
   decision_req.txn_id = "txn-state-rollback";
   decision_req.participants = participants;
   decision_req.participant_count = 1U;
@@ -11807,7 +11807,7 @@ static void test_txn_recovery_applies_queue_side_effects(void **state) {
            message->namespace_name);
   participant.namespace_name = participant_namespace;
   participant.key = participant_key;
-  participant.backend_hash = "backend-queue";
+  participant.backend_hash = NULL;
   message->close(message);
   message = NULL;
   lc_client_close(client);
@@ -12999,7 +12999,7 @@ static int pouch_watch_commit_txn_ack_with_client(lc_client *client,
                                         sizeof(participant_key));
     participant.namespace_name = message->namespace_name;
     participant.key = participant_key;
-    participant.backend_hash = "backend-queue";
+    participant.backend_hash = NULL;
     decision_req.participants = &participant;
     decision_req.participant_count = 1U;
     rc = client->txn_commit(client, &decision_req, &decision_res, error);
@@ -13023,7 +13023,8 @@ static int pouch_watch_commit_txn_ack_child(const char *root, const char *queue,
 
   client = NULL;
   lc_error_init(&error);
-  make_endpoint(root, endpoint, sizeof(endpoint));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?pouch_single_writer=false", root) > 0);
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
@@ -13288,9 +13289,11 @@ test_client_queue_watch_detects_forked_transaction_ack_commit(void **state) {
   make_root("client-queue-watch-fork-txn", root, sizeof(root));
   cleanup_root(root);
 
-  /* The watch callback forks a child which opens Pouch. */
+  /* The watch callback forks a shared-root child client. */
   assert_true(snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?background_compaction=false", root) > 0);
+                       "pouch://%s?background_compaction=false&"
+                       "pouch_single_writer=false",
+                       root) > 0);
   open_pouch_client_endpoint(endpoint, &watcher, &error);
   enqueue_req.queue = "watch-fork-txn";
   enqueue_req.visibility_timeout_seconds = 120L;
@@ -14605,7 +14608,7 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
 
   participant.namespace_name = acquire_req.namespace_name;
   participant.key = key;
-  participant.backend_hash = "pouch-state";
+  participant.backend_hash = NULL;
   decision_req.txn_id = acquire_req.txn_id;
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
@@ -14706,7 +14709,7 @@ test_transaction_bound_lease_rollback_clears_matching_lease(void **state) {
 
   participant.namespace_name = "default";
   participant.key = key;
-  participant.backend_hash = "pouch-state";
+  participant.backend_hash = NULL;
   decision_req.txn_id = acquire_req.txn_id;
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
@@ -14799,7 +14802,7 @@ static void test_txn_decision_skips_newer_state_lease(void **state) {
 
   participant.namespace_name = "default";
   participant.key = key;
-  participant.backend_hash = "pouch-state";
+  participant.backend_hash = NULL;
   decision_req.txn_id = "txn-old";
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
@@ -18976,6 +18979,7 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   char root[512];
   char txn_record[1024];
   char state_bytes[128];
+  char backend_hash[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
   size_t txn_record_length;
   int rc;
 
@@ -19009,6 +19013,11 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   decision_req.target_backend_hash = "target-backend";
 
   open_pouch_client(root, &client, &error);
+  rc = lc_pouch_backend_hash(((lc_client_handle *)client)->pouch, backend_hash,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  participants[0].backend_hash = backend_hash;
+  participants[1].backend_hash = backend_hash;
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(decision_res.txn_id, "txn-pouch-records");
@@ -19148,7 +19157,7 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   assert_true(bytes_contain_text(txn_record, txn_record_length, "orders/eu"));
   assert_true(
       bytes_contain_text(txn_record, txn_record_length, "state/order-1"));
-  assert_true(bytes_contain_text(txn_record, txn_record_length, "backend-a"));
+  assert_true(bytes_contain_text(txn_record, txn_record_length, backend_hash));
 
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_close(pouch);
@@ -19203,7 +19212,7 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   pouch = ((lc_client_handle *)client)->pouch;
   participant.namespace_name = "default";
   participant.key = "state/replay-commit";
-  participant.backend_hash = "pouch-state";
+  participant.backend_hash = NULL;
   rc = lc_source_from_memory("committed", strlen("committed"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, participant.namespace_name,
@@ -19303,10 +19312,10 @@ static void test_txn_decision_merges_durable_participants(void **state) {
   pouch = ((lc_client_handle *)client)->pouch;
   participants[0].namespace_name = "default";
   participants[0].key = "state/txn-merge-first";
-  participants[0].backend_hash = "pouch-state";
+  participants[0].backend_hash = NULL;
   participants[1].namespace_name = "default";
   participants[1].key = "state/txn-merge-second";
-  participants[1].backend_hash = "pouch-state";
+  participants[1].backend_hash = NULL;
   rc = lc_source_from_memory("first", strlen("first"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, participants[0].namespace_name,
@@ -19361,6 +19370,108 @@ static void test_txn_decision_merges_durable_participants(void **state) {
   assert_true(read_result.found);
   read_source_to_string(read_result.body, body, sizeof(body));
   assert_string_equal(body, "second");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_txn_decision_skips_foreign_backend_participant(void **state) {
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_txn_participant participants[2];
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char backend_hash[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
+  char body[64];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  memset(participants, 0, sizeof(participants));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("txn-backend-routing", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  pouch = ((lc_client_handle *)client)->pouch;
+  rc = lc_pouch_backend_hash(pouch, backend_hash, &error);
+  assert_int_equal(rc, LC_OK);
+  participants[0].namespace_name = "default";
+  participants[0].key = "state/local";
+  participants[0].backend_hash = backend_hash;
+  participants[1].namespace_name = "default";
+  participants[1].key = "state/foreign";
+  participants[1].backend_hash = "foreign-backend";
+
+  rc = lc_source_from_memory("local", strlen("local"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, participants[0].namespace_name,
+                                  participants[0].key, "txn-backend-routing",
+                                  source, NULL, &write_result, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  rc = lc_source_from_memory("foreign", strlen("foreign"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, participants[1].namespace_name,
+                                  participants[1].key, "txn-backend-routing",
+                                  source, NULL, &write_result, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  decision_req.txn_id = "txn-backend-routing";
+  decision_req.participants = participants;
+  decision_req.participant_count = 2U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  rc = lc_pouch_state_read(pouch, participants[0].namespace_name,
+                           participants[0].key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, body, sizeof(body));
+  assert_string_equal(body, "local");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(pouch, participants[0].namespace_name,
+                           "state/local/.staging/txn-backend-routing",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+
+  rc = lc_pouch_state_read(pouch, participants[1].namespace_name,
+                           participants[1].key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(pouch, participants[1].namespace_name,
+                           "state/foreign/.staging/txn-backend-routing",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, body, sizeof(body));
+  assert_string_equal(body, "foreign");
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
 
   lc_client_close(client);
@@ -19440,7 +19551,7 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
 
   participant.namespace_name = "objects/txn";
   participant.key = "state/object-1";
-  participant.backend_hash = "backend-object";
+  participant.backend_hash = NULL;
   decision_req.txn_id = "txn-attachment-commit";
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
@@ -19555,7 +19666,7 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
     memset(&participant, 0, sizeof(participant));
     participant.namespace_name = "objects/recover";
     participant.key = "state/object-2";
-    participant.backend_hash = "backend-object";
+    participant.backend_hash = NULL;
     test_write_binary_txn_record(pouch, "txn-attachment-recover", "commit", 0L,
                                  1UL, "", &participant, 1U, &error);
   }
@@ -19671,7 +19782,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   list_req.lease.key = "state/object-queue";
   participants[0].namespace_name = "objects/mixed";
   participants[0].key = "state/object-queue";
-  participants[0].backend_hash = "backend-object";
+  participants[0].backend_hash = NULL;
   decision_req.participants = participants;
   decision_req.participant_count = 1U;
   enqueue_req.namespace_name = "objects/mixed";
@@ -19723,7 +19834,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
                                       sizeof(queue_participant_key));
   participants[1].namespace_name = message->namespace_name;
   participants[1].key = queue_participant_key;
-  participants[1].backend_hash = "backend-queue";
+  participants[1].backend_hash = NULL;
   decision_req.participant_count = 2U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -19771,7 +19882,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
                                       sizeof(queue_participant_key));
   participants[1].namespace_name = message->namespace_name;
   participants[1].key = queue_participant_key;
-  participants[1].backend_hash = "backend-queue";
+  participants[1].backend_hash = NULL;
   decision_req.participant_count = 2U;
   rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -19869,7 +19980,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
 
   participant.namespace_name = "objects/delete";
   participant.key = "state/object-3";
-  participant.backend_hash = "backend-object";
+  participant.backend_hash = NULL;
   decision_req.txn_id = "txn-delete-commit";
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
@@ -20001,7 +20112,7 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
     memset(&participant, 0, sizeof(participant));
     participant.namespace_name = "orders/recover";
     participant.key = "state/recover-commit";
-    participant.backend_hash = "backend-recover";
+    participant.backend_hash = NULL;
     test_write_binary_txn_record(pouch, "txn-recover-commit", "commit", 0L, 1UL,
                                  "", &participant, 1U, &error);
   }
@@ -20021,7 +20132,7 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
     memset(&participant, 0, sizeof(participant));
     participant.namespace_name = "orders/recover";
     participant.key = "state/recover-expired";
-    participant.backend_hash = "backend-recover";
+    participant.backend_hash = NULL;
     test_write_binary_txn_record(pouch, "txn-recover-expired", "prepare", 1L,
                                  1UL, "", &participant, 1U, &error);
   }
@@ -20029,17 +20140,6 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   pouch = NULL;
 
   open_pouch_client(root, &client, &error);
-  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
-  assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, "orders/recover", "state/recover-commit",
-                           &read_result, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_true(read_result.found);
-  read_source_to_string(read_result.body, bytes, sizeof(bytes));
-  assert_true(bytes_contain_text(bytes, strlen(bytes),
-                                 "\"value\":\"recovered-commit\""));
-  lc_pouch_state_read_result_cleanup(NULL, &read_result);
-
   handler.begin = pouch_query_key_begin;
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
@@ -20059,6 +20159,20 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
                                  "\"engine\":\"index\""));
   lc_query_res_cleanup(&query_res);
 
+  /* The exclusive client must release the root before the raw durability probe.
+   */
+  lc_client_close(client);
+  client = NULL;
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "orders/recover", "state/recover-commit",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, bytes, sizeof(bytes));
+  assert_true(bytes_contain_text(bytes, strlen(bytes),
+                                 "\"value\":\"recovered-commit\""));
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
   rc = lc_pouch_state_read(pouch, "orders/recover",
                            "state/recover-expired/.staging/txn-recover-expired",
                            &read_result, &error);
@@ -20083,7 +20197,6 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   lc_pouch_close(pouch);
   pouch = NULL;
 
-  lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -20605,6 +20718,7 @@ int main(void) {
       cmocka_unit_test(test_txn_decisions_persist_participant_records),
       cmocka_unit_test(test_txn_replay_applies_durable_decision),
       cmocka_unit_test(test_txn_decision_merges_durable_participants),
+      cmocka_unit_test(test_txn_decision_skips_foreign_backend_participant),
       cmocka_unit_test(test_txn_decisions_apply_attachment_side_effects),
       cmocka_unit_test(test_txn_recovery_applies_attachment_side_effects),
       cmocka_unit_test(

@@ -572,7 +572,8 @@ typedef struct lc_index_flush_res {
 } lc_index_flush_res;
 
 /** Transaction participant identity used by TC prepare/commit/rollback
- * operations. */
+ * operations. A nonempty backend hash targets that exact resource manager;
+ * an empty hash is a compatibility wildcard. */
 typedef struct lc_txn_participant {
   const char *namespace_name;
   const char *key;
