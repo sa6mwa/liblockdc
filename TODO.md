@@ -169,8 +169,9 @@ Acceptance:
   key-conflict, lease-fencing, and crash-handoff tests.
 - [ ] Shared mode refresh work is proportional to the unseen committed tail,
   not the total namespace history.
-- [ ] Opening two default exclusive clients against one root fails
-  deterministically and does not mutate the root.
+- [x] Opening two default exclusive clients against one root fails
+  deterministically and does not mutate the root, including independent
+  processes rather than only two handles in one process.
 
 ### 4. Maintenance, Recovery, And Resource Lifecycle
 
