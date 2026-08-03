@@ -19010,7 +19010,7 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   decision_req.participant_count = 2U;
   decision_req.expires_at_unix = 2147483647L;
   decision_req.tc_term = 7UL;
-  decision_req.target_backend_hash = "target-backend";
+  decision_req.target_backend_hash = NULL;
 
   open_pouch_client(root, &client, &error);
   rc = lc_pouch_backend_hash(((lc_client_handle *)client)->pouch, backend_hash,
@@ -19018,6 +19018,7 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   assert_int_equal(rc, LC_OK);
   participants[0].backend_hash = backend_hash;
   participants[1].backend_hash = backend_hash;
+  decision_req.target_backend_hash = backend_hash;
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(decision_res.txn_id, "txn-pouch-records");
@@ -19152,8 +19153,7 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   assert_true(txn_record_length > 4U);
   assert_memory_equal(txn_record, "LPT1", 4U);
   assert_true(bytes_contain_text(txn_record, txn_record_length, "commit"));
-  assert_true(
-      bytes_contain_text(txn_record, txn_record_length, "target-backend"));
+  assert_true(bytes_contain_text(txn_record, txn_record_length, backend_hash));
   assert_true(bytes_contain_text(txn_record, txn_record_length, "orders/eu"));
   assert_true(
       bytes_contain_text(txn_record, txn_record_length, "state/order-1"));
@@ -19223,7 +19223,7 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   test_write_binary_txn_record(pouch, "txn-replay-commit", "commit", 0L, 1UL,
-                               "pouch-state", &participant, 1U, &error);
+                               NULL, &participant, 1U, &error);
 
   replay_req.txn_id = "txn-replay-commit";
   rc = client->txn_replay(client, &replay_req, &replay_res, &error);
@@ -19255,7 +19255,7 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   test_write_binary_txn_record(pouch, "txn-replay-expired", "prepare", 1L, 1UL,
-                               "pouch-state", &participant, 1U, &error);
+                               NULL, &participant, 1U, &error);
 
   replay_req.txn_id = "txn-replay-expired";
   rc = client->txn_replay(client, &replay_req, &replay_res, &error);
@@ -19340,7 +19340,7 @@ static void test_txn_decision_merges_durable_participants(void **state) {
   prepare_req.participant_count = 1U;
   prepare_req.expires_at_unix = 100L;
   prepare_req.tc_term = 3U;
-  prepare_req.target_backend_hash = "pouch-state";
+  prepare_req.target_backend_hash = NULL;
   rc = client->txn_prepare(client, &prepare_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(decision_res.state, "prepare");
@@ -19351,7 +19351,7 @@ static void test_txn_decision_merges_durable_participants(void **state) {
   commit_req.participant_count = 1U;
   commit_req.expires_at_unix = 10L;
   commit_req.tc_term = 3U;
-  commit_req.target_backend_hash = "pouch-state";
+  commit_req.target_backend_hash = NULL;
   rc = client->txn_commit(client, &commit_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(decision_res.state, "commit");
@@ -19472,6 +19472,113 @@ static void test_txn_decision_skips_foreign_backend_participant(void **state) {
   assert_true(read_result.found);
   read_source_to_string(read_result.body, body, sizeof(body));
   assert_string_equal(body, "foreign");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_txn_decision_validates_target_backend(void **state) {
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char backend_hash[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
+  char padded_backend_hash[LC_POUCH_BACKEND_HASH_HEX_BYTES + 3U];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  lc_txn_replay_req_init(&replay_req);
+  memset(&replay_res, 0, sizeof(replay_res));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("txn-target-backend", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  pouch = ((lc_client_handle *)client)->pouch;
+  rc = lc_pouch_backend_hash(pouch, backend_hash, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(snprintf(padded_backend_hash, sizeof(padded_backend_hash), " %s ",
+                       backend_hash) > 0);
+
+  decision_req.txn_id = "txn-target-local";
+  decision_req.target_backend_hash = padded_backend_hash;
+  rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "prepare");
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  decision_req.txn_id = "txn-target-foreign";
+  decision_req.target_backend_hash = "foreign-backend";
+  rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch transaction target backend hash does not "
+                      "match root");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_pouch_state_read(pouch, ".txns", "txn-target-foreign", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+
+  participant.namespace_name = "default";
+  participant.key = "state/blank-backend";
+  participant.backend_hash = " \t ";
+  decision_req.txn_id = "txn-target-blank-participant";
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  decision_req.target_backend_hash = NULL;
+  rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch transaction participant backend hash is "
+                      "invalid");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_pouch_state_read(pouch, ".txns", "txn-target-blank-participant",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+
+  test_write_binary_txn_record(pouch, "txn-target-replay", "commit", 0L, 1UL,
+                               "foreign-backend", NULL, 0U, &error);
+  replay_req.txn_id = "txn-target-replay";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch transaction target backend hash does not "
+                      "match root");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_pouch_client_recover_transactions(client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch transaction target backend hash does not "
+                      "match root");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_pouch_state_read(pouch, ".txns", "txn-target-replay", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
 
   lc_client_close(client);
@@ -20719,6 +20826,7 @@ int main(void) {
       cmocka_unit_test(test_txn_replay_applies_durable_decision),
       cmocka_unit_test(test_txn_decision_merges_durable_participants),
       cmocka_unit_test(test_txn_decision_skips_foreign_backend_participant),
+      cmocka_unit_test(test_txn_decision_validates_target_backend),
       cmocka_unit_test(test_txn_decisions_apply_attachment_side_effects),
       cmocka_unit_test(test_txn_recovery_applies_attachment_side_effects),
       cmocka_unit_test(

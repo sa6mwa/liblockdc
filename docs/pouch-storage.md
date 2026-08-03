@@ -494,7 +494,18 @@ applies that participant only when it equals the root's persisted
 own resource manager. An empty hash is the compatibility wildcard and is
 applied locally. Decision records retain every participant regardless of its
 backend so the coordinator can deliver the same durable decision to each
-resource manager.
+resource manager. Pouch trims outer whitespace from participant hashes and
+rejects a nonempty value that becomes empty, matching Go lockd's transport
+validation.
+
+A nonempty decision `target_backend_hash` scopes the whole decision to one
+receiving resource manager. Pouch trims its outer whitespace and requires it
+to equal the receiving root's persisted `.lockd/backend-id` before creating,
+merging, or applying the record. An empty target is deliberately unscoped for
+compatibility. Replay and open-time recovery revalidate persisted targets;
+they reject a foreign or malformed scoped record without applying or deleting
+it. This preserves coordinator routing rather than treating a durable decision
+from another resource manager as local work.
 
 Pouch obligations:
 

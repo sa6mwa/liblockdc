@@ -573,7 +573,8 @@ typedef struct lc_index_flush_res {
 
 /** Transaction participant identity used by TC prepare/commit/rollback
  * operations. A nonempty backend hash targets that exact resource manager;
- * an empty hash is a compatibility wildcard. */
+ * an empty hash is a compatibility wildcard. Outer whitespace is normalized;
+ * whitespace-only nonempty values are invalid. */
 typedef struct lc_txn_participant {
   const char *namespace_name;
   const char *key;
@@ -593,7 +594,10 @@ typedef struct lc_txn_replay_res {
   char *correlation_id;
 } lc_txn_replay_res;
 
-/** Request used for TC prepare, commit, and rollback decisions. */
+/** Request used for TC prepare, commit, and rollback decisions.
+ * A nonempty target_backend_hash scopes the decision to one receiving resource
+ * manager. It is normalized for outer whitespace and must match that resource
+ * manager's backend identity. */
 typedef struct lc_txn_decision_req {
   const char *txn_id;
   const lc_txn_participant *participants;

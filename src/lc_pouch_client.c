@@ -10,6 +10,7 @@
 
 #include <lql/lql.h>
 
+#include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
@@ -99,6 +100,8 @@ static int lc_pouch_txn_buffer_append_string(lc_pouch_txn_buffer *buffer,
 static int lc_pouch_txn_id_present(const char *txn_id);
 static int lc_pouch_txn_validate_participants(const lc_txn_decision_req *req,
                                               lc_error *error);
+static void lc_pouch_txn_trim_bounds(const char *value, const char **start,
+                                     size_t *length);
 static int lc_pouch_now_unix(lc_pouch_unix_seconds *out, lc_error *error);
 static int lc_pouch_binary_cursor_magic(lc_pouch_binary_cursor *cursor,
                                         const char magic[4], lc_error *error);
@@ -5698,6 +5701,27 @@ static int lc_pouch_txn_id_present(const char *txn_id) {
   return txn_id != NULL && txn_id[0] != '\0';
 }
 
+static void lc_pouch_txn_trim_bounds(const char *value, const char **start,
+                                     size_t *length) {
+  const char *first;
+  const char *last;
+
+  first = value != NULL ? value : "";
+  while (*first != '\0' && isspace((unsigned char)*first)) {
+    ++first;
+  }
+  last = first + strlen(first);
+  while (last > first && isspace((unsigned char)last[-1])) {
+    --last;
+  }
+  if (start != NULL) {
+    *start = first;
+  }
+  if (length != NULL) {
+    *length = (size_t)(last - first);
+  }
+}
+
 static char *lc_pouch_staged_storage_key(const char *key, const char *txn_id,
                                          lc_error *error) {
   char *staged_key;
@@ -6419,6 +6443,29 @@ static int lc_pouch_txn_record_replace_string(char **field, const char *value,
   return LC_OK;
 }
 
+static int lc_pouch_txn_record_replace_trimmed_string(char **field,
+                                                      const char *value,
+                                                      lc_error *error) {
+  const char *start;
+  size_t length;
+  char *copy;
+
+  lc_pouch_txn_trim_bounds(value, &start, &length);
+  copy = (char *)lc_alloc_with_allocator(NULL, length + 1U);
+  if (copy == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch transaction field", NULL,
+                        NULL, NULL);
+  }
+  if (length != 0U) {
+    memcpy(copy, start, length);
+  }
+  copy[length] = '\0';
+  lc_free_with_allocator(NULL, *field);
+  *field = copy;
+  return LC_OK;
+}
+
 static int
 lc_pouch_txn_record_add_participant_copy(lc_pouch_txn_record *record,
                                          const lc_txn_participant *participant,
@@ -6439,7 +6486,7 @@ lc_pouch_txn_record_add_participant_copy(lc_pouch_txn_record *record,
         &key, participant != NULL ? participant->key : NULL, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_txn_record_replace_string(
+    rc = lc_pouch_txn_record_replace_trimmed_string(
         &backend_hash, participant != NULL ? participant->backend_hash : NULL,
         error);
   }
@@ -6530,7 +6577,7 @@ static int lc_pouch_txn_record_merge_request(lc_pouch_txn_record *record,
     if (rc == LC_OK) {
       record->expires_at_unix = request->expires_at_unix;
       record->tc_term = request->tc_term;
-      rc = lc_pouch_txn_record_replace_string(
+      rc = lc_pouch_txn_record_replace_trimmed_string(
           &record->target_backend_hash, request->target_backend_hash, error);
     }
   } else {
@@ -6564,7 +6611,7 @@ static int lc_pouch_txn_record_merge_request(lc_pouch_txn_record *record,
          record->target_backend_hash[0] == '\0') &&
         request->target_backend_hash != NULL &&
         request->target_backend_hash[0] != '\0') {
-      rc = lc_pouch_txn_record_replace_string(
+      rc = lc_pouch_txn_record_replace_trimmed_string(
           &record->target_backend_hash, request->target_backend_hash, error);
     }
     if (rc == LC_OK && strcmp(record->state, "prepare") == 0) {
@@ -6585,12 +6632,10 @@ static int lc_pouch_txn_record_merge_request(lc_pouch_txn_record *record,
             backend_hash != NULL && backend_hash[0] != '\0') {
           char *replacement;
 
-          replacement = lc_strdup_local(backend_hash);
-          if (replacement == NULL) {
-            rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                              "failed to allocate pouch transaction backend",
-                              NULL, NULL, NULL);
-          } else {
+          replacement = NULL;
+          rc = lc_pouch_txn_record_replace_trimmed_string(&replacement,
+                                                          backend_hash, error);
+          if (rc == LC_OK) {
             lc_free_with_allocator(
                 NULL, (char *)record->participants[existing].backend_hash);
             record->participants[existing].backend_hash = replacement;
@@ -9728,12 +9773,19 @@ static int lc_pouch_txn_validate_participants(const lc_txn_decision_req *req,
                                               lc_error *error) {
   size_t i;
 
+  if (req == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction request is required", NULL, NULL,
+                        NULL);
+  }
   if (req->participant_count > 0U && req->participants == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch transaction participants are required", NULL,
                         NULL, NULL);
   }
   for (i = 0U; i < req->participant_count; ++i) {
+    size_t backend_hash_length;
+
     if (req->participants[i].namespace_name == NULL ||
         req->participants[i].namespace_name[0] == '\0' ||
         req->participants[i].key == NULL ||
@@ -9741,6 +9793,16 @@ static int lc_pouch_txn_validate_participants(const lc_txn_decision_req *req,
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch transaction participant requires namespace "
                           "and key",
+                          NULL, NULL, NULL);
+    }
+    lc_pouch_txn_trim_bounds(req->participants[i].backend_hash, NULL,
+                             &backend_hash_length);
+    if (req->participants[i].backend_hash != NULL &&
+        req->participants[i].backend_hash[0] != '\0' &&
+        backend_hash_length == 0U) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch transaction participant backend hash is "
+                          "invalid",
                           NULL, NULL, NULL);
     }
   }
@@ -10589,10 +10651,19 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
   if (strcmp(state, "prepare") == 0) {
     return LC_OK;
   }
+  rc = lc_pouch_txn_validate_participants(req, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   requires_backend_hash = 0;
   for (i = 0U; i < req->participant_count; ++i) {
-    if (req->participants[i].backend_hash != NULL &&
-        req->participants[i].backend_hash[0] != '\0') {
+    const char *participant_backend_hash;
+    size_t participant_backend_hash_length;
+
+    lc_pouch_txn_trim_bounds(req->participants[i].backend_hash,
+                             &participant_backend_hash,
+                             &participant_backend_hash_length);
+    if (participant_backend_hash_length != 0U) {
       requires_backend_hash = 1;
       break;
     }
@@ -10605,13 +10676,16 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
   }
   for (i = 0U; i < req->participant_count; ++i) {
     const char *participant_backend_hash;
+    size_t participant_backend_hash_length;
     const char *namespace_name = NULL;
 
-    participant_backend_hash = req->participants[i].backend_hash != NULL
-                                   ? req->participants[i].backend_hash
-                                   : "";
-    if (participant_backend_hash[0] != '\0' &&
-        strcmp(participant_backend_hash, local_backend_hash) != 0) {
+    lc_pouch_txn_trim_bounds(req->participants[i].backend_hash,
+                             &participant_backend_hash,
+                             &participant_backend_hash_length);
+    if (participant_backend_hash_length != 0U &&
+        (strlen(local_backend_hash) != participant_backend_hash_length ||
+         strncmp(participant_backend_hash, local_backend_hash,
+                 participant_backend_hash_length) != 0)) {
       continue;
     }
 
@@ -14601,6 +14675,39 @@ int lc_pouch_client_flush_index_method(lc_client *self,
   return LC_OK;
 }
 
+static int lc_pouch_txn_validate_target_backend(lc_pouch *pouch,
+                                                const char *target_backend_hash,
+                                                lc_error *error) {
+  char local_backend_hash[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
+  const char *target;
+  size_t target_length;
+  size_t local_length;
+  int rc;
+
+  if (pouch == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction target requires an open root", NULL,
+                        NULL, NULL);
+  }
+  lc_pouch_txn_trim_bounds(target_backend_hash, &target, &target_length);
+  if (target_length == 0U) {
+    return LC_OK;
+  }
+  rc = lc_pouch_backend_hash(pouch, local_backend_hash, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  local_length = strlen(local_backend_hash);
+  if (target_length != local_length ||
+      strncmp(target, local_backend_hash, target_length) != 0) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction target backend hash does not "
+                        "match root",
+                        NULL, NULL, "pouch");
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_client_txn_decision(lc_client *self,
                                         const lc_txn_decision_req *req,
                                         const char *state,
@@ -14613,6 +14720,7 @@ static int lc_pouch_txn_decision_record_locked(void *context, lc_error *error) {
   lc_pouch_state_read_result read_result;
   lc_pouch_txn_buffer buffer;
   lc_pouch_state_write_options options;
+  lc_txn_decision_req existing_request;
   lc_source *source;
   lc_sink *sink;
   const void *bytes;
@@ -14631,6 +14739,7 @@ static int lc_pouch_txn_decision_record_locked(void *context, lc_error *error) {
   memset(&read_result, 0, sizeof(read_result));
   memset(&buffer, 0, sizeof(buffer));
   memset(&options, 0, sizeof(options));
+  lc_txn_decision_req_init(&existing_request);
   source = NULL;
   sink = NULL;
   bytes = NULL;
@@ -14663,6 +14772,19 @@ static int lc_pouch_txn_decision_record_locked(void *context, lc_error *error) {
     memcpy(record_bytes, bytes, length);
     record_bytes[length] = '\0';
     rc = lc_pouch_txn_parse_record(record_bytes, length, &ctx->record, error);
+  }
+  if (rc == LC_OK && read_result.found) {
+    existing_request.txn_id = ctx->request->txn_id;
+    existing_request.participants = ctx->record.participants;
+    existing_request.participant_count = ctx->record.participant_count;
+    existing_request.expires_at_unix = ctx->record.expires_at_unix;
+    existing_request.tc_term = ctx->record.tc_term;
+    existing_request.target_backend_hash = ctx->record.target_backend_hash;
+    rc = lc_pouch_txn_validate_participants(&existing_request, error);
+  }
+  if (rc == LC_OK && read_result.found) {
+    rc = lc_pouch_txn_validate_target_backend(
+        ctx->client->pouch, ctx->record.target_backend_hash, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_txn_record_merge_request(&ctx->record, ctx->request,
@@ -14777,7 +14899,12 @@ int lc_pouch_client_txn_replay_method(lc_client *self,
     decision_req.target_backend_hash = txn_record.target_backend_hash;
     response_state = txn_record.state;
     response_index = read_result.index_seq;
-    if (strcmp(txn_record.state, "prepare") == 0) {
+    rc = lc_pouch_txn_validate_participants(&decision_req, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_txn_validate_target_backend(
+          client->pouch, decision_req.target_backend_hash, error);
+    }
+    if (rc == LC_OK && strcmp(txn_record.state, "prepare") == 0) {
       rc = lc_pouch_now_unix(&now, error);
       if (rc == LC_OK && txn_record.expires_at_unix > 0L &&
           txn_record.expires_at_unix <= now) {
@@ -14798,11 +14925,11 @@ int lc_pouch_client_txn_replay_method(lc_client *self,
           }
         }
       }
-    } else if (strcmp(txn_record.state, "commit") == 0 ||
-               strcmp(txn_record.state, "rollback") == 0) {
+    } else if (rc == LC_OK && (strcmp(txn_record.state, "commit") == 0 ||
+                               strcmp(txn_record.state, "rollback") == 0)) {
       rc = lc_pouch_txn_apply_participants(client, &decision_req,
                                            txn_record.state, 1, error);
-    } else {
+    } else if (rc == LC_OK) {
       rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "pouch transaction replay state is unsupported", NULL,
                         NULL, "pouch");
@@ -14845,6 +14972,11 @@ static int lc_pouch_client_txn_decision(lc_client *self,
   client = (lc_client_handle *)self;
   memset(&context, 0, sizeof(context));
   lc_txn_decision_req_init(&decision_req);
+  rc = lc_pouch_txn_validate_target_backend(client->pouch,
+                                            req->target_backend_hash, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   key = lc_pouch_txn_key(req->txn_id, error);
   if (key == NULL) {
     return error != NULL ? error->code : LC_ERR_NOMEM;
@@ -14969,14 +15101,19 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
       req.expires_at_unix = record.expires_at_unix;
       req.tc_term = record.tc_term;
       req.target_backend_hash = record.target_backend_hash;
-      if (strcmp(record.state, "commit") == 0 ||
-          strcmp(record.state, "rollback") == 0) {
+      rc = lc_pouch_txn_validate_participants(&req, error);
+      if (rc == LC_OK) {
+        rc = lc_pouch_txn_validate_target_backend(
+            client->pouch, req.target_backend_hash, error);
+      }
+      if (rc == LC_OK && (strcmp(record.state, "commit") == 0 ||
+                          strcmp(record.state, "rollback") == 0)) {
         rc = lc_pouch_txn_apply_participants(client, &req, record.state, 1,
                                              error);
         if (rc == LC_OK) {
           cleanup_decision = 1;
         }
-      } else if (strcmp(record.state, "prepare") == 0 &&
+      } else if (rc == LC_OK && strcmp(record.state, "prepare") == 0 &&
                  record.expires_at_unix > 0L && record.expires_at_unix <= now) {
         lc_txn_decision_res rollback_res;
 
