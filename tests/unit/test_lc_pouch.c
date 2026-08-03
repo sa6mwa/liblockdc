@@ -13382,7 +13382,9 @@ typedef struct pouch_watch_txn_ack_capture {
   lc_client *client;
   const char *root_path;
   const char *queue;
-  int fork_child;
+  int use_prestarted_child;
+  int child_start_fd;
+  pid_t child_pid;
   int event_count;
   int saw_available;
   int saw_unavailable_after_commit;
@@ -13506,11 +13508,16 @@ static int pouch_watch_commit_txn_ack_child(const char *root, const char *queue,
   char endpoint[540];
   lc_error error;
   int rc;
+  int written;
 
   client = NULL;
   lc_error_init(&error);
-  assert_true(snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?pouch_single_writer=false", root) > 0);
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?pouch_single_writer=false", root);
+  if (written <= 0 || (size_t)written >= sizeof(endpoint)) {
+    lc_error_cleanup(&error);
+    return LC_ERR_INVALID;
+  }
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
@@ -13526,36 +13533,19 @@ static int pouch_watch_commit_txn_ack_child(const char *root, const char *queue,
   return rc;
 }
 
-static int pouch_watch_commit_txn_ack_in_child(const char *root,
-                                               const char *queue,
-                                               const char *txn_id,
-                                               lc_error *error) {
-  pid_t pid;
+static int pouch_watch_commit_txn_ack_prestarted_child(const char *root,
+                                                       const char *queue,
+                                                       const char *txn_id,
+                                                       int start_fd) {
+  char signal;
   int status;
 
-  pid = fork();
-  if (pid < 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to fork pouch watch transaction child",
-                        strerror(errno), NULL, NULL);
+  status = read(start_fd, &signal, 1U) == 1 ? LC_OK : LC_ERR_TRANSPORT;
+  (void)close(start_fd);
+  if (status != LC_OK) {
+    return status;
   }
-  if (pid == 0) {
-    int child_rc;
-
-    child_rc = pouch_watch_commit_txn_ack_child(root, queue, txn_id);
-    _exit(child_rc == LC_OK ? 0 : 1);
-  }
-  if (waitpid(pid, &status, 0) < 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to wait for pouch watch transaction child",
-                        strerror(errno), NULL, NULL);
-  }
-  if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "pouch watch transaction child failed", NULL, NULL,
-                        NULL);
-  }
-  return LC_OK;
+  return pouch_watch_commit_txn_ack_child(root, queue, txn_id);
 }
 
 static int pouch_watch_commit_txn_ack_on_initial_available(
@@ -13575,9 +13565,25 @@ static int pouch_watch_commit_txn_ack_on_initial_available(
     capture->saw_available = 1;
     snprintf(capture->head_message_id, sizeof(capture->head_message_id), "%s",
              event->head_message_id);
-    if (capture->fork_child) {
-      rc = pouch_watch_commit_txn_ack_in_child(
-          capture->root_path, capture->queue, "txn-watch-ack", error);
+    if (capture->use_prestarted_child) {
+      if (capture->child_start_fd < 0 || capture->child_pid <= 0 ||
+          write(capture->child_start_fd, "1", 1U) != 1) {
+        (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                           "failed to start pouch watch transaction child",
+                           strerror(errno), NULL, "pouch");
+        return 0;
+      }
+      (void)close(capture->child_start_fd);
+      capture->child_start_fd = -1;
+      if (waitpid(capture->child_pid, &rc, 0) < 0 || !WIFEXITED(rc) ||
+          WEXITSTATUS(rc) != 0) {
+        (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                           "pouch watch transaction child failed", NULL, NULL,
+                           "pouch");
+        return 0;
+      }
+      capture->child_pid = -1;
+      rc = LC_OK;
     } else {
       rc = pouch_watch_commit_txn_ack_with_client(
           capture->client, capture->queue, "txn-watch-ack", error);
@@ -13761,11 +13767,14 @@ test_client_queue_watch_detects_forked_transaction_ack_commit(void **state) {
   lc_error error;
   char endpoint[560];
   char root[512];
+  int child_start[2];
+  pid_t child_pid;
   int rc;
 
   (void)state;
   watcher = NULL;
   source = NULL;
+  child_pid = -1;
   lc_enqueue_req_init(&enqueue_req);
   memset(&enqueue_res, 0, sizeof(enqueue_res));
   lc_watch_queue_req_init(&watch_req);
@@ -13775,7 +13784,20 @@ test_client_queue_watch_detects_forked_transaction_ack_commit(void **state) {
   make_root("client-queue-watch-fork-txn", root, sizeof(root));
   cleanup_root(root);
 
-  /* The watch callback forks a shared-root child client. */
+  /* Fork before opening the threaded watcher. The callback only releases the
+   * prestarted child, which opens its own shared-root client after fork. */
+  assert_int_equal(pipe(child_start), 0);
+  child_pid = fork();
+  assert_true(child_pid >= 0);
+  if (child_pid == 0) {
+    (void)close(child_start[1]);
+    _exit(pouch_watch_commit_txn_ack_prestarted_child(
+              root, "watch-fork-txn", "txn-watch-ack", child_start[0]) == LC_OK
+              ? 0
+              : 1);
+  }
+  (void)close(child_start[0]);
+
   assert_true(snprintf(endpoint, sizeof(endpoint),
                        "pouch://%s?background_compaction=false&"
                        "pouch_single_writer=false",
@@ -13794,7 +13816,9 @@ test_client_queue_watch_detects_forked_transaction_ack_commit(void **state) {
 
   capture.root_path = root;
   capture.queue = "watch-fork-txn";
-  capture.fork_child = 1;
+  capture.use_prestarted_child = 1;
+  capture.child_start_fd = child_start[1];
+  capture.child_pid = child_pid;
   watch_req.queue = "watch-fork-txn";
   handler.handle = pouch_watch_commit_txn_ack_on_initial_available;
   handler.context = &capture;
@@ -13806,6 +13830,8 @@ test_client_queue_watch_detects_forked_transaction_ack_commit(void **state) {
   assert_int_equal(capture.saw_available, 1);
   assert_int_equal(capture.saw_unavailable_after_commit, 1);
   assert_true(capture.head_message_id[0] != '\0');
+  assert_int_equal(capture.child_start_fd, -1);
+  assert_int_equal(capture.child_pid, -1);
 
   lc_client_close(watcher);
   cleanup_root(root);

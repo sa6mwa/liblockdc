@@ -246,6 +246,13 @@ typedef int (*lc_pouch_state_read_many_fn)(
     const char *key, const lc_pouch_state_read_result *result, void *context,
     lc_error *error);
 
+/**
+ * Opens a Pouch root and starts its owned worker threads.
+ *
+ * A process must fork before opening Pouch, or exec before using Pouch in the
+ * child. Re-entering an inherited Pouch handle after fork is unsupported:
+ * worker-owned pthread state is not available in the child.
+ */
 int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                   const lc_pouch_open_options *options, lc_pouch **out,
                   lc_error *error);

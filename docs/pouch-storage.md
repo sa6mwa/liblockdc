@@ -731,6 +731,14 @@ default, relaxing durability, or omitting core operations from comparison.
   exclusive mode cannot take ownership while any live shared handle retains its
   read lock, and a crashed handle's kernel lock is released before recovery.
 
+- Fork lifecycle: an open Pouch handle owns pthread workers. A process must
+  fork before opening Pouch, or `exec` before the child uses Pouch. Calling a
+  Pouch API on an inherited open handle is unsupported because a child retains
+  only the calling thread while worker-owned mutexes and condition variables
+  may have been held at the fork boundary. This does not restrict separate
+  parent and child handles opened after a pre-open fork; shared-root process
+  coordination continues to apply to those independent handles.
+
 - Fsync batching and diagnostics:
   Pouch defaults to `durable_sync=0`, the same `NoSync` mutation boundary used
   by Go disk's default `failover` mode. Finalized records are immediately
