@@ -7034,6 +7034,31 @@ static int lc_pouch_state_cache_manifest_copy(
   return LC_OK;
 }
 
+/* Metadata batches materialize their own append manifest. While exclusive
+ * mutation authority is held, the resident record can therefore be borrowed
+ * directly instead of allocating an otherwise-unused manifest copy. */
+static int lc_pouch_state_cache_borrow_exclusive_record(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    lc_pouch_state_entry *current) {
+  lc_pouch_state_cache_namespace *cache;
+  uint64_t writer_mode_epoch;
+
+  if (pouch == NULL || namespace_name == NULL || key == NULL ||
+      current == NULL ||
+      !lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch)) {
+    return 0;
+  }
+  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  if (cache == NULL || !cache->initialized ||
+      cache->writer_mode_epoch != writer_mode_epoch ||
+      cache->namespace_path == NULL || cache->active_segment_leaf == NULL) {
+    return 0;
+  }
+  lc_pouch_state_entry_borrow_cache_record(
+      lc_pouch_state_cache_record_find(cache, key), current);
+  return 1;
+}
+
 static int
 lc_pouch_state_manifest_materialize(lc_pouch *pouch, const char *namespace_name,
                                     lc_pouch_namespace_manifest *manifest,
@@ -10895,6 +10920,7 @@ int lc_pouch_state_update_metadata_locked(
   lc_pouch_state_entry current;
   lc_pouch_namespace_manifest manifest;
   lc_pouch_generation max_version;
+  int use_metadata_batcher;
   int current_is_borrowed;
   int rc;
 
@@ -10908,12 +10934,19 @@ int lc_pouch_state_update_metadata_locked(
   memset(&current, 0, sizeof(current));
   memset(&manifest, 0, sizeof(manifest));
   current_is_borrowed = 0;
-  rc = lc_pouch_state_manifest_lookup_cached_borrowed(
-      pouch, namespace_name, key, &manifest, &current, &max_version,
-      &current_is_borrowed, error);
+  use_metadata_batcher = lc_pouch_single_writer_enabled(pouch) &&
+                         pouch->state_metadata_append_batcher != NULL;
+  if (use_metadata_batcher && lc_pouch_state_cache_borrow_exclusive_record(
+                                  pouch, namespace_name, key, &current)) {
+    current_is_borrowed = 1;
+    rc = LC_OK;
+  } else {
+    rc = lc_pouch_state_manifest_lookup_cached_borrowed(
+        pouch, namespace_name, key, &manifest, &current, &max_version,
+        &current_is_borrowed, error);
+  }
   if (rc == LC_OK) {
-    if (lc_pouch_single_writer_enabled(pouch) &&
-        pouch->state_metadata_append_batcher != NULL) {
+    if (use_metadata_batcher) {
       rc = lc_pouch_state_metadata_append_schedule_from_current_locked(
           pouch, namespace_name, key, &current, current_is_borrowed, options,
           out, error);
@@ -10939,6 +10972,7 @@ int lc_pouch_state_update_metadata_prepared_locked(
   lc_pouch_state_write_options options;
   lc_pouch_generation max_version;
   int apply;
+  int use_metadata_batcher;
   int current_is_borrowed;
   int rc;
 
@@ -10954,9 +10988,17 @@ int lc_pouch_state_update_metadata_prepared_locked(
   memset(&view, 0, sizeof(view));
   memset(&options, 0, sizeof(options));
   current_is_borrowed = 0;
-  rc = lc_pouch_state_manifest_lookup_cached_borrowed(
-      pouch, namespace_name, key, &manifest, &current, &max_version,
-      &current_is_borrowed, error);
+  use_metadata_batcher = lc_pouch_single_writer_enabled(pouch) &&
+                         pouch->state_metadata_append_batcher != NULL;
+  if (use_metadata_batcher && lc_pouch_state_cache_borrow_exclusive_record(
+                                  pouch, namespace_name, key, &current)) {
+    current_is_borrowed = 1;
+    rc = LC_OK;
+  } else {
+    rc = lc_pouch_state_manifest_lookup_cached_borrowed(
+        pouch, namespace_name, key, &manifest, &current, &max_version,
+        &current_is_borrowed, error);
+  }
   if (rc == LC_OK) {
     view.found = current.found;
     view.version = current.version;
@@ -10968,8 +11010,7 @@ int lc_pouch_state_update_metadata_prepared_locked(
     apply = 1;
     rc = prepare(&view, prepare_context, &options, &apply, error);
     if (rc == LC_OK && apply) {
-      if (lc_pouch_single_writer_enabled(pouch) &&
-          pouch->state_metadata_append_batcher != NULL) {
+      if (use_metadata_batcher) {
         rc = lc_pouch_state_metadata_append_schedule_from_current_locked(
             pouch, namespace_name, key, &current, current_is_borrowed, &options,
             out, error);
