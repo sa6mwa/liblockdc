@@ -482,6 +482,16 @@ Pouch must preserve this. For staged attachments, use the Go attachment helper
 shape `state/<key>/.staging/<txn>/attachments/<id>`, not the generic staged
 state key helper unless the resulting key is exactly the same.
 
+A transaction-bound public update or mutate takes namespace mutation authority
+before it reads the committed key metadata. Within that one authority window it
+validates the lease, reads any existing staged metadata, derives the staged
+CAS/query-visibility decision, and appends the staged record. It must not
+perform a client-side lease pre-read and then re-read the lease from an
+unrelated staging callback. This wider namespace boundary is deliberate: the
+committed key and its `<key>/.staging/<txn>` companion form one transaction
+decision even though ordinary non-transactional writes retain exact-key
+concurrency.
+
 ### Transactions
 
 Go disk uses reserved control namespaces for transaction records/decision

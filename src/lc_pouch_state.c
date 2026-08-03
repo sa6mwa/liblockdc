@@ -12569,8 +12569,8 @@ static int lc_pouch_state_read_internal(lc_pouch *pouch,
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_state_manifest_lookup_cached(pouch, namespace_name, key,
-                                             &manifest, &current, NULL, error);
+  rc = lc_pouch_state_manifest_lookup_cached_for_mutation(
+      pouch, namespace_name, key, &manifest, &current, NULL, error);
   if (rc != LC_OK || !current.found) {
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
@@ -12684,8 +12684,8 @@ int lc_pouch_state_read_metadata_locked(lc_pouch *pouch,
                         NULL, NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
-  rc = lc_pouch_state_manifest_lookup_cached(pouch, namespace_name, key,
-                                             &manifest, &current, NULL, error);
+  rc = lc_pouch_state_manifest_lookup_cached_for_mutation(
+      pouch, namespace_name, key, &manifest, &current, NULL, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -12715,8 +12715,8 @@ int lc_pouch_state_read_locked(lc_pouch *pouch, const char *namespace_name,
   memset(out, 0, sizeof(*out));
   memset(&current, 0, sizeof(current));
   memset(&manifest, 0, sizeof(manifest));
-  rc = lc_pouch_state_manifest_lookup_cached(pouch, namespace_name, key,
-                                             &manifest, &current, NULL, error);
+  rc = lc_pouch_state_manifest_lookup_cached_for_mutation(
+      pouch, namespace_name, key, &manifest, &current, NULL, error);
   if (rc == LC_OK && current.found && current.payload_span.present) {
     rc = lc_pouch_state_read_result_from_entry(pouch, namespace_name, &manifest,
                                                &current, 1, out, error);
