@@ -2539,6 +2539,7 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
   int requested_single_writer;
   int pthread_rc;
   int rc;
+  size_t key_mutex_index;
 
   if (root_path == NULL || root_path[0] == '\0' || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -2588,6 +2589,19 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         strerror(pthread_rc), NULL, "pouch");
   }
   pouch->state_mutation_mutex_initialized = 1;
+  for (key_mutex_index = 0U;
+       key_mutex_index < LC_POUCH_EXCLUSIVE_KEY_STRIPE_COUNT;
+       ++key_mutex_index) {
+    pthread_rc = pthread_mutex_init(
+        &pouch->exclusive_key_mutexes[key_mutex_index], NULL);
+    if (pthread_rc != 0) {
+      lc_pouch_close(pouch);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to initialize pouch exclusive key mutex",
+                          strerror(pthread_rc), NULL, "pouch");
+    }
+    pouch->exclusive_key_mutex_count += 1U;
+  }
   pthread_rc = pthread_cond_init(&pouch->writer_presence_cond, NULL);
   if (pthread_rc != 0) {
     lc_pouch_close(pouch);
@@ -2777,6 +2791,11 @@ void lc_pouch_close(lc_pouch *pouch) {
   }
   if (pouch->state_mutation_mutex_initialized) {
     pthread_mutex_destroy(&pouch->state_mutation_mutex);
+  }
+  while (pouch->exclusive_key_mutex_count > 0U) {
+    pouch->exclusive_key_mutex_count -= 1U;
+    (void)pthread_mutex_destroy(
+        &pouch->exclusive_key_mutexes[pouch->exclusive_key_mutex_count]);
   }
   if (pouch->writer_mode_guard_initialized) {
     (void)pthread_rwlock_destroy(&pouch->writer_mode_guard);

@@ -26,6 +26,11 @@ typedef struct lc_pouch_fsync_request lc_pouch_fsync_request;
 typedef struct lc_pouch_fsync_batcher lc_pouch_fsync_batcher;
 typedef struct lc_pouch_writer_root_lock_entry lc_pouch_writer_root_lock_entry;
 
+/* Exclusive roots have one in-process writer. These bounded stripes retain
+ * conflicting-key serialization through durable completion without shared
+ * mode's registry allocation or cross-process lock work. */
+#define LC_POUCH_EXCLUSIVE_KEY_STRIPE_COUNT 97U
+
 typedef struct lc_pouch_state_change_visit_entry {
   const char *key;
   const char *content_type;
@@ -131,6 +136,8 @@ struct lc_pouch {
   int writer_presence_stop;
   pthread_mutex_t state_mutation_mutex;
   int state_mutation_mutex_initialized;
+  pthread_mutex_t exclusive_key_mutexes[LC_POUCH_EXCLUSIVE_KEY_STRIPE_COUNT];
+  size_t exclusive_key_mutex_count;
   lc_pouch_fsync_batcher *fsync_batcher;
   pthread_mutex_t compaction_mutex;
   pthread_cond_t compaction_cond;

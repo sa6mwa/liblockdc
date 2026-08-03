@@ -63,6 +63,7 @@ typedef struct lc_pouch_state_key_lock {
   int maintenance_fd;
   struct lc_pouch_state_process_namespace_mutex *process_mutex;
   struct lc_pouch_state_process_namespace_guard *maintenance_guard;
+  pthread_mutex_t *exclusive_key_mutex;
 } lc_pouch_state_key_lock;
 
 typedef struct lc_pouch_state_append_lock {
@@ -1447,6 +1448,7 @@ static int lc_pouch_state_key_lock_acquire(lc_pouch *pouch,
   int fd;
   int maintenance_fd;
   int rc;
+  int pthread_rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
       key == NULL || key[0] == '\0' || lock == NULL) {
@@ -1458,6 +1460,7 @@ static int lc_pouch_state_key_lock_acquire(lc_pouch *pouch,
   lock->maintenance_fd = -1;
   lock->process_mutex = NULL;
   lock->maintenance_guard = NULL;
+  lock->exclusive_key_mutex = NULL;
   if (lc_pouch_state_namespace_lock_is_held(pouch, namespace_name)) {
     return LC_OK;
   }
@@ -1468,6 +1471,43 @@ static int lc_pouch_state_key_lock_acquire(lc_pouch *pouch,
     key_len = strlen(key);
   } else {
     canonical_key = key;
+  }
+  if (lc_pouch_single_writer_enabled(pouch)) {
+    hash = ((uint64_t)0xcbf29ce4UL << 32U) | (uint64_t)0x84222325UL;
+    for (cursor = (const unsigned char *)namespace_name; *cursor != '\0';
+         ++cursor) {
+      hash ^= (uint64_t)*cursor;
+      hash *= ((uint64_t)0x00000100UL << 32U) | (uint64_t)0x000001b3UL;
+    }
+    hash ^= (uint64_t)'\n';
+    hash *= ((uint64_t)0x00000100UL << 32U) | (uint64_t)0x000001b3UL;
+    for (cursor = (const unsigned char *)canonical_key;
+         (size_t)(cursor - (const unsigned char *)canonical_key) < key_len;
+         ++cursor) {
+      hash ^= (uint64_t)*cursor;
+      hash *= ((uint64_t)0x00000100UL << 32U) | (uint64_t)0x000001b3UL;
+    }
+    if (pouch->exclusive_key_mutex_count == 0U) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch exclusive key mutexes are unavailable", NULL,
+                          NULL, "pouch");
+    }
+    lock->exclusive_key_mutex = &pouch->exclusive_key_mutexes[(
+        size_t)(hash % pouch->exclusive_key_mutex_count)];
+    pthread_rc = pthread_mutex_lock(lock->exclusive_key_mutex);
+    if (pthread_rc != 0) {
+      lock->exclusive_key_mutex = NULL;
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to lock pouch exclusive key mutex",
+                          strerror(pthread_rc), NULL, "pouch");
+    }
+    rc = lc_pouch_state_process_namespace_guard_lock(
+        pouch, namespace_name, 0, &lock->maintenance_guard, error);
+    if (rc != LC_OK) {
+      (void)pthread_mutex_unlock(lock->exclusive_key_mutex);
+      lock->exclusive_key_mutex = NULL;
+    }
+    return rc;
   }
   namespace_len = strlen(namespace_name);
   if (namespace_len > (size_t)-1 - key_len - 2U) {
@@ -1497,9 +1537,6 @@ static int lc_pouch_state_key_lock_acquire(lc_pouch *pouch,
   if (rc != LC_OK) {
     lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
     return rc;
-  }
-  if (lc_pouch_single_writer_enabled(pouch)) {
-    return LC_OK;
   }
   namespace_path = lc_pouch_namespace_path(&pouch->allocator, pouch->root_path,
                                            namespace_name);
@@ -1640,6 +1677,10 @@ static void lc_pouch_state_key_lock_release(lc_pouch_state_key_lock *lock) {
   }
   lc_pouch_state_process_namespace_guard_unlock(&lock->maintenance_guard);
   lc_pouch_state_process_namespace_mutex_unlock(&lock->process_mutex);
+  if (lock->exclusive_key_mutex != NULL) {
+    (void)pthread_mutex_unlock(lock->exclusive_key_mutex);
+    lock->exclusive_key_mutex = NULL;
+  }
 }
 
 static int lc_pouch_state_key_mutation_begin(lc_pouch *pouch,
