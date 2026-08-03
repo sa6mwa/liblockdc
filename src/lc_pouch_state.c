@@ -1339,8 +1339,8 @@ lc_pouch_state_namespace_lock_release(lc_pouch_state_namespace_lock *lock) {
   lc_pouch_state_process_namespace_guard_unlock(&lock->maintenance_guard);
 }
 
-/* Serializes the physical active-log append without widening per-key locking.
- */
+/* Shared roots serialize physical appends here. Exclusive mutations already
+ * hold their root-local mutation or namespace authority through the append. */
 static int lc_pouch_state_append_lock_acquire(lc_pouch *pouch,
                                               const char *namespace_name,
                                               lc_pouch_state_append_lock *lock,
@@ -1359,13 +1359,15 @@ static int lc_pouch_state_append_lock_acquire(lc_pouch *pouch,
   }
   lock->fd = -1;
   lock->process_mutex = NULL;
+  if (lc_pouch_single_writer_enabled(pouch)) {
+    return LC_OK;
+  }
   rc = lc_pouch_state_process_namespace_mutex_lock(pouch, namespace_name,
                                                    &lock->process_mutex, error);
   if (rc != LC_OK) {
     return rc;
   }
-  if (lc_pouch_state_namespace_lock_is_held(pouch, namespace_name) ||
-      lc_pouch_single_writer_enabled(pouch)) {
+  if (lc_pouch_state_namespace_lock_is_held(pouch, namespace_name)) {
     return LC_OK;
   }
   namespace_path = lc_pouch_namespace_path(&pouch->allocator, pouch->root_path,
