@@ -1087,10 +1087,10 @@ int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
   char *active_segment;
   int rc;
 
-  if (manifest == NULL || segment_id == 0UL) {
+  if (manifest == NULL || segment_id == 0UL || manifest->borrowed) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch namespace manifest rotate requires manifest "
-                        "and segment id",
+                        "ownership and segment id",
                         NULL, NULL, NULL);
   }
   active_segment = lc_pouch_namespace_segment_leaf(allocator, segment_id);
@@ -1120,10 +1120,11 @@ int lc_pouch_namespace_manifest_install_snapshot(
   char *snapshot_copy;
   int rc;
 
-  if (manifest == NULL || snapshot_leaf == NULL || snapshot_leaf[0] == '\0' ||
-      snapshot_segment_id == 0UL) {
+  if (manifest == NULL || manifest->borrowed || snapshot_leaf == NULL ||
+      snapshot_leaf[0] == '\0' || snapshot_segment_id == 0UL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch snapshot install requires manifest and snapshot",
+                        "pouch snapshot install requires owned manifest and "
+                        "snapshot",
                         NULL, NULL, NULL);
   }
   snapshot_copy = lc_strdup_with_allocator(allocator, snapshot_leaf);
@@ -1148,11 +1149,12 @@ int lc_pouch_namespace_manifest_mark_obsolete_segment(
     const char *segment_leaf, uint64_t marked_at_unix, lc_error *error) {
   uint64_t parsed;
 
-  if (manifest == NULL || marked_at_unix == 0U ||
+  if (manifest == NULL || manifest->borrowed || marked_at_unix == 0U ||
       !lc_pouch_namespace_parse_segment_id(segment_leaf, &parsed)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch obsolete segment requires a segment leaf", NULL,
-                        NULL, NULL);
+                        "pouch obsolete segment requires owned manifest and "
+                        "segment leaf",
+                        NULL, NULL, NULL);
   }
   if (manifest->active_segment != NULL &&
       strcmp(manifest->active_segment, segment_leaf) == 0) {
@@ -1169,10 +1171,11 @@ int lc_pouch_namespace_manifest_mark_obsolete_snapshot(
     const char *snapshot_leaf, uint64_t marked_at_unix, lc_error *error) {
   uint64_t parsed;
 
-  if (manifest == NULL || marked_at_unix == 0U ||
+  if (manifest == NULL || manifest->borrowed || marked_at_unix == 0U ||
       !lc_pouch_namespace_parse_snapshot_id(snapshot_leaf, &parsed)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch obsolete snapshot requires a snapshot leaf",
+                        "pouch obsolete snapshot requires owned manifest and "
+                        "snapshot leaf",
                         NULL, NULL, NULL);
   }
   if (manifest->latest_snapshot != NULL &&
@@ -1189,9 +1192,11 @@ int lc_pouch_namespace_manifest_save(const lc_allocator *allocator,
                                      const char *namespace_name,
                                      lc_pouch_namespace_manifest *manifest,
                                      lc_error *error) {
-  if (manifest == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+  if (manifest == NULL || manifest->borrowed || namespace_name == NULL ||
+      namespace_name[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch namespace manifest save requires namespace",
+                        "pouch namespace manifest save requires owned manifest "
+                        "and namespace",
                         NULL, NULL, NULL);
   }
   return lc_pouch_namespace_manifest_write(allocator, namespace_name, manifest,
@@ -1273,10 +1278,11 @@ int lc_pouch_namespace_manifest_cleanup_obsolete(
   int changed;
   int rc;
 
-  if (manifest == NULL || manifest->namespace_path == NULL) {
+  if (manifest == NULL || manifest->borrowed ||
+      manifest->namespace_path == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch obsolete cleanup requires manifest", NULL, NULL,
-                        NULL);
+                        "pouch obsolete cleanup requires owned manifest", NULL,
+                        NULL, NULL);
   }
   if (deleted_count != NULL) {
     *deleted_count = 0UL;
@@ -1633,6 +1639,10 @@ void lc_pouch_namespace_marker_refresh_state_cleanup(
 void lc_pouch_namespace_manifest_cleanup(
     const lc_allocator *allocator, lc_pouch_namespace_manifest *manifest) {
   if (manifest == NULL) {
+    return;
+  }
+  if (manifest->borrowed) {
+    memset(manifest, 0, sizeof(*manifest));
     return;
   }
   lc_free_with_allocator(allocator, manifest->namespace_path);

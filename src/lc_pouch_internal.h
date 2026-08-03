@@ -6,7 +6,7 @@
 
 #include <pthread.h>
 
-typedef struct lc_pouch_state_cache_namespace lc_pouch_state_cache_namespace;
+typedef struct lc_pouch_namespace_logstore lc_pouch_namespace_logstore;
 typedef struct lc_pouch_source_cache_entry lc_pouch_source_cache_entry;
 typedef struct lc_pouch_query_index_generation_cache_entry
     lc_pouch_query_index_generation_cache_entry;
@@ -175,9 +175,9 @@ struct lc_pouch {
   int janitor_thread_started;
   int janitor_stop;
   int janitor_pending;
-  lc_pouch_state_cache_namespace *state_cache_namespaces;
-  lc_pouch_state_cache_namespace
-      *state_cache_namespace_buckets[LC_POUCH_NAMESPACE_REGISTRY_BUCKET_COUNT];
+  lc_pouch_namespace_logstore *namespace_logstores;
+  lc_pouch_namespace_logstore
+      *namespace_logstore_buckets[LC_POUCH_NAMESPACE_REGISTRY_BUCKET_COUNT];
   pthread_mutex_t source_cache_mutex;
   int source_cache_mutex_initialized;
   lc_pouch_source_cache_entry *source_cache_entries;
@@ -210,6 +210,11 @@ typedef void (*lc_pouch_test_metadata_append_hook_fn)(
     void *context, const char *namespace_name);
 extern lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook;
 extern void *lc_pouch_test_metadata_append_context;
+typedef void (*lc_pouch_test_tail_repair_hook_fn)(void *context,
+                                                  const char *reason,
+                                                  const char *segment);
+extern lc_pouch_test_tail_repair_hook_fn lc_pouch_test_tail_repair_hook;
+extern void *lc_pouch_test_tail_repair_context;
 #endif
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);

@@ -115,6 +115,12 @@ typedef struct pouch_chunked_source {
   size_t read_count;
 } pouch_chunked_source;
 
+typedef struct pouch_tail_repair_capture {
+  unsigned long count;
+  char reason[32];
+  char segment[64];
+} pouch_tail_repair_capture;
+
 typedef struct pouch_stream_overlap {
   lc_pouch *pouch;
   pthread_mutex_t mutex;
@@ -488,6 +494,21 @@ static void pouch_metadata_worker_overlap_hook(void *context,
     assert_int_equal(pthread_cond_broadcast(&overlap->cond), 0);
   }
   assert_int_equal(pthread_mutex_unlock(&overlap->mutex), 0);
+}
+
+static void pouch_tail_repair_capture_hook(void *context, const char *reason,
+                                           const char *segment) {
+  pouch_tail_repair_capture *capture;
+
+  capture = (pouch_tail_repair_capture *)context;
+  if (capture == NULL) {
+    return;
+  }
+  ++capture->count;
+  snprintf(capture->reason, sizeof(capture->reason), "%s",
+           reason != NULL ? reason : "");
+  snprintf(capture->segment, sizeof(capture->segment), "%s",
+           segment != NULL ? segment : "");
 }
 
 static void *pouch_metadata_worker_overlap_first_update(void *context) {
@@ -7551,6 +7572,51 @@ static void test_namespace_manifest_uses_u64_snapshot_ids(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_namespace_manifest_rejects_borrowed_mutation(void **state) {
+  lc_pouch_namespace_manifest manifest;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  memset(&manifest, 0, sizeof(manifest));
+  manifest.namespace_path = "resident-view";
+  manifest.active_segment = "segment-0000000000000001.log";
+  manifest.borrowed = 1;
+  lc_error_init(&error);
+
+  rc = lc_pouch_namespace_manifest_rotate(NULL, "default", &manifest, 2U,
+                                          &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_namespace_manifest_install_snapshot(
+      NULL, "default", &manifest, "snapshot-0000000000000001.log", 1U, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_namespace_manifest_mark_obsolete_segment(
+      NULL, &manifest, "segment-0000000000000001.log", 1U, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_namespace_manifest_save(NULL, "default", &manifest, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_namespace_manifest_cleanup_obsolete(NULL, "default", &manifest,
+                                                    1U, 0U, NULL, NULL, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+
+  lc_pouch_namespace_manifest_cleanup(NULL, &manifest);
+  assert_null(manifest.namespace_path);
+  assert_null(manifest.active_segment);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_namespace_segment_leaf_parser_rejects_retired_layout(void **state) {
   uint64_t segment_id;
@@ -9477,6 +9543,7 @@ static void test_state_writes_roll_active_segments(void **state) {
   char root[512];
   char bytes[64];
   char *namespace_path;
+  pouch_tail_repair_capture tail_repair;
   int rc;
 
   (void)state;
@@ -9485,12 +9552,15 @@ static void test_state_writes_roll_active_segments(void **state) {
   memset(&first, 0, sizeof(first));
   memset(&second, 0, sizeof(second));
   memset(&read_result, 0, sizeof(read_result));
+  memset(&tail_repair, 0, sizeof(tail_repair));
   make_root("state-rollover", root, sizeof(root));
   cleanup_root(root);
 
   open_options.segment_target_bytes = 128UL;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
+  lc_pouch_test_tail_repair_hook = pouch_tail_repair_capture_hook;
+  lc_pouch_test_tail_repair_context = &tail_repair;
   rc = lc_source_from_memory("one", strlen("one"), &body, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "team/alpha", "state/current", body, NULL,
@@ -9518,6 +9588,9 @@ static void test_state_writes_roll_active_segments(void **state) {
     assert_true(path_is_file(first_segment_path));
     assert_true(path_is_file(second_segment_path));
   }
+  assert_int_equal(tail_repair.count, 0UL);
+  lc_pouch_test_tail_repair_hook = NULL;
+  lc_pouch_test_tail_repair_context = NULL;
 
   lc_pouch_close(pouch);
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
@@ -22610,6 +22683,7 @@ int main(void) {
       cmocka_unit_test(test_open_rejects_unsupported_root_manifest),
       cmocka_unit_test(test_ensure_namespace_creates_per_namespace_layout),
       cmocka_unit_test(test_namespace_manifest_uses_u64_snapshot_ids),
+      cmocka_unit_test(test_namespace_manifest_rejects_borrowed_mutation),
       cmocka_unit_test(
           test_namespace_segment_leaf_parser_rejects_retired_layout),
       cmocka_unit_test(

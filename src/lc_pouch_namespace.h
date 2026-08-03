@@ -33,6 +33,11 @@ typedef struct lc_pouch_namespace_manifest {
   unsigned long obsolete_snapshot_count;
   unsigned long segment_count;
   int repaired;
+  /* A resident namespace owner may expose its immutable manifest fields to a
+   * caller already serialized by that owner. Borrowed views are read-only and
+   * their cleanup only clears this struct; durable manifest mutators reject
+   * them until the caller materializes an owned manifest. */
+  int borrowed;
 } lc_pouch_namespace_manifest;
 
 typedef struct lc_pouch_namespace_marker_snapshot {

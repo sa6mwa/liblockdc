@@ -51,6 +51,8 @@ lc_pouch_test_hook lc_pouch_test_after_snapshot_write_hook = NULL;
 void *lc_pouch_test_after_snapshot_write_context = NULL;
 lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook = NULL;
 void *lc_pouch_test_metadata_append_context = NULL;
+lc_pouch_test_tail_repair_hook_fn lc_pouch_test_tail_repair_hook = NULL;
+void *lc_pouch_test_tail_repair_context = NULL;
 #endif
 
 typedef struct lc_pouch_state_namespace_lock {
@@ -191,11 +193,11 @@ static int lc_pouch_state_repair_active_tail_locked(
 static int lc_pouch_state_fd_seek(int fd, uint64_t offset, const char *message,
                                   lc_error *error);
 static int lc_pouch_state_cache_set_active_segment(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
     const lc_pouch_namespace_manifest *manifest, uint64_t offset,
     lc_error *error);
 static int lc_pouch_state_cache_active_append_fd(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
     const lc_pouch_namespace_manifest *manifest, int *out, lc_error *error);
 static int
 lc_pouch_state_cache_lookup(lc_pouch *pouch, const char *namespace_name,
@@ -204,10 +206,10 @@ lc_pouch_state_cache_lookup(lc_pouch *pouch, const char *namespace_name,
                             lc_pouch_generation *max_version_out,
                             lc_error *error);
 static int lc_pouch_state_cache_refresh_for_mode(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
     const lc_pouch_namespace_manifest *manifest, lc_error *error);
 static int lc_pouch_state_cache_matches_manifest(
-    const lc_pouch_state_cache_namespace *cache,
+    const lc_pouch_namespace_logstore *cache,
     const lc_pouch_namespace_manifest *manifest);
 static void
 lc_pouch_state_cache_invalidate_namespace(lc_pouch *pouch,
@@ -1048,17 +1050,17 @@ typedef struct lc_pouch_state_cache_record {
   struct lc_pouch_state_cache_record *bucket_next;
 } lc_pouch_state_cache_record;
 
-static lc_pouch_state_cache_namespace *
-lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
-                                    int create, lc_error *error);
+static lc_pouch_namespace_logstore *
+lc_pouch_namespace_logstore_find(lc_pouch *pouch, const char *namespace_name,
+                                 int create, lc_error *error);
 static lc_pouch_state_cache_record *
-lc_pouch_state_cache_record_find(lc_pouch_state_cache_namespace *ns,
+lc_pouch_state_cache_record_find(lc_pouch_namespace_logstore *ns,
                                  const char *key);
 static int lc_pouch_state_compaction_record_ref_matches(
     const lc_pouch_state_cache_record *record, const char *container,
     uint64_t offset);
 static int lc_pouch_state_read_many_snapshot_body_from_cache(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
     lc_pouch_state_cache_record *record, const char *crypto_context,
     const char *payload_span_path, uint64_t payload_offset,
     uint64_t payload_length, const lc_pouch_state_entry *current,
@@ -2364,7 +2366,7 @@ typedef struct lc_pouch_state_compaction_capture {
   uint64_t candidate_bytes;
 } lc_pouch_state_compaction_capture;
 
-struct lc_pouch_state_cache_namespace {
+struct lc_pouch_namespace_logstore {
   char *namespace_name;
   unsigned long namespace_hash;
   pthread_mutex_t exclusive_append_gate;
@@ -2388,8 +2390,8 @@ struct lc_pouch_state_cache_namespace {
   size_t record_bucket_count;
   size_t record_count;
   size_t body_cache_bytes;
-  struct lc_pouch_state_cache_namespace *hash_next;
-  struct lc_pouch_state_cache_namespace *next;
+  struct lc_pouch_namespace_logstore *hash_next;
+  struct lc_pouch_namespace_logstore *next;
 };
 
 static unsigned long lc_pouch_state_namespace_hash(const char *namespace_name) {
@@ -2545,7 +2547,7 @@ static void lc_pouch_state_body_cache_entry_release(
 
 static void
 lc_pouch_state_cache_record_body_clear(const lc_allocator *allocator,
-                                       lc_pouch_state_cache_namespace *ns,
+                                       lc_pouch_namespace_logstore *ns,
                                        lc_pouch_state_cache_record *record) {
   lc_pouch_state_body_cache_entry *entry;
 
@@ -2565,8 +2567,9 @@ lc_pouch_state_cache_record_body_clear(const lc_allocator *allocator,
   lc_pouch_state_body_cache_entry_release(allocator, entry);
 }
 
-static void lc_pouch_state_cache_namespace_clear_body_cache(
-    const lc_allocator *allocator, lc_pouch_state_cache_namespace *ns) {
+static void
+lc_pouch_namespace_logstore_clear_body_cache(const lc_allocator *allocator,
+                                             lc_pouch_namespace_logstore *ns) {
   lc_pouch_state_cache_record *record;
 
   if (ns == NULL) {
@@ -2610,8 +2613,9 @@ lc_pouch_state_cache_records_cleanup(const lc_allocator *allocator,
   }
 }
 
-static void lc_pouch_state_cache_namespace_clear_records(
-    const lc_allocator *allocator, lc_pouch_state_cache_namespace *ns) {
+static void
+lc_pouch_namespace_logstore_clear_records(const lc_allocator *allocator,
+                                          lc_pouch_namespace_logstore *ns) {
   if (ns == NULL) {
     return;
   }
@@ -2643,16 +2647,16 @@ static void lc_pouch_state_cache_namespace_clear_records(
 static void
 lc_pouch_state_cache_invalidate_namespace(lc_pouch *pouch,
                                           const char *namespace_name) {
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
 
   if (pouch == NULL || namespace_name == NULL) {
     return;
   }
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   if (cache == NULL) {
     return;
   }
-  lc_pouch_state_cache_namespace_clear_records(&pouch->allocator, cache);
+  lc_pouch_namespace_logstore_clear_records(&pouch->allocator, cache);
   cache->max_segment_id = 0U;
   cache->max_version = 0UL;
   cache->writer_mode_epoch = 0U;
@@ -2934,7 +2938,7 @@ static int lc_pouch_state_scan_body_snapshot_open_result(
     lc_pouch_state_scan_body_snapshot *snapshot,
     lc_pouch_state_read_result *out, lc_error *error) {
   lc_pouch_state_process_namespace_mutex *process_mutex;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_cache_record *record;
   lc_pouch_state_entry current;
   char *crypto_context;
@@ -2981,8 +2985,7 @@ static int lc_pouch_state_scan_body_snapshot_open_result(
     rc = lc_pouch_state_process_namespace_mutex_lock(pouch, namespace_name,
                                                      &process_mutex, error);
     if (rc == LC_OK) {
-      cache =
-          lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, error);
+      cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, error);
       record = cache != NULL
                    ? lc_pouch_state_cache_record_find(cache, snapshot->key)
                    : NULL;
@@ -3048,7 +3051,7 @@ static int lc_pouch_state_scan_body_snapshot_open_result(
 }
 
 static int lc_pouch_state_read_many_snapshot_body_from_cache(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
     lc_pouch_state_cache_record *record, const char *crypto_context,
     const char *payload_span_path, uint64_t payload_offset,
     uint64_t payload_length, const lc_pouch_state_entry *current,
@@ -3118,7 +3121,7 @@ static int lc_pouch_state_read_many_snapshot_body_from_cache(
   if (rc == LC_OK) {
     if (cache->body_cache_bytes + length >
         LC_POUCH_STATE_BODY_CACHE_MAX_BYTES) {
-      lc_pouch_state_cache_namespace_clear_body_cache(&pouch->allocator, cache);
+      lc_pouch_namespace_logstore_clear_body_cache(&pouch->allocator, cache);
     }
     if (length <= LC_POUCH_STATE_BODY_CACHE_MAX_BYTES) {
       entry = (lc_pouch_state_body_cache_entry *)lc_calloc_with_allocator(
@@ -3181,7 +3184,7 @@ static int lc_pouch_state_read_many_snapshot_body_from_cache(
 }
 
 static void lc_pouch_state_cache_record_store_body_source(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
     lc_pouch_state_cache_record *record, lc_source *body,
     lc_pouch_generation version, uint64_t bytes) {
   lc_pouch_state_body_cache_entry *entry;
@@ -3222,7 +3225,7 @@ static void lc_pouch_state_cache_record_store_body_source(
     }
     if (cache->body_cache_bytes + length >
         LC_POUCH_STATE_BODY_CACHE_MAX_BYTES) {
-      lc_pouch_state_cache_namespace_clear_body_cache(&pouch->allocator, cache);
+      lc_pouch_namespace_logstore_clear_body_cache(&pouch->allocator, cache);
     }
     entry = (lc_pouch_state_body_cache_entry *)lc_calloc_with_allocator(
         &pouch->allocator, 1U, sizeof(*entry));
@@ -3254,7 +3257,7 @@ static void lc_pouch_state_cache_record_store_body_source(
 static int lc_pouch_state_read_many_snapshot_from_entry(
     lc_pouch *pouch, const char *namespace_name,
     const lc_pouch_namespace_manifest *manifest, const char *requested_key,
-    lc_pouch_state_cache_namespace *cache, lc_pouch_state_cache_record *record,
+    lc_pouch_namespace_logstore *cache, lc_pouch_state_cache_record *record,
     const lc_pouch_state_entry *current, int include_body, int copy_cached_body,
     lc_pouch_state_read_many_snapshot *snapshot, lc_error *error) {
   int rc;
@@ -3412,27 +3415,27 @@ static int lc_pouch_state_read_many_snapshot_from_entry(
 }
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch) {
-  lc_pouch_state_cache_namespace *ns;
+  lc_pouch_namespace_logstore *ns;
 
   if (pouch == NULL) {
     return;
   }
-  ns = pouch->state_cache_namespaces;
+  ns = pouch->namespace_logstores;
   while (ns != NULL) {
-    lc_pouch_state_cache_namespace *next;
+    lc_pouch_namespace_logstore *next;
 
     next = ns->next;
     if (ns->exclusive_append_gate_initialized) {
       (void)pthread_mutex_destroy(&ns->exclusive_append_gate);
     }
     lc_free_with_allocator(&pouch->allocator, ns->namespace_name);
-    lc_pouch_state_cache_namespace_clear_records(&pouch->allocator, ns);
+    lc_pouch_namespace_logstore_clear_records(&pouch->allocator, ns);
     lc_free_with_allocator(&pouch->allocator, ns);
     ns = next;
   }
-  pouch->state_cache_namespaces = NULL;
-  memset(pouch->state_cache_namespace_buckets, 0,
-         sizeof(pouch->state_cache_namespace_buckets));
+  pouch->namespace_logstores = NULL;
+  memset(pouch->namespace_logstore_buckets, 0,
+         sizeof(pouch->namespace_logstore_buckets));
 }
 
 void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch) {
@@ -3606,10 +3609,10 @@ lc_pouch_state_source_from_span(lc_pouch *pouch, const char *crypto_context,
                                              descriptor, out, error);
 }
 
-static lc_pouch_state_cache_namespace *
-lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
-                                    int create, lc_error *error) {
-  lc_pouch_state_cache_namespace *ns;
+static lc_pouch_namespace_logstore *
+lc_pouch_namespace_logstore_find(lc_pouch *pouch, const char *namespace_name,
+                                 int create, lc_error *error) {
+  lc_pouch_namespace_logstore *ns;
   unsigned long namespace_hash;
   size_t bucket_index;
   int rc;
@@ -3632,7 +3635,7 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
                        strerror(pthread_rc), NULL, "pouch");
     return NULL;
   }
-  for (ns = pouch->state_cache_namespace_buckets[bucket_index]; ns != NULL;
+  for (ns = pouch->namespace_logstore_buckets[bucket_index]; ns != NULL;
        ns = ns->hash_next) {
     if (ns->namespace_hash == namespace_hash &&
         strcmp(ns->namespace_name, namespace_name) == 0) {
@@ -3644,7 +3647,7 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
     (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
     return NULL;
   }
-  ns = (lc_pouch_state_cache_namespace *)lc_calloc_with_allocator(
+  ns = (lc_pouch_namespace_logstore *)lc_calloc_with_allocator(
       &pouch->allocator, 1U, sizeof(*ns));
   if (ns == NULL) {
     lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -3665,14 +3668,14 @@ lc_pouch_state_cache_namespace_find(lc_pouch *pouch, const char *namespace_name,
   }
   ns->active_append_fd = -1;
   ns->namespace_hash = namespace_hash;
-  ns->hash_next = pouch->state_cache_namespace_buckets[bucket_index];
-  pouch->state_cache_namespace_buckets[bucket_index] = ns;
-  ns->next = pouch->state_cache_namespaces;
-  pouch->state_cache_namespaces = ns;
+  ns->hash_next = pouch->namespace_logstore_buckets[bucket_index];
+  pouch->namespace_logstore_buckets[bucket_index] = ns;
+  ns->next = pouch->namespace_logstores;
+  pouch->namespace_logstores = ns;
   rc = lc_pouch_compaction_track_namespace(pouch, ns->namespace_name, error);
   if (rc != LC_OK) {
-    pouch->state_cache_namespaces = ns->next;
-    pouch->state_cache_namespace_buckets[bucket_index] = ns->hash_next;
+    pouch->namespace_logstores = ns->next;
+    pouch->namespace_logstore_buckets[bucket_index] = ns->hash_next;
     lc_free_with_allocator(&pouch->allocator, ns->namespace_name);
     lc_free_with_allocator(&pouch->allocator, ns);
     (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
@@ -3686,7 +3689,7 @@ static int lc_pouch_state_exclusive_append_gate_lock(lc_pouch *pouch,
                                                      const char *namespace_name,
                                                      pthread_mutex_t **out,
                                                      lc_error *error) {
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   pthread_mutex_t *gate;
   int pthread_rc;
   int rc;
@@ -3698,7 +3701,7 @@ static int lc_pouch_state_exclusive_append_gate_lock(lc_pouch *pouch,
                         NULL, "pouch");
   }
   *out = NULL;
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 1, error);
   if (cache == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
@@ -3742,7 +3745,7 @@ lc_pouch_state_exclusive_append_gate_unlock(pthread_mutex_t **gate) {
 
 int lc_pouch_state_compaction_track_cached_namespaces(lc_pouch *pouch,
                                                       lc_error *error) {
-  lc_pouch_state_cache_namespace *ns;
+  lc_pouch_namespace_logstore *ns;
   int pthread_rc;
   int rc;
 
@@ -3757,7 +3760,7 @@ int lc_pouch_state_compaction_track_cached_namespaces(lc_pouch *pouch,
                         "failed to lock pouch state cache registry",
                         strerror(pthread_rc), NULL, "pouch");
   }
-  for (ns = pouch->state_cache_namespaces; ns != NULL; ns = ns->next) {
+  for (ns = pouch->namespace_logstores; ns != NULL; ns = ns->next) {
     rc = lc_pouch_compaction_track_namespace(pouch, ns->namespace_name, error);
     if (rc != LC_OK) {
       (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
@@ -3792,8 +3795,8 @@ static size_t lc_pouch_state_cache_bucket_count_for(size_t record_count) {
 }
 
 static int lc_pouch_state_cache_record_index_rebuild(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *ns,
-    size_t next_record_count, lc_error *error) {
+    lc_pouch *pouch, lc_pouch_namespace_logstore *ns, size_t next_record_count,
+    lc_error *error) {
   lc_pouch_state_cache_record **buckets;
   lc_pouch_state_cache_record *record;
   size_t bucket_count;
@@ -3826,8 +3829,8 @@ static int lc_pouch_state_cache_record_index_rebuild(
 }
 
 static int lc_pouch_state_cache_record_index_ensure(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *ns,
-    size_t next_record_count, lc_error *error) {
+    lc_pouch *pouch, lc_pouch_namespace_logstore *ns, size_t next_record_count,
+    lc_error *error) {
   if (ns->record_buckets != NULL &&
       next_record_count * 2U <= ns->record_bucket_count) {
     return LC_OK;
@@ -3837,7 +3840,7 @@ static int lc_pouch_state_cache_record_index_ensure(
 }
 
 static lc_pouch_state_cache_record *
-lc_pouch_state_cache_record_find(lc_pouch_state_cache_namespace *ns,
+lc_pouch_state_cache_record_find(lc_pouch_namespace_logstore *ns,
                                  const char *key) {
   lc_pouch_state_cache_record *record;
 
@@ -3901,7 +3904,7 @@ static int lc_pouch_state_cache_record_key_compare(const void *left,
 }
 
 static int lc_pouch_state_cache_record_index_build(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *ns,
+    lc_pouch *pouch, lc_pouch_namespace_logstore *ns,
     lc_pouch_state_cache_record ***records_out, size_t *count_out,
     lc_error *error) {
   lc_pouch_state_cache_record **records;
@@ -4009,7 +4012,7 @@ lc_pouch_state_entry_supersedes(const lc_pouch_state_entry *candidate,
 }
 
 static int lc_pouch_state_cache_apply_entry(lc_pouch *pouch,
-                                            lc_pouch_state_cache_namespace *ns,
+                                            lc_pouch_namespace_logstore *ns,
                                             const lc_pouch_state_entry *entry,
                                             lc_error *error) {
   lc_pouch_state_cache_record *record;
@@ -5095,7 +5098,7 @@ static int lc_pouch_state_reserve_index_records(
   lc_u64 parsed;
   lc_pouch_generation base;
   lc_pouch_generation end_index;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_process_namespace_mutex *sequence_mutex;
   int fd;
   int scan_required;
@@ -5111,7 +5114,7 @@ static int lc_pouch_state_reserve_index_records(
                         NULL, "pouch");
   }
   if (lc_pouch_single_writer_enabled(pouch)) {
-    cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
     if (cache != NULL && cache->initialized) {
       base = manifest->state_max_version;
       if (cache->max_version > base) {
@@ -5177,7 +5180,7 @@ static int lc_pouch_state_reserve_index_records(
                         NULL, "pouch");
   }
   base = manifest->state_max_version;
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   scan_required = cache == NULL || !cache->initialized;
   if (cache != NULL && cache->initialized && cache->max_version > base) {
     base = cache->max_version;
@@ -5281,7 +5284,7 @@ static int lc_pouch_state_append_binary_records_locked(
     lc_pouch_state_binary_append_item *items, size_t item_count,
     lc_error *error) {
   char *segment_path;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   int fd;
   int rc;
   int manifest_from_cache;
@@ -5299,7 +5302,7 @@ static int lc_pouch_state_append_binary_records_locked(
                         NULL, NULL, "pouch");
   }
   segment_path = NULL;
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   single_writer = lc_pouch_single_writer_enabled(pouch);
   manifest_from_cache =
       single_writer && cache != NULL && cache->initialized &&
@@ -5348,8 +5351,7 @@ static int lc_pouch_state_append_binary_records_locked(
     }
   }
   if (rc == LC_OK && !single_writer) {
-    cache =
-        lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 1, error);
     if (cache == NULL) {
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     } else {
@@ -6437,6 +6439,13 @@ static void lc_pouch_state_log_tail_repair(lc_pouch *pouch, const char *reason,
                                            uint64_t offset) {
   pslog_field fields[3];
 
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_pouch_test_tail_repair_hook != NULL) {
+    lc_pouch_test_tail_repair_hook(lc_pouch_test_tail_repair_context, reason,
+                                   segment);
+  }
+#endif
+
   fields[0] = lc_log_str_field("reason", reason);
   fields[1] = lc_log_str_field("segment", segment);
   fields[2] = lc_log_u64_field("record_offset", offset);
@@ -6561,7 +6570,7 @@ static int lc_pouch_state_repair_active_tail_locked(
     lc_pouch *pouch, const char *namespace_name,
     const lc_pouch_namespace_manifest *manifest, const char *segment_path,
     const char *segment_leaf, lc_error *error) {
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_entry current;
   lc_pouch_generation max_version;
   uint64_t start_offset;
@@ -6574,7 +6583,7 @@ static int lc_pouch_state_repair_active_tail_locked(
                         "pouch");
   }
   start_offset = 0U;
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   if (cache != NULL && cache->initialized &&
       cache->active_segment_leaf != NULL &&
       strcmp(cache->active_segment_leaf, segment_leaf) == 0 &&
@@ -7037,7 +7046,7 @@ static int lc_pouch_state_collect_decisions(
 }
 
 static int lc_pouch_state_cache_replay_file(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
     const char *segment_path, const char *container_leaf,
     int allow_truncated_tail, uint64_t start_offset, uint64_t *end_offset_out,
     lc_error *error) {
@@ -7151,7 +7160,7 @@ static int lc_pouch_state_cache_replay_file(
 
 static int lc_pouch_state_cache_warm_transformed_bodies(
     lc_pouch *pouch, const char *namespace_name,
-    lc_pouch_state_cache_namespace *cache,
+    lc_pouch_namespace_logstore *cache,
     const lc_pouch_namespace_manifest *manifest, lc_error *error) {
   lc_pouch_state_cache_record *record;
   int transformed;
@@ -7230,7 +7239,7 @@ static int lc_pouch_state_cache_warm_transformed_bodies(
 }
 
 static int lc_pouch_state_cache_matches_manifest(
-    const lc_pouch_state_cache_namespace *cache,
+    const lc_pouch_namespace_logstore *cache,
     const lc_pouch_namespace_manifest *manifest) {
   if (cache == NULL || manifest == NULL || !cache->initialized ||
       cache->max_segment_id != manifest->max_segment_id ||
@@ -7263,7 +7272,7 @@ static int lc_pouch_state_cache_matches_manifest(
 
 static int
 lc_pouch_state_cache_tail_active(lc_pouch *pouch,
-                                 lc_pouch_state_cache_namespace *cache,
+                                 lc_pouch_namespace_logstore *cache,
                                  const lc_pouch_namespace_manifest *manifest,
                                  int *rebuild, lc_error *error) {
   char *segment_path;
@@ -7306,7 +7315,7 @@ lc_pouch_state_cache_tail_active(lc_pouch *pouch,
 }
 
 static int lc_pouch_state_cache_refresh(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
     const lc_pouch_namespace_manifest *manifest, int force, lc_error *error) {
   unsigned long segment_index;
   int rebuild;
@@ -7329,7 +7338,7 @@ static int lc_pouch_state_cache_refresh(
       return rc;
     }
   }
-  lc_pouch_state_cache_namespace_clear_records(&pouch->allocator, cache);
+  lc_pouch_namespace_logstore_clear_records(&pouch->allocator, cache);
   cache->max_version = 0UL;
   cache->max_segment_id = 0UL;
   cache->segment_count = 0UL;
@@ -7418,7 +7427,7 @@ static int lc_pouch_state_cache_refresh(
 }
 
 static int lc_pouch_state_cache_refresh_for_mode(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
     const lc_pouch_namespace_manifest *manifest, lc_error *error) {
   uint64_t mode_epoch;
   int force_refresh;
@@ -7444,7 +7453,7 @@ static int lc_pouch_state_cache_refresh_for_mode(
 }
 
 static int lc_pouch_state_cache_set_active_segment(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
     const lc_pouch_namespace_manifest *manifest, uint64_t offset,
     lc_error *error) {
   char *active_segment_leaf;
@@ -7477,7 +7486,7 @@ static int lc_pouch_state_cache_set_active_segment(
 }
 
 static int lc_pouch_state_cache_active_append_fd(
-    lc_pouch *pouch, lc_pouch_state_cache_namespace *cache,
+    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
     const lc_pouch_namespace_manifest *manifest, int *out, lc_error *error) {
   char *segment_path;
   int fd;
@@ -7533,8 +7542,36 @@ static int lc_pouch_state_cache_active_append_fd(
   return LC_OK;
 }
 
+/* The caller holds the namespace projection and append gate. The resident
+ * fields therefore remain stable for the lifetime of this read-only view.
+ * Durable manifest changes must first call manifest_materialize(), which
+ * replaces the view with an owned manifest before any mutation. */
+static int lc_pouch_state_cache_manifest_borrow(
+    lc_pouch *pouch, const lc_pouch_namespace_logstore *cache,
+    lc_pouch_namespace_manifest *manifest, lc_error *error) {
+  if (pouch == NULL || cache == NULL || manifest == NULL ||
+      !cache->initialized || cache->namespace_path == NULL ||
+      cache->active_segment_leaf == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch cache manifest is not current", NULL, NULL,
+                        "pouch");
+  }
+  (void)pouch;
+  memset(manifest, 0, sizeof(*manifest));
+  manifest->namespace_path = cache->namespace_path;
+  manifest->active_segment = cache->active_segment_leaf;
+  manifest->active_segment_id = cache->active_segment_id;
+  manifest->max_segment_id = cache->max_segment_id;
+  manifest->segment_count = cache->segment_count;
+  manifest->state_max_version = cache->max_version;
+  manifest->borrowed = 1;
+  return LC_OK;
+}
+
+/* Public read paths can release projection coordination before consuming their
+ * result. Keep their manifest independent of the resident owner. */
 static int lc_pouch_state_cache_manifest_copy(
-    lc_pouch *pouch, const lc_pouch_state_cache_namespace *cache,
+    lc_pouch *pouch, const lc_pouch_namespace_logstore *cache,
     lc_pouch_namespace_manifest *manifest, lc_error *error) {
   if (pouch == NULL || cache == NULL || manifest == NULL ||
       !cache->initialized || cache->namespace_path == NULL ||
@@ -7567,7 +7604,7 @@ static int lc_pouch_state_cache_manifest_copy(
 static int lc_pouch_state_cache_borrow_exclusive_record(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     lc_pouch_state_entry *current) {
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   uint64_t writer_mode_epoch;
 
   if (pouch == NULL || namespace_name == NULL || key == NULL ||
@@ -7575,7 +7612,7 @@ static int lc_pouch_state_cache_borrow_exclusive_record(
       !lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch)) {
     return 0;
   }
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   if (cache == NULL || !cache->initialized ||
       cache->writer_mode_epoch != writer_mode_epoch ||
       cache->namespace_path == NULL || cache->active_segment_leaf == NULL) {
@@ -7619,7 +7656,7 @@ static int lc_pouch_state_manifest_lookup_cached(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     lc_pouch_namespace_manifest *manifest, lc_pouch_state_entry *current,
     lc_pouch_generation *max_version_out, lc_error *error) {
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   uint64_t writer_mode_epoch;
   int single_writer;
   int rc;
@@ -7632,7 +7669,7 @@ static int lc_pouch_state_manifest_lookup_cached(
   }
   memset(manifest, 0, sizeof(*manifest));
   memset(current, 0, sizeof(*current));
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
   if (single_writer && cache != NULL && cache->initialized &&
       cache->writer_mode_epoch == writer_mode_epoch &&
@@ -7671,7 +7708,7 @@ static int lc_pouch_state_manifest_lookup_cached_borrowed(
     lc_pouch_namespace_manifest *manifest, lc_pouch_state_entry *current,
     lc_pouch_generation *max_version_out, int *current_is_borrowed,
     lc_error *error) {
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   uint64_t writer_mode_epoch;
   int single_writer;
   int rc;
@@ -7683,12 +7720,12 @@ static int lc_pouch_state_manifest_lookup_cached_borrowed(
                         NULL, "pouch");
   }
   *current_is_borrowed = 0;
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
   if (single_writer && cache != NULL && cache->initialized &&
       cache->writer_mode_epoch == writer_mode_epoch &&
       cache->namespace_path != NULL && cache->active_segment_leaf != NULL) {
-    rc = lc_pouch_state_cache_manifest_copy(pouch, cache, manifest, error);
+    rc = lc_pouch_state_cache_manifest_borrow(pouch, cache, manifest, error);
     if (rc != LC_OK) {
       return rc;
     }
@@ -7705,12 +7742,12 @@ static int lc_pouch_state_manifest_lookup_cached_borrowed(
 }
 
 /* Return a projection-backed manifest in exclusive mode; otherwise refresh. */
-static int
-lc_pouch_state_manifest_view(lc_pouch *pouch, const char *namespace_name,
-                             lc_pouch_namespace_manifest *manifest,
-                             lc_pouch_state_cache_namespace **cache_out,
-                             lc_error *error) {
-  lc_pouch_state_cache_namespace *cache;
+static int lc_pouch_state_manifest_view(lc_pouch *pouch,
+                                        const char *namespace_name,
+                                        lc_pouch_namespace_manifest *manifest,
+                                        lc_pouch_namespace_logstore **cache_out,
+                                        lc_error *error) {
+  lc_pouch_namespace_logstore *cache;
   uint64_t writer_mode_epoch;
   int single_writer;
   int rc;
@@ -7723,12 +7760,12 @@ lc_pouch_state_manifest_view(lc_pouch *pouch, const char *namespace_name,
   }
   *cache_out = NULL;
   memset(manifest, 0, sizeof(*manifest));
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
   if (single_writer && cache != NULL && cache->initialized &&
       cache->writer_mode_epoch == writer_mode_epoch &&
       cache->namespace_path != NULL && cache->active_segment_leaf != NULL) {
-    rc = lc_pouch_state_cache_manifest_copy(pouch, cache, manifest, error);
+    rc = lc_pouch_state_cache_manifest_borrow(pouch, cache, manifest, error);
     if (rc == LC_OK) {
       *cache_out = cache;
     }
@@ -7742,8 +7779,7 @@ lc_pouch_state_manifest_view(lc_pouch *pouch, const char *namespace_name,
                                           error);
   }
   if (rc == LC_OK) {
-    cache =
-        lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 1, error);
     if (cache == NULL) {
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     } else {
@@ -7760,7 +7796,7 @@ lc_pouch_state_manifest_view(lc_pouch *pouch, const char *namespace_name,
 
 int lc_pouch_state_warm_namespace(lc_pouch *pouch, const char *namespace_name,
                                   lc_error *error) {
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_process_namespace_mutex *process_mutex;
   int rc;
@@ -7788,7 +7824,7 @@ int lc_pouch_state_warm_namespace(lc_pouch *pouch, const char *namespace_name,
   if (rc != LC_OK) {
     goto cleanup_unlocked;
   }
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 1, error);
   if (cache == NULL) {
     rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   } else {
@@ -7806,11 +7842,11 @@ lc_pouch_state_cache_lookup(lc_pouch *pouch, const char *namespace_name,
                             const char *key, lc_pouch_state_entry *out,
                             lc_pouch_generation *max_version_out,
                             lc_error *error) {
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_cache_record *record;
   int rc;
 
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 1, error);
   if (cache == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
@@ -8156,7 +8192,7 @@ static int lc_pouch_state_snapshot_write_high_water(
 
 static int lc_pouch_state_write_snapshot(
     lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
-    const char *snapshot_leaf, lc_pouch_state_cache_namespace *cache,
+    const char *snapshot_leaf, lc_pouch_namespace_logstore *cache,
     const lc_pouch_state_compaction_capture *capture, lc_error *error) {
   lc_pouch_state_cache_record **records;
   char tmp_leaf[128];
@@ -8597,7 +8633,7 @@ static void lc_pouch_state_compaction_candidate_remove_at(
 
 static int lc_pouch_state_compaction_protect_live_links(
     lc_pouch *pouch, lc_pouch_state_compaction_capture *capture,
-    lc_pouch_state_cache_namespace *cache, int *blocked, lc_error *error) {
+    lc_pouch_namespace_logstore *cache, int *blocked, lc_error *error) {
   lc_pouch_state_cache_record *record;
 
   (void)error;
@@ -8707,7 +8743,7 @@ static int lc_pouch_state_compaction_capture_record_add(
 
 static int lc_pouch_state_compaction_capture_records(
     lc_pouch *pouch, lc_pouch_state_compaction_capture *capture,
-    lc_pouch_state_cache_namespace *cache, lc_error *error) {
+    lc_pouch_namespace_logstore *cache, lc_error *error) {
   lc_pouch_state_cache_record **records;
   size_t record_count;
   size_t index;
@@ -8816,7 +8852,7 @@ static int lc_pouch_state_compaction_validate_candidates(
 static int lc_pouch_state_compaction_validate_capture(
     lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest,
     const lc_pouch_state_compaction_capture *before,
-    lc_pouch_state_cache_namespace *cache, lc_error *error) {
+    lc_pouch_namespace_logstore *cache, lc_error *error) {
   lc_pouch_state_cache_record **records;
   char *manifest_path;
   char *manifest_text;
@@ -9196,7 +9232,7 @@ static int lc_pouch_state_compact_namespace_if_needed(
   uint64_t compacted_segment_id;
   uint64_t now_seconds;
   lc_pouch_state_compaction_capture capture;
-  lc_pouch_state_cache_namespace candidate_cache;
+  lc_pouch_namespace_logstore candidate_cache;
   int protected_snapshot_blocked;
   int rc;
 
@@ -9291,8 +9327,8 @@ static int lc_pouch_state_compact_namespace_if_needed(
   }
   lc_free_with_allocator(&pouch->allocator, candidate_cache.namespace_name);
   candidate_cache.namespace_name = NULL;
-  lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
-                                               &candidate_cache);
+  lc_pouch_namespace_logstore_clear_records(&pouch->allocator,
+                                            &candidate_cache);
   if (rc != LC_OK) {
     lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
     lc_pouch_maintenance_mark_aborted(pouch, out, "candidate-read-aborted");
@@ -9442,7 +9478,7 @@ static int lc_pouch_state_compact_namespace(
     lc_pouch_namespace_manifest *manifest, unsigned long *cleanup_deleted_count,
     unsigned long *cleanup_pending_count, const char **abort_diagnostic,
     int *compacted_out, lc_error *error) {
-  lc_pouch_state_cache_namespace snapshot_cache;
+  lc_pouch_namespace_logstore snapshot_cache;
   lc_pouch_state_compaction_capture capture;
   char *snapshot_leaf;
   uint64_t compacted_segment_id;
@@ -9485,8 +9521,8 @@ static int lc_pouch_state_compact_namespace(
     }
     lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
     lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
-    lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
-                                                 &snapshot_cache);
+    lc_pouch_namespace_logstore_clear_records(&pouch->allocator,
+                                              &snapshot_cache);
     return rc;
   }
   rc = lc_pouch_state_compaction_protect_live_links(
@@ -9497,8 +9533,8 @@ static int lc_pouch_state_compact_namespace(
     }
     lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
     lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
-    lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
-                                                 &snapshot_cache);
+    lc_pouch_namespace_logstore_clear_records(&pouch->allocator,
+                                              &snapshot_cache);
     return rc;
   }
   if (protected_snapshot_blocked || capture.candidate_count == 0U) {
@@ -9508,8 +9544,8 @@ static int lc_pouch_state_compact_namespace(
     }
     lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
     lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
-    lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
-                                                 &snapshot_cache);
+    lc_pouch_namespace_logstore_clear_records(&pouch->allocator,
+                                              &snapshot_cache);
     return LC_OK;
   }
   rc = lc_pouch_state_compaction_capture_records(pouch, &capture,
@@ -9520,8 +9556,8 @@ static int lc_pouch_state_compact_namespace(
     }
     lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
     lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
-    lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
-                                                 &snapshot_cache);
+    lc_pouch_namespace_logstore_clear_records(&pouch->allocator,
+                                              &snapshot_cache);
     return rc;
   }
   compacted_segment_id = manifest->max_segment_id;
@@ -9531,8 +9567,8 @@ static int lc_pouch_state_compact_namespace(
   if (compacted_segment_id == LC_U64_MAX) {
     lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
     lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
-    lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
-                                                 &snapshot_cache);
+    lc_pouch_namespace_logstore_clear_records(&pouch->allocator,
+                                              &snapshot_cache);
     if (abort_diagnostic != NULL) {
       *abort_diagnostic = "snapshot-sequence-overflow";
     }
@@ -9547,8 +9583,8 @@ static int lc_pouch_state_compact_namespace(
     lc_free_with_allocator(&pouch->allocator, snapshot_leaf);
     lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
     lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
-    lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
-                                                 &snapshot_cache);
+    lc_pouch_namespace_logstore_clear_records(&pouch->allocator,
+                                              &snapshot_cache);
     if (abort_diagnostic != NULL) {
       *abort_diagnostic = "snapshot-prepare-aborted";
     }
@@ -9597,13 +9633,12 @@ static int lc_pouch_state_compact_namespace(
     }
   }
   if (rc == LC_OK) {
-    lc_pouch_state_cache_namespace *live_cache;
+    lc_pouch_namespace_logstore *live_cache;
 
     live_cache =
-        lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+        lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
     if (live_cache != NULL) {
-      lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
-                                                   live_cache);
+      lc_pouch_namespace_logstore_clear_records(&pouch->allocator, live_cache);
       live_cache->initialized = 0;
       live_cache->max_segment_id = 0UL;
       live_cache->segment_count = 0UL;
@@ -9629,8 +9664,7 @@ static int lc_pouch_state_compact_namespace(
   lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
   lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
   snapshot_cache.namespace_name = NULL;
-  lc_pouch_state_cache_namespace_clear_records(&pouch->allocator,
-                                               &snapshot_cache);
+  lc_pouch_namespace_logstore_clear_records(&pouch->allocator, &snapshot_cache);
   return rc;
 }
 
@@ -9813,12 +9847,12 @@ static int lc_pouch_state_cache_apply_write(
     uint64_t cipher_bytes, const char *descriptor,
     lc_pouch_unix_seconds updated_at_unix, int has_query_hidden,
     int query_hidden, int found, unsigned char record_type) {
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_entry entry;
   lc_error ignored;
   int rc;
 
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   if (cache == NULL || !cache->initialized) {
     return LC_OK;
   }
@@ -9847,7 +9881,7 @@ static int lc_pouch_state_cache_apply_write(
   rc = lc_pouch_state_cache_apply_entry(pouch, cache, &entry, &ignored);
   lc_error_cleanup(&ignored);
   if (rc != LC_OK) {
-    lc_pouch_state_cache_namespace_clear_records(&pouch->allocator, cache);
+    lc_pouch_namespace_logstore_clear_records(&pouch->allocator, cache);
     cache->initialized = 0;
     cache->max_segment_id = 0UL;
     cache->segment_count = 0UL;
@@ -10075,7 +10109,7 @@ static char *lc_pouch_state_staged_key(const lc_allocator *allocator,
 static int lc_pouch_state_recover_staged_decisions_locked(
     lc_pouch *pouch, const char *namespace_name, lc_error *error) {
   lc_pouch_namespace_manifest manifest;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_decision *decisions;
   lc_pouch_state_decision *decision;
   unsigned long recovered_count;
@@ -10087,7 +10121,7 @@ static int lc_pouch_state_recover_staged_decisions_locked(
                         "pouch and namespace",
                         NULL, NULL, NULL);
   }
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 1, error);
   if (cache == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
@@ -10157,14 +10191,14 @@ int lc_pouch_state_recover_staged_decisions(lc_pouch *pouch,
                                             const char *namespace_name,
                                             lc_error *error) {
   lc_pouch_state_namespace_lock lock;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
     return lc_pouch_state_recover_staged_decisions_locked(pouch, namespace_name,
                                                           error);
   }
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   if (cache != NULL && cache->decision_recovery_checked) {
     return LC_OK;
   }
@@ -10185,7 +10219,7 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
                                 lc_pouch_state_write_result *out,
                                 lc_error *error) {
   lc_pouch_state_entry current;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_hash_source hash_source;
   const char *content_type;
@@ -10245,7 +10279,7 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   memset(out, 0, sizeof(*out));
   memset(&manifest, 0, sizeof(manifest));
   memset(&current, 0, sizeof(current));
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
   namespace_locked =
       lc_pouch_state_namespace_lock_is_held(pouch, namespace_name);
@@ -10254,7 +10288,7 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
                         cache->namespace_path != NULL &&
                         cache->active_segment_leaf != NULL;
   if (manifest_from_cache) {
-    rc = lc_pouch_state_cache_manifest_copy(pouch, cache, &manifest, error);
+    rc = lc_pouch_state_cache_manifest_borrow(pouch, cache, &manifest, error);
     if (rc == LC_OK) {
       max_version = cache->max_version;
       rc = lc_pouch_state_entry_from_cache_record(
@@ -10272,7 +10306,7 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
       rc = lc_pouch_state_cache_lookup(pouch, namespace_name, &manifest, key,
                                        &current, &max_version, error);
     }
-    cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
     single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
   }
   if (rc != LC_OK) {
@@ -10446,13 +10480,13 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
    * held, while the exact-key precondition remains protected by its key lock.
    */
   if (single_writer) {
-    cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
     if (cache != NULL && cache->initialized &&
         cache->writer_mode_epoch == writer_mode_epoch &&
         cache->namespace_path != NULL && cache->active_segment_leaf != NULL) {
       lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
       memset(&manifest, 0, sizeof(manifest));
-      rc = lc_pouch_state_cache_manifest_copy(pouch, cache, &manifest, error);
+      rc = lc_pouch_state_cache_manifest_borrow(pouch, cache, &manifest, error);
       manifest_from_cache = rc == LC_OK ? 1 : 0;
     } else {
       manifest_from_cache = 0;
@@ -10476,8 +10510,7 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
     }
   }
   if (rc == LC_OK && !single_writer) {
-    cache =
-        lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 1, error);
     if (cache == NULL) {
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     } else {
@@ -10875,13 +10908,13 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
         query_hidden, 1, put_record_type);
     if (body->reset != NULL &&
         bytes <= LC_POUCH_STATE_BODY_CACHE_RECORD_MAX_BYTES) {
-      lc_pouch_state_cache_namespace *cache;
+      lc_pouch_namespace_logstore *cache;
       lc_pouch_state_cache_record *record;
       lc_error cache_error;
 
       lc_error_init(&cache_error);
-      cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0,
-                                                  &cache_error);
+      cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0,
+                                               &cache_error);
       record =
           cache != NULL ? lc_pouch_state_cache_record_find(cache, key) : NULL;
       if (record != NULL && record->found && record->version == version &&
@@ -11100,7 +11133,7 @@ static void lc_pouch_state_metadata_append_process(
       items[LC_POUCH_STATE_METADATA_APPEND_BATCH_MAX];
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_append_lock append_lock;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_process_namespace_mutex *projection_mutex;
   size_t index;
   int cache_cleared;
@@ -11335,7 +11368,7 @@ static int lc_pouch_state_metadata_append_batcher_get(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_state_metadata_append_batcher **out, lc_error *error) {
   lc_pouch_state_metadata_append_batcher *batcher;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   int cond_initialized;
   int mutex_initialized;
   int pthread_rc;
@@ -11347,7 +11380,7 @@ static int lc_pouch_state_metadata_append_batcher_get(
                         NULL, "pouch");
   }
   *out = NULL;
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 1, error);
   if (cache == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
@@ -11427,15 +11460,14 @@ int lc_pouch_state_metadata_append_worker_init(lc_pouch *pouch,
 void lc_pouch_state_metadata_append_worker_close(lc_pouch *pouch) {
   lc_pouch_state_metadata_append_batcher *batcher;
   lc_pouch_state_metadata_append_batcher *next;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
 
   if (pouch == NULL || !pouch->state_cache_mutex_initialized) {
     return;
   }
   batcher = NULL;
   pthread_mutex_lock(&pouch->state_cache_mutex);
-  for (cache = pouch->state_cache_namespaces; cache != NULL;
-       cache = cache->next) {
+  for (cache = pouch->namespace_logstores; cache != NULL; cache = cache->next) {
     if (cache->metadata_append_batcher != NULL) {
       cache->metadata_append_batcher->next = batcher;
       batcher = cache->metadata_append_batcher;
@@ -12047,7 +12079,7 @@ static int lc_pouch_state_promote_staged_locked(
   lc_pouch_state_entry staged;
   lc_pouch_namespace_manifest manifest;
   char *staged_key;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_generation version;
   lc_pouch_generation decision_version;
   lc_pouch_generation discard_version;
@@ -12077,7 +12109,7 @@ static int lc_pouch_state_promote_staged_locked(
   rc = lc_pouch_state_manifest_lookup_cached(
       pouch, namespace_name, key, &manifest, &committed, NULL, error);
   if (rc == LC_OK) {
-    cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
     if (cache != NULL && cache->initialized) {
       rc = lc_pouch_state_entry_from_cache_record(
           pouch, lc_pouch_state_cache_record_find(cache, staged_key), &staged,
@@ -12224,7 +12256,7 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   lc_pouch_state_entry staged;
   lc_pouch_namespace_manifest manifest;
   char *staged_key;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_generation version;
   lc_pouch_generation decision_version;
   lc_pouch_generation discard_version;
@@ -12254,7 +12286,7 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   rc = lc_pouch_state_manifest_lookup_cached(
       pouch, namespace_name, key, &manifest, &committed, NULL, error);
   if (rc == LC_OK) {
-    cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
     if (cache != NULL && cache->initialized) {
       rc = lc_pouch_state_entry_from_cache_record(
           pouch, lc_pouch_state_cache_record_find(cache, staged_key), &staged,
@@ -12478,7 +12510,7 @@ static int lc_pouch_state_read_internal(lc_pouch *pouch,
                                         const char *key, int include_body,
                                         lc_pouch_state_read_result *out,
                                         lc_error *error) {
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_cache_record *record;
   lc_pouch_state_entry current;
   lc_pouch_namespace_manifest manifest;
@@ -12511,7 +12543,7 @@ static int lc_pouch_state_read_internal(lc_pouch *pouch,
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     goto cleanup_unlocked;
   }
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   record = cache != NULL ? lc_pouch_state_cache_record_find(cache, key) : NULL;
   if (include_body && lc_pouch_single_writer_enabled(pouch) && cache != NULL &&
       record != NULL) {
@@ -12660,7 +12692,7 @@ int lc_pouch_state_read_metadata_view_locked(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     lc_pouch_state_metadata_view *out,
     lc_pouch_state_read_result *owned_fallback, lc_error *error) {
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_cache_record *record;
   uint64_t writer_mode_epoch;
   int single_writer;
@@ -12675,7 +12707,7 @@ int lc_pouch_state_read_metadata_view_locked(
   }
   memset(out, 0, sizeof(*out));
   memset(owned_fallback, 0, sizeof(*owned_fallback));
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
   if (single_writer && cache != NULL && cache->initialized &&
       cache->writer_mode_epoch == writer_mode_epoch &&
@@ -12716,7 +12748,7 @@ int lc_pouch_state_read(lc_pouch *pouch, const char *namespace_name,
 int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
                         const char *key, lc_sink *dst,
                         lc_pouch_state_read_result *out, lc_error *error) {
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_cache_record *record;
   lc_pouch_state_entry current;
   lc_pouch_namespace_manifest manifest;
@@ -12742,7 +12774,7 @@ int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
     return rc;
   }
   if (lc_pouch_single_writer_enabled(pouch)) {
-    cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
     record =
         cache != NULL ? lc_pouch_state_cache_record_find(cache, key) : NULL;
     if (record != NULL && record->found && record->body_cache != NULL &&
@@ -12769,7 +12801,7 @@ int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     goto cleanup_unlocked;
   }
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   record = cache != NULL ? lc_pouch_state_cache_record_find(cache, key) : NULL;
   if (cache != NULL && record != NULL && record->body_cache != NULL &&
       record->body_cache->version == record->version &&
@@ -12823,7 +12855,7 @@ static int lc_pouch_state_read_many_internal(
     size_t key_count, lc_pouch_state_read_many_fn visitor, void *context,
     int include_body, int copy_cached_body, lc_error *error) {
   lc_pouch_namespace_manifest manifest;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_cache_record **record_index;
   lc_pouch_state_read_many_snapshot *snapshots;
   size_t record_index_count;
@@ -13018,7 +13050,7 @@ int lc_pouch_state_scan_summaries(lc_pouch *pouch, const char *namespace_name,
                                   lc_pouch_state_scan_summaries_result *out,
                                   lc_error *error) {
   lc_pouch_namespace_manifest manifest;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_cache_record **record_index;
   lc_pouch_state_scan_body_snapshot *snapshots;
   size_t record_index_count;
@@ -13146,7 +13178,7 @@ static int lc_pouch_state_visit_internal(lc_pouch *pouch,
                                          void *context, int locked,
                                          lc_error *error) {
   lc_pouch_namespace_manifest manifest;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_cache_record *record;
   lc_pouch_state_visit_snapshot *snapshots;
   size_t snapshot_count;
@@ -13251,7 +13283,7 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
 int lc_pouch_state_visible_count(lc_pouch *pouch, const char *namespace_name,
                                  size_t *count, lc_error *error) {
   lc_pouch_namespace_manifest manifest;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_cache_record *record;
   lc_pouch_state_process_namespace_mutex *process_mutex;
   int rc;
@@ -13296,7 +13328,7 @@ int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_state_change_visit_fn visitor,
                                void *context, lc_error *error) {
   lc_pouch_namespace_manifest manifest;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_cache_record *record;
   lc_pouch_state_visit_snapshot *snapshots;
   lc_pouch_state_process_namespace_mutex *process_mutex;
@@ -13372,7 +13404,7 @@ cleanup:
 int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
                              lc_pouch_generation *out, lc_error *error) {
   lc_pouch_namespace_manifest manifest;
-  lc_pouch_state_cache_namespace *cache;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_process_namespace_mutex *process_mutex;
   uint64_t writer_mode_epoch;
   int single_writer;
@@ -13388,7 +13420,7 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
   *out = 0UL;
   process_mutex = NULL;
   single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   if (single_writer && cache != NULL && cache->initialized &&
       cache->writer_mode_epoch == writer_mode_epoch) {
     *out = cache->max_version;
@@ -13413,7 +13445,7 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
   if (rc != LC_OK) {
     goto cleanup_unlocked;
   }
-  cache = lc_pouch_state_cache_namespace_find(pouch, namespace_name, 0, NULL);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   if (single_writer) {
     if (cache != NULL && cache->initialized) {
       *out = cache->max_version > manifest.state_max_version
@@ -13426,8 +13458,7 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
       rc = lc_pouch_state_manifest_max_version(pouch, &manifest, out, error);
     }
   } else {
-    cache =
-        lc_pouch_state_cache_namespace_find(pouch, namespace_name, 1, error);
+    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 1, error);
     if (cache == NULL) {
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     } else {

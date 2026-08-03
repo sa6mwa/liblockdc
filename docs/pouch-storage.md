@@ -603,18 +603,24 @@ Each difference from Go disk is classified below as representation/local
 implementation, operational/public API behavior, or a removed/rejected
 divergence.
 
-### Blocking Operational Gap
+### Resolved Exclusive Hot-Path Gap
 
-The pre-cutover runtime is not an accepted implementation divergence. Its
-ordinary mutation path opens and parses the namespace manifest, checks or
-repairs the active tail, opens and closes the active segment, and follows
-shared-root append coordination even when the root has one writer. That work
-dominates acquire and other small lockstore mutations and is unlike Go disk's
-resident namespace logstore.
+The rejected pre-cutover path opened and parsed the namespace manifest,
+checked or repaired the active tail, opened and closed the active segment, and
+followed shared-root append coordination for each ordinary mutation. That is
+not used by a healthy default-exclusive namespace. Its stable
+`namespace_logstore` owns the projection, logical-key index, active segment
+identity and offset, reusable append descriptor, namespace append gate, and
+metadata worker.
 
-The refactor must replace this with the mode contract below. It may not hide
-the gap by weakening the benchmark, making shared-root the undocumented
-default, relaxing durability, or omitting core operations from comparison.
+While the namespace projection and append gate are held, exclusive mutations
+use a read-only borrowed manifest view of that owner instead of allocating a
+copy or rereading storage. A durable manifest mutator rejects such a view; the
+caller must first materialize an owned manifest at rotation, recovery,
+maintenance, takeover, or I/O invalidation. Public read results remain
+independent copies before releasing projection coordination. This preserves the
+Go-disk resident-logstore property without exposing Pouch runtime ownership in
+the public API or durable format.
 
 ### Representation And Local Implementation
 
@@ -1107,11 +1113,15 @@ integer overflow must fail.
 ## Append And Commit Pipeline
 
 Pouch writes through a rolling per-namespace logstore with a common resident
-namespace core. The default exclusive state path has a resident logical-key
-projection, durable index high-water sequence, active segment identity/offset,
-bounded source cache, and active append descriptor. Shared-root, recovery,
-takeover, rotation, maintenance, and I/O invalidation deliberately leave that
-path to coordinate or rebuild durable state.
+namespace core. The private `namespace_logstore` is the stable owner for the
+default-exclusive state path: a resident normalized logical-key projection,
+durable index high-water sequence, active segment and snapshot lifecycle,
+active segment identity/offset, bounded source cache, and active append
+descriptor. State, leases, objects, attachments, queues, and staged
+transactions all reach authoritative storage through that owner; query
+artifacts remain derived and rebuildable from its projection. Shared-root,
+recovery, takeover, rotation, maintenance, and I/O invalidation deliberately
+leave that path to coordinate or rebuild durable state.
 
 Each resident namespace owner also retains its exclusive append gate and its
 bounded metadata append worker for the Pouch lifetime. This keeps the
@@ -1183,11 +1193,11 @@ Required behavior:
   new reference. Exact-key, maintenance, and writer-mode guards remain held
   throughout. This is Pouch's C implementation of Go disk's namespace
   metadata/write-gate split, not a second writer or a buffered payload path.
-  The gate is allocated once per Pouch handle and namespace, survives cache
-  invalidation until close, and does not perform a root stat, shared-mode
-  process registry lookup, or file-lock operation on a healthy exclusive
-  mutation. The cache namespace registry has its own short-lived mutex and
-  does not use shared-root mutation ownership;
+  The gate is allocated once per Pouch handle and namespace, survives
+  projection invalidation until close, and does not perform a root stat,
+  shared-mode process registry lookup, or file-lock operation on a healthy
+  exclusive mutation. The namespace-logstore registry has its own short-lived
+  mutex and does not use shared-root mutation ownership;
 - for an SDK-owned `lc_source_from_memory` state or object body no larger than
   64 KiB, Pouch may hash and transform the already-materialized unread range
   in bounded memory, then append one complete finalized record with one

@@ -86,14 +86,16 @@ user data records.
   append gate, and metadata append worker to one stable namespace owner. The
   process-level namespace guard remains separately registered because it must
   coordinate aliases of the same root across Pouch handles.
-- [ ] Design one internal namespace-logstore owner used by all state, object,
-  metadata, lease, queue, attachment, transaction, and index mutations.
-- [ ] Keep a resident logical record index keyed by normalized key, durable
-  index high-water sequence, active segment leaf, append offset, and manifest
-  generation/lifecycle state.
-- [ ] Hold reusable descriptors for the active append segment and bounded read
-  sources. Close and invalidate them only at rotation, recovery, maintenance,
-  mode transition, I/O failure, or Pouch close/abort.
+- [x] Design one internal `namespace_logstore` owner used by all authoritative
+  state, object, metadata, lease, queue, attachment, and transaction
+  mutations. Derived query artifacts consume its projection and remain
+  rebuildable rather than becoming a second authority.
+- [x] Keep a resident logical record index keyed by normalized key, durable
+  index high-water sequence, active segment leaf and offset, plus active
+  segment/snapshot lifecycle state.
+- [x] Hold reusable descriptors for the active append segment and bounded read
+  sources. Invalidate them only at rotation, recovery, maintenance, mode
+  transition, I/O failure, or Pouch close/abort.
 - [ ] Replace duplicated client pre-read plus state-layer reread paths with one
   mutation authority that reads cached metadata, evaluates CAS/lease state,
   appends, commits, and publishes the updated projection atomically.
@@ -209,10 +211,12 @@ Acceptance:
 - [x] Make compaction/retention take the writer-mode and namespace-maintenance
   barriers, drain affected key/append work, capture/validate/install, then
   invalidate only changed namespace resources.
-- [ ] Tail repair is a takeover/recovery operation. Do not invoke it on a
-  healthy resident exclusive append path.
-- [ ] Preserve sync foreground operations and the existing background janitor
-  contract: maintenance must never delay a completed foreground mutation.
+- [x] Tail repair is a takeover/recovery operation. A healthy resident
+  exclusive append path does not invoke it, including when a normal append
+  rotates its active segment.
+- [x] Preserve sync foreground operations and the existing background janitor
+  contract: maintenance is signaled only after a completed foreground mutation
+  and runs outside that operation's completion path.
 - [ ] Close descriptors, stop workers, release ownership, and clean all cache
   state correctly on close, abort, failed open, and fork-sensitive test paths.
 
@@ -225,8 +229,10 @@ Acceptance:
 
 ### 5. Remove The Superseded Hot Path
 
-- [ ] Delete per-mutation manifest scan/reopen/tail-repair behavior from the
-  exclusive path.
+- [x] Delete per-mutation manifest scan/reopen/tail-repair behavior from the
+  exclusive path. Its resident logstore now lends a read-only manifest view
+  while namespace append authority is held; rotation and lifecycle work first
+  materialize an owned manifest.
 - [x] Delete duplicate lease validation reads where mutation authority already
   holds the target-key lock and cached projection. Queue-state lease update,
   metadata, and delete now validate only through their exact-key mutation
