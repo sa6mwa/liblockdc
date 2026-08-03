@@ -51,6 +51,7 @@ static pthread_mutex_t lc_pouch_writer_root_lock_mutex =
  * can accidentally upgrade a shared lock or release every lock on close.
  */
 struct lc_pouch_writer_root_lock_entry {
+  lc_allocator allocator;
   dev_t device;
   ino_t inode;
   int fd;
@@ -2137,7 +2138,7 @@ static void lc_pouch_writer_root_lock_release(lc_pouch *pouch) {
     fl.l_whence = SEEK_SET;
     (void)fcntl(entry->fd, F_SETLK, &fl);
     (void)close(entry->fd);
-    free(entry);
+    lc_free_with_allocator(&entry->allocator, entry);
   }
   pthread_mutex_unlock(&lc_pouch_writer_root_lock_mutex);
 }
@@ -2238,7 +2239,8 @@ static int lc_pouch_writer_root_lock_acquire(lc_pouch *pouch, int mode,
                         "failed to lock pouch writer root",
                         strerror(saved_errno), NULL, "pouch");
   }
-  entry = (lc_pouch_writer_root_lock_entry *)calloc(1U, sizeof(*entry));
+  entry = (lc_pouch_writer_root_lock_entry *)lc_calloc_with_allocator(
+      &pouch->allocator, 1U, sizeof(*entry));
   if (entry == NULL) {
     fl.l_type = F_UNLCK;
     (void)fcntl(fd, F_SETLK, &fl);
@@ -2248,6 +2250,7 @@ static int lc_pouch_writer_root_lock_acquire(lc_pouch *pouch, int mode,
                         "failed to allocate pouch writer root lock", NULL, NULL,
                         "pouch");
   }
+  entry->allocator = pouch->allocator;
   entry->device = st.st_dev;
   entry->inode = st.st_ino;
   entry->fd = fd;

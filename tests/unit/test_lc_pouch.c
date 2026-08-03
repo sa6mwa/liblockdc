@@ -89,6 +89,7 @@ typedef struct pouch_reentrant_query_context {
 typedef struct pouch_fail_allocator_state {
   size_t calls;
   size_t fail_at;
+  size_t free_calls;
 } pouch_fail_allocator_state;
 
 typedef struct pouch_queue_notification_write {
@@ -1121,7 +1122,12 @@ static void *pouch_fail_realloc(void *context, void *ptr, size_t size) {
 }
 
 static void pouch_fail_free(void *context, void *ptr) {
-  (void)context;
+  pouch_fail_allocator_state *state;
+
+  state = (pouch_fail_allocator_state *)context;
+  if (state != NULL && ptr != NULL) {
+    state->free_calls += 1U;
+  }
   free(ptr);
 }
 
@@ -4280,6 +4286,45 @@ static void test_single_writer_runtime_control_and_ha_probe(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_false(presence.present);
   lc_pouch_close(writer);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_writer_root_lock_retains_creating_allocator(void **state) {
+  pouch_fail_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_pouch *first;
+  lc_pouch *second;
+  lc_pouch_open_options options;
+  lc_error error;
+  char root[512];
+  size_t frees_after_first_close;
+  int rc;
+
+  (void)state;
+  memset(&alloc_state, 0, sizeof(alloc_state));
+  pouch_fail_allocator_init(&allocator, &alloc_state);
+  first = NULL;
+  second = NULL;
+  memset(&options, 0, sizeof(options));
+  lc_error_init(&error);
+  make_root("writer-lock-allocator", root, sizeof(root));
+  cleanup_root(root);
+
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  rc = lc_pouch_open(root, &allocator, &options, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_open(root, NULL, &options, &second, &error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_pouch_close(first);
+  first = NULL;
+  frees_after_first_close = alloc_state.free_calls;
+  lc_pouch_close(second);
+  second = NULL;
+  assert_int_equal(alloc_state.free_calls, frees_after_first_close + 1U);
+
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -24329,6 +24374,7 @@ int main(void) {
       cmocka_unit_test(
           test_single_writer_rebuilds_index_without_advisory_sequence),
       cmocka_unit_test(test_single_writer_runtime_control_and_ha_probe),
+      cmocka_unit_test(test_writer_root_lock_retains_creating_allocator),
       cmocka_unit_test(
           test_single_writer_transition_waits_for_active_append_operation),
       cmocka_unit_test(test_maintenance_waits_for_active_key_operation),
