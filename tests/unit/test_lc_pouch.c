@@ -18867,8 +18867,7 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   assert_string_equal(replay_res.correlation_id,
                       "pouch-txn-00000000000000000002");
   lc_txn_replay_res_cleanup(&replay_res);
-  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
-  assert_int_equal(rc, LC_OK);
+  pouch = ((lc_client_handle *)reader)->pouch;
   rc = lc_pouch_state_read(pouch, "orders/eu", "state/order-1", &read_result,
                            &error);
   assert_int_equal(rc, LC_OK);
@@ -18889,7 +18888,6 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   read_source_to_string(read_result.body, state_bytes, sizeof(state_bytes));
   assert_string_equal(state_bytes, "committed-order-1");
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  lc_pouch_close(pouch);
   pouch = NULL;
 
   decision_req.txn_id = "txn-pouch-rollback";
@@ -18909,15 +18907,13 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   assert_string_equal(replay_res.correlation_id,
                       "pouch-txn-00000000000000000003");
   lc_txn_replay_res_cleanup(&replay_res);
-  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
-  assert_int_equal(rc, LC_OK);
+  pouch = ((lc_client_handle *)reader)->pouch;
   rc = lc_pouch_state_read(pouch, "orders/eu",
                            "state/order-1/.staging/txn-pouch-rollback",
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  lc_pouch_close(pouch);
   pouch = NULL;
   lc_client_close(reader);
   reader = NULL;
@@ -18960,6 +18956,104 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   lc_pouch_close(pouch);
   pouch = NULL;
 
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_txn_replay_applies_durable_decision(void **state) {
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_txn_participant participant;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char body[64];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  source = NULL;
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_replay_req_init(&replay_req);
+  memset(&replay_res, 0, sizeof(replay_res));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("txn-replay-apply", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  pouch = ((lc_client_handle *)client)->pouch;
+  participant.namespace_name = "default";
+  participant.key = "state/replay-commit";
+  participant.backend_hash = "pouch-state";
+  rc = lc_source_from_memory("committed", strlen("committed"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, participant.namespace_name,
+                                  participant.key, "txn-replay-commit", source,
+                                  NULL, &write_result, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  test_write_binary_txn_record(pouch, "txn-replay-commit", "commit", 0L, 1UL,
+                               "pouch-state", &participant, 1U, &error);
+
+  replay_req.txn_id = "txn-replay-commit";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(replay_res.state, "commit");
+  lc_txn_replay_res_cleanup(&replay_res);
+  rc = lc_pouch_state_read(pouch, participant.namespace_name, participant.key,
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, body, sizeof(body));
+  assert_string_equal(body, "committed");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(pouch, participant.namespace_name,
+                           "state/replay-commit/.staging/txn-replay-commit",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  participant.key = "state/replay-expired";
+  rc = lc_source_from_memory("discarded", strlen("discarded"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, participant.namespace_name,
+                                  participant.key, "txn-replay-expired", source,
+                                  NULL, &write_result, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  test_write_binary_txn_record(pouch, "txn-replay-expired", "prepare", 1L, 1UL,
+                               "pouch-state", &participant, 1U, &error);
+
+  replay_req.txn_id = "txn-replay-expired";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(replay_res.state, "rollback");
+  lc_txn_replay_res_cleanup(&replay_res);
+  rc = lc_pouch_state_read(pouch, participant.namespace_name,
+                           "state/replay-expired/.staging/txn-replay-expired",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(pouch, participant.namespace_name, participant.key,
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -20196,6 +20290,7 @@ int main(void) {
       cmocka_unit_test(
           test_flush_index_rebuilds_incomplete_summary_after_document_fix),
       cmocka_unit_test(test_txn_decisions_persist_participant_records),
+      cmocka_unit_test(test_txn_replay_applies_durable_decision),
       cmocka_unit_test(test_txn_decisions_apply_attachment_side_effects),
       cmocka_unit_test(test_txn_recovery_applies_attachment_side_effects),
       cmocka_unit_test(

@@ -1654,7 +1654,8 @@ struct lc_client {
   /** Triggers an index flush for the selected namespace. */
   int (*flush_index)(lc_client *self, const lc_index_flush_req *req,
                      lc_index_flush_res *out, lc_error *error);
-  /** Replays a transaction by transaction identifier. */
+  /** Reapplies a durable transaction decision by identifier. An expired
+   * prepared decision is converted to rollback before it is applied. */
   int (*txn_replay)(lc_client *self, const lc_txn_replay_req *req,
                     lc_txn_replay_res *out, lc_error *error);
   /** Prepares a transaction decision. */
@@ -2089,7 +2090,8 @@ int lc_update_namespace_config(lc_client *client,
 /** Triggers an index flush for the selected namespace. */
 int lc_flush_index(lc_client *client, const lc_index_flush_req *req,
                    lc_index_flush_res *out, lc_error *error);
-/** Replays a transaction by transaction identifier. */
+/** Reapplies a durable transaction decision by identifier. An expired prepared
+ * decision is converted to rollback before it is applied. */
 int lc_txn_replay(lc_client *client, const lc_txn_replay_req *req,
                   lc_txn_replay_res *out, lc_error *error);
 /** Prepares a transaction decision. */

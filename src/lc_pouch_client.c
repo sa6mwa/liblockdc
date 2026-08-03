@@ -9527,29 +9527,6 @@ static int lc_pouch_txn_build_record(const lc_txn_decision_req *req,
   return rc;
 }
 
-static int lc_pouch_txn_extract_state(const char *record, size_t length,
-                                      char **out, lc_error *error) {
-  lc_pouch_binary_cursor cursor;
-  char *state;
-  int rc;
-
-  *out = NULL;
-  memset(&cursor, 0, sizeof(cursor));
-  cursor.bytes = (const unsigned char *)record;
-  cursor.length = length;
-  state = NULL;
-  rc = lc_pouch_binary_cursor_magic(&cursor, LC_POUCH_TXN_RECORD_MAGIC, error);
-  if (rc == LC_OK) {
-    rc = lc_pouch_binary_cursor_string(&cursor, &state, error);
-  }
-  if (rc == LC_OK) {
-    *out = state;
-    return LC_OK;
-  }
-  lc_free_with_allocator(NULL, state);
-  return rc;
-}
-
 static int lc_pouch_txn_decision_response(lc_txn_decision_res *out,
                                           const char *txn_id, const char *state,
                                           lc_pouch_generation version,
@@ -10169,9 +10146,22 @@ static int lc_pouch_txn_apply_queue_state_participant(
       lc_pouch_txn_apply_queue_participant_locked, &context, error);
 }
 
+static int lc_pouch_txn_is_queue_lease_mismatch(const lc_error *error) {
+  if (error == NULL || error->code != LC_ERR_INVALID ||
+      error->message == NULL) {
+    return 0;
+  }
+  return strcmp(error->message, "pouch queue transaction lease mismatch") ==
+             0 ||
+         strcmp(error->message, "pouch queue transaction lease missing") == 0 ||
+         strcmp(error->message, "pouch queue transaction lease expired") == 0;
+}
+
 static int lc_pouch_txn_apply_participants(lc_client_handle *client,
                                            const lc_txn_decision_req *req,
-                                           const char *state, lc_error *error) {
+                                           const char *state,
+                                           int tolerate_queue_lease_mismatch,
+                                           lc_error *error) {
   size_t i;
 
   if (strcmp(state, "prepare") == 0) {
@@ -10198,6 +10188,12 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
           client, namespace_name, req->participants[i].key, req->txn_id, state,
           error);
       if (rc != LC_OK) {
+        if (tolerate_queue_lease_mismatch &&
+            lc_pouch_txn_is_queue_lease_mismatch(error)) {
+          lc_error_cleanup(error);
+          lc_error_init(error);
+          continue;
+        }
         return rc;
       }
       continue;
@@ -10207,6 +10203,12 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
           client, namespace_name, req->participants[i].key, req->txn_id, state,
           error);
       if (rc != LC_OK) {
+        if (tolerate_queue_lease_mismatch &&
+            lc_pouch_txn_is_queue_lease_mismatch(error)) {
+          lc_error_cleanup(error);
+          lc_error_init(error);
+          continue;
+        }
         return rc;
       }
       continue;
@@ -14166,17 +14168,29 @@ int lc_pouch_client_flush_index_method(lc_client *self,
   return LC_OK;
 }
 
+static int lc_pouch_client_txn_decision(lc_client *self,
+                                        const lc_txn_decision_req *req,
+                                        const char *state,
+                                        int tolerate_queue_lease_mismatch,
+                                        lc_txn_decision_res *out,
+                                        lc_error *error);
+
 int lc_pouch_client_txn_replay_method(lc_client *self,
                                       const lc_txn_replay_req *req,
                                       lc_txn_replay_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_state_read_result read_result;
+  lc_pouch_txn_record txn_record;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
   lc_sink *sink;
   const void *bytes;
   size_t length;
   char *record;
-  char *state;
   char *key;
+  const char *response_state;
+  lc_pouch_generation response_index;
+  lc_pouch_unix_seconds now;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -14187,9 +14201,14 @@ int lc_pouch_client_txn_replay_method(lc_client *self,
   memset(out, 0, sizeof(*out));
   client = (lc_client_handle *)self;
   memset(&read_result, 0, sizeof(read_result));
+  memset(&txn_record, 0, sizeof(txn_record));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
   sink = NULL;
   record = NULL;
-  state = NULL;
+  response_state = NULL;
+  response_index = 0UL;
+  now = 0L;
   key = lc_pouch_txn_key(req->txn_id, error);
   if (key == NULL) {
     return error != NULL ? error->code : LC_ERR_NOMEM;
@@ -14221,18 +14240,59 @@ int lc_pouch_client_txn_replay_method(lc_client *self,
   if (rc == LC_OK) {
     memcpy(record, bytes, length);
     record[length] = '\0';
-    rc = lc_pouch_txn_extract_state(record, length, &state, error);
+    rc = lc_pouch_txn_parse_record(record, length, &txn_record, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_txn_replay_response(out, req->txn_id, state,
-                                      read_result.index_seq, error);
+    decision_req.txn_id = req->txn_id;
+    decision_req.participants = txn_record.participants;
+    decision_req.participant_count = txn_record.participant_count;
+    decision_req.expires_at_unix = txn_record.expires_at_unix;
+    decision_req.tc_term = txn_record.tc_term;
+    decision_req.target_backend_hash = txn_record.target_backend_hash;
+    response_state = txn_record.state;
+    response_index = read_result.index_seq;
+    if (strcmp(txn_record.state, "prepare") == 0) {
+      rc = lc_pouch_now_unix(&now, error);
+      if (rc == LC_OK && txn_record.expires_at_unix > 0L &&
+          txn_record.expires_at_unix <= now) {
+        rc = lc_pouch_client_txn_decision(self, &decision_req, "rollback", 1,
+                                          &decision_res, error);
+        if (rc == LC_OK) {
+          lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+          memset(&read_result, 0, sizeof(read_result));
+          rc = lc_pouch_state_read_metadata(
+              client->pouch, LC_POUCH_TXN_NAMESPACE, key, &read_result, error);
+          if (rc == LC_OK && read_result.found) {
+            response_state = "rollback";
+            response_index = read_result.index_seq;
+          } else if (rc == LC_OK) {
+            rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                              "pouch transaction replay record disappeared",
+                              NULL, NULL, NULL);
+          }
+        }
+      }
+    } else if (strcmp(txn_record.state, "commit") == 0 ||
+               strcmp(txn_record.state, "rollback") == 0) {
+      rc = lc_pouch_txn_apply_participants(client, &decision_req,
+                                           txn_record.state, 1, error);
+    } else {
+      rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "pouch transaction replay state is unsupported", NULL,
+                        NULL, "pouch");
+    }
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_replay_response(out, req->txn_id, response_state,
+                                      response_index, error);
   }
   if (sink != NULL) {
     lc_sink_close(sink);
   }
-  lc_free_with_allocator(NULL, state);
   lc_free_with_allocator(NULL, record);
   lc_free_with_allocator(NULL, key);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_pouch_txn_record_cleanup(&txn_record);
   lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
   return rc;
 }
@@ -14240,6 +14300,7 @@ int lc_pouch_client_txn_replay_method(lc_client *self,
 static int lc_pouch_client_txn_decision(lc_client *self,
                                         const lc_txn_decision_req *req,
                                         const char *state,
+                                        int tolerate_queue_lease_mismatch,
                                         lc_txn_decision_res *out,
                                         lc_error *error) {
   lc_client_handle *client;
@@ -14280,7 +14341,8 @@ static int lc_pouch_client_txn_decision(lc_client *self,
     lc_source_close(source);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_txn_apply_participants(client, req, state, error);
+    rc = lc_pouch_txn_apply_participants(client, req, state,
+                                         tolerate_queue_lease_mismatch, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_txn_decision_response(out, req->txn_id, state,
@@ -14296,21 +14358,21 @@ int lc_pouch_client_txn_prepare_method(lc_client *self,
                                        const lc_txn_decision_req *req,
                                        lc_txn_decision_res *out,
                                        lc_error *error) {
-  return lc_pouch_client_txn_decision(self, req, "prepare", out, error);
+  return lc_pouch_client_txn_decision(self, req, "prepare", 0, out, error);
 }
 
 int lc_pouch_client_txn_commit_method(lc_client *self,
                                       const lc_txn_decision_req *req,
                                       lc_txn_decision_res *out,
                                       lc_error *error) {
-  return lc_pouch_client_txn_decision(self, req, "commit", out, error);
+  return lc_pouch_client_txn_decision(self, req, "commit", 0, out, error);
 }
 
 int lc_pouch_client_txn_rollback_method(lc_client *self,
                                         const lc_txn_decision_req *req,
                                         lc_txn_decision_res *out,
                                         lc_error *error) {
-  return lc_pouch_client_txn_decision(self, req, "rollback", out, error);
+  return lc_pouch_client_txn_decision(self, req, "rollback", 0, out, error);
 }
 
 int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
@@ -14385,7 +14447,8 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
       req.target_backend_hash = record.target_backend_hash;
       if (strcmp(record.state, "commit") == 0 ||
           strcmp(record.state, "rollback") == 0) {
-        rc = lc_pouch_txn_apply_participants(client, &req, record.state, error);
+        rc = lc_pouch_txn_apply_participants(client, &req, record.state, 1,
+                                             error);
         if (rc == LC_OK) {
           cleanup_decision = 1;
         }
@@ -14394,8 +14457,8 @@ int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error) {
         lc_txn_decision_res rollback_res;
 
         memset(&rollback_res, 0, sizeof(rollback_res));
-        rc = lc_pouch_client_txn_decision(self, &req, "rollback", &rollback_res,
-                                          error);
+        rc = lc_pouch_client_txn_decision(self, &req, "rollback", 1,
+                                          &rollback_res, error);
         if (rc == LC_OK) {
           cleanup_decision = 1;
         }

@@ -427,11 +427,13 @@ Queue delivery obligations:
 - transaction commit of a staged queue ack deletes message metadata and payload
   before clearing message lease metadata; transaction rollback discards the
   staged ack and makes the message visible again;
-- before either transaction decision changes a queue participant, Pouch holds
+- before a direct transaction decision changes a queue participant, Pouch holds
   namespace mutation authority and verifies that the current message or state
-  lease still belongs to that transaction. A replayed decision must reject a
-  newer transaction's lease rather than deleting its queue document or
-  clearing its metadata;
+  lease still belongs to that transaction. A direct decision rejects a newer
+  transaction's lease rather than deleting its queue document or clearing its
+  metadata. Replay and startup recovery instead skip that stale participant,
+  preserving the newer lease while continuing the durable decision for the
+  remaining participants, matching Go disk's idempotent replay behavior;
 - stateful queue operations acquire paired message and state leases;
 - transaction marker application pairs `q/<queue>/msg/<id>` and
   `q/<queue>/state/<id>` the same way Go `queue.ParseMessageLeaseKey` and
@@ -497,6 +499,14 @@ Pouch obligations:
 - queue message/state paired marker application is preserved;
 - transaction records containing production data are transformed at rest on
   crypto/compression roots.
+
+`txn_replay` parses and applies the stored participant list, not caller-supplied
+participant data. A durable `commit` or `rollback` is reapplied idempotently.
+An expired `prepare` is first converted to a durable `rollback`, then applied.
+Non-expired prepares are reported without changing participants. Queue lease
+mismatches during replay or startup recovery mean that a newer delivery has
+superseded the old participant: Pouch skips only that participant and does not
+delete or clear the newer queue state.
 
 ### Compaction
 
