@@ -5939,7 +5939,6 @@ static void lc_pouch_attachment_metadata_encode(
 
 static int lc_pouch_attachment_created_at_decode(
     const unsigned char *metadata, size_t metadata_length,
-    lc_pouch_unix_seconds legacy_updated_at_unix,
     lc_pouch_unix_seconds *created_at_unix, lc_error *error) {
   uint64_t value;
   size_t i;
@@ -5948,12 +5947,6 @@ static int lc_pouch_attachment_created_at_decode(
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch attachment timestamp requires output", NULL,
                         NULL, NULL);
-  }
-  if (metadata_length == 0U) {
-    /* Pre-timestamp attachment records have only their persisted update time.
-     */
-    *created_at_unix = legacy_updated_at_unix;
-    return LC_OK;
   }
   if (metadata == NULL ||
       metadata_length != LC_POUCH_ATTACHMENT_METADATA_BYTES ||
@@ -6071,8 +6064,7 @@ static int lc_pouch_attach_write_locked(void *context, lc_error *error) {
       !lc_pouch_attachment_is_delete_marker(current.content_type);
   if (rc == LC_OK && current_is_attachment) {
     rc = lc_pouch_attachment_created_at_decode(
-        current.metadata, current.metadata_length, current.updated_at_unix,
-        &created_at_unix, error);
+        current.metadata, current.metadata_length, &created_at_unix, error);
   }
   lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &current);
   memset(&current, 0, sizeof(current));
@@ -6082,8 +6074,7 @@ static int lc_pouch_attach_write_locked(void *context, lc_error *error) {
                              ctx->attachment_key, &current, error);
     if (rc == LC_OK && current.found) {
       rc = lc_pouch_attachment_created_at_decode(
-          current.metadata, current.metadata_length, current.updated_at_unix,
-          &created_at_unix, error);
+          current.metadata, current.metadata_length, &created_at_unix, error);
     }
     lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &current);
   }
@@ -6210,8 +6201,7 @@ static int lc_pouch_attachment_visit(const lc_pouch_state_visit_entry *entry,
                         NULL);
   }
   rc = lc_pouch_attachment_created_at_decode(
-      entry->metadata, entry->metadata_length, entry->updated_at_unix,
-      &created_at_unix, error);
+      entry->metadata, entry->metadata_length, &created_at_unix, error);
   if (rc == LC_OK) {
     rc = lc_pouch_attachment_append_info(builder, name, entry->bytes,
                                          entry->content_type, created_at_unix,
@@ -12588,9 +12578,9 @@ int lc_pouch_client_get_attachment_method(lc_client *self,
     rc = lc_copy(read_result.body, dst, NULL, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_attachment_created_at_decode(
-        read_result.metadata, read_result.metadata_length,
-        read_result.updated_at_unix, &created_at_unix, error);
+    rc = lc_pouch_attachment_created_at_decode(read_result.metadata,
+                                               read_result.metadata_length,
+                                               &created_at_unix, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_attachment_info_fill(

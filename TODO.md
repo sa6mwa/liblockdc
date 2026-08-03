@@ -241,9 +241,13 @@ Acceptance:
   metadata, and delete now validate only through their exact-key mutation
   precondition; private describe/get/load retain their required read-time
   validation.
-- [ ] Delete tests, comments, benchmark assumptions, and diagnostics that
-  define shared-root work as the ordinary default write path.
-- [ ] Do not keep an unused compatibility implementation after the cutover.
+- [x] Delete tests, comments, benchmark assumptions, and diagnostics that
+  define shared-root work as the ordinary default write path. The source/docs
+  scan has no such path; shared root is explicit-only throughout the runtime
+  and benchmark contract.
+- [x] Do not keep an unused compatibility implementation after the cutover.
+  Attachment metadata now requires its current timestamp envelope; no
+  pre-timestamp attachment fallback or alternate Pouch layout reader remains.
 
 ## Verification And Performance Evidence
 

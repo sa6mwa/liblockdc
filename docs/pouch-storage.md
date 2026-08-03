@@ -331,8 +331,8 @@ Implementation obligations:
 - staged attachment promotion/discard follows release/transaction outcome;
 - attachment creation time is preserved in compact attachment-owned metadata,
   while the object record's persisted update timestamp is the authority for
-  `updated_at_unix`; pre-metadata attachment records report their persisted
-  update time as their creation time because no earlier value exists;
+  `updated_at_unix`. Missing or malformed attachment-owned metadata is a
+  corrupt Pouch record, not a legacy layout to infer;
 - attachment bytes are exact on readback;
 - attachment rows are hidden from public state scans/query/index/get-public.
 

@@ -11892,6 +11892,69 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_attachment_rejects_missing_timestamp_metadata(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_attach_op attach_op;
+  lc_attach_res attach_res;
+  lc_attachment_list_req list_req;
+  lc_attachment_list list;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  lc_error error;
+  char root[512];
+  char attachment_key[256];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&list, 0, sizeof(list));
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_attach_op_init(&attach_op);
+  lc_attachment_list_req_init(&list_req);
+  lc_error_init(&error);
+  make_root("attachment-missing-timestamp", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  attach_op.lease.key = "attachment-corrupt";
+  attach_op.name = "bad.bin";
+  attach_op.content_type = "application/octet-stream";
+  rc = lc_source_from_memory("bad", strlen("bad"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->attach(client, &attach_op, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_attach_res_cleanup(&attach_res);
+
+  snprintf(attachment_key, sizeof(attachment_key),
+           "state/%s/attachments/6261642e62696e", attach_op.lease.key);
+  options.has_metadata = 1;
+  options.metadata = NULL;
+  options.metadata_length = 0U;
+  options.object_record = 1;
+  rc = lc_pouch_state_update_metadata(((lc_client_handle *)client)->pouch,
+                                      "default", attachment_key, &options,
+                                      &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  list_req.lease.key = attach_op.lease.key;
+  list_req.public_read = 1;
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "pouch attachment metadata is invalid");
+
+  lc_attachment_list_cleanup(&list);
+  lc_error_cleanup(&error);
+  lc_client_close(client);
+  cleanup_root(root);
+}
+
 static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   lc_client *client;
   lc_source *source;
@@ -22890,6 +22953,7 @@ int main(void) {
       cmocka_unit_test(test_client_mutate_applies_plan_and_preconditions),
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
       cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
+      cmocka_unit_test(test_attachment_rejects_missing_timestamp_metadata),
       cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
       cmocka_unit_test(test_txn_queue_decision_rejects_newer_delivery_lease),
       cmocka_unit_test(test_client_queue_dequeue_honors_wait_seconds),
