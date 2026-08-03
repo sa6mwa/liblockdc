@@ -12724,11 +12724,22 @@ static int lc_pouch_client_dequeue_once(lc_client_handle *client,
     rc = lc_pouch_queue_write_record(client, record, error);
     if (rc != LC_OK) {
       lc_error rollback_error;
+      lc_lease_ref rollback_lease;
+      lc_pouch_state_write_result rollback_write_result;
 
       lc_error_init(&rollback_error);
-      (void)lc_pouch_write_lease_tombstone(
-          client, namespace_name, message_lease_key, req->owner,
-          message_fencing_token, 0UL, &rollback_error);
+      memset(&rollback_lease, 0, sizeof(rollback_lease));
+      memset(&rollback_write_result, 0, sizeof(rollback_write_result));
+      rollback_lease.namespace_name = namespace_name;
+      rollback_lease.key = message_lease_key;
+      rollback_lease.lease_id = lease_id;
+      rollback_lease.txn_id = req->txn_id;
+      rollback_lease.fencing_token = message_fencing_token;
+      (void)lc_pouch_replace_lease_record(
+          client, &rollback_lease, namespace_name, message_lease_key, 0L, 1,
+          &rollback_write_result, &rollback_error);
+      lc_pouch_state_write_result_cleanup(&client->allocator,
+                                          &rollback_write_result);
       lc_error_cleanup(&rollback_error);
     }
     lc_free_with_allocator(NULL, message_lease_key);
@@ -13059,11 +13070,22 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
       }
       if (rc != LC_OK) {
         lc_error rollback_error;
+        lc_lease_ref rollback_lease;
+        lc_pouch_state_write_result rollback_write_result;
 
         lc_error_init(&rollback_error);
-        (void)lc_pouch_write_lease_tombstone(
-            client, namespace_name, message_lease_key, req->owner,
-            message_fencing_token, 0UL, &rollback_error);
+        memset(&rollback_lease, 0, sizeof(rollback_lease));
+        memset(&rollback_write_result, 0, sizeof(rollback_write_result));
+        rollback_lease.namespace_name = namespace_name;
+        rollback_lease.key = message_lease_key;
+        rollback_lease.lease_id = lease_id;
+        rollback_lease.txn_id = req->txn_id;
+        rollback_lease.fencing_token = message_fencing_token;
+        (void)lc_pouch_replace_lease_record(
+            client, &rollback_lease, namespace_name, message_lease_key, 0L, 1,
+            &rollback_write_result, &rollback_error);
+        lc_pouch_state_write_result_cleanup(&client->allocator,
+                                            &rollback_write_result);
         lc_error_cleanup(&rollback_error);
       }
       lc_free_with_allocator(NULL, message_lease_key);
@@ -16580,10 +16602,10 @@ int lc_pouch_lease_keepalive_method(lc_lease *self, const lc_keepalive_req *req,
 int lc_pouch_lease_release_method(lc_lease *self, const lc_release_req *req,
                                   lc_error *error) {
   lc_lease_handle *lease;
-  lc_pouch_lease_record lease_record;
   lc_release_op op;
   lc_release_res res;
   lc_lease_ref ref;
+  lc_pouch_state_write_result write_result;
   int discarded;
   int rc;
 
@@ -16593,35 +16615,34 @@ int lc_pouch_lease_release_method(lc_lease *self, const lc_release_req *req,
   }
   lease = (lc_lease_handle *)self;
   if (lease->pouch_state_key != NULL) {
-    memset(&lease_record, 0, sizeof(lease_record));
+    memset(&write_result, 0, sizeof(write_result));
     lc_lease_ref_init(&ref);
     ref.namespace_name = lease->namespace_name;
     ref.key = lease->key;
     ref.lease_id = lease->lease_id;
     ref.txn_id = lease->txn_id;
     ref.fencing_token = lease->fencing_token;
-    rc = lc_pouch_validate_lease_record(lease->client, &ref,
-                                        lease->namespace_name, lease->key,
-                                        &lease_record, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
     if (req != NULL && req->rollback &&
         lc_pouch_txn_id_present(lease->txn_id)) {
+      rc = lc_pouch_validate_lease_record(
+          lease->client, &ref, lease->namespace_name, lease->key, NULL, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
       discarded = 0;
       rc = lc_pouch_state_discard_staged(
           lease->client->pouch, lease->namespace_name,
           lc_pouch_lease_state_storage_key(lease), lease->txn_id, &discarded,
           error);
       if (rc != LC_OK) {
-        lc_pouch_lease_record_cleanup(&lease_record);
         return rc;
       }
     }
-    rc = lc_pouch_write_lease_tombstone(
-        lease->client, lease->namespace_name, lease->key, lease_record.owner,
-        lease_record.fencing_token, lease_record.version, error);
-    lc_pouch_lease_record_cleanup(&lease_record);
+    rc = lc_pouch_replace_lease_record(lease->client, &ref,
+                                       lease->namespace_name, lease->key, 0L, 1,
+                                       &write_result, error);
+    lc_pouch_state_write_result_cleanup(&lease->client->allocator,
+                                        &write_result);
     return rc;
   }
   lc_release_op_init(&op);
