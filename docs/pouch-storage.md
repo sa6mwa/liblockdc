@@ -864,6 +864,13 @@ the public API or durable format.
   `durable_sync=1` is an intentional stronger Pouch opt-in for callers that
   require a root-scoped durable group-commit boundary. It is not the default
   benchmark or compatibility policy.
+  The separate strict-durability benchmark compares that Pouch opt-in with one
+  Go disk server in `auto` HA mode, because Go core uses `NoSync` in both
+  `failover` and `single` but not `auto`. `make benchmark-pouch-go-durable`
+  reports this equal-sync-boundary production pair, and the optional
+  `make benchmark-pouch-go-durable-gate` applies the same documented 1.25x
+  core-metric budget. It is deliberately distinct from the default release
+  gate, which tests the default compatible `NoSync` modes.
 
 - Raw storage surface and empty staged key:
   Go exposes a generic backend with raw object list/get/put/delete operations
@@ -1292,6 +1299,17 @@ requested sync boundary, and the resident projection has accepted the new
 ref. A writer pipeline may batch independent operations but may not
 acknowledge, reorder, or expose an operation before that point.
 
+The pending query-index overlay is derived from that accepted projection. Each
+writer prepares its own derived entry independently, then serializes only the
+overlay publication. An index flush holds that same short ownership boundary
+only to capture its overlay epoch and detach the entries it owns; it releases
+the mutex before index artifact I/O. A later writer publishes into the next
+epoch, so the flush cannot corrupt the overlay, discard that writer's entry,
+or stall public completion on index work. The overlay remains rebuildable from
+the authoritative log and never becomes a second mutation authority. A
+separate root-local flush mutex serializes competing artifact publications; it
+does not participate in the mutation path.
+
 Go disk's default failover path marks writes `NoSync` because a per-write fsync
 can dominate core lockd workloads. Pouch has the same default boundary:
 finalized records are visible to shared readers and safe to replay after a
@@ -1695,11 +1713,15 @@ can recover lazily. Aggregate timing must not hide a slower core operation.
 
 Acceptance target: exclusive Pouch must materially outperform the matching Go
 lockd disk plaintext or crypto configuration on every gated core metric. The
-numeric release budget must be set from a stable baseline before this cutover
-is declared complete; strict-but-undefined "faster" is insufficient. Pouch
-compression variants retain their own reported performance evidence. Shared
-root has separate correctness, contention, handoff, and bounded-performance
-coverage and does not dilute the exclusive release target.
+numeric release budget is a minimum `1.25x` Pouch speedup: every Pouch latency
+must be at most 80% of the matching Go disk median. The stable baseline is the
+median of three same-run production samples for each engine, preventing host
+variance from redefining a release threshold. `make
+benchmark-pouch-go-parity-gate` enforces this with
+`POUCH_GO_PARITY_MIN_SPEEDUP=1.25`; strict-but-undefined "faster" is
+insufficient. Pouch compression variants retain their own reported performance
+evidence. Shared root has separate correctness, contention, handoff, and
+bounded-performance coverage and does not dilute the exclusive release target.
 
 ## Fuzzing And Failure Modes
 

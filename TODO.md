@@ -109,10 +109,14 @@ user data records.
 
 Acceptance:
 
-- [ ] The record format and replay results are unchanged for all supported
-  record families.
-- [ ] A successful mutation is visible only at the documented finalized-record
-  and durable-sync boundary.
+- [x] The record format and replay results are unchanged for all supported
+  record families. Focused replay coverage verifies binary tags and reopened
+  state for state put/delete/link/meta/decision/object put/delete, while the
+  snapshot high-water regression covers the control-record family.
+- [x] A successful mutation is visible only at the documented finalized-record
+  and durable-sync boundary. Focused complete-record, callback-stream, public
+  durable policy, and deterministic group-commit tests prove finalization,
+  shared sync completion, and post-commit projection publication.
 - [x] A failed append or commit leaves no published cache/index entry and uses
   the existing crash-tail recovery rules. The callback-source failure
   regression proves that a partial streaming append preserves the resident and
@@ -148,8 +152,13 @@ Acceptance:
 - [x] Match Go disk group-commit scheduling: a durable group waits at most two
   milliseconds or until its maximum request count, deduplicates file syncs,
   and propagates the shared result to every waiting operation.
-- [ ] Measure durable-sync throughput and latency against Go disk under the
-  standard concurrency matrix.
+- [x] Measure strict-durability throughput and latency through the dedicated
+  production pair: Pouch `durable_sync=1` against a single Go disk
+  `--ha auto` server, the first Go disk mode that does not apply `NoSync`.
+  `make benchmark-pouch-go-durable` reports the bounded pair; the matching
+  opt-in `make benchmark-pouch-go-durable-gate` applies the established
+  core-metric speedup policy. The default matrix remains Pouch
+  `durable_sync=0` versus Go disk `failover`, the aligned `NoSync` contract.
 - [x] Route cached public reads, lease metadata reads, direct query reads, and
   scan-oriented query views through the resident projection in exclusive mode.
 - [x] Rotate without reopening healthy normal append descriptors; publish the
@@ -303,9 +312,10 @@ Acceptance:
 - [x] Provide bounded development commands: isolated exclusive Pouch probes,
   the segmented production matrix, and explicit shared-root concurrency, with
   the combined routine limited by one 90-second outer timeout.
-- [ ] Set and document the numeric exclusive-mode release budget from a stable
-  baseline before claiming completion. The intended outcome is a substantial
-  Pouch advantage on every core feature, not merely aggregate parity.
+- [x] Set and document the numeric exclusive-mode release budget from a stable
+  baseline before claiming completion. The parity gate requires at least a
+  1.25x Pouch speedup on every comparable core metric, using the median of
+  three same-run Go-disk production samples as the control baseline.
 
 ## Completion Criteria
 

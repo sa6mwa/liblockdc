@@ -41,7 +41,8 @@ exported Go client and full-form LQL expressions. The pouch side measures the
 C query path directly through `selector_lql` and reports C-side query time so
 the cgo bridge is excluded from pouch latency metrics.
 
-`make benchmark-pouch-go-production` runs the production workload for six
+`make benchmark-pouch-go-production` runs the default aligned-`NoSync`
+production workload for six
 explicit variants by default: `ProductionPouchPT`, `ProductionPouchCrypto`,
 `ProductionPouchCompression`, `ProductionPouchCryptoCompression`, and
 `ProductionLockdDiskNoCrypto`, plus `ProductionLockdDiskCrypto`. Pouch crypto
@@ -53,6 +54,27 @@ remain reported Pouch diagnostics rather than mismatched parity inputs. The
 production target reports split flush metrics so index flush work can be
 attributed to intermediate write-churn flushes, final flush, no-op flush, and
 post-reopen flush.
+
+`make benchmark-pouch-go-parity-gate` uses the median from
+`POUCH_GO_PARITY_COUNT=3` same-run production samples for each engine. Its
+exclusive release budget is `POUCH_GO_PARITY_MIN_SPEEDUP=1.25`: Pouch must be
+no slower than 80% of the matching Go disk latency on every comparable core
+metric. Set the variable only to make an intentional release-policy change;
+the gate reports the measured speedup for every budget miss. Compression has no
+matching Go disk transform, so it remains reported evidence rather than a
+synthetic cross-engine ratio.
+
+`make benchmark-pouch-go-durable` is the separate strict-durability matrix.
+It compares Pouch `durable_sync=true` with a one-server Go disk `--ha auto`
+run: Go core applies `NoSync` in `failover` and `single`, but not `auto`.
+The command measures plaintext and storage-crypto configurations across the
+same production operation metrics. Its default 12-row, two-update, 128 KiB,
+16 KiB-segment profile is bounded at 90 seconds and retains rollover. Set the
+`POUCH_GO_DURABLE_*` variables for another profile. `make
+benchmark-pouch-go-durable-gate` uses the same three-sample and 1.25x policy
+when that opt-in durability mode must meet the release performance budget.
+Neither command is folded into the default parity gate, because strict sync is
+not Go disk's default disk policy.
 Attachment output separates `attachment-write-ns/op` from
 `attachment-read-ns/op`; the legacy combined `attachment-ns/op` remains a
 diagnostic only.
@@ -109,13 +131,14 @@ outside the timed region. Defaults are two writers, 32 writes per writer, and a
 `POUCH_GO_CONCURRENCY_WRITES_PER_WRITER`, and
 `POUCH_GO_CONCURRENCY_PAYLOAD_BYTES`.
 
-The Go harness does not pass `--ha`, so lockd uses its default `failover` mode.
+The default Go harness passes `--ha failover` explicitly.
 Go disk rejects `concurrent` for disk roots, and Go core marks failover writes
 `NoSync`. Pouch defaults to `durable_sync=false`, so this matrix uses the same
 power-loss durability boundary while comparing contention, shared-root,
 key-lock, and observed throughput. Run `durable_sync=true` separately when a
-stronger Pouch `fdatasync` group-commit boundary is required; do not compare
-that strict mode directly to the default Go failover numbers.
+stronger Pouch `fdatasync` group-commit boundary is required; use the explicit
+`benchmark-pouch-go-durable` pair rather than comparing that strict mode to
+default Go failover numbers.
 
 Crypto mode measures the operational overhead of each engine's enabled
 at-rest-encryption configuration, not a byte-for-byte cryptographic-format

@@ -109,6 +109,10 @@ static pthread_mutex_t lc_pouch_fsync_batcher_registry_mutex =
     PTHREAD_MUTEX_INITIALIZER;
 static lc_pouch_fsync_batcher *lc_pouch_fsync_batchers;
 
+#ifdef LOCKDC_TEST_BUILD
+long lc_pouch_test_fsync_batch_delay_ns;
+#endif
+
 static int lc_pouch_mutex_init_recursive(pthread_mutex_t *mutex) {
   pthread_mutexattr_t attr;
   int rc;
@@ -133,12 +137,12 @@ static int lc_pouch_sync_fd(int fd) {
 #endif
 }
 
-static void lc_pouch_fsync_deadline(struct timespec *deadline) {
+static void lc_pouch_fsync_deadline(struct timespec *deadline, long delay_ns) {
   if (deadline == NULL) {
     return;
   }
   clock_gettime(CLOCK_REALTIME, deadline);
-  deadline->tv_nsec += LC_POUCH_FSYNC_BATCH_DELAY_NS;
+  deadline->tv_nsec += delay_ns;
   if (deadline->tv_nsec >= 1000000000L) {
     deadline->tv_sec += deadline->tv_nsec / 1000000000L;
     deadline->tv_nsec %= 1000000000L;
@@ -325,6 +329,7 @@ static void *lc_pouch_fsync_worker(void *arg) {
   struct timespec deadline;
   size_t batch_count;
   uint64_t sync_ns;
+  long batch_delay_ns;
 
   batcher = (lc_pouch_fsync_batcher *)arg;
   pthread_mutex_lock(&batcher->mutex);
@@ -336,9 +341,15 @@ static void *lc_pouch_fsync_worker(void *arg) {
       pthread_mutex_unlock(&batcher->mutex);
       return NULL;
     }
-    if (!batcher->stop && LC_POUCH_FSYNC_BATCH_DELAY_NS > 0L &&
+    batch_delay_ns = LC_POUCH_FSYNC_BATCH_DELAY_NS;
+#ifdef LOCKDC_TEST_BUILD
+    if (lc_pouch_test_fsync_batch_delay_ns > 0L) {
+      batch_delay_ns = lc_pouch_test_fsync_batch_delay_ns;
+    }
+#endif
+    if (!batcher->stop && batch_delay_ns > 0L &&
         !lc_pouch_fsync_batch_limit_reached(batcher)) {
-      lc_pouch_fsync_deadline(&deadline);
+      lc_pouch_fsync_deadline(&deadline, batch_delay_ns);
       while (!batcher->stop && !lc_pouch_fsync_batch_limit_reached(batcher)) {
         if (pthread_cond_timedwait(&batcher->cond, &batcher->mutex,
                                    &deadline) == ETIMEDOUT) {
@@ -2614,6 +2625,22 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
                         strerror(pthread_rc), NULL, "pouch");
   }
   pouch->state_cache_mutex_initialized = 1;
+  pthread_rc = pthread_mutex_init(&pouch->query_pending_mutex, NULL);
+  if (pthread_rc != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch pending query mutex",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->query_pending_mutex_initialized = 1;
+  pthread_rc = pthread_mutex_init(&pouch->query_flush_mutex, NULL);
+  if (pthread_rc != 0) {
+    lc_pouch_close(pouch);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch query flush mutex",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  pouch->query_flush_mutex_initialized = 1;
   pthread_rc = pthread_mutex_init(&pouch->source_cache_mutex, NULL);
   if (pthread_rc != 0) {
     lc_pouch_close(pouch);
@@ -2842,6 +2869,12 @@ void lc_pouch_close(lc_pouch *pouch) {
   }
   if (pouch->state_cache_mutex_initialized) {
     pthread_mutex_destroy(&pouch->state_cache_mutex);
+  }
+  if (pouch->query_pending_mutex_initialized) {
+    pthread_mutex_destroy(&pouch->query_pending_mutex);
+  }
+  if (pouch->query_flush_mutex_initialized) {
+    pthread_mutex_destroy(&pouch->query_flush_mutex);
   }
   if (pouch->source_cache_mutex_initialized) {
     pthread_mutex_destroy(&pouch->source_cache_mutex);

@@ -86,9 +86,15 @@ type lockdDiskHarness struct {
 	addr               string
 	cryptoEnabled      bool
 	segmentTargetBytes int64
+	haMode             string
 	cancel             context.CancelFunc
 	cmd                *exec.Cmd
 }
+
+const (
+	lockdDiskFailoverHAMode = "failover"
+	lockdDiskDurableHAMode  = "auto"
+)
 
 func startLockdDiskHarness(tb testing.TB) *lockdDiskHarness {
 	return startLockdDiskHarnessWithOptions(tb, false, lockdDiskDefaultLogstoreSegmentSize)
@@ -103,9 +109,16 @@ func startLockdDiskHarnessWithSegmentTarget(tb testing.TB, segmentTargetBytes in
 }
 
 func startLockdDiskHarnessWithOptions(tb testing.TB, cryptoEnabled bool, segmentTargetBytes int64) *lockdDiskHarness {
+	return startLockdDiskHarnessWithOptionsAndHAMode(tb, cryptoEnabled, segmentTargetBytes, lockdDiskFailoverHAMode)
+}
+
+func startLockdDiskHarnessWithOptionsAndHAMode(tb testing.TB, cryptoEnabled bool, segmentTargetBytes int64, haMode string) *lockdDiskHarness {
 	tb.Helper()
 	if segmentTargetBytes <= 0 {
 		segmentTargetBytes = lockdDiskDefaultLogstoreSegmentSize
+	}
+	if haMode == "" {
+		haMode = lockdDiskFailoverHAMode
 	}
 
 	bin := lockdDiskBenchBinary()
@@ -145,6 +158,7 @@ func startLockdDiskHarnessWithOptions(tb testing.TB, cryptoEnabled bool, segment
 		addr:               addr,
 		cryptoEnabled:      cryptoEnabled,
 		segmentTargetBytes: segmentTargetBytes,
+		haMode:             haMode,
 		logs:               &bytes.Buffer{},
 	}
 	h.start(tb)
@@ -154,11 +168,8 @@ func startLockdDiskHarnessWithOptions(tb testing.TB, cryptoEnabled bool, segment
 	return h
 }
 
-func (h *lockdDiskHarness) start(tb testing.TB) {
-	tb.Helper()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	args := []string{
+func (h *lockdDiskHarness) commandArgs() []string {
+	return []string{
 		"--bootstrap", h.authRoot,
 		"--store", "disk://" + h.dataRoot,
 		"--listen", h.addr,
@@ -170,7 +181,35 @@ func (h *lockdDiskHarness) start(tb testing.TB) {
 		"--indexer-flush-docs", "64",
 		"--indexer-flush-interval", "1s",
 		"--logstore-segment-size", strconv.FormatInt(h.segmentTargetBytes, 10),
+		"--ha", h.haMode,
 	}
+}
+
+func TestLockdDiskHarnessCommandArgsPreserveHAMode(t *testing.T) {
+	h := &lockdDiskHarness{
+		authRoot:           "/tmp/auth",
+		dataRoot:           "/tmp/data",
+		addr:               "127.0.0.1:12345",
+		segmentTargetBytes: 65536,
+		haMode:             lockdDiskDurableHAMode,
+	}
+	args := h.commandArgs()
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == "--ha" {
+			if args[index+1] != lockdDiskDurableHAMode {
+				t.Fatalf("lockd disk harness --ha=%q, want %q", args[index+1], lockdDiskDurableHAMode)
+			}
+			return
+		}
+	}
+	t.Fatal("lockd disk harness command is missing --ha")
+}
+
+func (h *lockdDiskHarness) start(tb testing.TB) {
+	tb.Helper()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	args := h.commandArgs()
 	if !h.cryptoEnabled {
 		args = append(args, "--disable-storage-encryption")
 	}

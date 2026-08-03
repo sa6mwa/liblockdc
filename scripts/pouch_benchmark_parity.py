@@ -4,7 +4,7 @@ import sys
 
 
 BENCH_RE = re.compile(
-    r"^(BenchmarkProduction(?:PouchPT|PouchCrypto|PouchCompression|PouchCryptoCompression|LockdDiskNoCrypto|LockdDiskCrypto)/\S+?)(?:-\d+)?\s+"
+    r"^(BenchmarkProduction(?:PouchPT|PouchCrypto|PouchCompression|PouchCryptoCompression|PouchDurablePT|PouchDurableCrypto|LockdDiskNoCrypto|LockdDiskCrypto|LockdDiskDurableNoCrypto|LockdDiskDurableCrypto)/\S+?)(?:-\d+)?\s+"
 )
 
 # These are public end-to-end operations whose Pouch and Go disk measurements
@@ -31,6 +31,8 @@ CORE_METRICS = frozenset(
     )
 )
 
+DEFAULT_MIN_SPEEDUP = 1.25
+
 
 def parse_float(value):
     try:
@@ -54,8 +56,12 @@ def parse(path):
         "PouchCrypto": {},
         "PouchCompression": {},
         "PouchCryptoCompression": {},
+        "PouchDurablePT": {},
+        "PouchDurableCrypto": {},
         "LockdDiskNoCrypto": {},
         "LockdDiskCrypto": {},
+        "LockdDiskDurableNoCrypto": {},
+        "LockdDiskDurableCrypto": {},
     }
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         for line in handle:
@@ -93,18 +99,55 @@ def parse(path):
     }
 
 
+def parse_args(argv):
+    min_speedup = DEFAULT_MIN_SPEEDUP
+    mode = "default"
+    args = argv[1:]
+    while len(args) > 1:
+        if len(args) >= 2 and args[0] == "--min-speedup":
+            min_speedup = parse_float(args[1])
+            args = args[2:]
+            continue
+        if len(args) >= 2 and args[0] == "--mode":
+            mode = args[1]
+            args = args[2:]
+            continue
+        break
+    if (
+        len(args) == 1
+        and min_speedup is not None
+        and min_speedup > 1.0
+        and mode in ("default", "durable")
+    ):
+        return min_speedup, mode, args[0]
+    print(
+        "usage: pouch_benchmark_parity.py [--min-speedup <greater-than-1>] "
+        "[--mode default|durable] "
+        "<go-benchmark-output>",
+        file=sys.stderr,
+    )
+    return None
+
+
 def main(argv):
-    if len(argv) != 2:
-        print("usage: pouch_benchmark_parity.py <go-benchmark-output>", file=sys.stderr)
+    args = parse_args(argv)
+    if args is None:
         return 2
-    variants = parse(argv[1])
+    min_speedup, mode, path = args
+    variants = parse(path)
     failures = []
     # Go disk has no compression mode. Keep those Pouch variants in the
     # production report, but gate only transform-equivalent comparisons.
-    comparisons = (
-        ("PouchPT", "LockdDiskNoCrypto"),
-        ("PouchCrypto", "LockdDiskCrypto"),
-    )
+    if mode == "durable":
+        comparisons = (
+            ("PouchDurablePT", "LockdDiskDurableNoCrypto"),
+            ("PouchDurableCrypto", "LockdDiskDurableCrypto"),
+        )
+    else:
+        comparisons = (
+            ("PouchPT", "LockdDiskNoCrypto"),
+            ("PouchCrypto", "LockdDiskCrypto"),
+        )
     for pouch_variant, disk_variant in comparisons:
         disk = variants[disk_variant]
         if not disk:
@@ -132,18 +175,31 @@ def main(argv):
                         "%s/%s missing metric %s" % (pouch_variant, scenario, metric)
                     )
                     continue
-                if pouch_value >= disk_value:
-                    ratio = pouch_value / disk_value if disk_value > 0 else float("inf")
+                max_pouch_value = disk_value / min_speedup
+                if pouch_value > max_pouch_value:
+                    speedup = disk_value / pouch_value if pouch_value > 0 else float("inf")
                     failures.append(
-                        "%s/%s %s slower-or-equal: pouch=%.0f disk=%.0f ratio=%.3f"
-                        % (pouch_variant, scenario, metric, pouch_value, disk_value, ratio)
+                        "%s/%s %s misses %.2fx speedup: pouch=%.0f disk=%.0f "
+                        "speedup=%.3fx"
+                        % (
+                            pouch_variant,
+                            scenario,
+                            metric,
+                            min_speedup,
+                            pouch_value,
+                            disk_value,
+                            speedup,
+                        )
                     )
     if failures:
         print("pouch benchmark parity gate failed:")
         for failure in failures:
             print("  - %s" % failure)
         return 1
-    print("pouch benchmark parity gate passed")
+    print(
+        "pouch benchmark parity gate passed: %s mode, %.2fx minimum speedup"
+        % (mode, min_speedup)
+    )
     return 0
 
 

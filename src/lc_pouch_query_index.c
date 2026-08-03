@@ -1713,24 +1713,6 @@ static void lc_pouch_query_index_pending_entry_cleanup(
   memset(entry, 0, sizeof(*entry));
 }
 
-static void lc_pouch_query_index_pending_remove_entry(
-    lc_pouch *pouch, lc_pouch_query_index_pending_entry *previous,
-    lc_pouch_query_index_pending_entry *entry) {
-  if (pouch == NULL || entry == NULL) {
-    return;
-  }
-  if (previous != NULL) {
-    previous->next = entry->next;
-  } else {
-    pouch->query_pending_index = entry->next;
-  }
-  if (pouch->query_pending_index_count > 0U) {
-    --pouch->query_pending_index_count;
-  }
-  lc_pouch_query_index_pending_entry_cleanup(&pouch->allocator, entry);
-  lc_free_with_allocator(&pouch->allocator, entry);
-}
-
 static lc_pouch_query_index_pending_entry *
 lc_pouch_query_index_pending_detach_key(lc_pouch *pouch,
                                         const char *namespace_name,
@@ -1779,61 +1761,6 @@ lc_pouch_query_index_pending_detach_key(lc_pouch *pouch,
   return detached;
 }
 
-static int lc_pouch_query_index_pending_apply(
-    lc_pouch *pouch, lc_pouch_query_index_summary *summary,
-    const lc_pouch_query_index_row *row, lc_error *error) {
-  lc_pouch_query_index_pending_entry *entry;
-  lc_pouch_query_index_pending_entry *previous;
-  size_t index;
-  int rc;
-
-  if (pouch == NULL || summary == NULL || row == NULL || row->key == NULL) {
-    return 0;
-  }
-  previous = NULL;
-  entry = pouch->query_pending_index;
-  while (entry != NULL) {
-    if (entry->namespace_name != NULL && entry->key != NULL &&
-        strcmp(entry->namespace_name, summary->namespace_name) == 0 &&
-        strcmp(entry->key, row->key) == 0 && entry->version == row->version) {
-      rc = lc_pouch_query_index_term_reserve(
-          summary, summary->term_count + entry->term_count, error);
-      if (rc == LC_OK) {
-        rc = lc_pouch_query_index_presence_reserve(
-            summary, summary->presence_count + entry->presence_count, error);
-      }
-      if (rc != LC_OK) {
-        if (error != NULL) {
-          lc_error_cleanup(error);
-          lc_error_init(error);
-        }
-        return 0;
-      }
-      if (!entry->term_index_complete) {
-        summary->term_index_complete = 0;
-      }
-      if (!entry->presence_index_complete) {
-        summary->presence_index_complete = 0;
-      }
-      for (index = 0U; index < entry->term_count; ++index) {
-        summary->terms[summary->term_count++] = entry->terms[index];
-        memset(&entry->terms[index], 0, sizeof(entry->terms[index]));
-      }
-      for (index = 0U; index < entry->presence_count; ++index) {
-        summary->presences[summary->presence_count++] = entry->presences[index];
-        memset(&entry->presences[index], 0, sizeof(entry->presences[index]));
-      }
-      lc_pouch_query_index_pending_segment_remove_namespace(
-          pouch, summary->namespace_name);
-      lc_pouch_query_index_pending_remove_entry(pouch, previous, entry);
-      return 1;
-    }
-    previous = entry;
-    entry = entry->next;
-  }
-  return 0;
-}
-
 static void lc_pouch_query_index_drain_source(lc_source *source) {
   char buffer[4096];
   lc_error error;
@@ -1847,6 +1774,52 @@ static void lc_pouch_query_index_drain_source(lc_source *source) {
   lc_error_cleanup(&error);
 }
 
+static int lc_pouch_query_index_pending_lock(lc_pouch *pouch, lc_error *error) {
+  int pthread_rc;
+
+  if (pouch == NULL || !pouch->query_pending_mutex_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch pending query index requires an open pouch",
+                        NULL, NULL, "pouch");
+  }
+  pthread_rc = pthread_mutex_lock(&pouch->query_pending_mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch pending query index",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  return LC_OK;
+}
+
+static void lc_pouch_query_index_pending_unlock(lc_pouch *pouch) {
+  if (pouch != NULL && pouch->query_pending_mutex_initialized) {
+    (void)pthread_mutex_unlock(&pouch->query_pending_mutex);
+  }
+}
+
+static int lc_pouch_query_index_flush_lock(lc_pouch *pouch, lc_error *error) {
+  int pthread_rc;
+
+  if (pouch == NULL || !pouch->query_flush_mutex_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query flush requires an open pouch", NULL, NULL,
+                        "pouch");
+  }
+  pthread_rc = pthread_mutex_lock(&pouch->query_flush_mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch query flush",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  return LC_OK;
+}
+
+static void lc_pouch_query_index_flush_unlock(lc_pouch *pouch) {
+  if (pouch != NULL && pouch->query_flush_mutex_initialized) {
+    (void)pthread_mutex_unlock(&pouch->query_flush_mutex);
+  }
+}
+
 static void
 lc_pouch_query_index_pending_mark_incomplete(lc_pouch *pouch,
                                              const char *namespace_name) {
@@ -1854,7 +1827,20 @@ lc_pouch_query_index_pending_mark_incomplete(lc_pouch *pouch,
     return;
   }
   pouch->query_pending_index_incomplete = 1;
+  ++pouch->query_pending_epoch;
   lc_pouch_query_index_pending_segment_remove_namespace(pouch, namespace_name);
+}
+
+static void lc_pouch_query_index_pending_mark_incomplete_safely(
+    lc_pouch *pouch, const char *namespace_name) {
+  lc_error error;
+
+  lc_error_init(&error);
+  if (lc_pouch_query_index_pending_lock(pouch, &error) == LC_OK) {
+    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name);
+    lc_pouch_query_index_pending_unlock(pouch);
+  }
+  lc_error_cleanup(&error);
 }
 
 /* Transaction staging is durable recovery state, never public query state. */
@@ -1889,12 +1875,12 @@ void lc_pouch_query_index_note_state_write(
       result != NULL && result->has_query_hidden && result->query_hidden;
   if (key == NULL || result == NULL ||
       (!query_hidden && (body == NULL || body->reset == NULL))) {
-    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name);
+    lc_pouch_query_index_pending_mark_incomplete_safely(pouch, namespace_name);
     return;
   }
   lc_error_init(&error);
   if (!query_hidden && body->reset(body, &error) != LC_OK) {
-    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name);
+    lc_pouch_query_index_pending_mark_incomplete_safely(pouch, namespace_name);
     lc_error_cleanup(&error);
     return;
   }
@@ -1908,7 +1894,7 @@ void lc_pouch_query_index_note_state_write(
   summary.presence_index_complete = 1;
   row.key_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, key);
   if (row.key_hex == NULL) {
-    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name);
+    lc_pouch_query_index_pending_mark_incomplete_safely(pouch, namespace_name);
     lc_error_cleanup(&error);
     return;
   }
@@ -1925,7 +1911,7 @@ void lc_pouch_query_index_note_state_write(
   }
   lc_free_with_allocator(&pouch->allocator, row.key_hex);
   if (rc != LC_OK) {
-    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name);
+    lc_pouch_query_index_pending_mark_incomplete_safely(pouch, namespace_name);
     lc_pouch_query_index_summary_cleanup(&summary);
     lc_error_cleanup(&error);
     return;
@@ -1933,7 +1919,7 @@ void lc_pouch_query_index_note_state_write(
   entry = (lc_pouch_query_index_pending_entry *)lc_calloc_with_allocator(
       &pouch->allocator, 1U, sizeof(*entry));
   if (entry == NULL) {
-    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name);
+    lc_pouch_query_index_pending_mark_incomplete_safely(pouch, namespace_name);
     lc_pouch_query_index_summary_cleanup(&summary);
     lc_error_cleanup(&error);
     return;
@@ -1950,7 +1936,7 @@ void lc_pouch_query_index_note_state_write(
   if (entry->namespace_name == NULL || entry->key == NULL ||
       entry->key_hex == NULL || entry->content_type_hex == NULL ||
       entry->etag_hex == NULL) {
-    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name);
+    lc_pouch_query_index_pending_mark_incomplete_safely(pouch, namespace_name);
     lc_pouch_query_index_pending_entry_cleanup(&pouch->allocator, entry);
     lc_free_with_allocator(&pouch->allocator, entry);
     lc_pouch_query_index_summary_cleanup(&summary);
@@ -1981,11 +1967,20 @@ void lc_pouch_query_index_note_state_write(
   summary.presences = NULL;
   summary.presence_count = 0U;
   summary.presence_capacity = 0U;
+  rc = lc_pouch_query_index_pending_lock(pouch, &error);
+  if (rc != LC_OK) {
+    lc_pouch_query_index_pending_entry_cleanup(&pouch->allocator, entry);
+    lc_free_with_allocator(&pouch->allocator, entry);
+    lc_pouch_query_index_summary_cleanup(&summary);
+    lc_error_cleanup(&error);
+    return;
+  }
   replaced_entries =
       lc_pouch_query_index_pending_detach_key(pouch, namespace_name, key, NULL);
   entry->next = pouch->query_pending_index;
   pouch->query_pending_index = entry;
   ++pouch->query_pending_index_count;
+  ++pouch->query_pending_epoch;
   rc = lc_pouch_query_index_pending_segment_note_write(
       pouch, entry, replaced_entries, &error);
   if (rc != LC_OK) {
@@ -1994,6 +1989,7 @@ void lc_pouch_query_index_note_state_write(
   lc_pouch_query_index_pending_entries_cleanup(&pouch->allocator,
                                                replaced_entries);
   lc_pouch_query_index_summary_cleanup(&summary);
+  lc_pouch_query_index_pending_unlock(pouch);
   lc_error_cleanup(&error);
 }
 
@@ -2015,7 +2011,7 @@ void lc_pouch_query_index_note_state_delete(
     return;
   }
   if (key == NULL || result == NULL) {
-    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name);
+    lc_pouch_query_index_pending_mark_incomplete_safely(pouch, namespace_name);
     return;
   }
   lc_error_init(&error);
@@ -2023,7 +2019,7 @@ void lc_pouch_query_index_note_state_delete(
   entry = (lc_pouch_query_index_pending_entry *)lc_calloc_with_allocator(
       &pouch->allocator, 1U, sizeof(*entry));
   if (entry == NULL) {
-    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name);
+    lc_pouch_query_index_pending_mark_incomplete_safely(pouch, namespace_name);
     lc_error_cleanup(&error);
     return;
   }
@@ -2033,7 +2029,7 @@ void lc_pouch_query_index_note_state_delete(
   entry->key_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, key);
   if (entry->namespace_name == NULL || entry->key == NULL ||
       entry->key_hex == NULL) {
-    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name);
+    lc_pouch_query_index_pending_mark_incomplete_safely(pouch, namespace_name);
     lc_pouch_query_index_pending_entry_cleanup(&pouch->allocator, entry);
     lc_free_with_allocator(&pouch->allocator, entry);
     lc_error_cleanup(&error);
@@ -2043,11 +2039,19 @@ void lc_pouch_query_index_note_state_delete(
   entry->deleted = 1;
   entry->term_index_complete = 1;
   entry->presence_index_complete = 1;
+  rc = lc_pouch_query_index_pending_lock(pouch, &error);
+  if (rc != LC_OK) {
+    lc_pouch_query_index_pending_entry_cleanup(&pouch->allocator, entry);
+    lc_free_with_allocator(&pouch->allocator, entry);
+    lc_error_cleanup(&error);
+    return;
+  }
   replaced_entries =
       lc_pouch_query_index_pending_detach_key(pouch, namespace_name, key, NULL);
   entry->next = pouch->query_pending_index;
   pouch->query_pending_index = entry;
   ++pouch->query_pending_index_count;
+  ++pouch->query_pending_epoch;
   rc = lc_pouch_query_index_pending_segment_note_delete(
       pouch, entry, replaced_entries, &error);
   if (rc != LC_OK) {
@@ -2055,6 +2059,7 @@ void lc_pouch_query_index_note_state_delete(
   }
   lc_pouch_query_index_pending_entries_cleanup(&pouch->allocator,
                                                replaced_entries);
+  lc_pouch_query_index_pending_unlock(pouch);
   lc_error_cleanup(&error);
 }
 
@@ -2109,27 +2114,38 @@ int lc_pouch_query_index_has_pending(lc_pouch *pouch,
                                      const char *namespace_name) {
   lc_pouch_query_index_pending_entry *entry;
   lc_pouch_query_index_pending_segment *segment;
+  lc_error error;
+  int pending;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
     return 0;
   }
-  if (pouch->query_pending_index_incomplete) {
+  lc_error_init(&error);
+  if (lc_pouch_query_index_pending_lock(pouch, &error) != LC_OK) {
+    lc_error_cleanup(&error);
     return 1;
   }
-  for (entry = pouch->query_pending_index; entry != NULL; entry = entry->next) {
+  pending = 0;
+  if (pouch->query_pending_index_incomplete) {
+    pending = 1;
+  }
+  for (entry = pouch->query_pending_index; !pending && entry != NULL;
+       entry = entry->next) {
     if (entry->namespace_name != NULL &&
         strcmp(entry->namespace_name, namespace_name) == 0) {
-      return 1;
+      pending = 1;
     }
   }
-  for (segment = pouch->query_pending_segments; segment != NULL;
+  for (segment = pouch->query_pending_segments; !pending && segment != NULL;
        segment = segment->next) {
     if (segment->namespace_name != NULL &&
         strcmp(segment->namespace_name, namespace_name) == 0) {
-      return 1;
+      pending = 1;
     }
   }
-  return 0;
+  lc_pouch_query_index_pending_unlock(pouch);
+  lc_error_cleanup(&error);
+  return pending;
 }
 
 static void lc_pouch_query_index_pending_entries_cleanup(
@@ -11754,6 +11770,10 @@ static int lc_pouch_query_index_flush_segmented(
   int pending_fast_path_allowed;
   int use_pending_entries;
   int use_pending_segment;
+  int query_pending_locked;
+  int query_flush_locked;
+  int pending_incomplete;
+  uint64_t pending_epoch;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -11818,6 +11838,11 @@ static int lc_pouch_query_index_flush_segmented(
   cleanup_unreferenced = 0;
   use_pending_entries = 0;
   use_pending_segment = 0;
+  query_pending_locked = 0;
+  query_flush_locked = 0;
+  pending_incomplete = 0;
+  pending_epoch = 0U;
+  rc = LC_OK;
   summary.allocator = &pouch->allocator;
   summary.pouch = pouch;
   summary.namespace_name = namespace_name;
@@ -11826,10 +11851,17 @@ static int lc_pouch_query_index_flush_segmented(
   text.allocator = &pouch->allocator;
   deletes.allocator = &pouch->allocator;
 
+  rc = lc_pouch_query_index_flush_lock(pouch, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  query_flush_locked = 1;
+
   manifest_path =
       lc_pouch_query_index_manifest_path(pouch, namespace_name, error);
   if (manifest_path == NULL) {
-    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
   }
   rc = lc_pouch_query_index_manifest_read(pouch, manifest_path, &manifest,
                                           error);
@@ -11861,18 +11893,27 @@ static int lc_pouch_query_index_flush_segmented(
                  !manifest.valid || manifest.index_seq > state_index_seq ||
                  manifest.segment_count >= LC_POUCH_QUERY_INDEX_MAX_SEGMENTS;
   cleanup_unreferenced = full_rebuild || validate_existing_segments;
-  pending_fast_path_allowed = lc_pouch_single_writer_enabled(pouch) &&
-                              !pouch->query_pending_index_incomplete;
+  rc = lc_pouch_query_index_pending_lock(pouch, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  query_pending_locked = 1;
+  pending_epoch = pouch->query_pending_epoch;
+  pending_incomplete = pouch->query_pending_index_incomplete;
+  pending_fast_path_allowed =
+      lc_pouch_single_writer_enabled(pouch) && !pending_incomplete;
+  if (pending_fast_path_allowed) {
+    pending_entries = lc_pouch_query_index_pending_detach_namespace(
+        pouch, namespace_name, &pending_count);
+    pending_segment = lc_pouch_query_index_pending_segment_detach_namespace(
+        pouch, namespace_name);
+  }
+  lc_pouch_query_index_pending_unlock(pouch);
+  query_pending_locked = 0;
   if (full_rebuild) {
     retired_manifest = manifest;
     memset(&manifest, 0, sizeof(manifest));
     segment_base_index_seq = 0UL;
-    if (pending_fast_path_allowed) {
-      pending_entries = lc_pouch_query_index_pending_detach_namespace(
-          pouch, namespace_name, &pending_count);
-      pending_segment = lc_pouch_query_index_pending_segment_detach_namespace(
-          pouch, namespace_name);
-    }
     if (pending_count > 0U) {
       size_t pending_visible_count;
       size_t state_visible_count;
@@ -11920,12 +11961,6 @@ static int lc_pouch_query_index_flush_segmented(
     }
   } else {
     segment_base_index_seq = manifest.index_seq;
-    if (pending_fast_path_allowed) {
-      pending_entries = lc_pouch_query_index_pending_detach_namespace(
-          pouch, namespace_name, &pending_count);
-      pending_segment = lc_pouch_query_index_pending_segment_detach_namespace(
-          pouch, namespace_name);
-    }
     if (pending_count > 0U && pending_segment == NULL) {
       pending_segment = lc_pouch_query_index_pending_segment_build_entries(
           pouch, namespace_name, pending_entries, pending_count, error);
@@ -11977,10 +12012,6 @@ static int lc_pouch_query_index_flush_segmented(
     }
     extract_count = 0U;
     for (extract_index = 0U; extract_index < summary.count; ++extract_index) {
-      if (lc_pouch_query_index_pending_apply(
-              pouch, &summary, &summary.rows[extract_index], error)) {
-        continue;
-      }
       extract_keys[extract_count] = summary.rows[extract_index].key;
       extract_row_indices[extract_count] = extract_index;
       ++extract_count;
@@ -12095,13 +12126,16 @@ static int lc_pouch_query_index_flush_segmented(
     rc = lc_pouch_query_index_manifest_write(pouch, manifest_path, &manifest,
                                              error);
   }
-  if (rc == LC_OK && !use_pending_entries) {
-    lc_pouch_query_index_pending_entries_cleanup(
-        &pouch->allocator, lc_pouch_query_index_pending_detach_namespace(
-                               pouch, namespace_name, NULL));
-    pouch->query_pending_index_incomplete = 0;
-  } else if (rc == LC_OK) {
-    pouch->query_pending_index_incomplete = 0;
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_pending_lock(pouch, error);
+    if (rc == LC_OK) {
+      query_pending_locked = 1;
+      if (pouch->query_pending_epoch == pending_epoch) {
+        pouch->query_pending_index_incomplete = 0;
+      }
+      lc_pouch_query_index_pending_unlock(pouch);
+      query_pending_locked = 0;
+    }
   }
   if (rc == LC_OK && retired_manifest.segment_count > 0U) {
     lc_pouch_query_index_manifest_unlink_segments(pouch, namespace_name,
@@ -12167,6 +12201,12 @@ cleanup:
       &trigram_term_path, &temporal_term_path, &delete_path);
   lc_free_with_allocator(&pouch->allocator, packed_path);
   lc_free_with_allocator(&pouch->allocator, manifest_path);
+  if (query_pending_locked) {
+    lc_pouch_query_index_pending_unlock(pouch);
+  }
+  if (query_flush_locked) {
+    lc_pouch_query_index_flush_unlock(pouch);
+  }
   return rc;
 }
 

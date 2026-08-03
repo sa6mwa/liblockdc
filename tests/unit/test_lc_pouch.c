@@ -107,6 +107,23 @@ typedef struct pouch_parallel_state_write {
   int rc;
 } pouch_parallel_state_write;
 
+typedef struct pouch_parallel_fsync_commit {
+  lc_pouch *pouch;
+  pthread_barrier_t *start;
+  int fd;
+  lc_error error;
+  int rc;
+} pouch_parallel_fsync_commit;
+
+typedef struct pouch_parallel_query_flush {
+  lc_pouch *pouch;
+  pthread_barrier_t *start;
+  lc_pouch_generation state_index_seq;
+  lc_pouch_query_index_flush_result result;
+  lc_error error;
+  int rc;
+} pouch_parallel_query_flush;
+
 typedef struct pouch_chunked_source {
   const unsigned char *bytes;
   size_t length;
@@ -762,6 +779,42 @@ static void *pouch_write_state_in_parallel(void *context) {
   if (source != NULL) {
     lc_source_close(source);
   }
+  return NULL;
+}
+
+static void *pouch_fsync_commit_in_parallel(void *context) {
+  pouch_parallel_fsync_commit *commit;
+  int barrier_rc;
+
+  commit = (pouch_parallel_fsync_commit *)context;
+  lc_error_init(&commit->error);
+  barrier_rc = pthread_barrier_wait(commit->start);
+  if (barrier_rc != 0 && barrier_rc != PTHREAD_BARRIER_SERIAL_THREAD) {
+    commit->rc = lc_error_set(&commit->error, LC_ERR_TRANSPORT, 0L,
+                              "parallel pouch fsync barrier failed", NULL, NULL,
+                              "pouch");
+    return NULL;
+  }
+  commit->rc = lc_pouch_fsync_commit(commit->pouch, commit->fd, &commit->error);
+  return NULL;
+}
+
+static void *pouch_query_flush_in_parallel(void *context) {
+  pouch_parallel_query_flush *flush;
+  int barrier_rc;
+
+  flush = (pouch_parallel_query_flush *)context;
+  lc_error_init(&flush->error);
+  barrier_rc = pthread_barrier_wait(flush->start);
+  if (barrier_rc != 0 && barrier_rc != PTHREAD_BARRIER_SERIAL_THREAD) {
+    flush->rc = lc_error_set(&flush->error, LC_ERR_TRANSPORT, 0L,
+                             "parallel pouch query flush barrier failed", NULL,
+                             NULL, "pouch");
+    return NULL;
+  }
+  flush->rc = lc_pouch_query_index_flush(flush->pouch, "default",
+                                         flush->state_index_seq, &flush->result,
+                                         &flush->error);
   return NULL;
 }
 
@@ -4691,19 +4744,22 @@ static void test_pouch_durable_sync_batches_parallel_writes(void **state) {
   lc_pouch *pouch;
   lc_pouch_open_options options;
   lc_pouch_fsync_stats fsync_stats;
-  pouch_parallel_state_write writes[4];
+  pouch_parallel_fsync_commit commits[4];
   pthread_barrier_t start;
   pthread_t threads[4];
   lc_error error;
   char root[512];
+  char fsync_path[1024];
+  int fd;
   size_t index;
   int rc;
 
   (void)state;
   pouch = NULL;
+  fd = -1;
   memset(&options, 0, sizeof(options));
   memset(&fsync_stats, 0, sizeof(fsync_stats));
-  memset(writes, 0, sizeof(writes));
+  memset(commits, 0, sizeof(commits));
   lc_error_init(&error);
   make_root("durable-sync-batch", root, sizeof(root));
   cleanup_root(root);
@@ -4712,18 +4768,91 @@ static void test_pouch_durable_sync_batches_parallel_writes(void **state) {
   options.fsync_batch_max_ops = 4U;
   rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
+  assert_true(
+      snprintf(fsync_path, sizeof(fsync_path), "%s/fsync-batch.log", root) > 0);
+  fd = open(fsync_path, O_CREAT | O_RDWR | O_TRUNC, 0600);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, "x", 1U), 1);
+  assert_int_equal(pthread_barrier_init(&start, NULL, 4U), 0);
+  lc_pouch_test_fsync_batch_delay_ns = 50000000L;
+  for (index = 0U; index < 4U; ++index) {
+    commits[index].pouch = pouch;
+    commits[index].start = &start;
+    commits[index].fd = fd;
+    assert_int_equal(pthread_create(&threads[index], NULL,
+                                    pouch_fsync_commit_in_parallel,
+                                    &commits[index]),
+                     0);
+  }
+  for (index = 0U; index < 4U; ++index) {
+    assert_int_equal(pthread_join(threads[index], NULL), 0);
+  }
+  lc_pouch_test_fsync_batch_delay_ns = 0L;
+  assert_int_equal(pthread_barrier_destroy(&start), 0);
+  for (index = 0U; index < 4U; ++index) {
+    assert_int_equal(commits[index].rc, LC_OK);
+    lc_error_cleanup(&commits[index].error);
+  }
+  rc = lc_pouch_fsync_stats_read(pouch, &fsync_stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(fsync_stats.total_requests, 4U);
+  assert_true(fsync_stats.total_batches < fsync_stats.total_requests);
+  assert_true(fsync_stats.max_batch_size > 1U);
+
+  assert_int_equal(close(fd), 0);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static int pouch_query_index_count_row(const lc_pouch_query_index_row_view *row,
+                                       void *context, lc_error *error) {
+  size_t *count;
+
+  (void)row;
+  (void)error;
+  count = (size_t *)context;
+  ++*count;
+  return LC_OK;
+}
+
+static void
+test_parallel_state_writes_keep_query_projection_consistent(void **state) {
+  lc_pouch *pouch;
+  pouch_parallel_state_write writes[4];
+  lc_pouch_query_index_flush_result flush_result;
+  pthread_barrier_t start;
+  pthread_t threads[4];
+  lc_pouch_generation state_index_seq;
+  lc_pouch_generation query_index_seq;
+  lc_error error;
+  char root[512];
+  size_t index;
+  size_t row_count;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  memset(writes, 0, sizeof(writes));
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_error_init(&error);
+  make_root("parallel-query-projection", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
   assert_int_equal(pthread_barrier_init(&start, NULL, 4U), 0);
   for (index = 0U; index < 4U; ++index) {
     writes[index].pouch = pouch;
     writes[index].start = &start;
-    writes[index].key = index == 0U   ? "durable-sync-batch/a"
-                        : index == 1U ? "durable-sync-batch/b"
-                        : index == 2U ? "durable-sync-batch/c"
-                                      : "durable-sync-batch/d";
-    writes[index].value = index == 0U   ? "a"
-                          : index == 1U ? "b"
-                          : index == 2U ? "c"
-                                        : "d";
+    writes[index].key = index == 0U   ? "query-pending/a"
+                        : index == 1U ? "query-pending/b"
+                        : index == 2U ? "query-pending/c"
+                                      : "query-pending/d";
+    writes[index].value = index == 0U   ? "{\"value\":1}"
+                          : index == 1U ? "{\"value\":2}"
+                          : index == 2U ? "{\"value\":3}"
+                                        : "{\"value\":4}";
     assert_int_equal(pthread_create(&threads[index], NULL,
                                     pouch_write_state_in_parallel,
                                     &writes[index]),
@@ -4738,11 +4867,182 @@ static void test_pouch_durable_sync_batches_parallel_writes(void **state) {
     lc_pouch_state_write_result_cleanup(NULL, &writes[index].result);
     lc_error_cleanup(&writes[index].error);
   }
-  rc = lc_pouch_fsync_stats_read(pouch, &fsync_stats, &error);
+
+  state_index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(pouch, "default", &state_index_seq, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(fsync_stats.total_requests, 4U);
-  assert_true(fsync_stats.total_batches < fsync_stats.total_requests);
-  assert_true(fsync_stats.max_batch_size > 1U);
+  assert_int_equal(state_index_seq, 4UL);
+  assert_true(lc_pouch_query_index_has_pending(pouch, "default"));
+  rc = lc_pouch_query_index_flush(pouch, "default", state_index_seq,
+                                  &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, state_index_seq);
+  row_count = 0U;
+  query_index_seq = 0UL;
+  rc = lc_pouch_query_index_visit(pouch, "default", pouch_query_index_count_row,
+                                  &row_count, &query_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(query_index_seq, state_index_seq);
+  assert_int_equal(row_count, 4U);
+
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_parallel_query_flush_preserves_later_write(void **state) {
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_pouch_state_write_result base_write;
+  lc_pouch_query_index_flush_result final_flush;
+  pouch_parallel_state_write write;
+  pouch_parallel_query_flush flush;
+  pthread_barrier_t start;
+  pthread_t write_thread;
+  pthread_t flush_thread;
+  lc_pouch_generation state_index_seq;
+  lc_pouch_generation query_index_seq;
+  lc_error error;
+  char root[512];
+  size_t row_count;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  memset(&base_write, 0, sizeof(base_write));
+  memset(&final_flush, 0, sizeof(final_flush));
+  memset(&write, 0, sizeof(write));
+  memset(&flush, 0, sizeof(flush));
+  lc_error_init(&error);
+  make_root("parallel-query-flush", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "query-flush/base", source, NULL,
+                            &base_write, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &base_write);
+
+  state_index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(pouch, "default", &state_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(state_index_seq, 1UL);
+  assert_int_equal(pthread_barrier_init(&start, NULL, 2U), 0);
+  write.pouch = pouch;
+  write.start = &start;
+  write.key = "query-flush/later";
+  write.value = "{\"value\":2}";
+  flush.pouch = pouch;
+  flush.start = &start;
+  flush.state_index_seq = state_index_seq;
+  assert_int_equal(pthread_create(&write_thread, NULL,
+                                  pouch_write_state_in_parallel, &write),
+                   0);
+  assert_int_equal(pthread_create(&flush_thread, NULL,
+                                  pouch_query_flush_in_parallel, &flush),
+                   0);
+  assert_int_equal(pthread_join(write_thread, NULL), 0);
+  assert_int_equal(pthread_join(flush_thread, NULL), 0);
+  assert_int_equal(pthread_barrier_destroy(&start), 0);
+  assert_int_equal(write.rc, LC_OK);
+  assert_int_equal(flush.rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write.result);
+  lc_error_cleanup(&write.error);
+  lc_error_cleanup(&flush.error);
+
+  state_index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(pouch, "default", &state_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(state_index_seq, 2UL);
+  rc = lc_pouch_query_index_flush(pouch, "default", state_index_seq,
+                                  &final_flush, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(final_flush.index_seq, state_index_seq);
+  row_count = 0U;
+  query_index_seq = 0UL;
+  rc = lc_pouch_query_index_visit(pouch, "default", pouch_query_index_count_row,
+                                  &row_count, &query_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(query_index_seq, state_index_seq);
+  assert_int_equal(row_count, 2U);
+
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_parallel_query_flushes_publish_one_valid_index(void **state) {
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_pouch_state_write_result state_write;
+  pouch_parallel_query_flush flushes[2];
+  pthread_barrier_t start;
+  pthread_t threads[2];
+  lc_pouch_generation state_index_seq;
+  lc_pouch_generation query_index_seq;
+  lc_error error;
+  char root[512];
+  size_t index;
+  size_t row_count;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  memset(&state_write, 0, sizeof(state_write));
+  memset(flushes, 0, sizeof(flushes));
+  lc_error_init(&error);
+  make_root("parallel-query-flushes", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "query-flushes/key", source, NULL,
+                            &state_write, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &state_write);
+  state_index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(pouch, "default", &state_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(state_index_seq, 1UL);
+
+  assert_int_equal(pthread_barrier_init(&start, NULL, 2U), 0);
+  for (index = 0U; index < 2U; ++index) {
+    flushes[index].pouch = pouch;
+    flushes[index].start = &start;
+    flushes[index].state_index_seq = state_index_seq;
+    assert_int_equal(pthread_create(&threads[index], NULL,
+                                    pouch_query_flush_in_parallel,
+                                    &flushes[index]),
+                     0);
+  }
+  for (index = 0U; index < 2U; ++index) {
+    assert_int_equal(pthread_join(threads[index], NULL), 0);
+    assert_int_equal(flushes[index].rc, LC_OK);
+    assert_int_equal(flushes[index].result.index_seq, state_index_seq);
+    lc_error_cleanup(&flushes[index].error);
+  }
+  assert_int_equal(pthread_barrier_destroy(&start), 0);
+
+  row_count = 0U;
+  query_index_seq = 0UL;
+  rc = lc_pouch_query_index_visit(pouch, "default", pouch_query_index_count_row,
+                                  &row_count, &query_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(query_index_seq, state_index_seq);
+  assert_int_equal(row_count, 1U);
 
   lc_pouch_close(pouch);
   cleanup_root(root);
@@ -11699,6 +11999,183 @@ static void test_staged_state_writes_durable_decision_records(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &promoted);
   lc_pouch_state_write_result_cleanup(NULL, &staged_commit);
   lc_pouch_state_write_result_cleanup(NULL, &committed);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static int pouch_state_segments_contain_record_type(const char *root,
+                                                    const char *namespace_name,
+                                                    unsigned char type) {
+  const unsigned char header[] = {'L', 'H', 'C', 'P', 1U, type};
+  char segment_path[1024];
+  unsigned long segment_index;
+
+  for (segment_index = 1UL;
+       segment_index <= pouch_state_segment_count(root, namespace_name);
+       ++segment_index) {
+    pouch_state_segment_path(root, namespace_name, segment_index, segment_path,
+                             sizeof(segment_path));
+    if (pouch_file_contains_bytes(segment_path, header, sizeof(header))) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static void
+test_state_replay_preserves_all_binary_record_families(void **state) {
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_pouch_state_write_options metadata_options;
+  lc_pouch_state_write_options object_options;
+  lc_pouch_state_write_result state_write;
+  lc_pouch_state_write_result metadata_write;
+  lc_pouch_state_write_result deleted_write;
+  lc_pouch_state_write_result state_delete;
+  lc_pouch_state_write_result object_write;
+  lc_pouch_state_write_result object_delete;
+  lc_pouch_state_write_result staged_write;
+  lc_pouch_state_write_result promoted;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char body[64];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  memset(&metadata_options, 0, sizeof(metadata_options));
+  memset(&object_options, 0, sizeof(object_options));
+  memset(&state_write, 0, sizeof(state_write));
+  memset(&metadata_write, 0, sizeof(metadata_write));
+  memset(&deleted_write, 0, sizeof(deleted_write));
+  memset(&state_delete, 0, sizeof(state_delete));
+  memset(&object_write, 0, sizeof(object_write));
+  memset(&object_delete, 0, sizeof(object_delete));
+  memset(&staged_write, 0, sizeof(staged_write));
+  memset(&promoted, 0, sizeof(promoted));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("state-record-families", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("metadata-body", strlen("metadata-body"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/metadata", source, NULL,
+                            &state_write, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  metadata_options.has_metadata = 1;
+  metadata_options.metadata = (const unsigned char *)"metadata";
+  metadata_options.metadata_length = strlen("metadata");
+  metadata_options.has_query_hidden = 1;
+  metadata_options.query_hidden = 1;
+  rc = lc_pouch_state_update_metadata(pouch, "team/alpha", "state/metadata",
+                                      &metadata_options, &metadata_write,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("deleted-body", strlen("deleted-body"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "state/deleted", source, NULL,
+                            &deleted_write, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_delete(pouch, "team/alpha", "state/deleted", NULL,
+                             &state_delete, &error);
+  assert_int_equal(rc, LC_OK);
+
+  object_options.object_record = 1;
+  rc = lc_source_from_memory("object-body", strlen("object-body"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/alpha", "object/deleted", source,
+                            &object_options, &object_write, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_delete(pouch, "team/alpha", "object/deleted",
+                             &object_options, &object_delete, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("promoted-body", strlen("promoted-body"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_stage_write(pouch, "team/alpha", "state/promoted",
+                                  "record-family-txn", source, NULL,
+                                  &staged_write, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_promote_staged(pouch, "team/alpha", "state/promoted",
+                                     "record-family-txn", NULL, &promoted,
+                                     &error);
+  assert_int_equal(rc, LC_OK);
+
+  assert_true(pouch_state_segments_contain_record_type(root, "team/alpha", 1U));
+  assert_true(pouch_state_segments_contain_record_type(root, "team/alpha", 2U));
+  assert_true(pouch_state_segments_contain_record_type(root, "team/alpha", 3U));
+  assert_true(pouch_state_segments_contain_record_type(root, "team/alpha", 4U));
+  assert_true(pouch_state_segments_contain_record_type(root, "team/alpha", 5U));
+  assert_true(pouch_state_segments_contain_record_type(root, "team/alpha", 7U));
+  assert_true(pouch_state_segments_contain_record_type(root, "team/alpha", 8U));
+
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/metadata", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_true(read_result.has_query_hidden);
+  assert_true(read_result.query_hidden);
+  assert_int_equal(read_result.metadata_length, strlen("metadata"));
+  assert_memory_equal(read_result.metadata, "metadata",
+                      read_result.metadata_length);
+  read_source_to_string(read_result.body, body, sizeof(body));
+  assert_string_equal(body, "metadata-body");
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/deleted", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  rc = lc_pouch_state_read(pouch, "team/alpha", "object/deleted", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  rc = lc_pouch_state_read(pouch, "team/alpha", "state/promoted", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, body, sizeof(body));
+  assert_string_equal(body, "promoted-body");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &promoted);
+  lc_pouch_state_write_result_cleanup(NULL, &staged_write);
+  lc_pouch_state_write_result_cleanup(NULL, &object_delete);
+  lc_pouch_state_write_result_cleanup(NULL, &object_write);
+  lc_pouch_state_write_result_cleanup(NULL, &state_delete);
+  lc_pouch_state_write_result_cleanup(NULL, &deleted_write);
+  lc_pouch_state_write_result_cleanup(NULL, &metadata_write);
+  lc_pouch_state_write_result_cleanup(NULL, &state_write);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -23648,6 +24125,7 @@ int main(void) {
       cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),
       cmocka_unit_test(test_namespace_manifest_repairs_from_existing_segments),
       cmocka_unit_test(test_staged_state_writes_durable_decision_records),
+      cmocka_unit_test(test_state_replay_preserves_all_binary_record_families),
       cmocka_unit_test(
           test_staged_decision_recovery_tombstones_interrupted_discard),
       cmocka_unit_test(test_client_update_get_load_roundtrips_state),
@@ -23728,6 +24206,10 @@ int main(void) {
       cmocka_unit_test(test_resident_descriptors_stay_bounded_across_lifecycle),
       cmocka_unit_test(test_pouch_durable_sync_policy),
       cmocka_unit_test(test_pouch_durable_sync_batches_parallel_writes),
+      cmocka_unit_test(
+          test_parallel_state_writes_keep_query_projection_consistent),
+      cmocka_unit_test(test_parallel_query_flush_preserves_later_write),
+      cmocka_unit_test(test_parallel_query_flushes_publish_one_valid_index),
       cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),
       cmocka_unit_test(test_pouch_defaults_and_post_mutation_janitor),
       cmocka_unit_test(test_exclusive_writer_probe_heartbeat_precedence),

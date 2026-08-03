@@ -87,7 +87,7 @@ func runPouchFixtureC(b *testing.B, fixture *pouchFixture, engine, scenario stri
 	}
 }
 
-func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes, segmentTargetBytes int64, cryptoEnabled, compressionEnabled bool) {
+func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes, segmentTargetBytes int64, cryptoEnabled, compressionEnabled, durableSync bool) {
 	var totalCNS uint64
 	var result C.lockdc_pouch_bench_result
 
@@ -100,6 +100,7 @@ func runPouchProductionC(b *testing.B, rows, updatesPerKey, payloadBytes, segmen
 			C.uint64_t(segmentTargetBytes),
 			C.int(boolToInt(cryptoEnabled)),
 			C.int(boolToInt(compressionEnabled)),
+			C.int(boolToInt(durableSync)),
 			&result,
 		)
 		if rc != 0 {

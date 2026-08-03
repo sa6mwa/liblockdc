@@ -403,7 +403,8 @@ static void lockdc_bench_cleanup_root(const char *path) {
 static int lockdc_bench_open_client(const char *root, const char *crypto_key,
                                     const char *compression,
                                     uint64_t segment_target_bytes,
-                                    lc_client **out, lc_error *error) {
+                                    int durable_sync, lc_client **out,
+                                    lc_error *error) {
   lc_client_config config;
   const char *endpoints[1];
   char endpoint[1200];
@@ -413,11 +414,15 @@ static int lockdc_bench_open_client(const char *root, const char *crypto_key,
   if (segment_target_bytes != 0U) {
     written = snprintf(endpoint, sizeof(endpoint),
                        "pouch://%s?pouch_single_writer=true&"
+                       "durable_sync=%s&"
                        "segment_target_bytes=%" PRIu64,
-                       root, segment_target_bytes);
+                       root, durable_sync != 0 ? "true" : "false",
+                       segment_target_bytes);
   } else {
     written = snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?pouch_single_writer=true", root);
+                       "pouch://%s?pouch_single_writer=true&"
+                       "durable_sync=%s",
+                       root, durable_sync != 0 ? "true" : "false");
   }
   if (written <= 0 || (size_t)written >= sizeof(endpoint)) {
     return LC_ERR_INVALID;
@@ -1749,8 +1754,8 @@ int lockdc_pouch_bench_fixture_open(long rows, lockdc_pouch_bench_fixture **out,
   }
   snprintf(fixture->root, sizeof(fixture->root), "%s", root_template);
   fixture->rows = rows;
-  rc = lockdc_bench_open_client(fixture->root, NULL, NULL, 0U, &fixture->client,
-                                &error);
+  rc = lockdc_bench_open_client(fixture->root, NULL, NULL, 0U, 0,
+                                &fixture->client, &error);
   if (rc == LC_OK) {
     rc = lockdc_bench_seed(fixture->client, rows, &error);
   }
@@ -1814,7 +1819,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
                                       long payload_bytes,
                                       uint64_t segment_target_bytes,
                                       int crypto_enabled,
-                                      int compression_enabled,
+                                      int compression_enabled, int durable_sync,
                                       lockdc_pouch_bench_result *out) {
   char root_template[] = LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX";
   char root[sizeof(LOCKDC_POUCH_BENCH_TMP_PREFIX "XXXXXX")];
@@ -1864,9 +1869,9 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
     }
   }
   phase = "open client";
-  rc = lockdc_bench_open_client(root, crypto_key,
-                                compression_enabled != 0 ? "zlib" : NULL,
-                                segment_target_bytes, &client, &error);
+  rc = lockdc_bench_open_client(
+      root, crypto_key, compression_enabled != 0 ? "zlib" : NULL,
+      segment_target_bytes, durable_sync, &client, &error);
   if (rc != LC_OK) {
     goto done;
   }
@@ -2070,9 +2075,9 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
   lc_client_close(client);
   client = NULL;
   phase = "reopen client";
-  rc = lockdc_bench_open_client(root, crypto_key,
-                                compression_enabled != 0 ? "zlib" : NULL,
-                                segment_target_bytes, &client, &error);
+  rc = lockdc_bench_open_client(
+      root, crypto_key, compression_enabled != 0 ? "zlib" : NULL,
+      segment_target_bytes, durable_sync, &client, &error);
   if (rc != LC_OK) {
     goto done;
   }

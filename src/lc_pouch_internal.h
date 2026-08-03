@@ -162,6 +162,12 @@ struct lc_pouch {
   int state_mutation_mutex_initialized;
   pthread_mutex_t state_cache_mutex;
   int state_cache_mutex_initialized;
+  /* Serializes the rebuildable pending query projection and flush snapshots. */
+  pthread_mutex_t query_pending_mutex;
+  int query_pending_mutex_initialized;
+  /* Serializes query artifact publication without stalling pending writers. */
+  pthread_mutex_t query_flush_mutex;
+  int query_flush_mutex_initialized;
   pthread_mutex_t exclusive_key_mutexes[LC_POUCH_EXCLUSIVE_KEY_STRIPE_COUNT];
   size_t exclusive_key_mutex_count;
   lc_pouch_fsync_batcher *fsync_batcher;
@@ -203,6 +209,8 @@ struct lc_pouch {
   lc_pouch_query_index_pending_entry *query_pending_index;
   size_t query_pending_index_count;
   int query_pending_index_incomplete;
+  /* Lets a flush preserve publications that arrived after its capture. */
+  uint64_t query_pending_epoch;
   lc_pouch_query_index_pending_segment *query_pending_segments;
   lc_pouch_query_index_manifest_trust_entry *query_manifest_trust;
 };
@@ -228,6 +236,9 @@ typedef void (*lc_pouch_test_tail_repair_hook_fn)(void *context,
                                                   const char *segment);
 extern lc_pouch_test_tail_repair_hook_fn lc_pouch_test_tail_repair_hook;
 extern void *lc_pouch_test_tail_repair_context;
+/* Extends only test batch coalescing, without changing production scheduling.
+ */
+extern long lc_pouch_test_fsync_batch_delay_ns;
 size_t lc_pouch_test_resident_descriptor_count(lc_pouch *pouch);
 #endif
 

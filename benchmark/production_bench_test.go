@@ -610,9 +610,13 @@ func warmLockdDiskProductionQuery(b *testing.B, h *lockdDiskHarness, rows int64,
 }
 
 func runLockdDiskProduction(b *testing.B, rows, updatesPerKey, payloadBytes, segmentTargetBytes int64, cryptoEnabled bool) productionMetrics {
+	return runLockdDiskProductionWithHAMode(b, rows, updatesPerKey, payloadBytes, segmentTargetBytes, cryptoEnabled, lockdDiskFailoverHAMode)
+}
+
+func runLockdDiskProductionWithHAMode(b *testing.B, rows, updatesPerKey, payloadBytes, segmentTargetBytes int64, cryptoEnabled bool, haMode string) productionMetrics {
 	b.Helper()
 
-	h := startLockdDiskHarnessWithOptions(b, cryptoEnabled, segmentTargetBytes)
+	h := startLockdDiskHarnessWithOptionsAndHAMode(b, cryptoEnabled, segmentTargetBytes, haMode)
 	metrics := productionMetrics{}
 	for row := int64(0); row < rows; row++ {
 		phaseStart := time.Now()
@@ -923,7 +927,7 @@ func BenchmarkProductionPouchPT(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
-			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, false, false)
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, false, false, false)
 		})
 	}
 }
@@ -932,7 +936,7 @@ func BenchmarkProductionPouchCrypto(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
-			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, true, false)
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, true, false, false)
 		})
 	}
 }
@@ -941,7 +945,7 @@ func BenchmarkProductionPouchCompression(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
-			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, false, true)
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, false, true, false)
 		})
 	}
 }
@@ -950,7 +954,25 @@ func BenchmarkProductionPouchCryptoCompression(b *testing.B) {
 	for _, scenario := range productionScenarios() {
 		scenario := scenario
 		b.Run(productionBenchName(scenario), func(b *testing.B) {
-			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, true, true)
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, true, true, false)
+		})
+	}
+}
+
+func BenchmarkProductionPouchDurablePT(b *testing.B) {
+	for _, scenario := range productionScenarios() {
+		scenario := scenario
+		b.Run(productionBenchName(scenario), func(b *testing.B) {
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, false, false, true)
+		})
+	}
+}
+
+func BenchmarkProductionPouchDurableCrypto(b *testing.B) {
+	for _, scenario := range productionScenarios() {
+		scenario := scenario
+		b.Run(productionBenchName(scenario), func(b *testing.B) {
+			runPouchProductionC(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, true, false, true)
 		})
 	}
 }
@@ -1025,6 +1047,32 @@ func BenchmarkProductionLockdDiskCrypto(b *testing.B) {
 			var metrics productionMetrics
 			for i := 0; i < b.N; i++ {
 				metrics = runLockdDiskProduction(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, true)
+			}
+			reportLockdDiskProductionMetrics(b, metrics)
+		})
+	}
+}
+
+func BenchmarkProductionLockdDiskDurableNoCrypto(b *testing.B) {
+	for _, scenario := range productionScenarios() {
+		scenario := scenario
+		b.Run(productionBenchName(scenario), func(b *testing.B) {
+			var metrics productionMetrics
+			for i := 0; i < b.N; i++ {
+				metrics = runLockdDiskProductionWithHAMode(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, false, lockdDiskDurableHAMode)
+			}
+			reportLockdDiskProductionMetrics(b, metrics)
+		})
+	}
+}
+
+func BenchmarkProductionLockdDiskDurableCrypto(b *testing.B) {
+	for _, scenario := range productionScenarios() {
+		scenario := scenario
+		b.Run(productionBenchName(scenario), func(b *testing.B) {
+			var metrics productionMetrics
+			for i := 0; i < b.N; i++ {
+				metrics = runLockdDiskProductionWithHAMode(b, scenario.rows, scenario.updatesPerKey, scenario.payloadBytes, scenario.segmentTargetBytes, true, lockdDiskDurableHAMode)
 			}
 			reportLockdDiskProductionMetrics(b, metrics)
 		})
