@@ -1066,12 +1066,21 @@ Required behavior:
   within a namespace, processes at most 128 records in one append batch,
   publishes each resulting projection entry before its caller is acknowledged,
   and never accepts a payload source;
+- for an SDK-owned `lc_source_from_memory` state or object body no larger than
+  64 KiB, Pouch may hash and transform the already-materialized unread range
+  in bounded memory, then append one complete finalized record with one
+  vectored write. This includes supported zlib and AES-GCM transforms. It is
+  an explicit materialized-value optimization, not streaming: callback, file,
+  fd, externally implemented, and larger memory sources never enter it;
 - stream large payload records directly from the caller-provided reader through
   transforms, hash/etag, and CRC into the active writer file without full
   materialization;
-- write a `PENDING` header first, write finalized key and metadata while that
-  header remains pending, then publish the finalized header last after final
-  stored lengths, descriptor, hash/etag, and CRC are known;
+- for streaming records, write a `PENDING` header first, write finalized key
+  and metadata while that header remains pending, then publish the finalized
+  header last after final stored lengths, descriptor, hash/etag, and CRC are
+  known. A materialized complete-record append needs no pending rewrite: a
+  partial `writev` is an incomplete active tail because its declared record
+  length exceeds the verified file size, so normal tail repair discards it;
 - when `durable_sync=1`, group independent commit requests through a
   root-scoped fsync batcher. Direct mutation paths defer active-file syncs
   through duplicate fds held by the current state commit group; the exclusive
@@ -1126,7 +1135,8 @@ default. It applies to stored record bytes, not source payload bytes.
 Initial constants should mirror Go disk unless profiling proves a C-local
 change is better:
 
-- inline payload threshold: 1 MiB;
+- materialized complete-record threshold: 64 KiB, and only for values already
+  owned by `lc_source_from_memory`;
 - payload streaming buffer: 128 KiB;
 - read file cache: 64 open segment/snapshot files;
 - append batch buffer cap for grouped inline records: 1 MiB.

@@ -593,6 +593,51 @@ static void lc_memory_source_close(lc_source_impl *base) {
   free(source);
 }
 
+int lc_source_memory_view(const lc_source *source,
+                          const unsigned char **bytes_out, size_t *length_out) {
+  const lc_memory_source *memory;
+
+  if (bytes_out != NULL) {
+    *bytes_out = NULL;
+  }
+  if (length_out != NULL) {
+    *length_out = 0U;
+  }
+  if (source == NULL || bytes_out == NULL || length_out == NULL ||
+      source->read != lc_source_pub_read ||
+      source->reset != lc_source_pub_reset ||
+      source->close != lc_source_pub_close) {
+    return 0;
+  }
+  memory = (const lc_memory_source *)source;
+  if (memory->base.read_impl != lc_memory_source_read ||
+      memory->base.reset_impl != lc_memory_source_reset ||
+      memory->base.close_impl != lc_memory_source_close ||
+      memory->offset > memory->length) {
+    return 0;
+  }
+  *bytes_out = memory->bytes != NULL ? memory->bytes + memory->offset : NULL;
+  *length_out = memory->length - memory->offset;
+  return 1;
+}
+
+void lc_source_memory_consume(lc_source *source) {
+  lc_memory_source *memory;
+
+  if (source == NULL || source->read != lc_source_pub_read ||
+      source->reset != lc_source_pub_reset ||
+      source->close != lc_source_pub_close) {
+    return;
+  }
+  memory = (lc_memory_source *)source;
+  if (memory->base.read_impl == lc_memory_source_read &&
+      memory->base.reset_impl == lc_memory_source_reset &&
+      memory->base.close_impl == lc_memory_source_close &&
+      memory->offset <= memory->length) {
+    memory->offset = memory->length;
+  }
+}
+
 static size_t lc_file_source_read(lc_source_impl *base, void *buffer,
                                   size_t count, lc_error *error) {
   lc_file_source *source;
@@ -2362,6 +2407,12 @@ int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error) {
   if (src == NULL || dst == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "lc_copy requires src and dst", NULL, NULL, NULL);
+  }
+  /* `error` is an output for this copy operation. A clean source EOF must not
+   * inherit an unrelated failure from an earlier operation. */
+  if (error != NULL) {
+    lc_error_cleanup(error);
+    lc_error_init(error);
   }
   total = 0U;
   for (;;) {

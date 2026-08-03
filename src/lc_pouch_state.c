@@ -1236,6 +1236,38 @@ static char *lc_pouch_state_hash_final(const lc_allocator *allocator,
   return etag;
 }
 
+static char *lc_pouch_state_hash_bytes(const lc_allocator *allocator,
+                                       const unsigned char *bytes,
+                                       size_t length, lc_error *error) {
+  EVP_MD_CTX *ctx;
+  char *etag;
+
+  if (length > 0U && bytes == NULL) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch inline payload hash requires bytes", NULL, NULL,
+                       "pouch");
+    return NULL;
+  }
+  ctx = EVP_MD_CTX_new();
+  if (ctx == NULL) {
+    (void)lc_error_set(error, LC_ERR_NOMEM, 0L,
+                       "failed to allocate pouch state payload hash context",
+                       NULL, NULL, "pouch");
+    return NULL;
+  }
+  etag = NULL;
+  if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1 ||
+      (length > 0U && EVP_DigestUpdate(ctx, bytes, length) != 1)) {
+    (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                       "failed to hash pouch state payload", NULL, NULL,
+                       "pouch");
+  } else {
+    etag = lc_pouch_state_hash_final(allocator, ctx, error);
+  }
+  EVP_MD_CTX_free(ctx);
+  return etag;
+}
+
 static char *lc_pouch_state_empty_etag(const lc_allocator *allocator,
                                        lc_error *error) {
   EVP_MD_CTX *ctx;
@@ -4197,6 +4229,49 @@ static int lc_pouch_state_record_write_prefix(
   if (meta_len > 0U) {
     parts[part_count].iov_base = (void *)meta;
     parts[part_count].iov_len = meta_len;
+    ++part_count;
+  }
+  return lc_pouch_state_writev_all(fd, parts, part_count, error);
+}
+
+static int lc_pouch_state_record_write_complete(
+    int fd, unsigned char type, const void *key, size_t key_len,
+    const unsigned char *meta, size_t meta_len, const unsigned char *payload,
+    size_t payload_len, unsigned long payload_crc, lc_error *error) {
+  unsigned char encoded[LC_POUCH_STATE_RECORD_HEADER_BYTES];
+  struct iovec parts[4];
+  int part_count;
+  int rc;
+
+  if ((key_len > 0U && key == NULL) || (meta_len > 0U && meta == NULL) ||
+      (payload_len > 0U && payload == NULL)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch inline state record is invalid", NULL, NULL,
+                        "pouch");
+  }
+  rc = lc_pouch_state_record_header_encode(type, key, key_len, meta, meta_len,
+                                           (uint64_t)payload_len, payload_crc,
+                                           0UL, encoded, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  part_count = 0;
+  parts[part_count].iov_base = encoded;
+  parts[part_count].iov_len = sizeof(encoded);
+  ++part_count;
+  if (key_len > 0U) {
+    parts[part_count].iov_base = (void *)key;
+    parts[part_count].iov_len = key_len;
+    ++part_count;
+  }
+  if (meta_len > 0U) {
+    parts[part_count].iov_base = (void *)meta;
+    parts[part_count].iov_len = meta_len;
+    ++part_count;
+  }
+  if (payload_len > 0U) {
+    parts[part_count].iov_base = (void *)payload;
+    parts[part_count].iov_len = payload_len;
     ++part_count;
   }
   return lc_pouch_state_writev_all(fd, parts, part_count, error);
@@ -9569,6 +9644,8 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   char *etag;
   unsigned char *meta;
   unsigned char *final_meta;
+  const unsigned char *materialized_plain;
+  unsigned char *materialized_stored;
   const char placeholder_etag[] =
       "0000000000000000000000000000000000000000000000000000000000000000";
   int fd;
@@ -9579,8 +9656,11 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   unsigned long stored_crc;
   uint64_t segment_size;
   uint64_t payload_offset;
+  uint64_t record_end;
   size_t meta_len;
   size_t final_meta_len;
+  size_t materialized_plain_len;
+  size_t materialized_stored_len;
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
@@ -9591,6 +9671,7 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   int manifest_from_cache;
   int retain_active_append_fd;
   int single_writer;
+  int use_materialized_record;
   uint64_t writer_mode_epoch;
   unsigned char put_record_type;
 
@@ -9692,6 +9773,12 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   memset(&payload_span, 0, sizeof(payload_span));
   meta = NULL;
   final_meta = NULL;
+  materialized_plain = NULL;
+  materialized_stored = NULL;
+  materialized_plain_len = 0U;
+  materialized_stored_len = 0U;
+  record_end = 0UL;
+  use_materialized_record = 0;
   content_type = options != NULL && options->content_type != NULL
                      ? options->content_type
                      : "application/octet-stream";
@@ -9913,127 +10000,196 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   }
   payload_offset = segment_size + LC_POUCH_STATE_RECORD_HEADER_BYTES +
                    (uint64_t)strlen(key) + (uint64_t)meta_len;
-  rc = lc_pouch_state_record_write_prefix(fd, put_record_type, key, strlen(key),
-                                          meta, meta_len, 0U, 0UL,
-                                          LC_POUCH_RECORD_FLAG_PENDING, error);
-  if (rc != LC_OK) {
-    lc_pouch_state_append_fd_rollback(fd, segment_size,
-                                      retain_active_append_fd);
-    lc_free_with_allocator(&pouch->allocator, meta);
-    lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
-    lc_free_with_allocator(&pouch->allocator, payload_context);
-    lc_free_with_allocator(&pouch->allocator, segment_path);
-    lc_pouch_state_append_lock_release(&append_lock);
-    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-    return rc;
-  }
-
-  bytes = 0UL;
-  cipher_bytes = 0UL;
-  stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
-  descriptor = NULL;
-  hash_ctx = EVP_MD_CTX_new();
-  if (hash_ctx == NULL) {
-    lc_pouch_state_append_fd_rollback(fd, segment_size,
-                                      retain_active_append_fd);
-    lc_free_with_allocator(&pouch->allocator, meta);
-    lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
-    lc_free_with_allocator(&pouch->allocator, payload_context);
-    lc_free_with_allocator(&pouch->allocator, segment_path);
-    lc_pouch_state_append_lock_release(&append_lock);
-    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch state payload hash context",
-                        NULL, NULL, "pouch");
-  }
-  rc = lc_pouch_state_hash_source_init(&hash_source, body, hash_ctx, error);
-  if (rc != LC_OK) {
-    EVP_MD_CTX_free(hash_ctx);
-    lc_pouch_state_append_fd_rollback(fd, segment_size,
-                                      retain_active_append_fd);
-    lc_free_with_allocator(&pouch->allocator, meta);
-    lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
-    lc_free_with_allocator(&pouch->allocator, payload_context);
-    lc_free_with_allocator(&pouch->allocator, segment_path);
-    lc_pouch_state_append_lock_release(&append_lock);
-    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-    return rc;
-  }
-  crypto_context = lc_strdup_with_allocator(&pouch->allocator, payload_context);
-  if (crypto_context == NULL) {
-    EVP_MD_CTX_free(hash_ctx);
-    lc_pouch_state_append_fd_rollback(fd, segment_size,
-                                      retain_active_append_fd);
-    lc_free_with_allocator(&pouch->allocator, meta);
-    lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
-    lc_free_with_allocator(&pouch->allocator, payload_context);
-    lc_free_with_allocator(&pouch->allocator, segment_path);
-    lc_pouch_state_append_lock_release(&append_lock);
-    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
-    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate pouch state crypto context", NULL,
-                        NULL, NULL);
-  }
-  rc = lc_pouch_crypto_stream_to_fd_crc_with_compression(
-      pouch->crypto, crypto_context, fd, &hash_source.pub, &bytes,
-      &cipher_bytes, &stored_crc, &descriptor,
-      options == NULL || !options->disable_compression, error);
-  lc_free_with_allocator(&pouch->allocator, crypto_context);
-  if (rc == LC_OK && hash_source.failed) {
-    rc =
-        lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                     "failed to hash pouch state payload", NULL, NULL, "pouch");
-  }
-  if (rc == LC_OK) {
-    etag = lc_pouch_state_hash_final(&pouch->allocator, hash_ctx, error);
-    if (etag == NULL) {
-      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  use_materialized_record =
+      single_writer &&
+      lc_source_memory_view(body, &materialized_plain,
+                            &materialized_plain_len) &&
+      materialized_plain_len <= LC_POUCH_CRYPTO_MEMORY_TRANSFORM_MAX_BYTES;
+  if (use_materialized_record) {
+    bytes = (uint64_t)materialized_plain_len;
+    cipher_bytes = 0UL;
+    stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
+    descriptor = NULL;
+    rc = lc_pouch_crypto_transform_memory(
+        pouch->crypto, payload_context, materialized_plain,
+        materialized_plain_len,
+        options == NULL || !options->disable_compression, &materialized_stored,
+        &materialized_stored_len, &stored_crc, &descriptor, error);
+    if (rc == LC_OK) {
+      cipher_bytes = (uint64_t)materialized_stored_len;
+      etag = lc_pouch_state_hash_bytes(&pouch->allocator, materialized_plain,
+                                       materialized_plain_len, error);
+      if (etag == NULL) {
+        rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+      }
     }
-  }
-  EVP_MD_CTX_free(hash_ctx);
-  updated_at_unix = lc_pouch_maintenance_now_seconds();
-  if (rc == LC_OK) {
-    lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
-    rc = lc_pouch_state_payload_span_set(
-        &pouch->allocator, &payload_span, manifest.active_segment, segment_size,
-        payload_offset, cipher_bytes, stored_crc, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_encode_payload_meta(
-        &pouch->allocator, version, updated_at_unix, bytes, cipher_bytes,
-        content_type, etag, descriptor, &payload_span, payload_context,
-        metadata, metadata_length, LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE,
-        has_query_hidden, query_hidden, &final_meta, &final_meta_len, error);
-    if (rc == LC_OK && final_meta_len != meta_len) {
+    updated_at_unix = lc_pouch_maintenance_now_seconds();
+    if (rc == LC_OK) {
+      lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
+      rc = lc_pouch_state_payload_span_set(
+          &pouch->allocator, &payload_span, manifest.active_segment,
+          segment_size, payload_offset, cipher_bytes, stored_crc, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_encode_payload_meta(
+          &pouch->allocator, version, updated_at_unix, bytes, cipher_bytes,
+          content_type, etag, descriptor, &payload_span, payload_context,
+          metadata, metadata_length, LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE,
+          has_query_hidden, query_hidden, &final_meta, &final_meta_len, error);
+      if (rc == LC_OK && final_meta_len != meta_len) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch state metadata reservation changed size", NULL,
+                          NULL, "pouch");
+      }
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_reserve_index_records(
+          pouch, namespace_name, &manifest, 1UL, &index_seq, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_meta_set_index_seq(final_meta, final_meta_len,
+                                             index_seq, error);
+    }
+    if (rc == LC_OK && cipher_bytes > LC_U64_MAX - payload_offset) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch state metadata reservation changed size", NULL,
-                        NULL, "pouch");
+                        "pouch state record offset exceeds u64", NULL, NULL,
+                        "pouch");
     }
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_reserve_index_records(pouch, namespace_name, &manifest,
-                                              1UL, &index_seq, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_meta_set_index_seq(final_meta, final_meta_len,
-                                           index_seq, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_record_finalize(fd, segment_size, put_record_type, key,
-                                        strlen(key), final_meta, final_meta_len,
-                                        cipher_bytes, stored_crc, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_fd_end(
-        fd, &payload_offset,
-        "failed to restore pouch state segment append offset", error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_defer_fsync(pouch, fd, error);
+    if (rc == LC_OK) {
+      record_end = payload_offset + cipher_bytes;
+      rc = lc_pouch_state_record_write_complete(
+          fd, put_record_type, key, strlen(key), final_meta, final_meta_len,
+          materialized_stored, materialized_stored_len, stored_crc, error);
+    }
+    if (rc == LC_OK) {
+      lc_source_memory_consume(body);
+      payload_offset = record_end;
+      rc = lc_pouch_state_defer_fsync(pouch, fd, error);
+    }
+  } else {
+    rc = lc_pouch_state_record_write_prefix(
+        fd, put_record_type, key, strlen(key), meta, meta_len, 0U, 0UL,
+        LC_POUCH_RECORD_FLAG_PENDING, error);
+    if (rc != LC_OK) {
+      lc_pouch_state_append_fd_rollback(fd, segment_size,
+                                        retain_active_append_fd);
+      lc_free_with_allocator(&pouch->allocator, meta);
+      lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
+      lc_free_with_allocator(&pouch->allocator, payload_context);
+      lc_free_with_allocator(&pouch->allocator, segment_path);
+      lc_pouch_state_append_lock_release(&append_lock);
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      return rc;
+    }
+
+    bytes = 0UL;
+    cipher_bytes = 0UL;
+    stored_crc = (unsigned long)crc32(0L, Z_NULL, 0);
+    descriptor = NULL;
+    hash_ctx = EVP_MD_CTX_new();
+    if (hash_ctx == NULL) {
+      lc_pouch_state_append_fd_rollback(fd, segment_size,
+                                        retain_active_append_fd);
+      lc_free_with_allocator(&pouch->allocator, meta);
+      lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
+      lc_free_with_allocator(&pouch->allocator, payload_context);
+      lc_free_with_allocator(&pouch->allocator, segment_path);
+      lc_pouch_state_append_lock_release(&append_lock);
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch state payload hash context",
+                          NULL, NULL, "pouch");
+    }
+    rc = lc_pouch_state_hash_source_init(&hash_source, body, hash_ctx, error);
+    if (rc != LC_OK) {
+      EVP_MD_CTX_free(hash_ctx);
+      lc_pouch_state_append_fd_rollback(fd, segment_size,
+                                        retain_active_append_fd);
+      lc_free_with_allocator(&pouch->allocator, meta);
+      lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
+      lc_free_with_allocator(&pouch->allocator, payload_context);
+      lc_free_with_allocator(&pouch->allocator, segment_path);
+      lc_pouch_state_append_lock_release(&append_lock);
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      return rc;
+    }
+    crypto_context =
+        lc_strdup_with_allocator(&pouch->allocator, payload_context);
+    if (crypto_context == NULL) {
+      EVP_MD_CTX_free(hash_ctx);
+      lc_pouch_state_append_fd_rollback(fd, segment_size,
+                                        retain_active_append_fd);
+      lc_free_with_allocator(&pouch->allocator, meta);
+      lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
+      lc_free_with_allocator(&pouch->allocator, payload_context);
+      lc_free_with_allocator(&pouch->allocator, segment_path);
+      lc_pouch_state_append_lock_release(&append_lock);
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch state crypto context", NULL,
+                          NULL, NULL);
+    }
+    rc = lc_pouch_crypto_stream_to_fd_crc_with_compression(
+        pouch->crypto, crypto_context, fd, &hash_source.pub, &bytes,
+        &cipher_bytes, &stored_crc, &descriptor,
+        options == NULL || !options->disable_compression, error);
+    lc_free_with_allocator(&pouch->allocator, crypto_context);
+    if (rc == LC_OK && hash_source.failed) {
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to hash pouch state payload", NULL, NULL,
+                        "pouch");
+    }
+    if (rc == LC_OK) {
+      etag = lc_pouch_state_hash_final(&pouch->allocator, hash_ctx, error);
+      if (etag == NULL) {
+        rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+      }
+    }
+    EVP_MD_CTX_free(hash_ctx);
+    updated_at_unix = lc_pouch_maintenance_now_seconds();
+    if (rc == LC_OK) {
+      lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
+      rc = lc_pouch_state_payload_span_set(
+          &pouch->allocator, &payload_span, manifest.active_segment,
+          segment_size, payload_offset, cipher_bytes, stored_crc, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_encode_payload_meta(
+          &pouch->allocator, version, updated_at_unix, bytes, cipher_bytes,
+          content_type, etag, descriptor, &payload_span, payload_context,
+          metadata, metadata_length, LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE,
+          has_query_hidden, query_hidden, &final_meta, &final_meta_len, error);
+      if (rc == LC_OK && final_meta_len != meta_len) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch state metadata reservation changed size", NULL,
+                          NULL, "pouch");
+      }
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_reserve_index_records(
+          pouch, namespace_name, &manifest, 1UL, &index_seq, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_meta_set_index_seq(final_meta, final_meta_len,
+                                             index_seq, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_record_finalize(
+          fd, segment_size, put_record_type, key, strlen(key), final_meta,
+          final_meta_len, cipher_bytes, stored_crc, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_fd_end(
+          fd, &payload_offset,
+          "failed to restore pouch state segment append offset", error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_defer_fsync(pouch, fd, error);
+    }
   }
   if (!retain_active_append_fd && close(fd) != 0 && rc == LC_OK) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -10108,6 +10264,7 @@ lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
   }
   lc_free_with_allocator(&pouch->allocator, etag);
   lc_free_with_allocator(&pouch->allocator, descriptor);
+  lc_free_with_allocator(&pouch->allocator, materialized_stored);
   lc_pouch_state_payload_span_cleanup(&pouch->allocator, &payload_span);
   lc_free_with_allocator(&pouch->allocator, payload_context);
   lc_free_with_allocator(&pouch->allocator, meta);

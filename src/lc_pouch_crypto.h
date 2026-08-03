@@ -8,6 +8,10 @@
 
 typedef struct lc_pouch_crypto lc_pouch_crypto;
 
+/* The inline record path is intentionally bounded. Larger values remain on
+ * the one-pass streaming path and are never materialized by Pouch. */
+#define LC_POUCH_CRYPTO_MEMORY_TRANSFORM_MAX_BYTES (64U * 1024U)
+
 typedef struct lc_pouch_crypto_open_options {
   const char *key_string;
   const char *key_file;
@@ -57,6 +61,14 @@ int lc_pouch_crypto_stream_to_fd_crc_with_compression(
     lc_pouch_crypto *crypto, const char *context, int fd, lc_source *body,
     uint64_t *plain_bytes, uint64_t *cipher_bytes, unsigned long *stored_crc,
     char **descriptor_out, int allow_compression, lc_error *error);
+/* Transforms a bounded, already-materialized payload without touching a
+ * source. Callers retain ownership of `plain`; `stored_out` uses Pouch's
+ * allocator and must be released with lc_free_with_allocator(). */
+int lc_pouch_crypto_transform_memory(
+    lc_pouch_crypto *crypto, const char *context, const unsigned char *plain,
+    size_t plain_length, int allow_compression, unsigned char **stored_out,
+    size_t *stored_length_out, unsigned long *stored_crc_out,
+    char **descriptor_out, lc_error *error);
 int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
                                      const char *context, const char *path,
                                      const char *descriptor, lc_source **out,

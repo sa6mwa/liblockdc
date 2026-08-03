@@ -93,9 +93,11 @@ user data records.
 - [ ] Replace duplicated client pre-read plus state-layer reread paths with one
   mutation authority that reads cached metadata, evaluates CAS/lease state,
   appends, commits, and publishes the updated projection atomically.
-- [ ] Preserve real streaming. Large values flow from source through
-  compression/encryption, hashing, CRC, pending-record finalization, and the
-  active descriptor without whole-value materialization.
+- [x] Preserve real streaming. Large and all non-memory values flow from source
+  through compression/encryption, hashing, CRC, pending-record finalization,
+  and the active descriptor without whole-value materialization. Only the
+  unread bytes of a bounded `lc_source_from_memory` value may use the explicit
+  complete-record materialized fast path.
 
 Acceptance:
 
@@ -115,9 +117,10 @@ Acceptance:
   namespace's resident projection, active descriptor, and cursor on first use.
 - [x] Route state, lease, object, attachment, queue, and staged-transaction
   mutations through the resident append path. Default-exclusive metadata-only
-  state mutations use a bounded ordered append worker; streaming state and
-  object bodies remain direct and public completion still waits for its own
-  finalized commit result.
+  state mutations use a bounded ordered append worker; bounded SDK memory
+  bodies use one complete-record append while all streaming bodies remain
+  direct, and public completion still waits for its own finalized commit
+  result.
 - [x] Match Go disk group-commit scheduling: a durable group waits at most two
   milliseconds or until its maximum request count, deduplicates file syncs,
   and propagates the shared result to every waiting operation.

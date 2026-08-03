@@ -1167,14 +1167,12 @@ int lc_pouch_crypto_test_check_byte_counter(uint64_t total, size_t delta,
 }
 #endif
 
-static int lc_pouch_crypto_encrypt_frame(
-    int fd, EVP_CIPHER_CTX *ctx, const unsigned char key[LC_POUCH_DEK_BYTES],
+static int lc_pouch_crypto_encrypt_frame_to_memory(
+    EVP_CIPHER_CTX *ctx, const unsigned char key[LC_POUCH_DEK_BYTES],
     const unsigned char nonce_prefix[LC_POUCH_NONCE_PREFIX_BYTES],
     const char *context, size_t context_len, unsigned long counter,
-    const unsigned char *plain, size_t plain_len, uint64_t *cipher_total,
-    unsigned long *stored_crc, lc_error *error) {
-  unsigned char
-      frame[8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES];
+    const unsigned char *plain, size_t plain_len, unsigned char *frame,
+    size_t frame_capacity, size_t *frame_length_out, lc_error *error) {
   unsigned char *header;
   unsigned char *cipher;
   unsigned char *tag;
@@ -1184,7 +1182,15 @@ static int lc_pouch_crypto_encrypt_frame(
   int out_len;
   int final_len;
   int aad_len;
-  int rc;
+
+  if (ctx == NULL || key == NULL || nonce_prefix == NULL ||
+      (plain_len > 0U && plain == NULL) || frame == NULL ||
+      frame_length_out == NULL || plain_len > LC_POUCH_FRAME_PLAINTEXT_BYTES ||
+      frame_capacity < 8U + plain_len + LC_POUCH_GCM_TAG_BYTES) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch encrypted frame arguments are invalid", NULL,
+                        NULL, "pouch");
+  }
 
   header = frame;
   cipher = frame + 8U;
@@ -1203,6 +1209,7 @@ static int lc_pouch_crypto_encrypt_frame(
            : 1) == 0 ||
       EVP_EncryptUpdate(ctx, cipher, &out_len, plain, (int)plain_len) != 1 ||
       EVP_EncryptFinal_ex(ctx, cipher + out_len, &final_len) != 1) {
+    OPENSSL_cleanse(nonce, sizeof(nonce));
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to encrypt pouch payload frame", NULL, NULL,
                         "pouch");
@@ -1211,17 +1218,40 @@ static int lc_pouch_crypto_encrypt_frame(
   tag = cipher + cipher_len;
   if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, LC_POUCH_GCM_TAG_BYTES,
                           tag) != 1) {
+    OPENSSL_cleanse(nonce, sizeof(nonce));
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to encrypt pouch payload frame", NULL, NULL,
                         "pouch");
   }
   frame_len = 8U + cipher_len + LC_POUCH_GCM_TAG_BYTES;
+  *frame_length_out = frame_len;
+  OPENSSL_cleanse(nonce, sizeof(nonce));
+  return LC_OK;
+}
+
+static int lc_pouch_crypto_encrypt_frame(
+    int fd, EVP_CIPHER_CTX *ctx, const unsigned char key[LC_POUCH_DEK_BYTES],
+    const unsigned char nonce_prefix[LC_POUCH_NONCE_PREFIX_BYTES],
+    const char *context, size_t context_len, unsigned long counter,
+    const unsigned char *plain, size_t plain_len, uint64_t *cipher_total,
+    unsigned long *stored_crc, lc_error *error) {
+  unsigned char
+      frame[8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES];
+  size_t frame_len;
+  int rc;
+
+  frame_len = 0U;
+  rc = lc_pouch_crypto_encrypt_frame_to_memory(
+      ctx, key, nonce_prefix, context, context_len, counter, plain, plain_len,
+      frame, sizeof(frame), &frame_len, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   if (cipher_total != NULL) {
     rc = lc_pouch_crypto_check_byte_counter(
         *cipher_total, frame_len,
         "pouch encrypted payload byte count exceeds platform limit", error);
     if (rc != LC_OK) {
-      OPENSSL_cleanse(nonce, sizeof(nonce));
       return rc;
     }
   }
@@ -1233,7 +1263,6 @@ static int lc_pouch_crypto_encrypt_frame(
   if (rc == LC_OK && cipher_total != NULL) {
     *cipher_total += (uint64_t)frame_len;
   }
-  OPENSSL_cleanse(nonce, sizeof(nonce));
   return rc;
 }
 
@@ -1736,6 +1765,237 @@ int lc_pouch_crypto_stream_to_fd_crc_with_compression(
   return lc_pouch_crypto_stream_to_fd_crc_impl(
       crypto, context, fd, body, plain_bytes, cipher_bytes, stored_crc,
       descriptor_out, allow_compression, error);
+}
+
+int lc_pouch_crypto_transform_memory(
+    lc_pouch_crypto *crypto, const char *context, const unsigned char *plain,
+    size_t plain_length, int allow_compression, unsigned char **stored_out,
+    size_t *stored_length_out, unsigned long *stored_crc_out,
+    char **descriptor_out, lc_error *error) {
+  const lc_allocator *allocator;
+  const unsigned char empty_plain = 0U;
+  const unsigned char *working;
+  unsigned char *compressed_bytes;
+  unsigned char *stored;
+  char *descriptor;
+  lc_pouch_crypto_desc desc;
+  EVP_CIPHER_CTX *ctx;
+  uLong compressed_capacity;
+  size_t working_length;
+  size_t stored_capacity;
+  size_t stored_length;
+  size_t data_frames;
+  size_t frame_count;
+  size_t remaining;
+  size_t plain_offset;
+  unsigned long counter;
+  int encrypted;
+  int compressed;
+  int rc;
+
+  if (stored_out == NULL || stored_length_out == NULL ||
+      stored_crc_out == NULL || descriptor_out == NULL ||
+      (plain_length > 0U && plain == NULL) ||
+      plain_length > LC_POUCH_CRYPTO_MEMORY_TRANSFORM_MAX_BYTES) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch inline payload transform is invalid", NULL, NULL,
+                        "pouch");
+  }
+  *stored_out = NULL;
+  *stored_length_out = 0U;
+  *stored_crc_out = (unsigned long)crc32(0L, Z_NULL, 0);
+  *descriptor_out = NULL;
+  allocator = crypto != NULL ? &crypto->allocator : NULL;
+  encrypted = crypto != NULL && crypto->encryption_enabled;
+  compressed =
+      allow_compression && crypto != NULL && crypto->compression_enabled;
+  if (encrypted && (context == NULL || context[0] == '\0')) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch crypto write requires context", NULL, NULL,
+                        "pouch");
+  }
+
+  compressed_bytes = NULL;
+  stored = NULL;
+  descriptor = NULL;
+  ctx = NULL;
+  working = plain != NULL ? plain : &empty_plain;
+  working_length = plain_length;
+  if (compressed) {
+    compressed_capacity = compressBound((uLong)plain_length);
+    if ((uLong)(size_t)compressed_capacity != compressed_capacity) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch compressed inline payload exceeds platform "
+                          "limit",
+                          NULL, NULL, "pouch");
+    }
+    compressed_bytes = (unsigned char *)lc_alloc_with_allocator(
+        allocator,
+        (size_t)compressed_capacity == 0U ? 1U : (size_t)compressed_capacity);
+    if (compressed_bytes == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate compressed inline payload", NULL,
+                          NULL, "pouch");
+    }
+    if (compress2(compressed_bytes, &compressed_capacity, working,
+                  (uLong)plain_length, Z_DEFAULT_COMPRESSION) != Z_OK) {
+      lc_free_with_allocator(allocator, compressed_bytes);
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "failed to compress pouch payload", NULL, NULL,
+                          "pouch");
+    }
+    working = compressed_bytes;
+    working_length = (size_t)compressed_capacity;
+  }
+  if (!encrypted) {
+    if (!compressed && working_length > 0U) {
+      stored =
+          (unsigned char *)lc_alloc_with_allocator(allocator, working_length);
+      if (stored == NULL) {
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "failed to allocate inline payload", NULL, NULL,
+                            "pouch");
+      }
+      memcpy(stored, working, working_length);
+    } else if (compressed) {
+      stored = compressed_bytes;
+      compressed_bytes = NULL;
+    }
+    if (compressed) {
+      memset(&desc, 0, sizeof(desc));
+      desc.compressed = 1;
+      rc = lc_pouch_crypto_descriptor_encode(allocator, &desc, &descriptor,
+                                             error);
+      if (rc != LC_OK) {
+        lc_free_with_allocator(allocator, stored);
+        return rc;
+      }
+    }
+    if (working_length > 0U) {
+      *stored_crc_out = (unsigned long)crc32((uLong)*stored_crc_out, stored,
+                                             (uInt)working_length);
+    }
+    *stored_out = stored;
+    *stored_length_out = working_length;
+    *descriptor_out = descriptor;
+    return LC_OK;
+  }
+
+  memset(&desc, 0, sizeof(desc));
+  desc.encrypted = 1;
+  desc.compressed = compressed;
+  desc.frame_size = LC_POUCH_FRAME_PLAINTEXT_BYTES;
+  if (!lc_pouch_crypto_random_bytes(desc.nonce_prefix,
+                                    sizeof(desc.nonce_prefix))) {
+    lc_free_with_allocator(allocator, compressed_bytes);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to generate pouch crypto descriptor material",
+                        NULL, NULL, "pouch");
+  }
+  rc = lc_pouch_crypto_descriptor_encode(allocator, &desc, &descriptor, error);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(allocator, compressed_bytes);
+    return rc;
+  }
+  data_frames = 0U;
+  if (working_length > 0U) {
+    data_frames = 1U;
+    if (working_length > LC_POUCH_FIRST_FRAME_PLAINTEXT_BYTES) {
+      remaining = working_length - LC_POUCH_FIRST_FRAME_PLAINTEXT_BYTES;
+      data_frames += (remaining + LC_POUCH_FRAME_PLAINTEXT_BYTES - 1U) /
+                     LC_POUCH_FRAME_PLAINTEXT_BYTES;
+    }
+  }
+  if (data_frames == (size_t)-1) {
+    lc_free_with_allocator(allocator, descriptor);
+    lc_free_with_allocator(allocator, compressed_bytes);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch encrypted inline payload exceeds platform "
+                        "limit",
+                        NULL, NULL, "pouch");
+  }
+  frame_count = data_frames + 1U;
+  if (frame_count >
+      (((size_t)-1) - working_length) / (8U + LC_POUCH_GCM_TAG_BYTES)) {
+    lc_free_with_allocator(allocator, descriptor);
+    lc_free_with_allocator(allocator, compressed_bytes);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch encrypted inline payload exceeds platform "
+                        "limit",
+                        NULL, NULL, "pouch");
+  }
+  stored_capacity =
+      working_length + frame_count * (8U + LC_POUCH_GCM_TAG_BYTES);
+  stored = (unsigned char *)lc_alloc_with_allocator(
+      allocator, stored_capacity == 0U ? 1U : stored_capacity);
+  if (stored == NULL) {
+    lc_free_with_allocator(allocator, descriptor);
+    lc_free_with_allocator(allocator, compressed_bytes);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate encrypted inline payload", NULL,
+                        NULL, "pouch");
+  }
+  ctx = EVP_CIPHER_CTX_new();
+  if (ctx == NULL) {
+    lc_free_with_allocator(allocator, stored);
+    lc_free_with_allocator(allocator, descriptor);
+    lc_free_with_allocator(allocator, compressed_bytes);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch crypto cipher context", NULL,
+                        NULL, "pouch");
+  }
+  stored_length = 0U;
+  plain_offset = 0U;
+  counter = 0UL;
+  rc = LC_OK;
+  while (plain_offset < working_length) {
+    size_t chunk;
+    size_t frame_length;
+
+    chunk = counter == 0UL ? LC_POUCH_FIRST_FRAME_PLAINTEXT_BYTES
+                           : LC_POUCH_FRAME_PLAINTEXT_BYTES;
+    if (chunk > working_length - plain_offset) {
+      chunk = working_length - plain_offset;
+    }
+    rc = lc_pouch_crypto_encrypt_frame_to_memory(
+        ctx, crypto->data_key, desc.nonce_prefix, context, strlen(context),
+        counter, working + plain_offset, chunk, stored + stored_length,
+        stored_capacity - stored_length, &frame_length, error);
+    if (rc != LC_OK) {
+      break;
+    }
+    stored_length += frame_length;
+    plain_offset += chunk;
+    ++counter;
+  }
+  if (rc == LC_OK) {
+    size_t frame_length;
+
+    rc = lc_pouch_crypto_encrypt_frame_to_memory(
+        ctx, crypto->data_key, desc.nonce_prefix, context, strlen(context),
+        counter, &empty_plain, 0U, stored + stored_length,
+        stored_capacity - stored_length, &frame_length, error);
+    if (rc == LC_OK) {
+      stored_length += frame_length;
+    }
+  }
+  EVP_CIPHER_CTX_free(ctx);
+  if (compressed_bytes != NULL) {
+    OPENSSL_cleanse(compressed_bytes, working_length);
+    lc_free_with_allocator(allocator, compressed_bytes);
+  }
+  if (rc != LC_OK) {
+    OPENSSL_cleanse(stored, stored_capacity);
+    lc_free_with_allocator(allocator, stored);
+    lc_free_with_allocator(allocator, descriptor);
+    return rc;
+  }
+  *stored_crc_out =
+      (unsigned long)crc32((uLong)*stored_crc_out, stored, (uInt)stored_length);
+  *stored_out = stored;
+  *stored_length_out = stored_length;
+  *descriptor_out = descriptor;
+  return LC_OK;
 }
 
 static size_t lc_pouch_crypto_source_read(lc_source *self, void *buffer,

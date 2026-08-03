@@ -1916,7 +1916,8 @@ int lc_sink_to_memory(lc_sink **out, lc_error *error);
 /** Returns the bytes accumulated by an in-memory sink. */
 int lc_sink_memory_bytes(lc_sink *sink, const void **bytes, size_t *length,
                          lc_error *error);
-/** Copies all bytes from a source into a sink. */
+/** Copies all bytes from a source into a sink. Resets `error` for this
+ * operation before reading the source. */
 int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error);
 
 /** Generates a new `lc-pouch-key-v1:<base64url>` root key string.

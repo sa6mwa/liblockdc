@@ -107,6 +107,14 @@ typedef struct pouch_parallel_state_write {
   int rc;
 } pouch_parallel_state_write;
 
+typedef struct pouch_chunked_source {
+  const unsigned char *bytes;
+  size_t length;
+  size_t offset;
+  size_t max_chunk;
+  size_t read_count;
+} pouch_chunked_source;
+
 typedef struct pouch_parallel_lease_acquire {
   lc_client *client;
   pthread_barrier_t *start;
@@ -157,6 +165,29 @@ static void *pouch_write_queue_notification(void *context) {
   (void)nanosleep(&write->delay, NULL);
   write->rc = lc_pouch_path_write_text_file(write->path, "sequence=1\n", NULL);
   return NULL;
+}
+
+static size_t pouch_chunked_source_read(void *context, void *buffer,
+                                        size_t count, lc_error *error) {
+  pouch_chunked_source *source;
+  size_t available;
+
+  (void)error;
+  source = (pouch_chunked_source *)context;
+  if (source == NULL || source->offset >= source->length) {
+    return 0U;
+  }
+  available = source->length - source->offset;
+  if (count > source->max_chunk) {
+    count = source->max_chunk;
+  }
+  if (count > available) {
+    count = available;
+  }
+  memcpy(buffer, source->bytes + source->offset, count);
+  source->offset += count;
+  source->read_count += 1U;
+  return count;
 }
 
 static void *pouch_write_state_in_parallel(void *context) {
@@ -6594,6 +6625,123 @@ static void test_state_crypto_compression_round_trips(void **state) {
   rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_read(pouch, "default", "compressed/crypto", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  read_source_to_string(read_result.body, readback, sizeof(readback));
+  assert_string_equal(readback, payload);
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_state_memory_source_appends_finalized_record(void **state) {
+  static const char payload[] = "inline record";
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_record_header header;
+  unsigned char encoded[LC_POUCH_RECORD_HEADER_BYTES];
+  lc_error error;
+  char root[512];
+  char segment_path[1024];
+  FILE *fp;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  fp = NULL;
+  memset(&write_result, 0, sizeof(write_result));
+  lc_error_init(&error);
+  make_root("state-inline-record", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory(payload, sizeof(payload) - 1U, &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "inline/record", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+
+  pouch_state_segment_path(root, "default", 1UL, segment_path,
+                           sizeof(segment_path));
+  fp = fopen(segment_path, "rb");
+  assert_non_null(fp);
+  assert_int_equal(fread(encoded, 1U, sizeof(encoded), fp), sizeof(encoded));
+  rc = lc_pouch_record_header_decode(encoded, &header, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(header.type, 1U);
+  assert_int_equal(header.flags, 0UL);
+  assert_int_equal(header.payload_len, sizeof(payload) - 1U);
+  assert_int_equal(fclose(fp), 0);
+
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_state_callback_source_retains_streaming_path(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_options write_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  pouch_chunked_source chunked;
+  lc_error error;
+  char *crypto_key;
+  char root[512];
+  char payload[8192];
+  char readback[8192];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  crypto_key = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_options, 0, sizeof(write_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  memset(&chunked, 0, sizeof(chunked));
+  lc_error_init(&error);
+  make_root("state-callback-stream", root, sizeof(root));
+  cleanup_root(root);
+  fill_repeated_payload(payload, sizeof(payload));
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  options.crypto_key = crypto_key;
+  options.compression = "zlib";
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  chunked.bytes = (const unsigned char *)payload;
+  chunked.length = strlen(payload);
+  chunked.max_chunk = 113U;
+  rc = lc_source_from_callbacks(pouch_chunked_source_read, NULL, NULL, &chunked,
+                                &body, &error);
+  assert_int_equal(rc, LC_OK);
+  write_options.content_type = "application/json";
+  rc = lc_pouch_state_write(pouch, "default", "callback/stream", body,
+                            &write_options, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(chunked.read_count > 1U);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "default", "callback/stream", &read_result,
                            &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
@@ -19466,6 +19614,8 @@ int main(void) {
       cmocka_unit_test(test_state_compression_streams_segment_payloads),
       cmocka_unit_test(test_state_compression_mode_is_root_invariant),
       cmocka_unit_test(test_state_crypto_compression_round_trips),
+      cmocka_unit_test(test_state_memory_source_appends_finalized_record),
+      cmocka_unit_test(test_state_callback_source_retains_streaming_path),
       cmocka_unit_test(test_pouch_crypto_compression_leases_skip_zlib),
       cmocka_unit_test(test_pouch_compression_leases_skip_zlib),
       cmocka_unit_test(test_state_replay_rejects_corrupt_binary_header),
