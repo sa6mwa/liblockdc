@@ -11765,6 +11765,7 @@ static int lc_pouch_query_index_flush_segmented(
   lc_pouch_generation segment_base_index_seq;
   int manifest_segments_valid;
   int manifest_trusted;
+  int manifest_current;
   int full_rebuild;
   int cleanup_unreferenced;
   int pending_fast_path_allowed;
@@ -11870,6 +11871,7 @@ static int lc_pouch_query_index_flush_segmented(
   }
   manifest_segments_valid = 0;
   manifest_trusted = 0;
+  manifest_current = 0;
   if (manifest.present && manifest.valid) {
     manifest_trusted = lc_pouch_query_index_manifest_trust_valid(
         pouch, namespace_name, manifest.index_seq);
@@ -11885,8 +11887,7 @@ static int lc_pouch_query_index_flush_segmented(
     }
     if (manifest_segments_valid && manifest.index_seq == state_index_seq &&
         manifest.segment_count < LC_POUCH_QUERY_INDEX_MAX_SEGMENTS) {
-      out->index_seq = state_index_seq;
-      goto cleanup;
+      manifest_current = 1;
     }
   }
   full_rebuild = !manifest_segments_valid || !manifest.present ||
@@ -11902,15 +11903,23 @@ static int lc_pouch_query_index_flush_segmented(
   pending_incomplete = pouch->query_pending_index_incomplete;
   pending_fast_path_allowed =
       lc_pouch_single_writer_enabled(pouch) && !pending_incomplete;
-  /* A successful flush covers this local snapshot in every writer mode.
-   * Shared roots still rebuild from durable state, but must retire their local
-   * projection so concurrent writers do not leave it resident indefinitely. */
+  /* Every successful flush, including a current-manifest fast return, covers
+   * this local snapshot. Shared roots still rebuild from durable state, but
+   * must retire their local projection so concurrent writers do not leave it
+   * resident indefinitely. */
   pending_entries = lc_pouch_query_index_pending_detach_namespace(
       pouch, namespace_name, &pending_count);
   pending_segment = lc_pouch_query_index_pending_segment_detach_namespace(
       pouch, namespace_name);
+  if (manifest_current) {
+    pouch->query_pending_index_incomplete = 0;
+  }
   lc_pouch_query_index_pending_unlock(pouch);
   query_pending_locked = 0;
+  if (manifest_current) {
+    out->index_seq = state_index_seq;
+    goto cleanup;
+  }
   if (full_rebuild) {
     retired_manifest = manifest;
     memset(&manifest, 0, sizeof(manifest));

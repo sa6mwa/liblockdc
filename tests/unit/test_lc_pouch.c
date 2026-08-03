@@ -4941,6 +4941,68 @@ test_shared_query_index_flush_retires_pending_projection(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_shared_query_index_fast_flush_retires_peer_projection(void **state) {
+  lc_pouch *pouch;
+  lc_pouch *peer;
+  lc_pouch_open_options options;
+  lc_source *source;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_query_index_flush_result flush_result;
+  lc_pouch_generation state_index_seq;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  peer = NULL;
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_error_init(&error);
+  make_root("shared-query-peer-pending-retire", root, sizeof(root));
+  cleanup_root(root);
+
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_open(root, NULL, &options, &peer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "query-pending/peer", source,
+                            NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  state_index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(pouch, "default", &state_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(lc_pouch_query_index_has_pending(pouch, "default"));
+  rc = lc_pouch_query_index_flush(peer, "default", state_index_seq,
+                                  &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, state_index_seq);
+
+  memset(&flush_result, 0, sizeof(flush_result));
+  rc = lc_pouch_query_index_flush(pouch, "default", state_index_seq,
+                                  &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, state_index_seq);
+  assert_false(lc_pouch_query_index_has_pending(pouch, "default"));
+
+  lc_pouch_close(peer);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_parallel_query_flush_preserves_later_write(void **state) {
   lc_pouch *pouch;
   lc_source *source;
@@ -24275,6 +24337,8 @@ int main(void) {
           test_parallel_state_writes_keep_query_projection_consistent),
       cmocka_unit_test(
           test_shared_query_index_flush_retires_pending_projection),
+      cmocka_unit_test(
+          test_shared_query_index_fast_flush_retires_peer_projection),
       cmocka_unit_test(test_parallel_query_flush_preserves_later_write),
       cmocka_unit_test(test_parallel_query_flushes_publish_one_valid_index),
       cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),
