@@ -12342,6 +12342,7 @@ int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
   lc_pouch_state_entry current;
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_process_namespace_mutex *process_mutex;
+  lc_source *source;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -12352,7 +12353,10 @@ int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
                         NULL, NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
+  memset(&current, 0, sizeof(current));
+  memset(&manifest, 0, sizeof(manifest));
   process_mutex = NULL;
+  source = NULL;
   rc = lc_pouch_state_process_namespace_mutex_lock(pouch, namespace_name,
                                                    &process_mutex, error);
   if (rc != LC_OK) {
@@ -12368,13 +12372,8 @@ int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
       rc = lc_pouch_state_read_result_from_cache_record(pouch, record, out,
                                                         error);
       if (rc == LC_OK) {
-        rc = lc_sink_memory_reserve(dst, record->body_cache->length, error);
-      }
-      if (rc == LC_OK && record->body_cache->length > 0U &&
-          !dst->write(dst, record->body_cache->bytes,
-                      record->body_cache->length, error)) {
-        rc = error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_TRANSPORT;
+        rc = lc_pouch_state_body_cache_source_open(
+            &pouch->allocator, record->body_cache, &source, error);
       }
       goto cleanup_unlocked;
     }
@@ -12396,28 +12395,19 @@ int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
   if (cache != NULL && record != NULL && record->body_cache != NULL &&
       record->body_cache->version == record->version &&
       record->body_cache->length == (size_t)record->bytes) {
-    rc = lc_sink_memory_reserve(dst, record->body_cache->length, error);
-    if (rc == LC_OK && record->body_cache->length > 0U &&
-        !dst->write(dst, record->body_cache->bytes, record->body_cache->length,
-                    error)) {
-      rc = error != NULL && error->code != LC_OK ? error->code
-                                                 : LC_ERR_TRANSPORT;
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_read_result_from_cache_record(pouch, record, out,
+                                                        error);
     }
     if (rc == LC_OK) {
-      rc = lc_pouch_state_read_result_from_entry(
-          pouch, namespace_name, &manifest, &current, 0, out, error);
+      rc = lc_pouch_state_body_cache_source_open(
+          &pouch->allocator, record->body_cache, &source, error);
     }
   } else {
     rc = lc_pouch_state_read_result_from_entry(pouch, namespace_name, &manifest,
                                                &current, 1, out, error);
     if (rc == LC_OK && out->found) {
-      rc = out->bytes > 0UL
-               ? lc_sink_memory_reserve(dst, (size_t)out->bytes, error)
-               : LC_OK;
-    }
-    if (rc == LC_OK && out->found && out->body != NULL) {
-      rc = lc_copy(out->body, dst, NULL, error);
-      out->body->close(out->body);
+      source = out->body;
       out->body = NULL;
     }
   }
@@ -12425,6 +12415,19 @@ int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
 cleanup_unlocked:
   lc_pouch_state_process_namespace_mutex_unlock(&process_mutex);
+  /* A returned source owns either a duplicated segment descriptor or a body
+   * cache reference. Stream only after releasing namespace coordination so a
+   * slow caller cannot serialize unrelated reads or projection snapshots. */
+  if (rc == LC_OK && source != NULL && out->found && out->bytes > 0UL &&
+      out->bytes <= (uint64_t)(size_t)-1) {
+    rc = lc_sink_memory_reserve(dst, (size_t)out->bytes, error);
+  }
+  if (rc == LC_OK && source != NULL) {
+    rc = lc_copy(source, dst, NULL, error);
+  }
+  if (source != NULL) {
+    source->close(source);
+  }
   return rc;
 }
 

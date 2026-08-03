@@ -1349,6 +1349,10 @@ Required behavior:
 - never read past the stored payload span;
 - expose payload readers that stream transforms in the correct order;
 - return metadata from projections without opening payload bytes;
+- when a public copy operation needs a payload, capture its result metadata and
+  a dup-backed segment source or retained bounded body-cache source while
+  coordinated, then release namespace coordination before copying into the
+  caller sink. A slow or blocked caller sink must not serialize another read;
 - avoid opening hidden, staged, reserved, and internal-prefix rows for scan
   summaries;
 - keep public state, private state, attachment/object, queue, and transaction
