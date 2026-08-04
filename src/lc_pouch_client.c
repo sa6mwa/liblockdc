@@ -7450,6 +7450,32 @@ static void lc_pouch_lease_record_cleanup(lc_pouch_lease_record *record) {
   memset(record, 0, sizeof(*record));
 }
 
+static int lc_pouch_fencing_token_from_i64(lc_i64 value, long *out_value,
+                                           const char *field, lc_error *error) {
+  if (!lc_i64_to_long_checked(value, out_value)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease fencing_token exceeds public API range",
+                        field, NULL, "pouch");
+  }
+  return LC_OK;
+}
+
+static int lc_pouch_next_fencing_token(long prior_token, long *out_value,
+                                       lc_error *error) {
+  if (out_value == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch fencing token output is required", NULL, NULL,
+                        "pouch");
+  }
+  if (prior_token >= LONG_MAX) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease fencing token exceeds long range", NULL,
+                        NULL, "pouch");
+  }
+  *out_value = prior_token > 0L ? prior_token + 1L : 1L;
+  return LC_OK;
+}
+
 static void lc_pouch_generate_lease_id(char *buffer, size_t buffer_size) {
   uint64_t sequence;
   lc_pouch_unix_seconds now_seconds = 0L;
@@ -7512,7 +7538,11 @@ static int lc_pouch_lease_record_parse(lc_client_handle *client,
   }
   if (rc == LC_OK) {
     rc = lc_pouch_binary_cursor_i64(&cursor, &signed_value, error);
-    record->fencing_token = (long)signed_value;
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_fencing_token_from_i64(
+        (lc_i64)signed_value, &record->fencing_token,
+        "lease record fencing_token is out of range", error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_binary_cursor_i64(&cursor, &signed_value, error);
@@ -8073,16 +8103,12 @@ static int lc_pouch_queue_lease_acquire_prepare_metadata(
       lease_record.expires_at_unix > ctx->now_seconds) {
     *apply = 0;
   }
-  if (rc == LC_OK && *apply && lease_record.found &&
-      lease_record.fencing_token == LONG_MAX) {
-    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch queue lease fencing token exceeds long range",
-                      NULL, NULL, "pouch");
+  if (rc == LC_OK && *apply) {
+    rc = lc_pouch_next_fencing_token(
+        lease_record.found ? lease_record.fencing_token : 0L,
+        &ctx->fencing_token, error);
   }
   if (rc == LC_OK && *apply) {
-    ctx->fencing_token = lease_record.found && lease_record.fencing_token > 0L
-                             ? lease_record.fencing_token + 1L
-                             : 1L;
     txn_id = ctx->req->txn_id != NULL ? ctx->req->txn_id : "";
     rc = lc_pouch_txn_buffer_append_bytes(
         &ctx->lease_metadata, LC_POUCH_LEASE_RECORD_MAGIC,
@@ -8430,8 +8456,12 @@ static int lc_pouch_queue_record_parse(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
-    record->lease_fencing_token = (long)signed_value;
     header_length += 8U;
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_fencing_token_from_i64(
+        (lc_i64)signed_value, &record->lease_fencing_token,
+        "queue record lease_fencing_token is out of range", error);
   }
   if (rc == LC_OK &&
       (record->namespace_name == NULL || record->queue == NULL ||
@@ -8443,18 +8473,33 @@ static int lc_pouch_queue_record_parse(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
-    record->attempts = (int)signed_value;
     header_length += 8U;
+  }
+  if (rc == LC_OK &&
+      !lc_i64_to_int_checked((lc_i64)signed_value, &record->attempts)) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch queue record attempts is out of range", NULL, NULL,
+                      "pouch");
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
-    record->max_attempts = (int)signed_value;
     header_length += 8U;
+  }
+  if (rc == LC_OK &&
+      !lc_i64_to_int_checked((lc_i64)signed_value, &record->max_attempts)) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch queue record max_attempts is out of range", NULL,
+                      NULL, "pouch");
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
-    record->failure_attempts = (int)signed_value;
     header_length += 8U;
+  }
+  if (rc == LC_OK &&
+      !lc_i64_to_int_checked((lc_i64)signed_value, &record->failure_attempts)) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch queue record failure_attempts is out of range",
+                      NULL, NULL, "pouch");
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
@@ -8463,8 +8508,13 @@ static int lc_pouch_queue_record_parse(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
-    record->enqueued_at_nsec = (long)signed_value;
     header_length += 8U;
+  }
+  if (rc == LC_OK && !lc_i64_to_long_checked((lc_i64)signed_value,
+                                             &record->enqueued_at_nsec)) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch queue record enqueued_at_nsec is out of range",
+                      NULL, NULL, "pouch");
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_u64(read_result->body, &payload_bytes, error);
@@ -8483,8 +8533,14 @@ static int lc_pouch_queue_record_parse(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_i64(read_result->body, &signed_value, error);
-    record->visibility_timeout_seconds = (long)signed_value;
     header_length += 8U;
+  }
+  if (rc == LC_OK &&
+      !lc_i64_to_long_checked((lc_i64)signed_value,
+                              &record->visibility_timeout_seconds)) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch queue record visibility timeout is out of range",
+                      NULL, NULL, "pouch");
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_source_u64(read_result->body, &payload_bytes, error);
@@ -11020,9 +11076,13 @@ static int lc_pouch_acquire_prepare_metadata(
     return LC_OK;
   }
   expected_lease_version = lease_record.found ? lease_record.version : 0UL;
-  ctx->fencing_token = lease_record.found && lease_record.fencing_token > 0L
-                           ? lease_record.fencing_token + 1L
-                           : 1L;
+  rc = lc_pouch_next_fencing_token(
+      lease_record.found ? lease_record.fencing_token : 0L, &ctx->fencing_token,
+      error);
+  if (rc != LC_OK) {
+    lc_pouch_lease_record_cleanup(&lease_record);
+    return rc;
+  }
   rc = lc_pouch_expiration_from_ttl(ctx->req->ttl_seconds,
                                     &ctx->lease_expires_at_unix, error);
   if (rc != LC_OK) {
@@ -13531,9 +13591,12 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
                       "pouch queue state lease already held", NULL, NULL, NULL);
     goto cleanup;
   }
-  state_fencing_token = lease_record.found && lease_record.fencing_token > 0L
-                            ? lease_record.fencing_token + 1L
-                            : 1L;
+  rc = lc_pouch_next_fencing_token(
+      lease_record.found ? lease_record.fencing_token : 0L,
+      &state_fencing_token, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
   rc = lc_pouch_write_lease_record_with_visibility(
       client, handle->namespace_name, state_key, req->owner, state_lease_id,
       handle->txn_id, state_fencing_token, handle->not_visible_until_unix,

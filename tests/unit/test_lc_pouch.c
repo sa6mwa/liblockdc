@@ -3425,6 +3425,41 @@ static void test_write_binary_txn_record(
   test_binary_buffer_cleanup(&buffer);
 }
 
+static void test_write_binary_lease_record(lc_pouch *pouch, const char *key,
+                                           lc_i64 fencing_token,
+                                           lc_error *error) {
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  test_binary_buffer buffer;
+  lc_source *source;
+  int rc;
+
+  memset(&buffer, 0, sizeof(buffer));
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  source = NULL;
+  test_binary_buffer_append(&buffer, "LPL1", 4U);
+  test_binary_buffer_string(&buffer, "default");
+  test_binary_buffer_string(&buffer, key);
+  test_binary_buffer_string(&buffer, "prior-owner");
+  test_binary_buffer_string(&buffer, "prior-lease");
+  test_binary_buffer_string(&buffer, "");
+  test_binary_buffer_i64(&buffer, fencing_token);
+  test_binary_buffer_i64(&buffer, 0L);
+  options.content_type = "application/x-lockdc-pouch-lease";
+  options.has_metadata = 1;
+  options.metadata = buffer.bytes;
+  options.metadata_length = buffer.length;
+  rc = lc_source_from_memory("{}", 2U, &source, error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", key, source, &options,
+                            &write_result, error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  test_binary_buffer_cleanup(&buffer);
+}
+
 static void assert_file_contains(const char *path, const char *needle) {
   FILE *fp;
   char *bytes;
@@ -18622,6 +18657,69 @@ test_acquire_rolls_back_unrepresentable_generation_claim(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_pouch_fencing_tokens_do_not_wrap_or_narrow(void **state) {
+  lc_pouch *pouch;
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire_req;
+  lc_error error;
+  long ignored_token;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  client = NULL;
+  lease = NULL;
+  ignored_token = 0L;
+  lc_acquire_req_init(&acquire_req);
+  lc_error_init(&error);
+  make_root("fencing-token-range", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/fencing-token-range/%ld", (long)getpid());
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  test_write_binary_lease_record(pouch, key, (lc_i64)LONG_MAX, &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "fencing-token-owner";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(lease);
+  assert_string_equal(error.message,
+                      "pouch lease fencing token exceeds long range");
+  lc_client_close(client);
+  client = NULL;
+
+  if (!lc_i64_to_long_checked(LC_I64_MAX, &ignored_token)) {
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+    rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+    assert_int_equal(rc, LC_OK);
+    test_write_binary_lease_record(pouch, key, LC_I64_MAX, &error);
+    lc_pouch_close(pouch);
+    pouch = NULL;
+
+    open_pouch_client(root, &client, &error);
+    rc = client->acquire(client, &acquire_req, &lease, &error);
+    assert_int_equal(rc, LC_ERR_INVALID);
+    assert_null(lease);
+    assert_string_equal(error.message,
+                        "pouch lease fencing_token exceeds public API range");
+    lc_client_close(client);
+    client = NULL;
+  }
+
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_acquire_honors_block_seconds(void **state) {
   lc_client *client;
   lc_lease *lease;
@@ -25121,6 +25219,7 @@ int main(void) {
       cmocka_unit_test(test_acquire_allocation_failure_rolls_back_claim),
       cmocka_unit_test(
           test_acquire_rolls_back_unrepresentable_generation_claim),
+      cmocka_unit_test(test_pouch_fencing_tokens_do_not_wrap_or_narrow),
       cmocka_unit_test(test_acquire_honors_block_seconds),
       cmocka_unit_test(test_transaction_bound_lease_requires_transaction_id),
       cmocka_unit_test(
