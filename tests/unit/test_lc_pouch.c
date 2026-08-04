@@ -9718,6 +9718,17 @@ test_pouch_tc_surface_persists_local_single_node_state(void **state) {
   assert_string_equal(renew_res.leader_id, "node-a");
   lc_tc_lease_renew_res_cleanup(&renew_res);
 
+  acquire_req.candidate_id = "node-b";
+  acquire_req.candidate_endpoint = "pouch://node-b";
+  acquire_req.term = 2UL;
+  acquire_req.ttl_ms = 0L;
+  rc = client->tc_lease_acquire(client, &acquire_req, &acquire_res, NULL);
+  assert_int_equal(rc, LC_ERR_INVALID);
+
+  renew_req.ttl_ms = 0L;
+  rc = client->tc_lease_renew(client, &renew_req, &renew_res, NULL);
+  assert_int_equal(rc, LC_ERR_INVALID);
+
   lc_client_close(client);
   client = NULL;
   open_pouch_client(root, &client, &error);
