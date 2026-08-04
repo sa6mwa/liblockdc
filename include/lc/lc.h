@@ -1726,8 +1726,11 @@ struct lc_client {
    * `StartConsumer` workflow.
    *
    * The returned service owns deep copies of the consumer configs and may
-   * outlive the root client. Each worker uses its own cloned client instance so
-   * retries and shutdown do not invalidate the caller's root handle.
+   * outlive the root client. Remote workers use cloned client instances. Pouch
+   * workers retain and share the source client's local session so the default
+   * exclusive writer remains a single root owner; closing the source client
+   * after service creation does not release that session until the service is
+   * closed.
    */
   int (*new_consumer_service)(lc_client *self,
                               const lc_consumer_service_config *config,

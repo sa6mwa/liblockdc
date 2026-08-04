@@ -3597,6 +3597,8 @@ static void test_pouch_direct_state_attachment_reopen_roundtrip(void **state) {
   (void)state;
   make_pouch_root("state-attachment", root, sizeof(root), endpoint,
                   sizeof(endpoint));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?pouch_single_writer=false", root) > 0);
 
   client = NULL;
   reader = NULL;
@@ -4213,9 +4215,6 @@ static void test_pouch_direct_consumer_service_with_state(void **state) {
   assert_lc_ok(rc, &error);
   assert_non_null(service);
 
-  rc = service->start(service, &error);
-  assert_lc_ok(rc, &error);
-
   enqueue_req.queue = queue_name;
   enqueue_req.content_type = "text/plain";
   enqueue_req.visibility_timeout_seconds = 30L;
@@ -4226,6 +4225,14 @@ static void test_pouch_direct_consumer_service_with_state(void **state) {
   rc = client->enqueue(client, &enqueue_req, src, &enqueue_res, &error);
   lc_source_close(src);
   src = NULL;
+  assert_lc_ok(rc, &error);
+
+  /* The service retains Pouch's exclusive local session after its caller
+   * closes the source client. */
+  lc_client_close(client);
+  client = NULL;
+
+  rc = service->start(service, &error);
   assert_lc_ok(rc, &error);
 
   consumer_context.expected_minimum_count = 1;
@@ -4251,7 +4258,6 @@ static void test_pouch_direct_consumer_service_with_state(void **state) {
   pthread_mutex_destroy(&consumer_context.mutex);
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_consumer_service_close(service);
-  lc_client_close(client);
   lc_error_cleanup(&error);
   cleanup_pouch_root(root);
 }

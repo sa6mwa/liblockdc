@@ -68,6 +68,7 @@ typedef struct lc_consumer_runtime_message {
 
 struct lc_consumer_service_handle {
   lc_consumer_service pub;
+  lc_client_handle *pouch_client;
   char **endpoints;
   size_t endpoint_count;
   char *unix_socket_path;
@@ -2095,6 +2096,7 @@ static void *lc_consumer_worker_main(void *context) {
   int rc;
   int attempt;
   int failures;
+  int owns_client;
 
   worker = (lc_consumer_worker_state *)context;
   service = worker->service;
@@ -2102,14 +2104,20 @@ static void *lc_consumer_worker_main(void *context) {
   client_handle = NULL;
   attempt = 0;
   failures = 0;
+  owns_client = 0;
   lc_error_init(&error);
   lc_engine_error_init(&engine_error);
 
-  rc = lc_consumer_clone_client(service, &client, &error);
-  if (rc != LC_OK) {
-    lc_consumer_set_fatal_error(service, rc, &error,
-                                "failed to open consumer worker client");
-    goto done;
+  if (service->pouch_client != NULL) {
+    client = &service->pouch_client->pub;
+  } else {
+    rc = lc_consumer_clone_client(service, &client, &error);
+    if (rc != LC_OK) {
+      lc_consumer_set_fatal_error(service, rc, &error,
+                                  "failed to open consumer worker client");
+      goto done;
+    }
+    owns_client = 1;
   }
   client_handle = (lc_client_handle *)client;
   if (client_handle->is_pouch) {
@@ -2217,7 +2225,7 @@ static void *lc_consumer_worker_main(void *context) {
   }
 
 done:
-  if (client != NULL) {
+  if (owns_client && client != NULL) {
     client->close(client);
   }
   lc_engine_error_cleanup(&engine_error);
@@ -2389,6 +2397,9 @@ void lc_consumer_service_close_method(lc_consumer_service *self) {
                                        service->pouch_crypto_key);
   lc_free_with_allocator(&service->allocator, service->pouch_crypto_key_file);
   lc_free_with_allocator(&service->allocator, service->pouch_compression);
+  if (service->pouch_client != NULL) {
+    lc_client_close_method(&service->pouch_client->pub);
+  }
   lc_error_cleanup(&service->fatal_error);
   pthread_cond_destroy(&service->cond);
   pthread_mutex_destroy(&service->mutex);
@@ -2432,6 +2443,10 @@ int lc_client_new_consumer_service_method(
   if (rc != LC_OK) {
     lc_consumer_service_close_method(&service->pub);
     return rc;
+  }
+  if (client->is_pouch) {
+    lc_client_handle_retain(client);
+    service->pouch_client = client;
   }
   service->worker_count = 0U;
   for (i = 0U; i < config->consumer_count; ++i) {

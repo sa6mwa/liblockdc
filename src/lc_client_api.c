@@ -2803,6 +2803,15 @@ int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
   return LC_OK;
 }
 
+void lc_client_handle_retain(lc_client_handle *client) {
+  if (client == NULL || !client->lifecycle_mutex_initialized) {
+    return;
+  }
+  pthread_mutex_lock(&client->lifecycle_mutex);
+  client->refcount += 1UL;
+  pthread_mutex_unlock(&client->lifecycle_mutex);
+}
+
 void lc_client_close_method(lc_client *self) {
   lc_client_handle *client;
   size_t i;
@@ -2811,6 +2820,17 @@ void lc_client_close_method(lc_client *self) {
     return;
   }
   client = (lc_client_handle *)self;
+  if (!client->lifecycle_mutex_initialized) {
+    return;
+  }
+  pthread_mutex_lock(&client->lifecycle_mutex);
+  if (client->refcount > 1UL) {
+    client->refcount -= 1UL;
+    pthread_mutex_unlock(&client->lifecycle_mutex);
+    return;
+  }
+  client->refcount = 0UL;
+  pthread_mutex_unlock(&client->lifecycle_mutex);
   if (client->pouch != NULL) {
     lc_pouch_close(client->pouch);
   }
@@ -2835,5 +2855,6 @@ void lc_client_close_method(lc_client *self) {
                                        client->pouch_crypto_key);
   lc_client_free(client, client->pouch_crypto_key_file);
   lc_client_free(client, client->pouch_compression);
+  pthread_mutex_destroy(&client->lifecycle_mutex);
   lc_client_free(client, client);
 }

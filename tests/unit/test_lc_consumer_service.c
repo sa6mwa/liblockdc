@@ -159,6 +159,7 @@ int __real_lc_engine_client_subscribe_with_state(
 
 struct lc_consumer_service_handle {
   lc_consumer_service pub;
+  lc_client_handle *pouch_client;
   char **endpoints;
   size_t endpoint_count;
   char *unix_socket_path;

@@ -55,6 +55,9 @@ struct lc_client_handle {
   pslog_logger *logger;
   int owns_logger;
   lc_allocator allocator;
+  pthread_mutex_t lifecycle_mutex;
+  unsigned long refcount;
+  int lifecycle_mutex_initialized;
 };
 
 struct lc_lease_handle {
@@ -519,6 +522,7 @@ int lc_client_new_consumer_service_method(
 int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
                                  const lc_watch_handler *handler,
                                  lc_error *error);
+void lc_client_handle_retain(lc_client_handle *client);
 void lc_client_close_method(lc_client *self);
 
 int lc_lease_describe_method(lc_lease *self, lc_error *error);

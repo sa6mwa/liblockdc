@@ -15086,9 +15086,10 @@ static void lc_pouch_tc_lease_record_cleanup(lc_pouch_tc_lease_record *record) {
   memset(record, 0, sizeof(*record));
 }
 
-static int lc_pouch_tc_expiration_from_ttl_ms(
-    lc_pouch_unix_seconds now, long ttl_ms,
-    lc_pouch_unix_seconds *expires_at_unix, lc_error *error) {
+static int
+lc_pouch_tc_expiration_from_ttl_ms(lc_pouch_unix_seconds now, long ttl_ms,
+                                   lc_pouch_unix_seconds *expires_at_unix,
+                                   lc_error *error) {
   long ttl_seconds;
 
   if (expires_at_unix == NULL) {
@@ -15099,8 +15100,7 @@ static int lc_pouch_tc_expiration_from_ttl_ms(
   *expires_at_unix = 0L;
   if (ttl_ms <= 0L) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch TC ttl_ms must be positive", NULL, NULL,
-                        NULL);
+                        "pouch TC ttl_ms must be positive", NULL, NULL, NULL);
   }
   ttl_seconds = ttl_ms / 1000L;
   if (ttl_ms % 1000L != 0L) {
@@ -16212,8 +16212,8 @@ int lc_pouch_client_tc_lease_acquire_method(lc_client *self,
   expires_at_unix = 0L;
   rc = lc_pouch_now_unix(&now, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_tc_expiration_from_ttl_ms(now, req->ttl_ms,
-                                             &expires_at_unix, error);
+    rc = lc_pouch_tc_expiration_from_ttl_ms(now, req->ttl_ms, &expires_at_unix,
+                                            error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_tc_read_lease(client, &record, error);
@@ -16271,8 +16271,8 @@ int lc_pouch_client_tc_lease_renew_method(lc_client *self,
   expires_at_unix = 0L;
   rc = lc_pouch_now_unix(&now, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_tc_expiration_from_ttl_ms(now, req->ttl_ms,
-                                             &expires_at_unix, error);
+    rc = lc_pouch_tc_expiration_from_ttl_ms(now, req->ttl_ms, &expires_at_unix,
+                                            error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_tc_read_lease(client, &record, error);

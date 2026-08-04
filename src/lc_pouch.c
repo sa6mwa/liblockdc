@@ -228,8 +228,8 @@ lc_pouch_fsync_batch_limit_reached(const lc_pouch_fsync_batcher *batcher) {
   return (uint64_t)batcher->queue_count >= batcher->batch_max_ops;
 }
 
-static void lc_pouch_fsync_batcher_recompute_limit_locked(
-    lc_pouch_fsync_batcher *batcher) {
+static void
+lc_pouch_fsync_batcher_recompute_limit_locked(lc_pouch_fsync_batcher *batcher) {
   lc_pouch_fsync_batcher_ref *entry;
   uint64_t batch_max_ops;
 
@@ -246,8 +246,9 @@ static void lc_pouch_fsync_batcher_recompute_limit_locked(
   batcher->batch_max_ops = batch_max_ops;
 }
 
-static int lc_pouch_fsync_batcher_add_ref_locked(
-    lc_pouch_fsync_batcher *batcher, uint64_t batch_max_ops, lc_error *error) {
+static int
+lc_pouch_fsync_batcher_add_ref_locked(lc_pouch_fsync_batcher *batcher,
+                                      uint64_t batch_max_ops, lc_error *error) {
   lc_pouch_fsync_batcher_ref *entry;
 
   entry = (lc_pouch_fsync_batcher_ref *)lc_calloc_with_allocator(
@@ -264,8 +265,9 @@ static int lc_pouch_fsync_batcher_add_ref_locked(
   return LC_OK;
 }
 
-static void lc_pouch_fsync_batcher_remove_ref_locked(
-    lc_pouch_fsync_batcher *batcher, uint64_t batch_max_ops) {
+static void
+lc_pouch_fsync_batcher_remove_ref_locked(lc_pouch_fsync_batcher *batcher,
+                                         uint64_t batch_max_ops) {
   lc_pouch_fsync_batcher_ref *entry;
   lc_pouch_fsync_batcher_ref *previous;
 
@@ -290,8 +292,8 @@ static void lc_pouch_fsync_batcher_remove_ref_locked(
   lc_pouch_fsync_batcher_recompute_limit_locked(batcher);
 }
 
-static void lc_pouch_fsync_batcher_refs_cleanup(
-    lc_pouch_fsync_batcher_ref *entry) {
+static void
+lc_pouch_fsync_batcher_refs_cleanup(lc_pouch_fsync_batcher_ref *entry) {
   while (entry != NULL) {
     lc_pouch_fsync_batcher_ref *next;
 

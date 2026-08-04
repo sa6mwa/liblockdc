@@ -5139,8 +5139,7 @@ static void test_pouch_durable_sync_batches_parallel_writes(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void
-test_pouch_durable_sync_restores_live_batch_limit(void **state) {
+static void test_pouch_durable_sync_restores_live_batch_limit(void **state) {
   lc_pouch *survivor;
   lc_pouch *strict;
   lc_pouch_open_options options;
@@ -5180,8 +5179,8 @@ test_pouch_durable_sync_restores_live_batch_limit(void **state) {
   lc_pouch_close(strict);
   strict = NULL;
 
-  assert_true(snprintf(fsync_path, sizeof(fsync_path), "%s/fsync-live.log",
-                       root) > 0);
+  assert_true(
+      snprintf(fsync_path, sizeof(fsync_path), "%s/fsync-live.log", root) > 0);
   fd = open(fsync_path, O_CREAT | O_RDWR | O_TRUNC, 0600);
   assert_true(fd >= 0);
   assert_int_equal(write(fd, "x", 1U), 1);

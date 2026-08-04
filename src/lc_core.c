@@ -1860,6 +1860,17 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
                         NULL, NULL, NULL);
   }
   client->allocator = config->allocator;
+  rc = pthread_mutex_init(&client->lifecycle_mutex, NULL);
+  if (rc != 0) {
+    lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
+    lc_engine_error_cleanup(&engine_error);
+    lc_free_with_allocator(&config->allocator, client);
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize client lifecycle mutex",
+                        strerror(rc), NULL, NULL);
+  }
+  client->lifecycle_mutex_initialized = 1;
+  client->refcount = 1UL;
   client->is_pouch = is_pouch;
   client->disable_logger_sys_field = config->disable_logger_sys_field;
   client->base_logger =
@@ -1870,6 +1881,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     if (client->logger == NULL) {
       lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
       lc_engine_error_cleanup(&engine_error);
+      pthread_mutex_destroy(&client->lifecycle_mutex);
       lc_free_with_allocator(&config->allocator, client);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to initialize client logger", NULL, NULL,
@@ -1888,6 +1900,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
       public_rc = lc_error_from_engine(error, &engine_error);
       lc_engine_error_cleanup(&engine_error);
       lc_free_with_allocator(&config->allocator, bundle_capture.bytes);
+      pthread_mutex_destroy(&client->lifecycle_mutex);
       lc_free_with_allocator(&config->allocator, client);
       return public_rc;
     }
