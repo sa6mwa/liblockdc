@@ -11616,6 +11616,88 @@ static void test_state_writes_roll_active_segments(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_metadata_batch_rollover_resets_active_segment_size(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_options metadata_options;
+  lc_pouch_state_write_result initial_write;
+  lc_pouch_state_write_result metadata_write;
+  lc_error error;
+  unsigned char metadata[512];
+  char root[512];
+  char first_segment_path[1024];
+  char second_segment_path[1024];
+  struct stat second_before;
+  struct stat second_after;
+  unsigned long update_count;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&metadata_options, 0, sizeof(metadata_options));
+  memset(&initial_write, 0, sizeof(initial_write));
+  memset(&metadata_write, 0, sizeof(metadata_write));
+  memset(metadata, 'm', sizeof(metadata));
+  lc_error_init(&error);
+  make_root("metadata-batch-rollover-offset", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 4096U;
+  metadata_options.has_metadata = 1;
+  metadata_options.metadata = metadata;
+  metadata_options.metadata_length = sizeof(metadata);
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("body", strlen("body"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/metadata-batch", body,
+                            &metadata_options, &initial_write, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+
+  assert_int_equal(pouch_state_segment_count(root, "default"), 1UL);
+  for (update_count = 0UL;
+       update_count < 16UL && pouch_state_segment_count(root, "default") < 2UL;
+       ++update_count) {
+    rc = lc_pouch_state_update_metadata(
+        pouch, "default", "state/metadata-batch", &metadata_options,
+        &metadata_write, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_pouch_state_write_result_cleanup(NULL, &metadata_write);
+    memset(&metadata_write, 0, sizeof(metadata_write));
+  }
+  pouch_state_segment_path(root, "default", 1UL, first_segment_path,
+                           sizeof(first_segment_path));
+  pouch_state_segment_path(root, "default", 2UL, second_segment_path,
+                           sizeof(second_segment_path));
+  assert_true(path_is_file(first_segment_path));
+  assert_true(path_is_file(second_segment_path));
+  assert_int_equal(pouch_state_segment_count(root, "default"), 2UL);
+  assert_int_equal(stat(second_segment_path, &second_before), 0);
+  assert_true(second_before.st_size > 0);
+  assert_true((uint64_t)second_before.st_size <=
+              open_options.segment_target_bytes / 2U);
+
+  rc = lc_pouch_state_update_metadata(pouch, "default", "state/metadata-batch",
+                                      &metadata_options, &metadata_write,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(pouch_state_segment_count(root, "default"), 2UL);
+  assert_int_equal(stat(second_segment_path, &second_after), 0);
+  assert_true(second_after.st_size > second_before.st_size);
+
+  lc_pouch_state_write_result_cleanup(NULL, &metadata_write);
+  lc_pouch_state_write_result_cleanup(NULL, &initial_write);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_state_idle_compaction_installs_snapshot(void **state) {
   lc_pouch *pouch;
   lc_source *body;
@@ -25627,6 +25709,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_state_write_enforces_expected_etag),
       cmocka_unit_test(test_state_write_enforces_create_if_absent),
       cmocka_unit_test(test_state_writes_roll_active_segments),
+      cmocka_unit_test(test_metadata_batch_rollover_resets_active_segment_size),
       cmocka_unit_test(test_state_idle_compaction_installs_snapshot),
       cmocka_unit_test(test_state_idle_compaction_waits_for_first_mutation),
       cmocka_unit_test(test_state_replay_ignores_stale_generation),

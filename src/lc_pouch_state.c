@@ -5803,6 +5803,7 @@ static int lc_pouch_state_append_binary_records_locked(
       rc = lc_pouch_state_cache_set_active_segment(pouch, cache, manifest, 0U,
                                                    error);
     }
+    segment_size = 0U;
   }
   fd = -1;
   if (rc == LC_OK) {
