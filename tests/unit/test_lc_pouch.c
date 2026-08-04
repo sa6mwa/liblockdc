@@ -15947,7 +15947,9 @@ static void test_txn_queue_decision_rejects_newer_delivery_lease(void **state) {
   dequeue_req.queue = "txn-stale";
   dequeue_req.owner = "first-worker";
   dequeue_req.txn_id = "txn-first";
-  dequeue_req.visibility_timeout_seconds = 1L;
+  /* The first lease must remain valid through the staged acknowledgement,
+   * including under the Valgrind gate, before the test expires it below. */
+  dequeue_req.visibility_timeout_seconds = 5L;
   rc = client->dequeue(client, &dequeue_req, &first_message, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(first_message);
@@ -15971,7 +15973,7 @@ static void test_txn_queue_decision_rejects_newer_delivery_lease(void **state) {
   snprintf(metadata_key, sizeof(metadata_key), "q/txn-stale/msg/%s.meta",
            first_message->message_id);
 
-  sleep(2U);
+  sleep(6U);
   dequeue_req.owner = "second-worker";
   dequeue_req.txn_id = "txn-second";
   dequeue_req.visibility_timeout_seconds = 30L;
