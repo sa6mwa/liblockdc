@@ -490,13 +490,13 @@ lc_engine_parse_namespace_response(const void *parsed_json,
       lc_engine_strdup_local(parsed->query.preferred_engine);
   response->fallback_engine =
       lc_engine_strdup_local(parsed->query.fallback_engine);
-  response->etag = lc_engine_strdup_local(parsed->etag);
+  response->etag = lc_engine_strdup_local(result->etag);
   if ((parsed->namespace_name != NULL && response->namespace_name == NULL) ||
       (parsed->query.preferred_engine != NULL &&
        response->preferred_engine == NULL) ||
       (parsed->query.fallback_engine != NULL &&
        response->fallback_engine == NULL) ||
-      (parsed->etag != NULL && response->etag == NULL)) {
+      (result->etag != NULL && response->etag == NULL)) {
     lc_engine_namespace_config_response_cleanup(response);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate namespace response");
@@ -869,7 +869,7 @@ int lc_engine_client_update_namespace_config(
   headers[0].value = "application/json";
   header_count += 1U;
   if (request->if_etag != NULL && request->if_etag[0] != '\0') {
-    headers[header_count].name = "X-If-Config-ETag";
+    headers[header_count].name = "If-Match";
     headers[header_count].value = request->if_etag;
     header_count += 1U;
   }

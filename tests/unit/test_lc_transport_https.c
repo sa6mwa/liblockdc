@@ -2173,16 +2173,19 @@ test_state_transport_parses_buffered_typed_json_response(void **state) {
 }
 
 static void test_management_transport_paths_use_mtls(void **state) {
-  static const char *json_header[] = {"Content-Type: application/json"};
+  static const char *json_headers[] = {"Content-Type: application/json",
+                                       "If-Match: \"config-etag\""};
   https_expectation expectations[] = {
-      {"PUT", "/v1/namespace", json_header, 1U,
+      {"PUT", "/v1/namespace", json_headers,
+       sizeof(json_headers) / sizeof(json_headers[0]),
        (const char *const[]){"\"namespace\":\"team-a\"",
                              "\"preferred_engine\":\"index\"",
                              "\"fallback_engine\":\"scan\""},
        3U, 0, 200,
        (const char *const[]){"X-Correlation-Id: corr-ns-put",
+                             "ETag: \"config-next\"",
                              "Content-Type: application/json"},
-       2U,
+       3U,
        "{\"namespace\":\"team-a\",\"query\":{\"preferred_engine\":\"index\","
        "\"fallback_engine\":\"scan\"}}",
        "liblockdc test client"},
@@ -2214,11 +2217,13 @@ static void test_management_transport_paths_use_mtls(void **state) {
   ns_req.namespace_name = "team-a";
   ns_req.preferred_engine = "index";
   ns_req.fallback_engine = "scan";
+  ns_req.if_etag = "\"config-etag\"";
   rc = lc_engine_client_update_namespace_config(client, &ns_req, &ns_res,
                                                 &error);
   assert_int_equal(rc, LC_ENGINE_OK);
   assert_string_equal(ns_res.preferred_engine, "index");
   assert_string_equal(ns_res.fallback_engine, "scan");
+  assert_string_equal(ns_res.etag, "config-next");
 
   lc_engine_client_close(client);
   https_testserver_stop(&server);
