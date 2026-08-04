@@ -5139,6 +5139,84 @@ static void test_pouch_durable_sync_batches_parallel_writes(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_pouch_durable_sync_restores_live_batch_limit(void **state) {
+  lc_pouch *survivor;
+  lc_pouch *strict;
+  lc_pouch_open_options options;
+  lc_pouch_fsync_stats fsync_stats;
+  pouch_parallel_fsync_commit commits[4];
+  pthread_barrier_t start;
+  pthread_t threads[4];
+  lc_error error;
+  char root[512];
+  char fsync_path[1024];
+  int fd;
+  size_t index;
+  int rc;
+
+  (void)state;
+  survivor = NULL;
+  strict = NULL;
+  fd = -1;
+  memset(&options, 0, sizeof(options));
+  memset(&fsync_stats, 0, sizeof(fsync_stats));
+  memset(commits, 0, sizeof(commits));
+  lc_error_init(&error);
+  make_root("durable-sync-live-limit", root, sizeof(root));
+  cleanup_root(root);
+
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  options.background_compaction_enabled = 0;
+  options.durable_sync = 1;
+  options.fsync_batch_max_ops = 4U;
+  rc = lc_pouch_open(root, NULL, &options, &survivor, &error);
+  assert_int_equal(rc, LC_OK);
+
+  options.fsync_batch_max_ops = 1U;
+  rc = lc_pouch_open(root, NULL, &options, &strict, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_close(strict);
+  strict = NULL;
+
+  assert_true(snprintf(fsync_path, sizeof(fsync_path), "%s/fsync-live.log",
+                       root) > 0);
+  fd = open(fsync_path, O_CREAT | O_RDWR | O_TRUNC, 0600);
+  assert_true(fd >= 0);
+  assert_int_equal(write(fd, "x", 1U), 1);
+  assert_int_equal(pthread_barrier_init(&start, NULL, 4U), 0);
+  lc_pouch_test_fsync_batch_delay_ns = 50000000L;
+  for (index = 0U; index < 4U; ++index) {
+    commits[index].pouch = survivor;
+    commits[index].start = &start;
+    commits[index].fd = fd;
+    assert_int_equal(pthread_create(&threads[index], NULL,
+                                    pouch_fsync_commit_in_parallel,
+                                    &commits[index]),
+                     0);
+  }
+  for (index = 0U; index < 4U; ++index) {
+    assert_int_equal(pthread_join(threads[index], NULL), 0);
+  }
+  lc_pouch_test_fsync_batch_delay_ns = 0L;
+  assert_int_equal(pthread_barrier_destroy(&start), 0);
+  for (index = 0U; index < 4U; ++index) {
+    assert_int_equal(commits[index].rc, LC_OK);
+    lc_error_cleanup(&commits[index].error);
+  }
+  rc = lc_pouch_fsync_stats_read(survivor, &fsync_stats, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(fsync_stats.total_requests, 4U);
+  assert_true(fsync_stats.total_batches < fsync_stats.total_requests);
+  assert_true(fsync_stats.max_batch_size > 1U);
+
+  assert_int_equal(close(fd), 0);
+  lc_pouch_close(survivor);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static int pouch_query_index_count_row(const lc_pouch_query_index_row_view *row,
                                        void *context, lc_error *error) {
   size_t *count;
@@ -24993,6 +25071,7 @@ int main(void) {
       cmocka_unit_test(test_resident_descriptors_stay_bounded_across_lifecycle),
       cmocka_unit_test(test_pouch_durable_sync_policy),
       cmocka_unit_test(test_pouch_durable_sync_batches_parallel_writes),
+      cmocka_unit_test(test_pouch_durable_sync_restores_live_batch_limit),
       cmocka_unit_test(
           test_parallel_state_writes_keep_query_projection_consistent),
       cmocka_unit_test(test_shared_query_index_flush_catches_up_durable_state),

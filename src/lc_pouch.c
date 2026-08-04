@@ -99,6 +99,11 @@ typedef struct lc_pouch_fsync_batch_file {
   int fd;
 } lc_pouch_fsync_batch_file;
 
+typedef struct lc_pouch_fsync_batcher_ref {
+  uint64_t batch_max_ops;
+  struct lc_pouch_fsync_batcher_ref *next;
+} lc_pouch_fsync_batcher_ref;
+
 struct lc_pouch_fsync_batcher {
   dev_t device;
   ino_t inode;
@@ -110,6 +115,7 @@ struct lc_pouch_fsync_batcher {
   size_t queue_count;
   uint64_t batch_max_ops;
   lc_pouch_fsync_stats stats;
+  lc_pouch_fsync_batcher_ref *refs;
   unsigned long refcount;
   int stop;
   struct lc_pouch_fsync_batcher *next;
@@ -220,6 +226,79 @@ lc_pouch_fsync_batch_limit_reached(const lc_pouch_fsync_batcher *batcher) {
     return 0;
   }
   return (uint64_t)batcher->queue_count >= batcher->batch_max_ops;
+}
+
+static void lc_pouch_fsync_batcher_recompute_limit_locked(
+    lc_pouch_fsync_batcher *batcher) {
+  lc_pouch_fsync_batcher_ref *entry;
+  uint64_t batch_max_ops;
+
+  if (batcher == NULL) {
+    return;
+  }
+  batch_max_ops = 0U;
+  for (entry = batcher->refs; entry != NULL; entry = entry->next) {
+    if (entry->batch_max_ops != 0U &&
+        (batch_max_ops == 0U || entry->batch_max_ops < batch_max_ops)) {
+      batch_max_ops = entry->batch_max_ops;
+    }
+  }
+  batcher->batch_max_ops = batch_max_ops;
+}
+
+static int lc_pouch_fsync_batcher_add_ref_locked(
+    lc_pouch_fsync_batcher *batcher, uint64_t batch_max_ops, lc_error *error) {
+  lc_pouch_fsync_batcher_ref *entry;
+
+  entry = (lc_pouch_fsync_batcher_ref *)lc_calloc_with_allocator(
+      NULL, 1U, sizeof(*entry));
+  if (entry == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to track pouch fsync batch limit", NULL, NULL,
+                        "pouch");
+  }
+  entry->batch_max_ops = batch_max_ops;
+  entry->next = batcher->refs;
+  batcher->refs = entry;
+  lc_pouch_fsync_batcher_recompute_limit_locked(batcher);
+  return LC_OK;
+}
+
+static void lc_pouch_fsync_batcher_remove_ref_locked(
+    lc_pouch_fsync_batcher *batcher, uint64_t batch_max_ops) {
+  lc_pouch_fsync_batcher_ref *entry;
+  lc_pouch_fsync_batcher_ref *previous;
+
+  if (batcher == NULL) {
+    return;
+  }
+  previous = NULL;
+  entry = batcher->refs;
+  while (entry != NULL) {
+    if (entry->batch_max_ops == batch_max_ops) {
+      if (previous != NULL) {
+        previous->next = entry->next;
+      } else {
+        batcher->refs = entry->next;
+      }
+      lc_free_with_allocator(NULL, entry);
+      break;
+    }
+    previous = entry;
+    entry = entry->next;
+  }
+  lc_pouch_fsync_batcher_recompute_limit_locked(batcher);
+}
+
+static void lc_pouch_fsync_batcher_refs_cleanup(
+    lc_pouch_fsync_batcher_ref *entry) {
+  while (entry != NULL) {
+    lc_pouch_fsync_batcher_ref *next;
+
+    next = entry->next;
+    lc_free_with_allocator(NULL, entry);
+    entry = next;
+  }
 }
 
 static int lc_pouch_fsync_batch_seen(lc_pouch_fsync_batch_file *files,
@@ -405,14 +484,17 @@ static int lc_pouch_fsync_batcher_init(lc_pouch *pouch, lc_error *error) {
   }
   if (batcher != NULL) {
     pthread_mutex_lock(&batcher->mutex);
-    if (batcher->batch_max_ops == 0U ||
-        (pouch->fsync_batch_max_ops != 0U &&
-         pouch->fsync_batch_max_ops < batcher->batch_max_ops)) {
-      batcher->batch_max_ops = pouch->fsync_batch_max_ops;
+    pthread_rc = lc_pouch_fsync_batcher_add_ref_locked(
+        batcher, pouch->fsync_batch_max_ops, error);
+    if (pthread_rc == LC_OK) {
+      ++batcher->refcount;
+      pthread_cond_broadcast(&batcher->cond);
     }
-    ++batcher->refcount;
     pthread_mutex_unlock(&batcher->mutex);
     pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
+    if (pthread_rc != LC_OK) {
+      return pthread_rc;
+    }
     pouch->fsync_batcher = batcher;
     return LC_OK;
   }
@@ -443,12 +525,21 @@ static int lc_pouch_fsync_batcher_init(lc_pouch *pouch, lc_error *error) {
                         "failed to initialize pouch fsync condition",
                         strerror(pthread_rc), NULL, "pouch");
   }
-  created->batch_max_ops = pouch->fsync_batch_max_ops;
+  pthread_rc = lc_pouch_fsync_batcher_add_ref_locked(
+      created, pouch->fsync_batch_max_ops, error);
+  if (pthread_rc != LC_OK) {
+    pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
+    pthread_cond_destroy(&created->cond);
+    pthread_mutex_destroy(&created->mutex);
+    lc_free_with_allocator(NULL, created);
+    return pthread_rc;
+  }
   created->refcount = 1UL;
   pthread_rc =
       pthread_create(&created->thread, NULL, lc_pouch_fsync_worker, created);
   if (pthread_rc != 0) {
     pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
+    lc_pouch_fsync_batcher_refs_cleanup(created->refs);
     pthread_cond_destroy(&created->cond);
     pthread_mutex_destroy(&created->mutex);
     lc_free_with_allocator(NULL, created);
@@ -478,10 +569,12 @@ static void lc_pouch_fsync_batcher_close(lc_pouch *pouch) {
     return;
   }
   pthread_mutex_lock(&batcher->mutex);
+  lc_pouch_fsync_batcher_remove_ref_locked(batcher, pouch->fsync_batch_max_ops);
   if (batcher->refcount > 0UL) {
     --batcher->refcount;
   }
   if (batcher->refcount != 0UL) {
+    pthread_cond_broadcast(&batcher->cond);
     pthread_mutex_unlock(&batcher->mutex);
     pthread_mutex_unlock(&lc_pouch_fsync_batcher_registry_mutex);
     return;
@@ -500,6 +593,7 @@ static void lc_pouch_fsync_batcher_close(lc_pouch *pouch) {
   pthread_join(batcher->thread, NULL);
   pthread_cond_destroy(&batcher->cond);
   pthread_mutex_destroy(&batcher->mutex);
+  lc_pouch_fsync_batcher_refs_cleanup(batcher->refs);
   lc_free_with_allocator(NULL, batcher);
 }
 

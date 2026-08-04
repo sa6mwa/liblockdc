@@ -800,7 +800,10 @@ the public API or durable format.
   direct open option and `pouch://...?durable_sync=true`. The batcher collects
   eligible requests for at most two milliseconds, or until
   `fsync_batch_max_ops` is reached, matching Go disk's bounded group-commit
-  schedule. Every caller waits for its group's shared sync result.
+  schedule. One root has one batcher: when multiple durable-sync handles are
+  live, its effective bound is the lowest nonzero `fsync_batch_max_ops` among
+  them (zero contributes no bound). Opening and closing a handle recomputes
+  that live-root bound. Every caller waits for its group's shared sync result.
   `lc_pouch_fsync_stats_read` reports fixed-width aggregate batch,
   request, latency, bound, and bucket counters using Go's 1 through 4096
   histogram boundaries; they remain zero when durable sync is disabled.
