@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+timed_bin="$script_dir/run_timed.sh"
 
 preset=${LOCKDC_VALGRIND_PRESET:-valgrind}
 build_dir="$repo_root/build/$preset"
@@ -51,8 +52,8 @@ if ! command -v "$valgrind_bin" >/dev/null 2>&1; then
   exit 2
 fi
 
-cmake --fresh --preset "$preset"
-cmake --build --preset "$preset"
+"$timed_bin" "valgrind configure" cmake --fresh --preset "$preset"
+"$timed_bin" "valgrind build" cmake --build --preset "$preset"
 
 for test_name in "${valgrind_tests[@]}"; do
   test_path="$build_dir/tests/unit/$test_name"
@@ -70,7 +71,7 @@ for test_name in "${valgrind_tests[@]}"; do
     exit 2
   fi
 
-  LOCKDC_UNDER_VALGRIND=1 "$valgrind_bin" \
+  "$timed_bin" "valgrind $test_name" env LOCKDC_UNDER_VALGRIND=1 "$valgrind_bin" \
     --leak-check=full \
     --show-leak-kinds=definite,indirect \
     --track-origins=yes \

@@ -385,7 +385,9 @@ __format:
 finalize-slice:
 	$(TIMED) finalize-slice $(MAKE) __finalize-slice
 
-__finalize-slice: __format __test-debug
+__finalize-slice:
+	$(TIMED) 'finalize-slice format' $(MAKE) __format
+	$(TIMED) 'finalize-slice test-debug' $(MAKE) __test-debug
 
 valgrind:
 	$(TIMED) valgrind $(MAKE) __valgrind
@@ -437,7 +439,9 @@ __benchmarks: __build-x86_64-linux-gnu-release
 bench-gate:
 	$(TIMED) bench-gate $(MAKE) __bench-gate
 
-__bench-gate: __benchmarks __perf-gate
+__bench-gate:
+	$(TIMED) 'bench-gate benchmarks' $(MAKE) __benchmarks
+	$(TIMED) 'bench-gate perf-gate' $(MAKE) __perf-gate
 
 bench-check:
 	$(TIMED) bench-check $(MAKE) __bench-check
@@ -452,7 +456,9 @@ __benchmarks-go: __benchmark-pouch-go
 perf-gate:
 	$(TIMED) perf-gate $(MAKE) __perf-gate
 
-__perf-gate: __benchmark-pouch-go-prepare __benchmark-pouch-go-parity-gate
+__perf-gate:
+	$(TIMED) 'perf-gate benchmark-prepare' $(MAKE) __benchmark-pouch-go-prepare
+	$(TIMED) 'perf-gate pouch-go-parity' $(MAKE) __benchmark-pouch-go-parity-gate
 
 benchmark-pouch-perf: __benchmark-pouch-perf-prepare
 	$(TIMED) benchmark-pouch-perf timeout --kill-after=5s \
@@ -775,7 +781,12 @@ release:
 prerelease:
 	$(TIMED) prerelease $(MAKE) __prerelease
 
-__prerelease-ordinary: __finalize-slice __valgrind __fuzz-smoke __test-e2e __bench-gate
+__prerelease-ordinary:
+	$(TIMED) 'prerelease finalize-slice' $(MAKE) __finalize-slice
+	$(TIMED) 'prerelease valgrind' $(MAKE) __valgrind
+	$(TIMED) 'prerelease fuzz-smoke' $(MAKE) __fuzz-smoke
+	$(TIMED) 'prerelease e2e' $(MAKE) __test-e2e
+	$(TIMED) 'prerelease bench-gate' $(MAKE) __bench-gate
 
 __prerelease: __prerelease-ordinary
 

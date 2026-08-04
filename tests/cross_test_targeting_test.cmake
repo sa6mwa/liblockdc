@@ -21,7 +21,14 @@ file(MAKE_DIRECTORY "${bin_dir}")
 file(MAKE_DIRECTORY "${fake_sysroot}")
 
 file(COPY "${LOCKDC_ROOT}/scripts/cross_test.sh" DESTINATION "${script_dir}")
+file(COPY "${LOCKDC_ROOT}/scripts/run_timed.sh" DESTINATION "${script_dir}")
 file(CHMOD "${script_dir}/cross_test.sh"
+    PERMISSIONS
+        OWNER_READ OWNER_WRITE OWNER_EXECUTE
+        GROUP_READ GROUP_EXECUTE
+        WORLD_READ WORLD_EXECUTE
+)
+file(CHMOD "${script_dir}/run_timed.sh"
     PERMISSIONS
         OWNER_READ OWNER_WRITE OWNER_EXECUTE
         GROUP_READ GROUP_EXECUTE

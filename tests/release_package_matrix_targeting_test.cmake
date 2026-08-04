@@ -30,7 +30,14 @@ foreach(preset
 endforeach()
 
 file(COPY "${LOCKDC_ROOT}/scripts/run_linux_package_matrix.sh" DESTINATION "${fake_script_dir}")
+file(COPY "${LOCKDC_ROOT}/scripts/run_timed.sh" DESTINATION "${fake_script_dir}")
 file(COPY "${LOCKDC_ROOT}/scripts/osxcross_available.sh" DESTINATION "${fake_script_dir}")
+file(CHMOD "${fake_script_dir}/run_timed.sh"
+    PERMISSIONS
+        OWNER_READ OWNER_WRITE OWNER_EXECUTE
+        GROUP_READ GROUP_EXECUTE
+        WORLD_READ WORLD_EXECUTE
+)
 
 set(fake_release_source_script "${fake_script_dir}/test_release_from_source.sh")
 file(WRITE "${fake_release_source_script}" [=[

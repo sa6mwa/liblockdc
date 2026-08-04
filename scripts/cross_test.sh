@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+timed_bin="$script_dir/run_timed.sh"
 mode=${1:-all}
 
 cross_release_presets=(
@@ -62,8 +63,9 @@ require_release_runner() {
 }
 
 run_cross_preset_package_isolation() {
-  "$script_dir/build.sh" debug
-  ctest --preset debug --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout" -R "$cross_preset_package_regex"
+  "$timed_bin" "cross-preset build debug" "$script_dir/build.sh" debug
+  "$timed_bin" "cross-preset package-isolation" \
+    ctest --preset debug --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout" -R "$cross_preset_package_regex"
 }
 
 run_cross_release_matrix() {
@@ -72,8 +74,9 @@ run_cross_release_matrix() {
   for preset in "${cross_release_presets[@]}"; do
     require_release_build_tree "$preset"
     require_release_runner "$preset"
-    LOCKDC_SLOW_TEST_RUNTIME=1 ctest --preset "$preset" --output-on-failure --progress --stop-on-failure \
-      --timeout "$ctest_timeout" -LE lifecycle-host
+    "$timed_bin" "release-matrix test $preset" env LOCKDC_SLOW_TEST_RUNTIME=1 \
+      ctest --preset "$preset" --output-on-failure --progress --stop-on-failure \
+        --timeout "$ctest_timeout" -LE lifecycle-host
   done
 }
 

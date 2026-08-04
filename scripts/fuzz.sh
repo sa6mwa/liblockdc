@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+timed_bin="$script_dir/run_timed.sh"
 build_dir="$repo_root/build/fuzz/tests/fuzz"
 source_corpus_root="$repo_root/tests/fuzz/corpus"
 work_corpus_root="$repo_root/build/fuzz/corpus"
@@ -27,8 +28,8 @@ prepare_corpus() {
     printf '%s\n' "$dst_dir"
 }
 
-"$script_dir/build.sh" fuzz
-ctest --preset fuzz
+"$timed_bin" "fuzz build" "$script_dir/build.sh" fuzz
+"$timed_bin" "fuzz ctest" ctest --preset fuzz
 
 afl_fuzz=$("$script_dir/cpkt-aflpp.sh" discover | sed -n 's/^afl_fuzz=//p')
 
@@ -43,7 +44,8 @@ run_fuzzer() {
     lockdc_assert_generated_path "$repo_root" "$findings_dir"
     rm -rf "$findings_dir"
     mkdir -p "$findings_dir"
-    AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_NO_AFFINITY=1 \
+    "$timed_bin" "fuzz $name" env \
+        AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_NO_AFFINITY=1 \
         "$afl_fuzz" -V "$max_total_time" -i "$corpus_dir" -o "$findings_dir" -- "$build_dir/$target" @@
 }
 
