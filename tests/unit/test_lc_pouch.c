@@ -9394,6 +9394,16 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   assert_string_equal(ns_res.fallback_engine, "scan");
   lc_namespace_config_res_cleanup(&ns_res);
 
+  ns_req.preferred_engine = "index";
+  ns_req.fallback_engine = NULL;
+  ns_req.if_etag = "";
+  rc = client->update_namespace_config(client, &ns_req, &ns_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(ns_res.preferred_engine, "index");
+  assert_string_equal(ns_res.fallback_engine, "scan");
+  lc_namespace_config_res_cleanup(&ns_res);
+  ns_req.if_etag = NULL;
+
   ns_req.preferred_engine = "linear";
   ns_req.fallback_engine = NULL;
   rc = client->update_namespace_config(client, &ns_req, &ns_res, &error);

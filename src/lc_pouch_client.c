@@ -14496,7 +14496,8 @@ int lc_pouch_client_update_namespace_config_method(
   options.has_query_hidden = 1;
   options.query_hidden = 1;
   options.object_record = 1;
-  options.expected_etag = req->if_etag;
+  options.expected_etag =
+      req->if_etag != NULL && req->if_etag[0] != '\0' ? req->if_etag : NULL;
   if (rc == LC_OK) {
     rc = lc_pouch_state_write(client->pouch, namespace_name, key, source,
                               &options, &write_result, error);
