@@ -3344,9 +3344,9 @@ static int lc_pouch_query_index_hex_text_contains(const char *value_hex,
 
 static int lc_pouch_query_index_hex_contains_aligned(const char *value_hex,
                                                      const char *needle_hex) {
+  const char *match;
   size_t value_len;
   size_t needle_len;
-  size_t index;
 
   if (value_hex == NULL || needle_hex == NULL) {
     return 0;
@@ -3359,10 +3359,12 @@ static int lc_pouch_query_index_hex_contains_aligned(const char *value_hex,
   if (value_len % 2U != 0U || needle_len % 2U != 0U || needle_len > value_len) {
     return 0;
   }
-  for (index = 0U; index + needle_len <= value_len; index += 2U) {
-    if (strncmp(value_hex + index, needle_hex, needle_len) == 0) {
+  match = value_hex;
+  while ((match = strstr(match, needle_hex)) != NULL) {
+    if (((size_t)(match - value_hex) % 2U) == 0U) {
       return 1;
     }
+    ++match;
   }
   return 0;
 }
@@ -6055,7 +6057,7 @@ lc_pouch_query_index_pending_mark_incomplete(lc_pouch *pouch,
                                              lc_pouch_generation index_seq) {
   lc_pouch_query_index_pending_entry *pending;
   lc_pouch_query_index_pending_entry *previous;
-  lc_pouch_generation base_index_seq;
+  lc_pouch_generation base_index_seq = 0UL;
   lc_error error;
   int rc;
 
@@ -6178,7 +6180,7 @@ static void lc_pouch_query_index_pending_note_write(
   lc_pouch_generation base_index_seq;
   char *key_hex;
   lc_error error;
-  int covers_namespace;
+  int covers_namespace = 0;
   int need_seed;
   int rc;
 
@@ -13700,6 +13702,35 @@ static int lc_pouch_query_index_docid_list_intersect_sorted(
   return rc;
 }
 
+static int lc_pouch_query_index_docid_list_is_subset_sorted(
+    const lc_pouch_index_result_docid_list *subset,
+    const lc_pouch_index_result_docid_list *superset) {
+  size_t subset_index;
+  size_t superset_index;
+
+  if (subset == NULL || superset == NULL) {
+    return 0;
+  }
+  subset_index = 0U;
+  superset_index = 0U;
+  while (subset_index < subset->count && superset_index < superset->count) {
+    unsigned long subset_doc_id;
+    unsigned long superset_doc_id;
+
+    subset_doc_id = subset->items[subset_index].doc_id;
+    superset_doc_id = superset->items[superset_index].doc_id;
+    if (subset_doc_id == superset_doc_id) {
+      ++subset_index;
+      ++superset_index;
+    } else if (subset_doc_id > superset_doc_id) {
+      ++superset_index;
+    } else {
+      return 0;
+    }
+  }
+  return subset_index == subset->count;
+}
+
 static int lc_pouch_query_index_collect_trigram_docids(
     lc_pouch *pouch, const lc_pouch_query_index_generation_cache_entry *entry,
     const char *field_hex, const char *needle_hex,
@@ -14019,10 +14050,18 @@ static int lc_pouch_query_index_generation_term_matches(
          * incomplete and is covered by the trigram candidate path. */
         if (term_value_type == 's' ||
             term_value_type == LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE) {
-          *matched = ignore_case ? lc_pouch_query_index_hex_text_contains(
-                                       term_value_hex, needle_text, 1)
-                                 : lc_pouch_query_index_hex_contains_aligned(
-                                       term_value_hex, needle_hex);
+          if (ignore_case && lc_pouch_query_index_hex_contains_aligned(
+                                 term_value_hex, needle_hex)) {
+            /* Most persisted text is already lower-case. Avoid hex decoding
+             * for that common case; mixed-case input uses the complete
+             * case-folding verifier below. */
+            *matched = 1;
+          } else {
+            *matched = ignore_case ? lc_pouch_query_index_hex_text_contains(
+                                         term_value_hex, needle_text, 1)
+                                   : lc_pouch_query_index_hex_contains_aligned(
+                                         term_value_hex, needle_hex);
+          }
         }
       }
     }
@@ -14750,9 +14789,6 @@ static int lc_pouch_query_index_segmented_collect(
                 prefix_match, contains_match, ignore_case, range_bounds,
                 temporal_bounds, &trigram_docids, &exact_docids, &present,
                 &valid, &text_prefix_seen, error);
-            if (text_prefix_seen && text_complete_out != NULL) {
-              *text_complete_out = 0;
-            }
           }
           if (rc == LC_OK && trigram_docids.count > 0U &&
               (!present || !valid)) {
@@ -14765,6 +14801,14 @@ static int lc_pouch_query_index_segmented_collect(
               exact_docids.count > 0U) {
             rc = lc_pouch_index_result_docid_list_sort_compact(
                 &pouch->allocator, &exact_docids, error);
+          }
+          if (rc == LC_OK && text_prefix_seen && text_complete_out != NULL &&
+              !lc_pouch_query_index_docid_list_is_subset_sorted(
+                  &trigram_docids, &exact_docids)) {
+            /* A retained prefix can only be incomplete for candidate
+             * documents it did not already verify. Those are the only rows
+             * that require the slower body-level fallback. */
+            *text_complete_out = 0;
           }
           if (rc == LC_OK && exact_docids.count > 0U) {
             docids = exact_docids;

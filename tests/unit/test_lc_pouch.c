@@ -218,6 +218,7 @@ typedef struct pouch_chunked_source {
   size_t offset;
   size_t max_chunk;
   size_t read_count;
+  size_t largest_request;
 } pouch_chunked_source;
 
 typedef struct pouch_failing_source {
@@ -374,6 +375,9 @@ static size_t pouch_chunked_source_read(void *context, void *buffer,
     return 0U;
   }
   available = source->length - source->offset;
+  if (count > source->largest_request) {
+    source->largest_request = count;
+  }
   if (count > source->max_chunk) {
     count = source->max_chunk;
   }
@@ -10416,6 +10420,55 @@ static void test_state_callback_source_retains_streaming_path(void **state) {
 }
 
 static void
+test_state_plain_callback_source_uses_bounded_stream_buffer(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_state_write_result write_result;
+  pouch_chunked_source chunked;
+  lc_error error;
+  unsigned char *payload;
+  size_t payload_length;
+  char root[512];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  payload = NULL;
+  payload_length = 128U * 1024U;
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&chunked, 0, sizeof(chunked));
+  lc_error_init(&error);
+  make_root("state-plain-callback-stream", root, sizeof(root));
+  cleanup_root(root);
+  payload = (unsigned char *)malloc(payload_length);
+  assert_non_null(payload);
+  memset(payload, 'p', payload_length);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  chunked.bytes = payload;
+  chunked.length = payload_length;
+  chunked.max_chunk = 8U * 1024U;
+  rc = lc_source_from_callbacks(pouch_chunked_source_read, NULL, NULL, &chunked,
+                                &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "callback/plain-stream", body,
+                            NULL, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(write_result.bytes == (uint64_t)payload_length);
+  assert_true(chunked.largest_request >= 64U * 1024U);
+  assert_true(chunked.read_count <= 32U);
+
+  lc_source_close(body);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  free(payload);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_state_stream_failure_keeps_published_projection_and_replay(void **state) {
   lc_pouch *pouch;
   lc_source *body;
@@ -10552,6 +10605,7 @@ test_exclusive_streaming_write_releases_projection_for_independent_key(
   lc_pouch *pouch;
   lc_pouch_open_options options;
   pouch_stream_overlap overlap;
+  pthread_attr_t thread_attr;
   pthread_t first_thread;
   pthread_t second_thread;
   lc_error error;
@@ -10562,6 +10616,7 @@ test_exclusive_streaming_write_releases_projection_for_independent_key(
   int stream_entered;
   int precondition_entered;
   int second_finished;
+  int thread_attr_initialized;
   int rc;
 
   (void)state;
@@ -10582,9 +10637,12 @@ test_exclusive_streaming_write_releases_projection_for_independent_key(
   overlap.second_namespace = "other";
   overlap.first_rc = LC_ERR_INVALID;
   overlap.second_rc = LC_ERR_INVALID;
+  thread_attr_initialized = pthread_attr_init(&thread_attr) == 0;
+  assert_true(thread_attr_initialized);
+  assert_int_equal(pthread_attr_setstacksize(&thread_attr, 128U * 1024U), 0);
   first_started =
-      pthread_create(&first_thread, NULL, pouch_stream_overlap_first_write,
-                     &overlap) == 0;
+      pthread_create(&first_thread, &thread_attr,
+                     pouch_stream_overlap_first_write, &overlap) == 0;
   stream_entered =
       first_started
           ? pouch_stream_overlap_wait(&overlap, &overlap.stream_entered)
@@ -10594,8 +10652,8 @@ test_exclusive_streaming_write_releases_projection_for_independent_key(
   second_finished = 0;
   if (stream_entered) {
     second_started =
-        pthread_create(&second_thread, NULL, pouch_stream_overlap_second_write,
-                       &overlap) == 0;
+        pthread_create(&second_thread, &thread_attr,
+                       pouch_stream_overlap_second_write, &overlap) == 0;
     if (second_started) {
       precondition_entered = pouch_stream_overlap_wait(
           &overlap, &overlap.second_precondition_entered);
@@ -10612,6 +10670,9 @@ test_exclusive_streaming_write_releases_projection_for_independent_key(
   }
   if (second_started) {
     assert_int_equal(pthread_join(second_thread, NULL), 0);
+  }
+  if (thread_attr_initialized) {
+    assert_int_equal(pthread_attr_destroy(&thread_attr), 0);
   }
 
   assert_true(first_started);
@@ -25260,6 +25321,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_state_crypto_compression_round_trips),
       cmocka_unit_test(test_state_memory_source_appends_finalized_record),
       cmocka_unit_test(test_state_callback_source_retains_streaming_path),
+      cmocka_unit_test(
+          test_state_plain_callback_source_uses_bounded_stream_buffer),
       cmocka_unit_test(
           test_state_stream_failure_keeps_published_projection_and_replay),
       cmocka_unit_test(test_shared_abort_reopen_recovers_published_record),

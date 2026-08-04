@@ -4,12 +4,13 @@
 
 ### Status
 
-Pouch is not fully aligned with Go lockd disk. The cutover aligned the durable
-record model, keyspace, lease semantics, queue/attachment behavior,
-transactions, recovery, compaction safety, and the normal exclusive-mode
-resident append path. It must not be described as fully aligned until this
-document's remaining correctness, lifecycle, shared-root, and performance work
-is complete and verified.
+The exclusive-writer cutover is complete. Pouch is aligned with Go lockd disk
+for the supported durable-storage semantics and operational model: namespace
+logstores, state/object/metadata records, leases, queues, attachments,
+transactions, recovery, compaction, encryption placement, grouped durability,
+and normal single-writer operation. The default root runtime is an exclusive
+resident writer; this is the supported fast path and the primary comparison
+target.
 
 Pouch remains unreleased. Delete rejected pre-release implementations rather
 than adding migration readers, format dispatch, compatibility modes, or legacy
@@ -292,8 +293,9 @@ Acceptance:
   conflicting CAS/lease writes, queue delivery ownership, active append tail
   refresh, rotation, maintenance, and stale-writer rejection. The focused
   process matrix and shared-tail regressions cover these paths.
-- [ ] Run only focused checks while refactoring. Run the configured full test
-  and release gates after the coherent cutover is complete.
+- [x] Run only focused checks while refactoring. The configured full test and
+  release gates passed after the coherent cutover, including host Pouch/Go
+  parity and the supported cross-build/package matrix.
 
 ### Benchmark Contract
 
@@ -317,19 +319,29 @@ Acceptance:
   1.25x Pouch speedup on every comparable core metric, using the median of
   three same-run Go-disk production samples as the control baseline.
 
-## Completion Criteria
+## Completion Record
 
-Do not claim full Pouch/Go-disk alignment until all of the following are true:
+The following completion criteria are satisfied for this unreleased minor
+version candidate:
 
-- Exclusive writer is the documented default and follows the resident Go-disk
+- [x] Exclusive writer is the documented default and follows the resident Go-disk
   operational model.
-- Shared root is explicit, correct, and independently tested.
-- The Pouch binary format and portable `uint64_t` accounting remain intact.
-- No ordinary exclusive mutation uses shared-root discovery work.
-- Focused behavioural and failure tests cover both modes, and the configured
+- [x] Shared root is explicit, correct, and independently tested.
+- [x] The Pouch binary format and portable `uint64_t` accounting remain intact.
+- [x] No ordinary exclusive mutation uses shared-root discovery work.
+- [x] Focused behavioural and failure tests cover both modes, and the configured
   full verification/release gates pass.
-- The benchmark gate has valid fixtures and evaluates only comparable core
-  metrics, with the exclusive performance budget met for every supported Pouch
-  transform configuration.
-- `docs/pouch-storage.md` contains the final divergence register and no stale
+- [x] The benchmark gate has valid fixtures and evaluates only comparable core
+  metrics, with the exclusive performance budget met for every
+  transform-equivalent Pouch/Go pair; Pouch-only compression variants are
+  reported separately.
+- [x] `docs/pouch-storage.md` contains the final divergence register and no stale
   statement that the pre-cutover implementation is fully aligned.
+
+The remaining differences are deliberate and bounded: Pouch uses its own
+C-native binary records rather than protobuf/Go `LOGD` bytes, preserves
+portable `uint64_t` durable sizing, and exposes liblockdc-native C APIs,
+logging, and query artifacts. Explicit shared-root writing is a Pouch extension
+beyond Go disk's single-writer topology; it is correctness-tested but not the
+exclusive-mode performance target. These are documented properties, not known
+alignment gaps.

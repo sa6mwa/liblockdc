@@ -13528,7 +13528,7 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
   char *state_object_key;
   char state_lease_id[192];
   lc_version state_version;
-  long state_fencing_token;
+  long state_fencing_token = 0L;
   lc_pouch_unix_seconds now_seconds = 0;
   int rc;
 

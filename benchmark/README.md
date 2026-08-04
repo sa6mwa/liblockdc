@@ -61,8 +61,11 @@ exclusive release budget is `POUCH_GO_PARITY_MIN_SPEEDUP=1.25`: Pouch must be
 no slower than 80% of the matching Go disk latency on every comparable core
 metric. Set the variable only to make an intentional release-policy change;
 the gate reports the measured speedup for every budget miss. Compression has no
-matching Go disk transform, so it remains reported evidence rather than a
-synthetic cross-engine ratio.
+matching Go disk transform, so the release gate runs only the four comparable
+variants selected by the full-name `POUCH_GO_PARITY_BENCH` expression;
+compression remains reported evidence in the complete six-mode production
+matrix rather than a synthetic cross-engine ratio. `POUCH_GO_PARITY_TIMEOUT=15m`
+is the finite budget for the three-sample, three-scenario release comparison.
 
 `make benchmark-pouch-go-durable` is the separate strict-durability matrix.
 It compares Pouch `durable_sync=true` with a one-server Go disk `--ha auto`

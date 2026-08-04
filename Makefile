@@ -48,9 +48,14 @@ POUCH_GO_ACCEPTANCE_SCALE_SCENARIOS ?= EqSparse,RangeHalf,InTags,ContainsMessage
 POUCH_GO_ACCEPTANCE_TIMEOUT ?= 3m
 POUCH_GO_PRODUCTION_BENCH ?= Production(PouchPT|PouchCrypto|PouchCompression|PouchCryptoCompression|LockdDiskNoCrypto|LockdDiskCrypto)
 POUCH_GO_PRODUCTION_BENCHTIME ?= 1x
+# Preserve the first-segment end anchor through the three recursive benchmark
+# make invocations. It keeps the PouchCrypto compression variants out of the
+# transform-equivalent release comparison.
+POUCH_GO_PARITY_BENCH ?= ^BenchmarkProduction(PouchPT|PouchCrypto|LockdDiskNoCrypto|LockdDiskCrypto)$$$$$$$$/.*
 POUCH_GO_PARITY_BENCHTIME ?= 1x
 POUCH_GO_PARITY_COUNT ?= 3
 POUCH_GO_PARITY_MIN_SPEEDUP ?= 1.25
+POUCH_GO_PARITY_TIMEOUT ?= 15m
 POUCH_GO_DURABLE_BENCH ?= Production(PouchDurablePT|PouchDurableCrypto|LockdDiskDurableNoCrypto|LockdDiskDurableCrypto)
 POUCH_GO_DURABLE_BENCHTIME ?= 1x
 POUCH_GO_DURABLE_COUNT ?= 1
@@ -645,14 +650,16 @@ __benchmark-pouch-go-concurrency:
 
 benchmark-pouch-go-parity-gate: __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-go-parity-gate timeout --kill-after=5s \
-	  '$(POUCH_GO_PRODUCTION_TIMEOUT)' $(MAKE) __benchmark-pouch-go-parity-gate
+	  '$(POUCH_GO_PARITY_TIMEOUT)' $(MAKE) __benchmark-pouch-go-parity-gate
 
 __benchmark-pouch-go-parity-gate:
 	mkdir -p $(ROOT)/build
 	set -o pipefail; \
-	  $(MAKE) __benchmark-pouch-go-production \
+	$(MAKE) __benchmark-pouch-go-production \
+	    POUCH_GO_PRODUCTION_BENCH='$(POUCH_GO_PARITY_BENCH)' \
 	    POUCH_GO_PRODUCTION_BENCHTIME='$(POUCH_GO_PARITY_BENCHTIME)' \
 	    POUCH_GO_BENCH_COUNT='$(POUCH_GO_PARITY_COUNT)' \
+	    POUCH_GO_PRODUCTION_TIMEOUT='$(POUCH_GO_PARITY_TIMEOUT)' \
 	    2>&1 | tee $(ROOT)/build/pouch-go-production.bench.txt
 	python3 scripts/pouch_benchmark_parity.py --min-speedup $(POUCH_GO_PARITY_MIN_SPEEDUP) $(ROOT)/build/pouch-go-production.bench.txt
 

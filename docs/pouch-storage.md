@@ -44,24 +44,29 @@ Relevant Go disk files:
 - `../lockd/internal/core/txn_marker_apply.go`
 - `../lockd/namespaces/config_store.go`
 
-### Audit Baseline
+### Alignment Record
 
-The 2026-08-03 source and production-benchmark sweep found a blocking
-operational alignment gap. Pouch's durable representation is substantially
-aligned: namespace locality, record families, fixed-width durable scalars,
-streamed payload spans, staged links, lease/queue metadata, and
-capture/validate/install compaction preserve their required storage property.
-The exclusive state core is now in cutover: ordinary state, lease, object,
-attachment, queue, and staged-transaction mutations use the resident
-projection, active segment offset, and retained append descriptor. Direct and
-scan-oriented reads use the same projection after the first namespace warm.
-The remaining runtime alignment work is benchmark evidence across every public
-operation, and keeping recovery, takeover, rotation, maintenance, and explicit
-shared-root work off that healthy exclusive path.
+The 2026-08-04 source, behaviour, production-benchmark, and lifecycle sweep
+completed the exclusive-writer cutover. Pouch now matches the Go disk storage
+contract and operational model for namespace locality, record families,
+fixed-width durable scalars, streamed payload spans, staged links,
+lease/queue metadata, capture/validate/install compaction, recovery, grouped
+durability, and public state/object/attachment/queue/query operations. Normal
+exclusive state, lease, object, attachment, queue, and staged-transaction
+mutations use the resident projection, active segment offset, and retained
+append descriptor. Direct and scan-oriented reads use that projection after
+the first namespace warm.
 
-This is not an accepted divergence and Pouch must not be called fully aligned
-until the exclusive-writer cutover is complete. The source comparison does not
-claim Go/Pouch byte compatibility or interchangeable public storage APIs.
+There are no known semantic or operational alignment gaps in the supported
+exclusive-writer contract. The deliberate differences are limited to Pouch's
+C-native binary record and derived query-artifact formats rather than
+protobuf/Go `LOGD` bytes, fixed-width `uint64_t` durable sizes and offsets,
+and liblockdc-native public C APIs, error handling, and logging. Explicit
+shared-root writing is a Pouch-specific, correctness-tested extension beyond
+Go disk's single-writer topology; it is deliberately lower-throughput and is
+not used as the exclusive-path performance baseline. The source comparison
+does not claim Go/Pouch byte compatibility or interchangeable public storage
+APIs.
 
 ## Go Disk Alignment Contract
 
@@ -1784,8 +1789,12 @@ variance from redefining a release threshold. `make
 benchmark-pouch-go-parity-gate` enforces this with
 `POUCH_GO_PARITY_MIN_SPEEDUP=1.25`; strict-but-undefined "faster" is
 insufficient. Pouch compression variants retain their own reported performance
-evidence. Shared root has separate correctness, contention, handoff, and
-bounded-performance coverage and does not dilute the exclusive release target.
+evidence in the complete production matrix, but are excluded from the release
+gate because Go disk has no transform-equivalent compression mode. The release
+gate runs only plaintext and crypto Pouch/Go pairs, with three production
+samples each and a finite `POUCH_GO_PARITY_TIMEOUT=15m` budget. Shared root has
+separate correctness, contention, handoff, and bounded-performance coverage
+and does not dilute the exclusive release target.
 
 ## Fuzzing And Failure Modes
 

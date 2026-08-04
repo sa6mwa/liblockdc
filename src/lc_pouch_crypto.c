@@ -1249,16 +1249,15 @@ static int lc_pouch_crypto_encrypt_frame(
     const unsigned char nonce_prefix[LC_POUCH_NONCE_PREFIX_BYTES],
     const char *context, size_t context_len, unsigned long counter, int set_key,
     const unsigned char *plain, size_t plain_len, uint64_t *cipher_total,
-    unsigned long *stored_crc, lc_error *error) {
-  unsigned char
-      frame[8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES];
+    unsigned long *stored_crc, unsigned char *frame, size_t frame_capacity,
+    lc_error *error) {
   size_t frame_len;
   int rc;
 
   frame_len = 0U;
   rc = lc_pouch_crypto_encrypt_frame_to_memory(
       ctx, key, nonce_prefix, context, context_len, counter, set_key, plain,
-      plain_len, frame, sizeof(frame), &frame_len, error);
+      plain_len, frame, frame_capacity, &frame_len, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -1281,12 +1280,13 @@ static int lc_pouch_crypto_encrypt_frame(
   return rc;
 }
 
-static int lc_pouch_crypto_stream_plain_to_fd(int fd, lc_source *body,
+static int lc_pouch_crypto_stream_plain_to_fd(const lc_allocator *allocator,
+                                              int fd, lc_source *body,
                                               uint64_t *plain_bytes,
                                               uint64_t *cipher_bytes,
                                               unsigned long *stored_crc,
                                               lc_error *error) {
-  unsigned char buffer[LC_POUCH_FRAME_PLAINTEXT_BYTES];
+  unsigned char *buffer;
   uint64_t total;
   int rc;
 
@@ -1296,12 +1296,21 @@ static int lc_pouch_crypto_stream_plain_to_fd(int fd, lc_source *body,
                         "byte outputs",
                         NULL, NULL, "pouch");
   }
+  /* Source callbacks may run on small pthread stacks. Keep this bounded
+   * streaming scratch outside that stack while preserving direct flow. */
+  buffer = (unsigned char *)lc_alloc_with_allocator(
+      allocator, LC_POUCH_FRAME_PLAINTEXT_BYTES);
+  if (buffer == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch streaming buffer", NULL, NULL,
+                        "pouch");
+  }
   total = 0UL;
   rc = LC_OK;
   for (;;) {
     size_t got;
 
-    got = body->read(body, buffer, sizeof(buffer), error);
+    got = body->read(body, buffer, LC_POUCH_FRAME_PLAINTEXT_BYTES, error);
     if (got == 0U) {
       if (error != NULL && error->code != LC_OK) {
         rc = error->code;
@@ -1322,7 +1331,8 @@ static int lc_pouch_crypto_stream_plain_to_fd(int fd, lc_source *body,
     }
     total += (uint64_t)got;
   }
-  OPENSSL_cleanse(buffer, sizeof(buffer));
+  OPENSSL_cleanse(buffer, LC_POUCH_FRAME_PLAINTEXT_BYTES);
+  lc_free_with_allocator(allocator, buffer);
   if (rc == LC_OK) {
     *plain_bytes = total;
     *cipher_bytes = total;
@@ -1609,7 +1619,8 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
   lc_pouch_zlib_source *deflater;
   lc_source *write_body;
   EVP_CIPHER_CTX *ctx;
-  unsigned char buffer[LC_POUCH_FRAME_PLAINTEXT_BYTES];
+  unsigned char *plain_buffer;
+  unsigned char *frame_buffer;
   uint64_t plain_total;
   uint64_t cipher_total;
   unsigned long counter;
@@ -1633,8 +1644,9 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
   compressed =
       allow_compression && crypto != NULL && crypto->compression_enabled;
   if (!encrypted && !compressed) {
-    return lc_pouch_crypto_stream_plain_to_fd(fd, body, plain_bytes,
-                                              cipher_bytes, stored_crc, error);
+    return lc_pouch_crypto_stream_plain_to_fd(
+        crypto != NULL ? &crypto->allocator : NULL, fd, body, plain_bytes,
+        cipher_bytes, stored_crc, error);
   }
   if (encrypted && (context == NULL || context[0] == '\0')) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -1677,8 +1689,9 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
     uint64_t compressed_bytes;
 
     compressed_bytes = 0UL;
-    rc = lc_pouch_crypto_stream_plain_to_fd(fd, write_body, &compressed_bytes,
-                                            cipher_bytes, stored_crc, error);
+    rc = lc_pouch_crypto_stream_plain_to_fd(&crypto->allocator, fd, write_body,
+                                            &compressed_bytes, cipher_bytes,
+                                            stored_crc, error);
     if (rc == LC_OK) {
       *plain_bytes =
           deflater != NULL ? deflater->input_total : compressed_bytes;
@@ -1701,6 +1714,23 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
                         "failed to allocate pouch crypto cipher context", NULL,
                         NULL, "pouch");
   }
+  plain_buffer = (unsigned char *)lc_alloc_with_allocator(
+      &crypto->allocator, LC_POUCH_FRAME_PLAINTEXT_BYTES);
+  frame_buffer = (unsigned char *)lc_alloc_with_allocator(
+      &crypto->allocator,
+      8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES);
+  if (plain_buffer == NULL || frame_buffer == NULL) {
+    lc_free_with_allocator(&crypto->allocator, plain_buffer);
+    lc_free_with_allocator(&crypto->allocator, frame_buffer);
+    EVP_CIPHER_CTX_free(ctx);
+    lc_free_with_allocator(&crypto->allocator, descriptor);
+    if (deflater != NULL) {
+      deflater->pub.close(&deflater->pub);
+    }
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch encrypted streaming buffers",
+                        NULL, NULL, "pouch");
+  }
   plain_total = 0UL;
   cipher_total = 0UL;
   counter = 0UL;
@@ -1711,7 +1741,7 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
 
     target =
         counter == 0UL ? LC_POUCH_FIRST_FRAME_PLAINTEXT_BYTES : desc.frame_size;
-    got = write_body->read(write_body, buffer, target, error);
+    got = write_body->read(write_body, plain_buffer, target, error);
     if (got == 0U) {
       if (error != NULL && error->code != LC_OK) {
         rc = error->code;
@@ -1726,7 +1756,9 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
     }
     rc = lc_pouch_crypto_encrypt_frame(
         fd, ctx, crypto->data_key, desc.nonce_prefix, context, strlen(context),
-        counter, counter == 0UL, buffer, got, &cipher_total, stored_crc, error);
+        counter, counter == 0UL, plain_buffer, got, &cipher_total, stored_crc,
+        frame_buffer,
+        8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES, error);
     if (rc != LC_OK) {
       break;
     }
@@ -1742,10 +1774,16 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
   if (rc == LC_OK) {
     rc = lc_pouch_crypto_encrypt_frame(
         fd, ctx, crypto->data_key, desc.nonce_prefix, context, strlen(context),
-        counter, counter == 0UL, buffer, 0U, &cipher_total, stored_crc, error);
+        counter, counter == 0UL, plain_buffer, 0U, &cipher_total, stored_crc,
+        frame_buffer,
+        8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES, error);
   }
   EVP_CIPHER_CTX_free(ctx);
-  OPENSSL_cleanse(buffer, sizeof(buffer));
+  OPENSSL_cleanse(plain_buffer, LC_POUCH_FRAME_PLAINTEXT_BYTES);
+  OPENSSL_cleanse(frame_buffer,
+                  8U + LC_POUCH_FRAME_PLAINTEXT_BYTES + LC_POUCH_GCM_TAG_BYTES);
+  lc_free_with_allocator(&crypto->allocator, plain_buffer);
+  lc_free_with_allocator(&crypto->allocator, frame_buffer);
   if (rc != LC_OK) {
     lc_free_with_allocator(&crypto->allocator, descriptor);
     if (deflater != NULL) {
