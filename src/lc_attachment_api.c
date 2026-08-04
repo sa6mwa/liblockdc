@@ -24,7 +24,7 @@ typedef struct lc_engine_stream_request_state {
   char *correlation_id;
   char *content_type;
   char *etag;
-  long key_version;
+  lc_version key_version;
   long fencing_token;
   char *attachment_id;
   char *attachment_name;
@@ -494,8 +494,8 @@ static size_t lc_engine_stream_header_callback(char *buffer, size_t size,
     }
   } else if (lc_engine_header_name_equals(buffer, (size_t)(colon - buffer),
                                           "X-Key-Version")) {
-    if (!lc_parse_long_base10_range_checked(value, (size_t)(end - value),
-                                            &state->key_version)) {
+    if (!lc_parse_i64_base10_range_checked(value, (size_t)(end - value),
+                                           &state->key_version)) {
       lc_engine_set_protocol_error(state->error,
                                    "attachment key version is out of range");
       state->stream_error = 1;
@@ -793,7 +793,7 @@ static int lc_engine_perform_streaming(
     state->client = client;
     state->http_status = 0L;
     state->stream_error = 0;
-    state->key_version = 0L;
+    state->key_version = 0;
     state->fencing_token = 0L;
     state->attachment_size = 0L;
     state->attachment_created_at_unix = 0L;

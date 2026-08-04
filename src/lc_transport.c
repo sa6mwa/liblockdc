@@ -675,8 +675,8 @@ static size_t lc_engine_header_callback(char *buffer, size_t size,
         --end;
       }
       end = lc_engine_trim_http_ows_end(value, end);
-      if (!lc_parse_long_base10_range_checked(value, (size_t)(end - value),
-                                              &result->key_version)) {
+      if (!lc_parse_i64_base10_range_checked(value, (size_t)(end - value),
+                                             &result->key_version)) {
         return lc_engine_header_numeric_parse_failed(
             result, "response X-Key-Version header is invalid");
       }

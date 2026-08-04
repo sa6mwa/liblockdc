@@ -38,7 +38,7 @@ typedef struct lc_engine_http_result {
   long http_status;
   char *correlation_id;
   char *etag;
-  long key_version;
+  lc_version key_version;
   long fencing_token;
   char *content_type;
   char *header_parse_error_message;

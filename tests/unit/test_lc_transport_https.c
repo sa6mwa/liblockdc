@@ -2034,7 +2034,8 @@ static void test_state_transport_paths_use_mtls(void **state) {
       "\"ttl_seconds\":30", "\"owner\":\"owner-a\"",
       "\"txn_id\":\"txn-acquire\""};
   static const char *corr_acquire[] = {"X-Correlation-Id: corr-acquire",
-                                       "Content-Type: application/json"};
+                                       "Content-Type: application/json",
+                                       "X-Key-Version: 2147483648"};
   static const char *corr_get[] = {
       "X-Correlation-Id: corr-get", "Content-Type: application/json",
       "ETag: etag-1", "X-Key-Version: 4", "X-Fencing-Token: 11"};
@@ -2913,7 +2914,7 @@ static void
 test_state_transport_accepts_numeric_headers_with_trailing_ows(void **state) {
   static const char *response_headers[] = {
       "X-Correlation-Id: corr-get-ows", "Content-Type: application/json",
-      "ETag: etag-2", "X-Key-Version: 5 \t", "X-Fencing-Token: 11 "};
+      "ETag: etag-2", "X-Key-Version: 2147483648 \t", "X-Fencing-Token: 11 "};
   https_expectation expectations[] = {
       {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
        0U, NULL, 0U, 1, 200, response_headers,
@@ -2926,6 +2927,7 @@ test_state_transport_accepts_numeric_headers_with_trailing_ows(void **state) {
   lc_engine_get_request req;
   lc_engine_get_response res;
   lc_engine_error error;
+  lc_version expected_version;
   int rc;
 
   (void)state;
@@ -2939,6 +2941,7 @@ test_state_transport_accepts_numeric_headers_with_trailing_ows(void **state) {
   memset(&res, 0, sizeof(res));
   memset(&error, 0, sizeof(error));
   client = NULL;
+  expected_version = (lc_version)2147483647L + 1;
   init_client_config(&config, server.port, material.client_bundle_path);
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
@@ -2947,7 +2950,7 @@ test_state_transport_accepts_numeric_headers_with_trailing_ows(void **state) {
   req.public_read = 1;
   rc = lc_engine_client_get(client, &req, &res, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
-  assert_int_equal(res.version, 5L);
+  assert_true(res.version == expected_version);
   assert_int_equal(res.fencing_token, 11L);
 
   lc_engine_get_response_cleanup(&res);

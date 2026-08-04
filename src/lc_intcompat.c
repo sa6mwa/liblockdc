@@ -372,6 +372,19 @@ int lc_parse_ulong_base10_range_checked(const char *text, size_t length,
   return lc_parse_ulong_base10_checked(buffer, out_value);
 }
 
+int lc_parse_i64_base10_range_checked(const char *text, size_t length,
+                                      lc_i64 *out_value) {
+  char buffer[64];
+  size_t parsed_length;
+
+  if (!lc_parse_base10_copy(text, length, buffer, sizeof(buffer),
+                            &parsed_length)) {
+    return 0;
+  }
+  (void)parsed_length;
+  return lc_i64_parse_base10(buffer, out_value);
+}
+
 int lc_parse_u64_base10_range_checked(const char *text, size_t length,
                                       lc_u64 *out_value) {
   char buffer[64];
