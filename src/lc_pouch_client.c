@@ -13128,10 +13128,17 @@ static int lc_pouch_client_enqueue_locked(lc_client_handle *client,
       payload_source = NULL;
     }
     if (rc == LC_OK) {
-      record.payload_length = (size_t)counting_source.bytes;
       payload_written = 1;
+      if (!lc_u64_to_size_checked((lc_u64)result.bytes,
+                                  &record.payload_length)) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch queue payload is too large", NULL, NULL,
+                          "pouch");
+      }
       lc_pouch_state_write_result_cleanup(&client->allocator, &result);
-      rc = lc_pouch_queue_record_source(&record, &record_source, error);
+      if (rc == LC_OK) {
+        rc = lc_pouch_queue_record_source(&record, &record_source, error);
+      }
     }
     if (rc == LC_OK) {
       rc = lc_pouch_state_write(client->pouch, namespace_name,

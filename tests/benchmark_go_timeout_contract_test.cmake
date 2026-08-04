@@ -6,8 +6,9 @@ file(READ "${LOCKDC_ROOT}/Makefile" root_makefile)
 
 foreach(snippet
         "POUCH_GO_TEST_TIMEOUT ?= 10m"
+        "POUCH_GO_TEST_RUN ?= ^$$"
         "timeout --kill-after=5s '$(POUCH_GO_TEST_TIMEOUT)'"
-        "$(GO) test -run '^$$' -bench '$(POUCH_GO_BENCH)'"
+        "$(GO) test -run '$(POUCH_GO_TEST_RUN)' -bench '$(POUCH_GO_BENCH)'"
         "-timeout '$(POUCH_GO_TEST_TIMEOUT)'"
         "POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_ACCEPTANCE_TIMEOUT)'"
         "benchmark-pouch-go-production:"
