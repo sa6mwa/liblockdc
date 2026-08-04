@@ -160,6 +160,13 @@ target_sources(lc_unit_mutate_stream PRIVATE
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
 )
 lc_add_unit_test(lc_unit_pouch test_lc_pouch.c)
+if(CMAKE_CROSSCOMPILING AND CMAKE_CROSSCOMPILING_EMULATOR)
+  string(REPLACE ";" "|" lc_pouch_cross_emulator_spec
+    "${CMAKE_CROSSCOMPILING_EMULATOR}")
+  target_compile_definitions(lc_unit_pouch PRIVATE
+    "LOCKDC_TEST_CROSS_EMULATOR_SPEC=\"${lc_pouch_cross_emulator_spec}\""
+  )
+endif()
 # Pouch combines logstore recovery and durability cases in one debug target;
 # its debug execution exceeds the default unit-test window.
 set_tests_properties(lc_unit_pouch PROPERTIES TIMEOUT 300)

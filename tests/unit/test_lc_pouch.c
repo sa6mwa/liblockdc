@@ -36,8 +36,17 @@
 #include <unistd.h>
 
 #define POUCH_UNIT_TMP_PREFIX "/tmp/liblockdc-unit-pouch-"
+#define POUCH_TEST_CHILD_COMMAND_MAX 20U
+#define POUCH_TEST_CROSS_EMULATOR_MAX_ARGS 8U
+#define POUCH_TEST_CROSS_EMULATOR_SPEC_MAX 4096U
 
 static const char *pouch_test_executable;
+#ifdef LOCKDC_TEST_CROSS_EMULATOR_SPEC
+static char pouch_test_cross_emulator_spec[POUCH_TEST_CROSS_EMULATOR_SPEC_MAX];
+#endif
+static const char
+    *pouch_test_cross_emulator_args[POUCH_TEST_CROSS_EMULATOR_MAX_ARGS];
+static size_t pouch_test_cross_emulator_arg_count;
 
 typedef char pouch_test_generation_is_u64
     [sizeof(lc_pouch_generation) == sizeof(uint64_t) ? 1 : -1];
@@ -62,23 +71,60 @@ static void pouch_test_child_u64_arg(char *out, size_t out_size,
   assert_true(lc_u64_format_base10((lc_u64)value, out, out_size) >= 0);
 }
 
+static void pouch_test_configure_child_exec(void) {
+#ifdef LOCKDC_TEST_CROSS_EMULATOR_SPEC
+  char *cursor;
+  char *separator;
+  size_t spec_length;
+
+  spec_length = strlen(LOCKDC_TEST_CROSS_EMULATOR_SPEC);
+  assert_true(spec_length > 0U &&
+              spec_length < sizeof(pouch_test_cross_emulator_spec));
+  memcpy(pouch_test_cross_emulator_spec, LOCKDC_TEST_CROSS_EMULATOR_SPEC,
+         spec_length + 1U);
+  pouch_test_cross_emulator_arg_count = 0U;
+  cursor = pouch_test_cross_emulator_spec;
+  while (cursor[0] != '\0') {
+    assert_true(pouch_test_cross_emulator_arg_count <
+                POUCH_TEST_CROSS_EMULATOR_MAX_ARGS);
+    pouch_test_cross_emulator_args[pouch_test_cross_emulator_arg_count++] =
+        cursor;
+    separator = strchr(cursor, '|');
+    if (separator == NULL) {
+      break;
+    }
+    *separator = '\0';
+    cursor = separator + 1;
+  }
+  assert_true(pouch_test_cross_emulator_arg_count > 0U && cursor[0] != '\0');
+#else
+  pouch_test_cross_emulator_arg_count = 0U;
+#endif
+}
+
 static pid_t pouch_test_spawn_child(const char *operation,
                                     const char *const *arguments,
                                     size_t argument_count) {
-  const char *command[10];
+  const char *command[POUCH_TEST_CHILD_COMMAND_MAX];
+  size_t command_count;
   size_t index;
   pid_t pid;
 
   assert_non_null(pouch_test_executable);
   assert_non_null(operation);
-  assert_true(argument_count + 4U <= sizeof(command) / sizeof(command[0]));
-  command[0] = pouch_test_executable;
-  command[1] = "--pouch-child";
-  command[2] = operation;
-  for (index = 0U; index < argument_count; ++index) {
-    command[index + 3U] = arguments[index];
+  assert_true(pouch_test_cross_emulator_arg_count + argument_count + 4U <=
+              sizeof(command) / sizeof(command[0]));
+  command_count = 0U;
+  for (index = 0U; index < pouch_test_cross_emulator_arg_count; ++index) {
+    command[command_count++] = pouch_test_cross_emulator_args[index];
   }
-  command[argument_count + 3U] = NULL;
+  command[command_count++] = pouch_test_executable;
+  command[command_count++] = "--pouch-child";
+  command[command_count++] = operation;
+  for (index = 0U; index < argument_count; ++index) {
+    command[command_count++] = arguments[index];
+  }
+  command[command_count] = NULL;
   pid = fork();
   assert_true(pid >= 0);
   if (pid == 0) {
@@ -25451,6 +25497,7 @@ int main(int argc, char **argv) {
   };
 
   pouch_test_executable = argc > 0 ? argv[0] : NULL;
+  pouch_test_configure_child_exec();
   if (argc > 1 && strcmp(argv[1], "--pouch-child") == 0) {
     return pouch_test_child_main(argc, argv);
   }
