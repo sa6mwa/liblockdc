@@ -5734,6 +5734,33 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_pouch_indexer_deadline_clamps_u64_interval(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_error error;
+  struct timespec deadline;
+  char root[512];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&deadline, 0, sizeof(deadline));
+  lc_error_init(&error);
+  make_root("indexer-deadline-u64-interval", root, sizeof(root));
+  cleanup_root(root);
+
+  options.indexer_flush_interval_seconds = LC_U64_MAX;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_test_indexer_deadline(pouch, &deadline);
+  assert_int_equal((long)deadline.tv_sec, LONG_MAX);
+
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_pouch_defaults_and_post_mutation_janitor(void **state) {
   lc_pouch *pouch;
   lc_pouch_open_options options;
@@ -24954,6 +24981,7 @@ int main(void) {
       cmocka_unit_test(test_shared_query_flush_observes_peer_streamed_state),
       cmocka_unit_test(test_query_index_staleness_is_namespace_scoped),
       cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),
+      cmocka_unit_test(test_pouch_indexer_deadline_clamps_u64_interval),
       cmocka_unit_test(test_pouch_defaults_and_post_mutation_janitor),
       cmocka_unit_test(test_exclusive_writer_probe_heartbeat_precedence),
       cmocka_unit_test(

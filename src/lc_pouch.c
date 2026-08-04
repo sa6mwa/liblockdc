@@ -884,17 +884,26 @@ void lc_pouch_compaction_note_mutation(lc_pouch *pouch) {
 
 static void lc_pouch_indexer_deadline(const lc_pouch *pouch,
                                       struct timespec *deadline) {
+  uint64_t seconds;
+
   if (pouch == NULL || deadline == NULL) {
     return;
   }
   clock_gettime(CLOCK_REALTIME, deadline);
-  if (deadline->tv_sec >
-      LONG_MAX - (time_t)pouch->indexer_flush_interval_seconds) {
+  seconds = pouch->indexer_flush_interval_seconds;
+  if (seconds > (uint64_t)(LONG_MAX - deadline->tv_sec)) {
     deadline->tv_sec = LONG_MAX;
   } else {
-    deadline->tv_sec += (time_t)pouch->indexer_flush_interval_seconds;
+    deadline->tv_sec += (time_t)seconds;
   }
 }
+
+#ifdef LOCKDC_TEST_BUILD
+void lc_pouch_test_indexer_deadline(lc_pouch *pouch,
+                                    struct timespec *deadline) {
+  lc_pouch_indexer_deadline(pouch, deadline);
+}
+#endif
 
 static void lc_pouch_indexer_pending_namespaces_cleanup(
     lc_pouch *pouch, lc_pouch_indexer_pending_namespace *namespaces) {

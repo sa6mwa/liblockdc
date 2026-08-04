@@ -5,6 +5,7 @@
 #include "lc_pouch_crypto.h"
 
 #include <pthread.h>
+#include <time.h>
 
 typedef struct lc_pouch_namespace_logstore lc_pouch_namespace_logstore;
 typedef struct lc_pouch_source_cache_entry lc_pouch_source_cache_entry;
@@ -245,6 +246,7 @@ extern void *lc_pouch_test_tail_repair_context;
  */
 extern long lc_pouch_test_fsync_batch_delay_ns;
 size_t lc_pouch_test_resident_descriptor_count(lc_pouch *pouch);
+void lc_pouch_test_indexer_deadline(lc_pouch *pouch, struct timespec *deadline);
 #endif
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);
