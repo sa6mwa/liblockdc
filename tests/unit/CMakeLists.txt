@@ -161,8 +161,20 @@ target_sources(lc_unit_mutate_stream PRIVATE
 )
 lc_add_unit_test(lc_unit_pouch test_lc_pouch.c)
 if(CMAKE_CROSSCOMPILING AND CMAKE_CROSSCOMPILING_EMULATOR)
+  set(lc_pouch_cross_emulator ${CMAKE_CROSSCOMPILING_EMULATOR})
+  list(GET lc_pouch_cross_emulator 0 lc_pouch_cross_emulator_program)
+  if(NOT IS_ABSOLUTE "${lc_pouch_cross_emulator_program}")
+    find_program(lc_pouch_cross_emulator_program_path
+      NAMES "${lc_pouch_cross_emulator_program}"
+      REQUIRED
+    )
+    list(REMOVE_AT lc_pouch_cross_emulator 0)
+    list(INSERT lc_pouch_cross_emulator 0
+      "${lc_pouch_cross_emulator_program_path}"
+    )
+  endif()
   string(REPLACE ";" "|" lc_pouch_cross_emulator_spec
-    "${CMAKE_CROSSCOMPILING_EMULATOR}")
+    "${lc_pouch_cross_emulator}")
   target_compile_definitions(lc_unit_pouch PRIVATE
     "LOCKDC_TEST_CROSS_EMULATOR_SPEC=\"${lc_pouch_cross_emulator_spec}\""
   )
