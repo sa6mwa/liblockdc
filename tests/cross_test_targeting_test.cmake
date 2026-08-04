@@ -126,6 +126,7 @@ assert_log_contains("ctest\\|--preset\\|aarch64-linux-gnu-release\\|--output-on-
 assert_log_contains("ctest\\|--preset\\|aarch64-linux-musl-release\\|--output-on-failure\\|" "aarch64 musl ctest invocation")
 assert_log_contains("ctest\\|--preset\\|armhf-linux-gnu-release\\|--output-on-failure\\|" "armhf gnu ctest invocation")
 assert_log_contains("ctest\\|--preset\\|armhf-linux-musl-release\\|--output-on-failure\\|" "armhf musl ctest invocation")
+assert_log_contains("-L\\|cross-runtime\\|" "curated target-runtime test label")
 assert_log_not_contains("build\\|" "release preset build invocation")
 
 file(WRITE "${fake_build}" [=[

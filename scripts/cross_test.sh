@@ -76,7 +76,7 @@ run_cross_release_matrix() {
     require_release_runner "$preset"
     "$timed_bin" "release-matrix test $preset" env LOCKDC_SLOW_TEST_RUNTIME=1 \
       ctest --preset "$preset" --output-on-failure --progress --stop-on-failure \
-        --timeout "$ctest_timeout" -LE lifecycle-host
+        --timeout "$ctest_timeout" -L cross-runtime
   done
 }
 

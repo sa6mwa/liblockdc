@@ -113,6 +113,7 @@ assert_contains(valgrind_script "\"$timed_bin\" \"valgrind $test_name\"" "per-te
 assert_contains(fuzz_script "\"$timed_bin\" \"fuzz $name\"" "per-target fuzz timing")
 assert_contains(linux_build_matrix_script "\"$timed_bin\" \"release-matrix build $preset\"" "per-preset release build timing")
 assert_contains(cross_test_script "\"$timed_bin\" \"release-matrix test $preset\"" "per-preset release test timing")
+assert_contains(cross_test_script "-L cross-runtime" "curated QEMU runtime test selection")
 assert_contains(package_matrix_script "release-matrix package source-smoke" "per-artifact package timing")
 assert_contains(root_makefile "__prerelease-hardening: __prerelease __fuzz __release-matrix" "hardening prerelease graph")
 assert_contains(root_makefile "__lifecycle-version-contract:" "lifecycle version contract target")

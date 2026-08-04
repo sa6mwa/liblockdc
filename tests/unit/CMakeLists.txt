@@ -20,7 +20,12 @@ function(lc_add_unit_test target_name)
     )
   endif()
   add_test(NAME ${target_name} COMMAND ${target_name})
-  set_tests_properties(${target_name} PROPERTIES TIMEOUT 60)
+  # The QEMU release suite exercises every portable core unit target.  Keep
+  # protocol edge-case permutations on the native sanitizer and host-release
+  # suites, where they provide the same coverage without emulator overhead.
+  set_tests_properties(${target_name} PROPERTIES
+    LABELS "unit;cross-runtime"
+    TIMEOUT 60)
   if(LOCKDC_C_TEST_ENVIRONMENT)
     set_tests_properties(${target_name} PROPERTIES
       ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
@@ -65,6 +70,12 @@ function(lc_add_https_unit_test_case target_name case_macro)
   endif()
 endfunction()
 
+function(lc_add_cross_runtime_https_unit_test_case target_name case_macro)
+  lc_add_https_unit_test_case(${target_name} ${case_macro})
+  set_tests_properties(${target_name} PROPERTIES
+    LABELS "unit;transport;cross-runtime")
+endfunction()
+
 lc_add_unit_test(lc_unit_streams test_lc_streams.c)
 add_executable(lc_unit_tmp_cleanup_probe
   test_lc_tmp_cleanup.c
@@ -85,7 +96,7 @@ add_test(NAME lc_unit_tmp_cleanup_signal
     -P "${CMAKE_SOURCE_DIR}/tests/tmp_cleanup_signal_test.cmake"
 )
 set_tests_properties(lc_unit_tmp_cleanup_signal PROPERTIES
-  LABELS "unit;local"
+  LABELS "unit;local;cross-runtime"
   TIMEOUT 15
 )
 add_test(NAME lc_unit_tmp_cleanup_abort
@@ -96,7 +107,7 @@ add_test(NAME lc_unit_tmp_cleanup_abort
     -P "${CMAKE_SOURCE_DIR}/tests/tmp_cleanup_signal_test.cmake"
 )
 set_tests_properties(lc_unit_tmp_cleanup_abort PROPERTIES
-  LABELS "unit;local"
+  LABELS "unit;local;cross-runtime"
   TIMEOUT 15
 )
 add_test(NAME lc_unit_tmp_cleanup_auto_stale
@@ -105,7 +116,7 @@ add_test(NAME lc_unit_tmp_cleanup_auto_stale
     ${lc_unit_tmp_cleanup_probe_command}
 )
 set_tests_properties(lc_unit_tmp_cleanup_auto_stale PROPERTIES
-  LABELS "unit;local"
+  LABELS "unit;local;cross-runtime"
   TIMEOUT 15
 )
 add_test(NAME lc_unit_tmp_cleanup_explicit_global_stale
@@ -114,7 +125,7 @@ add_test(NAME lc_unit_tmp_cleanup_explicit_global_stale
     ${lc_unit_tmp_cleanup_probe_command}
 )
 set_tests_properties(lc_unit_tmp_cleanup_explicit_global_stale PROPERTIES
-  LABELS "unit;local"
+  LABELS "unit;local;cross-runtime"
   TIMEOUT 15
 )
 add_test(NAME lc_unit_tmp_cleanup_orphan_owner_marker
@@ -123,7 +134,7 @@ add_test(NAME lc_unit_tmp_cleanup_orphan_owner_marker
     ${lc_unit_tmp_cleanup_probe_command}
 )
 set_tests_properties(lc_unit_tmp_cleanup_orphan_owner_marker PROPERTIES
-  LABELS "unit;local"
+  LABELS "unit;local;cross-runtime"
   TIMEOUT 15
 )
 add_test(NAME lc_unit_tmp_cleanup_unmarked_global_prefix
@@ -132,7 +143,7 @@ add_test(NAME lc_unit_tmp_cleanup_unmarked_global_prefix
     ${lc_unit_tmp_cleanup_probe_command}
 )
 set_tests_properties(lc_unit_tmp_cleanup_unmarked_global_prefix PROPERTIES
-  LABELS "unit;local"
+  LABELS "unit;local;cross-runtime"
   TIMEOUT 15
 )
 lc_add_unit_test(lc_unit_engine_allocator test_lc_engine_allocator.c)
@@ -194,7 +205,7 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_client_open_rejects_bundle_without_ca
   LC_HTTPS_CASE_CLIENT_OPEN_REJECTS_BUNDLE_WITHOUT_CA
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_client_open_accepts_memory_bundle_source
   LC_HTTPS_CASE_CLIENT_OPEN_ACCEPTS_MEMORY_BUNDLE_SOURCE
 )
@@ -210,11 +221,11 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_public_client_open_accepts_chunked_callback_bundle_source
   LC_HTTPS_CASE_PUBLIC_CLIENT_OPEN_ACCEPTS_CHUNKED_CALLBACK_BUNDLE_SOURCE
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_state_paths_use_mtls
   LC_HTTPS_CASE_STATE_PATHS_USE_MTLS
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_state_parses_buffered_typed_json_response
   LC_HTTPS_CASE_STATE_PARSES_BUFFERED_TYPED_JSON_RESPONSE
 )
@@ -230,7 +241,7 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_management_paths_use_mtls
   LC_HTTPS_CASE_MANAGEMENT_PATHS_USE_MTLS
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_queue_paths_use_mtls
   LC_HTTPS_CASE_QUEUE_PATHS_USE_MTLS
 )
@@ -242,7 +253,7 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_watch_rejects_oversized_error_body
   LC_HTTPS_CASE_WATCH_REJECTS_OVERSIZED_ERROR_BODY
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_watch_filters_and_finishes_trailing_event
   LC_HTTPS_CASE_WATCH_FILTERS_AND_FINISHES_TRAILING_EVENT
 )
@@ -330,7 +341,7 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_public_lease_attach_rejects_malformed_json_response
   LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_REJECTS_MALFORMED_JSON_RESPONSE
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_public_lease_attach_retries_node_passive_and_cleans_parser_state
   LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_RETRIES_NODE_PASSIVE_AND_CLEANS_PARSER_STATE
 )
@@ -442,7 +453,7 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_public_query_stream_captures_headers_and_body
   LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_CAPTURES_HEADERS_AND_BODY
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_public_query_keys_streams_chunks_and_headers
   LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_STREAMS_CHUNKS_AND_HEADERS
 )
