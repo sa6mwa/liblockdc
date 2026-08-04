@@ -229,6 +229,12 @@ typedef void (*lc_pouch_test_after_acquire_claim_hook_fn)(void *context);
 extern lc_pouch_test_after_acquire_claim_hook_fn
     lc_pouch_test_after_acquire_claim_hook;
 extern void *lc_pouch_test_after_acquire_claim_context;
+/* Invoked after dequeue-with-state persists its state lease, before it builds
+ * the returned message handle. */
+typedef void (*lc_pouch_test_after_dequeue_state_lease_hook_fn)(void *context);
+extern lc_pouch_test_after_dequeue_state_lease_hook_fn
+    lc_pouch_test_after_dequeue_state_lease_hook;
+extern void *lc_pouch_test_after_dequeue_state_lease_context;
 typedef void (*lc_pouch_test_metadata_append_hook_fn)(
     void *context, const char *namespace_name);
 extern lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook;

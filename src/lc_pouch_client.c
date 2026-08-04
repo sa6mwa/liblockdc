@@ -61,6 +61,9 @@ static uint64_t lc_pouch_lease_id_counter = 0U;
 lc_pouch_test_after_acquire_claim_hook_fn
     lc_pouch_test_after_acquire_claim_hook = NULL;
 void *lc_pouch_test_after_acquire_claim_context = NULL;
+lc_pouch_test_after_dequeue_state_lease_hook_fn
+    lc_pouch_test_after_dequeue_state_lease_hook = NULL;
+void *lc_pouch_test_after_dequeue_state_lease_context = NULL;
 #endif
 
 typedef struct lc_pouch_acquire_for_update_file {
@@ -13514,6 +13517,49 @@ int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
   return rc;
 }
 
+/* A local dequeue-with-state must not leave a delivery leased when construction
+ * of its companion state lease or message handle fails. This is intentionally
+ * a direct rollback, even for transaction-tagged deliveries: no handle escaped
+ * to let a later transaction resolve an internal partial delivery. */
+static int lc_pouch_queue_rollback_stateful_delivery(
+    lc_client_handle *client, const lc_message_ref *message, lc_error *error) {
+  lc_pouch_queue_record record;
+  int rc;
+
+  if (client == NULL || message == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch stateful dequeue rollback requires client and "
+                        "message",
+                        NULL, NULL, NULL);
+  }
+  memset(&record, 0, sizeof(record));
+  rc = lc_pouch_queue_copy_message_ref(message, &record, client, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_validate_state_lease(client, message, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_replace_string(&record.status, "available", error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_clear_lease(&record, error);
+  }
+  if (rc == LC_OK) {
+    if (record.attempts > 0) {
+      record.attempts -= 1;
+    }
+    record.not_visible_until_unix = 0L;
+    rc = lc_pouch_queue_write_record(client, &record, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_clear_message_lease(client, message, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_queue_release_state_lease(client, message, 0, error);
+  }
+  lc_pouch_queue_record_cleanup(&record);
+  return rc;
+}
+
 int lc_pouch_client_dequeue_with_state_method(lc_client *self,
                                               const lc_dequeue_req *req,
                                               lc_message **out,
@@ -13530,6 +13576,7 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
   lc_version state_version;
   long state_fencing_token = 0L;
   lc_pouch_unix_seconds now_seconds = 0;
+  int state_lease_acquired;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -13542,6 +13589,8 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
   message = NULL;
   state_key = NULL;
   state_object_key = NULL;
+  state_lease_id[0] = '\0';
+  state_lease_acquired = 0;
   memset(&read_result, 0, sizeof(read_result));
   memset(&lease_write_result, 0, sizeof(lease_write_result));
   memset(&lease_record, 0, sizeof(lease_record));
@@ -13605,6 +13654,13 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
   if (rc != LC_OK) {
     goto cleanup;
   }
+  state_lease_acquired = 1;
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_pouch_test_after_dequeue_state_lease_hook != NULL) {
+    lc_pouch_test_after_dequeue_state_lease_hook(
+        lc_pouch_test_after_dequeue_state_lease_context);
+  }
+#endif
   handle->state_etag =
       lc_client_strdup(client, read_result.found ? read_result.etag : NULL);
   handle->state_lease_id = lc_client_strdup(client, state_lease_id);
@@ -13644,6 +13700,34 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
   message = NULL;
 
 cleanup:
+  if (rc != LC_OK && message != NULL) {
+    lc_message_ref rollback_message;
+    lc_error rollback_error;
+    int rollback_rc;
+
+    memset(&rollback_message, 0, sizeof(rollback_message));
+    rollback_message.namespace_name = handle->namespace_name;
+    rollback_message.queue = handle->queue;
+    rollback_message.message_id = handle->message_id;
+    rollback_message.lease_id = handle->lease_id;
+    rollback_message.txn_id = handle->txn_id;
+    rollback_message.fencing_token = handle->fencing_token;
+    rollback_message.meta_etag = handle->meta_etag;
+    if (state_lease_acquired) {
+      rollback_message.state_lease_id = state_lease_id;
+      rollback_message.state_fencing_token = state_fencing_token;
+    }
+    lc_error_init(&rollback_error);
+    rollback_rc = lc_pouch_queue_rollback_stateful_delivery(
+        client, &rollback_message, &rollback_error);
+    if (rollback_rc != LC_OK && error != NULL) {
+      lc_error_cleanup(error);
+      *error = rollback_error;
+      lc_error_init(&rollback_error);
+      rc = rollback_rc;
+    }
+    lc_error_cleanup(&rollback_error);
+  }
   lc_free_with_allocator(NULL, state_object_key);
   lc_free_with_allocator(NULL, state_key);
   lc_pouch_lease_record_cleanup(&lease_record);

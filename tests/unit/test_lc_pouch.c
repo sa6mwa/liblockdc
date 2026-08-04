@@ -1231,7 +1231,7 @@ static void pouch_fail_allocator_init(lc_allocator *allocator,
   allocator->context = state;
 }
 
-static void pouch_fail_next_allocation_after_acquire_claim(void *context) {
+static void pouch_fail_next_allocation(void *context) {
   pouch_fail_allocator_state *state;
 
   state = (pouch_fail_allocator_state *)context;
@@ -16577,6 +16577,88 @@ test_client_queue_dequeue_with_state_uses_pouch_lease(void **state) {
 }
 
 static void
+test_client_queue_dequeue_with_state_rolls_back_partial_delivery(void **state) {
+  pouch_fail_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_config config;
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_nack_req nack_req;
+  lc_message *message;
+  lc_error error;
+  const char *endpoints[1];
+  char endpoint[540];
+  char root[512];
+  int rc;
+
+  (void)state;
+  memset(&alloc_state, 0, sizeof(alloc_state));
+  pouch_fail_allocator_init(&allocator, &alloc_state);
+  client = NULL;
+  source = NULL;
+  message = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  lc_nack_req_init(&nack_req);
+  lc_error_init(&error);
+  make_root("client-queue-state-rollback", root, sizeof(root));
+  cleanup_root(root);
+  make_endpoint(root, endpoint, sizeof(endpoint));
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.allocator = allocator;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  enqueue_req.queue = "jobs";
+  rc = lc_source_from_memory("job", strlen("job"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  dequeue_req.queue = "jobs";
+  dequeue_req.owner = "rollback-worker";
+  dequeue_req.visibility_timeout_seconds = 60L;
+  lc_pouch_test_after_dequeue_state_lease_context = &alloc_state;
+  lc_pouch_test_after_dequeue_state_lease_hook = pouch_fail_next_allocation;
+  rc = client->dequeue_with_state(client, &dequeue_req, &message, &error);
+  lc_pouch_test_after_dequeue_state_lease_hook = NULL;
+  lc_pouch_test_after_dequeue_state_lease_context = NULL;
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_null(message);
+  assert_true(alloc_state.fail_at != 0U);
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  alloc_state.fail_at = 0U;
+  rc = client->dequeue_with_state(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_string_equal(message->message_id, enqueue_res.message_id);
+  assert_int_equal(message->attempts, 1);
+  assert_non_null(message->state(message));
+
+  nack_req.delay_seconds = 0L;
+  nack_req.intent = LC_NACK_INTENT_DEFER;
+  rc = message->nack(message, &nack_req, &error);
+  assert_int_equal(rc, LC_OK);
+  message = NULL;
+
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_client_queue_state_lease_transaction_update_uses_distinct_lease_key(
     void **state) {
   lc_client *client;
@@ -18750,8 +18832,7 @@ static void test_acquire_allocation_failure_rolls_back_claim(void **state) {
   acquire_req.owner = "alloc-fail-owner";
   acquire_req.ttl_seconds = 30L;
   lc_pouch_test_after_acquire_claim_context = &alloc_state;
-  lc_pouch_test_after_acquire_claim_hook =
-      pouch_fail_next_allocation_after_acquire_claim;
+  lc_pouch_test_after_acquire_claim_hook = pouch_fail_next_allocation;
   rc = client->acquire(client, &acquire_req, &lease, &error);
   lc_pouch_test_after_acquire_claim_hook = NULL;
   lc_pouch_test_after_acquire_claim_context = NULL;
@@ -25410,6 +25491,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_client_queue_dequeue_cursor_resumes_after_consumed_message),
       cmocka_unit_test(test_client_queue_dequeue_with_state_uses_pouch_lease),
+      cmocka_unit_test(
+          test_client_queue_dequeue_with_state_rolls_back_partial_delivery),
       cmocka_unit_test(
           test_client_queue_state_lease_transaction_update_uses_distinct_lease_key),
       cmocka_unit_test(

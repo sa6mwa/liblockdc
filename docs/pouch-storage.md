@@ -442,6 +442,12 @@ Queue delivery obligations:
   preserving the newer lease while continuing the durable decision for the
   remaining participants, matching Go disk's idempotent replay behavior;
 - stateful queue operations acquire paired message and state leases;
+- `dequeue_with_state` is all-or-nothing from the caller's perspective. If
+  state-lease setup or message-handle construction fails after a message lease
+  is durable, Pouch directly restores the message's available queue record and
+  clears the message and any newly acquired state lease before returning the
+  error. This rollback is direct even for a transaction-tagged request because
+  no message handle escaped to let a transaction resolve a partial delivery;
 - transaction marker application pairs `q/<queue>/msg/<id>` and
   `q/<queue>/state/<id>` the same way Go `queue.ParseMessageLeaseKey` and
   `ParseStateLeaseKey` do.

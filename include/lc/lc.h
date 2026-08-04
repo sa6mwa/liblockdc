@@ -1712,7 +1712,10 @@ struct lc_client {
   /** Dequeues up to `req->page_size` messages and returns them as a batch. */
   int (*dequeue_batch)(lc_client *self, const lc_dequeue_req *req,
                        lc_dequeue_batch_res *out, lc_error *error);
-  /** Dequeues a queue message and includes an associated state lease handle. */
+  /**
+   * Dequeues a queue message and its associated state lease handle atomically.
+   * On error, neither lease is retained by the client.
+   */
   int (*dequeue_with_state)(lc_client *self, const lc_dequeue_req *req,
                             lc_message **out, lc_error *error);
   /** Consumes queue messages with a streaming callback. */
@@ -2154,7 +2157,10 @@ int lc_dequeue(lc_client *client, const lc_dequeue_req *req, lc_message **out,
 /** Dequeues up to `req->page_size` messages and returns them as a batch. */
 int lc_dequeue_batch(lc_client *client, const lc_dequeue_req *req,
                      lc_dequeue_batch_res *out, lc_error *error);
-/** Dequeues a message and includes an associated state lease handle. */
+/**
+ * Dequeues a message and its associated state lease handle atomically.
+ * On error, neither lease is retained by the client.
+ */
 int lc_dequeue_with_state(lc_client *client, const lc_dequeue_req *req,
                           lc_message **out, lc_error *error);
 /** Consumes queue messages with a streaming callback. */
