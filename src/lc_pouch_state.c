@@ -11618,9 +11618,8 @@ static void lc_pouch_state_metadata_append_process(
   }
   memset(items, 0, sizeof(items));
   memset(&manifest, 0, sizeof(manifest));
+  memset(&append_lock, 0, sizeof(append_lock));
   append_lock.fd = -1;
-  append_lock.process_mutex = NULL;
-  append_lock.exclusive_gate = NULL;
   lc_error_init(&batch_error);
   cache_cleared = 0;
   cache = NULL;

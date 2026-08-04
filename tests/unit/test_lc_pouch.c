@@ -18,6 +18,7 @@
 #include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
 #include "lc_api_internal.h"
+#include "lc_intcompat.h"
 #include "lc_pouch.h"
 #include "lc_pouch_crypto.h"
 #include "lc_pouch_index.h"
@@ -36,6 +37,8 @@
 
 #define POUCH_UNIT_TMP_PREFIX "/tmp/liblockdc-unit-pouch-"
 
+static const char *pouch_test_executable;
+
 typedef char pouch_test_generation_is_u64
     [sizeof(lc_pouch_generation) == sizeof(uint64_t) ? 1 : -1];
 typedef char pouch_test_unix_seconds_is_i64
@@ -46,6 +49,44 @@ typedef char pouch_test_index_sequence_is_u64
     [sizeof(lc_index_seq) == sizeof(uint64_t) ? 1 : -1];
 typedef char
     pouch_test_tc_term_is_u64[sizeof(lc_tc_term) == sizeof(uint64_t) ? 1 : -1];
+
+static void pouch_test_child_fd_arg(char *out, size_t out_size, int fd) {
+  int written;
+
+  written = snprintf(out, out_size, "%d", fd);
+  assert_true(written > 0 && (size_t)written < out_size);
+}
+
+static void pouch_test_child_u64_arg(char *out, size_t out_size,
+                                     uint64_t value) {
+  assert_true(lc_u64_format_base10((lc_u64)value, out, out_size) >= 0);
+}
+
+static pid_t pouch_test_spawn_child(const char *operation,
+                                    const char *const *arguments,
+                                    size_t argument_count) {
+  const char *command[10];
+  size_t index;
+  pid_t pid;
+
+  assert_non_null(pouch_test_executable);
+  assert_non_null(operation);
+  assert_true(argument_count + 4U <= sizeof(command) / sizeof(command[0]));
+  command[0] = pouch_test_executable;
+  command[1] = "--pouch-child";
+  command[2] = operation;
+  for (index = 0U; index < argument_count; ++index) {
+    command[index + 3U] = arguments[index];
+  }
+  command[argument_count + 3U] = NULL;
+  pid = fork();
+  assert_true(pid >= 0);
+  if (pid == 0) {
+    execv(command[0], (char *const *)command);
+    _exit(127);
+  }
+  return pid;
+}
 
 typedef struct pouch_value_doc {
   lonejson_int64 value;
@@ -6907,12 +6948,6 @@ static int pouch_shared_process_write_with_segment_target(
     const char *root, const char *key, const char *value, int start_fd,
     uint64_t segment_target_bytes);
 
-static int pouch_shared_process_write(const char *root, const char *key,
-                                      const char *value, int start_fd) {
-  return pouch_shared_process_write_with_segment_target(root, key, value,
-                                                        start_fd, 0U);
-}
-
 static int pouch_shared_process_write_with_segment_target(
     const char *root, const char *key, const char *value, int start_fd,
     uint64_t segment_target_bytes) {
@@ -7354,6 +7389,157 @@ static int pouch_shared_process_compact_after_snapshot(const char *root,
   return rc;
 }
 
+static pid_t pouch_test_spawn_shared_write(const char *root, const char *key,
+                                           const char *value, int start_fd,
+                                           uint64_t segment_target_bytes) {
+  char start_fd_arg[32];
+  char segment_target_arg[32];
+  const char *arguments[5];
+
+  pouch_test_child_fd_arg(start_fd_arg, sizeof(start_fd_arg), start_fd);
+  pouch_test_child_u64_arg(segment_target_arg, sizeof(segment_target_arg),
+                           segment_target_bytes);
+  arguments[0] = root;
+  arguments[1] = key;
+  arguments[2] = value;
+  arguments[3] = start_fd_arg;
+  arguments[4] = segment_target_arg;
+  return pouch_test_spawn_child("shared-write", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
+}
+
+static pid_t pouch_test_spawn_shared_hold(const char *root, int ready_fd,
+                                          int release_fd) {
+  char ready_fd_arg[32];
+  char release_fd_arg[32];
+  const char *arguments[3];
+
+  pouch_test_child_fd_arg(ready_fd_arg, sizeof(ready_fd_arg), ready_fd);
+  pouch_test_child_fd_arg(release_fd_arg, sizeof(release_fd_arg), release_fd);
+  arguments[0] = root;
+  arguments[1] = ready_fd_arg;
+  arguments[2] = release_fd_arg;
+  return pouch_test_spawn_child("shared-hold", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
+}
+
+static pid_t pouch_test_spawn_exclusive_hold(const char *root, int ready_fd,
+                                             int release_fd) {
+  char ready_fd_arg[32];
+  char release_fd_arg[32];
+  const char *arguments[3];
+
+  pouch_test_child_fd_arg(ready_fd_arg, sizeof(ready_fd_arg), ready_fd);
+  pouch_test_child_fd_arg(release_fd_arg, sizeof(release_fd_arg), release_fd);
+  arguments[0] = root;
+  arguments[1] = ready_fd_arg;
+  arguments[2] = release_fd_arg;
+  return pouch_test_spawn_child("exclusive-hold", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
+}
+
+static pid_t pouch_test_spawn_shared_lease_hold(const char *root, int ready_fd,
+                                                int release_fd) {
+  char ready_fd_arg[32];
+  char release_fd_arg[32];
+  const char *arguments[3];
+
+  pouch_test_child_fd_arg(ready_fd_arg, sizeof(ready_fd_arg), ready_fd);
+  pouch_test_child_fd_arg(release_fd_arg, sizeof(release_fd_arg), release_fd);
+  arguments[0] = root;
+  arguments[1] = ready_fd_arg;
+  arguments[2] = release_fd_arg;
+  return pouch_test_spawn_child("shared-lease-hold", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
+}
+
+static pid_t pouch_test_spawn_shared_lease_handoff(const char *root,
+                                                   int blocked_fd,
+                                                   int proceed_fd) {
+  char blocked_fd_arg[32];
+  char proceed_fd_arg[32];
+  const char *arguments[3];
+
+  pouch_test_child_fd_arg(blocked_fd_arg, sizeof(blocked_fd_arg), blocked_fd);
+  pouch_test_child_fd_arg(proceed_fd_arg, sizeof(proceed_fd_arg), proceed_fd);
+  arguments[0] = root;
+  arguments[1] = blocked_fd_arg;
+  arguments[2] = proceed_fd_arg;
+  return pouch_test_spawn_child("shared-lease-handoff", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
+}
+
+static pid_t pouch_test_spawn_shared_enqueue(const char *root) {
+  const char *arguments[1];
+
+  arguments[0] = root;
+  return pouch_test_spawn_child("shared-enqueue", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
+}
+
+static pid_t pouch_test_spawn_shared_dequeue(const char *root,
+                                             const char *owner, int ready_fd,
+                                             int start_fd, int result_fd) {
+  char ready_fd_arg[32];
+  char start_fd_arg[32];
+  char result_fd_arg[32];
+  const char *arguments[5];
+
+  pouch_test_child_fd_arg(ready_fd_arg, sizeof(ready_fd_arg), ready_fd);
+  pouch_test_child_fd_arg(start_fd_arg, sizeof(start_fd_arg), start_fd);
+  pouch_test_child_fd_arg(result_fd_arg, sizeof(result_fd_arg), result_fd);
+  arguments[0] = root;
+  arguments[1] = owner;
+  arguments[2] = ready_fd_arg;
+  arguments[3] = start_fd_arg;
+  arguments[4] = result_fd_arg;
+  return pouch_test_spawn_child("shared-dequeue", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
+}
+
+static pid_t pouch_test_spawn_shared_stage_write(const char *root,
+                                                 const char *key,
+                                                 const char *value,
+                                                 const char *txn_id,
+                                                 int start_fd) {
+  char start_fd_arg[32];
+  const char *arguments[5];
+
+  pouch_test_child_fd_arg(start_fd_arg, sizeof(start_fd_arg), start_fd);
+  arguments[0] = root;
+  arguments[1] = key;
+  arguments[2] = value;
+  arguments[3] = txn_id;
+  arguments[4] = start_fd_arg;
+  return pouch_test_spawn_child("shared-stage-write", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
+}
+
+static pid_t pouch_test_spawn_shared_commit(const char *root,
+                                            const char *txn_id) {
+  const char *arguments[2];
+
+  arguments[0] = root;
+  arguments[1] = txn_id;
+  return pouch_test_spawn_child("shared-commit", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
+}
+
+static pid_t pouch_test_spawn_shared_compaction(const char *root, int ready_fd,
+                                                int resume_fd) {
+  char ready_fd_arg[32];
+  char resume_fd_arg[32];
+  const char *arguments[3];
+
+  pouch_test_child_fd_arg(ready_fd_arg, sizeof(ready_fd_arg), ready_fd);
+  pouch_test_child_fd_arg(resume_fd_arg, sizeof(resume_fd_arg), resume_fd);
+  arguments[0] = root;
+  arguments[1] = ready_fd_arg;
+  arguments[2] = resume_fd_arg;
+  return pouch_test_spawn_child("shared-compaction", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
+}
+
 static void test_process_writer_modes_and_shared_writes(void **state) {
   lc_pouch *reader;
   lc_pouch_state_read_result first_read;
@@ -7386,27 +7572,11 @@ static void test_process_writer_modes_and_shared_writes(void **state) {
   cleanup_root(root);
 
   assert_int_equal(pipe(first_start), 0);
-  first_pid = fork();
-  assert_true(first_pid >= 0);
-  if (first_pid == 0) {
-    (void)close(first_start[1]);
-    _exit(pouch_shared_process_write(root, "state/process-first", "first",
-                                     first_start[0]) == LC_OK
-              ? 0
-              : 1);
-  }
+  first_pid = pouch_test_spawn_shared_write(root, "state/process-first",
+                                            "first", first_start[0], 0U);
   assert_int_equal(pipe(second_start), 0);
-  second_pid = fork();
-  assert_true(second_pid >= 0);
-  if (second_pid == 0) {
-    (void)close(first_start[0]);
-    (void)close(first_start[1]);
-    (void)close(second_start[1]);
-    _exit(pouch_shared_process_write(root, "state/process-second", "second",
-                                     second_start[0]) == LC_OK
-              ? 0
-              : 1);
-  }
+  second_pid = pouch_test_spawn_shared_write(root, "state/process-second",
+                                             "second", second_start[0], 0U);
   (void)close(first_start[0]);
   (void)close(second_start[0]);
   assert_int_equal(write(first_start[1], "1", 1U), 1);
@@ -7441,16 +7611,8 @@ static void test_process_writer_modes_and_shared_writes(void **state) {
 
   assert_int_equal(pipe(shared_ready), 0);
   assert_int_equal(pipe(shared_release), 0);
-  holder_pid = fork();
-  assert_true(holder_pid >= 0);
-  if (holder_pid == 0) {
-    (void)close(shared_ready[0]);
-    (void)close(shared_release[1]);
-    _exit(pouch_shared_process_hold(root, shared_ready[1], shared_release[0]) ==
-                  LC_OK
-              ? 0
-              : 1);
-  }
+  holder_pid =
+      pouch_test_spawn_shared_hold(root, shared_ready[1], shared_release[0]);
   (void)close(shared_ready[1]);
   (void)close(shared_release[0]);
   assert_int_equal(read(shared_ready[0], &signal, 1U), 1);
@@ -7474,15 +7636,7 @@ static void test_process_writer_modes_and_shared_writes(void **state) {
 
   assert_int_equal(pipe(ready), 0);
   assert_int_equal(pipe(release), 0);
-  holder_pid = fork();
-  assert_true(holder_pid >= 0);
-  if (holder_pid == 0) {
-    (void)close(ready[0]);
-    (void)close(release[1]);
-    _exit(pouch_exclusive_process_hold(root, ready[1], release[0]) == LC_OK
-              ? 0
-              : 1);
-  }
+  holder_pid = pouch_test_spawn_exclusive_hold(root, ready[1], release[0]);
   (void)close(ready[1]);
   (void)close(release[0]);
   assert_int_equal(read(ready[0], &signal, 1U), 1);
@@ -7529,29 +7683,12 @@ static void test_shared_process_writers_rotate_segments(void **state) {
   cleanup_root(root);
 
   assert_int_equal(pipe(first_start), 0);
-  first_pid = fork();
-  assert_true(first_pid >= 0);
-  if (first_pid == 0) {
-    (void)close(first_start[1]);
-    _exit(pouch_shared_process_write_with_segment_target(
-              root, "state/process-rotation-first", first_value, first_start[0],
-              512U) == LC_OK
-              ? 0
-              : 1);
-  }
+  first_pid = pouch_test_spawn_shared_write(
+      root, "state/process-rotation-first", first_value, first_start[0], 512U);
   assert_int_equal(pipe(second_start), 0);
-  second_pid = fork();
-  assert_true(second_pid >= 0);
-  if (second_pid == 0) {
-    (void)close(first_start[0]);
-    (void)close(first_start[1]);
-    (void)close(second_start[1]);
-    _exit(pouch_shared_process_write_with_segment_target(
-              root, "state/process-rotation-second", second_value,
-              second_start[0], 512U) == LC_OK
-              ? 0
-              : 1);
-  }
+  second_pid =
+      pouch_test_spawn_shared_write(root, "state/process-rotation-second",
+                                    second_value, second_start[0], 512U);
   (void)close(first_start[0]);
   (void)close(second_start[0]);
   assert_int_equal(write(first_start[1], "1", 1U), 1);
@@ -7592,16 +7729,8 @@ static void test_shared_process_lease_conflict_and_handoff(void **state) {
 
   assert_int_equal(pipe(holder_ready), 0);
   assert_int_equal(pipe(holder_release), 0);
-  holder_pid = fork();
-  assert_true(holder_pid >= 0);
-  if (holder_pid == 0) {
-    (void)close(holder_ready[0]);
-    (void)close(holder_release[1]);
-    _exit(pouch_shared_process_hold_lease(root, holder_ready[1],
-                                          holder_release[0]) == LC_OK
-              ? 0
-              : 1);
-  }
+  holder_pid = pouch_test_spawn_shared_lease_hold(root, holder_ready[1],
+                                                  holder_release[0]);
   (void)close(holder_ready[1]);
   (void)close(holder_release[0]);
   assert_int_equal(read(holder_ready[0], &signal, 1U), 1);
@@ -7609,17 +7738,8 @@ static void test_shared_process_lease_conflict_and_handoff(void **state) {
 
   assert_int_equal(pipe(contender_blocked), 0);
   assert_int_equal(pipe(contender_proceed), 0);
-  contender_pid = fork();
-  assert_true(contender_pid >= 0);
-  if (contender_pid == 0) {
-    (void)close(holder_release[1]);
-    (void)close(contender_blocked[0]);
-    (void)close(contender_proceed[1]);
-    _exit(pouch_shared_process_acquire_after_handoff(
-              root, contender_blocked[1], contender_proceed[0]) == LC_OK
-              ? 0
-              : 1);
-  }
+  contender_pid = pouch_test_spawn_shared_lease_handoff(
+      root, contender_blocked[1], contender_proceed[0]);
   (void)close(contender_blocked[1]);
   (void)close(contender_proceed[0]);
   assert_int_equal(read(contender_blocked[0], &signal, 1U), 1);
@@ -7659,11 +7779,7 @@ static void test_shared_process_queue_delivers_once(void **state) {
   make_root("process-shared-queue", root, sizeof(root));
   cleanup_root(root);
 
-  enqueue_pid = fork();
-  assert_true(enqueue_pid >= 0);
-  if (enqueue_pid == 0) {
-    _exit(pouch_shared_process_enqueue(root) == LC_OK ? 0 : 1);
-  }
+  enqueue_pid = pouch_test_spawn_shared_enqueue(root);
   assert_int_equal(waitpid(enqueue_pid, &status, 0), enqueue_pid);
   assert_true(WIFEXITED(status));
   assert_int_equal(WEXITSTATUS(status), 0);
@@ -7671,28 +7787,10 @@ static void test_shared_process_queue_delivers_once(void **state) {
   assert_int_equal(pipe(ready), 0);
   assert_int_equal(pipe(start), 0);
   assert_int_equal(pipe(delivery), 0);
-  first_pid = fork();
-  assert_true(first_pid >= 0);
-  if (first_pid == 0) {
-    (void)close(ready[0]);
-    (void)close(start[1]);
-    (void)close(delivery[0]);
-    _exit(pouch_shared_process_dequeue(root, "process-first", ready[1],
-                                       start[0], delivery[1]) == LC_OK
-              ? 0
-              : 1);
-  }
-  second_pid = fork();
-  assert_true(second_pid >= 0);
-  if (second_pid == 0) {
-    (void)close(ready[0]);
-    (void)close(start[1]);
-    (void)close(delivery[0]);
-    _exit(pouch_shared_process_dequeue(root, "process-second", ready[1],
-                                       start[0], delivery[1]) == LC_OK
-              ? 0
-              : 1);
-  }
+  first_pid = pouch_test_spawn_shared_dequeue(root, "process-first", ready[1],
+                                              start[0], delivery[1]);
+  second_pid = pouch_test_spawn_shared_dequeue(root, "process-second", ready[1],
+                                               start[0], delivery[1]);
   (void)close(ready[1]);
   (void)close(start[0]);
   (void)close(delivery[1]);
@@ -7743,29 +7841,12 @@ static void test_shared_process_transaction_stages_and_commits(void **state) {
   cleanup_root(root);
 
   assert_int_equal(pipe(first_start), 0);
-  first_pid = fork();
-  assert_true(first_pid >= 0);
-  if (first_pid == 0) {
-    (void)close(first_start[1]);
-    _exit(pouch_shared_process_stage_write(root, "state/process-txn-first",
-                                           "first", "process-txn",
-                                           first_start[0]) == LC_OK
-              ? 0
-              : 1);
-  }
+  first_pid = pouch_test_spawn_shared_stage_write(
+      root, "state/process-txn-first", "first", "process-txn", first_start[0]);
   assert_int_equal(pipe(second_start), 0);
-  second_pid = fork();
-  assert_true(second_pid >= 0);
-  if (second_pid == 0) {
-    (void)close(first_start[0]);
-    (void)close(first_start[1]);
-    (void)close(second_start[1]);
-    _exit(pouch_shared_process_stage_write(root, "state/process-txn-second",
-                                           "second", "process-txn",
-                                           second_start[0]) == LC_OK
-              ? 0
-              : 1);
-  }
+  second_pid = pouch_test_spawn_shared_stage_write(
+      root, "state/process-txn-second", "second", "process-txn",
+      second_start[0]);
   (void)close(first_start[0]);
   (void)close(second_start[0]);
   assert_int_equal(write(first_start[1], "1", 1U), 1);
@@ -7779,13 +7860,7 @@ static void test_shared_process_transaction_stages_and_commits(void **state) {
   assert_true(WIFEXITED(status));
   assert_int_equal(WEXITSTATUS(status), 0);
 
-  commit_pid = fork();
-  assert_true(commit_pid >= 0);
-  if (commit_pid == 0) {
-    _exit(pouch_shared_process_commit_transaction(root, "process-txn") == LC_OK
-              ? 0
-              : 1);
-  }
+  commit_pid = pouch_test_spawn_shared_commit(root, "process-txn");
   assert_int_equal(waitpid(commit_pid, &status, 0), commit_pid);
   assert_true(WIFEXITED(status));
   assert_int_equal(WEXITSTATUS(status), 0);
@@ -7879,33 +7954,16 @@ static void test_shared_process_maintenance_serializes_writer(void **state) {
 
   assert_int_equal(pipe(snapshot_ready), 0);
   assert_int_equal(pipe(snapshot_resume), 0);
-  compaction_pid = fork();
-  assert_true(compaction_pid >= 0);
-  if (compaction_pid == 0) {
-    (void)close(snapshot_ready[0]);
-    (void)close(snapshot_resume[1]);
-    _exit(pouch_shared_process_compact_after_snapshot(
-              root, snapshot_ready[1], snapshot_resume[0]) == LC_OK
-              ? 0
-              : 1);
-  }
+  compaction_pid = pouch_test_spawn_shared_compaction(root, snapshot_ready[1],
+                                                      snapshot_resume[0]);
   (void)close(snapshot_ready[1]);
   (void)close(snapshot_resume[0]);
   assert_int_equal(read(snapshot_ready[0], &signal, 1U), 1);
   (void)close(snapshot_ready[0]);
 
   assert_int_equal(pipe(writer_start), 0);
-  writer_pid = fork();
-  assert_true(writer_pid >= 0);
-  if (writer_pid == 0) {
-    (void)close(snapshot_resume[1]);
-    (void)close(writer_start[1]);
-    _exit(pouch_shared_process_write_with_segment_target(
-              root, "state/maintenance-third", "third", writer_start[0],
-              512U) == LC_OK
-              ? 0
-              : 1);
-  }
+  writer_pid = pouch_test_spawn_shared_write(root, "state/maintenance-third",
+                                             "third", writer_start[0], 512U);
   (void)close(writer_start[0]);
   assert_int_equal(write(writer_start[1], "1", 1U), 1);
   (void)close(writer_start[1]);
@@ -8524,6 +8582,17 @@ static int pouch_child_public_update(const char *root, const char *key,
   rc = error.code;
   lc_error_cleanup(&error);
   return rc;
+}
+
+static pid_t pouch_test_spawn_public_update(const char *root, const char *key,
+                                            const char *json) {
+  const char *arguments[3];
+
+  arguments[0] = root;
+  arguments[1] = key;
+  arguments[2] = json;
+  return pouch_test_spawn_child("public-update", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
 }
 
 static void pouch_state_segment_path(const char *root,
@@ -13274,14 +13343,7 @@ static void test_client_update_waits_for_namespace_mutation_lock(void **state) {
   lc_update_res_cleanup(&update_res);
   lock_fd = pouch_test_lock_namespace_write_file(root, "default");
 
-  pid = fork();
-  assert_true(pid >= 0);
-  if (pid == 0) {
-    _exit(pouch_child_public_update(root, "state/locked", "{\"value\":2}") ==
-                  LC_OK
-              ? 0
-              : 1);
-  }
+  pid = pouch_test_spawn_public_update(root, "state/locked", "{\"value\":2}");
 
   usleep(100000);
   rc = waitpid(pid, &status, WNOHANG);
@@ -17279,6 +17341,20 @@ static int pouch_watch_commit_txn_ack_prestarted_child(const char *root,
   return pouch_watch_commit_txn_ack_child(root, queue, txn_id);
 }
 
+static pid_t pouch_test_spawn_watch_txn_ack(const char *root, const char *queue,
+                                            const char *txn_id, int start_fd) {
+  char start_fd_arg[32];
+  const char *arguments[4];
+
+  pouch_test_child_fd_arg(start_fd_arg, sizeof(start_fd_arg), start_fd);
+  arguments[0] = root;
+  arguments[1] = queue;
+  arguments[2] = txn_id;
+  arguments[3] = start_fd_arg;
+  return pouch_test_spawn_child("watch-txn-ack", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
+}
+
 static int pouch_watch_commit_txn_ack_on_initial_available(
     void *context, const lc_watch_event *event, lc_error *error) {
   pouch_watch_txn_ack_capture *capture;
@@ -17515,18 +17591,11 @@ test_client_queue_watch_detects_forked_transaction_ack_commit(void **state) {
   make_root("client-queue-watch-fork-txn", root, sizeof(root));
   cleanup_root(root);
 
-  /* Fork before opening the threaded watcher. The callback only releases the
-   * prestarted child, which opens its own shared-root client after fork. */
+  /* Start an exec'd child before opening the threaded watcher. The callback
+   * only releases that child, which opens its own shared-root client. */
   assert_int_equal(pipe(child_start), 0);
-  child_pid = fork();
-  assert_true(child_pid >= 0);
-  if (child_pid == 0) {
-    (void)close(child_start[1]);
-    _exit(pouch_watch_commit_txn_ack_prestarted_child(
-              root, "watch-fork-txn", "txn-watch-ack", child_start[0]) == LC_OK
-              ? 0
-              : 1);
-  }
+  child_pid = pouch_test_spawn_watch_txn_ack(root, "watch-fork-txn",
+                                             "txn-watch-ack", child_start[0]);
   (void)close(child_start[0]);
 
   assert_true(snprintf(endpoint, sizeof(endpoint),
@@ -24992,7 +25061,106 @@ static void test_acquire_for_update_rollback_removes_new_state(void **state) {
   lc_error_cleanup(&error);
 }
 
-int main(void) {
+static int pouch_test_child_parse_fd(const char *text, int *out) {
+  char *end;
+  long value;
+
+  if (text == NULL || out == NULL || text[0] == '\0') {
+    return 0;
+  }
+  errno = 0;
+  end = NULL;
+  value = strtol(text, &end, 10);
+  if (errno != 0 || end == text || *end != '\0' || value < 0L ||
+      value > (long)INT_MAX) {
+    return 0;
+  }
+  *out = (int)value;
+  return 1;
+}
+
+static int pouch_test_child_parse_u64(const char *text, uint64_t *out) {
+  lc_u64 value;
+
+  if (text == NULL || out == NULL || text[0] == '\0') {
+    return 0;
+  }
+  if (!lc_u64_parse_base10(text, &value)) {
+    return 0;
+  }
+  *out = (uint64_t)value;
+  return 1;
+}
+
+static int pouch_test_child_main(int argc, char **argv) {
+  const char *operation;
+  uint64_t segment_target_bytes;
+  int first_fd;
+  int second_fd;
+  int third_fd;
+  int rc;
+
+  if (argc < 4 || argv[2] == NULL) {
+    return 1;
+  }
+  operation = argv[2];
+  first_fd = -1;
+  second_fd = -1;
+  third_fd = -1;
+  segment_target_bytes = 0U;
+  rc = LC_ERR_INVALID;
+  if (strcmp(operation, "shared-write") == 0 && argc == 8 &&
+      pouch_test_child_parse_fd(argv[6], &first_fd) &&
+      pouch_test_child_parse_u64(argv[7], &segment_target_bytes)) {
+    rc = pouch_shared_process_write_with_segment_target(
+        argv[3], argv[4], argv[5], first_fd, segment_target_bytes);
+  } else if (strcmp(operation, "shared-hold") == 0 && argc == 6 &&
+             pouch_test_child_parse_fd(argv[4], &first_fd) &&
+             pouch_test_child_parse_fd(argv[5], &second_fd)) {
+    rc = pouch_shared_process_hold(argv[3], first_fd, second_fd);
+  } else if (strcmp(operation, "exclusive-hold") == 0 && argc == 6 &&
+             pouch_test_child_parse_fd(argv[4], &first_fd) &&
+             pouch_test_child_parse_fd(argv[5], &second_fd)) {
+    rc = pouch_exclusive_process_hold(argv[3], first_fd, second_fd);
+  } else if (strcmp(operation, "shared-lease-hold") == 0 && argc == 6 &&
+             pouch_test_child_parse_fd(argv[4], &first_fd) &&
+             pouch_test_child_parse_fd(argv[5], &second_fd)) {
+    rc = pouch_shared_process_hold_lease(argv[3], first_fd, second_fd);
+  } else if (strcmp(operation, "shared-lease-handoff") == 0 && argc == 6 &&
+             pouch_test_child_parse_fd(argv[4], &first_fd) &&
+             pouch_test_child_parse_fd(argv[5], &second_fd)) {
+    rc = pouch_shared_process_acquire_after_handoff(argv[3], first_fd,
+                                                    second_fd);
+  } else if (strcmp(operation, "shared-enqueue") == 0 && argc == 4) {
+    rc = pouch_shared_process_enqueue(argv[3]);
+  } else if (strcmp(operation, "shared-dequeue") == 0 && argc == 8 &&
+             pouch_test_child_parse_fd(argv[5], &first_fd) &&
+             pouch_test_child_parse_fd(argv[6], &second_fd) &&
+             pouch_test_child_parse_fd(argv[7], &third_fd)) {
+    rc = pouch_shared_process_dequeue(argv[3], argv[4], first_fd, second_fd,
+                                      third_fd);
+  } else if (strcmp(operation, "shared-stage-write") == 0 && argc == 8 &&
+             pouch_test_child_parse_fd(argv[7], &first_fd)) {
+    rc = pouch_shared_process_stage_write(argv[3], argv[4], argv[5], argv[6],
+                                          first_fd);
+  } else if (strcmp(operation, "shared-commit") == 0 && argc == 5) {
+    rc = pouch_shared_process_commit_transaction(argv[3], argv[4]);
+  } else if (strcmp(operation, "shared-compaction") == 0 && argc == 6 &&
+             pouch_test_child_parse_fd(argv[4], &first_fd) &&
+             pouch_test_child_parse_fd(argv[5], &second_fd)) {
+    rc = pouch_shared_process_compact_after_snapshot(argv[3], first_fd,
+                                                     second_fd);
+  } else if (strcmp(operation, "public-update") == 0 && argc == 6) {
+    rc = pouch_child_public_update(argv[3], argv[4], argv[5]);
+  } else if (strcmp(operation, "watch-txn-ack") == 0 && argc == 7 &&
+             pouch_test_child_parse_fd(argv[6], &first_fd)) {
+    rc = pouch_watch_commit_txn_ack_prestarted_child(argv[3], argv[4], argv[5],
+                                                     first_fd);
+  }
+  return rc == LC_OK ? 0 : 1;
+}
+
+int main(int argc, char **argv) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_index_docid_set_keeps_sorted_unique_docids),
       cmocka_unit_test(test_index_docid_set_merges_sorted_sets),
@@ -25282,6 +25450,10 @@ int main(void) {
       cmocka_unit_test(test_acquire_for_update_rollback_removes_new_state),
   };
 
+  pouch_test_executable = argc > 0 ? argv[0] : NULL;
+  if (argc > 1 && strcmp(argv[1], "--pouch-child") == 0) {
+    return pouch_test_child_main(argc, argv);
+  }
   return cmocka_run_group_tests(tests, setup_pouch_unit_group,
                                 teardown_pouch_unit_group);
 }
