@@ -569,8 +569,8 @@ static void test_attach_response_parses_with_thread_runtime(void **state) {
   rc = lc_engine_parse_attach_response_json(
       "{\"attachment\":{\"id\":\"att-1\",\"name\":\"blob.txt\","
       "\"size\":11,\"plaintext_sha256\":\"sha-1\","
-      "\"content_type\":\"text/plain\",\"created_at_unix\":1000,"
-      "\"updated_at_unix\":1001},\"noop\":false,\"version\":5}",
+      "\"content_type\":\"text/plain\",\"created_at_unix\":2147483648,"
+      "\"updated_at_unix\":2147483649},\"noop\":false,\"version\":2147483650}",
       "corr-attach", &response, &error);
 
   assert_int_equal(rc, LC_ENGINE_OK);
@@ -579,10 +579,12 @@ static void test_attach_response_parses_with_thread_runtime(void **state) {
   assert_int_equal(response.attachment.size, 11L);
   assert_string_equal(response.attachment.plaintext_sha256, "sha-1");
   assert_string_equal(response.attachment.content_type, "text/plain");
-  assert_int_equal(response.attachment.created_at_unix, 1000L);
-  assert_int_equal(response.attachment.updated_at_unix, 1001L);
+  assert_int_equal(response.attachment.created_at_unix,
+                   (lonejson_int64)2147483647L + 1L);
+  assert_int_equal(response.attachment.updated_at_unix,
+                   (lonejson_int64)2147483647L + 2L);
   assert_false(response.noop);
-  assert_int_equal(response.version, 5L);
+  assert_int_equal(response.version, (lonejson_int64)2147483647L + 3L);
   assert_string_equal(response.correlation_id, "corr-attach");
 
   lc_engine_attach_response_cleanup(&response);

@@ -1131,11 +1131,8 @@ static int lc_engine_attachment_info_from_headers(
   return 1;
 }
 
-static int lc_engine_i64_to_long_checked(lonejson_int64 value,
-                                         const char *label,
-                                         lonejson_int64 *out_value,
-                                         lc_engine_error *error) {
-  (void)label;
+static int lc_engine_i64_assign(lonejson_int64 value, lonejson_int64 *out_value,
+                                lc_engine_error *error) {
   if (out_value == NULL) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
                                       "missing i64 destination");
@@ -1175,20 +1172,17 @@ static int lc_engine_attachment_info_from_json(
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to copy attachment strings");
   }
-  rc = lc_engine_i64_to_long_checked(
-      parsed->size, "attachment size is out of range", &info->size, error);
+  rc = lc_engine_i64_assign(parsed->size, &info->size, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
-  rc = lc_engine_i64_to_long_checked(
-      parsed->created_at_unix, "attachment created_at_unix is out of range",
-      &info->created_at_unix, error);
+  rc = lc_engine_i64_assign(parsed->created_at_unix, &info->created_at_unix,
+                            error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
-  return lc_engine_i64_to_long_checked(
-      parsed->updated_at_unix, "attachment updated_at_unix is out of range",
-      &info->updated_at_unix, error);
+  return lc_engine_i64_assign(parsed->updated_at_unix, &info->updated_at_unix,
+                              error);
 }
 
 int lc_engine_parse_attach_response_json(const char *json,
@@ -1233,9 +1227,7 @@ int lc_engine_parse_attach_response_json(const char *json,
     return rc;
   }
   response->noop = parsed.noop ? 1 : 0;
-  rc = lc_engine_i64_to_long_checked(parsed.version,
-                                     "attach version is out of range",
-                                     &response->version, error);
+  rc = lc_engine_i64_assign(parsed.version, &response->version, error);
   if (rc != LC_ENGINE_OK) {
     runtime->cleanup(runtime, &lc_engine_attach_response_map, &parsed);
     lc_engine_attach_response_cleanup(response);
@@ -1778,21 +1770,16 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
         &response->failure_attempts, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_to_long_checked(
-        parsed.not_visible_until_unix,
-        "enqueue not_visible_until_unix is out of range",
-        &response->not_visible_until_unix, error);
+    rc = lc_engine_i64_assign(parsed.not_visible_until_unix,
+                              &response->not_visible_until_unix, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_to_long_checked(
-        parsed.visibility_timeout_seconds,
-        "enqueue visibility_timeout_seconds is out of range",
-        &response->visibility_timeout_seconds, error);
+    rc = lc_engine_i64_assign(parsed.visibility_timeout_seconds,
+                              &response->visibility_timeout_seconds, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_to_long_checked(parsed.payload_bytes,
-                                       "enqueue payload_bytes is out of range",
-                                       &response->payload_bytes, error);
+    rc = lc_engine_i64_assign(parsed.payload_bytes, &response->payload_bytes,
+                              error);
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_lonejson_cleanup(client, &lc_engine_enqueue_response_map,
@@ -1876,9 +1863,7 @@ int lc_engine_client_attach_from(lc_engine_client *client,
                                            &parsed.attachment, error);
   if (rc == LC_ENGINE_OK) {
     response->noop = parsed.noop ? 1 : 0;
-    rc = lc_engine_i64_to_long_checked(parsed.version,
-                                       "attach version is out of range",
-                                       &response->version, error);
+    rc = lc_engine_i64_assign(parsed.version, &response->version, error);
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_lonejson_cleanup(client, &lc_engine_attach_response_map, &parsed);
@@ -2157,7 +2142,7 @@ int lc_engine_client_delete_attachment(
     return rc;
   }
   response->deleted = parsed.deleted ? 1 : 0;
-  response->version = (long)parsed.version;
+  response->version = parsed.version;
   if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
   }
@@ -2225,7 +2210,7 @@ int lc_engine_client_delete_all_attachments(
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  response->version = (long)parsed.version;
+  response->version = parsed.version;
   rc = lc_engine_i64_to_int_checked(
       parsed.deleted, "delete attachments deleted count is out of range",
       &response->deleted, error);

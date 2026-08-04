@@ -4120,8 +4120,8 @@ test_public_lease_attach_retries_node_passive_and_cleans_parser_state(
        0U, 0, 200, second_attach_response_headers, 2U,
        "{\"attachment\":{\"id\":\"att-1\",\"name\":\"blob.txt\","
        "\"size\":11,\"plaintext_sha256\":\"sha-1\","
-       "\"content_type\":\"text/plain\",\"created_at_unix\":1000,"
-       "\"updated_at_unix\":1001},\"noop\":false,\"version\":5}",
+       "\"content_type\":\"text/plain\",\"created_at_unix\":2147483648,"
+       "\"updated_at_unix\":2147483649},\"noop\":false,\"version\":2147483650}",
        "liblockdc test client"}};
   https_tls_material material;
   https_testserver server;
@@ -4180,8 +4180,12 @@ test_public_lease_attach_retries_node_passive_and_cleans_parser_state(
   assert_int_equal(rc, LC_OK);
   assert_string_equal(attach_res.attachment.id, "att-1");
   assert_string_equal(attach_res.attachment.name, "blob.txt");
+  assert_int_equal(attach_res.attachment.created_at_unix,
+                   (lc_unix_seconds)2147483647L + 1L);
+  assert_int_equal(attach_res.attachment.updated_at_unix,
+                   (lc_unix_seconds)2147483647L + 2L);
   assert_false(attach_res.noop);
-  assert_int_equal(attach_res.version, 5L);
+  assert_int_equal(attach_res.version, (lc_version)2147483647L + 3L);
 
   lc_attach_res_cleanup(&attach_res);
   lc_source_close(src);
