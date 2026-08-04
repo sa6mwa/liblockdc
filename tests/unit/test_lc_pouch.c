@@ -1238,6 +1238,13 @@ static void pouch_fail_next_allocation(void *context) {
   state->fail_at = state->calls + 1U;
 }
 
+static int pouch_force_dequeue_claim_failure(void *context, lc_error *error) {
+  (void)context;
+  return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "forced pouch queue delivery construction failure", NULL,
+                      NULL, NULL);
+}
+
 static void test_index_docid_set_keeps_sorted_unique_docids(void **state) {
   lc_allocator allocator;
   lc_pouch_index_docid_set set;
@@ -16627,6 +16634,28 @@ test_client_queue_dequeue_with_state_rolls_back_partial_delivery(void **state) {
   dequeue_req.queue = "jobs";
   dequeue_req.owner = "rollback-worker";
   dequeue_req.visibility_timeout_seconds = 60L;
+  lc_pouch_test_after_queue_lease_claim_hook =
+      pouch_force_dequeue_claim_failure;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  lc_pouch_test_after_queue_lease_claim_hook = NULL;
+  lc_pouch_test_after_queue_lease_claim_context = NULL;
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_null(message);
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_pouch_test_before_queue_message_build_context = &alloc_state;
+  lc_pouch_test_before_queue_message_build_hook = pouch_fail_next_allocation;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  lc_pouch_test_before_queue_message_build_hook = NULL;
+  lc_pouch_test_before_queue_message_build_context = NULL;
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_null(message);
+  assert_true(alloc_state.fail_at != 0U);
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  alloc_state.fail_at = 0U;
   lc_pouch_test_after_dequeue_state_lease_context = &alloc_state;
   lc_pouch_test_after_dequeue_state_lease_hook = pouch_fail_next_allocation;
   rc = client->dequeue_with_state(client, &dequeue_req, &message, &error);

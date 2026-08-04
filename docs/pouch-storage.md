@@ -441,6 +441,10 @@ Queue delivery obligations:
   metadata. Replay and startup recovery instead skip that stale participant,
   preserving the newer lease while continuing the durable decision for the
   remaining participants, matching Go disk's idempotent replay behavior;
+- a dequeue whose durable claim succeeds but whose queue-record update or
+  public message-handle construction fails clears that message lease before it
+  returns an error. Once the delivery record is published, Pouch also restores
+  it to available state and reverses the unobserved attempt;
 - stateful queue operations acquire paired message and state leases;
 - `dequeue_with_state` is all-or-nothing from the caller's perspective. If
   state-lease setup or message-handle construction fails after a message lease

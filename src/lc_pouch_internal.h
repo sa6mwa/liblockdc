@@ -235,6 +235,16 @@ typedef void (*lc_pouch_test_after_dequeue_state_lease_hook_fn)(void *context);
 extern lc_pouch_test_after_dequeue_state_lease_hook_fn
     lc_pouch_test_after_dequeue_state_lease_hook;
 extern void *lc_pouch_test_after_dequeue_state_lease_context;
+/* Invoked after queue dequeue persists the message lease, before it publishes
+ * the delivery record. */
+extern lc_pouch_test_hook lc_pouch_test_after_queue_lease_claim_hook;
+extern void *lc_pouch_test_after_queue_lease_claim_context;
+/* Invoked after a queue delivery is durable, before its public handle is
+ * constructed. */
+typedef void (*lc_pouch_test_before_queue_message_build_hook_fn)(void *context);
+extern lc_pouch_test_before_queue_message_build_hook_fn
+    lc_pouch_test_before_queue_message_build_hook;
+extern void *lc_pouch_test_before_queue_message_build_context;
 typedef void (*lc_pouch_test_metadata_append_hook_fn)(
     void *context, const char *namespace_name);
 extern lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook;

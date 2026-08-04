@@ -1706,7 +1706,10 @@ struct lc_client {
   /** Streams a queue payload upload and enqueues it. */
   int (*enqueue)(lc_client *self, const lc_enqueue_req *req, lc_source *src,
                  lc_enqueue_res *out, lc_error *error);
-  /** Dequeues a queue message without an associated state lease. */
+  /**
+   * Dequeues a queue message without an associated state lease.
+   * On error, no delivery lease is retained by the client.
+   */
   int (*dequeue)(lc_client *self, const lc_dequeue_req *req, lc_message **out,
                  lc_error *error);
   /** Dequeues up to `req->page_size` messages and returns them as a batch. */
@@ -2150,7 +2153,9 @@ int lc_tc_rm_list(lc_client *client, lc_tc_rm_list_res *out, lc_error *error);
 /** Streams a queue payload upload and enqueues it. */
 int lc_enqueue(lc_client *client, const lc_enqueue_req *req, lc_source *src,
                lc_enqueue_res *out, lc_error *error);
-/** Dequeues a message and returns an `lc_message` handle for follow-up calls.
+/**
+ * Dequeues a message and returns an `lc_message` handle for follow-up calls.
+ * On error, no delivery lease is retained by the client.
  */
 int lc_dequeue(lc_client *client, const lc_dequeue_req *req, lc_message **out,
                lc_error *error);

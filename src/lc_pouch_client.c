@@ -64,6 +64,11 @@ void *lc_pouch_test_after_acquire_claim_context = NULL;
 lc_pouch_test_after_dequeue_state_lease_hook_fn
     lc_pouch_test_after_dequeue_state_lease_hook = NULL;
 void *lc_pouch_test_after_dequeue_state_lease_context = NULL;
+lc_pouch_test_hook lc_pouch_test_after_queue_lease_claim_hook = NULL;
+void *lc_pouch_test_after_queue_lease_claim_context = NULL;
+lc_pouch_test_before_queue_message_build_hook_fn
+    lc_pouch_test_before_queue_message_build_hook = NULL;
+void *lc_pouch_test_before_queue_message_build_context = NULL;
 #endif
 
 typedef struct lc_pouch_acquire_for_update_file {
@@ -13346,6 +13351,29 @@ int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
       &context, error);
 }
 
+static int lc_pouch_queue_rollback_published_delivery(
+    lc_client_handle *client, const lc_message_ref *message, lc_error *error);
+
+static int lc_pouch_queue_rollback_delivery_after_failure(
+    lc_client_handle *client, const lc_message_ref *message, int published,
+    int failure_rc, lc_error *error) {
+  lc_error rollback_error;
+  int rollback_rc;
+
+  lc_error_init(&rollback_error);
+  rollback_rc = published ? lc_pouch_queue_rollback_published_delivery(
+                                client, message, &rollback_error)
+                          : lc_pouch_queue_clear_message_lease(client, message,
+                                                               &rollback_error);
+  if (rollback_rc != LC_OK && error != NULL) {
+    lc_error_cleanup(error);
+    *error = rollback_error;
+    lc_error_init(&rollback_error);
+  }
+  lc_error_cleanup(&rollback_error);
+  return rollback_rc != LC_OK ? rollback_rc : failure_rc;
+}
+
 static int lc_pouch_client_dequeue_once(lc_client_handle *client,
                                         const char *namespace_name,
                                         const lc_dequeue_req *req,
@@ -13371,12 +13399,17 @@ static int lc_pouch_client_dequeue_once(lc_client_handle *client,
     char *message_lease_key;
     char lease_id[160];
     long message_fencing_token;
+    lc_pouch_generation record_version_before;
+    lc_message_ref rollback_message;
     int lease_acquired;
 
     message_lease_key = NULL;
     message_fencing_token = 0L;
     lease_acquired = 0;
+    record_version_before = 0UL;
+    memset(&rollback_message, 0, sizeof(rollback_message));
     record = &scan.records[i];
+    record_version_before = record->version;
     if (!after_cursor) {
       if (strcmp(record->message_id, req->start_after) == 0) {
         after_cursor = 1;
@@ -13411,6 +13444,24 @@ static int lc_pouch_client_dequeue_once(lc_client_handle *client,
       lc_free_with_allocator(NULL, message_lease_key);
       continue;
     }
+    rollback_message.namespace_name = namespace_name;
+    rollback_message.queue = record->queue;
+    rollback_message.message_id = record->message_id;
+    rollback_message.lease_id = lease_id;
+    rollback_message.txn_id = req->txn_id;
+    rollback_message.fencing_token = message_fencing_token;
+#ifdef LOCKDC_TEST_BUILD
+    if (lc_pouch_test_after_queue_lease_claim_hook != NULL) {
+      rc = lc_pouch_test_after_queue_lease_claim_hook(
+          lc_pouch_test_after_queue_lease_claim_context, error);
+      if (rc != LC_OK) {
+        rc = lc_pouch_queue_rollback_delivery_after_failure(
+            client, &rollback_message, 0, rc, error);
+        lc_free_with_allocator(NULL, message_lease_key);
+        break;
+      }
+    }
+#endif
     record->attempts += 1;
     lc_free_with_allocator(NULL, record->status);
     lc_free_with_allocator(NULL, record->lease_id);
@@ -13426,29 +13477,16 @@ static int lc_pouch_client_dequeue_once(lc_client_handle *client,
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch queue delivery state", NULL,
                         NULL, NULL);
+      rc = lc_pouch_queue_rollback_delivery_after_failure(
+          client, &rollback_message, 0, rc, error);
       lc_free_with_allocator(NULL, message_lease_key);
       break;
     }
     rc = lc_pouch_queue_write_record(client, record, error);
     if (rc != LC_OK) {
-      lc_error rollback_error;
-      lc_lease_ref rollback_lease;
-      lc_pouch_state_write_result rollback_write_result;
-
-      lc_error_init(&rollback_error);
-      memset(&rollback_lease, 0, sizeof(rollback_lease));
-      memset(&rollback_write_result, 0, sizeof(rollback_write_result));
-      rollback_lease.namespace_name = namespace_name;
-      rollback_lease.key = message_lease_key;
-      rollback_lease.lease_id = lease_id;
-      rollback_lease.txn_id = req->txn_id;
-      rollback_lease.fencing_token = message_fencing_token;
-      (void)lc_pouch_replace_lease_record(
-          client, &rollback_lease, namespace_name, message_lease_key, 0L, 1,
-          &rollback_write_result, &rollback_error);
-      lc_pouch_state_write_result_cleanup(&client->allocator,
-                                          &rollback_write_result);
-      lc_error_cleanup(&rollback_error);
+      rc = lc_pouch_queue_rollback_delivery_after_failure(
+          client, &rollback_message, record->version != record_version_before,
+          rc, error);
     }
     lc_free_with_allocator(NULL, message_lease_key);
     if (rc != LC_OK && lc_pouch_queue_retryable_version_conflict(error)) {
@@ -13458,9 +13496,19 @@ static int lc_pouch_client_dequeue_once(lc_client_handle *client,
       continue;
     }
     if (rc == LC_OK) {
+#ifdef LOCKDC_TEST_BUILD
+      if (lc_pouch_test_before_queue_message_build_hook != NULL) {
+        lc_pouch_test_before_queue_message_build_hook(
+            lc_pouch_test_before_queue_message_build_context);
+      }
+#endif
       next_cursor = record->message_id;
       rc = lc_pouch_queue_make_message(client, record, next_cursor, NULL, out,
                                        error);
+      if (rc != LC_OK) {
+        rc = lc_pouch_queue_rollback_delivery_after_failure(
+            client, &rollback_message, 1, rc, error);
+      }
     }
     break;
   }
@@ -13517,22 +13565,25 @@ int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
   return rc;
 }
 
-/* A local dequeue-with-state must not leave a delivery leased when construction
- * of its companion state lease or message handle fails. This is intentionally
- * a direct rollback, even for transaction-tagged deliveries: no handle escaped
- * to let a later transaction resolve an internal partial delivery. */
-static int lc_pouch_queue_rollback_stateful_delivery(
+/* A local dequeue failure must not leave an inaccessible delivery leased. This
+ * is intentionally a direct rollback, even for transaction-tagged deliveries:
+ * no handle escaped to let a later transaction resolve a partial delivery. */
+static int lc_pouch_queue_rollback_published_delivery(
     lc_client_handle *client, const lc_message_ref *message, lc_error *error) {
   lc_pouch_queue_record record;
+  lc_pouch_generation record_version_before;
+  int rollback_record_write_attempted;
   int rc;
 
   if (client == NULL || message == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch stateful dequeue rollback requires client and "
+                        "pouch queue delivery rollback requires client and "
                         "message",
                         NULL, NULL, NULL);
   }
   memset(&record, 0, sizeof(record));
+  record_version_before = 0UL;
+  rollback_record_write_attempted = 0;
   rc = lc_pouch_queue_copy_message_ref(message, &record, client, error);
   if (rc == LC_OK) {
     rc = lc_pouch_queue_validate_state_lease(client, message, error);
@@ -13548,7 +13599,17 @@ static int lc_pouch_queue_rollback_stateful_delivery(
       record.attempts -= 1;
     }
     record.not_visible_until_unix = 0L;
+    record_version_before = record.version;
+    rollback_record_write_attempted = 1;
     rc = lc_pouch_queue_write_record(client, &record, error);
+  }
+  if (rollback_record_write_attempted && rc != LC_OK &&
+      record.version != record_version_before) {
+    /* The durable rollback record is already installed. Its response ETag is
+     * only a transient cache; continue clearing the paired lease. */
+    lc_error_cleanup(error);
+    lc_error_init(error);
+    rc = LC_OK;
   }
   if (rc == LC_OK) {
     rc = lc_pouch_queue_clear_message_lease(client, message, error);
@@ -13702,8 +13763,6 @@ int lc_pouch_client_dequeue_with_state_method(lc_client *self,
 cleanup:
   if (rc != LC_OK && message != NULL) {
     lc_message_ref rollback_message;
-    lc_error rollback_error;
-    int rollback_rc;
 
     memset(&rollback_message, 0, sizeof(rollback_message));
     rollback_message.namespace_name = handle->namespace_name;
@@ -13717,16 +13776,8 @@ cleanup:
       rollback_message.state_lease_id = state_lease_id;
       rollback_message.state_fencing_token = state_fencing_token;
     }
-    lc_error_init(&rollback_error);
-    rollback_rc = lc_pouch_queue_rollback_stateful_delivery(
-        client, &rollback_message, &rollback_error);
-    if (rollback_rc != LC_OK && error != NULL) {
-      lc_error_cleanup(error);
-      *error = rollback_error;
-      lc_error_init(&rollback_error);
-      rc = rollback_rc;
-    }
-    lc_error_cleanup(&rollback_error);
+    rc = lc_pouch_queue_rollback_delivery_after_failure(
+        client, &rollback_message, 1, rc, error);
   }
   lc_free_with_allocator(NULL, state_object_key);
   lc_free_with_allocator(NULL, state_key);
