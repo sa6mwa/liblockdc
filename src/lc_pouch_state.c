@@ -53,6 +53,8 @@ lc_pouch_test_hook lc_pouch_test_after_snapshot_write_hook = NULL;
 void *lc_pouch_test_after_snapshot_write_context = NULL;
 lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook = NULL;
 void *lc_pouch_test_metadata_append_context = NULL;
+lc_pouch_test_hook lc_pouch_test_after_metadata_batch_append_hook = NULL;
+void *lc_pouch_test_after_metadata_batch_append_context = NULL;
 lc_pouch_test_body_append_hook_fn lc_pouch_test_body_append_hook = NULL;
 void *lc_pouch_test_body_append_context = NULL;
 lc_pouch_test_tail_repair_hook_fn lc_pouch_test_tail_repair_hook = NULL;
@@ -5670,6 +5672,7 @@ static int lc_pouch_state_append_binary_records_locked(
   int fd;
   int rc;
   int manifest_from_cache;
+  int append_started;
   int retain_active_append_fd;
   int single_writer;
   lc_pouch_generation first_index;
@@ -5692,8 +5695,10 @@ static int lc_pouch_state_append_binary_records_locked(
       manifest->segment_leaves == NULL &&
       strcmp(cache->active_segment_leaf, manifest->active_segment) == 0;
   retain_active_append_fd = 0;
+  append_started = 0;
   first_index = 0UL;
   record_size = 0U;
+  segment_size = 0U;
   rc = LC_OK;
   for (index = 0U; index < item_count; ++index) {
     if ((items[index].key_len > 0U && items[index].key == NULL) ||
@@ -5817,8 +5822,17 @@ static int lc_pouch_state_append_binary_records_locked(
     }
   }
   if (rc == LC_OK) {
+    /* Finalized metadata records are replayable immediately. Arm rollback
+     * before any write so partial writev failures discard this batch too. */
+    append_started = 1;
     rc = lc_pouch_state_record_write_prefix_batch(fd, items, item_count, error);
   }
+#ifdef LOCKDC_TEST_BUILD
+  if (rc == LC_OK && lc_pouch_test_after_metadata_batch_append_hook != NULL) {
+    rc = lc_pouch_test_after_metadata_batch_append_hook(
+        lc_pouch_test_after_metadata_batch_append_context, error);
+  }
+#endif
   if (rc == LC_OK) {
     rc = lc_pouch_state_defer_fsync(pouch, fd, error);
   }
@@ -5832,8 +5846,12 @@ static int lc_pouch_state_append_binary_records_locked(
       strcmp(cache->active_segment_leaf, manifest->active_segment) == 0) {
     cache->active_segment_offset = segment_size + record_size;
   }
-  if (rc != LC_OK && retain_active_append_fd) {
-    lc_pouch_state_append_fd_rollback(fd, segment_size, 1);
+  if (rc != LC_OK && append_started) {
+    if (retain_active_append_fd) {
+      lc_pouch_state_append_fd_rollback(fd, segment_size, 1);
+    } else {
+      lc_pouch_state_truncate_path_best_effort(segment_path, segment_size);
+    }
   }
   lc_free_with_allocator(&pouch->allocator, segment_path);
   return rc;

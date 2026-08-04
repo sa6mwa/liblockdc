@@ -1264,6 +1264,14 @@ static int pouch_fail_queue_batch_message_build(void *context,
   return LC_OK;
 }
 
+static int pouch_fail_after_metadata_batch_append(void *context,
+                                                  lc_error *error) {
+  (void)context;
+  return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "forced pouch metadata batch sync failure", NULL, NULL,
+                      "pouch");
+}
+
 static void test_index_docid_set_keeps_sorted_unique_docids(void **state) {
   lc_allocator allocator;
   lc_pouch_index_docid_set set;
@@ -6623,6 +6631,78 @@ test_shared_writer_replay_orders_same_version_metadata_by_index(void **state) {
                       read_result.metadata_length);
   read_source_to_string(read_result.body, body, sizeof(body));
   assert_string_equal(body, "body");
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(reader);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_shared_metadata_batch_failure_does_not_replay_unreported_write(
+    void **state) {
+  lc_pouch *writer;
+  lc_pouch *reader;
+  lc_pouch_open_options shared_open_options;
+  lc_pouch_state_write_options metadata_options;
+  lc_pouch_state_write_result initial_write;
+  lc_pouch_state_write_result failed_write;
+  lc_pouch_state_read_result read_result;
+  lc_source *source;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  writer = NULL;
+  reader = NULL;
+  source = NULL;
+  memset(&shared_open_options, 0, sizeof(shared_open_options));
+  memset(&metadata_options, 0, sizeof(metadata_options));
+  memset(&initial_write, 0, sizeof(initial_write));
+  memset(&failed_write, 0, sizeof(failed_write));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("shared-metadata-batch-rollback", root, sizeof(root));
+  cleanup_root(root);
+
+  shared_open_options.single_writer_set = 1;
+  shared_open_options.single_writer = 0;
+  shared_open_options.durable_sync = 1;
+  rc = lc_pouch_open(root, NULL, &shared_open_options, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("body", strlen("body"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(writer, "default", "state/metadata", source, NULL,
+                            &initial_write, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+
+  metadata_options.has_metadata = 1;
+  metadata_options.metadata = (const unsigned char *)"unreported";
+  metadata_options.metadata_length = strlen("unreported");
+  lc_pouch_test_after_metadata_batch_append_hook =
+      pouch_fail_after_metadata_batch_append;
+  rc = lc_pouch_state_update_metadata(writer, "default", "state/metadata",
+                                      &metadata_options, &failed_write, &error);
+  lc_pouch_test_after_metadata_batch_append_hook = NULL;
+  lc_pouch_test_after_metadata_batch_append_context = NULL;
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_null(failed_write.etag);
+
+  lc_pouch_state_write_result_cleanup(NULL, &failed_write);
+  lc_pouch_state_write_result_cleanup(NULL, &initial_write);
+  lc_pouch_close(writer);
+  writer = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_pouch_open(root, NULL, &shared_open_options, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(reader, "default", "state/metadata", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_int_equal(read_result.metadata_length, 0U);
 
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_pouch_close(reader);
@@ -25677,6 +25757,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_shared_writers_append_one_rolling_segment),
       cmocka_unit_test(
           test_shared_writer_replay_orders_same_version_metadata_by_index),
+      cmocka_unit_test(
+          test_shared_metadata_batch_failure_does_not_replay_unreported_write),
       cmocka_unit_test(test_shared_writers_reserve_unique_indexes_in_parallel),
       cmocka_unit_test(test_shared_writer_batches_parallel_memory_bodies),
       cmocka_unit_test(

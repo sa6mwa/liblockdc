@@ -253,6 +253,10 @@ typedef void (*lc_pouch_test_metadata_append_hook_fn)(
     void *context, const char *namespace_name);
 extern lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook;
 extern void *lc_pouch_test_metadata_append_context;
+/* Invoked after a finalized metadata batch reaches the active segment, before
+ * its sync boundary is confirmed. */
+extern lc_pouch_test_hook lc_pouch_test_after_metadata_batch_append_hook;
+extern void *lc_pouch_test_after_metadata_batch_append_context;
 typedef void (*lc_pouch_test_body_append_hook_fn)(void *context,
                                                   const char *namespace_name);
 extern lc_pouch_test_body_append_hook_fn lc_pouch_test_body_append_hook;
