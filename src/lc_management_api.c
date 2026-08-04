@@ -874,7 +874,7 @@ int lc_engine_client_update_namespace_config(
     header_count += 1U;
   }
   rc = lc_engine_http_json_request_stream(
-      client, "PUT", "/v1/namespace", &lc_engine_namespace_config_body_map,
+      client, "POST", "/v1/namespace", &lc_engine_namespace_config_body_map,
       &body_src, headers, header_count,
       &lc_engine_namespace_config_response_map, &parsed, &result, error);
   if (rc != LC_ENGINE_OK) {

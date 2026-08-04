@@ -2176,7 +2176,7 @@ static void test_management_transport_paths_use_mtls(void **state) {
   static const char *json_headers[] = {"Content-Type: application/json",
                                        "If-Match: \"config-etag\""};
   https_expectation expectations[] = {
-      {"PUT", "/v1/namespace", json_headers,
+      {"POST", "/v1/namespace", json_headers,
        sizeof(json_headers) / sizeof(json_headers[0]),
        (const char *const[]){"\"namespace\":\"team-a\"",
                              "\"preferred_engine\":\"index\"",
