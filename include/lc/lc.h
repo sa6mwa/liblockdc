@@ -1712,7 +1712,10 @@ struct lc_client {
    */
   int (*dequeue)(lc_client *self, const lc_dequeue_req *req, lc_message **out,
                  lc_error *error);
-  /** Dequeues up to `req->page_size` messages and returns them as a batch. */
+  /**
+   * Dequeues up to `req->page_size` messages and returns them as a batch.
+   * On error, no delivery lease is retained by the client.
+   */
   int (*dequeue_batch)(lc_client *self, const lc_dequeue_req *req,
                        lc_dequeue_batch_res *out, lc_error *error);
   /**
@@ -2159,7 +2162,10 @@ int lc_enqueue(lc_client *client, const lc_enqueue_req *req, lc_source *src,
  */
 int lc_dequeue(lc_client *client, const lc_dequeue_req *req, lc_message **out,
                lc_error *error);
-/** Dequeues up to `req->page_size` messages and returns them as a batch. */
+/**
+ * Dequeues up to `req->page_size` messages and returns them as a batch.
+ * On error, no delivery lease is retained by the client.
+ */
 int lc_dequeue_batch(lc_client *client, const lc_dequeue_req *req,
                      lc_dequeue_batch_res *out, lc_error *error);
 /**

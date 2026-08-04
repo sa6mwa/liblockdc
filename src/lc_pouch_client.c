@@ -69,6 +69,8 @@ void *lc_pouch_test_after_queue_lease_claim_context = NULL;
 lc_pouch_test_before_queue_message_build_hook_fn
     lc_pouch_test_before_queue_message_build_hook = NULL;
 void *lc_pouch_test_before_queue_message_build_context = NULL;
+lc_pouch_test_hook lc_pouch_test_after_queue_batch_message_build_hook = NULL;
+void *lc_pouch_test_after_queue_batch_message_build_context = NULL;
 #endif
 
 typedef struct lc_pouch_acquire_for_update_file {
@@ -13374,6 +13376,48 @@ static int lc_pouch_queue_rollback_delivery_after_failure(
   return rollback_rc != LC_OK ? rollback_rc : failure_rc;
 }
 
+static int
+lc_pouch_queue_rollback_message_after_failure(lc_client_handle *client,
+                                              lc_message *message,
+                                              int failure_rc, lc_error *error) {
+  lc_message_handle *handle;
+  lc_message_ref rollback_message;
+
+  if (message == NULL) {
+    return failure_rc;
+  }
+  handle = (lc_message_handle *)message;
+  memset(&rollback_message, 0, sizeof(rollback_message));
+  rollback_message.namespace_name = handle->namespace_name;
+  rollback_message.queue = handle->queue;
+  rollback_message.message_id = handle->message_id;
+  rollback_message.lease_id = handle->lease_id;
+  rollback_message.txn_id = handle->txn_id;
+  rollback_message.fencing_token = handle->fencing_token;
+  rollback_message.state_lease_id = handle->state_lease_id;
+  rollback_message.state_fencing_token = handle->state_fencing_token;
+  return lc_pouch_queue_rollback_delivery_after_failure(
+      client, &rollback_message, 1, failure_rc, error);
+}
+
+static int lc_pouch_queue_rollback_batch_messages_after_failure(
+    lc_client_handle *client, lc_message **messages, size_t count,
+    int failure_rc, lc_error *error) {
+  size_t i;
+  int rc;
+
+  rc = failure_rc;
+  for (i = 0U; i < count; ++i) {
+    if (messages[i] != NULL) {
+      rc = lc_pouch_queue_rollback_message_after_failure(client, messages[i],
+                                                         rc, error);
+      messages[i]->close(messages[i]);
+      messages[i] = NULL;
+    }
+  }
+  return rc;
+}
+
 static int lc_pouch_client_dequeue_once(lc_client_handle *client,
                                         const char *namespace_name,
                                         const lc_dequeue_req *req,
@@ -13822,6 +13866,7 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
   if (rc != LC_OK) {
     return rc;
   }
+  client = (lc_client_handle *)self;
   page_req = *req;
   limit = req->page_size > 0 ? req->page_size : 1;
   messages = NULL;
@@ -13830,7 +13875,6 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
   rc = LC_OK;
   now = 0L;
   if (req->wait_seconds == 0L) {
-    client = (lc_client_handle *)self;
     namespace_name = NULL;
     memset(&scan, 0, sizeof(scan));
     rc = lc_pouch_client_public_namespace(client, req->namespace_name,
@@ -13852,12 +13896,17 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
       lc_message *message;
       char lease_id[160];
       long message_fencing_token;
+      lc_pouch_generation record_version_before;
+      lc_message_ref rollback_message;
       int lease_acquired;
 
       message_lease_key = NULL;
       message_fencing_token = 0L;
       lease_acquired = 0;
+      record_version_before = 0UL;
+      memset(&rollback_message, 0, sizeof(rollback_message));
       record = &scan.records[i];
+      record_version_before = record->version;
       if (!after_cursor) {
         if (strcmp(record->message_id, req->start_after) == 0) {
           after_cursor = 1;
@@ -13892,6 +13941,24 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
         lc_free_with_allocator(NULL, message_lease_key);
         continue;
       }
+      rollback_message.namespace_name = namespace_name;
+      rollback_message.queue = record->queue;
+      rollback_message.message_id = record->message_id;
+      rollback_message.lease_id = lease_id;
+      rollback_message.txn_id = req->txn_id;
+      rollback_message.fencing_token = message_fencing_token;
+#ifdef LOCKDC_TEST_BUILD
+      if (lc_pouch_test_after_queue_lease_claim_hook != NULL) {
+        rc = lc_pouch_test_after_queue_lease_claim_hook(
+            lc_pouch_test_after_queue_lease_claim_context, error);
+        if (rc != LC_OK) {
+          rc = lc_pouch_queue_rollback_delivery_after_failure(
+              client, &rollback_message, 0, rc, error);
+          lc_free_with_allocator(NULL, message_lease_key);
+          break;
+        }
+      }
+#endif
       record->attempts += 1;
       lc_free_with_allocator(NULL, record->status);
       lc_free_with_allocator(NULL, record->lease_id);
@@ -13907,29 +13974,18 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
         rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch queue delivery state", NULL,
                           NULL, NULL);
+        rc = lc_pouch_queue_rollback_delivery_after_failure(
+            client, &rollback_message, 0, rc, error);
+        lc_free_with_allocator(NULL, message_lease_key);
+        break;
       }
       if (rc == LC_OK) {
         rc = lc_pouch_queue_write_record(client, record, error);
       }
       if (rc != LC_OK) {
-        lc_error rollback_error;
-        lc_lease_ref rollback_lease;
-        lc_pouch_state_write_result rollback_write_result;
-
-        lc_error_init(&rollback_error);
-        memset(&rollback_lease, 0, sizeof(rollback_lease));
-        memset(&rollback_write_result, 0, sizeof(rollback_write_result));
-        rollback_lease.namespace_name = namespace_name;
-        rollback_lease.key = message_lease_key;
-        rollback_lease.lease_id = lease_id;
-        rollback_lease.txn_id = req->txn_id;
-        rollback_lease.fencing_token = message_fencing_token;
-        (void)lc_pouch_replace_lease_record(
-            client, &rollback_lease, namespace_name, message_lease_key, 0L, 1,
-            &rollback_write_result, &rollback_error);
-        lc_pouch_state_write_result_cleanup(&client->allocator,
-                                            &rollback_write_result);
-        lc_error_cleanup(&rollback_error);
+        rc = lc_pouch_queue_rollback_delivery_after_failure(
+            client, &rollback_message, record->version != record_version_before,
+            rc, error);
       }
       lc_free_with_allocator(NULL, message_lease_key);
       if (rc != LC_OK && lc_pouch_queue_retryable_version_conflict(error)) {
@@ -13940,8 +13996,25 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
       }
       message = NULL;
       if (rc == LC_OK) {
+#ifdef LOCKDC_TEST_BUILD
+        if (lc_pouch_test_before_queue_message_build_hook != NULL) {
+          lc_pouch_test_before_queue_message_build_hook(
+              lc_pouch_test_before_queue_message_build_context);
+        }
+#endif
         rc = lc_pouch_queue_make_message(client, record, record->message_id,
                                          NULL, &message, error);
+      }
+#ifdef LOCKDC_TEST_BUILD
+      if (rc == LC_OK &&
+          lc_pouch_test_after_queue_batch_message_build_hook != NULL) {
+        rc = lc_pouch_test_after_queue_batch_message_build_hook(
+            lc_pouch_test_after_queue_batch_message_build_context, error);
+      }
+#endif
+      if (rc != LC_OK) {
+        rc = lc_pouch_queue_rollback_delivery_after_failure(
+            client, &rollback_message, 1, rc, error);
       }
       if (rc == LC_OK) {
         if (count == capacity) {
@@ -13952,10 +14025,13 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
           next = (lc_message **)lc_realloc_with_allocator(
               NULL, messages, next_capacity * sizeof(messages[0]));
           if (next == NULL) {
-            message->close(message);
             rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                               "failed to allocate pouch dequeue batch", NULL,
                               NULL, NULL);
+            rc = lc_pouch_queue_rollback_delivery_after_failure(
+                client, &rollback_message, 1, rc, error);
+            message->close(message);
+            message = NULL;
             break;
           }
           messages = next;
@@ -13974,8 +14050,13 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
       messages = NULL;
     }
     if (messages != NULL) {
-      for (i = 0U; i < count; ++i) {
-        messages[i]->close(messages[i]);
+      if (rc != LC_OK) {
+        rc = lc_pouch_queue_rollback_batch_messages_after_failure(
+            client, messages, count, rc, error);
+      } else {
+        for (i = 0U; i < count; ++i) {
+          messages[i]->close(messages[i]);
+        }
       }
       lc_free_with_allocator(NULL, messages);
     }
@@ -13997,10 +14078,12 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
       next = (lc_message **)lc_realloc_with_allocator(
           NULL, messages, next_capacity * sizeof(messages[0]));
       if (next == NULL) {
-        message->close(message);
         rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch dequeue batch", NULL, NULL,
                           NULL);
+        rc = lc_pouch_queue_rollback_message_after_failure(client, message, rc,
+                                                           error);
+        message->close(message);
         break;
       }
       messages = next;
@@ -14019,10 +14102,15 @@ int lc_pouch_client_dequeue_batch_method(lc_client *self,
     messages = NULL;
   }
   if (messages != NULL) {
-    size_t i;
+    if (rc != LC_OK) {
+      rc = lc_pouch_queue_rollback_batch_messages_after_failure(
+          client, messages, count, rc, error);
+    } else {
+      size_t i;
 
-    for (i = 0U; i < count; ++i) {
-      messages[i]->close(messages[i]);
+      for (i = 0U; i < count; ++i) {
+        messages[i]->close(messages[i]);
+      }
     }
     lc_free_with_allocator(NULL, messages);
   }

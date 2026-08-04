@@ -445,6 +445,9 @@ Queue delivery obligations:
   public message-handle construction fails clears that message lease before it
   returns an error. Once the delivery record is published, Pouch also restores
   it to available state and reverses the unobserved attempt;
+- `dequeue_batch` applies the same rule to every message it claimed. If any
+  member cannot be transferred into the returned batch, Pouch restores that
+  member and every earlier unreturned batch member before returning the error;
 - stateful queue operations acquire paired message and state leases;
 - `dequeue_with_state` is all-or-nothing from the caller's perspective. If
   state-lease setup or message-handle construction fails after a message lease

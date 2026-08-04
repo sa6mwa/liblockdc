@@ -245,6 +245,10 @@ typedef void (*lc_pouch_test_before_queue_message_build_hook_fn)(void *context);
 extern lc_pouch_test_before_queue_message_build_hook_fn
     lc_pouch_test_before_queue_message_build_hook;
 extern void *lc_pouch_test_before_queue_message_build_context;
+/* Invoked after each zero-wait batch message is built, before ownership moves
+ * into the batch result. */
+extern lc_pouch_test_hook lc_pouch_test_after_queue_batch_message_build_hook;
+extern void *lc_pouch_test_after_queue_batch_message_build_context;
 typedef void (*lc_pouch_test_metadata_append_hook_fn)(
     void *context, const char *namespace_name);
 extern lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook;

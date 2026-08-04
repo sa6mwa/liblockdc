@@ -179,6 +179,11 @@ typedef struct pouch_fail_allocator_state {
   size_t free_calls;
 } pouch_fail_allocator_state;
 
+typedef struct pouch_queue_batch_hook_state {
+  size_t calls;
+  size_t fail_at;
+} pouch_queue_batch_hook_state;
+
 typedef struct pouch_queue_notification_write {
   const char *path;
   struct timespec delay;
@@ -1243,6 +1248,20 @@ static int pouch_force_dequeue_claim_failure(void *context, lc_error *error) {
   return lc_error_set(error, LC_ERR_NOMEM, 0L,
                       "forced pouch queue delivery construction failure", NULL,
                       NULL, NULL);
+}
+
+static int pouch_fail_queue_batch_message_build(void *context,
+                                                lc_error *error) {
+  pouch_queue_batch_hook_state *state;
+
+  state = (pouch_queue_batch_hook_state *)context;
+  state->calls += 1U;
+  if (state->calls == state->fail_at) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "forced pouch queue batch construction failure", NULL,
+                        NULL, NULL);
+  }
+  return LC_OK;
 }
 
 static void test_index_docid_set_keeps_sorted_unique_docids(void **state) {
@@ -16305,6 +16324,81 @@ static void test_client_queue_dequeue_batch_returns_page(void **state) {
 }
 
 static void
+test_client_queue_dequeue_batch_rolls_back_unreturned_messages(void **state) {
+  pouch_queue_batch_hook_state hook_state;
+  lc_client *client;
+  lc_source *source;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_dequeue_batch_res batch;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  memset(&hook_state, 0, sizeof(hook_state));
+  client = NULL;
+  source = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  memset(&batch, 0, sizeof(batch));
+  lc_error_init(&error);
+  make_root("client-queue-batch-rollback", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "batch-rollback";
+  rc = lc_source_from_memory("one", strlen("one"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  rc = lc_source_from_memory("two", strlen("two"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  dequeue_req.queue = "batch-rollback";
+  dequeue_req.owner = "batch-rollback-worker";
+  dequeue_req.page_size = 2;
+  hook_state.fail_at = 2U;
+  lc_pouch_test_after_queue_batch_message_build_context = &hook_state;
+  lc_pouch_test_after_queue_batch_message_build_hook =
+      pouch_fail_queue_batch_message_build;
+  rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
+  lc_pouch_test_after_queue_batch_message_build_hook = NULL;
+  lc_pouch_test_after_queue_batch_message_build_context = NULL;
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_null(batch.messages);
+  assert_int_equal(batch.count, 0U);
+
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(batch.count, 2U);
+  assert_int_equal(batch.messages[0]->attempts, 1);
+  assert_int_equal(batch.messages[1]->attempts, 1);
+  rc = batch.messages[0]->ack(batch.messages[0], &error);
+  assert_int_equal(rc, LC_OK);
+  rc = batch.messages[1]->ack(batch.messages[1], &error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_dequeue_batch_cleanup(&batch);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_client_queue_dequeue_batch_preserves_fifo_payload_order(void **state) {
   lc_client *client;
   lc_source *source;
@@ -25515,6 +25609,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_txn_recovery_applies_queue_side_effects),
       cmocka_unit_test(test_client_queue_mutations_touch_notification_marker),
       cmocka_unit_test(test_client_queue_dequeue_batch_returns_page),
+      cmocka_unit_test(
+          test_client_queue_dequeue_batch_rolls_back_unreturned_messages),
       cmocka_unit_test(
           test_client_queue_dequeue_batch_preserves_fifo_payload_order),
       cmocka_unit_test(
