@@ -18,6 +18,8 @@ typedef struct lc_pouch_query_index_packed_cache_entry
     lc_pouch_query_index_packed_cache_entry;
 typedef struct lc_pouch_query_index_manifest_trust_entry
     lc_pouch_query_index_manifest_trust_entry;
+typedef struct lc_pouch_query_index_pending_entry
+    lc_pouch_query_index_pending_entry;
 typedef struct lc_pouch_fsync_request lc_pouch_fsync_request;
 typedef struct lc_pouch_fsync_batcher lc_pouch_fsync_batcher;
 typedef struct lc_pouch_state_metadata_append_batcher
@@ -105,6 +107,8 @@ struct lc_pouch {
   lc_allocator allocator;
   char *root_path;
   uint64_t segment_target_bytes;
+  uint64_t indexer_flush_docs;
+  uint64_t indexer_flush_interval_seconds;
   uint64_t fsync_batch_max_ops;
   unsigned long compaction_min_segment_count;
   uint64_t compaction_min_reclaimable_bytes;
@@ -211,6 +215,9 @@ struct lc_pouch {
   lc_pouch_query_index_packed_cache_entry *query_packed_cache;
   size_t query_packed_cache_count;
   lc_pouch_query_index_manifest_trust_entry *query_manifest_trust;
+  /* Exclusive-writer derived postings awaiting immutable publication. This is
+   * protected by indexer_mutex and deliberately stores no document bodies. */
+  lc_pouch_query_index_pending_entry *query_pending_index;
 };
 
 #ifdef LOCKDC_TEST_BUILD
@@ -241,6 +248,10 @@ size_t lc_pouch_test_resident_descriptor_count(lc_pouch *pouch);
 #endif
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);
+/** Writes best-effort exclusive-root clean checkpoints after all append fsyncs.
+ * Missing or invalid checkpoints only require a cold replay; they never alter
+ * durable record ordering. */
+void lc_pouch_state_checkpoint_clean_close(lc_pouch *pouch);
 int lc_pouch_single_writer_snapshot(lc_pouch *pouch, uint64_t *epoch_out);
 int lc_pouch_single_writer_enabled(lc_pouch *pouch);
 /**

@@ -4950,60 +4950,22 @@ run_index_query:
       } else if (plan.contains) {
         lc_pouch_query_index_key_collect_context collect_context;
         lc_pouch_generation candidate_seq;
-        lc_pouch_generation complete_seq;
         lc_pouch_generation exact_seq;
         size_t needle_len;
-        int text_complete_known;
         int text_complete;
-        int used_token_exact;
 
         memset(&collect_context, 0, sizeof(collect_context));
         collect_context.keys = &keys;
         collect_context.candidate_exact = 1;
         needle_len = strlen(plan.values[value_index]);
-        text_complete_known = 0;
-        used_token_exact = 0;
         exact_seq = 0UL;
-        if (strcmp(plan.field, "/...") == 0 && needle_len >= 4U &&
-            needle_len <= 8U) {
-          rc = lc_pouch_query_index_visit_any_text_token(
-              scan->client->pouch, scan->namespace_name,
-              plan.values[value_index], plan.ignore_case,
-              lc_pouch_query_index_key_collect_marked, &collect_context,
-              &exact_seq, error);
-          text_complete = 0;
-          used_token_exact = 1;
-        } else {
-          rc = lc_pouch_query_index_visit_contains_complete(
-              scan->client->pouch, scan->namespace_name, plan.field,
-              plan.values[value_index], plan.ignore_case,
-              lc_pouch_query_index_key_collect_marked, &collect_context,
-              &exact_seq, &text_complete, error);
-          text_complete_known = 1;
-        }
+        rc = lc_pouch_query_index_visit_contains_complete(
+            scan->client->pouch, scan->namespace_name, plan.field,
+            plan.values[value_index], plan.ignore_case,
+            lc_pouch_query_index_key_collect_marked, &collect_context,
+            &exact_seq, &text_complete, error);
         if (rc == LC_OK && exact_seq > value_seq) {
           value_seq = exact_seq;
-        }
-        complete_seq = 0UL;
-        if (rc == LC_OK && !text_complete && !used_token_exact &&
-            !text_complete_known) {
-          rc = lc_pouch_query_index_contains_text_complete(
-              scan->client->pouch, scan->namespace_name, plan.field,
-              &text_complete, &complete_seq, error);
-        }
-        if (rc == LC_OK && complete_seq > value_seq) {
-          value_seq = complete_seq;
-        }
-        if (rc == LC_OK && used_token_exact && !text_complete &&
-            plan.value_count == 1U) {
-          size_t visible_count;
-
-          visible_count = 0U;
-          rc = lc_pouch_state_visible_count(
-              scan->client->pouch, scan->namespace_name, &visible_count, error);
-          if (rc == LC_OK && keys.count >= visible_count) {
-            text_complete = 1;
-          }
         }
         candidate_seq = 0UL;
         collect_context.candidate_exact = 0;
@@ -12298,11 +12260,10 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   if (rc != LC_OK) {
     goto cleanup;
   }
-  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
-                                      req->lease.key, NULL, error);
-  if (rc != LC_OK) {
-    goto cleanup;
-  }
+  /* The state-write precondition below validates this lease immediately before
+   * publishing the attachment. Keeping validation there avoids a stale
+   * preflight read and, for encrypted roots, a second decrypt of the parent
+   * record on every attachment write. */
   content_type = req->content_type != NULL && req->content_type[0] != '\0'
                      ? req->content_type
                      : "application/octet-stream";
@@ -14586,12 +14547,9 @@ int lc_pouch_client_flush_index_method(lc_client *self,
     return rc;
   }
   mode = req->mode != NULL && req->mode[0] != '\0' ? req->mode : "wait";
-  if (strcmp(mode, "wait") == 0) {
-    rc = lc_pouch_state_warm_namespace(client->pouch, namespace_name, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
-  }
+  /* Go disk's wait flush publishes state already accepted by the indexer.
+   * Replaying the state log or deserializing every newly published artifact
+   * here is neither required for correctness nor part of that contract. */
   index_seq = 0UL;
   memset(&index_result, 0, sizeof(index_result));
   if (strcmp(mode, "sync") == 0) {
@@ -14625,13 +14583,6 @@ int lc_pouch_client_flush_index_method(lc_client *self,
   }
   if (rc != LC_OK) {
     return rc;
-  }
-  if (strcmp(mode, "wait") == 0) {
-    rc = lc_pouch_query_index_warm_namespace(client->pouch, namespace_name,
-                                             error);
-    if (rc != LC_OK) {
-      return rc;
-    }
   }
   out->namespace_name = lc_strdup_local(namespace_name);
   out->mode = lc_strdup_local(mode);

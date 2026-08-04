@@ -75,6 +75,8 @@ int lc_pouch_query_index_ensure_current(lc_pouch *pouch,
                                         int validate_current,
                                         lc_pouch_query_index_flush_result *out,
                                         lc_error *error);
+/* Preloads the manifest, document table, and query projections for a namespace.
+ */
 int lc_pouch_query_index_warm_namespace(lc_pouch *pouch,
                                         const char *namespace_name,
                                         lc_error *error);
@@ -85,6 +87,10 @@ void lc_pouch_query_index_note_state_write(
 void lc_pouch_query_index_note_state_delete(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const lc_pouch_state_write_result *result);
+/** Returns whether a complete exclusive-writer pending memtable has reached
+ * `document_limit`. The caller must hold `pouch->indexer_mutex`. */
+int lc_pouch_query_index_pending_document_limit_reached_locked(
+    lc_pouch *pouch, const char *namespace_name, uint64_t document_limit);
 int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_query_index_row_visit_fn visit,
                                void *context, lc_pouch_generation *index_seq,
@@ -146,13 +152,6 @@ int lc_pouch_query_index_visit_contains_complete(
     const char *needle, int ignore_case,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     lc_pouch_generation *index_seq, int *complete, lc_error *error);
-int lc_pouch_query_index_contains_text_complete(
-    lc_pouch *pouch, const char *namespace_name, const char *field,
-    int *complete, lc_pouch_generation *index_seq, lc_error *error);
-int lc_pouch_query_index_visit_any_text_token(
-    lc_pouch *pouch, const char *namespace_name, const char *needle,
-    int ignore_case, lc_pouch_query_index_key_visit_fn visit, void *context,
-    lc_pouch_generation *index_seq, lc_error *error);
 int lc_pouch_query_index_visit_contains_candidates(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const char *needle, int ignore_case,

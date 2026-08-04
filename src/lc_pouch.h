@@ -14,6 +14,13 @@ typedef lc_i64 lc_pouch_unix_seconds;
 
 typedef struct lc_pouch_open_options {
   uint64_t segment_target_bytes;
+  /** Maximum namespace mutations accumulated by the asynchronous indexer
+   * before it publishes an immutable generation. Zero selects the Go-disk
+   * default of 2,000. */
+  uint64_t indexer_flush_docs;
+  /** Maximum seconds the asynchronous indexer retains its first unflushed
+   * mutation. Zero selects the Go-disk disk-store default of ten seconds. */
+  uint64_t indexer_flush_interval_seconds;
   unsigned long compaction_min_segment_count;
   uint64_t compaction_min_reclaimable_bytes;
   /**
@@ -97,6 +104,8 @@ typedef struct lc_pouch_status {
   char *layout_name;
   unsigned long layout_version;
   uint64_t segment_target_bytes;
+  uint64_t indexer_flush_docs;
+  uint64_t indexer_flush_interval_seconds;
   unsigned long compaction_min_segment_count;
   uint64_t compaction_min_reclaimable_bytes;
   uint64_t compaction_interval_seconds;

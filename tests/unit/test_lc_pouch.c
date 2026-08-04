@@ -2003,14 +2003,17 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   lc_pouch_index_term_generation decoded;
   lc_pouch_index_docid_set numeric_set;
   lc_pouch_index_docid_set string_set;
+  lc_pouch_index_docid_set trigram_set;
   char *bytes;
   size_t length;
   unsigned long numeric_term_id;
   unsigned long numeric_term_id_again;
   unsigned long string_term_id;
+  unsigned long trigram_term_id;
   unsigned long found_term_id;
   unsigned long numeric_doc_ids[3];
   unsigned long string_doc_ids[64];
+  unsigned long trigram_doc_ids[2];
   size_t index;
   int rc;
 
@@ -2021,6 +2024,7 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   memset(&decoded, 0, sizeof(decoded));
   memset(&numeric_set, 0, sizeof(numeric_set));
   memset(&string_set, 0, sizeof(string_set));
+  memset(&trigram_set, 0, sizeof(trigram_set));
   bytes = NULL;
   length = 0U;
 
@@ -2044,6 +2048,10 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
                                              &error);
   assert_int_equal(rc, LC_OK);
   assert_true(string_term_id != numeric_term_id);
+  rc = lc_pouch_index_term_table_append_trigram_trusted(
+      &allocator, &generation.terms, "2f6e", 0x616263UL, &trigram_term_id,
+      &error);
+  assert_int_equal(rc, LC_OK);
 
   numeric_doc_ids[0] = 1UL;
   numeric_doc_ids[1] = 3UL;
@@ -2058,6 +2066,12 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   rc = lc_pouch_index_term_posting_table_put(&allocator, &generation.postings,
                                              string_term_id, string_doc_ids,
                                              64U, &error);
+  assert_int_equal(rc, LC_OK);
+  trigram_doc_ids[0] = 2UL;
+  trigram_doc_ids[1] = 6UL;
+  rc = lc_pouch_index_term_posting_table_put(&allocator, &generation.postings,
+                                             trigram_term_id, trigram_doc_ids,
+                                             2U, &error);
   assert_int_equal(rc, LC_OK);
 
   rc = lc_pouch_index_term_generation_encode(&generation, &allocator, &bytes,
@@ -2094,11 +2108,189 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   assert_int_equal(string_set.items[0], 0);
   assert_int_equal(string_set.items[63], 63);
 
+  assert_true(lc_pouch_index_term_table_find(&decoded.terms, "2f6e", "616263",
+                                             's', &found_term_id));
+  assert_int_equal(found_term_id, trigram_term_id);
+  rc = lc_pouch_index_term_posting_table_append_to_set(
+      &decoded.postings, found_term_id, &trigram_set, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(trigram_set.count, 2);
+  assert_int_equal(trigram_set.items[0], 2);
+  assert_int_equal(trigram_set.items[1], 6);
+
   lc_pouch_index_docid_set_cleanup(&allocator, &numeric_set);
   lc_pouch_index_docid_set_cleanup(&allocator, &string_set);
+  lc_pouch_index_docid_set_cleanup(&allocator, &trigram_set);
   lc_pouch_index_term_generation_cleanup(&allocator, &decoded);
   lc_pouch_index_term_generation_cleanup(&allocator, &generation);
   lc_free_with_allocator(&allocator, bytes);
+  lc_error_cleanup(&error);
+}
+
+static void test_index_term_generation_reads_v1_artifact(void **state) {
+  static const unsigned char legacy_bytes[] = {'L',
+                                               'P',
+                                               'I',
+                                               'T',
+                                               'G',
+                                               'E',
+                                               'N',
+                                               '1',
+                                               1U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               17U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               1U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               2U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               2U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               'v',
+                                               '1',
+                                               '\0',
+                                               1U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               1U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               1U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               (unsigned char)'s',
+                                               4U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               '2',
+                                               'f',
+                                               '7',
+                                               '6',
+                                               '\0',
+                                               2U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               '3',
+                                               '1',
+                                               '\0',
+                                               1U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               (unsigned char)'s',
+                                               1U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               3U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               1U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               0U,
+                                               3U};
+  lc_allocator allocator;
+  lc_error error;
+  lc_pouch_index_term_generation generation;
+  lc_pouch_index_docid_set docids;
+  unsigned long term_id;
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&generation, 0, sizeof(generation));
+  memset(&docids, 0, sizeof(docids));
+  term_id = 0UL;
+  rc = lc_pouch_index_term_generation_decode(
+      &allocator, (const char *)legacy_bytes, sizeof(legacy_bytes), 17UL, 1UL,
+      2UL, &generation, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(generation.namespace_name, "v1");
+  assert_true(lc_pouch_index_term_table_find(&generation.terms, "2f76", "31",
+                                             's', &term_id));
+  assert_int_equal(term_id, 1);
+  rc = lc_pouch_index_term_posting_table_append_to_set(
+      &generation.postings, term_id, &docids, &allocator, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(docids.count, 1);
+  assert_int_equal(docids.items[0], 3);
+
+  lc_pouch_index_docid_set_cleanup(&allocator, &docids);
+  lc_pouch_index_term_generation_cleanup(&allocator, &generation);
   lc_error_cleanup(&error);
 }
 
@@ -4220,6 +4412,103 @@ test_single_writer_rebuilds_index_without_advisory_sequence(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_single_writer_clean_checkpoint_restores_index_seq(void **state) {
+  lc_pouch *pouch;
+  lc_source *source;
+  lc_pouch_state_write_result first_write;
+  lc_pouch_state_write_result second_write;
+  lc_pouch_state_write_result third_write;
+  lc_pouch_state_write_result fourth_write;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char *checkpoint_path;
+  lc_pouch_generation index_seq;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  namespace_path = NULL;
+  checkpoint_path = NULL;
+  index_seq = 0UL;
+  memset(&first_write, 0, sizeof(first_write));
+  memset(&second_write, 0, sizeof(second_write));
+  memset(&third_write, 0, sizeof(third_write));
+  memset(&fourth_write, 0, sizeof(fourth_write));
+  lc_error_init(&error);
+  make_root("single-writer-clean-checkpoint", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("first", strlen("first"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/first", source, NULL,
+                            &first_write, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  rc = lc_source_from_memory("second", strlen("second"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/second", source, NULL,
+                            &second_write, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  rc = lc_source_from_memory("third", strlen("third"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/third", source, NULL,
+                            &third_write, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  namespace_path = lc_pouch_namespace_path(NULL, root, "default");
+  assert_non_null(namespace_path);
+  checkpoint_path = lc_pouch_path_join(NULL, namespace_path, "sequence.clean");
+  assert_non_null(checkpoint_path);
+  assert_path_file_contains(namespace_path, "sequence.clean", "max=3\n");
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_index_seq(pouch, "default", &index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(index_seq, third_write.index_seq);
+
+  rc = lc_source_from_memory("fourth", strlen("fourth"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/fourth", source, NULL,
+                            &fourth_write, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  assert_path_file_contains(namespace_path, "sequence.clean", "invalid\n");
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  write_text_file(checkpoint_path, "invalid\n");
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  index_seq = 0UL;
+  rc = lc_pouch_state_index_seq(pouch, "default", &index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(index_seq, fourth_write.index_seq);
+
+  lc_pouch_state_write_result_cleanup(NULL, &fourth_write);
+  lc_pouch_state_write_result_cleanup(NULL, &third_write);
+  lc_pouch_state_write_result_cleanup(NULL, &second_write);
+  lc_pouch_state_write_result_cleanup(NULL, &first_write);
+  lc_pouch_close(pouch);
+  lc_free_with_allocator(NULL, checkpoint_path);
+  lc_free_with_allocator(NULL, namespace_path);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_single_writer_runtime_control_and_ha_probe(void **state) {
   lc_pouch *writer;
   lc_pouch *peer;
@@ -5411,6 +5700,8 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   cleanup_root(root);
   assert_true(snprintf(endpoint, sizeof(endpoint),
                        "pouch://%s?durable_sync=true&segment_target_bytes=4096&"
+                       "indexer_flush_docs=64&"
+                       "indexer_flush_interval_seconds=1&"
                        "fsync_batch_max_ops=0&"
                        "queue_watch=true&"
                        "background_compaction=false&"
@@ -5425,6 +5716,8 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(status.durable_sync);
   assert_int_equal(status.segment_target_bytes, 4096U);
+  assert_int_equal(status.indexer_flush_docs, 64U);
+  assert_int_equal(status.indexer_flush_interval_seconds, 1U);
   assert_int_equal(status.fsync_batch_max_ops, 0U);
   assert_false(status.background_compaction_enabled);
   assert_true(status.compaction_throttling_disabled);
@@ -5473,6 +5766,8 @@ static void test_pouch_defaults_and_post_mutation_janitor(void **state) {
   rc = lc_pouch_status_read(pouch, &status, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(status.durable_sync);
+  assert_int_equal(status.indexer_flush_docs, 2000U);
+  assert_int_equal(status.indexer_flush_interval_seconds, 10U);
   assert_true(status.background_compaction_enabled);
   assert_false(status.compaction_throttling_disabled);
   assert_int_equal(status.compaction_interval_seconds, 30U * 60U);
@@ -19941,8 +20236,8 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
                                       "706c616e6e696e67");
   assert_query_index_segment_contains(namespace_path, "query.index.lcpt3g",
                                       "6e616e");
-  assert_query_index_segment_contains(namespace_path, "query.index.lcpt3g",
-                                      "2f2e2e2e");
+  assert_query_index_segment_not_contains(namespace_path, "query.index.lcpt3g",
+                                          "2f2e2e2e");
 
   snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
   query_req.cursor = cursor;
@@ -20963,6 +21258,104 @@ test_query_keys_index_long_strings_use_validated_candidates(void **state) {
 }
 
 static void
+test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture contains_page;
+  lc_error error;
+  char root[512];
+  char *match_value;
+  char *other_value;
+  char *json;
+  size_t value_length;
+  size_t json_length;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  match_value = NULL;
+  other_value = NULL;
+  json = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&contains_page, 0, sizeof(contains_page));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-keys-index-large-strings", root, sizeof(root));
+  cleanup_root(root);
+  open_pouch_client(root, &client, &error);
+
+  value_length = (64U * 1024U) + 128U;
+  match_value = (char *)malloc(value_length + 1U);
+  other_value = (char *)malloc(value_length + 1U);
+  assert_non_null(match_value);
+  assert_non_null(other_value);
+  memset(match_value, 'a', value_length);
+  memset(other_value, 'b', value_length);
+  memcpy(match_value + (value_length / 2U), "needle", sizeof("needle") - 1U);
+  match_value[value_length] = '\0';
+  other_value[value_length] = '\0';
+
+  json_length = value_length + 32U;
+  json = (char *)malloc(json_length);
+  assert_non_null(json);
+  snprintf(json, json_length, "{\"payload\":\"%s\"}", match_value);
+  lc_update_req_init(&update_req);
+  update_req.lease.namespace_name = "docs/query-index-large-strings";
+  update_req.lease.key = "doc/match";
+  rc = lc_source_from_memory(json, strlen(json), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_update_res_cleanup(&update_res);
+
+  snprintf(json, json_length, "{\"payload\":\"%s\"}", other_value);
+  lc_update_req_init(&update_req);
+  update_req.lease.namespace_name = "docs/query-index-large-strings";
+  update_req.lease.key = "doc/other";
+  rc = lc_source_from_memory(json, strlen(json), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_update_res_cleanup(&update_res);
+
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = "docs/query-index-large-strings";
+  query_req.selector_json =
+      "{\"contains\":{\"field\":\"/payload\",\"value\":\"needle\"}}";
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  query_req.limit = 10L;
+  rc = client->query_keys(client, &query_req, &handler, &contains_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(contains_page.count, 1);
+  assert_true(pouch_query_capture_has(&contains_page, "doc/match"));
+  assert_false(pouch_query_capture_has(&contains_page, "doc/other"));
+
+  lc_query_res_cleanup(&query_res);
+  free(json);
+  free(other_value);
+  free(match_value);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_query_keys_index_date_lql_filters_temporal_candidates(void **state) {
   lc_client *client;
   lc_pouch *pouch;
@@ -21882,11 +22275,6 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   char root[512];
   unsigned long delete_version;
   unsigned long stale_repair_version;
-  size_t warmed_artifact_cache_count;
-  size_t warmed_doc_table_cache_count;
-  size_t warmed_generation_cache_count;
-  size_t warmed_packed_cache_count;
-  void *warmed_manifest_trust;
   int rc;
 
   (void)state;
@@ -22032,6 +22420,12 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_true(snprintf(endpoint, sizeof(endpoint),
                        "pouch://%s?single_writer=true", root) > 0);
   open_pouch_client_endpoint(endpoint, &client, &error);
+  assert_true(((lc_client_handle *)client)->pouch->query_packed_cache_count >
+              0U);
+  assert_true(((lc_client_handle *)client)->pouch->query_doc_table_cache_count >
+              0U);
+  assert_true(
+      ((lc_client_handle *)client)->pouch->query_generation_cache_count > 0U);
 
   flush_req.mode = "wait";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
@@ -22039,23 +22433,8 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_string_equal(flush_res.mode, "wait");
   assert_true(((lc_client_handle *)client)->pouch->query_packed_cache_count >
               0U);
-  assert_true(((lc_client_handle *)client)->pouch->query_doc_table_cache_count >
-              0U);
-  assert_true(
-      ((lc_client_handle *)client)->pouch->query_generation_cache_count > 0U);
   assert_true(((lc_client_handle *)client)->pouch->query_artifact_cache_count >
               0U);
-  warmed_artifact_cache_count =
-      ((lc_client_handle *)client)->pouch->query_artifact_cache_count;
-  warmed_doc_table_cache_count =
-      ((lc_client_handle *)client)->pouch->query_doc_table_cache_count;
-  warmed_generation_cache_count =
-      ((lc_client_handle *)client)->pouch->query_generation_cache_count;
-  warmed_packed_cache_count =
-      ((lc_client_handle *)client)->pouch->query_packed_cache_count;
-  warmed_manifest_trust =
-      ((lc_client_handle *)client)->pouch->query_manifest_trust;
-  assert_non_null(warmed_manifest_trust);
   lc_index_flush_res_cleanup(&flush_res);
 
   query_req.namespace_name = "docs/flush";
@@ -22069,20 +22448,11 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_true(pouch_query_capture_has(&capture, "doc/live"));
   assert_true(((lc_client_handle *)client)->pouch->query_packed_cache_count >
               0U);
-  assert_int_equal(
-      ((lc_client_handle *)client)->pouch->query_artifact_cache_count,
-      warmed_artifact_cache_count);
-  assert_int_equal(
-      ((lc_client_handle *)client)->pouch->query_doc_table_cache_count,
-      warmed_doc_table_cache_count);
-  assert_int_equal(
-      ((lc_client_handle *)client)->pouch->query_generation_cache_count,
-      warmed_generation_cache_count);
-  assert_int_equal(
-      ((lc_client_handle *)client)->pouch->query_packed_cache_count,
-      warmed_packed_cache_count);
-  assert_ptr_equal(((lc_client_handle *)client)->pouch->query_manifest_trust,
-                   warmed_manifest_trust);
+  /* Open-time warming and first-use loading retain valid index artifacts. */
+  assert_true(((lc_client_handle *)client)->pouch->query_doc_table_cache_count >
+              0U);
+  assert_true(
+      ((lc_client_handle *)client)->pouch->query_generation_cache_count > 0U);
   lc_query_res_cleanup(&query_res);
   lc_client_close(client);
   client = NULL;
@@ -22114,8 +22484,10 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_query_index_segment_contains(namespace_path, "query.index",
                                       "row_count=3");
   lc_index_flush_res_cleanup(&flush_res);
-  assert_int_equal(
-      ((lc_client_handle *)client)->pouch->query_packed_cache_count, 0);
+  /* A validated synchronous repair adopts its newly written packed segment;
+   * invalid artifacts from the retired manifest are not retained. */
+  assert_true(((lc_client_handle *)client)->pouch->query_packed_cache_count >
+              0U);
 
   newest_query_index_path(namespace_path, "query.index.lcpttg", exact_term_path,
                           sizeof(exact_term_path));
@@ -24419,6 +24791,7 @@ int main(void) {
           test_index_term_keys_build_exact_for_field_rejects_invalid_values),
       cmocka_unit_test(test_index_term_fields_select_merged_range),
       cmocka_unit_test(test_index_term_generation_roundtrips_typed_postings),
+      cmocka_unit_test(test_index_term_generation_reads_v1_artifact),
       cmocka_unit_test(
           test_index_term_generation_rejects_corrupt_identity_and_payload),
       cmocka_unit_test(test_index_posting_roundtrips_sparse_docids),
@@ -24562,6 +24935,7 @@ int main(void) {
       cmocka_unit_test(test_single_writer_acquire_preserves_projection_cache),
       cmocka_unit_test(
           test_single_writer_rebuilds_index_without_advisory_sequence),
+      cmocka_unit_test(test_single_writer_clean_checkpoint_restores_index_seq),
       cmocka_unit_test(test_single_writer_runtime_control_and_ha_probe),
       cmocka_unit_test(test_writer_root_lock_retains_creating_allocator),
       cmocka_unit_test(
@@ -24644,6 +25018,8 @@ int main(void) {
       cmocka_unit_test(test_query_keys_index_text_stops_after_target_field),
       cmocka_unit_test(
           test_query_keys_index_long_strings_use_validated_candidates),
+      cmocka_unit_test(
+          test_query_keys_index_large_strings_use_fallback_candidates),
       cmocka_unit_test(
           test_query_keys_index_date_lql_filters_temporal_candidates),
       cmocka_unit_test(

@@ -415,13 +415,17 @@ static int lockdc_bench_open_client(const char *root, const char *crypto_key,
     written = snprintf(endpoint, sizeof(endpoint),
                        "pouch://%s?pouch_single_writer=true&"
                        "durable_sync=%s&"
+                       "indexer_flush_docs=64&"
+                       "indexer_flush_interval_seconds=1&"
                        "segment_target_bytes=%" PRIu64,
                        root, durable_sync != 0 ? "true" : "false",
                        segment_target_bytes);
   } else {
     written = snprintf(endpoint, sizeof(endpoint),
                        "pouch://%s?pouch_single_writer=true&"
-                       "durable_sync=%s",
+                       "durable_sync=%s&"
+                       "indexer_flush_docs=64&"
+                       "indexer_flush_interval_seconds=1",
                        root, durable_sync != 0 ? "true" : "false");
   }
   if (written <= 0 || (size_t)written >= sizeof(endpoint)) {

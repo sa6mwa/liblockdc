@@ -46,6 +46,7 @@
 #define LC_POUCH_STATE_HIGH_WATER_KEY ".lockd/high-water"
 #define LC_POUCH_STATE_INDEX_TRAILER_BYTES 12U
 #define LC_POUCH_STATE_INDEX_TRAILER_MAGIC 0x4c435349UL
+#define LC_POUCH_STATE_CLEAN_INDEX_CHECKPOINT_LEAF "sequence.clean"
 
 #ifdef LOCKDC_TEST_BUILD
 lc_pouch_test_hook lc_pouch_test_after_snapshot_write_hook = NULL;
@@ -583,6 +584,59 @@ static int lc_pouch_state_commit_group_end(lc_pouch_state_commit_group *group,
   }
   lc_pouch_state_commit_group_free(group);
   return rc;
+}
+
+static int lc_pouch_state_clean_checkpoint_read(
+    lc_pouch *pouch, const lc_pouch_namespace_manifest *manifest, int *valid,
+    lc_pouch_generation *value, lc_error *error) {
+  char *path;
+  char line[96];
+  lc_u64 parsed;
+  FILE *fp;
+  int rc;
+
+  if (pouch == NULL || manifest == NULL || manifest->namespace_path == NULL ||
+      valid == NULL || value == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch clean checkpoint requires namespace outputs",
+                        NULL, NULL, "pouch");
+  }
+  *valid = 0;
+  *value = 0UL;
+  path = lc_pouch_path_join(&pouch->allocator, manifest->namespace_path,
+                            LC_POUCH_STATE_CLEAN_INDEX_CHECKPOINT_LEAF);
+  if (path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch clean checkpoint path", NULL,
+                        NULL, "pouch");
+  }
+  fp = fopen(path, "rb");
+  if (fp == NULL) {
+    if (errno == ENOENT) {
+      lc_free_with_allocator(&pouch->allocator, path);
+      return LC_OK;
+    }
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to read pouch clean checkpoint", strerror(errno),
+                      NULL, "pouch");
+    lc_free_with_allocator(&pouch->allocator, path);
+    return rc;
+  }
+  if (fgets(line, sizeof(line), fp) != NULL && strncmp(line, "max=", 4U) == 0 &&
+      lc_parse_u64_base10_range_checked(line + 4U, strlen(line + 4U),
+                                        &parsed)) {
+    *value = (lc_pouch_generation)parsed;
+    *valid = 1;
+  }
+  if (fclose(fp) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to close pouch clean checkpoint", strerror(errno),
+                      NULL, "pouch");
+    lc_free_with_allocator(&pouch->allocator, path);
+    return rc;
+  }
+  lc_free_with_allocator(&pouch->allocator, path);
+  return LC_OK;
 }
 
 static int lc_pouch_state_defer_fsync(lc_pouch *pouch, int fd,
@@ -2591,6 +2645,7 @@ struct lc_pouch_namespace_logstore {
   lc_pouch_generation max_version;
   uint64_t writer_mode_epoch;
   int initialized;
+  int clean_checkpoint_invalidated;
   int decision_recovery_checked;
   lc_pouch_state_cache_record *records;
   lc_pouch_state_cache_record **record_buckets;
@@ -3680,6 +3735,81 @@ void lc_pouch_state_cache_cleanup(lc_pouch *pouch) {
   pouch->namespace_logstores = NULL;
   memset(pouch->namespace_logstore_buckets, 0,
          sizeof(pouch->namespace_logstore_buckets));
+}
+
+/* A clean checkpoint is only a cold-start hint. It is invalidated durably
+ * before the next exclusive reservation, so an abort or interrupted append
+ * can never make a later process trust an older high-water value. */
+static int lc_pouch_state_clean_checkpoint_invalidate(
+    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
+    const char *namespace_path, lc_error *error) {
+  char *path;
+  struct stat st;
+  int rc;
+
+  if (pouch == NULL || cache == NULL || namespace_path == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch clean checkpoint requires namespace state", NULL,
+                        NULL, "pouch");
+  }
+  if (cache->clean_checkpoint_invalidated) {
+    return LC_OK;
+  }
+  path = lc_pouch_path_join(&pouch->allocator, namespace_path,
+                            LC_POUCH_STATE_CLEAN_INDEX_CHECKPOINT_LEAF);
+  if (path == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch clean checkpoint path", NULL,
+                        NULL, "pouch");
+  }
+  if (lstat(path, &st) != 0) {
+    if (errno == ENOENT) {
+      cache->clean_checkpoint_invalidated = 1;
+      lc_free_with_allocator(&pouch->allocator, path);
+      return LC_OK;
+    }
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to inspect pouch clean checkpoint",
+                      strerror(errno), NULL, "pouch");
+    lc_free_with_allocator(&pouch->allocator, path);
+    return rc;
+  }
+  rc = lc_pouch_path_write_text_file(path, "invalid\n", error);
+  lc_free_with_allocator(&pouch->allocator, path);
+  if (rc == LC_OK) {
+    cache->clean_checkpoint_invalidated = 1;
+  }
+  return rc;
+}
+
+void lc_pouch_state_checkpoint_clean_close(lc_pouch *pouch) {
+  lc_pouch_namespace_logstore *ns;
+
+  if (pouch == NULL || !lc_pouch_single_writer_enabled(pouch)) {
+    return;
+  }
+  for (ns = pouch->namespace_logstores; ns != NULL; ns = ns->next) {
+    char *path;
+    char generation[32];
+    char line[96];
+    lc_error error;
+
+    if (!ns->initialized || ns->namespace_path == NULL ||
+        lc_u64_format_base10((lc_u64)ns->max_version, generation,
+                             sizeof(generation)) < 0 ||
+        snprintf(line, sizeof(line), "max=%s\n", generation) < 0) {
+      continue;
+    }
+    path = lc_pouch_path_join(&pouch->allocator, ns->namespace_path,
+                              LC_POUCH_STATE_CLEAN_INDEX_CHECKPOINT_LEAF);
+    if (path == NULL) {
+      continue;
+    }
+    lc_error_init(&error);
+    (void)lc_pouch_path_write_text_file(path, line, &error);
+    lc_error_cleanup(&error);
+    lc_free_with_allocator(&pouch->allocator, path);
+  }
 }
 
 void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch) {
@@ -5358,7 +5488,15 @@ static int lc_pouch_state_reserve_index_records(
                         NULL, "pouch");
   }
   if (lc_pouch_single_writer_enabled(pouch)) {
-    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
+    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 1, error);
+    if (cache == NULL) {
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+    rc = lc_pouch_state_clean_checkpoint_invalidate(
+        pouch, cache, manifest->namespace_path, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
     if (cache != NULL && cache->initialized) {
       base = manifest->state_max_version;
       if (cache->max_version > base) {
@@ -5376,9 +5514,9 @@ static int lc_pouch_state_reserve_index_records(
         *first_index_out = base + 1UL;
       }
       /* The exclusive owner has one resident allocator, so its projection is
-       * authoritative while live. After close, abort, or recovery, replay
-       * derives the high-water mark from finalized records. The sequence file
-       * remains an advisory cross-process allocator for shared-root mode. */
+       * authoritative while live. A normal close checkpoints this value for
+       * the next cold index read; abort or recovery replays finalized records.
+       * The sequence file remains a shared-root allocator. */
       return LC_OK;
     }
   }
@@ -6884,11 +7022,11 @@ static int lc_pouch_state_scan_file_max_version(
   for (;;) {
     lc_pouch_record_header header;
     unsigned char encoded[LC_POUCH_STATE_RECORD_HEADER_BYTES];
-    unsigned char version_meta[8];
-    lc_pouch_generation version;
+    unsigned char index_meta[LC_POUCH_STATE_INDEX_TRAILER_BYTES];
+    lc_pouch_generation index_seq;
     size_t got;
 
-    version = 0UL;
+    index_seq = 0UL;
     got = fread(encoded, 1U, sizeof(encoded), fp);
     if (got == 0U) {
       if (ferror(fp)) {
@@ -6952,18 +7090,33 @@ static int lc_pouch_state_scan_file_max_version(
     if (rc != LC_OK) {
       break;
     }
-    if (header.meta_len < sizeof(version_meta)) {
+    if ((header.type == LC_POUCH_STATE_RECORD_HIGH_WATER &&
+         header.meta_len != 8U) ||
+        (header.type != LC_POUCH_STATE_RECORD_HIGH_WATER &&
+         header.meta_len < LC_POUCH_STATE_INDEX_TRAILER_BYTES)) {
       rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                        "pouch state sequence metadata is truncated", NULL,
-                        NULL, "pouch");
+                        "pouch state sequence metadata is invalid", NULL, NULL,
+                        "pouch");
       break;
     }
     rc = lc_pouch_state_skip_file_bytes(fp, (uint64_t)header.key_len, error);
     if (rc != LC_OK) {
       break;
     }
-    got = fread(version_meta, 1U, sizeof(version_meta), fp);
-    if (got != sizeof(version_meta)) {
+    if (header.type == LC_POUCH_STATE_RECORD_HIGH_WATER) {
+      got = fread(index_meta, 1U, 8U, fp);
+    } else {
+      rc = lc_pouch_state_skip_file_bytes(
+          fp, (uint64_t)(header.meta_len - LC_POUCH_STATE_INDEX_TRAILER_BYTES),
+          error);
+      if (rc != LC_OK) {
+        break;
+      }
+      got = fread(index_meta, 1U, sizeof(index_meta), fp);
+    }
+    if (got != (header.type == LC_POUCH_STATE_RECORD_HIGH_WATER
+                    ? 8U
+                    : sizeof(index_meta))) {
       if (allow_truncated_tail && !ferror(fp)) {
         break;
       }
@@ -6972,18 +7125,18 @@ static int lc_pouch_state_scan_file_max_version(
                         NULL, "pouch");
       break;
     }
-    rc = lc_pouch_state_decode_generation(lc_pouch_state_get64(version_meta),
-                                          &version, error);
+    if (header.type == LC_POUCH_STATE_RECORD_HIGH_WATER) {
+      rc = lc_pouch_state_decode_generation(lc_pouch_state_get64(index_meta),
+                                            &index_seq, error);
+    } else {
+      rc = lc_pouch_state_meta_index_seq(index_meta, sizeof(index_meta),
+                                         &index_seq, error);
+    }
     if (rc != LC_OK) {
       break;
     }
-    if (version > *max_version) {
-      *max_version = version;
-    }
-    rc = lc_pouch_state_skip_file_bytes(
-        fp, (uint64_t)(header.meta_len - sizeof(version_meta)), error);
-    if (rc != LC_OK) {
-      break;
+    if (index_seq > *max_version) {
+      *max_version = index_seq;
     }
     rc = lc_pouch_state_skip_file_bytes(fp, header.payload_len, error);
     if (rc != LC_OK) {
@@ -14189,7 +14342,9 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
   lc_pouch_namespace_manifest manifest;
   lc_pouch_namespace_logstore *cache;
   lc_pouch_state_process_namespace_mutex *process_mutex;
+  lc_pouch_generation checkpoint;
   uint64_t writer_mode_epoch;
+  int checkpoint_valid;
   int single_writer;
   int rc;
 
@@ -14201,6 +14356,8 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
                         NULL, NULL, NULL);
   }
   *out = 0UL;
+  checkpoint = 0UL;
+  checkpoint_valid = 0;
   process_mutex = NULL;
   single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
   cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
@@ -14234,11 +14391,19 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
       *out = cache->max_version > manifest.state_max_version
                  ? cache->max_version
                  : manifest.state_max_version;
-    } else if (manifest.state_max_version > 0UL) {
-      *out = manifest.state_max_version;
-      rc = LC_OK;
     } else {
-      rc = lc_pouch_state_manifest_max_version(pouch, &manifest, out, error);
+      rc = lc_pouch_state_clean_checkpoint_read(
+          pouch, &manifest, &checkpoint_valid, &checkpoint, error);
+      if (rc == LC_OK && checkpoint_valid) {
+        *out = checkpoint > manifest.state_max_version
+                   ? checkpoint
+                   : manifest.state_max_version;
+      } else if (rc == LC_OK) {
+        /* A manifest high-water is a cache of the resident projection. Without
+         * a clean checkpoint it may lag a durable exclusive append, so only a
+         * finalized-record scan is safe after abort or crash recovery. */
+        rc = lc_pouch_state_manifest_max_version(pouch, &manifest, out, error);
+      }
     }
   } else {
     cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 1, error);

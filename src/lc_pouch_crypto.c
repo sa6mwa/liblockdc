@@ -1170,7 +1170,7 @@ int lc_pouch_crypto_test_check_byte_counter(uint64_t total, size_t delta,
 static int lc_pouch_crypto_encrypt_frame_to_memory(
     EVP_CIPHER_CTX *ctx, const unsigned char key[LC_POUCH_DEK_BYTES],
     const unsigned char nonce_prefix[LC_POUCH_NONCE_PREFIX_BYTES],
-    const char *context, size_t context_len, unsigned long counter,
+    const char *context, size_t context_len, unsigned long counter, int set_key,
     const unsigned char *plain, size_t plain_len, unsigned char *frame,
     size_t frame_capacity, size_t *frame_length_out, lc_error *error) {
   unsigned char *header;
@@ -1183,7 +1183,7 @@ static int lc_pouch_crypto_encrypt_frame_to_memory(
   int final_len;
   int aad_len;
 
-  if (ctx == NULL || key == NULL || nonce_prefix == NULL ||
+  if (ctx == NULL || (set_key && key == NULL) || nonce_prefix == NULL ||
       (plain_len > 0U && plain == NULL) || frame == NULL ||
       frame_length_out == NULL || plain_len > LC_POUCH_FRAME_PLAINTEXT_BYTES ||
       frame_capacity < 8U + plain_len + LC_POUCH_GCM_TAG_BYTES) {
@@ -1197,10 +1197,9 @@ static int lc_pouch_crypto_encrypt_frame_to_memory(
   lc_pouch_crypto_put32(header, counter);
   lc_pouch_crypto_put32(header + 4U, (unsigned long)plain_len);
   lc_pouch_crypto_nonce(nonce_prefix, counter, nonce);
-  if (EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1 ||
-      EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, sizeof(nonce), NULL) !=
-          1 ||
-      EVP_EncryptInit_ex(ctx, NULL, NULL, key, nonce) != 1 ||
+  /* The first frame installs the DEK; later frames retain it but always get a
+   * distinct nonce and complete authenticated GCM operation. */
+  if (EVP_EncryptInit_ex(ctx, NULL, NULL, set_key ? key : NULL, nonce) != 1 ||
       EVP_EncryptUpdate(ctx, NULL, &aad_len, header, 8) != 1 ||
       (context_len > 0U && EVP_EncryptUpdate(ctx, NULL, &aad_len,
                                              (const unsigned char *)context,
@@ -1229,10 +1228,26 @@ static int lc_pouch_crypto_encrypt_frame_to_memory(
   return LC_OK;
 }
 
+/* The cipher and nonce width are invariant for every frame in one payload.
+ * Reusing that setup preserves the framed format while avoiding an OpenSSL
+ * provider lookup for each independently authenticated frame. */
+static int lc_pouch_crypto_encrypt_context_begin(EVP_CIPHER_CTX *ctx,
+                                                 lc_error *error) {
+  if (ctx == NULL ||
+      EVP_EncryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1 ||
+      EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, LC_POUCH_NONCE_BYTES,
+                          NULL) != 1) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch payload cipher", NULL, NULL,
+                        "pouch");
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_crypto_encrypt_frame(
     int fd, EVP_CIPHER_CTX *ctx, const unsigned char key[LC_POUCH_DEK_BYTES],
     const unsigned char nonce_prefix[LC_POUCH_NONCE_PREFIX_BYTES],
-    const char *context, size_t context_len, unsigned long counter,
+    const char *context, size_t context_len, unsigned long counter, int set_key,
     const unsigned char *plain, size_t plain_len, uint64_t *cipher_total,
     unsigned long *stored_crc, lc_error *error) {
   unsigned char
@@ -1242,8 +1257,8 @@ static int lc_pouch_crypto_encrypt_frame(
 
   frame_len = 0U;
   rc = lc_pouch_crypto_encrypt_frame_to_memory(
-      ctx, key, nonce_prefix, context, context_len, counter, plain, plain_len,
-      frame, sizeof(frame), &frame_len, error);
+      ctx, key, nonce_prefix, context, context_len, counter, set_key, plain,
+      plain_len, frame, sizeof(frame), &frame_len, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -1689,8 +1704,8 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
   plain_total = 0UL;
   cipher_total = 0UL;
   counter = 0UL;
-  rc = LC_OK;
-  for (;;) {
+  rc = lc_pouch_crypto_encrypt_context_begin(ctx, error);
+  while (rc == LC_OK) {
     size_t got;
     size_t target;
 
@@ -1711,7 +1726,7 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
     }
     rc = lc_pouch_crypto_encrypt_frame(
         fd, ctx, crypto->data_key, desc.nonce_prefix, context, strlen(context),
-        counter, buffer, got, &cipher_total, stored_crc, error);
+        counter, counter == 0UL, buffer, got, &cipher_total, stored_crc, error);
     if (rc != LC_OK) {
       break;
     }
@@ -1727,7 +1742,7 @@ static int lc_pouch_crypto_stream_to_fd_crc_impl(
   if (rc == LC_OK) {
     rc = lc_pouch_crypto_encrypt_frame(
         fd, ctx, crypto->data_key, desc.nonce_prefix, context, strlen(context),
-        counter, buffer, 0U, &cipher_total, stored_crc, error);
+        counter, counter == 0UL, buffer, 0U, &cipher_total, stored_crc, error);
   }
   EVP_CIPHER_CTX_free(ctx);
   OPENSSL_cleanse(buffer, sizeof(buffer));
@@ -1947,8 +1962,8 @@ int lc_pouch_crypto_transform_memory(
   stored_length = 0U;
   plain_offset = 0U;
   counter = 0UL;
-  rc = LC_OK;
-  while (plain_offset < working_length) {
+  rc = lc_pouch_crypto_encrypt_context_begin(ctx, error);
+  while (rc == LC_OK && plain_offset < working_length) {
     size_t chunk;
     size_t frame_length;
 
@@ -1959,8 +1974,9 @@ int lc_pouch_crypto_transform_memory(
     }
     rc = lc_pouch_crypto_encrypt_frame_to_memory(
         ctx, crypto->data_key, desc.nonce_prefix, context, strlen(context),
-        counter, working + plain_offset, chunk, stored + stored_length,
-        stored_capacity - stored_length, &frame_length, error);
+        counter, counter == 0UL, working + plain_offset, chunk,
+        stored + stored_length, stored_capacity - stored_length, &frame_length,
+        error);
     if (rc != LC_OK) {
       break;
     }
@@ -1973,7 +1989,7 @@ int lc_pouch_crypto_transform_memory(
 
     rc = lc_pouch_crypto_encrypt_frame_to_memory(
         ctx, crypto->data_key, desc.nonce_prefix, context, strlen(context),
-        counter, &empty_plain, 0U, stored + stored_length,
+        counter, counter == 0UL, &empty_plain, 0U, stored + stored_length,
         stored_capacity - stored_length, &frame_length, error);
     if (rc == LC_OK) {
       stored_length += frame_length;

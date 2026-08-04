@@ -1058,6 +1058,8 @@ typedef struct lc_pouch_endpoint_options {
   int single_writer;
   int durable_sync;
   uint64_t segment_target_bytes;
+  uint64_t indexer_flush_docs;
+  uint64_t indexer_flush_interval_seconds;
   uint64_t fsync_batch_max_ops;
   int queue_watch;
   int background_compaction_enabled;
@@ -1326,6 +1328,26 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
                                      "segment_target_bytes",
                                      &options->segment_target_bytes, error);
+    lc_free_with_allocator(allocator, decoded_key);
+    return rc;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "indexer_flush_docs") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_indexer_flush_docs")) {
+    rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
+                                     "indexer_flush_docs",
+                                     &options->indexer_flush_docs, error);
+    lc_free_with_allocator(allocator, decoded_key);
+    return rc;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "indexer_flush_interval_seconds") ||
+      lc_query_part_equal(decoded_key, strlen(decoded_key),
+                          "pouch_indexer_flush_interval_seconds")) {
+    rc = lc_pouch_endpoint_parse_u64(
+        allocator, value, value_len, "indexer_flush_interval_seconds",
+        &options->indexer_flush_interval_seconds, error);
     lc_free_with_allocator(allocator, decoded_key);
     return rc;
   }
@@ -1887,6 +1909,10 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     pouch_open_options.durable_sync = pouch_endpoint_options.durable_sync;
     pouch_open_options.segment_target_bytes =
         pouch_endpoint_options.segment_target_bytes;
+    pouch_open_options.indexer_flush_docs =
+        pouch_endpoint_options.indexer_flush_docs;
+    pouch_open_options.indexer_flush_interval_seconds =
+        pouch_endpoint_options.indexer_flush_interval_seconds;
     pouch_open_options.fsync_batch_max_ops =
         pouch_endpoint_options.fsync_batch_max_ops;
     pouch_open_options.queue_watch = pouch_endpoint_options.queue_watch;

@@ -680,7 +680,13 @@ the public API or durable format.
   Go disk query/index internals are Go-native. Pouch uses C-native packed
   derived artifacts. Reason: indexes are derived from the authoritative
   logstore and may use a local format as long as query semantics, rebuild, and
-  performance intent are preserved.
+  performance intent are preserved. Pouch writes `LPITGEN1` term-generation
+  artifacts at format version 2: a sorted field dictionary is emitted once per
+  generation and terms refer to it by id; normalized three-byte trigrams are
+  encoded as three bytes rather than six hex characters. Version 1 artifacts,
+  which repeat the field and store every value as hex text, remain readable.
+  A failed or interrupted artifact upgrade is harmless because every index
+  artifact is derived and rebuilt from the authoritative state log.
 
 - TC cluster identity and TTL API:
   Go's internal TC cluster store takes an explicit identity and TTL. The current
@@ -805,6 +811,15 @@ the public API or durable format.
   the 64 MiB resolved default. It is a stored-record rolling threshold, so
   compression and encryption can change the segment count for the same input
   document workload.
+
+- Indexer batching:
+  `indexer_flush_docs` and `indexer_flush_interval_seconds` are fixed-width
+  direct Pouch open options and `pouch://` endpoint options. Zero selects the
+  Go disk-store defaults of 2,000 mutations and ten seconds. They only govern
+  asynchronous derived-index publication; durable state visibility and
+  `flush_index(mode=wait)` correctness are unchanged. Deployments that tune
+  Go disk's index writer may set the same bounds on Pouch, for example
+  `pouch://...?pouch_indexer_flush_docs=64&pouch_indexer_flush_interval_seconds=1`.
 
 - Filesystem capability policy and queue wake-up:
   Pouch detects NFS on Linux and BSD-family targets and exposes both detection
@@ -1193,9 +1208,13 @@ Required behavior:
   projection high-water mark and does not read, write, or lock the advisory
   `sequence` file on healthy mutations. Explicit shared-root mode reserves
   under `sequence.lock` so independent processes cannot reuse a sequence. A
-  close, abort, or recovery rebuilds the exclusive high-water mark from
-  finalized durable records; a stale or missing advisory file therefore cannot
-  change exclusive record ordering;
+  normal exclusive close writes a durable per-namespace clean checkpoint after
+  pending append syncs. A later cold index read may use that checkpoint instead
+  of replaying the namespace. The first subsequent mutation atomically marks
+  it invalid before reserving a record, and abort, crash recovery, a missing
+  checkpoint, or malformed checkpoint rebuilds from finalized durable records.
+  The checkpoint is therefore a performance hint only; it cannot change
+  exclusive record ordering;
 - in default exclusive mode, read current metadata from the resident
   projection, append through the resident writer, and retain the active segment
   descriptor across normal public operations. It must not rescan the manifest,
@@ -1304,9 +1323,10 @@ state mutation, the foreground path records only a small namespace marker on
 the opened Pouch handle. It never parses the document again, constructs
 postings, or retains a document body for later indexing. That handle's pthread
 indexer coalesces its markers and incrementally replays the authoritative state
-log for a namespace after 2,000 mutations for that namespace or ten seconds
-from its first unflushed mutation. The deadline is not restarted by later
-writes. Shared-root handles can each run an indexer, but still serialize
+log for a namespace after its configured distinct-document bound (2,000 by default) or
+its configured interval (ten seconds by default) from its first unflushed
+mutation. Repeated updates to one key replace that key's pending projection and
+do not advance the exclusive-writer document bound. The deadline is not restarted by later writes. Shared-root handles can each run an indexer, but still serialize
 publication through the durable namespace lock below.
 
 The durable state-index sequence is the sole index freshness boundary. A query
@@ -1315,6 +1335,17 @@ mismatch, it performs the same incremental replay synchronously when the
 background indexer has not yet published. Process exit can therefore leave
 only derived artifacts behind: the next synchronous query/flush repairs them
 from durable state without any lost document or in-memory body dependency.
+
+`flush_index(mode=wait)` publishes all state accepted by the indexer but does
+not deserialize every just-written derived artifact solely to populate a
+handle-local cache. This matches Go disk's flush boundary and keeps durable
+publication out of the query-cache hot path. The exclusive writer transfers a
+newly built, body-free trigram generation directly into its full-text cache;
+other query representations load lazily on first use, while open-time cache
+warming remains best effort. The packed binary artifact remains the sole
+durable source: reopened handles, shared roots, and cache-allocation failure
+use the normal validated packed-artifact decoder. No cache retains source JSON
+or full document bodies.
 
 Exclusive roots serialize derived artifact publication with a root-local flush
 mutex. Shared roots instead hold the namespace's durable cross-process write
@@ -1514,7 +1545,11 @@ Indexed query requirements:
   Recovery validates the manifest, header, and packed artifact signatures and
   rebuilds from the logstore if any derived write was interrupted or torn;
 - normal append flushes do not sweep the index directory for orphaned derived
-  artifacts. Full rebuild, repair/validated flush, and retired-segment cleanup
+  artifacts. Initial manifest bootstrap also skips a sweep because no artifact
+  can be referenced before that manifest is published; an interrupted
+  bootstrap can leave only unreachable derived files, which a later validated
+  repair or rebuild from an existing manifest reclaims. Full rebuilds from an
+  existing manifest, repair/validated flushes, and retired-segment cleanup
   paths perform orphan cleanup, so foreground append flush latency is not tied
   to directory size;
 - indexed queries may reuse per-client artifact-cache trust for segment headers
@@ -1531,6 +1566,12 @@ Indexed query requirements:
 - packed query-index artifacts are cached per client by file signature so one
   physical read/decrypt can serve document table, delete set, and term
   generation components for the same segment;
+- exclusive-writer roots eagerly construct immutable state and query-index
+  readers for existing namespaces at client open. This read-only derived cache
+  removes first-query decoding from the default fast path without publishing or
+  flushing data. Plain shared-root handles remain lazy to bound their optional
+  multi-writer memory footprint; encrypted or compressed roots retain eager
+  warming in either writer mode;
 - field-specific `contains` lookups report whether all text generations for
   the field are complete while collecting indexed candidates. The planner must
   not perform a second completeness-only artifact walk after a successful
@@ -1539,9 +1580,13 @@ Indexed query requirements:
   performance intent rather than rebuilding the full corpus on each flush;
 - full-text search must cover text in the full JSON document, including nested
   fields and long text fields, through the selected indexed engine;
-- `/...` full-text token and trigram terms are synthetic aggregate postings.
-  Whole-document `icontains` candidate selection must resolve those aggregate
-  postings directly, not scan concrete field-specific term dictionaries.
+- `/...` is a logical whole-document text selector, not a synthetic index
+  field. Pouch writes the same per-field raw trigrams as Go disk's default
+  index policy and unions matching field postings through the generation
+  cache's field directory. This avoids a second document scan and duplicate
+  aggregate postings during index publication; the normal text matcher still
+  verifies candidates against each concrete field. Older derived artifacts
+  with aggregate token postings remain readable and are replaced on rebuild.
 
 ## Staged State
 

@@ -70,9 +70,9 @@ static lc_pouch_writer_root_lock_entry *lc_pouch_writer_root_locks;
 #define LC_POUCH_WRITER_ROOT_LOCK_NONE 0
 #define LC_POUCH_WRITER_ROOT_LOCK_SHARED 1
 #define LC_POUCH_WRITER_ROOT_LOCK_EXCLUSIVE 2
-/* Match Go disk's default index writer batching policy. */
-#define LC_POUCH_INDEXER_FLUSH_DOCS 2000U
-#define LC_POUCH_INDEXER_FLUSH_INTERVAL_SECONDS 10U
+/* Match Go disk's disk-store index writer batching policy. */
+#define LC_POUCH_DEFAULT_INDEXER_FLUSH_DOCS 2000U
+#define LC_POUCH_DEFAULT_INDEXER_FLUSH_INTERVAL_SECONDS 10U
 
 struct lc_pouch_indexer_pending_namespace {
   char *namespace_name;
@@ -882,16 +882,17 @@ void lc_pouch_compaction_note_mutation(lc_pouch *pouch) {
   pthread_mutex_unlock(&pouch->compaction_mutex);
 }
 
-static void lc_pouch_indexer_deadline(struct timespec *deadline) {
-  if (deadline == NULL) {
+static void lc_pouch_indexer_deadline(const lc_pouch *pouch,
+                                      struct timespec *deadline) {
+  if (pouch == NULL || deadline == NULL) {
     return;
   }
   clock_gettime(CLOCK_REALTIME, deadline);
   if (deadline->tv_sec >
-      LONG_MAX - (time_t)LC_POUCH_INDEXER_FLUSH_INTERVAL_SECONDS) {
+      LONG_MAX - (time_t)pouch->indexer_flush_interval_seconds) {
     deadline->tv_sec = LONG_MAX;
   } else {
-    deadline->tv_sec += (time_t)LC_POUCH_INDEXER_FLUSH_INTERVAL_SECONDS;
+    deadline->tv_sec += (time_t)pouch->indexer_flush_interval_seconds;
   }
 }
 
@@ -942,7 +943,10 @@ static int lc_pouch_indexer_flush_limit_reached_locked(lc_pouch *pouch) {
 
   for (entry = pouch->indexer_pending_namespaces; entry != NULL;
        entry = entry->next) {
-    if (entry->write_count >= (uint64_t)LC_POUCH_INDEXER_FLUSH_DOCS) {
+    if (entry->write_count >= pouch->indexer_flush_docs &&
+        (!lc_pouch_single_writer_enabled(pouch) ||
+         lc_pouch_query_index_pending_document_limit_reached_locked(
+             pouch, entry->namespace_name, pouch->indexer_flush_docs))) {
       return 1;
     }
   }
@@ -1044,7 +1048,7 @@ static void *lc_pouch_indexer_worker(void *arg) {
     if (pouch->indexer_stop) {
       break;
     }
-    lc_pouch_indexer_deadline(&deadline);
+    lc_pouch_indexer_deadline(pouch, &deadline);
     wait_rc = 0;
     while (!pouch->indexer_stop &&
            !lc_pouch_indexer_flush_limit_reached_locked(pouch) &&
@@ -1543,6 +1547,14 @@ static void lc_pouch_init_options(lc_pouch *pouch,
       options != NULL && options->segment_target_bytes != 0U
           ? options->segment_target_bytes
           : LC_POUCH_DEFAULT_SEGMENT_TARGET_BYTES;
+  pouch->indexer_flush_docs =
+      options != NULL && options->indexer_flush_docs != 0U
+          ? options->indexer_flush_docs
+          : (uint64_t)LC_POUCH_DEFAULT_INDEXER_FLUSH_DOCS;
+  pouch->indexer_flush_interval_seconds =
+      options != NULL && options->indexer_flush_interval_seconds != 0U
+          ? options->indexer_flush_interval_seconds
+          : (uint64_t)LC_POUCH_DEFAULT_INDEXER_FLUSH_INTERVAL_SECONDS;
   pouch->fsync_batch_max_ops =
       options != NULL ? options->fsync_batch_max_ops : 0U;
   pouch->durable_sync = options != NULL && options->durable_sync ? 1 : 0;
@@ -1950,8 +1962,14 @@ static int lc_pouch_root_has_namespace_entries(lc_pouch *pouch, int *out,
   return LC_OK;
 }
 
-static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
-                                                lc_error *error) {
+/*
+ * Exclusive Pouch pays this bounded, read-only cache construction at open so
+ * its first query does not decode immutable segment readers. Plain shared
+ * roots remain lazy to keep their optional multi-writer resident footprint
+ * bounded. Transformed roots retain their existing eager warming in either
+ * writer mode.
+ */
+static int lc_pouch_warm_open_namespaces(lc_pouch *pouch, lc_error *error) {
   char *namespaces_path;
   DIR *dir;
   struct dirent *entry;
@@ -1959,7 +1977,8 @@ static int lc_pouch_warm_transformed_namespaces(lc_pouch *pouch,
   int saved_errno;
   int rc;
 
-  if (pouch == NULL || (!lc_pouch_crypto_enabled(pouch->crypto) &&
+  if (pouch == NULL || (!lc_pouch_single_writer_enabled(pouch) &&
+                        !lc_pouch_crypto_enabled(pouch->crypto) &&
                         !lc_pouch_crypto_compression_enabled(pouch->crypto))) {
     return LC_OK;
   }
@@ -3047,7 +3066,7 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     lc_pouch_close(pouch);
     return rc;
   }
-  rc = lc_pouch_warm_transformed_namespaces(pouch, error);
+  rc = lc_pouch_warm_open_namespaces(pouch, error);
   if (rc != LC_OK) {
     lc_pouch_close(pouch);
     return rc;
@@ -3069,7 +3088,7 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
   }
   *out = pouch;
   {
-    pslog_field fields[9];
+    pslog_field fields[11];
 
     fields[0] = lc_log_str_field("path", pouch->root_path);
     fields[1] = lc_log_str_field("query_engine", pouch->query_engine);
@@ -3085,7 +3104,11 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     fields[7] = lc_log_bool_field("background_compaction",
                                   pouch->background_compaction_enabled);
     fields[8] = lc_log_bool_field("durable_sync", pouch->durable_sync);
-    lc_log_info(pouch->logger, "open", fields, 9U);
+    fields[9] =
+        lc_log_u64_field("indexer_flush_docs", pouch->indexer_flush_docs);
+    fields[10] = lc_log_u64_field("indexer_flush_interval_seconds",
+                                  pouch->indexer_flush_interval_seconds);
+    lc_log_info(pouch->logger, "open", fields, 11U);
   }
   return LC_OK;
 }
@@ -3113,6 +3136,9 @@ void lc_pouch_close(lc_pouch *pouch) {
   lc_pouch_compaction_worker_close(pouch);
   lc_pouch_state_metadata_append_worker_close(pouch);
   lc_pouch_fsync_batcher_close(pouch);
+  if (!pouch->aborted) {
+    lc_pouch_state_checkpoint_clean_close(pouch);
+  }
   lc_pouch_state_cache_cleanup(pouch);
   lc_pouch_state_source_cache_cleanup(pouch);
   lc_pouch_query_index_cache_cleanup(pouch);
@@ -3783,6 +3809,8 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
   }
   out->layout_version = LC_POUCH_LAYOUT_VERSION;
   out->segment_target_bytes = pouch->segment_target_bytes;
+  out->indexer_flush_docs = pouch->indexer_flush_docs;
+  out->indexer_flush_interval_seconds = pouch->indexer_flush_interval_seconds;
   out->compaction_min_segment_count = pouch->compaction_min_segment_count;
   out->compaction_min_reclaimable_bytes =
       pouch->compaction_min_reclaimable_bytes;

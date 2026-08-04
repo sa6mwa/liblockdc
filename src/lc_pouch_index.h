@@ -183,8 +183,11 @@ typedef struct lc_pouch_index_adaptive_posting {
 typedef struct lc_pouch_index_term_entry {
   char *field_hex;
   char *value_hex;
+  unsigned long trigram_key;
   char value_type;
   unsigned long term_id;
+  int owns_field_hex;
+  int value_is_trigram_key;
 } lc_pouch_index_term_entry;
 
 typedef struct lc_pouch_index_term_table {
@@ -212,6 +215,7 @@ typedef struct lc_pouch_index_term_generation {
   unsigned long row_hash;
   lc_pouch_index_term_table terms;
   lc_pouch_index_term_posting_table postings;
+  int terms_sorted;
 } lc_pouch_index_term_generation;
 
 void lc_pouch_index_docid_set_cleanup(const lc_allocator *allocator,
@@ -379,6 +383,13 @@ int lc_pouch_index_term_table_append_trusted(
     const lc_allocator *allocator, lc_pouch_index_term_table *table,
     const char *field_hex, const char *value_hex, char value_type,
     unsigned long *term_id_out, lc_error *error);
+/** Appends a trusted raw trigram term without materializing its six-byte hex
+ * spelling. `field_hex` is borrowed and must outlive the table; encoding
+ * retains the normal on-disk term representation. */
+int lc_pouch_index_term_table_append_trigram_trusted(
+    const lc_allocator *allocator, lc_pouch_index_term_table *table,
+    const char *field_hex, unsigned long trigram_key,
+    unsigned long *term_id_out, lc_error *error);
 void lc_pouch_index_term_posting_table_cleanup(
     const lc_allocator *allocator, lc_pouch_index_term_posting_table *table);
 int lc_pouch_index_term_posting_table_put(
@@ -399,6 +410,9 @@ int lc_pouch_index_term_posting_table_append_to_set(
     lc_error *error);
 void lc_pouch_index_term_generation_cleanup(
     const lc_allocator *allocator, lc_pouch_index_term_generation *generation);
+/** Encodes the current compact term artifact: field names are dictionary
+ * entries and trusted trigrams remain three-byte values. Decoders retain
+ * compatibility with the legacy field-per-term artifact. */
 int lc_pouch_index_term_generation_encode(
     const lc_pouch_index_term_generation *generation,
     const lc_allocator *allocator, char **out_bytes, size_t *out_length,
