@@ -12,6 +12,10 @@ typedef struct lc_pouch lc_pouch;
 typedef lc_u64 lc_pouch_generation;
 typedef lc_i64 lc_pouch_unix_seconds;
 
+/* Internal staged-state marker. It is never exposed as a committed document. */
+#define LC_POUCH_STATE_DELETE_CONTENT_TYPE                                     \
+  "application/x-lockdc-pouch-state-delete"
+
 typedef struct lc_pouch_open_options {
   uint64_t segment_target_bytes;
   /** Maximum namespace mutations accumulated by the asynchronous indexer

@@ -1224,12 +1224,18 @@ typedef struct lc_attachment_list {
 /** Request used to fetch an attachment stream. */
 typedef struct lc_attachment_get_req {
   lc_attachment_selector selector;
+  /** Reads the committed public view when nonzero. Private reads require an
+   * active lease and, when transaction-bound, include that transaction's
+   * staged attachment changes. */
   int public_read;
 } lc_attachment_get_req;
 
 /** Client-level request used to list lease attachments. */
 typedef struct lc_attachment_list_req {
   lc_lease_ref lease;
+  /** Reads the committed public view when nonzero. Private reads require an
+   * active lease and, when transaction-bound, include that transaction's
+   * staged attachment changes. */
   int public_read;
 } lc_attachment_list_req;
 
@@ -1237,6 +1243,9 @@ typedef struct lc_attachment_list_req {
 typedef struct lc_attachment_get_op {
   lc_lease_ref lease;
   lc_attachment_selector selector;
+  /** Reads the committed public view when nonzero. Private reads require an
+   * active lease and, when transaction-bound, include that transaction's
+   * staged attachment changes. */
   int public_read;
 } lc_attachment_get_op;
 

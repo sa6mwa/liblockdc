@@ -14217,13 +14217,9 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
 
   list_req.lease.key = key;
   rc = client->list_attachments(client, &list_req, &list, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(list.count, 2U);
-  assert_string_equal(list.items[0].name, "alpha.txt");
-  assert_int_equal(list.items[0].created_at_unix, alpha_created_at_unix);
-  assert_int_equal(list.items[0].updated_at_unix, alpha_updated_at_unix);
-  assert_string_equal(list.items[1].name, "beta.bin");
-  assert_string_equal(list.items[1].id, beta_id);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
   lc_attachment_list_cleanup(&list);
 
   list_req.public_read = 1;
@@ -14234,10 +14230,23 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   assert_int_equal(list.items[0].created_at_unix, alpha_created_at_unix);
   assert_int_equal(list.items[0].updated_at_unix, alpha_updated_at_unix);
   assert_string_equal(list.items[1].name, "beta.bin");
+  assert_string_equal(list.items[1].id, beta_id);
   lc_attachment_list_cleanup(&list);
 
+  list_req.public_read = 0;
   get_op.lease.key = key;
   get_op.selector.name = "alpha.txt";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  sink->close(sink);
+  sink = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_attachment_get_res_cleanup(&get_res);
+
+  get_op.public_read = 1;
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->get_attachment(client, &get_op, sink, &get_res, &error);
@@ -14270,7 +14279,7 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   sink->close(sink);
   sink = NULL;
   lc_attachment_get_res_cleanup(&get_res);
-  get_op.public_read = 0;
+  get_op.public_read = 1;
 
   get_op.selector.name = NULL;
   get_op.selector.id = beta_id;
@@ -14323,6 +14332,7 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
                                       &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(deleted_count, 1);
+  list_req.public_read = 1;
   rc = client->list_attachments(client, &list_req, &list, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(list.count, 0U);
@@ -19863,6 +19873,115 @@ test_transaction_bound_lease_rollback_clears_matching_lease(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_transaction_bound_remove_stages_until_decision(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_sink *sink;
+  lc_acquire_req acquire_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_update_res update_res;
+  lc_get_res get_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_acquire_req_init(&acquire_req);
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  make_root("lease-txn-remove", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-txn-remove/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, key, "before-remove", NULL, 0L, 0, &update_res,
+                     &error);
+  lc_update_res_cleanup(&update_res);
+
+  acquire_req.key = key;
+  acquire_req.owner = "txn-remove-owner";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "txn-state-remove-rollback";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->remove(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("before-remove"));
+  assert_memory_equal(bytes, "before-remove", length);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+  sink = NULL;
+
+  participant.namespace_name = "default";
+  participant.key = key;
+  decision_req.txn_id = acquire_req.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(lease);
+  lease = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_memory_equal(bytes, "before-remove", length);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+  sink = NULL;
+
+  acquire_req.txn_id = "txn-state-remove-commit";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->remove(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  decision_req.txn_id = acquire_req.txn_id;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(lease);
+  lease = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_txn_decision_skips_newer_state_lease(void **state) {
   lc_client *client;
   lc_lease *old_lease;
@@ -24863,6 +24982,7 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
 
   list_req.lease.namespace_name = "objects/txn";
   list_req.lease.key = "state/object-1";
+  list_req.public_read = 1;
   rc = client->list_attachments(client, &list_req, &list, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(list.count, 0U);
@@ -24889,6 +25009,7 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
 
   get_op.lease.namespace_name = "objects/txn";
   get_op.lease.key = "state/object-1";
+  get_op.public_read = 1;
   get_op.selector.name = "report.txt";
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -24995,6 +25116,7 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
   open_pouch_client(root, &client, &error);
   list_req.lease.namespace_name = "objects/recover";
   list_req.lease.key = "state/object-2";
+  list_req.public_read = 1;
   rc = client->list_attachments(client, &list_req, &list, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(list.count, 1U);
@@ -25055,6 +25177,118 @@ static int pouch_attachment_list_has_name(const lc_attachment_list *list,
 }
 
 static void
+test_private_attachment_reads_validate_lease_and_overlay_transaction(
+    void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire_req;
+  lc_attach_req attach_req;
+  lc_attachment_selector selector;
+  lc_attachment_get_req get_req;
+  lc_attachment_list_req list_req;
+  lc_attachment_list list;
+  lc_attachment_get_res get_res;
+  lc_attach_res attach_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  int deleted;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  deleted = 0;
+  lc_acquire_req_init(&acquire_req);
+  lc_attach_req_init(&attach_req);
+  memset(&selector, 0, sizeof(selector));
+  lc_attachment_get_req_init(&get_req);
+  lc_attachment_list_req_init(&list_req);
+  memset(&list, 0, sizeof(list));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&attach_res, 0, sizeof(attach_res));
+  lc_error_init(&error);
+  make_root("attachment-txn-read", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  pouch_attach_text(client, "docs/attachment-txn", "state/attachment-txn", NULL,
+                    "old.txt", "old", &error);
+
+  acquire_req.namespace_name = "docs/attachment-txn";
+  acquire_req.key = "state/attachment-txn";
+  acquire_req.owner = "attachment-txn-owner";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "txn-attachment-read";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+
+  attach_req.name = "new.txt";
+  attach_req.content_type = "text/plain";
+  rc = lc_source_from_memory("new", strlen("new"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->attach(lease, &attach_req, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_attach_res_cleanup(&attach_res);
+
+  selector.name = "old.txt";
+  rc = lease->delete_attachment(lease, &selector, &deleted, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(deleted, 1);
+
+  list_req.lease.namespace_name = acquire_req.namespace_name;
+  list_req.lease.key = acquire_req.key;
+  list_req.lease.txn_id = acquire_req.txn_id;
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lease->list_attachments(lease, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 1U);
+  assert_true(pouch_attachment_list_has_name(&list, "new.txt"));
+  assert_false(pouch_attachment_list_has_name(&list, "old.txt"));
+  lc_attachment_list_cleanup(&list);
+
+  get_req.selector.name = "new.txt";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->get_attachment(lease, &get_req, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("new"));
+  assert_memory_equal(bytes, "new", length);
+  lc_attachment_get_res_cleanup(&get_res);
+  sink->close(sink);
+  sink = NULL;
+
+  list_req.public_read = 1;
+  list_req.lease.txn_id = NULL;
+  rc = client->list_attachments(client, &list_req, &list, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(list.count, 1U);
+  assert_true(pouch_attachment_list_has_name(&list, "old.txt"));
+  assert_false(pouch_attachment_list_has_name(&list, "new.txt"));
+  lc_attachment_list_cleanup(&list);
+
+  lc_lease_close(lease);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   lc_client *client;
   lc_source *source;
@@ -25099,6 +25333,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   open_pouch_client(root, &client, &error);
   list_req.lease.namespace_name = "objects/mixed";
   list_req.lease.key = "state/object-queue";
+  list_req.public_read = 1;
   participants[0].namespace_name = "objects/mixed";
   participants[0].key = "state/object-queue";
   participants[0].backend_hash = NULL;
@@ -25283,6 +25518,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
 
   list_req.lease.namespace_name = "objects/delete";
   list_req.lease.key = "state/object-3";
+  list_req.public_read = 1;
   delete_op.lease.namespace_name = "objects/delete";
   delete_op.lease.key = "state/object-3";
   delete_op.lease.txn_id = "txn-delete-commit";
@@ -26155,6 +26391,7 @@ int main(int argc, char **argv) {
           test_transaction_bound_lease_commit_makes_first_body_queryable),
       cmocka_unit_test(
           test_transaction_bound_lease_rollback_clears_matching_lease),
+      cmocka_unit_test(test_transaction_bound_remove_stages_until_decision),
       cmocka_unit_test(test_txn_decision_skips_newer_state_lease),
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),
@@ -26201,6 +26438,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_txn_decision_validates_target_backend),
       cmocka_unit_test(test_txn_decisions_apply_attachment_side_effects),
       cmocka_unit_test(test_txn_recovery_applies_attachment_side_effects),
+      cmocka_unit_test(
+          test_private_attachment_reads_validate_lease_and_overlay_transaction),
       cmocka_unit_test(
           test_txn_decisions_apply_mixed_object_queue_side_effects),
       cmocka_unit_test(test_txn_decisions_apply_attachment_delete_and_clear),

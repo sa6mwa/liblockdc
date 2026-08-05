@@ -10491,6 +10491,148 @@ static int lc_pouch_state_append_staged_commit_batch(
   return rc;
 }
 
+static int lc_pouch_state_is_staged_delete_marker(const char *content_type) {
+  return content_type != NULL &&
+         strcmp(content_type, LC_POUCH_STATE_DELETE_CONTENT_TYPE) == 0;
+}
+
+/* A transaction decision must retire its staged marker together with the
+ * committed tombstone. For an already-absent document the decision only
+ * retires the marker, preserving ordinary delete's no-op result. */
+static int lc_pouch_state_append_staged_delete_commit_batch(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_namespace_manifest *manifest, const char *key,
+    const char *staged_key, const char *committed_etag,
+    lc_pouch_generation committed_version, int delete_committed,
+    const char *staged_etag, lc_pouch_generation decision_version,
+    lc_pouch_generation discard_version, lc_pouch_unix_seconds updated_at_unix,
+    lc_error *error) {
+  lc_pouch_state_binary_append_item items[3];
+  unsigned char *committed_delete_meta;
+  unsigned char *decision_meta;
+  unsigned char *staged_delete_meta;
+  size_t committed_delete_meta_len;
+  size_t decision_meta_len;
+  size_t staged_delete_meta_len;
+  size_t item_count;
+  int rc;
+
+  committed_delete_meta = NULL;
+  decision_meta = NULL;
+  staged_delete_meta = NULL;
+  committed_delete_meta_len = 0U;
+  decision_meta_len = 0U;
+  staged_delete_meta_len = 0U;
+  item_count = 0U;
+  rc = LC_OK;
+  if (delete_committed) {
+    rc = lc_pouch_state_encode_delete_meta(
+        &pouch->allocator, committed_version, updated_at_unix, committed_etag,
+        &committed_delete_meta, &committed_delete_meta_len, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_encode_decision_meta(
+        &pouch->allocator, decision_version, staged_etag,
+        LC_POUCH_STATE_DECISION_COMMITTED, &decision_meta, &decision_meta_len,
+        error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_encode_delete_meta(
+        &pouch->allocator, discard_version, updated_at_unix, staged_etag,
+        &staged_delete_meta, &staged_delete_meta_len, error);
+  }
+  if (rc == LC_OK) {
+    memset(items, 0, sizeof(items));
+    if (delete_committed) {
+      items[item_count].record_type = LC_POUCH_STATE_RECORD_STATE_DELETE;
+      items[item_count].key = key;
+      items[item_count].key_len = strlen(key);
+      items[item_count].meta = committed_delete_meta;
+      items[item_count].meta_len = committed_delete_meta_len;
+      ++item_count;
+    }
+    items[item_count].record_type = LC_POUCH_STATE_RECORD_DECISION;
+    items[item_count].key = staged_key;
+    items[item_count].key_len = strlen(staged_key);
+    items[item_count].meta = decision_meta;
+    items[item_count].meta_len = decision_meta_len;
+    ++item_count;
+    items[item_count].record_type = LC_POUCH_STATE_RECORD_STATE_DELETE;
+    items[item_count].key = staged_key;
+    items[item_count].key_len = strlen(staged_key);
+    items[item_count].meta = staged_delete_meta;
+    items[item_count].meta_len = staged_delete_meta_len;
+    ++item_count;
+    rc = lc_pouch_state_append_binary_records(pouch, namespace_name, manifest,
+                                              items, item_count, error);
+  }
+  lc_free_with_allocator(&pouch->allocator, committed_delete_meta);
+  lc_free_with_allocator(&pouch->allocator, decision_meta);
+  lc_free_with_allocator(&pouch->allocator, staged_delete_meta);
+  return rc;
+}
+
+static int lc_pouch_state_commit_staged_delete_locked(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_namespace_manifest *manifest, const char *key,
+    const char *staged_key, const lc_pouch_state_entry *committed,
+    const lc_pouch_state_entry *staged, lc_pouch_state_write_result *out,
+    lc_error *error) {
+  char *etag;
+  lc_pouch_generation version;
+  lc_pouch_generation decision_version;
+  lc_pouch_generation discard_version;
+  lc_pouch_unix_seconds updated_at_unix;
+  int delete_committed;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || manifest == NULL ||
+      key == NULL || staged_key == NULL || committed == NULL ||
+      staged == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch staged delete commit requires state context",
+                        NULL, NULL, "pouch");
+  }
+  etag = NULL;
+  delete_committed = committed->found && committed->payload_span.present;
+  version = delete_committed ? committed->version + 1UL : 0UL;
+  updated_at_unix = lc_pouch_maintenance_now_seconds();
+  decision_version = staged->version + 1UL;
+  discard_version = decision_version + 1UL;
+  if (delete_committed) {
+    etag = lc_pouch_state_empty_etag(&pouch->allocator, error);
+    if (etag == NULL) {
+      return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+  }
+  rc = lc_pouch_state_append_staged_delete_commit_batch(
+      pouch, namespace_name, manifest, key, staged_key, etag, version,
+      delete_committed, staged->etag, decision_version, discard_version,
+      updated_at_unix, error);
+  if (rc == LC_OK && delete_committed) {
+    (void)lc_pouch_state_cache_apply_write(
+        pouch, namespace_name, manifest, key, NULL, etag, NULL, NULL, NULL, 0U,
+        version, 0UL, 0UL, NULL, updated_at_unix, 0, 0, 0,
+        LC_POUCH_STATE_RECORD_STATE_DELETE);
+  }
+  if (rc == LC_OK) {
+    (void)lc_pouch_state_cache_apply_write(
+        pouch, namespace_name, manifest, staged_key, NULL, staged->etag, NULL,
+        NULL, NULL, 0U, discard_version, 0UL, 0UL, NULL, updated_at_unix, 0, 0,
+        0, LC_POUCH_STATE_RECORD_STATE_DELETE);
+  }
+  if (rc == LC_OK && delete_committed) {
+    out->etag = etag;
+    etag = NULL;
+    out->index_seq = manifest->state_max_version;
+    out->version = version;
+    out->updated_at_unix = updated_at_unix;
+    lc_pouch_query_index_note_state_delete(pouch, namespace_name, key, out);
+  }
+  lc_free_with_allocator(&pouch->allocator, etag);
+  return rc;
+}
+
 static int lc_pouch_state_append_staged_discard_batch(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, const char *staged_key,
@@ -13069,6 +13211,18 @@ static int lc_pouch_state_promote_staged_locked(
   if (rc != LC_OK) {
     goto cleanup;
   }
+  if (!staged.found) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch staged promotion source is missing", NULL, NULL,
+                      NULL);
+    goto cleanup;
+  }
+  if (lc_pouch_state_is_staged_delete_marker(staged.content_type)) {
+    rc = lc_pouch_state_commit_staged_delete_locked(
+        pouch, namespace_name, &manifest, key, staged_key, &committed, &staged,
+        out, error);
+    goto cleanup;
+  }
   if (expected_committed_etag != NULL) {
     if (!committed.found ||
         strcmp(committed.etag, expected_committed_etag) != 0) {
@@ -13082,12 +13236,6 @@ static int lc_pouch_state_promote_staged_locked(
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch staged promotion committed state already exists",
                       NULL, NULL, NULL);
-    goto cleanup;
-  }
-  if (!staged.found) {
-    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                      "pouch staged promotion source is missing", NULL, NULL,
-                      NULL);
     goto cleanup;
   }
   promoted_metadata = staged.metadata;
@@ -13247,6 +13395,12 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
     goto cleanup;
   }
   if (!staged.found) {
+    goto cleanup;
+  }
+  if (lc_pouch_state_is_staged_delete_marker(staged.content_type)) {
+    rc = lc_pouch_state_commit_staged_delete_locked(
+        pouch, namespace_name, &manifest, key, staged_key, &committed, &staged,
+        out, error);
     goto cleanup;
   }
   promoted_metadata = staged.metadata;
