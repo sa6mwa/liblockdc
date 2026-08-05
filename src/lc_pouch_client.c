@@ -409,6 +409,24 @@ typedef struct lc_pouch_attach_write_context {
   lc_pouch_unix_seconds attachment_created_at_unix;
 } lc_pouch_attach_write_context;
 
+/* Attachment deletion changes both the parent lease projection and one or
+ * more attachment rows. Keep that work under one namespace authority. */
+typedef struct lc_pouch_attachment_delete_context {
+  lc_client_handle *client;
+  const lc_attachment_delete_op *req;
+  const char *namespace_name;
+  const char *attachment_key;
+  const char *staged_key;
+  int *deleted;
+} lc_pouch_attachment_delete_context;
+
+typedef struct lc_pouch_attachment_delete_all_context {
+  lc_client_handle *client;
+  const lc_attachment_delete_all_op *req;
+  const char *namespace_name;
+  int *deleted_count;
+} lc_pouch_attachment_delete_all_context;
+
 typedef struct lc_pouch_query_match_state {
   int matched;
 } lc_pouch_query_match_state;
@@ -8007,6 +8025,18 @@ static int lc_pouch_lease_ref_has_credentials(const lc_lease_ref *lease) {
   return lease != NULL && lease->lease_id != NULL && lease->lease_id[0] != '\0';
 }
 
+/* Every public mutation is lease-bound. Keep this check at the entry points so
+ * an absent lease cannot be interpreted as a request to skip fencing. */
+static int lc_pouch_client_require_lease_credentials(const lc_lease_ref *lease,
+                                                     lc_error *error) {
+  if (lc_pouch_lease_ref_has_credentials(lease)) {
+    return LC_OK;
+  }
+  return lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch lease-bound mutation requires lease_id", NULL,
+                      NULL, NULL);
+}
+
 static int lc_pouch_client_is_queue_state_key(const char *key) {
   return lc_pouch_queue_has_exact_lease_key_shape(key, "state");
 }
@@ -12088,6 +12118,10 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
   if (rc != LC_OK) {
     return rc;
   }
+  rc = lc_pouch_client_require_lease_credentials(&req->lease, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   options.content_type =
       req->content_type != NULL ? req->content_type : "application/json";
   options.expected_etag = req->if_state_etag;
@@ -12165,6 +12199,10 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
   mutation = NULL;
   rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
                                         &namespace_name, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
+  rc = lc_pouch_client_require_lease_credentials(&req->lease, error);
   if (rc != LC_OK) {
     goto cleanup;
   }
@@ -12278,6 +12316,11 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
     lc_pouch_state_write_result_cleanup(&client->allocator, &result);
     return rc;
   }
+  rc = lc_pouch_client_require_lease_credentials(&req->lease, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    return rc;
+  }
   lease_precondition.client = client;
   lease_precondition.lease = &req->lease;
   lease_precondition.namespace_name = namespace_name;
@@ -12342,6 +12385,10 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
   options.expected_etag = req->if_state_etag;
   rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
                                         &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_client_require_lease_credentials(&req->lease, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -12726,6 +12773,10 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   if (rc != LC_OK) {
     goto cleanup;
   }
+  rc = lc_pouch_client_require_lease_credentials(&req->lease, error);
+  if (rc != LC_OK) {
+    goto cleanup;
+  }
   /* The state-write precondition below validates this lease immediately before
    * publishing the attachment. Keeping validation there avoids a stale
    * preflight read and, for encrypted roots, a second decrypt of the parent
@@ -13022,149 +13073,107 @@ cleanup:
   return rc;
 }
 
-int lc_pouch_client_delete_attachment_method(lc_client *self,
-                                             const lc_attachment_delete_op *req,
-                                             int *deleted, lc_error *error) {
-  lc_client_handle *client;
+static int lc_pouch_attachment_delete_locked(void *context, lc_error *error) {
+  lc_pouch_attachment_delete_context *ctx;
   lc_pouch_state_read_result read_result;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
-  const char *namespace_name = NULL;
-  char *name;
-  char *attachment_key;
-  char *staged_key;
   int found;
   int rc;
 
-  if (self == NULL || req == NULL || deleted == NULL) {
+  ctx = (lc_pouch_attachment_delete_context *)context;
+  if (ctx == NULL || ctx->client == NULL || ctx->req == NULL ||
+      ctx->namespace_name == NULL || ctx->attachment_key == NULL ||
+      ctx->deleted == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch delete_attachment requires self, req, and "
-                        "deleted",
-                        NULL, NULL, NULL);
-  }
-  *deleted = 0;
-  client = (lc_client_handle *)self;
-  rc = lc_pouch_client_validate_lease_key(&req->lease, error);
-  if (rc != LC_OK) {
-    return rc;
+                        "pouch attachment deletion requires context", NULL,
+                        NULL, "pouch");
   }
   memset(&read_result, 0, sizeof(read_result));
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
-  name = NULL;
-  attachment_key = NULL;
-  staged_key = NULL;
+  *ctx->deleted = 0;
   found = 0;
-  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
-                                        &namespace_name, error);
-  if (rc != LC_OK) {
-    return rc;
+  rc = lc_pouch_validate_lease_record(ctx->client, &ctx->req->lease,
+                                      ctx->namespace_name, ctx->req->lease.key,
+                                      NULL, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_read(ctx->client->pouch, ctx->namespace_name,
+                             ctx->attachment_key, &read_result, error);
   }
-  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
-                                      req->lease.key, NULL, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-
-  name = lc_pouch_attachment_name_from_selector(&req->selector, error);
-  if (name == NULL) {
-    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
-  }
-  attachment_key =
-      lc_pouch_attachment_key(namespace_name, req->lease.key, name, error);
-  if (attachment_key == NULL) {
-    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
-    goto cleanup;
-  }
-  rc = lc_pouch_state_read(client->pouch, namespace_name, attachment_key,
-                           &read_result, error);
   if (rc == LC_OK && read_result.found) {
     found = 1;
   }
-  if (rc == LC_OK && lc_pouch_txn_id_present(req->lease.txn_id)) {
-    staged_key = lc_pouch_staged_attachment_key(namespace_name, req->lease.key,
-                                                name, req->lease.txn_id, error);
-    if (staged_key == NULL) {
-      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
-      goto cleanup;
+  if (rc == LC_OK && lc_pouch_txn_id_present(ctx->req->lease.txn_id)) {
+    if (ctx->staged_key == NULL) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch staged attachment deletion requires key", NULL,
+                        NULL, "pouch");
     }
-    lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
-    memset(&read_result, 0, sizeof(read_result));
-    rc = lc_pouch_state_read(client->pouch, namespace_name, staged_key,
-                             &read_result, error);
+    if (rc == LC_OK) {
+      lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &read_result);
+      memset(&read_result, 0, sizeof(read_result));
+      rc = lc_pouch_state_read(ctx->client->pouch, ctx->namespace_name,
+                               ctx->staged_key, &read_result, error);
+    }
     if (rc == LC_OK && read_result.found) {
       found = 1;
     }
     if (rc == LC_OK && found) {
-      rc = lc_pouch_attachment_stage_delete(client, namespace_name, staged_key,
-                                            error);
+      rc = lc_pouch_attachment_stage_delete(ctx->client, ctx->namespace_name,
+                                            ctx->staged_key, error);
       if (rc == LC_OK) {
-        *deleted = 1;
+        *ctx->deleted = 1;
       }
     }
   } else if (rc == LC_OK && read_result.found) {
     options.expected_version = read_result.version;
     options.has_expected_version = 1;
-    rc = lc_pouch_state_delete(client->pouch, namespace_name, attachment_key,
-                               &options, &write_result, error);
+    rc = lc_pouch_state_delete(ctx->client->pouch, ctx->namespace_name,
+                               ctx->attachment_key, &options, &write_result,
+                               error);
     if (rc == LC_OK) {
-      *deleted = 1;
+      *ctx->deleted = 1;
     }
   }
-
-cleanup:
-  lc_free_with_allocator(NULL, name);
-  lc_free_with_allocator(NULL, attachment_key);
-  lc_free_with_allocator(NULL, staged_key);
-  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
-  lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
+  lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &read_result);
+  lc_pouch_state_write_result_cleanup(&ctx->client->allocator, &write_result);
   return rc;
 }
 
-int lc_pouch_client_delete_all_attachments_method(
-    lc_client *self, const lc_attachment_delete_all_op *req, int *deleted_count,
-    lc_error *error) {
-  lc_client_handle *client;
+static int lc_pouch_attachment_delete_all_locked(void *context,
+                                                 lc_error *error) {
+  lc_pouch_attachment_delete_all_context *ctx;
   lc_pouch_attachment_list_builder builder;
   lc_pouch_txn_key_list staged_keys;
   lc_pouch_txn_key_list affected_keys;
-  const char *namespace_name = NULL;
   size_t i;
   int rc;
 
-  if (self == NULL || req == NULL || deleted_count == NULL) {
+  ctx = (lc_pouch_attachment_delete_all_context *)context;
+  if (ctx == NULL || ctx->client == NULL || ctx->req == NULL ||
+      ctx->namespace_name == NULL || ctx->deleted_count == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch delete_all_attachments requires self, req, "
-                        "and deleted_count",
-                        NULL, NULL, NULL);
-  }
-  *deleted_count = 0;
-  client = (lc_client_handle *)self;
-  rc = lc_pouch_client_validate_lease_key(&req->lease, error);
-  if (rc != LC_OK) {
-    return rc;
+                        "pouch attachment clear requires context", NULL, NULL,
+                        "pouch");
   }
   memset(&builder, 0, sizeof(builder));
   memset(&staged_keys, 0, sizeof(staged_keys));
   memset(&affected_keys, 0, sizeof(affected_keys));
-  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
-                                        &namespace_name, error);
-  if (rc != LC_OK) {
-    return rc;
+  *ctx->deleted_count = 0;
+  rc = lc_pouch_validate_lease_record(ctx->client, &ctx->req->lease,
+                                      ctx->namespace_name, ctx->req->lease.key,
+                                      NULL, error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_collect_attachments(ctx->client, ctx->namespace_name,
+                                      ctx->req->lease.key, &builder, error);
   }
-  rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
-                                      req->lease.key, NULL, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  rc = lc_pouch_collect_attachments(client, namespace_name, req->lease.key,
-                                    &builder, error);
-  if (rc == LC_OK && lc_pouch_txn_id_present(req->lease.txn_id)) {
+  if (rc == LC_OK && lc_pouch_txn_id_present(ctx->req->lease.txn_id)) {
     rc = lc_pouch_collect_staged_attachment_bases(
-        client, namespace_name, req->lease.key, req->lease.txn_id, &staged_keys,
-        error);
+        ctx->client, ctx->namespace_name, ctx->req->lease.key,
+        ctx->req->lease.txn_id, &staged_keys, error);
   }
-  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+  if (rc == LC_OK && lc_pouch_txn_id_present(ctx->req->lease.txn_id)) {
     for (i = 0U; rc == LC_OK && i < builder.key_count; ++i) {
       rc = lc_pouch_txn_key_list_append(&affected_keys, builder.keys[i].key,
                                         error);
@@ -13180,42 +13189,150 @@ int lc_pouch_client_delete_all_attachments_method(
       char *staged_attachment_key;
 
       staged_attachment_key = lc_pouch_staged_attachment_key_from_committed(
-          affected_keys.keys[i], req->lease.txn_id, error);
+          affected_keys.keys[i], ctx->req->lease.txn_id, error);
       if (staged_attachment_key == NULL) {
         rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
       } else {
-        rc = lc_pouch_attachment_stage_delete(client, namespace_name,
+        rc = lc_pouch_attachment_stage_delete(ctx->client, ctx->namespace_name,
                                               staged_attachment_key, error);
       }
       lc_free_with_allocator(NULL, staged_attachment_key);
       if (rc == LC_OK) {
-        *deleted_count += 1;
+        *ctx->deleted_count += 1;
       }
     }
-    lc_pouch_txn_key_list_cleanup(&affected_keys);
-    lc_pouch_txn_key_list_cleanup(&staged_keys);
-    lc_pouch_attachment_list_builder_cleanup(&builder);
-    return rc;
-  }
-  for (i = 0U; rc == LC_OK && i < builder.key_count; ++i) {
-    lc_pouch_state_write_options options;
-    lc_pouch_state_write_result result;
+  } else if (rc == LC_OK) {
+    for (i = 0U; rc == LC_OK && i < builder.key_count; ++i) {
+      lc_pouch_state_write_options options;
+      lc_pouch_state_write_result result;
 
-    memset(&options, 0, sizeof(options));
-    memset(&result, 0, sizeof(result));
-    options.expected_version = builder.keys[i].version;
-    options.has_expected_version = 1;
-    rc = lc_pouch_state_delete(client->pouch, namespace_name,
-                               builder.keys[i].key, &options, &result, error);
-    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
-    if (rc == LC_OK) {
-      *deleted_count += 1;
+      memset(&options, 0, sizeof(options));
+      memset(&result, 0, sizeof(result));
+      options.expected_version = builder.keys[i].version;
+      options.has_expected_version = 1;
+      rc = lc_pouch_state_delete(ctx->client->pouch, ctx->namespace_name,
+                                 builder.keys[i].key, &options, &result, error);
+      lc_pouch_state_write_result_cleanup(&ctx->client->allocator, &result);
+      if (rc == LC_OK) {
+        *ctx->deleted_count += 1;
+      }
     }
   }
   lc_pouch_txn_key_list_cleanup(&affected_keys);
   lc_pouch_txn_key_list_cleanup(&staged_keys);
   lc_pouch_attachment_list_builder_cleanup(&builder);
   return rc;
+}
+
+int lc_pouch_client_delete_attachment_method(lc_client *self,
+                                             const lc_attachment_delete_op *req,
+                                             int *deleted, lc_error *error) {
+  lc_client_handle *client;
+  lc_pouch_attachment_delete_context delete_context;
+  const char *namespace_name = NULL;
+  char *name;
+  char *attachment_key;
+  char *staged_key;
+  int rc;
+
+  if (self == NULL || req == NULL || deleted == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch delete_attachment requires self, req, and "
+                        "deleted",
+                        NULL, NULL, NULL);
+  }
+  *deleted = 0;
+  client = (lc_client_handle *)self;
+  rc = lc_pouch_client_validate_lease_key(&req->lease, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&delete_context, 0, sizeof(delete_context));
+  name = NULL;
+  attachment_key = NULL;
+  staged_key = NULL;
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_client_require_lease_credentials(&req->lease, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+
+  name = lc_pouch_attachment_name_from_selector(&req->selector, error);
+  if (name == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  attachment_key =
+      lc_pouch_attachment_key(namespace_name, req->lease.key, name, error);
+  if (attachment_key == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    goto cleanup;
+  }
+  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+    staged_key = lc_pouch_staged_attachment_key(namespace_name, req->lease.key,
+                                                name, req->lease.txn_id, error);
+    if (staged_key == NULL) {
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+      goto cleanup;
+    }
+  }
+  delete_context.client = client;
+  delete_context.req = req;
+  delete_context.namespace_name = namespace_name;
+  delete_context.attachment_key = attachment_key;
+  delete_context.staged_key = staged_key;
+  delete_context.deleted = deleted;
+  rc = lc_pouch_state_with_namespace_lock(client->pouch, namespace_name,
+                                          lc_pouch_attachment_delete_locked,
+                                          &delete_context, error);
+
+cleanup:
+  lc_free_with_allocator(NULL, name);
+  lc_free_with_allocator(NULL, attachment_key);
+  lc_free_with_allocator(NULL, staged_key);
+  return rc;
+}
+
+int lc_pouch_client_delete_all_attachments_method(
+    lc_client *self, const lc_attachment_delete_all_op *req, int *deleted_count,
+    lc_error *error) {
+  lc_client_handle *client;
+  lc_pouch_attachment_delete_all_context delete_context;
+  const char *namespace_name = NULL;
+  int rc;
+
+  if (self == NULL || req == NULL || deleted_count == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch delete_all_attachments requires self, req, "
+                        "and deleted_count",
+                        NULL, NULL, NULL);
+  }
+  *deleted_count = 0;
+  client = (lc_client_handle *)self;
+  rc = lc_pouch_client_validate_lease_key(&req->lease, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  memset(&delete_context, 0, sizeof(delete_context));
+  rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
+                                        &namespace_name, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_client_require_lease_credentials(&req->lease, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  delete_context.client = client;
+  delete_context.req = req;
+  delete_context.namespace_name = namespace_name;
+  delete_context.deleted_count = deleted_count;
+  return lc_pouch_state_with_namespace_lock(
+      client->pouch, namespace_name, lc_pouch_attachment_delete_all_locked,
+      &delete_context, error);
 }
 
 int lc_pouch_client_queue_stats_method(lc_client *self,

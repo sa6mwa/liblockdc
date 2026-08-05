@@ -13049,10 +13049,19 @@ static int lc_pouch_state_delete_locked(
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return LC_OK;
   }
+  /* A successful acquire creates a lease-only metadata projection. Removing
+   * that projection is a no-op: it must preserve the active lease and report
+   * the same no-state result as lockd disk. */
+  if (!current.payload_span.present) {
+    out->index_seq = manifest.state_max_version;
+    out->version = current.version;
+    out->updated_at_unix = current.updated_at_unix;
+    lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+    lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+    return LC_OK;
+  }
   (void)max_version;
-  version = current.found && current.payload_span.present
-                ? current.version + 1UL
-                : 1UL;
+  version = current.version + 1UL;
   etag = lc_pouch_state_empty_etag(&pouch->allocator, error);
   if (etag == NULL) {
     lc_pouch_state_entry_cleanup(&pouch->allocator, &current);

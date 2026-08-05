@@ -245,6 +245,14 @@ Implementation obligations:
   from the resident projection while exact-key mutation authority is held,
   before staging or writing state. They do not pre-read the lease and then
   validate it again in the mutation path;
+- every public state or attachment mutation requires a non-empty lease id and
+  its matching fencing token. A missing lease reference is an invalid request,
+  never an unfenced mutation request;
+- attachment upload, delete, and delete-all validate the parent key's lease
+  while namespace mutation authority encloses both that validation and the
+  attachment object/metadata mutation. A preflight lease read followed by a
+  later attachment write is not valid because expiry, release, or takeover can
+  occur between those steps;
 - metadata CAS must use etag/generation behavior matching Go disk for missing
   keys, stale etags, pending same-group writes, and conflicting pending writes;
 - projections cache hot lease and summary fields so lock paths do not parse

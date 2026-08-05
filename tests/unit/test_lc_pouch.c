@@ -312,7 +312,7 @@ typedef struct pouch_parallel_lease_acquire {
 typedef struct pouch_parallel_client_mutate {
   lc_client *client;
   pthread_barrier_t *start;
-  const char *key;
+  lc_lease_ref lease;
   unsigned int attempts;
   unsigned int completed;
   lc_error error;
@@ -1065,7 +1065,7 @@ static void *pouch_client_mutate_in_parallel(void *context) {
   lc_error_init(&mutate->error);
   lc_mutate_op_init(&request);
   mutations[0] = "/counter++";
-  request.lease.key = mutate->key;
+  request.lease = mutate->lease;
   request.mutations = mutations;
   request.mutation_count = 1U;
   barrier_rc = pthread_barrier_wait(mutate->start);
@@ -8329,16 +8329,78 @@ static char *pouch_test_hex_encode(const char *text) {
   return out;
 }
 
+/* Seed storage directly only when a test is specifically about on-disk state.
+ * Public API behavior must use write_client_state() below. */
+static void seed_pouch_state(lc_client *client, const char *key,
+                             const char *json, lc_update_res *out,
+                             lc_error *error) {
+  lc_pouch_state_write_result write_result;
+  lc_source *source;
+  int rc;
+
+  memset(&write_result, 0, sizeof(write_result));
+  rc = lc_source_from_memory(json, strlen(json), &source, error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(((lc_client_handle *)client)->pouch, "default", key,
+                            source, NULL, &write_result, error);
+  source->close(source);
+  assert_int_equal(rc, LC_OK);
+  assert_true(write_result.version <= (lc_pouch_generation)INT64_MAX);
+  assert_true(write_result.bytes <= (uint64_t)LONG_MAX);
+  out->new_version = (lc_version)write_result.version;
+  out->new_state_etag = lc_strdup_local(write_result.etag);
+  out->bytes = (long)write_result.bytes;
+  out->correlation_id = lc_strdup_local("pouch-test-state-seed");
+  assert_non_null(out->new_state_etag);
+  assert_non_null(out->correlation_id);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+}
+
+static void pouch_acquire_test_lease(lc_client *client,
+                                     const char *namespace_name,
+                                     const char *key, const char *txn_id,
+                                     lc_lease **out, lc_error *error) {
+  lc_acquire_req request;
+  int rc;
+
+  assert_non_null(client);
+  assert_non_null(key);
+  assert_non_null(out);
+  *out = NULL;
+  lc_acquire_req_init(&request);
+  request.namespace_name = namespace_name;
+  request.key = key;
+  request.owner = "pouch-test-lease";
+  request.ttl_seconds = 30L;
+  request.txn_id = txn_id;
+  rc = client->acquire(client, &request, out, error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(*out);
+}
+
+static void pouch_copy_lease_ref(lc_lease_ref *out, const lc_lease *lease) {
+  assert_non_null(out);
+  assert_non_null(lease);
+  out->namespace_name = lease->namespace_name;
+  out->key = lease->key;
+  out->lease_id = lease->lease_id;
+  out->txn_id = lease->txn_id;
+  out->fencing_token = lease->fencing_token;
+}
+
 static void write_client_state(lc_client *client, const char *key,
                                const char *json, const char *expected_etag,
                                long expected_version, int has_expected_version,
                                lc_update_res *out, lc_error *error) {
+  lc_lease *lease;
   lc_update_req update_req;
   lc_source *source;
   int rc;
 
+  lease = NULL;
   lc_update_req_init(&update_req);
-  update_req.lease.key = key;
+  pouch_acquire_test_lease(client, NULL, key, NULL, &lease, error);
+  pouch_copy_lease_ref(&update_req.lease, lease);
   update_req.if_state_etag = expected_etag;
   update_req.if_version = expected_version;
   update_req.has_if_version = has_expected_version;
@@ -8347,6 +8409,42 @@ static void write_client_state(lc_client *client, const char *key,
   rc = client->update(client, &update_req, source, out, error);
   source->close(source);
   assert_int_equal(rc, LC_OK);
+  rc = lease->release(lease, NULL, error);
+  assert_int_equal(rc, LC_OK);
+}
+
+static void pouch_update_with_test_lease(lc_client *client,
+                                         lc_update_req *request,
+                                         lc_source *source, lc_update_res *out,
+                                         lc_error *error) {
+  lc_lease *lease;
+  int rc;
+
+  assert_non_null(request);
+  lease = NULL;
+  pouch_acquire_test_lease(client, request->lease.namespace_name,
+                           request->lease.key, NULL, &lease, error);
+  pouch_copy_lease_ref(&request->lease, lease);
+  rc = client->update(client, request, source, out, error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->release(lease, NULL, error);
+  assert_int_equal(rc, LC_OK);
+}
+
+static void pouch_remove_with_test_lease(lc_client *client,
+                                         lc_remove_op *operation,
+                                         lc_remove_res *out, lc_error *error) {
+  lc_lease *lease;
+  int rc;
+
+  assert_non_null(operation);
+  lease = NULL;
+  pouch_acquire_test_lease(client, operation->lease.namespace_name,
+                           operation->lease.key, NULL, &lease, error);
+  pouch_copy_lease_ref(&operation->lease, lease);
+  rc = client->remove(client, operation, out, error);
+  assert_int_equal(rc, LC_OK);
+  lease->close(lease);
 }
 
 static void test_public_core_contract_roundtrips_all_transforms(void **state) {
@@ -9652,6 +9750,7 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
   lc_client *client;
+  lc_lease *lease;
   lc_namespace_config_req ns_req;
   lc_namespace_config_res ns_res;
   lc_update_req update_req;
@@ -9668,6 +9767,7 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   source = NULL;
   first_config_etag = NULL;
   memset(&ns_res, 0, sizeof(ns_res));
@@ -9710,6 +9810,9 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
 
   update_req.lease.namespace_name = namespace_name;
   update_req.lease.key = "doc/a";
+  pouch_acquire_test_lease(client, namespace_name, "doc/a", NULL, &lease,
+                           &error);
+  pouch_copy_lease_ref(&update_req.lease, lease);
   rc = lc_source_from_memory("{\"category\":\"planning\"}",
                              strlen("{\"category\":\"planning\"}"), &source,
                              &error);
@@ -9719,6 +9822,8 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   source->close(source);
   source = NULL;
   lc_update_res_cleanup(&update_res);
+  lease->close(lease);
+  lease = NULL;
 
   query_req.namespace_name = namespace_name;
   query_req.selector_json = selector;
@@ -9811,6 +9916,9 @@ test_pouch_namespace_config_persists_and_routes_implicit_queries(void **state) {
   if (client != NULL) {
     lc_client_close(client);
   }
+  if (lease != NULL) {
+    lease->close(lease);
+  }
   cleanup_root(root);
 }
 
@@ -9829,6 +9937,7 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   lc_namespace_config_req ns_req;
   lc_namespace_config_res ns_res;
   pouch_query_key_capture capture;
+  lc_lease *lease;
   lc_source *source;
   lc_error error;
   char root[512];
@@ -9836,6 +9945,7 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   source = NULL;
   memset(&update_res, 0, sizeof(update_res));
   memset(&enqueue_res, 0, sizeof(enqueue_res));
@@ -9935,13 +10045,16 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
 
   update_req.lease.namespace_name = ".lockdown";
   update_req.lease.key = "doc/a";
+  pouch_acquire_test_lease(client, ".lockdown", "doc/a", NULL, &lease, &error);
+  pouch_copy_lease_ref(&update_req.lease, lease);
   rc = lc_source_from_memory("{\"kind\":\"allowed\"}",
                              strlen("{\"kind\":\"allowed\"}"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->update(client, &update_req, source, &update_res, &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
+  lease->close(lease);
+  lease = NULL;
 
   lc_error_cleanup(&error);
   if (source != NULL) {
@@ -9951,6 +10064,9 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   lc_query_res_cleanup(&query_res);
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_update_res_cleanup(&update_res);
+  if (lease != NULL) {
+    lease->close(lease);
+  }
   lc_client_close(client);
   cleanup_root(root);
 }
@@ -13793,6 +13909,7 @@ static void test_client_update_get_load_roundtrips_state(void **state) {
 static void
 test_client_get_preserves_cached_binary_payload_length(void **state) {
   lc_client *client;
+  lc_lease *lease;
   lc_source *source;
   lc_sink *sink;
   lc_update_req update_req;
@@ -13807,6 +13924,7 @@ test_client_get_preserves_cached_binary_payload_length(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   source = NULL;
   sink = NULL;
   bytes = NULL;
@@ -13819,15 +13937,18 @@ test_client_get_preserves_cached_binary_payload_length(void **state) {
   cleanup_root(root);
 
   open_pouch_client(root, &client, &error);
-  update_req.lease.key = "state/binary";
+  pouch_acquire_test_lease(client, NULL, "state/binary", NULL, &lease, &error);
+  pouch_copy_lease_ref(&update_req.lease, lease);
   update_req.content_type = "application/octet-stream";
   rc = lc_source_from_memory(payload, sizeof(payload), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->update(client, &update_req, source, &update_res, &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
   assert_int_equal(update_res.bytes, (long)sizeof(payload));
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -13856,6 +13977,9 @@ test_client_get_preserves_cached_binary_payload_length(void **state) {
   sink->close(sink);
   lc_get_res_cleanup(&get_res);
   lc_update_res_cleanup(&update_res);
+  if (lease != NULL) {
+    lease->close(lease);
+  }
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -13863,6 +13987,7 @@ test_client_get_preserves_cached_binary_payload_length(void **state) {
 
 static void test_client_update_enforces_state_preconditions(void **state) {
   lc_client *client;
+  lc_lease *lease;
   lc_update_res first;
   lc_update_res second;
   lc_source *source;
@@ -13872,6 +13997,7 @@ static void test_client_update_enforces_state_preconditions(void **state) {
   int rc;
 
   (void)state;
+  lease = NULL;
   lc_error_init(&error);
   memset(&first, 0, sizeof(first));
   memset(&second, 0, sizeof(second));
@@ -13881,9 +14007,10 @@ static void test_client_update_enforces_state_preconditions(void **state) {
   open_pouch_client(root, &client, &error);
   write_client_state(client, "state/current", "{\"value\":1}", NULL, 0L, 0,
                      &first, &error);
+  pouch_acquire_test_lease(client, NULL, "state/current", NULL, &lease, &error);
 
   lc_update_req_init(&update_req);
-  update_req.lease.key = "state/current";
+  pouch_copy_lease_ref(&update_req.lease, lease);
   update_req.if_state_etag = "wrong";
   rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"), &source,
                              &error);
@@ -13895,7 +14022,7 @@ static void test_client_update_enforces_state_preconditions(void **state) {
   lc_error_init(&error);
 
   lc_update_req_init(&update_req);
-  update_req.lease.key = "state/current";
+  pouch_copy_lease_ref(&update_req.lease, lease);
   update_req.if_state_etag = first.new_state_etag;
   update_req.if_version = 99L;
   update_req.has_if_version = 1;
@@ -13908,6 +14035,10 @@ static void test_client_update_enforces_state_preconditions(void **state) {
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
   write_client_state(client, "state/current", "{\"value\":2}",
                      first.new_state_etag, 1L, 1, &second, &error);
   assert_sha256_text_etag(second.new_state_etag, "{\"value\":2}");
@@ -13915,6 +14046,9 @@ static void test_client_update_enforces_state_preconditions(void **state) {
 
   lc_update_res_cleanup(&first);
   lc_update_res_cleanup(&second);
+  if (lease != NULL) {
+    lease->close(lease);
+  }
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -13986,6 +14120,7 @@ static void test_client_update_waits_for_namespace_mutation_lock(void **state) {
 
 static void test_client_mutate_applies_plan_and_preconditions(void **state) {
   lc_client *client;
+  lc_lease *lease;
   lc_sink *sink;
   lc_update_res update_res;
   lc_mutate_op mutate_op;
@@ -14001,6 +14136,7 @@ static void test_client_mutate_applies_plan_and_preconditions(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   sink = NULL;
   memset(&update_res, 0, sizeof(update_res));
   lc_mutate_op_init(&mutate_op);
@@ -14014,11 +14150,12 @@ static void test_client_mutate_applies_plan_and_preconditions(void **state) {
   open_pouch_client(root, &client, &error);
   write_client_state(client, key, "{\"counter\":1,\"drop\":true}", NULL, 0L, 0,
                      &update_res, &error);
+  pouch_acquire_test_lease(client, NULL, key, NULL, &lease, &error);
 
   mutations[0] = "/counter++";
   mutations[1] = "/status=\"ok\"";
   mutations[2] = "rm:/drop";
-  mutate_op.lease.key = key;
+  pouch_copy_lease_ref(&mutate_op.lease, lease);
   mutate_op.mutations = mutations;
   mutate_op.mutation_count = 3U;
   mutate_op.if_state_etag = update_res.new_state_etag;
@@ -14055,6 +14192,9 @@ static void test_client_mutate_applies_plan_and_preconditions(void **state) {
 
   lc_mutate_res_cleanup(&mutate_res);
   lc_update_res_cleanup(&update_res);
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -14062,6 +14202,7 @@ static void test_client_mutate_applies_plan_and_preconditions(void **state) {
 
 static void test_client_mutate_serializes_concurrent_transforms(void **state) {
   lc_client *client;
+  lc_lease *lease;
   lc_sink *sink;
   lc_update_res update_res;
   lc_get_res get_res;
@@ -14078,6 +14219,7 @@ static void test_client_mutate_serializes_concurrent_transforms(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   sink = NULL;
   bytes = NULL;
   length = 0U;
@@ -14093,11 +14235,12 @@ static void test_client_mutate_serializes_concurrent_transforms(void **state) {
   write_client_state(client, key, "{\"counter\":0}", NULL, 0L, 0, &update_res,
                      &error);
   lc_update_res_cleanup(&update_res);
+  pouch_acquire_test_lease(client, NULL, key, NULL, &lease, &error);
   assert_int_equal(pthread_barrier_init(&start, NULL, 2U), 0);
   for (index = 0U; index < 2U; ++index) {
     mutations[index].client = client;
     mutations[index].start = &start;
-    mutations[index].key = key;
+    pouch_copy_lease_ref(&mutations[index].lease, lease);
     mutations[index].attempts = 8U;
     assert_int_equal(pthread_create(&threads[index], NULL,
                                     pouch_client_mutate_in_parallel,
@@ -14122,6 +14265,9 @@ static void test_client_mutate_serializes_concurrent_transforms(void **state) {
   lc_get_res_cleanup(&get_res);
   sink->close(sink);
 
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -14129,6 +14275,7 @@ static void test_client_mutate_serializes_concurrent_transforms(void **state) {
 
 static void test_client_get_missing_and_public_state_behavior(void **state) {
   lc_client *client;
+  lc_lease *lease;
   lc_source *source;
   lc_sink *sink;
   lc_get_opts get_opts;
@@ -14144,6 +14291,7 @@ static void test_client_get_missing_and_public_state_behavior(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   source = NULL;
   sink = NULL;
   bytes = NULL;
@@ -14178,7 +14326,8 @@ static void test_client_get_missing_and_public_state_behavior(void **state) {
   sink = NULL;
   lc_get_res_cleanup(&get_res);
 
-  update_req.lease.key = "public/state";
+  pouch_acquire_test_lease(client, NULL, "public/state", NULL, &lease, &error);
+  pouch_copy_lease_ref(&update_req.lease, lease);
   rc = lc_source_from_memory("{\"value\":42}", strlen("{\"value\":42}"),
                              &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -14187,6 +14336,9 @@ static void test_client_get_missing_and_public_state_behavior(void **state) {
   source->close(source);
   source = NULL;
   lc_update_res_cleanup(&update_res);
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -14215,6 +14367,9 @@ static void test_client_get_missing_and_public_state_behavior(void **state) {
   if (sink != NULL) {
     sink->close(sink);
   }
+  if (lease != NULL) {
+    lease->close(lease);
+  }
   lc_update_res_cleanup(&update_res);
   if (client != NULL) {
     lc_client_close(client);
@@ -14225,8 +14380,10 @@ static void test_client_get_missing_and_public_state_behavior(void **state) {
 
 static void test_client_attachments_roundtrip_and_delete(void **state) {
   lc_client *client;
+  lc_lease *lease;
   lc_source *source;
   lc_sink *sink;
+  lc_acquire_req acquire_req;
   lc_attach_op attach_op;
   lc_attach_res attach_res;
   lc_attachment_list_req list_req;
@@ -14249,6 +14406,7 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   source = NULL;
   sink = NULL;
   bytes = NULL;
@@ -14260,6 +14418,7 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   memset(&attach_res, 0, sizeof(attach_res));
   memset(&list, 0, sizeof(list));
   memset(&get_res, 0, sizeof(get_res));
+  lc_acquire_req_init(&acquire_req);
   lc_attach_op_init(&attach_op);
   lc_attachment_list_req_init(&list_req);
   lc_attachment_get_op_init(&get_op);
@@ -14271,7 +14430,17 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   snprintf(key, sizeof(key), "attachments/%ld", (long)getpid());
 
   open_pouch_client(root, &client, &error);
-  attach_op.lease.key = key;
+  acquire_req.key = key;
+  acquire_req.owner = "client-attachments";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  attach_op.lease.namespace_name = lease->namespace_name;
+  attach_op.lease.key = lease->key;
+  attach_op.lease.lease_id = lease->lease_id;
+  attach_op.lease.txn_id = lease->txn_id;
+  attach_op.lease.fencing_token = lease->fencing_token;
   attach_op.name = "alpha.txt";
   attach_op.content_type = "text/plain";
   attach_op.prevent_overwrite = 1;
@@ -14410,7 +14579,11 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   sink = NULL;
   lc_attachment_get_res_cleanup(&get_res);
 
-  delete_op.lease.key = key;
+  delete_op.lease.namespace_name = lease->namespace_name;
+  delete_op.lease.key = lease->key;
+  delete_op.lease.lease_id = lease->lease_id;
+  delete_op.lease.txn_id = lease->txn_id;
+  delete_op.lease.fencing_token = lease->fencing_token;
   delete_op.selector.name = "alpha.txt";
   rc = client->delete_attachment(client, &delete_op, &deleted, &error);
   assert_int_equal(rc, LC_OK);
@@ -14441,7 +14614,11 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(deleted, 0);
 
-  delete_all_op.lease.key = key;
+  delete_all_op.lease.namespace_name = lease->namespace_name;
+  delete_all_op.lease.key = lease->key;
+  delete_all_op.lease.lease_id = lease->lease_id;
+  delete_all_op.lease.txn_id = lease->txn_id;
+  delete_all_op.lease.fencing_token = lease->fencing_token;
   rc = client->delete_all_attachments(client, &delete_all_op, &deleted_count,
                                       &error);
   assert_int_equal(rc, LC_OK);
@@ -14459,6 +14636,9 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
   }
   lc_attachment_get_res_cleanup(&get_res);
   lc_attachment_list_cleanup(&list);
+  if (lease != NULL) {
+    lease->close(lease);
+  }
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -14466,7 +14646,9 @@ static void test_client_attachments_roundtrip_and_delete(void **state) {
 
 static void test_attachment_rejects_missing_timestamp_metadata(void **state) {
   lc_client *client;
+  lc_lease *lease;
   lc_source *source;
+  lc_acquire_req acquire_req;
   lc_attach_op attach_op;
   lc_attach_res attach_res;
   lc_attachment_list_req list_req;
@@ -14480,11 +14662,13 @@ static void test_attachment_rejects_missing_timestamp_metadata(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   source = NULL;
   memset(&attach_res, 0, sizeof(attach_res));
   memset(&list, 0, sizeof(list));
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
+  lc_acquire_req_init(&acquire_req);
   lc_attach_op_init(&attach_op);
   lc_attachment_list_req_init(&list_req);
   lc_error_init(&error);
@@ -14492,7 +14676,12 @@ static void test_attachment_rejects_missing_timestamp_metadata(void **state) {
   cleanup_root(root);
 
   open_pouch_client(root, &client, &error);
-  attach_op.lease.key = "attachment-corrupt";
+  acquire_req.key = "attachment-corrupt";
+  acquire_req.owner = "attachment-corrupt";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  pouch_copy_lease_ref(&attach_op.lease, lease);
   attach_op.name = "bad.bin";
   attach_op.content_type = "application/octet-stream";
   rc = lc_source_from_memory("bad", strlen("bad"), &source, &error);
@@ -14523,6 +14712,7 @@ static void test_attachment_rejects_missing_timestamp_metadata(void **state) {
 
   lc_attachment_list_cleanup(&list);
   lc_error_cleanup(&error);
+  lease->close(lease);
   lc_client_close(client);
   cleanup_root(root);
 }
@@ -14530,6 +14720,7 @@ static void test_attachment_rejects_missing_timestamp_metadata(void **state) {
 static void
 test_compaction_preserves_reachable_spans_in_writer_modes(void **state) {
   lc_client *client;
+  lc_lease *lease;
   lc_client_handle *handle;
   lc_pouch *pouch;
   lc_source *source;
@@ -14545,6 +14736,7 @@ test_compaction_preserves_reachable_spans_in_writer_modes(void **state) {
   lc_attach_res attach_res;
   lc_attachment_get_op get_op;
   lc_attachment_get_res get_res;
+  lc_acquire_req acquire_req;
   lc_error error;
   const void *bytes;
   size_t length;
@@ -14557,6 +14749,7 @@ test_compaction_preserves_reachable_spans_in_writer_modes(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   source = NULL;
   sink = NULL;
   bytes = NULL;
@@ -14574,6 +14767,7 @@ test_compaction_preserves_reachable_spans_in_writer_modes(void **state) {
     memset(&attach_res, 0, sizeof(attach_res));
     lc_attachment_get_op_init(&get_op);
     memset(&get_res, 0, sizeof(get_res));
+    lc_acquire_req_init(&acquire_req);
     make_root(shared ? "compaction-spans-shared" : "compaction-spans-exclusive",
               root, sizeof(root));
     cleanup_root(root);
@@ -14612,8 +14806,13 @@ test_compaction_preserves_reachable_spans_in_writer_modes(void **state) {
     lc_source_close(source);
     source = NULL;
 
-    attach_op.lease.namespace_name = "refs";
-    attach_op.lease.key = "state/attachment";
+    acquire_req.namespace_name = "refs";
+    acquire_req.key = "state/attachment";
+    acquire_req.owner = "compaction-spans";
+    acquire_req.ttl_seconds = 30L;
+    rc = client->acquire(client, &acquire_req, &lease, &error);
+    assert_int_equal(rc, LC_OK);
+    pouch_copy_lease_ref(&attach_op.lease, lease);
     attach_op.name = "payload.txt";
     attach_op.content_type = "text/plain";
     rc = lc_source_from_memory("attachment", strlen("attachment"), &source,
@@ -14624,6 +14823,9 @@ test_compaction_preserves_reachable_spans_in_writer_modes(void **state) {
     lc_source_close(source);
     source = NULL;
     lc_attach_res_cleanup(&attach_res);
+    rc = lease->release(lease, NULL, &error);
+    assert_int_equal(rc, LC_OK);
+    lease = NULL;
 
     maintenance_options.namespace_name = "refs";
     maintenance_options.force = 1;
@@ -15230,6 +15432,7 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   lc_client *client;
   lc_client *reader;
   lc_lease *lease;
+  lc_lease *txn_lease;
   lc_message *message;
   lc_source *source;
   lc_sink *sink;
@@ -15266,6 +15469,7 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   client = NULL;
   reader = NULL;
   lease = NULL;
+  txn_lease = NULL;
   message = NULL;
   source = NULL;
   sink = NULL;
@@ -15387,6 +15591,9 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   txn_update_req.lease.namespace_name = "default";
   txn_update_req.lease.key = "crypto/txn-state";
   txn_update_req.lease.txn_id = "crypto-txn";
+  pouch_acquire_test_lease(client, "default", "crypto/txn-state", "crypto-txn",
+                           &txn_lease, &error);
+  pouch_copy_lease_ref(&txn_update_req.lease, txn_lease);
   txn_update_req.content_type = "application/json";
   rc = lc_source_from_memory(
       "{\"secret\":\"staged-secret-redaction-required\"}",
@@ -15406,6 +15613,8 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
+  txn_lease->close(txn_lease);
+  txn_lease = NULL;
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -16409,6 +16618,7 @@ static void test_txn_update_preserves_delete_marker_content_type(void **state) {
   static const char content_type[] = "application/x-lockdc-pouch-state-delete";
   static const char payload[] = "transactional content type must survive";
   lc_client *client;
+  lc_lease *lease;
   lc_source *source;
   lc_sink *sink;
   lc_update_req update_req;
@@ -16425,6 +16635,7 @@ static void test_txn_update_preserves_delete_marker_content_type(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   source = NULL;
   sink = NULL;
   bytes = NULL;
@@ -16443,6 +16654,9 @@ static void test_txn_update_preserves_delete_marker_content_type(void **state) {
   update_req.lease.namespace_name = "default";
   update_req.lease.key = "state/content-type";
   update_req.lease.txn_id = "txn-delete-marker-content-type";
+  pouch_acquire_test_lease(client, "default", "state/content-type",
+                           update_req.lease.txn_id, &lease, &error);
+  pouch_copy_lease_ref(&update_req.lease, lease);
   update_req.content_type = content_type;
   rc = lc_source_from_memory(payload, strlen(payload), &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -16458,10 +16672,12 @@ static void test_txn_update_preserves_delete_marker_content_type(void **state) {
   decision_req.participant_count = 1U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
+  lease->close(lease);
+  lease = NULL;
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
-  rc = client->get(client, update_req.lease.key, NULL, sink, &get_res, &error);
+  rc = client->get(client, "state/content-type", NULL, sink, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(get_res.no_content);
   assert_string_equal(get_res.content_type, content_type);
@@ -16474,6 +16690,9 @@ static void test_txn_update_preserves_delete_marker_content_type(void **state) {
   lc_txn_decision_res_cleanup(&decision_res);
   lc_get_res_cleanup(&get_res);
   lc_update_res_cleanup(&update_res);
+  if (lease != NULL) {
+    lease->close(lease);
+  }
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -16486,6 +16705,8 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   const char *mutations[2];
   lc_client *client;
   lc_pouch *pouch;
+  lc_lease *state_lease;
+  lc_lease *rollback_lease;
   lc_source *source;
   lc_update_req update_req;
   lc_update_res update_res;
@@ -16518,6 +16739,8 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   (void)state;
   client = NULL;
   pouch = NULL;
+  state_lease = NULL;
+  rollback_lease = NULL;
   source = NULL;
   message = NULL;
   lc_update_req_init(&update_req);
@@ -16549,6 +16772,9 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   update_req.lease.namespace_name = "docs/txn-index";
   update_req.lease.key = "doc/txn";
   update_req.lease.txn_id = "txn-state-index";
+  pouch_acquire_test_lease(client, "docs/txn-index", "doc/txn",
+                           update_req.lease.txn_id, &state_lease, &error);
+  pouch_copy_lease_ref(&update_req.lease, state_lease);
   update_req.content_type = "application/json";
   rc = lc_source_from_memory(
       "{\"category\":\"planning\",\"counter\":41,\"kind\":\"txn\"}",
@@ -16565,6 +16791,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   mutate_op.lease.namespace_name = "docs/txn-index";
   mutate_op.lease.key = "doc/txn";
   mutate_op.lease.txn_id = "txn-state-index";
+  pouch_copy_lease_ref(&mutate_op.lease, state_lease);
   mutate_op.mutations = mutations;
   mutate_op.mutation_count = 2U;
   mutate_op.if_version = update_res.new_version;
@@ -16640,6 +16867,8 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
+  state_lease->close(state_lease);
+  state_lease = NULL;
 
   memset(&query_res, 0, sizeof(query_res));
   rc = client->query_keys(client, &query_req, &handler, &after_commit,
@@ -16679,6 +16908,9 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   update_req.lease.namespace_name = "docs/txn-index";
   update_req.lease.key = "doc/rollback";
   update_req.lease.txn_id = "txn-state-rollback";
+  pouch_acquire_test_lease(client, "docs/txn-index", "doc/rollback",
+                           update_req.lease.txn_id, &rollback_lease, &error);
+  pouch_copy_lease_ref(&update_req.lease, rollback_lease);
   update_req.content_type = "application/json";
   rc = lc_source_from_memory(
       "{\"category\":\"planning\",\"counter\":7}",
@@ -16699,6 +16931,8 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
+  rollback_lease->close(rollback_lease);
+  rollback_lease = NULL;
 
   memset(&query_res, 0, sizeof(query_res));
   rc = client->query_keys(client, &query_req, &handler, &after_rollback,
@@ -16709,6 +16943,12 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   assert_false(pouch_query_capture_has(&after_rollback, "doc/rollback"));
   lc_query_res_cleanup(&query_res);
 
+  if (rollback_lease != NULL) {
+    rollback_lease->close(rollback_lease);
+  }
+  if (state_lease != NULL) {
+    state_lease->close(state_lease);
+  }
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -18107,6 +18347,146 @@ static void test_client_rejects_missing_lease_and_queue_owners(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_client_mutations_require_lease_credentials(void **state) {
+  static const char *const mutations[] = {"/value=1"};
+  lc_client *client;
+  lc_source *source;
+  lc_sink *sink;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_mutate_op mutate_op;
+  lc_mutate_res mutate_res;
+  lc_metadata_op metadata_op;
+  lc_metadata_res metadata_res;
+  lc_remove_op remove_op;
+  lc_remove_res remove_res;
+  lc_attach_op attach_op;
+  lc_attach_res attach_res;
+  lc_attachment_delete_op delete_op;
+  lc_attachment_delete_all_op delete_all_op;
+  lc_get_res get_res;
+  lc_error error;
+  char root[512];
+  int deleted;
+  int deleted_count;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  deleted = 0;
+  deleted_count = 0;
+  lc_update_req_init(&update_req);
+  memset(&update_res, 0, sizeof(update_res));
+  lc_mutate_op_init(&mutate_op);
+  memset(&mutate_res, 0, sizeof(mutate_res));
+  lc_metadata_op_init(&metadata_op);
+  memset(&metadata_res, 0, sizeof(metadata_res));
+  lc_remove_op_init(&remove_op);
+  memset(&remove_res, 0, sizeof(remove_res));
+  lc_attach_op_init(&attach_op);
+  memset(&attach_res, 0, sizeof(attach_res));
+  lc_attachment_delete_op_init(&delete_op);
+  lc_attachment_delete_all_op_init(&delete_all_op);
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  make_root("client-missing-lease", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  update_req.lease.key = "state/lease-required";
+  rc = lc_source_from_memory("{\"value\":1}", strlen("{\"value\":1}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch lease-bound mutation requires lease_id");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  mutate_op.lease.key = "state/lease-required";
+  mutate_op.mutations = mutations;
+  mutate_op.mutation_count = 1U;
+  rc = client->mutate(client, &mutate_op, &mutate_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch lease-bound mutation requires lease_id");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  metadata_op.lease.key = "state/lease-required";
+  metadata_op.has_query_hidden = 1;
+  metadata_op.query_hidden = 1;
+  rc = client->metadata(client, &metadata_op, &metadata_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch lease-bound mutation requires lease_id");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  remove_op.lease.key = "state/lease-required";
+  rc = client->remove(client, &remove_op, &remove_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch lease-bound mutation requires lease_id");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  attach_op.lease.key = "state/lease-required";
+  attach_op.name = "attachment.txt";
+  rc = lc_source_from_memory("attachment", strlen("attachment"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->attach(client, &attach_op, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch lease-bound mutation requires lease_id");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  delete_op.lease.key = "state/lease-required";
+  delete_op.selector.name = "attachment.txt";
+  rc = client->delete_attachment(client, &delete_op, &deleted, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch lease-bound mutation requires lease_id");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  delete_all_op.lease.key = "state/lease-required";
+  rc = client->delete_all_attachments(client, &delete_all_op, &deleted_count,
+                                      &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch lease-bound mutation requires lease_id");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc =
+      client->get(client, "state/lease-required", NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+
+  sink->close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_attach_res_cleanup(&attach_res);
+  lc_remove_res_cleanup(&remove_res);
+  lc_metadata_res_cleanup(&metadata_res);
+  lc_mutate_res_cleanup(&mutate_res);
+  lc_update_res_cleanup(&update_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 typedef struct pouch_watch_capture {
   lc_client *client;
   const char *queue;
@@ -18586,6 +18966,7 @@ test_client_queue_watch_detects_forked_transaction_ack_commit(void **state) {
 static void
 test_client_remove_tombstones_state_and_enforces_preconditions(void **state) {
   lc_client *client;
+  lc_lease *lease;
   lc_sink *sink;
   lc_update_res update_res;
   lc_remove_op remove_op;
@@ -18598,6 +18979,7 @@ test_client_remove_tombstones_state_and_enforces_preconditions(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   sink = NULL;
   memset(&update_res, 0, sizeof(update_res));
   memset(&remove_res, 0, sizeof(remove_res));
@@ -18612,7 +18994,8 @@ test_client_remove_tombstones_state_and_enforces_preconditions(void **state) {
   write_client_state(client, key, "{\"value\":11}", NULL, 0L, 0, &update_res,
                      &error);
 
-  remove_op.lease.key = key;
+  pouch_acquire_test_lease(client, NULL, key, NULL, &lease, &error);
+  pouch_copy_lease_ref(&remove_op.lease, lease);
   remove_op.if_state_etag = "wrong";
   rc = client->remove(client, &remove_op, &remove_res, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
@@ -18622,7 +19005,7 @@ test_client_remove_tombstones_state_and_enforces_preconditions(void **state) {
 
   lc_remove_op_init(&remove_op);
   memset(&remove_res, 0, sizeof(remove_res));
-  remove_op.lease.key = key;
+  pouch_copy_lease_ref(&remove_op.lease, lease);
   remove_op.if_state_etag = update_res.new_state_etag;
   remove_op.if_version = update_res.new_version;
   remove_op.has_if_version = 1;
@@ -18630,6 +19013,8 @@ test_client_remove_tombstones_state_and_enforces_preconditions(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(remove_res.removed, 1);
   assert_int_equal(remove_res.new_version, 2L);
+  lease->close(lease);
+  lease = NULL;
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
@@ -18642,14 +19027,21 @@ test_client_remove_tombstones_state_and_enforces_preconditions(void **state) {
 
   lc_remove_op_init(&remove_op);
   memset(&remove_res, 0, sizeof(remove_res));
-  remove_op.lease.key = "missing";
+  pouch_acquire_test_lease(client, NULL, "missing", NULL, &lease, &error);
+  pouch_copy_lease_ref(&remove_op.lease, lease);
   rc = client->remove(client, &remove_op, &remove_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(remove_res.removed, 0);
   assert_int_equal(remove_res.new_version, 0L);
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
 
   lc_remove_res_cleanup(&remove_res);
   lc_update_res_cleanup(&update_res);
+  if (lease != NULL) {
+    lease->close(lease);
+  }
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -18657,6 +19049,7 @@ test_client_remove_tombstones_state_and_enforces_preconditions(void **state) {
 
 static void test_state_mutations_do_not_create_writer_markers(void **state) {
   lc_client *client;
+  lc_lease *lease;
   lc_sink *sink;
   lc_update_res update_res;
   lc_remove_op remove_op;
@@ -18677,6 +19070,7 @@ static void test_state_mutations_do_not_create_writer_markers(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   sink = NULL;
   bytes = NULL;
   length = 0U;
@@ -18703,11 +19097,14 @@ static void test_state_mutations_do_not_create_writer_markers(void **state) {
                      &error);
   lc_update_res_cleanup(&update_res);
 
-  remove_op.lease.key = key;
+  pouch_acquire_test_lease(client, NULL, key, NULL, &lease, &error);
+  pouch_copy_lease_ref(&remove_op.lease, lease);
   rc = client->remove(client, &remove_op, &remove_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(remove_res.removed, 1);
   lc_remove_res_cleanup(&remove_res);
+  lease->close(lease);
+  lease = NULL;
 
   memset(&handler_state, 0, sizeof(handler_state));
   handler_state.replacement = "{\"value\":4}";
@@ -18786,6 +19183,9 @@ static void test_state_mutations_do_not_create_writer_markers(void **state) {
   dir = NULL;
   lc_free_with_allocator(NULL, namespace_path);
   namespace_path = NULL;
+  if (lease != NULL) {
+    lease->close(lease);
+  }
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -19637,7 +20037,7 @@ test_acquire_rolls_back_unrepresentable_generation_claim(void **state) {
            (long)getpid());
 
   open_pouch_client(root, &client, &error);
-  write_client_state(client, key, "{}", NULL, 0L, 0, &update_res, &error);
+  seed_pouch_state(client, key, "{}", &update_res, &error);
   lc_update_res_cleanup(&update_res);
   lc_client_close(client);
   client = NULL;
@@ -20554,6 +20954,7 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
   lc_client *client;
   lc_pouch *pouch;
+  lc_lease *lease;
   lc_source *source;
   lc_query_req query_req;
   lc_query_res query_res;
@@ -20574,6 +20975,7 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   (void)state;
   client = NULL;
   pouch = NULL;
+  lease = NULL;
   source = NULL;
   memset(&query_res, 0, sizeof(query_res));
   memset(&handler, 0, sizeof(handler));
@@ -20678,6 +21080,8 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   lc_query_res_cleanup(&query_res);
   cursor_update_req.lease.namespace_name = "docs/query";
   cursor_update_req.lease.key = "doc/0";
+  pouch_acquire_test_lease(client, "docs/query", "doc/0", NULL, &lease, &error);
+  pouch_copy_lease_ref(&cursor_update_req.lease, lease);
   rc = lc_source_from_memory("{\"category\":\"planning\",\"n\":0}",
                              strlen("{\"category\":\"planning\",\"n\":0}"),
                              &source, &error);
@@ -20688,6 +21092,9 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_update_res_cleanup(&cursor_update_res);
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
 
   rc = client->query_keys(client, &query_req, &handler, &second_page,
                           &query_res, &error);
@@ -20732,6 +21139,9 @@ static void test_query_keys_scan_uses_liblql_and_query_hidden(void **state) {
   assert_int_equal(rc, LC_ERR_INVALID);
   lc_query_res_cleanup(&query_res);
   lc_error_cleanup(&error);
+  if (lease != NULL) {
+    lease->close(lease);
+  }
   lc_client_close(client);
   cleanup_root(root);
 }
@@ -20741,6 +21151,7 @@ test_query_keys_callback_can_reenter_pouch_public_api(void **state) {
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
   lc_client *client;
+  lc_lease *lease;
   lc_source *source;
   lc_update_req update_req;
   lc_update_res update_res;
@@ -20754,6 +21165,7 @@ test_query_keys_callback_can_reenter_pouch_public_api(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   source = NULL;
   memset(&update_res, 0, sizeof(update_res));
   memset(&query_res, 0, sizeof(query_res));
@@ -20768,6 +21180,9 @@ test_query_keys_callback_can_reenter_pouch_public_api(void **state) {
 
   update_req.lease.namespace_name = "docs/query-reentrant";
   update_req.lease.key = "doc/a";
+  pouch_acquire_test_lease(client, "docs/query-reentrant", "doc/a", NULL,
+                           &lease, &error);
+  pouch_copy_lease_ref(&update_req.lease, lease);
   rc = lc_source_from_memory("{\"category\":\"planning\",\"value\":1}",
                              strlen("{\"category\":\"planning\",\"value\":1}"),
                              &source, &error);
@@ -20777,6 +21192,9 @@ test_query_keys_callback_can_reenter_pouch_public_api(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_update_res_cleanup(&update_res);
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
 
   handler.begin = pouch_reentrant_query_key_begin;
   handler.chunk = pouch_reentrant_query_key_chunk;
@@ -20795,6 +21213,9 @@ test_query_keys_callback_can_reenter_pouch_public_api(void **state) {
   assert_true(pouch_query_capture_has(&reentrant.capture, "doc/a"));
 
   lc_query_res_cleanup(&query_res);
+  if (lease != NULL) {
+    lease->close(lease);
+  }
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -21148,10 +21569,10 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
                              strlen("{\"details\":{\"status\":\"inactive\"}}"),
                              &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = client->update(client, &update_req, source, &live_update, &error);
+  pouch_update_with_test_lease(client, &update_req, source, &live_update,
+                               &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
   lc_update_res_cleanup(&live_update);
   memset(&live_update, 0, sizeof(live_update));
 
@@ -21168,10 +21589,10 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   update_req.lease.key = "doc/live";
   rc = lc_source_from_memory(live_json, strlen(live_json), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = client->update(client, &update_req, source, &live_update, &error);
+  pouch_update_with_test_lease(client, &update_req, source, &live_update,
+                               &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
 
   lc_update_req_init(&update_req);
   update_req.lease.namespace_name = namespace_name;
@@ -21179,11 +21600,10 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   rc = lc_source_from_memory(live_updated_json, strlen(live_updated_json),
                              &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc =
-      client->update(client, &update_req, source, &live_updated_update, &error);
+  pouch_update_with_test_lease(client, &update_req, source,
+                               &live_updated_update, &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
 
   lc_update_req_init(&update_req);
   update_req.lease.namespace_name = namespace_name;
@@ -21191,10 +21611,10 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   rc = lc_source_from_memory(removed_json, strlen(removed_json), &source,
                              &error);
   assert_int_equal(rc, LC_OK);
-  rc = client->update(client, &update_req, source, &removed_update, &error);
+  pouch_update_with_test_lease(client, &update_req, source, &removed_update,
+                               &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
 
   lc_update_req_init(&update_req);
   update_req.lease.namespace_name = namespace_name;
@@ -21202,11 +21622,10 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   rc = lc_source_from_memory(pending_removed_json, strlen(pending_removed_json),
                              &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = client->update(client, &update_req, source, &pending_removed_update,
-                      &error);
+  pouch_update_with_test_lease(client, &update_req, source,
+                               &pending_removed_update, &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
 
   lc_update_req_init(&update_req);
   update_req.lease.namespace_name = namespace_name;
@@ -21214,18 +21633,17 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   rc = lc_source_from_memory(pending_json, strlen(pending_json), &source,
                              &error);
   assert_int_equal(rc, LC_OK);
-  rc = client->update(client, &update_req, source, &pending_update, &error);
+  pouch_update_with_test_lease(client, &update_req, source, &pending_update,
+                               &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
 
   lc_remove_op_init(&remove_op);
   remove_op.lease.namespace_name = namespace_name;
   remove_op.lease.key = "doc/removed";
   remove_op.if_version = removed_update.new_version;
   remove_op.has_if_version = 1;
-  rc = client->remove(client, &remove_op, &remove_res, &error);
-  assert_int_equal(rc, LC_OK);
+  pouch_remove_with_test_lease(client, &remove_op, &remove_res, &error);
   assert_int_equal(remove_res.removed, 1);
 
   lc_remove_res_cleanup(&remove_res);
@@ -21235,8 +21653,7 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
   remove_op.lease.key = "doc/z";
   remove_op.if_version = pending_removed_update.new_version;
   remove_op.has_if_version = 1;
-  rc = client->remove(client, &remove_op, &remove_res, &error);
-  assert_int_equal(rc, LC_OK);
+  pouch_remove_with_test_lease(client, &remove_op, &remove_res, &error);
   assert_int_equal(remove_res.removed, 1);
 
   lc_index_flush_req_init(&flush_req);
@@ -21370,10 +21787,10 @@ test_query_keys_index_summary_preserves_callback_failure(void **state) {
   update_req.lease.key = "doc/a";
   rc = lc_source_from_memory("{\"v\":1}", strlen("{\"v\":1}"), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = client->update(client, &update_req, source, &update_res, &error);
+  pouch_update_with_test_lease(client, &update_req, source, &update_res,
+                               &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
   lc_update_res_cleanup(&update_res);
 
   query_req.namespace_name = "docs/query-index-callback";
@@ -21451,10 +21868,10 @@ test_query_keys_index_repairs_unknown_generation_posting_term(void **state) {
   rc = lc_source_from_memory("{\"v\":\"one\"}", strlen("{\"v\":\"one\"}"),
                              &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = client->update(client, &update_req, source, &update_res, &error);
+  pouch_update_with_test_lease(client, &update_req, source, &update_res,
+                               &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
   lc_update_res_cleanup(&update_res);
 
   handler.begin = pouch_query_key_begin;
@@ -22708,10 +23125,10 @@ test_query_keys_index_long_strings_use_validated_candidates(void **state) {
   update_req.lease.key = "doc/a";
   rc = lc_source_from_memory(json, strlen(json), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = client->update(client, &update_req, source, &update_res, &error);
+  pouch_update_with_test_lease(client, &update_req, source, &update_res,
+                               &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
   lc_update_res_cleanup(&update_res);
   free(json);
   json = NULL;
@@ -22725,10 +23142,10 @@ test_query_keys_index_long_strings_use_validated_candidates(void **state) {
   update_req.lease.key = "doc/b";
   rc = lc_source_from_memory(json, strlen(json), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = client->update(client, &update_req, source, &update_res, &error);
+  pouch_update_with_test_lease(client, &update_req, source, &update_res,
+                               &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
   lc_update_res_cleanup(&update_res);
   free(json);
   json = NULL;
@@ -22854,10 +23271,10 @@ test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
   update_req.lease.key = "doc/match";
   rc = lc_source_from_memory(json, strlen(json), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = client->update(client, &update_req, source, &update_res, &error);
+  pouch_update_with_test_lease(client, &update_req, source, &update_res,
+                               &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
   lc_update_res_cleanup(&update_res);
 
   snprintf(json, json_length, "{\"payload\":\"%s\"}", other_value);
@@ -22866,10 +23283,10 @@ test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
   update_req.lease.key = "doc/other";
   rc = lc_source_from_memory(json, strlen(json), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = client->update(client, &update_req, source, &update_res, &error);
+  pouch_update_with_test_lease(client, &update_req, source, &update_res,
+                               &error);
   source->close(source);
   source = NULL;
-  assert_int_equal(rc, LC_OK);
   lc_update_res_cleanup(&update_res);
 
   handler.begin = pouch_query_key_begin;
@@ -24262,6 +24679,7 @@ test_flush_index_external_accept_invalidates_cached_summary(void **state) {
 static void
 test_query_index_rebuilds_manifest_missing_newest_segment(void **state) {
   lc_client *client;
+  lc_pouch_generation expected_index_seq;
   lc_update_res update_res;
   lc_index_flush_req flush_req;
   lc_index_flush_res flush_res;
@@ -24276,6 +24694,7 @@ test_query_index_rebuilds_manifest_missing_newest_segment(void **state) {
 
   (void)state;
   client = NULL;
+  expected_index_seq = 0U;
   namespace_path = NULL;
   memset(&update_res, 0, sizeof(update_res));
   lc_index_flush_req_init(&flush_req);
@@ -24303,6 +24722,10 @@ test_query_index_rebuilds_manifest_missing_newest_segment(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_index_flush_res_cleanup(&flush_res);
 
+  rc = lc_pouch_state_index_seq(((lc_client_handle *)client)->pouch, "default",
+                                &expected_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+
   namespace_path = lc_pouch_namespace_path(NULL, root, "default");
   assert_non_null(namespace_path);
   assert_int_equal(query_index_manifest_segment_count(namespace_path), 2U);
@@ -24321,8 +24744,7 @@ test_query_index_rebuilds_manifest_missing_newest_segment(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.count, 1);
   assert_true(pouch_query_capture_has(&capture, "doc/beta"));
-  assert_path_file_contains(namespace_path, "index/query.manifest",
-                            "state_index_seq=2");
+  assert_int_equal(query_res.index_seq, expected_index_seq);
   assert_int_equal(query_index_manifest_segment_count(namespace_path), 1U);
   assert_int_equal(query_index_regular_file_count(namespace_path), 3U);
   assert_query_index_segment_contains(namespace_path, "query.index",
@@ -24338,6 +24760,7 @@ test_query_index_rebuilds_manifest_missing_newest_segment(void **state) {
 static void
 test_query_index_rebuilds_manifest_missing_oldest_segment(void **state) {
   lc_client *client;
+  lc_pouch_generation expected_index_seq;
   lc_update_res update_res;
   lc_index_flush_req flush_req;
   lc_index_flush_res flush_res;
@@ -24352,6 +24775,7 @@ test_query_index_rebuilds_manifest_missing_oldest_segment(void **state) {
 
   (void)state;
   client = NULL;
+  expected_index_seq = 0U;
   namespace_path = NULL;
   memset(&update_res, 0, sizeof(update_res));
   lc_index_flush_req_init(&flush_req);
@@ -24379,6 +24803,10 @@ test_query_index_rebuilds_manifest_missing_oldest_segment(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_index_flush_res_cleanup(&flush_res);
 
+  rc = lc_pouch_state_index_seq(((lc_client_handle *)client)->pouch, "default",
+                                &expected_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+
   namespace_path = lc_pouch_namespace_path(NULL, root, "default");
   assert_non_null(namespace_path);
   assert_int_equal(query_index_manifest_segment_count(namespace_path), 2U);
@@ -24397,8 +24825,7 @@ test_query_index_rebuilds_manifest_missing_oldest_segment(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(capture.count, 1);
   assert_true(pouch_query_capture_has(&capture, "doc/alpha"));
-  assert_path_file_contains(namespace_path, "index/query.manifest",
-                            "state_index_seq=2");
+  assert_int_equal(query_res.index_seq, expected_index_seq);
   assert_int_equal(query_index_manifest_segment_count(namespace_path), 1U);
   assert_int_equal(query_index_regular_file_count(namespace_path), 3U);
   assert_query_index_segment_contains(namespace_path, "query.index",
@@ -24457,8 +24884,7 @@ test_query_index_rebuilds_delete_artifact_hash_mismatch(void **state) {
   lc_index_flush_res_cleanup(&flush_res);
 
   remove_op.lease.key = "doc/deleted";
-  rc = client->remove(client, &remove_op, &remove_res, &error);
-  assert_int_equal(rc, LC_OK);
+  pouch_remove_with_test_lease(client, &remove_op, &remove_res, &error);
   assert_int_equal(remove_res.removed, 1);
   lc_remove_res_cleanup(&remove_res);
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
@@ -25368,6 +25794,8 @@ static void test_txn_decision_validates_target_backend(void **state) {
 
 static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   lc_client *client;
+  lc_lease *commit_lease;
+  lc_lease *rollback_lease;
   lc_source *source;
   lc_sink *sink;
   lc_txn_participant participant;
@@ -25389,6 +25817,8 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
 
   (void)state;
   client = NULL;
+  commit_lease = NULL;
+  rollback_lease = NULL;
   source = NULL;
   sink = NULL;
   memset(&participant, 0, sizeof(participant));
@@ -25412,6 +25842,9 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   attach_op.lease.namespace_name = "objects/txn";
   attach_op.lease.key = "state/object-1";
   attach_op.lease.txn_id = "txn-attachment-commit";
+  pouch_acquire_test_lease(client, "objects/txn", "state/object-1",
+                           attach_op.lease.txn_id, &commit_lease, &error);
+  pouch_copy_lease_ref(&attach_op.lease, commit_lease);
   attach_op.name = "report.txt";
   attach_op.content_type = "text/plain";
   attach_op.prevent_overwrite = 1;
@@ -25447,6 +25880,8 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(decision_res.state, "commit");
   lc_txn_decision_res_cleanup(&decision_res);
+  commit_lease->close(commit_lease);
+  commit_lease = NULL;
 
   rc = client->list_attachments(client, &list_req, &list, &error);
   assert_int_equal(rc, LC_OK);
@@ -25475,6 +25910,9 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   lc_attachment_get_res_cleanup(&get_res);
 
   attach_op.lease.txn_id = "txn-attachment-rollback";
+  pouch_acquire_test_lease(client, "objects/txn", "state/object-1",
+                           attach_op.lease.txn_id, &rollback_lease, &error);
+  pouch_copy_lease_ref(&attach_op.lease, rollback_lease);
   attach_op.name = "rolled-back.txt";
   rc = lc_source_from_memory("rolled-back-object", strlen("rolled-back-object"),
                              &source, &error);
@@ -25490,6 +25928,8 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_string_equal(decision_res.state, "rollback");
   lc_txn_decision_res_cleanup(&decision_res);
+  rollback_lease->close(rollback_lease);
+  rollback_lease = NULL;
 
   rc = client->list_attachments(client, &list_req, &list, &error);
   assert_int_equal(rc, LC_OK);
@@ -25497,6 +25937,12 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   assert_string_equal(list.items[0].name, "report.txt");
   lc_attachment_list_cleanup(&list);
 
+  if (rollback_lease != NULL) {
+    rollback_lease->close(rollback_lease);
+  }
+  if (commit_lease != NULL) {
+    commit_lease->close(commit_lease);
+  }
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -25505,6 +25951,7 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
 static void test_txn_recovery_applies_attachment_side_effects(void **state) {
   lc_client *client;
   lc_pouch *pouch;
+  lc_lease *lease;
   lc_source *source;
   lc_attach_op attach_op;
   lc_attach_res attach_res;
@@ -25519,6 +25966,7 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
   (void)state;
   client = NULL;
   pouch = NULL;
+  lease = NULL;
   source = NULL;
   lc_attach_op_init(&attach_op);
   memset(&attach_res, 0, sizeof(attach_res));
@@ -25534,6 +25982,9 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
   attach_op.lease.namespace_name = "objects/recover";
   attach_op.lease.key = "state/object-2";
   attach_op.lease.txn_id = "txn-attachment-recover";
+  pouch_acquire_test_lease(client, "objects/recover", "state/object-2",
+                           attach_op.lease.txn_id, &lease, &error);
+  pouch_copy_lease_ref(&attach_op.lease, lease);
   attach_op.name = "recovered.txt";
   attach_op.content_type = "text/plain";
   rc = lc_source_from_memory("recovered-object", strlen("recovered-object"),
@@ -25544,6 +25995,8 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_attach_res_cleanup(&attach_res);
+  lease->close(lease);
+  lease = NULL;
   lc_client_close(client);
   client = NULL;
 
@@ -25588,29 +26041,42 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void pouch_attach_text(lc_client *client, const char *namespace_name,
-                              const char *key, const char *txn_id,
-                              const char *name, const char *body,
-                              lc_error *error) {
-  lc_attach_op attach_op;
+static void pouch_attach_text_with_lease(lc_lease *lease, const char *name,
+                                         const char *body, lc_error *error) {
+  lc_attach_req attach_req;
   lc_attach_res attach_res;
   lc_source *source;
   int rc;
 
-  lc_attach_op_init(&attach_op);
+  lc_attach_req_init(&attach_req);
   memset(&attach_res, 0, sizeof(attach_res));
   source = NULL;
-  attach_op.lease.namespace_name = namespace_name;
-  attach_op.lease.key = key;
-  attach_op.lease.txn_id = txn_id;
-  attach_op.name = name;
-  attach_op.content_type = "text/plain";
+  attach_req.name = name;
+  attach_req.content_type = "text/plain";
   rc = lc_source_from_memory(body, strlen(body), &source, error);
   assert_int_equal(rc, LC_OK);
-  rc = client->attach(client, &attach_op, source, &attach_res, error);
+  rc = lease->attach(lease, &attach_req, source, &attach_res, error);
   source->close(source);
   assert_int_equal(rc, LC_OK);
   lc_attach_res_cleanup(&attach_res);
+}
+
+static void pouch_attach_text(lc_client *client, const char *namespace_name,
+                              const char *key, const char *txn_id,
+                              const char *name, const char *body,
+                              lc_error *error) {
+  lc_lease *lease;
+  int rc;
+
+  lease = NULL;
+  pouch_acquire_test_lease(client, namespace_name, key, txn_id, &lease, error);
+  pouch_attach_text_with_lease(lease, name, body, error);
+  if (txn_id != NULL) {
+    lease->close(lease);
+  } else {
+    rc = lease->release(lease, NULL, error);
+    assert_int_equal(rc, LC_OK);
+  }
 }
 
 static int pouch_attachment_list_has_name(const lc_attachment_list *list,
@@ -25931,6 +26397,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
 
 static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   lc_client *client;
+  lc_lease *lease;
   lc_txn_participant participant;
   lc_txn_decision_req decision_req;
   lc_txn_decision_res decision_res;
@@ -25946,6 +26413,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
 
   (void)state;
   client = NULL;
+  lease = NULL;
   memset(&participant, 0, sizeof(participant));
   lc_txn_decision_req_init(&decision_req);
   memset(&decision_res, 0, sizeof(decision_res));
@@ -25971,6 +26439,9 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   delete_op.lease.namespace_name = "objects/delete";
   delete_op.lease.key = "state/object-3";
   delete_op.lease.txn_id = "txn-delete-commit";
+  pouch_acquire_test_lease(client, "objects/delete", "state/object-3",
+                           delete_op.lease.txn_id, &lease, &error);
+  pouch_copy_lease_ref(&delete_op.lease, lease);
   delete_op.selector.name = "delete.txt";
   deleted = 0;
   rc = client->delete_attachment(client, &delete_op, &deleted, &error);
@@ -25991,6 +26462,8 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
+  lease->close(lease);
+  lease = NULL;
 
   rc = client->list_attachments(client, &list_req, &list, &error);
   assert_int_equal(rc, LC_OK);
@@ -26000,6 +26473,9 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   lc_attachment_list_cleanup(&list);
 
   delete_op.lease.txn_id = "txn-delete-rollback";
+  pouch_acquire_test_lease(client, "objects/delete", "state/object-3",
+                           delete_op.lease.txn_id, &lease, &error);
+  pouch_copy_lease_ref(&delete_op.lease, lease);
   delete_op.selector.name = "rollback-delete.txt";
   deleted = 0;
   rc = client->delete_attachment(client, &delete_op, &deleted, &error);
@@ -26009,6 +26485,8 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
+  lease->close(lease);
+  lease = NULL;
   rc = client->list_attachments(client, &list_req, &list, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(pouch_attachment_list_has_name(&list, "rollback-delete.txt"));
@@ -26018,12 +26496,14 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
                     "clear-a.txt", "clear-a", &error);
   pouch_attach_text(client, "objects/delete", "state/object-3", NULL,
                     "clear-b.txt", "clear-b", &error);
-  pouch_attach_text(client, "objects/delete", "state/object-3",
-                    "txn-clear-commit", "staged-clear.txt", "staged-clear",
-                    &error);
+  pouch_acquire_test_lease(client, "objects/delete", "state/object-3",
+                           "txn-clear-commit", &lease, &error);
+  pouch_attach_text_with_lease(lease, "staged-clear.txt", "staged-clear",
+                               &error);
   delete_all_op.lease.namespace_name = "objects/delete";
   delete_all_op.lease.key = "state/object-3";
   delete_all_op.lease.txn_id = "txn-clear-commit";
+  pouch_copy_lease_ref(&delete_all_op.lease, lease);
   deleted_count = 0;
   rc = client->delete_all_attachments(client, &delete_all_op, &deleted_count,
                                       &error);
@@ -26037,6 +26517,8 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
+  lease->close(lease);
+  lease = NULL;
   rc = client->list_attachments(client, &list_req, &list, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(list.count, 0U);
@@ -26045,6 +26527,9 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   pouch_attach_text(client, "objects/delete", "state/object-3", NULL,
                     "rollback-clear.txt", "rollback-clear", &error);
   delete_all_op.lease.txn_id = "txn-clear-rollback";
+  pouch_acquire_test_lease(client, "objects/delete", "state/object-3",
+                           delete_all_op.lease.txn_id, &lease, &error);
+  pouch_copy_lease_ref(&delete_all_op.lease, lease);
   deleted_count = 0;
   rc = client->delete_all_attachments(client, &delete_all_op, &deleted_count,
                                       &error);
@@ -26054,12 +26539,17 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
+  lease->close(lease);
+  lease = NULL;
   rc = client->list_attachments(client, &list_req, &list, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(list.count, 1U);
   assert_string_equal(list.items[0].name, "rollback-clear.txt");
   lc_attachment_list_cleanup(&list);
 
+  if (lease != NULL) {
+    lease->close(lease);
+  }
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -26755,6 +27245,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_client_queue_max_durations_obey_timestamp_range),
       cmocka_unit_test(test_client_queue_subscribe_polling_paths),
       cmocka_unit_test(test_client_rejects_missing_lease_and_queue_owners),
+      cmocka_unit_test(test_client_mutations_require_lease_credentials),
       cmocka_unit_test(test_client_queue_watch_polling_detects_change),
       cmocka_unit_test(test_client_queue_watch_detects_transaction_ack_commit),
       cmocka_unit_test(

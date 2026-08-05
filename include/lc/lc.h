@@ -377,13 +377,14 @@ typedef struct lc_acquire_res {
 } lc_acquire_res;
 
 /** Stable lease identity used by client-level operations on an existing lease.
- */
+ * Mutating operations require a non-empty `lease_id` and its matching fencing
+ * token; an empty reference is never an unfenced write request. */
 typedef struct lc_lease_ref {
   /** Namespace of the existing lease. */
   const char *namespace_name;
   /** Key of the existing lease. */
   const char *key;
-  /** Server-issued lease identifier. */
+  /** Server-issued lease identifier, required for every mutation. */
   const char *lease_id;
   /** Transaction identifier associated with the lease, if any. */
   const char *txn_id;
@@ -463,7 +464,8 @@ typedef struct lc_update_opts {
   const char *content_type;
 } lc_update_opts;
 
-/** Client-level update operation for an existing lease reference. */
+/** Client-level update operation for an existing, credentialed lease reference.
+ */
 typedef struct lc_update_req {
   /** Existing lease identity to update. */
   lc_lease_ref lease;
@@ -524,7 +526,8 @@ typedef struct lc_mutate_local_req {
   lc_update_opts update;
 } lc_mutate_local_req;
 
-/** Client-level mutate operation for an existing lease reference. */
+/** Client-level mutate operation for an existing, credentialed lease reference.
+ */
 typedef struct lc_mutate_op {
   /** Existing lease identity to mutate. */
   lc_lease_ref lease;
@@ -564,7 +567,8 @@ typedef struct lc_metadata_req {
   int has_if_version;
 } lc_metadata_req;
 
-/** Client-level metadata update operation for an existing lease reference. */
+/** Client-level metadata update operation for an existing, credentialed lease
+ * reference. */
 typedef struct lc_metadata_op {
   /** Existing lease identity to update. */
   lc_lease_ref lease;
@@ -604,7 +608,8 @@ typedef struct lc_remove_req {
   int has_if_version;
 } lc_remove_req;
 
-/** Client-level remove operation for an existing lease reference. */
+/** Client-level remove operation for an existing, credentialed lease reference.
+ */
 typedef struct lc_remove_op {
   /** Existing lease identity to remove state from. */
   lc_lease_ref lease;
@@ -1545,7 +1550,8 @@ typedef struct lc_attach_req {
   int prevent_overwrite;
 } lc_attach_req;
 
-/** Client-level attachment upload operation for an existing lease reference. */
+/** Client-level attachment upload operation for an existing, credentialed
+ * lease reference. */
 typedef struct lc_attach_op {
   /** Existing lease identity to attach to. */
   lc_lease_ref lease;
@@ -1615,7 +1621,8 @@ typedef struct lc_attachment_get_op {
   int public_read;
 } lc_attachment_get_op;
 
-/** Client-level attachment delete operation for an existing lease reference. */
+/** Client-level attachment delete operation for an existing, credentialed
+ * lease reference. */
 typedef struct lc_attachment_delete_op {
   /** Existing lease identity to delete through. */
   lc_lease_ref lease;
@@ -1623,8 +1630,8 @@ typedef struct lc_attachment_delete_op {
   lc_attachment_selector selector;
 } lc_attachment_delete_op;
 
-/** Client-level operation used to delete all attachments for a lease reference.
- */
+/** Client-level operation used to delete all attachments through an existing,
+ * credentialed lease reference. */
 typedef struct lc_attachment_delete_all_op {
   /** Existing lease identity whose attachments should be deleted. */
   lc_lease_ref lease;
@@ -1988,17 +1995,18 @@ struct lc_client {
   int (*load)(lc_client *self, const char *key, const lonejson_map *map,
               void *dst, const lc_get_opts *opts, lc_get_res *out,
               lc_error *error);
-  /** Updates an existing lease reference from a streamed JSON source. */
+  /** Updates an existing, credentialed lease reference from a streamed JSON
+   * source. */
   int (*update)(lc_client *self, const lc_update_req *req, lc_source *src,
                 lc_update_res *out, lc_error *error);
-  /** Applies one or more server-side mutations to an existing lease reference.
-   */
+  /** Applies one or more server-side mutations to an existing, credentialed
+   * lease reference. */
   int (*mutate)(lc_client *self, const lc_mutate_op *req, lc_mutate_res *out,
                 lc_error *error);
-  /** Updates metadata fields on an existing lease reference. */
+  /** Updates metadata fields on an existing, credentialed lease reference. */
   int (*metadata)(lc_client *self, const lc_metadata_op *req,
                   lc_metadata_res *out, lc_error *error);
-  /** Removes the state bytes for an existing lease reference. */
+  /** Removes state bytes for an existing, credentialed lease reference. */
   int (*remove)(lc_client *self, const lc_remove_op *req, lc_remove_res *out,
                 lc_error *error);
   /** Renews an existing lease reference without using a bound `lc_lease`. */
@@ -2007,7 +2015,8 @@ struct lc_client {
   /** Releases an existing lease reference without using a bound `lc_lease`. */
   int (*release)(lc_client *self, const lc_release_op *req, lc_release_res *out,
                  lc_error *error);
-  /** Streams an attachment upload for an existing lease reference. */
+  /** Streams an attachment upload for an existing, credentialed lease
+   * reference. */
   int (*attach)(lc_client *self, const lc_attach_op *req, lc_source *src,
                 lc_attach_res *out, lc_error *error);
   /** Lists the attachments associated with an existing lease reference. */
@@ -2017,10 +2026,12 @@ struct lc_client {
   int (*get_attachment)(lc_client *self, const lc_attachment_get_op *req,
                         lc_sink *dst, lc_attachment_get_res *out,
                         lc_error *error);
-  /** Deletes one attachment associated with an existing lease reference. */
+  /** Deletes one attachment through an existing, credentialed lease
+   * reference. */
   int (*delete_attachment)(lc_client *self, const lc_attachment_delete_op *req,
                            int *deleted, lc_error *error);
-  /** Deletes all attachments associated with an existing lease reference. */
+  /** Deletes all attachments through an existing, credentialed lease
+   * reference. */
   int (*delete_all_attachments)(lc_client *self,
                                 const lc_attachment_delete_all_op *req,
                                 int *deleted_count, lc_error *error);
@@ -2563,16 +2574,18 @@ int lc_get(lc_client *client, const char *key, const lc_get_opts *opts,
 int lc_load(lc_client *client, const char *key, const lonejson_map *map,
             void *dst, const lc_get_opts *opts, lc_get_res *out,
             lc_error *error);
-/** Updates a lease reference from a streamed source. */
+/** Updates an existing, credentialed lease reference from a streamed source. */
 int lc_update(lc_client *client, const lc_update_req *req, lc_source *src,
               lc_update_res *out, lc_error *error);
-/** Applies one or more server-side mutations to a lease reference. */
+/** Applies one or more server-side mutations to a credentialed lease
+ * reference. */
 int lc_mutate(lc_client *client, const lc_mutate_op *req, lc_mutate_res *out,
               lc_error *error);
-/** Updates metadata fields on a lease reference. */
+/** Updates metadata fields on a credentialed lease reference. */
 int lc_metadata(lc_client *client, const lc_metadata_op *req,
                 lc_metadata_res *out, lc_error *error);
-/** Removes state bytes for a lease reference while keeping the lease alive. */
+/** Removes state bytes for a credentialed lease reference while keeping the
+ * lease alive. */
 int lc_remove(lc_client *client, const lc_remove_op *req, lc_remove_res *out,
               lc_error *error);
 /** Renews an existing lease reference without a bound `lc_lease` handle. */
@@ -2581,7 +2594,7 @@ int lc_keepalive(lc_client *client, const lc_keepalive_op *req,
 /** Releases an existing lease reference without a bound `lc_lease` handle. */
 int lc_release(lc_client *client, const lc_release_op *req, lc_release_res *out,
                lc_error *error);
-/** Streams an attachment upload for a lease reference. */
+/** Streams an attachment upload for a credentialed lease reference. */
 int lc_attach(lc_client *client, const lc_attach_op *req, lc_source *src,
               lc_attach_res *out, lc_error *error);
 /** Lists attachments associated with a lease reference. */
@@ -2591,10 +2604,10 @@ int lc_list_attachments(lc_client *client, const lc_attachment_list_req *req,
 int lc_get_attachment(lc_client *client, const lc_attachment_get_op *req,
                       lc_sink *dst, lc_attachment_get_res *out,
                       lc_error *error);
-/** Deletes one attachment selected by name or digest. */
+/** Deletes one attachment through a credentialed lease reference. */
 int lc_delete_attachment(lc_client *client, const lc_attachment_delete_op *req,
                          int *deleted, lc_error *error);
-/** Deletes all attachments for the given lease reference. */
+/** Deletes all attachments through a credentialed lease reference. */
 int lc_delete_all_attachments(lc_client *client,
                               const lc_attachment_delete_all_op *req,
                               int *deleted_count, lc_error *error);
