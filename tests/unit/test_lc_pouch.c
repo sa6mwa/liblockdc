@@ -21911,6 +21911,97 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_query_keys_index_preserves_strict_json_pointer_paths(void **state) {
+  static const char *const selectors[] = {
+      "{\"eq\":{\"field\":\"/0\",\"value\":\"object-numeric\"}}",
+      "{\"eq\":{\"field\":\"/a~1b\",\"value\":\"slash\"}}",
+      "{\"eq\":{\"field\":\"/a~0b\",\"value\":\"tilde\"}}",
+      "{\"eq\":{\"field\":\"/\",\"value\":\"empty\"}}",
+      "{\"eq\":{\"field\":\"/tags/0\",\"value\":\"array-zero\"}}",
+      "{\"eq\":{\"field\":\"/tags/0\",\"value\":\"object-zero\"}}",
+      "{\"eq\":{\"field\":\"/0\",\"value\":\"root-array-zero\"}}",
+      "{\"eq\":{\"field\":\"/tags[]\",\"value\":\"array-zero\"}}"};
+  static const char *const expected_keys[] = {
+      "doc/object", "doc/object",         "doc/object",     "doc/object",
+      "doc/array",  "doc/numeric-object", "doc/root-array", "doc/array"};
+  lc_client *client;
+  lc_update_res update_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture capture;
+  lc_error error;
+  char root[512];
+  size_t index;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-keys-index-strict-pointer", root, sizeof(root));
+  cleanup_root(root);
+  open_pouch_client(root, &client, &error);
+
+  write_client_state(client, "doc/object",
+                     "{\"0\":\"object-numeric\",\"a/b\":\"slash\","
+                     "\"a~b\":\"tilde\",\"\":\"empty\"}",
+                     NULL, 0L, 0, &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+  memset(&update_res, 0, sizeof(update_res));
+  write_client_state(client, "doc/array", "{\"tags\":[\"array-zero\"]}", NULL,
+                     0L, 0, &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+  memset(&update_res, 0, sizeof(update_res));
+  write_client_state(client, "doc/numeric-object",
+                     "{\"tags\":{\"0\":\"object-zero\"}}", NULL, 0L, 0,
+                     &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+  memset(&update_res, 0, sizeof(update_res));
+  write_client_state(client, "doc/root-array", "[\"root-array-zero\"]", NULL,
+                     0L, 0, &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  for (index = 0U; index < sizeof(selectors) / sizeof(selectors[0]); ++index) {
+    query_req.selector_json = selectors[index];
+    rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                            &error);
+    assert_int_equal(rc, LC_OK);
+    assert_int_equal(capture.count, 1);
+    assert_true(pouch_query_capture_has(&capture, expected_keys[index]));
+    assert_non_null(query_res.metadata_json);
+    assert_true(bytes_contain_text(query_res.metadata_json,
+                                   strlen(query_res.metadata_json),
+                                   "\"engine\":\"index\""));
+    lc_query_res_cleanup(&query_res);
+    memset(&query_res, 0, sizeof(query_res));
+    memset(&capture, 0, sizeof(capture));
+    query_req.refresh = NULL;
+  }
+
+  query_req.selector_json =
+      "{\"eq\":{\"field\":\"/tags[]\",\"value\":\"object-zero\"}}";
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 0);
+
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_query_keys_index_preserves_json_scalar_types(void **state) {
   lc_client *client;
   lc_pouch *pouch;
@@ -23159,6 +23250,70 @@ test_query_keys_index_rejects_wildcard_exists_selectors(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_query_documents_scan_matches_escaped_pointer_paths(void **state) {
+  static const char *const selectors[] = {
+      "{\"eq\":{\"field\":\"/a~1b\",\"value\":\"slash\"}}",
+      "{\"eq\":{\"field\":\"/a~0b\",\"value\":\"tilde\"}}",
+      "{\"eq\":{\"field\":\"/\",\"value\":\"empty\"}}"};
+  static const char *const expected_values[] = {
+      "\"a/b\":\"slash\"", "\"a~b\":\"tilde\"", "\"\":\"empty\""};
+  lc_client *client;
+  lc_update_res update_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_sink *sink;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  size_t index;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&query_res, 0, sizeof(query_res));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-documents-scan-escaped-pointer", root, sizeof(root));
+  cleanup_root(root);
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, "doc/escaped",
+                     "{\"a/b\":\"slash\",\"a~b\":\"tilde\","
+                     "\"\":\"empty\"}",
+                     NULL, 0L, 0, &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+
+  query_req.engine = "scan";
+  query_req.return_mode = "documents";
+  for (index = 0U; index < sizeof(selectors) / sizeof(selectors[0]); ++index) {
+    query_req.selector_json = selectors[index];
+    rc = lc_sink_to_memory(&sink, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = client->query(client, &query_req, sink, &query_res, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(bytes_contain_text(bytes, length, expected_values[index]));
+    assert_non_null(query_res.metadata_json);
+    assert_true(bytes_contain_text(query_res.metadata_json,
+                                   strlen(query_res.metadata_json),
+                                   "\"engine\":\"scan\""));
+    lc_sink_close(sink);
+    sink = NULL;
+    lc_query_res_cleanup(&query_res);
+    memset(&query_res, 0, sizeof(query_res));
+  }
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_query_documents_scan_streams_rows(void **state) {
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
@@ -23818,7 +23973,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   assert_query_index_segment_contains(namespace_path, "query.index",
                                       "format=pouch-query-index");
   assert_query_index_segment_contains(namespace_path, "query.index",
-                                      "version=11");
+                                      "version=12");
   assert_query_index_segment_contains(namespace_path, "query.index",
                                       "state_index_seq=4");
   assert_query_index_segment_contains(namespace_path, "query.index",
@@ -23957,7 +24112,7 @@ static void test_flush_index_reports_projection_high_water(void **state) {
   newest_query_index_path(namespace_path, "query.index", header_path,
                           sizeof(header_path));
   write_text_file(header_path,
-                  "format=pouch-query-index\nversion=2\nstate_index_seq=5\n"
+                  "format=pouch-query-index\nversion=11\nstate_index_seq=5\n"
                   "row_count=1\nsummary_hash=1\nrow 3 22 0 0 "
                   "646f632f6c697665 - -\n");
   flush_req.mode = "sync";
@@ -26703,6 +26858,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_query_keys_index_repairs_unknown_generation_posting_term),
       cmocka_unit_test(test_query_keys_index_scalar_in_uses_array_postings),
+      cmocka_unit_test(
+          test_query_keys_index_preserves_strict_json_pointer_paths),
       cmocka_unit_test(test_query_keys_index_preserves_json_scalar_types),
       cmocka_unit_test(test_query_keys_index_root_or_uses_scalar_union),
       cmocka_unit_test(test_query_keys_index_text_stops_after_target_field),
@@ -26715,6 +26872,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_query_keys_index_recursive_exists_uses_container_presence),
       cmocka_unit_test(test_query_keys_index_rejects_wildcard_exists_selectors),
+      cmocka_unit_test(test_query_documents_scan_matches_escaped_pointer_paths),
       cmocka_unit_test(test_query_documents_scan_streams_rows),
       cmocka_unit_test(test_query_documents_index_uses_scalar_postings),
       cmocka_unit_test(test_flush_index_reports_projection_high_water),

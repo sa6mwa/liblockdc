@@ -1559,6 +1559,13 @@ Indexed query requirements:
 
 - indexable selectors use indexes when the selected engine is index;
 - indexed execution must not silently fall back to scan;
+- strict JSON Pointer paths preserve decoded object-member names, including
+  numeric and empty names and `~0`/`~1` escapes. Exact array elements retain
+  their numeric JSON Pointer paths, while Pouch's `/field[]` shorthand is an
+  additional posting only for values whose parent is an actual JSON array;
+- a query-index format revision invalidates older derived artifacts and
+  rebuilds them from the authoritative logstore before serving the new field
+  semantics;
 - query-index artifacts are derived from logstore projections and are
   rebuildable after corruption or loss;
 - query-index segment headers are plaintext metadata. They contain format,

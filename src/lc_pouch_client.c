@@ -1367,6 +1367,42 @@ lc_pouch_query_scan_scalar_lonejson_read(void *user, unsigned char *buffer,
   return result;
 }
 
+static int lc_pouch_query_scan_scalar_pointer_segment_matches_path(
+    const char *encoded, size_t encoded_len,
+    const lonejson_path_segment *path_segment) {
+  size_t encoded_index;
+  size_t decoded_index;
+
+  if (encoded == NULL || path_segment == NULL) {
+    return 0;
+  }
+  decoded_index = 0U;
+  for (encoded_index = 0U; encoded_index < encoded_len; ++encoded_index) {
+    char byte;
+
+    byte = encoded[encoded_index];
+    if (byte == '~') {
+      if (encoded_index + 1U >= encoded_len) {
+        return 0;
+      }
+      ++encoded_index;
+      if (encoded[encoded_index] == '0') {
+        byte = '~';
+      } else if (encoded[encoded_index] == '1') {
+        byte = '/';
+      } else {
+        return 0;
+      }
+    }
+    if (decoded_index >= path_segment->len ||
+        path_segment->data[decoded_index] != byte) {
+      return 0;
+    }
+    ++decoded_index;
+  }
+  return decoded_index == path_segment->len;
+}
+
 static int
 lc_pouch_query_scan_scalar_field_matches_path(const char *field,
                                               const lonejson_value_path *path) {
@@ -1378,7 +1414,7 @@ lc_pouch_query_scan_scalar_field_matches_path(const char *field,
   }
   cursor = field + 1;
   segment_index = 0U;
-  while (*cursor != '\0') {
+  for (;;) {
     const char *slash;
     size_t len;
 
@@ -1387,18 +1423,16 @@ lc_pouch_query_scan_scalar_field_matches_path(const char *field,
     }
     slash = strchr(cursor, '/');
     len = slash != NULL ? (size_t)(slash - cursor) : strlen(cursor);
-    if (len == 0U || memchr(cursor, '[', len) != NULL ||
-        path->segments[segment_index].len != len ||
-        memcmp(path->segments[segment_index].data, cursor, len) != 0) {
+    if (!lc_pouch_query_scan_scalar_pointer_segment_matches_path(
+            cursor, len, &path->segments[segment_index])) {
       return 0;
     }
     ++segment_index;
     if (slash == NULL) {
-      break;
+      return segment_index == path->segment_count;
     }
     cursor = slash + 1;
   }
-  return segment_index == path->segment_count;
 }
 
 static int
@@ -1659,29 +1693,60 @@ lc_pouch_query_scan_scalar_reader_ws(lc_pouch_query_scan_scalar_reader *reader,
   }
 }
 
-static int lc_pouch_query_scan_scalar_field_segment(const char *field,
-                                                    size_t wanted,
-                                                    const char **segment,
-                                                    size_t *len) {
+static int lc_pouch_query_scan_scalar_field_segment(
+    lc_pouch_query_scan_scalar_match_state *state, const char *field,
+    size_t wanted, const char **segment, size_t *len, lc_error *error) {
   const char *cursor;
   size_t index;
 
-  if (field == NULL || field[0] != '/' || segment == NULL || len == NULL) {
+  if (state == NULL || field == NULL || field[0] != '/' || segment == NULL ||
+      len == NULL) {
     return 0;
   }
   cursor = field + 1;
   index = 0U;
-  while (*cursor != '\0') {
+  for (;;) {
     const char *slash;
+    size_t segment_len;
 
     slash = strchr(cursor, '/');
-    *len = slash != NULL ? (size_t)(slash - cursor) : strlen(cursor);
-    if (*len == 0U || memchr(cursor, '~', *len) != NULL ||
-        memchr(cursor, '[', *len) != NULL) {
-      return 0;
-    }
+    segment_len = slash != NULL ? (size_t)(slash - cursor) : strlen(cursor);
     if (index == wanted) {
-      *segment = cursor;
+      size_t source_index;
+      size_t decoded_len;
+
+      if (memchr(cursor, '~', segment_len) == NULL) {
+        *segment = cursor;
+        *len = segment_len;
+        return 1;
+      }
+      if (lc_pouch_query_scan_scalar_scratch_reserve(state, segment_len,
+                                                     error) != LC_OK) {
+        return 0;
+      }
+      decoded_len = 0U;
+      for (source_index = 0U; source_index < segment_len; ++source_index) {
+        char byte;
+
+        byte = cursor[source_index];
+        if (byte == '~') {
+          if (source_index + 1U >= segment_len) {
+            return 0;
+          }
+          ++source_index;
+          if (cursor[source_index] == '0') {
+            byte = '~';
+          } else if (cursor[source_index] == '1') {
+            byte = '/';
+          } else {
+            return 0;
+          }
+        }
+        state->scratch[decoded_len++] = byte;
+      }
+      state->scratch[decoded_len] = '\0';
+      *segment = state->scratch;
+      *len = decoded_len;
       return 1;
     }
     if (slash == NULL) {
@@ -1703,16 +1768,10 @@ lc_pouch_query_scan_scalar_field_segment_count(const char *field) {
   }
   cursor = field + 1;
   count = 0U;
-  while (*cursor != '\0') {
+  for (;;) {
     const char *slash;
-    size_t len;
 
     slash = strchr(cursor, '/');
-    len = slash != NULL ? (size_t)(slash - cursor) : strlen(cursor);
-    if (len == 0U || memchr(cursor, '~', len) != NULL ||
-        memchr(cursor, '[', len) != NULL) {
-      return 0U;
-    }
     ++count;
     if (slash == NULL) {
       break;
@@ -2075,8 +2134,8 @@ static int lc_pouch_query_scan_scalar_scan_object(
       return rc;
     }
   }
-  if (!lc_pouch_query_scan_scalar_field_segment(state->plan->field, depth,
-                                                &segment, &segment_len)) {
+  if (!lc_pouch_query_scan_scalar_field_segment(
+          state, state->plan->field, depth, &segment, &segment_len, error)) {
     return LC_ERR_INVALID;
   }
   rc = lc_pouch_query_scan_scalar_reader_ws(reader, &c, error);
@@ -2123,6 +2182,9 @@ static int lc_pouch_query_scan_scalar_scan_object(
         return rc;
       }
       if (c != '{') {
+        if (c == '[') {
+          return LC_OK;
+        }
         rc = lc_pouch_query_scan_scalar_skip_value(reader, error);
         if (rc == LC_OK && decided != NULL) {
           *decided = 1;
@@ -2418,7 +2480,7 @@ lc_pouch_query_match_scan_scalar_body(lc_pouch_query_scan_context *context,
       lc_pouch_query_scan_scalar_match_state_cleanup(&state);
       return LC_OK;
     }
-    if (rc != LC_OK || !direct_decided) {
+    if (rc != LC_OK && rc != LC_ERR_INVALID) {
       if (error != NULL) {
         if (direct_error.code != LC_OK) {
           *error = direct_error;
@@ -2436,12 +2498,17 @@ lc_pouch_query_match_scan_scalar_body(lc_pouch_query_scan_context *context,
       return rc;
     }
     lc_error_cleanup(&direct_error);
-    if (body->reset != NULL) {
-      rc = body->reset(body, error);
-      if (rc != LC_OK) {
-        lc_pouch_query_scan_scalar_match_state_cleanup(&state);
-        return rc;
-      }
+    if (body->reset == NULL) {
+      lc_pouch_query_scan_scalar_match_state_cleanup(&state);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch scan scalar source cannot retry after direct "
+                          "path evaluation",
+                          NULL, NULL, "pouch");
+    }
+    rc = body->reset(body, error);
+    if (rc != LC_OK) {
+      lc_pouch_query_scan_scalar_match_state_cleanup(&state);
+      return rc;
     }
   }
   runtime = lc_thread_lonejson_runtime();
