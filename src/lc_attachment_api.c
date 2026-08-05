@@ -31,8 +31,8 @@ typedef struct lc_engine_stream_request_state {
   char *attachment_sha256;
   char *attachment_content_type;
   long attachment_size;
-  long attachment_created_at_unix;
-  long attachment_updated_at_unix;
+  lc_unix_seconds attachment_created_at_unix;
+  lc_unix_seconds attachment_updated_at_unix;
   const lonejson_map *response_map;
   void *response_dst;
   lonejson_curl_parse parse;
@@ -539,7 +539,7 @@ static size_t lc_engine_stream_header_callback(char *buffer, size_t size,
     }
   } else if (lc_engine_header_name_equals(buffer, (size_t)(colon - buffer),
                                           "X-Attachment-Created-At")) {
-    if (!lc_parse_long_base10_range_checked(
+    if (!lc_parse_i64_base10_range_checked(
             value, (size_t)(end - value), &state->attachment_created_at_unix)) {
       lc_engine_set_protocol_error(state->error,
                                    "attachment created_at is out of range");
@@ -548,7 +548,7 @@ static size_t lc_engine_stream_header_callback(char *buffer, size_t size,
     }
   } else if (lc_engine_header_name_equals(buffer, (size_t)(colon - buffer),
                                           "X-Attachment-Updated-At")) {
-    if (!lc_parse_long_base10_range_checked(
+    if (!lc_parse_i64_base10_range_checked(
             value, (size_t)(end - value), &state->attachment_updated_at_unix)) {
       lc_engine_set_protocol_error(state->error,
                                    "attachment updated_at is out of range");

@@ -26,7 +26,12 @@ typedef struct lc_sink lc_sink;
 
 /** API-visible monotonic object version. Mirrors lockd's signed int64 value. */
 typedef int64_t lc_version;
-/** Unix timestamp in seconds. Mirrors lockd's signed int64 value. */
+/**
+ * Unix timestamp in seconds. Mirrors lockd's signed int64 value.
+ *
+ * Pouch and transport response paths preserve this range, including streamed
+ * attachment metadata headers.
+ */
 typedef int64_t lc_unix_seconds;
 /** Query/index sequence. Mirrors lockd's unsigned uint64 value. */
 typedef uint64_t lc_index_seq;

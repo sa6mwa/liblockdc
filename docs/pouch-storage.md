@@ -175,6 +175,11 @@ binary encode/decode path. A physical generation is range-checked before it is
 exposed as an API version, preserving Go's signed public version contract
 without narrowing the durable counter on ILP32.
 
+Timestamp width is invariant across response channels: Pouch durable metadata,
+transport JSON fields, and streamed attachment timestamp headers all preserve
+the full signed `lc_unix_seconds` range. They never use an architecture-width
+`long` intermediary.
+
 Pouch additionally uses `uint64_t` payload lengths and offsets. This is an
 accepted divergence from Go's 32-bit physical payload length because Pouch's
 large-payload/file-size invariant is stronger.

@@ -4198,6 +4198,87 @@ test_public_lease_attach_retries_node_passive_and_cleans_parser_state(
 }
 
 static void
+test_public_attachment_get_preserves_i64_timestamp_headers(void **state) {
+  static const char *response_headers[] = {
+      "X-Correlation-Id: corr-attachment-get",
+      "Content-Type: text/plain",
+      "X-Attachment-ID: att-1",
+      "X-Attachment-Name: blob.txt",
+      "X-Attachment-SHA256: sha-1",
+      "X-Attachment-Size: 5",
+      "X-Attachment-Created-At: 2147483648",
+      "X-Attachment-Updated-At: 2147483649"};
+  static const https_expectation expectations[] = {
+      {"GET",
+       "/v1/attachment?key=resource%2F1&namespace=transport-ns&name=blob.txt&"
+       "public=1",
+       NULL, 0U, NULL, 0U, 1, 200, response_headers,
+       sizeof(response_headers) / sizeof(response_headers[0]), "hello",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_client_config config;
+  lc_client *client;
+  lc_attachment_get_op req;
+  lc_attachment_get_res res;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&error, 0, sizeof(error));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  init_public_client_config(&config, server.port, material.client_bundle_path,
+                            NULL);
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  req.lease.namespace_name = "transport-ns";
+  req.lease.key = "resource/1";
+  req.selector.name = "blob.txt";
+  req.public_read = 1;
+  rc = lc_get_attachment(client, &req, sink, &res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(res.attachment.id, "att-1");
+  assert_string_equal(res.attachment.name, "blob.txt");
+  assert_int_equal(res.attachment.size, 5L);
+  assert_string_equal(res.attachment.plaintext_sha256, "sha-1");
+  assert_string_equal(res.attachment.content_type, "text/plain");
+  assert_int_equal(res.attachment.created_at_unix,
+                   (lc_unix_seconds)2147483647L + 1L);
+  assert_int_equal(res.attachment.updated_at_unix,
+                   (lc_unix_seconds)2147483647L + 2L);
+  assert_string_equal(res.correlation_id, "corr-attachment-get");
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, 5U);
+  assert_memory_equal(bytes, "hello", length);
+
+  lc_attachment_get_res_cleanup(&res);
+  lc_sink_close(sink);
+  lc_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+static void
 test_public_lease_attach_rejects_non_rewindable_retry_source(void **state) {
   static const char *json_header[] = {"Content-Type: application/json"};
   static const char *acquire_body[] = {
@@ -7580,6 +7661,10 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
   cmocka_unit_test(                                                            \
       test_public_lease_attach_retries_node_passive_and_cleans_parser_state)
 #elif defined(                                                                 \
+    LC_HTTPS_CASE_PUBLIC_ATTACHMENT_GET_PRESERVES_I64_TIMESTAMP_HEADERS)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_public_attachment_get_preserves_i64_timestamp_headers)
+#elif defined(                                                                 \
     LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_REJECTS_NON_REWINDABLE_RETRY_SOURCE)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_lease_attach_rejects_non_rewindable_retry_source)
@@ -7780,6 +7865,8 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
           test_public_lease_attach_rejects_malformed_json_response),              \
       cmocka_unit_test(                                                           \
           test_public_lease_attach_retries_node_passive_and_cleans_parser_state), \
+      cmocka_unit_test(                                                           \
+          test_public_attachment_get_preserves_i64_timestamp_headers),            \
       cmocka_unit_test(                                                           \
           test_public_lease_attach_rejects_non_rewindable_retry_source),          \
       cmocka_unit_test(                                                           \
