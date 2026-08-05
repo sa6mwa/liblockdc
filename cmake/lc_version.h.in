@@ -1,10 +1,20 @@
 #ifndef LC_VERSION_H
 #define LC_VERSION_H
 
+/**
+ * @file lc/version.h
+ * @brief Compile-time liblockdc version and ABI macros.
+ */
+
+/** Complete `MAJOR.MINOR.PATCH` version string for this liblockdc build. */
 #define LC_VERSION_STRING "@PROJECT_VERSION@"
+/** Semantic-version major component for this liblockdc build. */
 #define LC_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+/** Semantic-version minor component for this liblockdc build. */
 #define LC_VERSION_MINOR @PROJECT_VERSION_MINOR@
+/** Semantic-version patch component for this liblockdc build. */
 #define LC_VERSION_PATCH @PROJECT_VERSION_PATCH@
+/** Shared-library ABI generation exported by this liblockdc build. */
 #define LC_ABI_VERSION @LOCKDC_ABI_VERSION@
 
 #endif

@@ -1752,6 +1752,16 @@ copied at open, public `long` fields are range-checked before narrowing on
 query-document output, crypto, and compression remain real streaming paths
 unless the caller explicitly chooses a memory-backed source or sink.
 
+The header documentation audit is structural, not a sampling exercise. Every
+public typedef, enum value, transparent struct field, receiver method,
+callback, constructor, initializer, cleanup helper, and compatibility wrapper
+must have an adjacent Doxygen comment. Those comments must state the applicable
+ownership/lifetime rule, zero/default behavior, terminal-handle behavior,
+streaming or materialization boundary, representable-width restriction, and
+error contract. In particular, descriptor adapters document whether they
+borrow or own the descriptor, response comments identify owned fields, and
+callback comments identify which arguments may be retained after return.
+
 Coverage must include:
 
 - acquire, release, update, mutate, get, and get public;

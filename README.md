@@ -62,6 +62,13 @@ options. Common options are:
 - `segment_target_bytes=<u64>` for rolling segment sizing
 - `indexer_flush_docs=<u64>` and `indexer_flush_interval_seconds=<u64>` for
   asynchronous query-index publication
+- `background_compaction=false` to disable the default idle-debounced
+  compaction worker, and `disable_compaction_throttling=true` to remove its
+  default throughput bound
+- `retention_seconds=<u64>` and `janitor_interval_seconds=<u64>` for the
+  post-mutation retention worker
+- `queue_watch=true` to request filesystem-assisted queue wake-up where the
+  local filesystem supports it, with polling fallback otherwise
 - `query_engine=index|scan` and `query_fallback_engine=index|scan` for the
   namespace query preference used at open
 
@@ -256,6 +263,33 @@ as useful entry points for callers that prefer a flat symbol lookup, but the
 primary public surface and examples use the receiver-function form. New method
 slots are appended to preserve layout stability within the current
 shared-library ABI line.
+
+The installed [public header](include/lc/lc.h) is the detailed API reference;
+the generated `lc/version.h` also documents the compile-time semantic-version
+and ABI macros. Their Doxygen contracts cover every public handle,
+request/result type, field, callback, helper, and compatibility function. The
+conventions are:
+
+- initialize transparent config and request structs with their matching
+  `*_init()` helper before setting fields;
+- input pointers are borrowed for the call unless their documentation says
+  ownership transfers;
+- returned handles and heap-backed result fields are caller-owned and are
+  released with the matching `close()` or `*_cleanup()` helper;
+- close and cleanup helpers accept `NULL`, and cleanup helpers zero their
+  object after releasing nested ownership;
+- fallible calls return `LC_OK` or an `LC_ERR_*` status and may populate an
+  `lc_error`, which is released with `lc_error_cleanup()`;
+- `lc_source_from_fd()` and `lc_sink_to_fd()` borrow the descriptor and do not
+  close it; path-backed constructors own the descriptor they open;
+- streaming APIs use bounded producer-to-consumer buffers. Mapped lonejson
+  loads normally materialize mapped fields, while spool-backed mappings may
+  keep large fields file-backed.
+
+Portable widths are part of that contract: versions and Unix timestamps are
+signed 64-bit values, index sequences and transaction-coordinator terms are
+unsigned 64-bit values, and legacy public `long` byte/count fields reject
+values that cannot be represented on the calling architecture.
 
 - `lc_client`
   - root client handle

@@ -1,6 +1,36 @@
 #ifndef LC_LOCKDC_H
 #define LC_LOCKDC_H
 
+/**
+ * @file lc/lc.h
+ * @brief Public C API for remote lockd and local Pouch clients.
+ *
+ * The API is C89-compatible and uses receiver-style handles for normal
+ * workflows. Initialize transparent request/config structs with their
+ * matching `*_init()` function, then call methods such as
+ * `client->acquire(client, ...)` and `lease->update(lease, ...)`.
+ *
+ * Unless a field says otherwise, input strings, arrays, sources, sinks, and
+ * callback contexts are borrowed for the duration of the call. Successful
+ * operations that return handles or heap-backed response fields transfer
+ * ownership to the caller. Close handles with their receiver `close()` method
+ * or the matching `lc_*_close()` wrapper, and release response fields with the
+ * matching `*_cleanup()` helper. The free-function close wrappers and cleanup
+ * helpers accept `NULL`.
+ *
+ * Fallible functions return `LC_OK` on success and an `LC_ERR_*` status on
+ * failure. When supplied, `lc_error` receives actionable diagnostics and must
+ * eventually be passed to `lc_error_cleanup()`. Unless documented as a
+ * terminal operation, an existing handle remains owned by the caller after a
+ * failed method call.
+ *
+ * APIs described as streaming move data through bounded buffers without
+ * materializing the complete value. In-memory sources/sinks and ordinary
+ * mapped lonejson fields are materialized by design; lonejson source-backed
+ * and spool-backed mappings retain their documented streaming/file-backed
+ * behavior.
+ */
+
 #include <lc/version.h>
 #include <lonejson.h>
 #include <pslog.h>
@@ -88,21 +118,39 @@ typedef struct lc_error {
   char *correlation_id;
 } lc_error;
 
-/** Callback invoked while an acquire-for-update lease is held. */
+/**
+ * Callback invoked while an acquire-for-update lease is held.
+ *
+ * `update` is borrowed and valid only for this invocation. Return `LC_OK` to
+ * commit staged work or a non-`LC_OK` status to request rollback. Populate
+ * `error` with the failure cause when returning an error status.
+ */
 typedef int (*lc_acquire_for_update_handler_fn)(
     void *context, lc_acquire_for_update_context *update, lc_error *error);
 
-/** Callback used by `lc_source_from_callbacks()` to fill `buffer`.
+/**
+ * Callback used by `lc_source_from_callbacks()` to fill `buffer`.
  *
- * Return the number of bytes written, `0` for end-of-stream, or `0` with
- * `error` populated for failures.
+ * Write at most `count` bytes and return the number written. Short reads are
+ * allowed. Return zero only for end-of-stream or failure; distinguish failure
+ * by setting `error->code` to a non-`LC_OK` value. `buffer` is borrowed for the
+ * call and must not be retained.
  */
 typedef size_t (*lc_source_read_fn)(void *context, void *buffer, size_t count,
                                     lc_error *error);
-/** Optional callback used by `lc_source_from_callbacks()` to rewind a source.
+/**
+ * Optional callback used by `lc_source_from_callbacks()` to rewind a source.
+ *
+ * Return `LC_OK` after resetting the next read to the beginning, or a
+ * non-`LC_OK` status with `error` populated. Omitting this callback makes the
+ * source single-pass.
  */
 typedef int (*lc_source_reset_fn)(void *context, lc_error *error);
-/** Optional callback used by `lc_source_from_callbacks()` when closed. */
+/**
+ * Optional callback invoked exactly once when a callback source is closed.
+ *
+ * Use it to release resources owned by `context`; it cannot report an error.
+ */
 typedef void (*lc_source_close_fn)(void *context);
 
 /** Custom allocation hook for malloc-style allocation. */
@@ -230,11 +278,17 @@ typedef struct lc_client_config {
 
 /** Public status codes returned by all API entry points. */
 enum {
+  /** Operation completed successfully. */
   LC_OK = 0,
+  /** A required argument, value, state, or precondition is invalid. */
   LC_ERR_INVALID = 1,
+  /** Allocation failed. */
   LC_ERR_NOMEM = 2,
+  /** Transport, filesystem, or other I/O failed. */
   LC_ERR_TRANSPORT = 3,
+  /** A remote response or durable local value violated its protocol. */
   LC_ERR_PROTOCOL = 4,
+  /** The lockd server rejected an otherwise valid request. */
   LC_ERR_SERVER = 5
 };
 
@@ -261,7 +315,12 @@ struct lc_source {
  * The sink owns `impl` and releases it from `close()`.
  */
 struct lc_sink {
-  /** Writes exactly `count` bytes or returns an error. */
+  /**
+   * Writes exactly `count` bytes.
+   *
+   * Returns non-zero on success or zero with `error` populated on failure.
+   * `bytes` is borrowed for the call and must not be retained.
+   */
   int (*write)(lc_sink *self, const void *bytes, size_t count, lc_error *error);
   /** Releases the sink and any owned backing resources. */
   void (*close)(lc_sink *self);
@@ -269,14 +328,21 @@ struct lc_sink {
   void *impl;
 };
 
-/** Callback used to resolve a file-backed local-mutate input into a new source.
+/**
+ * Callback used to resolve a file-backed local-mutate input into a new source.
+ *
+ * `resolved_path` is borrowed for the call. Return `LC_OK` and transfer a new
+ * source through `out`, or return a non-`LC_OK` status with `error` populated.
+ * The local mutate operation closes a successfully returned source.
  */
 typedef int (*lc_file_value_open_fn)(void *context, const char *resolved_path,
                                      lc_source **out, lc_error *error);
 
 /** Optional override used by local mutate to open file-backed values. */
 typedef struct lc_file_value_resolver {
+  /** Opens `resolved_path` and transfers the returned source to the caller. */
   lc_file_value_open_fn open;
+  /** Opaque borrowed context passed to `open`. */
   void *context;
 } lc_file_value_resolver;
 
@@ -413,10 +479,13 @@ typedef struct lc_update_req {
 
 /** Metadata returned by a successful state update. */
 typedef struct lc_update_res {
+  /** State version after the update. */
   lc_version new_version;
+  /** Owned entity tag for the updated private state. */
   char *new_state_etag;
   /** State bytes, representable by `long` on the calling architecture. */
   long bytes;
+  /** Owned server correlation id for the update response. */
   char *correlation_id;
 } lc_update_res;
 
@@ -473,10 +542,13 @@ typedef struct lc_mutate_op {
 
 /** Metadata returned by a successful mutate operation. */
 typedef struct lc_mutate_res {
+  /** State version after applying all mutations. */
   lc_version new_version;
+  /** Owned entity tag for the mutated private state. */
   char *new_state_etag;
   /** State bytes, representable by `long` on the calling architecture. */
   long bytes;
+  /** Owned server correlation id for the mutate response. */
   char *correlation_id;
 } lc_mutate_res;
 
@@ -546,8 +618,11 @@ typedef struct lc_remove_op {
 
 /** Result returned by a remove operation. */
 typedef struct lc_remove_res {
+  /** Non-zero when state bytes were removed. */
   int removed;
+  /** State version after removal. */
   lc_version new_version;
+  /** Owned server correlation id for the remove response. */
   char *correlation_id;
 } lc_remove_res;
 
@@ -594,7 +669,9 @@ typedef struct lc_release_op {
 
 /** Result returned by a release operation. */
 typedef struct lc_release_res {
+  /** Non-zero when the durable lease was released. */
   int released;
+  /** Owned server correlation id for the release response. */
   char *correlation_id;
 } lc_release_res;
 
@@ -639,11 +716,18 @@ typedef struct lc_query_res {
 
 /** Chunked callback handler for `lc_query_keys()`. */
 typedef struct lc_query_key_handler {
-  /** Called when a decoded key string begins. */
+  /** Called when a decoded key string begins; return `LC_OK` to continue. */
   int (*begin)(void *context, lc_error *error);
-  /** Called with decoded UTF-8 key bytes. Bytes are valid only for the call. */
+  /**
+   * Called with decoded UTF-8 key bytes; return `LC_OK` to continue.
+   *
+   * Bytes are borrowed and valid only for the call. A key may arrive in
+   * multiple chunks, including chunks that split a UTF-8 sequence.
+   */
   int (*chunk)(void *context, const char *bytes, size_t len, lc_error *error);
-  /** Called after the key string and following array delimiter are validated.
+  /**
+   * Called after the key and following array delimiter are validated.
+   * Return `LC_OK` to continue with the next key.
    */
   int (*end)(void *context, lc_error *error);
 } lc_query_key_handler;
@@ -771,109 +855,158 @@ typedef struct lc_txn_decision_res {
 
 /** Request used to acquire the TC leader lease. */
 typedef struct lc_tc_lease_acquire_req {
+  /** Non-empty identity of the leadership candidate. */
   const char *candidate_id;
+  /** Endpoint advertised for the candidate. */
   const char *candidate_endpoint;
+  /** Candidate term; stale terms are rejected. */
   lc_tc_term term;
+  /** Requested leader-lease TTL in milliseconds. */
   long ttl_ms;
 } lc_tc_lease_acquire_req;
 
 /** Result returned by a TC leader lease acquisition attempt. */
 typedef struct lc_tc_lease_acquire_res {
+  /** Non-zero when the candidate acquired leadership. */
   int granted;
+  /** Owned identity of the leader observed after the request. */
   char *leader_id;
+  /** Owned endpoint of the leader observed after the request. */
   char *leader_endpoint;
+  /** Current transaction-coordinator term. */
   lc_tc_term term;
+  /** Leader-lease expiry as a Unix timestamp. */
   lc_unix_seconds expires_at_unix;
+  /** Owned server correlation id for the acquisition response. */
   char *correlation_id;
 } lc_tc_lease_acquire_res;
 
 /** Request used to renew the TC leader lease. */
 typedef struct lc_tc_lease_renew_req {
+  /** Identity of the current leader. */
   const char *leader_id;
+  /** Term held by the current leader. */
   lc_tc_term term;
+  /** Requested renewed TTL in milliseconds. */
   long ttl_ms;
 } lc_tc_lease_renew_req;
 
 /** Result returned by TC leader lease renewal. */
 typedef struct lc_tc_lease_renew_res {
+  /** Non-zero when the leader lease was renewed. */
   int renewed;
+  /** Owned identity of the leader observed after the request. */
   char *leader_id;
+  /** Owned endpoint of the leader observed after the request. */
   char *leader_endpoint;
+  /** Current transaction-coordinator term. */
   lc_tc_term term;
+  /** Renewed leader-lease expiry as a Unix timestamp. */
   lc_unix_seconds expires_at_unix;
+  /** Owned server correlation id for the renewal response. */
   char *correlation_id;
 } lc_tc_lease_renew_res;
 
 /** Request used to release the TC leader lease. */
 typedef struct lc_tc_lease_release_req {
+  /** Identity of the leader releasing the lease. */
   const char *leader_id;
+  /** Term held by the releasing leader. */
   lc_tc_term term;
 } lc_tc_lease_release_req;
 
 /** Result returned by TC leader lease release. */
 typedef struct lc_tc_lease_release_res {
+  /** Non-zero when the leader lease was released. */
   int released;
+  /** Owned server correlation id for the release response. */
   char *correlation_id;
 } lc_tc_lease_release_res;
 
 /** Snapshot of the current transaction coordinator leader. */
 typedef struct lc_tc_leader_res {
+  /** Owned current leader identity, or `NULL` when no leader is active. */
   char *leader_id;
+  /** Owned current leader endpoint, or `NULL` when no leader is active. */
   char *leader_endpoint;
+  /** Current transaction-coordinator term. */
   lc_tc_term term;
+  /** Current leader-lease expiry as a Unix timestamp. */
   lc_unix_seconds expires_at_unix;
+  /** Owned server correlation id for the leader response. */
   char *correlation_id;
 } lc_tc_leader_res;
 
 /** Request used to announce the current node into the TC cluster. */
 typedef struct lc_tc_cluster_announce_req {
+  /** Endpoint advertised by this node. */
   const char *self_endpoint;
 } lc_tc_cluster_announce_req;
 
 /** Cluster membership state returned by TC cluster operations. */
 typedef struct lc_tc_cluster_res {
+  /** Owned list of currently registered cluster endpoints. */
   lc_string_list endpoints;
+  /** Last membership update as a Unix timestamp. */
   lc_unix_seconds updated_at_unix;
+  /** Membership expiry as a Unix timestamp, or zero when not exposed. */
   lc_unix_seconds expires_at_unix;
+  /** Owned server correlation id for the cluster response. */
   char *correlation_id;
 } lc_tc_cluster_res;
 
 /** Request used to register a resource manager endpoint for a backend hash. */
 typedef struct lc_tc_rm_register_req {
+  /** Non-empty stable backend identity hash. */
   const char *backend_hash;
+  /** Resource-manager endpoint to register. */
   const char *endpoint;
 } lc_tc_rm_register_req;
 
 /** Request used to unregister a resource manager endpoint for a backend hash.
  */
 typedef struct lc_tc_rm_unregister_req {
+  /** Stable backend identity hash. */
   const char *backend_hash;
+  /** Resource-manager endpoint to unregister. */
   const char *endpoint;
 } lc_tc_rm_unregister_req;
 
 /** Result returned by TC RM register and unregister operations. */
 typedef struct lc_tc_rm_res {
+  /** Owned backend identity hash affected by the operation. */
   char *backend_hash;
+  /** Owned current endpoint list for that backend. */
   lc_string_list endpoints;
+  /** Last registry update as a Unix timestamp. */
   lc_unix_seconds updated_at_unix;
+  /** Owned server correlation id for the registry response. */
   char *correlation_id;
 } lc_tc_rm_res;
 
 /** Single TC RM backend entry returned by list operations. */
 typedef struct lc_tc_rm_backend {
+  /** Owned backend identity hash. */
   char *backend_hash;
+  /** Owned endpoints currently registered for the backend. */
   lc_string_list endpoints;
+  /** Last update for this backend as a Unix timestamp. */
   lc_unix_seconds updated_at_unix;
 } lc_tc_rm_backend;
 
 /** Full TC RM backend listing. */
 typedef struct lc_tc_rm_list_res {
+  /** Owned array of backend registry entries. */
   lc_tc_rm_backend *backends;
+  /** Number of entries in `backends`. */
   size_t backend_count;
+  /** Last update for the returned registry view. */
   lc_unix_seconds updated_at_unix;
+  /** Owned server correlation id for the listing response. */
   char *correlation_id;
 } lc_tc_rm_list_res;
 
+/** Request used to enqueue a streamed queue payload. */
 typedef struct lc_enqueue_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
   const char *namespace_name;
@@ -896,17 +1029,25 @@ typedef struct lc_enqueue_req {
 
 /** Result returned by a successful queue enqueue operation. */
 typedef struct lc_enqueue_res {
+  /** Owned namespace containing the message. */
   char *namespace_name;
+  /** Owned queue name. */
   char *queue;
+  /** Owned server-issued message identifier. */
   char *message_id;
+  /** Initial delivery-attempt count. */
   int attempts;
+  /** Maximum delivery attempts configured for the message. */
   int max_attempts;
+  /** Initial processing-failure attempt count. */
   int failure_attempts;
+  /** Earliest delivery time as a Unix timestamp. */
   lc_unix_seconds not_visible_until_unix;
   /** Returned visibility timeout. Values outside `long` are rejected. */
   long visibility_timeout_seconds;
   /** Returned payload byte count. Values outside `long` are rejected. */
   long payload_bytes;
+  /** Owned server correlation id for the enqueue response. */
   char *correlation_id;
 } lc_enqueue_res;
 
@@ -1080,6 +1221,7 @@ typedef struct lc_nack_req {
 
 /** Client-level nack operation on an existing queue message reference. */
 typedef struct lc_nack_op {
+  /** Queue message identity to negatively acknowledge. */
   lc_message_ref message;
   /** Delay in seconds before the message becomes visible again. The resulting
    * Unix timestamp must fit in `lc_unix_seconds`. */
@@ -1103,8 +1245,11 @@ typedef struct lc_nack_op {
 
 /** Result returned by queue nack operations. */
 typedef struct lc_nack_res {
+  /** Non-zero when the message was returned to the delivery lifecycle. */
   int requeued;
+  /** Owned updated queue metadata etag. */
   char *meta_etag;
+  /** Owned server correlation id for the nack response. */
   char *correlation_id;
 } lc_nack_res;
 
@@ -1162,19 +1307,36 @@ typedef struct lc_watch_event {
   char *correlation_id;
 } lc_watch_event;
 
-/** Callback invoked for each queue watch event. */
+/**
+ * Callback invoked for each queue watch event.
+ *
+ * `event` and all of its fields are borrowed for the invocation. Return
+ * `LC_OK` to continue watching or a non-`LC_OK` status with `error` populated
+ * to stop the watch.
+ */
 typedef int (*lc_watch_handler_fn)(void *context, const lc_watch_event *event,
                                    lc_error *error);
 
 /** Queue watch callback registration. */
 typedef struct lc_watch_handler {
+  /** Required event callback; returning non-`LC_OK` stops the watch. */
   lc_watch_handler_fn handle;
+  /** Opaque borrowed context passed to `handle`. */
   void *context;
 } lc_watch_handler;
 
-/** Queue consumer callback registration used by subscribe flows. */
+/**
+ * Queue consumer callback registration used by subscribe flows.
+ *
+ * The message is borrowed for the callback. Before returning `LC_OK`, the
+ * callback must terminalize it with `message->ack()` or `message->nack()`.
+ * Returning an error while the message remains open causes the subscribe flow
+ * to attempt a failure nack before closing the local handle.
+ */
 typedef struct lc_consumer {
+  /** Required delivery callback; return `LC_OK` only after ack or nack. */
   int (*handle)(void *context, lc_message *message, lc_error *error);
+  /** Opaque borrowed context passed to `handle`. */
   void *context;
 } lc_consumer;
 
@@ -1423,6 +1585,7 @@ typedef struct lc_attachment_list {
 
 /** Request used to fetch an attachment stream. */
 typedef struct lc_attachment_get_req {
+  /** Attachment id or name selector. */
   lc_attachment_selector selector;
   /** Reads the committed public view when nonzero. Private reads require an
    * active lease and, when transaction-bound, include that transaction's
@@ -1432,6 +1595,7 @@ typedef struct lc_attachment_get_req {
 
 /** Client-level request used to list lease attachments. */
 typedef struct lc_attachment_list_req {
+  /** Existing lease identity to list through. */
   lc_lease_ref lease;
   /** Reads the committed public view when nonzero. Private reads require an
    * active lease and, when transaction-bound, include that transaction's
@@ -1627,6 +1791,7 @@ struct lc_lease {
   /** Whether the state is hidden from normal query results. */
   int query_hidden;
 
+  /** Private implementation pointer; callers must not inspect or modify it. */
   void *impl;
 };
 
@@ -1730,6 +1895,7 @@ struct lc_message {
   /** Internal payload reader handle owned by the message. */
   lc_source *payload;
 
+  /** Private implementation pointer; callers must not inspect or modify it. */
   void *impl;
 };
 
@@ -1779,6 +1945,7 @@ struct lc_consumer_service {
    */
   void (*close)(lc_consumer_service *self);
 
+  /** Private implementation pointer; callers must not inspect or modify it. */
   void *impl;
 };
 
@@ -1981,6 +2148,7 @@ struct lc_client {
   /** Default namespace applied when request structs leave `namespace_name`
    * unset. */
   const char *default_namespace;
+  /** Private implementation pointer; callers must not inspect or modify it. */
   void *impl;
   /**
    * Acquires a lease, fetches the private state snapshot, invokes `handler`,
@@ -2009,17 +2177,49 @@ struct lc_client {
                     lc_query_res *out, lc_error *error);
 };
 
-/** Returns the semantic version string compiled into this build. */
+/**
+ * Returns the semantic version string compiled into this build.
+ *
+ * The returned process-lifetime string is borrowed and must not be freed.
+ */
 const char *lc_version_string(void);
 
-/** Resets an `lc_error` to a known empty state. */
+/**
+ * Resets an `lc_error` to a known empty state.
+ *
+ * Accepts `NULL`. Cleanup an error that already owns fields before
+ * reinitializing it.
+ */
 void lc_error_init(lc_error *error);
-/** Releases all heap-owned fields inside an `lc_error`. */
+/**
+ * Releases all heap-owned fields inside an `lc_error` and zeroes it.
+ *
+ * Accepts `NULL` and an already-zeroed error.
+ */
 void lc_error_cleanup(lc_error *error);
-/** Initializes an allocator override to use the default allocator. */
+/**
+ * Initializes an allocator override to use the default allocator.
+ *
+ * Accepts `NULL`. The resulting all-zero hook set selects libc allocation.
+ */
 void lc_allocator_init(lc_allocator *allocator);
-/** Initializes client configuration with safe defaults. */
+/**
+ * Initializes client configuration with public defaults.
+ *
+ * Accepts `NULL`. The initialized config has a 30-second timeout, prefers
+ * HTTP/2, uses the default 100 MiB typed-JSON limit, enables normal mTLS peer
+ * verification, and leaves endpoint, namespace, logger, allocator, and Pouch
+ * options unset.
+ */
 void lc_client_config_init(lc_client_config *config);
+
+/**
+ * @name Request and callback initializers
+ *
+ * Every initializer in this group accepts `NULL` and otherwise resets the
+ * entire object. Request initializers produce the documented zero/default
+ * behavior; they do not release fields previously owned by the object.
+ * @{ */
 /** Initializes a lease reference to all-zero/empty values. */
 void lc_lease_ref_init(lc_lease_ref *lease);
 /** Initializes an acquire request to all-zero/empty values. */
@@ -2100,7 +2300,10 @@ void lc_watch_handler_init(lc_watch_handler *handler);
 void lc_consumer_init(lc_consumer *consumer);
 /** Initializes a consumer restart policy to Go-SDK-compatible defaults. */
 void lc_consumer_restart_policy_init(lc_consumer_restart_policy *policy);
-/** Initializes one managed consumer config to all-zero/empty values. */
+/**
+ * Initializes one managed consumer config with one worker and the default
+ * restart policy; all other fields are zero/empty.
+ */
 void lc_consumer_config_init(lc_consumer_config *config);
 /** Initializes a consumer service config to all-zero/empty values. */
 void lc_consumer_service_config_init(lc_consumer_service_config *config);
@@ -2124,6 +2327,7 @@ void lc_attachment_delete_op_init(lc_attachment_delete_op *request);
 /** Initializes a client-level delete-all-attachments operation to
  * all-zero/empty values. */
 void lc_attachment_delete_all_op_init(lc_attachment_delete_all_op *request);
+/** @} */
 
 /**
  * Opens a new client handle.
@@ -2139,7 +2343,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
 /**
  * Creates a rewindable source backed by caller-provided memory.
  *
- * The bytes are borrowed; they must remain valid until the source is closed.
+ * The bytes are borrowed; they must remain valid and unchanged until the
+ * source is closed. The caller owns the returned source.
  */
 int lc_source_from_memory(const void *bytes, size_t length, lc_source **out,
                           lc_error *error);
@@ -2147,14 +2352,16 @@ int lc_source_from_memory(const void *bytes, size_t length, lc_source **out,
  * Opens a rewindable source backed by a file path.
  *
  * The returned source owns its file descriptor and closes it from
- * `lc_source_close()`.
+ * `lc_source_close()`. The caller owns the returned source.
  */
 int lc_source_from_file(const char *path, lc_source **out, lc_error *error);
 /**
- * Wraps a file descriptor as a rewindable source when possible.
+ * Wraps a borrowed file descriptor as a single-pass source.
  *
- * The descriptor is owned by the returned source after success. Callers that
- * still need their own descriptor should pass a duplicate.
+ * Closing the source does not close `fd`; the caller retains descriptor
+ * ownership. The source reads from and advances the descriptor's current file
+ * offset. Pass a duplicate when the source needs an independent offset or
+ * lifetime.
  */
 int lc_source_from_fd(int fd, lc_source **out, lc_error *error);
 /**
@@ -2162,25 +2369,35 @@ int lc_source_from_fd(int fd, lc_source **out, lc_error *error);
  *
  * `read` is required. `reset` may be `NULL` for single-pass streams, in which
  * case APIs that require a rewindable source return `LC_ERR_INVALID`. `close`
- * may be `NULL`; when present it is called from `lc_source_close()`.
+ * may be `NULL`; when present it is called from `lc_source_close()`. The
+ * caller owns the returned source.
  */
 int lc_source_from_callbacks(lc_source_read_fn read, lc_source_reset_fn reset,
                              lc_source_close_fn close, void *context,
                              lc_source **out, lc_error *error);
-/** Creates a sink that writes bytes to a file path and owns that file. */
+/**
+ * Creates a sink that truncates and writes a file path.
+ *
+ * The sink owns the opened descriptor and closes it with `lc_sink_close()`.
+ */
 int lc_sink_to_file(const char *path, lc_sink **out, lc_error *error);
 /**
- * Creates a sink that writes bytes to a file descriptor.
+ * Creates a sink that writes bytes to a borrowed file descriptor.
  *
- * The descriptor is owned by the returned sink after success. Callers that
- * still need their own descriptor should pass a duplicate.
+ * Closing the sink does not close `fd`; the caller retains descriptor
+ * ownership. Pass a duplicate when the sink needs an independent lifetime.
  */
 int lc_sink_to_fd(int fd, lc_sink **out, lc_error *error);
-/** Creates a sink that accepts and discards all bytes. */
+/** Creates a caller-owned sink that accepts and discards all bytes. */
 int lc_sink_to_discard(lc_sink **out, lc_error *error);
 /** Returns non-zero when a sink was created by `lc_sink_to_discard()`. */
 int lc_sink_is_discard(const lc_sink *sink);
-/** Creates an in-memory sink owned by the library. */
+/**
+ * Creates a caller-owned in-memory sink.
+ *
+ * The sink grows as bytes are written and releases its accumulated buffer when
+ * closed.
+ */
 int lc_sink_to_memory(lc_sink **out, lc_error *error);
 /**
  * Returns the bytes accumulated by an in-memory sink.
@@ -2194,21 +2411,27 @@ int lc_sink_memory_bytes(lc_sink *sink, const void **bytes, size_t *length,
  * Copies all bytes from a source into a sink.
  *
  * The copy is streaming and uses a bounded internal buffer. It resets `error`
- * for this operation before reading the source.
+ * for this operation before reading the source. It advances `src`, does not
+ * reset it, and leaves both handles open. `written` may be `NULL`; on success
+ * it receives the total bytes copied.
  */
 int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error);
 
 /** Generates a new `lc-pouch-key-v1:<base64url>` root key string.
  *
- * The returned string is allocated by liblockdc and must be released with
- * `lc_pouch_crypto_key_string_free()`.
+ * On success `out` receives a liblockdc-owned allocation transferred to the
+ * caller. Release it with `lc_pouch_crypto_key_string_free()`.
  */
 int lc_pouch_crypto_generate_key_string(char **out, lc_error *error);
 
-/** Releases a key string or path returned by pouch crypto helpers. */
+/**
+ * Releases a key string or path returned by Pouch crypto helpers.
+ *
+ * Accepts `NULL`. Do not use this helper for caller-owned key strings.
+ */
 void lc_pouch_crypto_key_string_free(char *key_string);
 
-/** Returns the default pouch crypto key-file path.
+/** Returns the default Pouch crypto key-file path.
  *
  * The path is `$XDG_CONFIG_HOME/liblockdc/pouch.key`, or
  * `$HOME/.config/liblockdc/pouch.key` when `XDG_CONFIG_HOME` is unset. The
@@ -2217,7 +2440,7 @@ void lc_pouch_crypto_key_string_free(char *key_string);
  */
 int lc_pouch_crypto_default_key_file(char **out, lc_error *error);
 
-/** Generates and writes a pouch root key file with mode `0600`.
+/** Generates and writes a Pouch root key file with mode `0600`.
  *
  * Parent directories are created with mode `0700`. When `overwrite` is zero,
  * an existing key file is rejected. When `key_string_out` is non-NULL, the
@@ -2227,56 +2450,89 @@ int lc_pouch_crypto_default_key_file(char **out, lc_error *error);
 int lc_pouch_crypto_generate_key_file(const char *path, int overwrite,
                                       char **key_string_out, lc_error *error);
 
-/** Closes and frees a client handle. */
+/** Closes and frees a client handle. Accepts `NULL`. */
 void lc_client_close(lc_client *client);
-/** Closes and frees a lease handle. */
+/** Closes and frees a lease handle. Accepts `NULL`. */
 void lc_lease_close(lc_lease *lease);
-/** Closes and frees a message handle. */
+/** Closes and frees a message handle. Accepts `NULL`. */
 void lc_message_close(lc_message *message);
-/** Closes and frees a source. */
+/** Closes and frees a source. Accepts `NULL`. */
 void lc_source_close(lc_source *source);
-/** Closes and frees a sink. */
+/** Closes and frees a sink. Accepts `NULL`. */
 void lc_sink_close(lc_sink *sink);
 
 /**
- * Cleanup helpers for responses and metadata structs that own heap memory.
+ * @name Owned response cleanup
  *
- * They release nested strings/arrays and leave the object reusable after a
- * subsequent init or zeroing step. Passing an already-zeroed object is safe.
- */
+ * These helpers release all nested strings, arrays, handles, and metadata
+ * owned by their response, then zero the object. Every helper accepts `NULL`
+ * and an already-zeroed object.
+ * @{ */
+/** Releases fields owned by an `lc_describe_res`. */
 void lc_describe_res_cleanup(lc_describe_res *response);
+/** Releases fields owned by an `lc_get_res`. */
 void lc_get_res_cleanup(lc_get_res *response);
+/** Releases fields owned by an `lc_update_res`. */
 void lc_update_res_cleanup(lc_update_res *response);
+/** Releases fields owned by an `lc_mutate_res`. */
 void lc_mutate_res_cleanup(lc_mutate_res *response);
+/** Releases fields owned by an `lc_metadata_res`. */
 void lc_metadata_res_cleanup(lc_metadata_res *response);
+/** Releases fields owned by an `lc_remove_res`. */
 void lc_remove_res_cleanup(lc_remove_res *response);
+/** Releases fields owned by an `lc_keepalive_res`. */
 void lc_keepalive_res_cleanup(lc_keepalive_res *response);
+/** Releases fields owned by an `lc_release_res`. */
 void lc_release_res_cleanup(lc_release_res *response);
+/** Releases fields owned by an `lc_query_res`. */
 void lc_query_res_cleanup(lc_query_res *response);
+/** Releases every string and the array owned by an `lc_string_list`. */
 void lc_string_list_cleanup(lc_string_list *response);
+/** Releases fields owned by an `lc_namespace_config_res`. */
 void lc_namespace_config_res_cleanup(lc_namespace_config_res *response);
+/** Releases fields owned by an `lc_index_flush_res`. */
 void lc_index_flush_res_cleanup(lc_index_flush_res *response);
+/** Releases fields owned by an `lc_txn_replay_res`. */
 void lc_txn_replay_res_cleanup(lc_txn_replay_res *response);
+/** Releases fields owned by an `lc_txn_decision_res`. */
 void lc_txn_decision_res_cleanup(lc_txn_decision_res *response);
+/** Releases fields owned by an `lc_tc_lease_acquire_res`. */
 void lc_tc_lease_acquire_res_cleanup(lc_tc_lease_acquire_res *response);
+/** Releases fields owned by an `lc_tc_lease_renew_res`. */
 void lc_tc_lease_renew_res_cleanup(lc_tc_lease_renew_res *response);
+/** Releases fields owned by an `lc_tc_lease_release_res`. */
 void lc_tc_lease_release_res_cleanup(lc_tc_lease_release_res *response);
+/** Releases fields owned by an `lc_tc_leader_res`. */
 void lc_tc_leader_res_cleanup(lc_tc_leader_res *response);
+/** Releases fields owned by an `lc_tc_cluster_res`. */
 void lc_tc_cluster_res_cleanup(lc_tc_cluster_res *response);
+/** Releases fields owned by an `lc_tc_rm_res`. */
 void lc_tc_rm_res_cleanup(lc_tc_rm_res *response);
+/** Releases every backend entry owned by an `lc_tc_rm_list_res`. */
 void lc_tc_rm_list_res_cleanup(lc_tc_rm_list_res *response);
+/** Releases fields owned by an `lc_enqueue_res`. */
 void lc_enqueue_res_cleanup(lc_enqueue_res *response);
+/** Releases fields owned by an `lc_queue_stats_res`. */
 void lc_queue_stats_res_cleanup(lc_queue_stats_res *response);
+/** Releases fields owned by an `lc_ack_res`. */
 void lc_ack_res_cleanup(lc_ack_res *response);
+/** Releases fields owned by an `lc_nack_res`. */
 void lc_nack_res_cleanup(lc_nack_res *response);
+/** Releases fields owned by an `lc_extend_res`. */
 void lc_extend_res_cleanup(lc_extend_res *response);
 /** Closes every message still owned by a dequeue batch and clears it. */
 void lc_dequeue_batch_cleanup(lc_dequeue_batch_res *response);
+/** Releases fields owned by an `lc_watch_event`. */
 void lc_watch_event_cleanup(lc_watch_event *event);
+/** Releases fields owned by an `lc_attachment_info`. */
 void lc_attachment_info_cleanup(lc_attachment_info *info);
+/** Releases fields owned by an `lc_attach_res`. */
 void lc_attach_res_cleanup(lc_attach_res *response);
+/** Releases every attachment owned by an `lc_attachment_list`. */
 void lc_attachment_list_cleanup(lc_attachment_list *response);
+/** Releases fields owned by an `lc_attachment_get_res`. */
 void lc_attachment_get_res_cleanup(lc_attachment_get_res *response);
+/** @} */
 
 /** Acquires a lease and returns a bound `lc_lease` handle for follow-up work.
  */
@@ -2298,7 +2554,12 @@ int lc_describe(lc_client *client, const lc_describe_req *req,
  */
 int lc_get(lc_client *client, const char *key, const lc_get_opts *opts,
            lc_sink *dst, lc_get_res *out, lc_error *error);
-/** Convenience `get()` variant that materializes the state into memory. */
+/**
+ * Parses state into a caller-provided struct through a lonejson map.
+ *
+ * Ordinary mapped fields are materialized. Spool-backed lonejson fields may
+ * remain file-backed; use `lc_get()` with a sink for fully streamed transfer.
+ */
 int lc_load(lc_client *client, const char *key, const lonejson_map *map,
             void *dst, const lc_get_opts *opts, lc_get_res *out,
             lc_error *error);
@@ -2462,7 +2723,11 @@ int lc_lease_describe(lc_lease *lease, lc_error *error);
 /** Streams the state document for a bound lease into `dst`. */
 int lc_lease_get(lc_lease *lease, lc_sink *dst, const lc_get_opts *opts,
                  lc_get_res *out, lc_error *error);
-/** Convenience `get()` variant that materializes a bound lease state in memory.
+/**
+ * Parses bound-lease state into a caller-provided struct through lonejson.
+ *
+ * Ordinary mapped fields are materialized. Spool-backed lonejson fields may
+ * remain file-backed; use `lc_lease_get()` for fully streamed transfer.
  */
 int lc_lease_load(lc_lease *lease, const lonejson_map *map, void *dst,
                   const lc_get_opts *opts, lc_get_res *out, lc_error *error);
@@ -2522,7 +2787,12 @@ int lc_message_extend(lc_message *message, const lc_extend_req *req,
                       lc_error *error);
 /** Returns the state lease associated with a bound message, if any. */
 lc_lease *lc_message_state(lc_message *message);
-/** Returns the rewindable payload reader owned by the message handle. */
+/**
+ * Returns the payload reader owned by the message handle.
+ *
+ * The borrowed reader may be single-pass for live subscription deliveries;
+ * do not close it independently of the message.
+ */
 lc_source *lc_message_payload(lc_message *message);
 /** Rewinds a bound message payload so it can be consumed again. */
 int lc_message_rewind_payload(lc_message *message, lc_error *error);
