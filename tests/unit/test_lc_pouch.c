@@ -10502,6 +10502,70 @@ test_state_overlapping_sources_from_same_segment_are_independent(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_state_plain_source_rejects_truncated_span_after_open(void **state) {
+  static const char payload[] = "plain-span-must-not-truncate";
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_sink *sink;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  char payload_path[1024];
+  uint64_t payload_length;
+  uint64_t payload_offset;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  sink = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("state-truncated-plain-span", root, sizeof(root));
+  cleanup_root(root);
+
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory(payload, strlen(payload), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/truncated", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+
+  pouch_state_payload_span_for_key(root, "default", "state/truncated",
+                                   payload_path, sizeof(payload_path),
+                                   &payload_offset, &payload_length);
+  assert_true(payload_length > 1U);
+  rc = lc_pouch_state_read(pouch, "default", "state/truncated", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_non_null(read_result.body);
+  truncate_file_at(payload_path, payload_offset + payload_length - 1U);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_copy(read_result.body, sink, NULL, &error);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_string_equal(error.message, "pouch payload span is truncated");
+
+  lc_sink_close(sink);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_state_memory_source_appends_finalized_record(void **state) {
   static const char payload[] = "inline record";
   lc_pouch *pouch;
@@ -25783,6 +25847,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_state_crypto_compression_round_trips),
       cmocka_unit_test(
           test_state_overlapping_sources_from_same_segment_are_independent),
+      cmocka_unit_test(
+          test_state_plain_source_rejects_truncated_span_after_open),
       cmocka_unit_test(test_state_memory_source_appends_finalized_record),
       cmocka_unit_test(test_state_callback_source_retains_streaming_path),
       cmocka_unit_test(

@@ -2663,6 +2663,11 @@ static size_t lc_pouch_plain_span_source_read(lc_source *self, void *buffer,
                        NULL, "pouch");
     return 0U;
   }
+  if (nread == 0) {
+    (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                       "pouch payload span is truncated", NULL, NULL, "pouch");
+    return 0U;
+  }
   source->read_bytes += (uint64_t)nread;
   return (size_t)nread;
 }
