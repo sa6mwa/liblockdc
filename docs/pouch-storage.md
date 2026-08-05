@@ -1,10 +1,11 @@
 # Pouch Storage Implementation Specification
 
-This document is the implementation authority for Pouch storage. Pouch has
-not shipped, so there is no compatibility obligation for rejected pre-release
-layouts, runtime paths, benchmark fixtures, or transition names. The current
-cutover retains the authoritative Pouch record format while replacing the
-writer runtime beneath it.
+This document is the implementation authority for Pouch storage. Pouch first
+ships in v0.13.0, and the record format specified here is its initial durable
+contract. Rejected development layouts, runtime paths, benchmark fixtures, and
+transition names have no compatibility obligation. The current cutover retains
+the authoritative Pouch record format while replacing the writer runtime
+beneath it.
 
 The implementation target is a real segmented logstore. Every namespace has a
 single numeric rolling active segment and one Pouch replay format. The target
@@ -1854,7 +1855,7 @@ The implementation cutover must remove rejected-code paths in the same slice:
 - per-mutation fsync-only append paths where batching is required;
 - hidden scan materialization paths;
 - index rebuild-on-every-flush paths;
-- compatibility branches for unreleased Pouch layouts;
+- compatibility branches for rejected development Pouch layouts;
 - stale tests, fixtures, benchmarks, docs, and names such as
   `pouch-redesign`, compatibility layers, company layers, and disk-conflated
   terminology.

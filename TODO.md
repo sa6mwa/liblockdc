@@ -12,10 +12,10 @@ and normal single-writer operation. The default root runtime is an exclusive
 resident writer; this is the supported fast path and the primary comparison
 target.
 
-Pouch remains unreleased. Delete rejected pre-release implementations rather
-than adding migration readers, format dispatch, compatibility modes, or legacy
-tests. This cutover changes runtime ownership and in-memory architecture, not
-the authoritative Pouch record format.
+Pouch first ships in v0.13.0. Delete rejected development implementations
+rather than adding migration readers, format dispatch, compatibility modes, or
+legacy tests. This cutover changes runtime ownership and in-memory
+architecture, not the authoritative Pouch record format.
 
 ### Standing Format Invariants
 
@@ -321,8 +321,8 @@ Acceptance:
 
 ## Completion Record
 
-The following completion criteria are satisfied for this unreleased minor
-version candidate:
+The following completion criteria are satisfied for the initial v0.13.0
+release candidate:
 
 - [x] Exclusive writer is the documented default and follows the resident Go-disk
   operational model.
