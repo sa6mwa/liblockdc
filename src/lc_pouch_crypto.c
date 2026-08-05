@@ -48,7 +48,7 @@ typedef struct lc_pouch_crypto_desc {
 typedef struct lc_pouch_crypto_source {
   lc_source pub;
   lc_allocator allocator;
-  FILE *fp;
+  int fd;
   EVP_CIPHER_CTX *ctx;
   unsigned char key[LC_POUCH_DEK_BYTES];
   unsigned char nonce_prefix[LC_POUCH_NONCE_PREFIX_BYTES];
@@ -63,6 +63,7 @@ typedef struct lc_pouch_crypto_source {
   uint64_t span_offset;
   uint64_t span_length;
   uint64_t span_remaining;
+  uint64_t read_offset;
   int bounded;
   int done;
 } lc_pouch_crypto_source;
@@ -70,7 +71,7 @@ typedef struct lc_pouch_crypto_source {
 typedef struct lc_pouch_plain_span_source {
   lc_source pub;
   lc_allocator allocator;
-  FILE *fp;
+  int fd;
   uint64_t offset;
   uint64_t length;
   uint64_t read_bytes;
@@ -125,20 +126,81 @@ static char *lc_pouch_crypto_strdup(const lc_allocator *allocator,
   return copy;
 }
 
-static int lc_pouch_crypto_seek(FILE *fp, uint64_t offset, const char *message,
-                                lc_error *error) {
+static int lc_pouch_crypto_pread_exact(int fd, uint64_t *offset, void *buffer,
+                                       size_t count,
+                                       const char *truncated_message,
+                                       const char *read_message,
+                                       lc_error *error) {
+  unsigned char *cursor;
+  uint64_t position;
   off_t target;
+  ssize_t nread;
+  size_t copied;
 
+  if (fd < 0 || offset == NULL || buffer == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch payload read requires descriptor and buffer",
+                        NULL, NULL, "pouch");
+  }
+  cursor = (unsigned char *)buffer;
+  position = *offset;
+  if (count > 0U && position > LC_U64_MAX - (uint64_t)count) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch payload offset exceeds platform limit", NULL,
+                        NULL, "pouch");
+  }
+  copied = 0U;
+  while (copied < count) {
+    target = (off_t)(position + (uint64_t)copied);
+    if (target < 0 || (uint64_t)target != position + (uint64_t)copied) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch payload offset exceeds platform limit", NULL,
+                          NULL, "pouch");
+    }
+    do {
+      nread = pread(fd, cursor + copied, count - copied, target);
+    } while (nread < 0 && errno == EINTR);
+    if (nread < 0) {
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L, read_message,
+                          strerror(errno), NULL, "pouch");
+    }
+    if (nread == 0) {
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L, truncated_message, NULL,
+                          NULL, "pouch");
+    }
+    copied += (size_t)nread;
+  }
+  *offset = position + (uint64_t)copied;
+  return LC_OK;
+}
+
+static int lc_pouch_crypto_pread_available(int fd, uint64_t offset,
+                                           int *available, lc_error *error) {
+  off_t target;
+  unsigned char byte;
+  ssize_t nread;
+
+  if (fd < 0 || available == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch payload read requires descriptor and output",
+                        NULL, NULL, "pouch");
+  }
+  *available = 0;
   target = (off_t)offset;
   if (target < 0 || (uint64_t)target != offset) {
-    errno = EINVAL;
-    return lc_error_set(error, LC_ERR_INVALID, 0L, message, strerror(errno),
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch payload offset exceeds platform limit", NULL,
                         NULL, "pouch");
   }
-  if (fseeko(fp, target, SEEK_SET) != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L, message, strerror(errno),
-                        NULL, "pouch");
+  do {
+    nread = pread(fd, &byte, 1U, target);
+  } while (nread < 0 && errno == EINTR);
+  if (nread < 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to verify encrypted pouch payload",
+                        strerror(errno), NULL, "pouch");
   }
+  *available = nread > 0 ? 1 : 0;
   return LC_OK;
 }
 
@@ -2123,6 +2185,7 @@ int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
                         "pouch");
   }
   source->allocator = crypto->allocator;
+  source->fd = -1;
   source->ctx = EVP_CIPHER_CTX_new();
   if (source->ctx == NULL) {
     lc_free_with_allocator(&crypto->allocator, source);
@@ -2130,8 +2193,8 @@ int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
                         "failed to allocate pouch decrypt context", NULL, NULL,
                         "pouch");
   }
-  source->fp = fopen(path, "rb");
-  if (source->fp == NULL) {
+  source->fd = open(path, O_RDONLY);
+  if (source->fd < 0) {
     EVP_CIPHER_CTX_free(source->ctx);
     lc_free_with_allocator(&crypto->allocator, source);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -2139,7 +2202,7 @@ int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
                         strerror(errno), NULL, "pouch");
   }
   if (context == NULL || context[0] == '\0') {
-    fclose(source->fp);
+    close(source->fd);
     EVP_CIPHER_CTX_free(source->ctx);
     lc_free_with_allocator(&crypto->allocator, source);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -2148,7 +2211,7 @@ int lc_pouch_crypto_source_from_file(lc_pouch_crypto *crypto,
   }
   source->context = lc_pouch_crypto_strdup(&crypto->allocator, context);
   if (source->context == NULL) {
-    fclose(source->fp);
+    close(source->fd);
     EVP_CIPHER_CTX_free(source->ctx);
     lc_free_with_allocator(&crypto->allocator, source);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -2237,22 +2300,7 @@ int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
                           NULL, "pouch");
     }
     lc_allocator_init(&plain->allocator);
-    plain->fp = fdopen(fd, "rb");
-    if (plain->fp == NULL) {
-      close(fd);
-      lc_free_with_allocator(&plain->allocator, plain);
-      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                          "failed to open pouch payload span descriptor",
-                          strerror(errno), NULL, "pouch");
-    }
-    if (lc_pouch_crypto_seek(plain->fp, offset,
-                             "failed to seek pouch payload span",
-                             error) != LC_OK) {
-      fclose(plain->fp);
-      lc_free_with_allocator(&plain->allocator, plain);
-      return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_TRANSPORT;
-    }
+    plain->fd = fd;
     plain->offset = offset;
     plain->length = length;
     plain->pub.read = lc_pouch_plain_span_source_read;
@@ -2281,22 +2329,7 @@ int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
     } else {
       lc_allocator_init(&plain->allocator);
     }
-    plain->fp = fdopen(fd, "rb");
-    if (plain->fp == NULL) {
-      close(fd);
-      lc_free_with_allocator(&plain->allocator, plain);
-      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                          "failed to open pouch payload span descriptor",
-                          strerror(errno), NULL, "pouch");
-    }
-    if (lc_pouch_crypto_seek(plain->fp, offset,
-                             "failed to seek pouch payload span",
-                             error) != LC_OK) {
-      fclose(plain->fp);
-      lc_free_with_allocator(&plain->allocator, plain);
-      return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_TRANSPORT;
-    }
+    plain->fd = fd;
     plain->offset = offset;
     plain->length = length;
     plain->pub.read = lc_pouch_plain_span_source_read;
@@ -2333,35 +2366,17 @@ int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
                         NULL, "pouch");
   }
   source->allocator = crypto->allocator;
+  source->fd = fd;
   source->ctx = EVP_CIPHER_CTX_new();
   if (source->ctx == NULL) {
-    close(fd);
+    close(source->fd);
     lc_free_with_allocator(&crypto->allocator, source);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch decrypt context", NULL, NULL,
                         "pouch");
   }
-  source->fp = fdopen(fd, "rb");
-  if (source->fp == NULL) {
-    close(fd);
-    EVP_CIPHER_CTX_free(source->ctx);
-    lc_free_with_allocator(&crypto->allocator, source);
-    return lc_error_set(
-        error, LC_ERR_TRANSPORT, 0L,
-        "failed to open encrypted pouch payload span descriptor",
-        strerror(errno), NULL, "pouch");
-  }
-  if (lc_pouch_crypto_seek(source->fp, offset,
-                           "failed to seek encrypted pouch payload span",
-                           error) != LC_OK) {
-    fclose(source->fp);
-    EVP_CIPHER_CTX_free(source->ctx);
-    lc_free_with_allocator(&crypto->allocator, source);
-    return error != NULL && error->code != LC_OK ? error->code
-                                                 : LC_ERR_TRANSPORT;
-  }
   if (context == NULL || context[0] == '\0') {
-    fclose(source->fp);
+    close(source->fd);
     EVP_CIPHER_CTX_free(source->ctx);
     lc_free_with_allocator(&crypto->allocator, source);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -2370,7 +2385,7 @@ int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
   }
   source->context = lc_pouch_crypto_strdup(&crypto->allocator, context);
   if (source->context == NULL) {
-    fclose(source->fp);
+    close(source->fd);
     EVP_CIPHER_CTX_free(source->ctx);
     lc_free_with_allocator(&crypto->allocator, source);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -2384,6 +2399,7 @@ int lc_pouch_crypto_source_from_fd_span(lc_pouch_crypto *crypto,
   source->span_offset = offset;
   source->span_length = length;
   source->span_remaining = length;
+  source->read_offset = offset;
   source->bounded = 1;
   source->pub.read = lc_pouch_crypto_source_read;
   source->pub.reset = lc_pouch_crypto_source_reset;
@@ -2414,19 +2430,22 @@ static int lc_pouch_crypto_read_frame(lc_pouch_crypto_source *source,
   int out_len;
   int final_len;
   int aad_len;
-  size_t got;
+  int available;
   int ok;
+  int rc;
 
+  available = 0;
   if (source->bounded && source->span_remaining < sizeof(header)) {
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "encrypted pouch payload span is truncated", NULL, NULL,
                         "pouch");
   }
-  got = fread(header, 1U, sizeof(header), source->fp);
-  if (got != sizeof(header)) {
-    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                        "encrypted pouch payload is truncated", NULL, NULL,
-                        "pouch");
+  rc = lc_pouch_crypto_pread_exact(
+      source->fd, &source->read_offset, header, sizeof(header),
+      "encrypted pouch payload is truncated",
+      "failed to read encrypted pouch payload", error);
+  if (rc != LC_OK) {
+    return rc;
   }
   counter = lc_pouch_crypto_get32(header);
   plain_len = lc_pouch_crypto_get32(header + 4U);
@@ -2448,19 +2467,21 @@ static int lc_pouch_crypto_read_frame(lc_pouch_crypto_source *source,
     source->span_remaining -= frame_len;
   }
   if (plain_len > 0UL) {
-    got = fread(source->cipher, 1U, (size_t)plain_len, source->fp);
-    if (got != (size_t)plain_len) {
-      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                          "encrypted pouch payload frame is truncated", NULL,
-                          NULL, "pouch");
+    rc = lc_pouch_crypto_pread_exact(
+        source->fd, &source->read_offset, source->cipher, (size_t)plain_len,
+        "encrypted pouch payload frame is truncated",
+        "failed to read encrypted pouch payload frame", error);
+    if (rc != LC_OK) {
+      return rc;
     }
   }
   tag = source->cipher + plain_len;
-  got = fread(tag, 1U, LC_POUCH_GCM_TAG_BYTES, source->fp);
-  if (got != LC_POUCH_GCM_TAG_BYTES) {
-    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                        "encrypted pouch payload frame tag is truncated", NULL,
-                        NULL, "pouch");
+  rc = lc_pouch_crypto_pread_exact(
+      source->fd, &source->read_offset, tag, LC_POUCH_GCM_TAG_BYTES,
+      "encrypted pouch payload frame tag is truncated",
+      "failed to read encrypted pouch payload frame tag", error);
+  if (rc != LC_OK) {
+    return rc;
   }
   lc_pouch_crypto_nonce(source->nonce_prefix, counter, nonce);
   ok = EVP_CIPHER_CTX_reset(source->ctx) == 1 &&
@@ -2500,10 +2521,12 @@ static int lc_pouch_crypto_read_frame(lc_pouch_crypto_source *source,
                             NULL, NULL, "pouch");
       }
     } else {
-      int extra;
-
-      extra = fgetc(source->fp);
-      if (extra != EOF) {
+      rc = lc_pouch_crypto_pread_available(source->fd, source->read_offset,
+                                           &available, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+      if (available) {
         return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                             "encrypted pouch payload has trailing bytes", NULL,
                             NULL, "pouch");
@@ -2566,12 +2589,7 @@ static int lc_pouch_crypto_source_reset(lc_source *self, lc_error *error) {
   }
   source = (lc_pouch_crypto_source *)self->impl;
   if (source->bounded) {
-    if (lc_pouch_crypto_seek(source->fp, source->span_offset,
-                             "failed to reset encrypted pouch payload span",
-                             error) != LC_OK) {
-      return error != NULL && error->code != LC_OK ? error->code
-                                                   : LC_ERR_TRANSPORT;
-    }
+    source->read_offset = source->span_offset;
     source->span_remaining = source->span_length;
     source->plain_offset = 0U;
     source->plain_length = 0U;
@@ -2579,11 +2597,7 @@ static int lc_pouch_crypto_source_reset(lc_source *self, lc_error *error) {
     source->done = 0;
     return LC_OK;
   }
-  if (fseek(source->fp, 0L, SEEK_SET) != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to reset encrypted pouch payload",
-                        strerror(errno), NULL, "pouch");
-  }
+  source->read_offset = 0UL;
   source->plain_offset = 0U;
   source->plain_length = 0U;
   source->counter = 0UL;
@@ -2598,8 +2612,8 @@ static void lc_pouch_crypto_source_close(lc_source *self) {
     return;
   }
   source = (lc_pouch_crypto_source *)self->impl;
-  if (source->fp != NULL) {
-    fclose(source->fp);
+  if (source->fd >= 0) {
+    close(source->fd);
   }
   EVP_CIPHER_CTX_free(source->ctx);
   OPENSSL_cleanse(source->key, sizeof(source->key));
@@ -2612,8 +2626,10 @@ static size_t lc_pouch_plain_span_source_read(lc_source *self, void *buffer,
                                               size_t count, lc_error *error) {
   lc_pouch_plain_span_source *source;
   uint64_t remaining;
+  uint64_t position;
+  off_t target;
+  ssize_t nread;
   size_t want;
-  size_t got;
 
   if (self == NULL || buffer == NULL || count == 0U) {
     return 0U;
@@ -2624,14 +2640,31 @@ static size_t lc_pouch_plain_span_source_read(lc_source *self, void *buffer,
   }
   remaining = source->length - source->read_bytes;
   want = (uint64_t)count < remaining ? count : (size_t)remaining;
-  got = fread(buffer, 1U, want, source->fp);
-  if (got == 0U && ferror(source->fp) && error != NULL) {
+  if (source->offset > LC_U64_MAX - source->read_bytes) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch payload offset exceeds platform limit", NULL,
+                       NULL, "pouch");
+    return 0U;
+  }
+  position = source->offset + source->read_bytes;
+  target = (off_t)position;
+  if (target < 0 || (uint64_t)target != position) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch payload offset exceeds platform limit", NULL,
+                       NULL, "pouch");
+    return 0U;
+  }
+  do {
+    nread = pread(source->fd, buffer, want, target);
+  } while (nread < 0 && errno == EINTR);
+  if (nread < 0) {
     (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                        "failed to read pouch payload span", strerror(errno),
                        NULL, "pouch");
+    return 0U;
   }
-  source->read_bytes += (uint64_t)got;
-  return got;
+  source->read_bytes += (uint64_t)nread;
+  return (size_t)nread;
 }
 
 static int lc_pouch_plain_span_source_reset(lc_source *self, lc_error *error) {
@@ -2643,16 +2676,10 @@ static int lc_pouch_plain_span_source_reset(lc_source *self, lc_error *error) {
                         "pouch");
   }
   source = (lc_pouch_plain_span_source *)self->impl;
-  if (source == NULL || source->fp == NULL) {
+  if (source == NULL || source->fd < 0) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to reset pouch payload span", strerror(errno),
                         NULL, "pouch");
-  }
-  if (lc_pouch_crypto_seek(source->fp, source->offset,
-                           "failed to reset pouch payload span",
-                           error) != LC_OK) {
-    return error != NULL && error->code != LC_OK ? error->code
-                                                 : LC_ERR_TRANSPORT;
   }
   source->read_bytes = 0UL;
   return LC_OK;
@@ -2668,8 +2695,8 @@ static void lc_pouch_plain_span_source_close(lc_source *self) {
   if (source == NULL) {
     return;
   }
-  if (source->fp != NULL) {
-    fclose(source->fp);
+  if (source->fd >= 0) {
+    close(source->fd);
   }
   lc_free_with_allocator(&source->allocator, source);
 }

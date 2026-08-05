@@ -758,7 +758,10 @@ the public API or durable format.
   durable heartbeat marker as takeover evidence until it expires. An explicit
   shared-root abort can reopen immediately and replays the last finalized
   record; an exclusive-root abort instead requires clean handoff or heartbeat
-  expiry before another exclusive writer opens.
+  expiry before another exclusive writer opens. A resident source descriptor is
+  an open-file cache only: every returned body source reads its payload span by
+  absolute offset, so overlapping plaintext, compressed, and encrypted streams
+  remain independent even when they originate in the same segment.
 
 - Post-cutover default HA is active/passive:
   one process owns the root; another process takes over only after clean

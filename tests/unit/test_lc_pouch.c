@@ -10408,6 +10408,100 @@ static void test_state_crypto_compression_round_trips(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_state_overlapping_sources_from_same_segment_are_independent(void **state) {
+  static const char first_payload[] = "first-stream-payload";
+  static const char second_payload[] = "second-stream-payload";
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_result first_write;
+  lc_pouch_state_write_result second_write;
+  lc_pouch_state_read_result first_read;
+  lc_pouch_state_read_result second_read;
+  lc_error error;
+  char *crypto_key;
+  char root[512];
+  char first_prefix[6];
+  char second_prefix[7];
+  int encrypted;
+  int rc;
+  size_t nread;
+
+  (void)state;
+  lc_error_init(&error);
+  make_root("state-overlapping-sources", root, sizeof(root));
+  for (encrypted = 0; encrypted < 2; ++encrypted) {
+    pouch = NULL;
+    body = NULL;
+    crypto_key = NULL;
+    memset(&options, 0, sizeof(options));
+    memset(&first_write, 0, sizeof(first_write));
+    memset(&second_write, 0, sizeof(second_write));
+    memset(&first_read, 0, sizeof(first_read));
+    memset(&second_read, 0, sizeof(second_read));
+    cleanup_root(root);
+
+    options.segment_target_bytes = 16U * 1024U * 1024U;
+    if (encrypted) {
+      rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+      assert_int_equal(rc, LC_OK);
+      options.crypto_key = crypto_key;
+    }
+    rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+    assert_int_equal(rc, LC_OK);
+
+    rc = lc_source_from_memory(first_payload, strlen(first_payload), &body,
+                               &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_pouch_state_write(pouch, "default", "state/first", body, NULL,
+                              &first_write, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_source_close(body);
+    body = NULL;
+    rc = lc_source_from_memory(second_payload, strlen(second_payload), &body,
+                               &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_pouch_state_write(pouch, "default", "state/second", body, NULL,
+                              &second_write, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_source_close(body);
+    body = NULL;
+
+    rc = lc_pouch_state_read(pouch, "default", "state/first", &first_read,
+                             &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_pouch_state_read(pouch, "default", "state/second", &second_read,
+                             &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(first_read.found);
+    assert_true(second_read.found);
+
+    nread = first_read.body->read(first_read.body, first_prefix,
+                                  sizeof(first_prefix) - 1U, &error);
+    assert_int_equal(nread, sizeof(first_prefix) - 1U);
+    first_prefix[nread] = '\0';
+    assert_string_equal(first_prefix, "first");
+    nread = second_read.body->read(second_read.body, second_prefix,
+                                   sizeof(second_prefix) - 1U, &error);
+    assert_int_equal(nread, sizeof(second_prefix) - 1U);
+    second_prefix[nread] = '\0';
+    assert_string_equal(second_prefix, "second");
+    assert_int_equal(error.code, LC_OK);
+
+    lc_pouch_state_read_result_cleanup(NULL, &second_read);
+    lc_pouch_state_read_result_cleanup(NULL, &first_read);
+    lc_pouch_state_write_result_cleanup(NULL, &second_write);
+    lc_pouch_state_write_result_cleanup(NULL, &first_write);
+    lc_pouch_close(pouch);
+    if (crypto_key != NULL) {
+      lc_pouch_crypto_key_string_free(crypto_key);
+    }
+    cleanup_root(root);
+  }
+  lc_error_cleanup(&error);
+}
+
 static void test_state_memory_source_appends_finalized_record(void **state) {
   static const char payload[] = "inline record";
   lc_pouch *pouch;
@@ -25687,6 +25781,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_state_compression_streams_segment_payloads),
       cmocka_unit_test(test_state_compression_mode_is_root_invariant),
       cmocka_unit_test(test_state_crypto_compression_round_trips),
+      cmocka_unit_test(
+          test_state_overlapping_sources_from_same_segment_are_independent),
       cmocka_unit_test(test_state_memory_source_appends_finalized_record),
       cmocka_unit_test(test_state_callback_source_retains_streaming_path),
       cmocka_unit_test(

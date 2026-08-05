@@ -3906,6 +3906,8 @@ static int lc_pouch_state_source_cache_dup_fd(lc_pouch *pouch, const char *path,
        entry = entry->next) {
     if (strcmp(entry->path, path) == 0) {
       entry->last_used = ++pouch->source_cache_tick;
+      /* Span sources use pread, so duplicated descriptors do not share a
+       * stream position. */
       fd = dup(entry->fd);
       if (fd < 0) {
         rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
