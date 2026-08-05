@@ -1533,9 +1533,7 @@ Required behavior:
 Public state scans must also exclude internal user-namespace key prefixes such
 as `q/`, `state/<key>/attachments/`, `state/<key>/.staging/`, and
 `config/namespace` unless a future public API deliberately exposes those
-transaction's staged record cannot become queryable before its decision.
 surfaces. This applies equally to derived and persisted query-index rows, so a
-transaction's staged record cannot become queryable before its decision.
 transaction's staged record cannot become queryable before its decision.
 Hiding must be enforced by metadata and prefix policy, not merely by placing
 records in a different namespace.
@@ -1743,6 +1741,16 @@ Every Pouch behavior is exercised through the public Pouch API or public
 storage API boundary, matching how Go lockd disk is benchmarked and tested.
 Tests and benchmarks must not use background magic or private mutation helpers
 to make Pouch look faster or more correct than the public engine.
+
+The installed C header is part of this public contract. Doxygen comments for
+public Pouch-facing configuration and APIs must document the same behavior
+described here: `pouch://` uses one absolute local root, exclusive single-writer
+mode is the default, explicit shared-root writing requires
+`single_writer=false` or `pouch_single_writer=false`, endpoint option values are
+copied at open, public `long` fields are range-checked before narrowing on
+32-bit targets, and state bodies, queue payloads, attachments, scan output,
+query-document output, crypto, and compression remain real streaming paths
+unless the caller explicitly chooses a memory-backed source or sink.
 
 Coverage must include:
 

@@ -40,6 +40,36 @@ accounting, and `int64_t` Unix timestamps. The current semantic alignment scope
 and every remaining format, operational, API, and portability divergence are
 recorded in [the Pouch storage specification](docs/pouch-storage.md).
 
+Select Pouch through a single absolute `pouch://` endpoint, for example
+`pouch:///var/lib/my-service/lockd-root`. The default is exclusive
+single-writer mode: one live process owns the root append path and normal
+acquire, update, release, queue, attachment, and query operations use the
+resident logstore fast path. Opening a second default writer for the same root
+fails instead of silently downgrading. Explicit shared-root writing remains
+available for callers that need multiple active local writers by adding
+`?single_writer=false` or `?pouch_single_writer=false`; that mode preserves
+correctness and process fencing but is not the primary performance target.
+
+Pouch endpoint options mirror the public C config and direct Pouch storage
+options. Common options are:
+
+- `compression=zlib` or `pouch_compression=zlib` for streaming at-rest zlib
+  compression
+- `pouch_crypto_key_file=/path/to/pouch.key` with
+  `pouch_crypto_generate_key_file=true` for encrypted local roots
+- `durable_sync=true` and `fsync_batch_max_ops=<u64>` for root-scoped durable
+  group commit
+- `segment_target_bytes=<u64>` for rolling segment sizing
+- `indexer_flush_docs=<u64>` and `indexer_flush_interval_seconds=<u64>` for
+  asynchronous query-index publication
+- `query_engine=index|scan` and `query_fallback_engine=index|scan` for the
+  namespace query preference used at open
+
+The public API remains the same receiver-function SDK surface for remote and
+Pouch clients. State bodies, queue payloads, attachments, scan output,
+query-document output, crypto, and compression use real streaming paths unless
+the caller explicitly chooses an in-memory source or sink.
+
 ## Build system
 
 The repository (<https://github.com/sa6mwa/liblockdc>) uses a Makefile-first workflow with CMake as the build backend:
