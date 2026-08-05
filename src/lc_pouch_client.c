@@ -5379,9 +5379,7 @@ static int lc_pouch_mutate_seed_empty(FILE *fp, lc_error *error) {
 static int lc_pouch_state_result_is_delete_marker(
     const lc_pouch_state_read_result *read_result) {
   return read_result != NULL && read_result->found &&
-         read_result->content_type != NULL &&
-         strcmp(read_result->content_type,
-                LC_POUCH_STATE_DELETE_CONTENT_TYPE) == 0;
+         read_result->staged_delete_marker;
 }
 
 static int lc_pouch_prepare_mutation_file_from_plan(
@@ -8391,7 +8389,7 @@ static int lc_pouch_client_stage_transaction_remove(
   int rc;
 
   source = NULL;
-  options->content_type = LC_POUCH_STATE_DELETE_CONTENT_TYPE;
+  options->staged_delete_marker = 1;
   options->has_query_hidden = 1;
   options->query_hidden = 1;
   rc = lc_source_from_memory("", 0U, &source, error);

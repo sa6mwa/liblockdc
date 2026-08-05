@@ -12,10 +12,6 @@ typedef struct lc_pouch lc_pouch;
 typedef lc_u64 lc_pouch_generation;
 typedef lc_i64 lc_pouch_unix_seconds;
 
-/* Internal staged-state marker. It is never exposed as a committed document. */
-#define LC_POUCH_STATE_DELETE_CONTENT_TYPE                                     \
-  "application/x-lockdc-pouch-state-delete"
-
 typedef struct lc_pouch_open_options {
   uint64_t segment_target_bytes;
   /** Maximum namespace mutations accumulated by the asynchronous indexer
@@ -203,6 +199,10 @@ typedef struct lc_pouch_state_write_options {
   int query_hidden;
   int disable_compression;
   int object_record;
+  /* Internal only: marks a staged transactional delete in durable metadata.
+   * Public content types remain ordinary content types unless this field is
+   * set by the delete path. */
+  int staged_delete_marker;
 } lc_pouch_state_write_options;
 
 typedef struct lc_pouch_state_write_result {
@@ -234,6 +234,8 @@ typedef struct lc_pouch_state_read_result {
   int has_query_hidden;
   int query_hidden;
   int has_body;
+  /* Internal transactional-delete discriminator from durable metadata. */
+  int staged_delete_marker;
   lc_source *body;
 } lc_pouch_state_read_result;
 

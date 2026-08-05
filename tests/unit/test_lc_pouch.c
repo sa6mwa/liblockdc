@@ -16405,6 +16405,80 @@ static void test_txn_queue_decision_rejects_newer_delivery_lease(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_txn_update_preserves_delete_marker_content_type(void **state) {
+  static const char content_type[] = "application/x-lockdc-pouch-state-delete";
+  static const char payload[] = "transactional content type must survive";
+  lc_client *client;
+  lc_source *source;
+  lc_sink *sink;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_get_res get_res;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_update_req_init(&update_req);
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  lc_error_init(&error);
+  make_root("txn-delete-marker-content-type", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  update_req.lease.namespace_name = "default";
+  update_req.lease.key = "state/content-type";
+  update_req.lease.txn_id = "txn-delete-marker-content-type";
+  update_req.content_type = content_type;
+  rc = lc_source_from_memory(payload, strlen(payload), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  participant.namespace_name = "default";
+  participant.key = "state/content-type";
+  decision_req.txn_id = update_req.lease.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, update_req.lease.key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  assert_string_equal(get_res.content_type, content_type);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen(payload));
+  assert_memory_equal(bytes, payload, length);
+
+  sink->close(sink);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_get_res_cleanup(&get_res);
+  lc_update_res_cleanup(&update_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   static const char selector[] =
@@ -26503,6 +26577,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_pouch_crypto_rejects_truncated_sealed_payload),
       cmocka_unit_test(test_pouch_crypto_rejects_trailing_payload_bytes),
       cmocka_unit_test(test_txn_decisions_apply_queue_side_effects),
+      cmocka_unit_test(test_txn_update_preserves_delete_marker_content_type),
       cmocka_unit_test(
           test_txn_decisions_stage_state_update_mutate_and_index_refresh),
       cmocka_unit_test(test_txn_recovery_applies_queue_side_effects),

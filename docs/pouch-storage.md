@@ -1163,7 +1163,9 @@ Required metadata fields by family:
   content type or state kind if needed, plaintext byte count `uint64_t`,
   stored byte count `uint64_t`, transform descriptor length and bytes,
   query-hidden flag, staged/internal flag, and any summary fields needed to
-  scan without opening hidden rows.
+  scan without opening hidden rows. A staged-delete decision is this dedicated
+  binary flag, never a sentinel content type: caller-provided content types
+  remain opaque and are committed unchanged.
 - state delete: generation `uint64_t`, modified timestamp, tombstone marker.
 - state metadata: generation `uint64_t`, modified timestamp, current etag,
   byte counts, descriptor, content type, and query visibility without replacing

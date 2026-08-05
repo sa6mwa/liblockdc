@@ -29,6 +29,9 @@
 
 #define LC_POUCH_STATE_RECORD_HEADER_BYTES LC_POUCH_RECORD_HEADER_BYTES
 #define LC_POUCH_STATE_PAYLOAD_META_FIXED_BYTES 74U
+#define LC_POUCH_STATE_PAYLOAD_FLAG_HAS_QUERY_HIDDEN 1U
+#define LC_POUCH_STATE_PAYLOAD_FLAG_QUERY_HIDDEN 2U
+#define LC_POUCH_STATE_PAYLOAD_FLAG_STAGED_DELETE 4U
 #define LC_POUCH_STATE_RECORD_META_MAX_BYTES (1024U * 1024U)
 #define LC_POUCH_STATE_RECORD_KEY_MAX_BYTES (1024U * 1024U)
 #define LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE 256U
@@ -1100,6 +1103,7 @@ struct lc_pouch_state_entry {
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  int staged_delete_marker;
   int seen;
   int found;
   int control;
@@ -1138,9 +1142,7 @@ static void lc_pouch_state_metadata_view_from_read_result(
   out->has_query_hidden = read_result->has_query_hidden;
   out->query_hidden = read_result->query_hidden;
   out->has_body = read_result->has_body;
-  out->is_delete_marker = read_result->content_type != NULL &&
-                          strcmp(read_result->content_type,
-                                 LC_POUCH_STATE_DELETE_CONTENT_TYPE) == 0;
+  out->is_delete_marker = read_result->staged_delete_marker;
 }
 
 static void
@@ -1159,9 +1161,7 @@ lc_pouch_state_metadata_view_from_entry(const lc_pouch_state_entry *entry,
   out->has_query_hidden = entry->has_query_hidden;
   out->query_hidden = entry->query_hidden;
   out->has_body = entry->payload_span.present;
-  out->is_delete_marker =
-      entry->content_type != NULL &&
-      strcmp(entry->content_type, LC_POUCH_STATE_DELETE_CONTENT_TYPE) == 0;
+  out->is_delete_marker = entry->staged_delete_marker;
 }
 
 typedef enum lc_pouch_state_record_type {
@@ -1281,6 +1281,7 @@ typedef struct lc_pouch_state_cache_record {
   lc_pouch_state_body_cache_entry *body_cache;
   int has_query_hidden;
   int query_hidden;
+  int staged_delete_marker;
   int found;
   int has_record_ref;
   unsigned char record_type;
@@ -1338,6 +1339,7 @@ typedef struct lc_pouch_state_visit_snapshot {
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  int staged_delete_marker;
   int found;
   unsigned char record_type;
 } lc_pouch_state_visit_snapshot;
@@ -1360,6 +1362,7 @@ typedef struct lc_pouch_state_read_many_snapshot {
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  int staged_delete_marker;
   int found;
   unsigned char record_type;
 } lc_pouch_state_read_many_snapshot;
@@ -1381,6 +1384,7 @@ typedef struct lc_pouch_state_scan_body_snapshot {
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  int staged_delete_marker;
   int found;
   unsigned char record_type;
 } lc_pouch_state_scan_body_snapshot;
@@ -2755,6 +2759,7 @@ static int lc_pouch_state_metadata_append_entry_copy(
   destination->cipher_bytes = source->cipher_bytes;
   destination->has_query_hidden = source->has_query_hidden;
   destination->query_hidden = source->query_hidden;
+  destination->staged_delete_marker = source->staged_delete_marker;
   if (source->content_type != NULL) {
     destination->content_type =
         lc_strdup_with_allocator(&pouch->allocator, source->content_type);
@@ -3064,6 +3069,7 @@ static int lc_pouch_state_visit_snapshot_append(
   snapshot->updated_at_unix = record->updated_at_unix;
   snapshot->has_query_hidden = record->has_query_hidden;
   snapshot->query_hidden = record->query_hidden;
+  snapshot->staged_delete_marker = record->staged_delete_marker;
   snapshot->found = record->found;
   snapshot->record_type = record->record_type;
   ++(*count);
@@ -3236,6 +3242,7 @@ static int lc_pouch_state_scan_body_snapshot_append(
   snapshot->updated_at_unix = record->updated_at_unix;
   snapshot->has_query_hidden = record->has_query_hidden;
   snapshot->query_hidden = record->query_hidden;
+  snapshot->staged_delete_marker = record->staged_delete_marker;
   snapshot->found = 1;
   snapshot->record_type = record->record_type;
   ++(*count);
@@ -3316,6 +3323,7 @@ static int lc_pouch_state_scan_body_snapshot_open_result(
         current.updated_at_unix = snapshot->updated_at_unix;
         current.has_query_hidden = snapshot->has_query_hidden;
         current.query_hidden = snapshot->query_hidden;
+        current.staged_delete_marker = snapshot->staged_delete_marker;
         current.seen = 1;
         current.found = 1;
         rc = lc_pouch_state_read_many_snapshot_body_from_cache(
@@ -3349,6 +3357,7 @@ static int lc_pouch_state_scan_body_snapshot_open_result(
   out->updated_at_unix = snapshot->updated_at_unix;
   out->has_query_hidden = snapshot->has_query_hidden;
   out->query_hidden = snapshot->query_hidden;
+  out->staged_delete_marker = snapshot->staged_delete_marker;
   out->has_body = snapshot->payload_span.present;
   out->found = 1;
   snapshot->content_type = NULL;
@@ -3622,6 +3631,7 @@ static int lc_pouch_state_read_many_snapshot_from_entry(
     snapshot->updated_at_unix = current->updated_at_unix;
     snapshot->has_query_hidden = current->has_query_hidden;
     snapshot->query_hidden = current->query_hidden;
+    snapshot->staged_delete_marker = current->staged_delete_marker;
     snapshot->found = 1;
     snapshot->record_type = current->record_type;
     return LC_OK;
@@ -3718,6 +3728,7 @@ static int lc_pouch_state_read_many_snapshot_from_entry(
   snapshot->updated_at_unix = current->updated_at_unix;
   snapshot->has_query_hidden = current->has_query_hidden;
   snapshot->query_hidden = current->query_hidden;
+  snapshot->staged_delete_marker = current->staged_delete_marker;
   snapshot->found = 1;
   snapshot->record_type = current->record_type;
   return LC_OK;
@@ -4599,6 +4610,7 @@ static int lc_pouch_state_cache_apply_entry(lc_pouch *pouch,
   record->updated_at_unix = entry->updated_at_unix;
   record->has_query_hidden = entry->has_query_hidden;
   record->query_hidden = entry->query_hidden;
+  record->staged_delete_marker = entry->staged_delete_marker;
   record->found = entry->found;
   if (entry->record_type == LC_POUCH_STATE_RECORD_OBJECT_PUT ||
       entry->record_type == LC_POUCH_STATE_RECORD_OBJECT_DELETE) {
@@ -4680,6 +4692,7 @@ static int lc_pouch_state_entry_from_cache_record(
   out->updated_at_unix = record->updated_at_unix;
   out->has_query_hidden = record->has_query_hidden;
   out->query_hidden = record->query_hidden;
+  out->staged_delete_marker = record->staged_delete_marker;
   out->seen = 1;
   out->found = record->found;
   out->record_type = record->record_type;
@@ -4711,6 +4724,7 @@ static void lc_pouch_state_entry_borrow_cache_record(
   out->updated_at_unix = record->updated_at_unix;
   out->has_query_hidden = record->has_query_hidden;
   out->query_hidden = record->query_hidden;
+  out->staged_delete_marker = record->staged_delete_marker;
   out->seen = 1;
   out->found = record->found;
   out->record_type = record->record_type;
@@ -6022,8 +6036,8 @@ static int lc_pouch_state_encode_payload_meta(
     const char *descriptor, const lc_pouch_state_payload_span *payload_span,
     const char *payload_context, const unsigned char *metadata,
     size_t metadata_length, size_t descriptor_reserve, int has_query_hidden,
-    int query_hidden, unsigned char **out, size_t *out_length,
-    lc_error *error) {
+    int query_hidden, int staged_delete_marker, unsigned char **out,
+    size_t *out_length, lc_error *error) {
   char ref_container[64];
   uint64_t ref_record_offset;
   uint64_t ref_offset;
@@ -6107,9 +6121,13 @@ static int lc_pouch_state_encode_payload_meta(
   lc_pouch_state_put64(meta + 40, ref_offset);
   lc_pouch_state_put64(meta + 48, ref_length);
   lc_pouch_state_put32(meta + 56, ref_crc);
-  meta[60] = has_query_hidden ? 1U : 0U;
+  meta[60] =
+      has_query_hidden ? LC_POUCH_STATE_PAYLOAD_FLAG_HAS_QUERY_HIDDEN : 0U;
   if (query_hidden) {
-    meta[60] |= 2U;
+    meta[60] |= LC_POUCH_STATE_PAYLOAD_FLAG_QUERY_HIDDEN;
+  }
+  if (staged_delete_marker) {
+    meta[60] |= LC_POUCH_STATE_PAYLOAD_FLAG_STAGED_DELETE;
   }
   lc_pouch_state_put16(meta + 62, (unsigned long)content_type_len);
   lc_pouch_state_put16(meta + 64, (unsigned long)etag_len);
@@ -6450,8 +6468,12 @@ payload_ref_decoded:
   entry->cipher_bytes = stored_bytes;
   entry->updated_at_unix =
       lc_pouch_state_decode_unix_seconds(lc_pouch_state_get64(meta + 8));
-  entry->has_query_hidden = (meta[60] & 1U) != 0;
-  entry->query_hidden = (meta[60] & 2U) != 0;
+  entry->has_query_hidden =
+      (meta[60] & LC_POUCH_STATE_PAYLOAD_FLAG_HAS_QUERY_HIDDEN) != 0U;
+  entry->query_hidden =
+      (meta[60] & LC_POUCH_STATE_PAYLOAD_FLAG_QUERY_HIDDEN) != 0U;
+  entry->staged_delete_marker =
+      (meta[60] & LC_POUCH_STATE_PAYLOAD_FLAG_STAGED_DELETE) != 0U;
   entry->seen = 1;
   entry->found = 1;
   entry->record_type = record_type;
@@ -7648,6 +7670,7 @@ static int lc_pouch_state_cache_warm_transformed_bodies(
     current.updated_at_unix = record->updated_at_unix;
     current.has_query_hidden = record->has_query_hidden;
     current.query_hidden = record->query_hidden;
+    current.staged_delete_marker = record->staged_delete_marker;
     current.seen = 1;
     current.found = 1;
     source = NULL;
@@ -8395,6 +8418,7 @@ static int lc_pouch_state_read_result_from_entry(
     out->has_query_hidden = current->has_query_hidden;
     out->query_hidden = current->query_hidden;
     out->has_body = current->payload_span.present;
+    out->staged_delete_marker = current->staged_delete_marker;
     out->found = 1;
     current->content_type = NULL;
     current->etag = NULL;
@@ -8456,6 +8480,7 @@ static int lc_pouch_state_read_result_from_cache_record(
   out->updated_at_unix = record->updated_at_unix;
   out->has_query_hidden = record->has_query_hidden;
   out->query_hidden = record->query_hidden;
+  out->staged_delete_marker = record->staged_delete_marker;
   out->index_seq = record->index_seq;
   out->has_body = record->payload_span.present;
   out->found = 1;
@@ -8507,8 +8532,8 @@ static int lc_pouch_state_snapshot_write_record(
           record->bytes, record->cipher_bytes, record->content_type,
           record->etag, record->descriptor, NULL, record->payload_context,
           record->metadata, record->metadata_length, 0U,
-          record->has_query_hidden, record->query_hidden, &meta, &meta_len,
-          error);
+          record->has_query_hidden, record->query_hidden,
+          record->staged_delete_marker, &meta, &meta_len, error);
       if (rc == LC_OK) {
         rc = lc_pouch_state_meta_set_index_seq(meta, meta_len,
                                                record->index_seq, error);
@@ -8532,7 +8557,8 @@ static int lc_pouch_state_snapshot_write_record(
         record->content_type, record->etag, NULL, &snapshot_span,
         record->payload_context, record->metadata, record->metadata_length,
         LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE, record->has_query_hidden,
-        record->query_hidden, &meta, &meta_len, error);
+        record->query_hidden, record->staged_delete_marker, &meta, &meta_len,
+        error);
     if (rc != LC_OK) {
       return rc;
     }
@@ -8583,7 +8609,8 @@ static int lc_pouch_state_snapshot_write_record(
           record->descriptor, &snapshot_span, record->payload_context,
           record->metadata, record->metadata_length,
           LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE, record->has_query_hidden,
-          record->query_hidden, &final_meta, &final_meta_len, error);
+          record->query_hidden, record->staged_delete_marker, &final_meta,
+          &final_meta_len, error);
       if (rc == LC_OK && final_meta_len != meta_len) {
         rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch snapshot metadata reservation changed size",
@@ -10310,7 +10337,8 @@ static int lc_pouch_state_cache_apply_write(
     size_t metadata_length, lc_pouch_generation version, uint64_t bytes,
     uint64_t cipher_bytes, const char *descriptor,
     lc_pouch_unix_seconds updated_at_unix, int has_query_hidden,
-    int query_hidden, int found, unsigned char record_type) {
+    int query_hidden, int staged_delete_marker, int found,
+    unsigned char record_type) {
   lc_pouch_namespace_logstore *cache;
   lc_pouch_state_entry entry;
   lc_error ignored;
@@ -10338,6 +10366,7 @@ static int lc_pouch_state_cache_apply_write(
   entry.updated_at_unix = updated_at_unix;
   entry.has_query_hidden = has_query_hidden;
   entry.query_hidden = query_hidden;
+  entry.staged_delete_marker = staged_delete_marker;
   entry.seen = 1;
   entry.found = found;
   entry.record_type = record_type;
@@ -10399,7 +10428,7 @@ static int lc_pouch_state_append_record(
     size_t metadata_length, lc_pouch_generation version, uint64_t bytes,
     uint64_t cipher_bytes, const char *descriptor,
     lc_pouch_unix_seconds updated_at_unix, int has_query_hidden,
-    int query_hidden, lc_error *error) {
+    int query_hidden, int staged_delete_marker, lc_error *error) {
   unsigned char *meta;
   size_t meta_len;
   int rc;
@@ -10417,8 +10446,8 @@ static int lc_pouch_state_append_record(
   rc = lc_pouch_state_encode_payload_meta(
       &pouch->allocator, version, updated_at_unix, bytes, cipher_bytes,
       content_type, etag, descriptor, payload_span, payload_context, metadata,
-      metadata_length, 0U, has_query_hidden, query_hidden, &meta, &meta_len,
-      error);
+      metadata_length, 0U, has_query_hidden, query_hidden, staged_delete_marker,
+      &meta, &meta_len, error);
   if (rc == LC_OK) {
     rc = lc_pouch_state_append_binary_record(pouch, namespace_name, manifest,
                                              record_type, key, strlen(key),
@@ -10461,7 +10490,7 @@ static int lc_pouch_state_append_staged_commit_batch(
       staged->cipher_bytes, staged->content_type, staged->etag,
       staged->descriptor, &staged->payload_span, staged->payload_context,
       metadata, metadata_length, 0U, staged->has_query_hidden,
-      staged->query_hidden, &link_meta, &link_meta_len, error);
+      staged->query_hidden, 0, &link_meta, &link_meta_len, error);
   if (rc == LC_OK) {
     rc = lc_pouch_state_encode_decision_meta(
         &pouch->allocator, decision_version, staged->etag,
@@ -10499,9 +10528,9 @@ static int lc_pouch_state_append_staged_commit_batch(
   return rc;
 }
 
-static int lc_pouch_state_is_staged_delete_marker(const char *content_type) {
-  return content_type != NULL &&
-         strcmp(content_type, LC_POUCH_STATE_DELETE_CONTENT_TYPE) == 0;
+static int
+lc_pouch_state_is_staged_delete_marker(const lc_pouch_state_entry *entry) {
+  return entry != NULL && entry->staged_delete_marker;
 }
 
 /* A transaction decision must retire its staged marker together with the
@@ -10620,14 +10649,14 @@ static int lc_pouch_state_commit_staged_delete_locked(
   if (rc == LC_OK && delete_committed) {
     (void)lc_pouch_state_cache_apply_write(
         pouch, namespace_name, manifest, key, NULL, etag, NULL, NULL, NULL, 0U,
-        version, 0UL, 0UL, NULL, updated_at_unix, 0, 0, 0,
+        version, 0UL, 0UL, NULL, updated_at_unix, 0, 0, 0, 0,
         LC_POUCH_STATE_RECORD_STATE_DELETE);
   }
   if (rc == LC_OK) {
     (void)lc_pouch_state_cache_apply_write(
         pouch, namespace_name, manifest, staged_key, NULL, staged->etag, NULL,
         NULL, NULL, 0U, discard_version, 0UL, 0UL, NULL, updated_at_unix, 0, 0,
-        0, LC_POUCH_STATE_RECORD_STATE_DELETE);
+        0, 0, LC_POUCH_STATE_RECORD_STATE_DELETE);
   }
   if (rc == LC_OK && delete_committed) {
     out->etag = etag;
@@ -10773,7 +10802,8 @@ static int lc_pouch_state_recover_staged_decisions_locked(
       (void)lc_pouch_state_cache_apply_write(
           pouch, namespace_name, &manifest, decision->staged_key, NULL,
           decision->etag, NULL, NULL, NULL, 0U, tombstone_version, 0UL, 0UL,
-          NULL, updated_at_unix, 0, 0, 0, LC_POUCH_STATE_RECORD_STATE_DELETE);
+          NULL, updated_at_unix, 0, 0, 0, 0,
+          LC_POUCH_STATE_RECORD_STATE_DELETE);
       recovered_count++;
     }
     lc_pouch_state_entry_cleanup(&pouch->allocator, &staged);
@@ -10861,6 +10891,7 @@ static int lc_pouch_state_write_resolved_locked(
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  int staged_delete_marker;
   const unsigned char *metadata;
   size_t metadata_length;
   lc_pouch_generation index_seq;
@@ -11028,6 +11059,8 @@ static int lc_pouch_state_write_resolved_locked(
   content_type = options != NULL && options->content_type != NULL
                      ? options->content_type
                      : "application/octet-stream";
+  staged_delete_marker =
+      options != NULL && options->staged_delete_marker ? 1 : 0;
   put_record_type = options != NULL && options->object_record
                         ? LC_POUCH_STATE_RECORD_OBJECT_PUT
                         : LC_POUCH_STATE_RECORD_STATE_PUT;
@@ -11272,7 +11305,8 @@ static int lc_pouch_state_write_resolved_locked(
       &pouch->allocator, version, updated_at_unix, 0UL, 0UL, content_type,
       placeholder_etag, NULL, &payload_span, payload_context, metadata,
       metadata_length, LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE,
-      has_query_hidden, query_hidden, &meta, &meta_len, error);
+      has_query_hidden, query_hidden, staged_delete_marker, &meta, &meta_len,
+      error);
   if (rc != LC_OK) {
     lc_pouch_state_append_fd_rollback(fd, segment_size,
                                       retain_active_append_fd);
@@ -11341,7 +11375,8 @@ static int lc_pouch_state_write_resolved_locked(
           &pouch->allocator, version, updated_at_unix, bytes, cipher_bytes,
           content_type, etag, descriptor, &payload_span, payload_context,
           metadata, metadata_length, LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE,
-          has_query_hidden, query_hidden, &final_meta, &final_meta_len, error);
+          has_query_hidden, query_hidden, staged_delete_marker, &final_meta,
+          &final_meta_len, error);
       if (rc == LC_OK && final_meta_len != meta_len) {
         rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch state metadata reservation changed size", NULL,
@@ -11483,7 +11518,8 @@ static int lc_pouch_state_write_resolved_locked(
           &pouch->allocator, version, updated_at_unix, bytes, cipher_bytes,
           content_type, etag, descriptor, &payload_span, payload_context,
           metadata, metadata_length, LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE,
-          has_query_hidden, query_hidden, &final_meta, &final_meta_len, error);
+          has_query_hidden, query_hidden, staged_delete_marker, &final_meta,
+          &final_meta_len, error);
       if (rc == LC_OK && final_meta_len != meta_len) {
         rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch state metadata reservation changed size", NULL,
@@ -11538,7 +11574,7 @@ static int lc_pouch_state_write_resolved_locked(
         pouch, namespace_name, &manifest, key, content_type, etag,
         &payload_span, payload_context, metadata, metadata_length, version,
         bytes, cipher_bytes, descriptor, updated_at_unix, has_query_hidden,
-        query_hidden, 1, put_record_type);
+        query_hidden, staged_delete_marker, 1, put_record_type);
     if (body->reset != NULL &&
         bytes <= LC_POUCH_STATE_BODY_CACHE_RECORD_MAX_BYTES) {
       lc_pouch_namespace_logstore *cache;
@@ -11941,7 +11977,8 @@ static void lc_pouch_state_metadata_append_process(
           request->current->etag != NULL ? request->current->etag : "",
           request->current->descriptor, &request->current->payload_span,
           request->current->payload_context, metadata, metadata_length, 0U,
-          request->has_query_hidden, request->query_hidden, &items[index].meta,
+          request->has_query_hidden, request->query_hidden,
+          request->current->staged_delete_marker, &items[index].meta,
           &items[index].meta_len, &batch_error);
       if (rc != LC_OK) {
         break;
@@ -12003,7 +12040,8 @@ static void lc_pouch_state_metadata_append_process(
             metadata, metadata_length, request->version,
             request->current->bytes, request->current->cipher_bytes,
             request->current->descriptor, request->out->updated_at_unix,
-            request->has_query_hidden, request->query_hidden, 1,
+            request->has_query_hidden, request->query_hidden,
+            request->current->staged_delete_marker, 1,
             LC_POUCH_STATE_RECORD_STATE_META);
         request->rc = LC_OK;
       } else {
@@ -12676,7 +12714,8 @@ static int lc_pouch_state_update_metadata_from_current_locked(
       options->has_metadata ? options->metadata_length
                             : current->metadata_length,
       version, current->bytes, current->cipher_bytes, current->descriptor,
-      updated_at_unix, has_query_hidden, query_hidden, error);
+      updated_at_unix, has_query_hidden, query_hidden,
+      current->staged_delete_marker, error);
   if (rc == LC_OK) {
     rc = lc_pouch_state_metadata_write_result_build(
         pouch, manifest, current, options, version, updated_at_unix,
@@ -12691,8 +12730,8 @@ static int lc_pouch_state_update_metadata_from_current_locked(
         options->has_metadata ? options->metadata_length
                               : current->metadata_length,
         version, current->bytes, current->cipher_bytes, current->descriptor,
-        updated_at_unix, has_query_hidden, query_hidden, 1,
-        LC_POUCH_STATE_RECORD_STATE_META);
+        updated_at_unix, has_query_hidden, query_hidden,
+        current->staged_delete_marker, 1, LC_POUCH_STATE_RECORD_STATE_META);
   }
   if (rc != LC_OK) {
     lc_pouch_state_write_result_cleanup(&pouch->allocator, out);
@@ -13030,7 +13069,7 @@ static int lc_pouch_state_delete_locked(
   if (rc == LC_OK) {
     (void)lc_pouch_state_cache_apply_write(
         pouch, namespace_name, &manifest, key, NULL, etag, NULL, NULL, NULL, 0U,
-        version, 0UL, 0UL, NULL, updated_at_unix, 0, 0, 0,
+        version, 0UL, 0UL, NULL, updated_at_unix, 0, 0, 0, 0,
         options != NULL && options->object_record
             ? LC_POUCH_STATE_RECORD_OBJECT_DELETE
             : current.record_type);
@@ -13361,7 +13400,7 @@ static int lc_pouch_state_promote_staged_locked(
                       NULL);
     goto cleanup;
   }
-  if (lc_pouch_state_is_staged_delete_marker(staged.content_type)) {
+  if (lc_pouch_state_is_staged_delete_marker(&staged)) {
     rc = lc_pouch_state_commit_staged_delete_locked(
         pouch, namespace_name, &manifest, key, staged_key, &committed, &staged,
         out, error);
@@ -13406,11 +13445,11 @@ static int lc_pouch_state_promote_staged_locked(
       &staged.payload_span, staged.payload_context, promoted_metadata,
       promoted_metadata_length, version, staged.bytes, staged.cipher_bytes,
       staged.descriptor, updated_at_unix, staged.has_query_hidden,
-      staged.query_hidden, 1, LC_POUCH_STATE_RECORD_STATE_PUT);
+      staged.query_hidden, 0, 1, LC_POUCH_STATE_RECORD_STATE_PUT);
   (void)lc_pouch_state_cache_apply_write(
       pouch, namespace_name, &manifest, staged_key, NULL, staged.etag, NULL,
       NULL, NULL, 0U, discard_version, 0UL, 0UL, NULL, updated_at_unix, 0, 0, 0,
-      LC_POUCH_STATE_RECORD_STATE_DELETE);
+      0, LC_POUCH_STATE_RECORD_STATE_DELETE);
   out->etag = lc_strdup_with_allocator(&pouch->allocator, staged.etag);
   if (out->etag == NULL) {
     rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -13541,7 +13580,7 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   if (!staged.found) {
     goto cleanup;
   }
-  if (lc_pouch_state_is_staged_delete_marker(staged.content_type)) {
+  if (lc_pouch_state_is_staged_delete_marker(&staged)) {
     rc = lc_pouch_state_commit_staged_delete_locked(
         pouch, namespace_name, &manifest, key, staged_key, &committed, &staged,
         out, error);
@@ -13572,11 +13611,11 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
       &staged.payload_span, staged.payload_context, promoted_metadata,
       promoted_metadata_length, version, staged.bytes, staged.cipher_bytes,
       staged.descriptor, updated_at_unix, staged.has_query_hidden,
-      staged.query_hidden, 1, LC_POUCH_STATE_RECORD_STATE_PUT);
+      staged.query_hidden, 0, 1, LC_POUCH_STATE_RECORD_STATE_PUT);
   (void)lc_pouch_state_cache_apply_write(
       pouch, namespace_name, &manifest, staged_key, NULL, staged.etag, NULL,
       NULL, NULL, 0U, discard_version, 0UL, 0UL, NULL, updated_at_unix, 0, 0, 0,
-      LC_POUCH_STATE_RECORD_STATE_DELETE);
+      0, LC_POUCH_STATE_RECORD_STATE_DELETE);
   out->etag = lc_strdup_with_allocator(&pouch->allocator, staged.etag);
   if (out->etag == NULL) {
     rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -13701,7 +13740,7 @@ int lc_pouch_state_discard_staged_locked(lc_pouch *pouch,
         (void)lc_pouch_state_cache_apply_write(
             pouch, namespace_name, &manifest, staged_key, NULL, etag, NULL,
             NULL, NULL, 0U, tombstone_version, 0UL, 0UL, NULL, updated_at_unix,
-            0, 0, 0, LC_POUCH_STATE_RECORD_STATE_DELETE);
+            0, 0, 0, 0, LC_POUCH_STATE_RECORD_STATE_DELETE);
       }
       if (rc == LC_OK && discarded != NULL) {
         *discarded = 1;
@@ -13836,6 +13875,7 @@ static int lc_pouch_state_read_internal(lc_pouch *pouch,
         out->has_query_hidden = current.has_query_hidden;
         out->query_hidden = current.query_hidden;
         out->has_body = current.payload_span.present;
+        out->staged_delete_marker = current.staged_delete_marker;
         out->found = 1;
         current.content_type = NULL;
         current.etag = NULL;
@@ -13975,9 +14015,7 @@ int lc_pouch_state_read_metadata_view_locked(
       out->has_query_hidden = record->has_query_hidden;
       out->query_hidden = record->query_hidden;
       out->has_body = record->payload_span.present;
-      out->is_delete_marker =
-          record->content_type != NULL &&
-          strcmp(record->content_type, LC_POUCH_STATE_DELETE_CONTENT_TYPE) == 0;
+      out->is_delete_marker = record->staged_delete_marker;
     }
     return LC_OK;
   }
@@ -13993,9 +14031,7 @@ int lc_pouch_state_read_metadata_view_locked(
     out->has_query_hidden = owned_fallback->has_query_hidden;
     out->query_hidden = owned_fallback->query_hidden;
     out->has_body = owned_fallback->has_body;
-    out->is_delete_marker = owned_fallback->content_type != NULL &&
-                            strcmp(owned_fallback->content_type,
-                                   LC_POUCH_STATE_DELETE_CONTENT_TYPE) == 0;
+    out->is_delete_marker = owned_fallback->staged_delete_marker;
   }
   return rc;
 }
