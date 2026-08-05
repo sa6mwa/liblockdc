@@ -10409,6 +10409,119 @@ static void test_state_crypto_compression_round_trips(void **state) {
 }
 
 static void
+test_crypto_compressed_source_authenticates_terminal_frame(void **state) {
+  enum {
+    terminal_frame_bytes = 8U + 16U,
+    compressed_input_bytes = 64U * 1024U,
+    target_stored_bytes = compressed_input_bytes + 3U * terminal_frame_bytes
+  };
+  lc_pouch_crypto *crypto;
+  lc_pouch_crypto_open_options crypto_options;
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  unsigned char *payload;
+  unsigned char *stored;
+  char *crypto_key;
+  char *descriptor;
+  char root[512];
+  char payload_path[1024];
+  size_t payload_length;
+  size_t stored_length;
+  size_t index;
+  unsigned long stored_crc;
+  uint32_t random_state;
+  FILE *fp;
+  int found;
+  int rc;
+
+  (void)state;
+  crypto = NULL;
+  source = NULL;
+  sink = NULL;
+  payload = NULL;
+  stored = NULL;
+  crypto_key = NULL;
+  descriptor = NULL;
+  fp = NULL;
+  memset(&crypto_options, 0, sizeof(crypto_options));
+  lc_error_init(&error);
+  make_root("crypto-compressed-terminal-frame", root, sizeof(root));
+  cleanup_root(root);
+  assert_int_equal(mkdir(root, 0700), 0);
+  assert_true(
+      snprintf(payload_path, sizeof(payload_path), "%s/payload.bin", root) > 0);
+  assert_true(strlen(payload_path) < sizeof(payload_path));
+
+  payload = (unsigned char *)malloc(compressed_input_bytes);
+  assert_non_null(payload);
+  random_state = (uint32_t)0x4d595df4UL;
+  for (index = 0U; index < compressed_input_bytes; ++index) {
+    random_state = random_state * (uint32_t)1664525UL + (uint32_t)1013904223UL;
+    payload[index] = (unsigned char)(random_state >> 24);
+  }
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  crypto_options.key_string = crypto_key;
+  crypto_options.compression_enabled = 1;
+  rc = lc_pouch_crypto_open(NULL, &crypto_options, &crypto, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+
+  /* The zlib adapter reads 64 KiB at a time. Choose an incompressible
+   * payload whose compressed stream ends at that exact boundary, then remove
+   * the following encrypted terminal frame. Without draining the inner source
+   * after Z_STREAM_END, this used to return all plaintext successfully. */
+  found = 0;
+  for (payload_length = 65300U;
+       payload_length <= compressed_input_bytes && !found; ++payload_length) {
+    stored_length = 0U;
+    stored_crc = 0UL;
+    rc = lc_pouch_crypto_transform_memory(
+        crypto, "crypto-compressed-terminal", payload, payload_length, 1,
+        &stored, &stored_length, &stored_crc, &descriptor, &error);
+    assert_int_equal(rc, LC_OK);
+    if (stored_length == target_stored_bytes) {
+      found = 1;
+    } else {
+      lc_free_with_allocator(NULL, descriptor);
+      lc_free_with_allocator(NULL, stored);
+      descriptor = NULL;
+      stored = NULL;
+    }
+  }
+  assert_true(found);
+  assert_non_null(stored);
+  assert_non_null(descriptor);
+  assert_true(stored_length > terminal_frame_bytes);
+
+  fp = fopen(payload_path, "wb");
+  assert_non_null(fp);
+  assert_int_equal(fwrite(stored, 1U, stored_length, fp), stored_length);
+  assert_int_equal(fclose(fp), 0);
+  fp = NULL;
+  truncate_file_at(payload_path, stored_length - terminal_frame_bytes);
+
+  rc = lc_pouch_crypto_source_from_file(crypto, "crypto-compressed-terminal",
+                                        payload_path, descriptor, &source,
+                                        &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_to_discard(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_copy(source, sink, NULL, &error);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+
+  lc_sink_close(sink);
+  source->close(source);
+  lc_free_with_allocator(NULL, descriptor);
+  lc_free_with_allocator(NULL, stored);
+  lc_pouch_crypto_close(crypto);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  free(payload);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_state_overlapping_sources_from_same_segment_are_independent(void **state) {
   static const char first_payload[] = "first-stream-payload";
   static const char second_payload[] = "second-stream-payload";
@@ -25845,6 +25958,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_state_compression_streams_segment_payloads),
       cmocka_unit_test(test_state_compression_mode_is_root_invariant),
       cmocka_unit_test(test_state_crypto_compression_round_trips),
+      cmocka_unit_test(
+          test_crypto_compressed_source_authenticates_terminal_frame),
       cmocka_unit_test(
           test_state_overlapping_sources_from_same_segment_are_independent),
       cmocka_unit_test(

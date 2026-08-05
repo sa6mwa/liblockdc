@@ -1405,7 +1405,7 @@ static int lc_pouch_crypto_stream_plain_to_fd(const lc_allocator *allocator,
 static size_t lc_pouch_zlib_source_read(lc_source *self, void *buffer,
                                         size_t count, lc_error *error) {
   lc_pouch_zlib_source *source;
-  int flush;
+  size_t total;
 
   if (self == NULL || buffer == NULL || count == 0U) {
     return 0U;
@@ -1414,71 +1414,116 @@ static size_t lc_pouch_zlib_source_read(lc_source *self, void *buffer,
   if (source == NULL || source->stream_done) {
     return 0U;
   }
-  source->stream.next_out = (unsigned char *)buffer;
-  source->stream.avail_out = (uInt)count;
-  while (source->stream.avail_out > 0U && !source->stream_done) {
-    int zrc;
+  total = 0U;
+  while (total < count && !source->stream_done) {
+    size_t output_chunk;
+    size_t produced;
 
-    if (source->stream.avail_in == 0U && !source->input_done) {
-      size_t got;
+    output_chunk = count - total;
+    if (output_chunk > (size_t)UINT_MAX) {
+      output_chunk = (size_t)UINT_MAX;
+    }
+    source->stream.next_out = (unsigned char *)buffer + total;
+    source->stream.avail_out = (uInt)output_chunk;
+    while (source->stream.avail_out > 0U && !source->stream_done) {
+      int flush;
+      int zrc;
 
-      got = source->inner->read(source->inner, source->input,
-                                sizeof(source->input), error);
-      if (got == 0U) {
-        if (error != NULL && error->code != LC_OK) {
-          return count - source->stream.avail_out;
+      if (source->stream.avail_in == 0U && !source->input_done) {
+        size_t got;
+
+        got = source->inner->read(source->inner, source->input,
+                                  sizeof(source->input), error);
+        if (got == 0U) {
+          if (error != NULL && error->code != LC_OK) {
+            return total + output_chunk - source->stream.avail_out;
+          }
+          source->input_done = 1;
+        } else {
+          if (error != NULL && error->code != LC_OK) {
+            return total + output_chunk - source->stream.avail_out;
+          }
+          if (lc_pouch_crypto_check_byte_counter(
+                  source->input_total, got,
+                  "pouch compressed plaintext byte count exceeds platform "
+                  "limit",
+                  error) != LC_OK) {
+            return total + output_chunk - source->stream.avail_out;
+          }
+          source->input_total += (uint64_t)got;
+          source->stream.next_in = source->input;
+          source->stream.avail_in = (uInt)got;
         }
-        source->input_done = 1;
+      }
+      flush = source->input_done ? Z_FINISH : Z_NO_FLUSH;
+      if (source->deflate_mode) {
+        zrc = deflate(&source->stream, flush);
+        if (zrc == Z_STREAM_END) {
+          source->stream_done = 1;
+          break;
+        }
+        if (zrc != Z_OK) {
+          (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                             "failed to compress pouch payload", NULL, NULL,
+                             "pouch");
+          return total + output_chunk - source->stream.avail_out;
+        }
       } else {
-        if (lc_pouch_crypto_check_byte_counter(
-                source->input_total, got,
-                "pouch compressed plaintext byte count exceeds platform limit",
-                error) != LC_OK) {
-          return count - source->stream.avail_out;
+        zrc = inflate(&source->stream, Z_NO_FLUSH);
+        if (zrc == Z_STREAM_END) {
+          size_t got;
+
+          if (source->stream.avail_in != 0U) {
+            (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                               "compressed pouch payload has trailing bytes",
+                               NULL, NULL, "pouch");
+            return total + output_chunk - source->stream.avail_out;
+          }
+          /* Do not expose a completed compressed stream before the wrapped
+           * source has reached EOF. In particular, encrypted sources only
+           * authenticate their terminal zero-length frame while being drained.
+           */
+          got = source->inner->read(source->inner, source->input,
+                                    sizeof(source->input), error);
+          if (error != NULL && error->code != LC_OK) {
+            return total + output_chunk - source->stream.avail_out;
+          }
+          if (got != 0U) {
+            (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                               "compressed pouch payload has trailing bytes",
+                               NULL, NULL, "pouch");
+            return total + output_chunk - source->stream.avail_out;
+          }
+          source->input_done = 1;
+          source->stream_done = 1;
+          break;
         }
-        source->input_total += (uint64_t)got;
-        source->stream.next_in = source->input;
-        source->stream.avail_in = (uInt)got;
+        if (zrc == Z_BUF_ERROR && source->input_done &&
+            source->stream.avail_in == 0U) {
+          (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                             "compressed pouch payload is truncated", NULL,
+                             NULL, "pouch");
+          return total + output_chunk - source->stream.avail_out;
+        }
+        if (zrc != Z_OK && zrc != Z_BUF_ERROR) {
+          (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                             "failed to decompress pouch payload", NULL, NULL,
+                             "pouch");
+          return total + output_chunk - source->stream.avail_out;
+        }
+        if (zrc == Z_BUF_ERROR &&
+            source->stream.avail_out == (uInt)output_chunk) {
+          break;
+        }
       }
     }
-    flush = source->input_done ? Z_FINISH : Z_NO_FLUSH;
-    if (source->deflate_mode) {
-      zrc = deflate(&source->stream, flush);
-      if (zrc == Z_STREAM_END) {
-        source->stream_done = 1;
-        break;
-      }
-      if (zrc != Z_OK) {
-        (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                           "failed to compress pouch payload", NULL, NULL,
-                           "pouch");
-        return count - source->stream.avail_out;
-      }
-    } else {
-      zrc = inflate(&source->stream, Z_NO_FLUSH);
-      if (zrc == Z_STREAM_END) {
-        source->stream_done = 1;
-        break;
-      }
-      if (zrc == Z_BUF_ERROR && source->input_done &&
-          source->stream.avail_in == 0U) {
-        (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                           "compressed pouch payload is truncated", NULL, NULL,
-                           "pouch");
-        return count - source->stream.avail_out;
-      }
-      if (zrc != Z_OK && zrc != Z_BUF_ERROR) {
-        (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                           "failed to decompress pouch payload", NULL, NULL,
-                           "pouch");
-        return count - source->stream.avail_out;
-      }
-      if (zrc == Z_BUF_ERROR && source->stream.avail_out == (uInt)count) {
-        break;
-      }
+    produced = output_chunk - source->stream.avail_out;
+    total += produced;
+    if (produced == 0U && !source->stream_done) {
+      break;
     }
   }
-  return count - source->stream.avail_out;
+  return total;
 }
 
 static int lc_pouch_zlib_source_reset(lc_source *self, lc_error *error) {
