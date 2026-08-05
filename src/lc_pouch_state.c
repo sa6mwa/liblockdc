@@ -1131,12 +1131,16 @@ static void lc_pouch_state_metadata_view_from_read_result(
   }
   out->found = 1;
   out->etag = read_result->etag;
+  out->content_type = read_result->content_type;
   out->version = read_result->version;
   out->metadata = read_result->metadata;
   out->metadata_length = read_result->metadata_length;
   out->has_query_hidden = read_result->has_query_hidden;
   out->query_hidden = read_result->query_hidden;
   out->has_body = read_result->has_body;
+  out->is_delete_marker = read_result->content_type != NULL &&
+                          strcmp(read_result->content_type,
+                                 LC_POUCH_STATE_DELETE_CONTENT_TYPE) == 0;
 }
 
 static void
@@ -1148,12 +1152,16 @@ lc_pouch_state_metadata_view_from_entry(const lc_pouch_state_entry *entry,
   }
   out->found = 1;
   out->etag = entry->etag;
+  out->content_type = entry->content_type;
   out->version = entry->version;
   out->metadata = entry->metadata;
   out->metadata_length = entry->metadata_length;
   out->has_query_hidden = entry->has_query_hidden;
   out->query_hidden = entry->query_hidden;
   out->has_body = entry->payload_span.present;
+  out->is_delete_marker =
+      entry->content_type != NULL &&
+      strcmp(entry->content_type, LC_POUCH_STATE_DELETE_CONTENT_TYPE) == 0;
 }
 
 typedef enum lc_pouch_state_record_type {
@@ -11597,39 +11605,60 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
       pouch, namespace_name, key, body, options, NULL, NULL, 0, out, error);
 }
 
-int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
-                         const char *key, lc_source *body,
-                         const lc_pouch_state_write_options *options,
-                         lc_pouch_state_write_result *out, lc_error *error) {
-  lc_pouch_state_commit_group *commit_group;
-  lc_pouch_state_key_lock lock;
-  int owns_commit_group;
+typedef struct lc_pouch_state_prepared_write_context {
+  lc_pouch *pouch;
+  const char *namespace_name;
+  const char *key;
+  const lc_pouch_state_write_options *options;
+  lc_pouch_state_body_prepare_fn prepare;
+  void *prepare_context;
+  lc_pouch_state_write_result *out;
+  lc_source *body;
+} lc_pouch_state_prepared_write_context;
+
+/* Prepare the transformed body after the current projection is stable under
+ * exact-key authority, then let the normal locked writer finalize it. */
+static int lc_pouch_state_write_prepared_locked(void *context,
+                                                lc_error *error) {
+  lc_pouch_state_prepared_write_context *prepared;
+  lc_pouch_state_read_result current;
   int rc;
 
-  commit_group = NULL;
-  owns_commit_group = 0;
-  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
-    return lc_pouch_state_write_locked(pouch, namespace_name, key, body,
-                                       options, out, error);
+  prepared = (lc_pouch_state_prepared_write_context *)context;
+  if (prepared == NULL || prepared->pouch == NULL ||
+      prepared->namespace_name == NULL || prepared->key == NULL ||
+      prepared->options == NULL || prepared->prepare == NULL ||
+      prepared->out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch prepared write requires complete context", NULL,
+                        NULL, "pouch");
   }
-  rc = lc_pouch_state_key_mutation_begin(pouch, namespace_name, key, &lock,
-                                         error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  rc = lc_pouch_state_commit_group_begin(pouch, &commit_group,
-                                         &owns_commit_group, error);
-  if (rc != LC_OK) {
-    lc_pouch_state_key_mutation_end(pouch, &lock);
-    return rc;
-  }
-  rc = lc_pouch_state_write_locked(pouch, namespace_name, key, body, options,
-                                   out, error);
-  rc = lc_pouch_state_finish_commit_group_after_mutation(
-      pouch, &lock, commit_group, owns_commit_group, rc, error);
+  memset(&current, 0, sizeof(current));
+  prepared->body = NULL;
+  rc = lc_pouch_state_read_locked(prepared->pouch, prepared->namespace_name,
+                                  prepared->key, &current, error);
   if (rc == LC_OK) {
-    lc_pouch_janitor_note_mutation(pouch);
+    rc = prepared->prepare(&current, prepared->prepare_context, &prepared->body,
+                           error);
   }
+  if (rc == LC_OK && prepared->body == NULL) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch prepared write callback returned no body", NULL,
+                      NULL, "pouch");
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_write_locked(prepared->pouch, prepared->namespace_name,
+                                     prepared->key, prepared->body,
+                                     prepared->options, prepared->out, error);
+  }
+  lc_pouch_state_read_result_cleanup(&prepared->pouch->allocator, &current);
+  return rc;
+}
+
+static void lc_pouch_state_log_write_result(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const lc_pouch_state_write_options *options, lc_source *body,
+    const lc_pouch_state_write_result *out, int rc, lc_error *error) {
   if (rc == LC_OK) {
     pslog_field fields[7];
 
@@ -11664,6 +11693,80 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
     fields[3] = lc_log_code_field(error);
     lc_log_error(pouch->logger, "logstore.write.error", fields, 4U);
   }
+}
+
+int lc_pouch_state_write_prepared(lc_pouch *pouch, const char *namespace_name,
+                                  const char *key,
+                                  const lc_pouch_state_write_options *options,
+                                  lc_pouch_state_body_prepare_fn prepare,
+                                  void *prepare_context,
+                                  lc_pouch_state_write_result *out,
+                                  lc_error *error) {
+  lc_pouch_state_prepared_write_context context;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      key == NULL || key[0] == '\0' || options == NULL || prepare == NULL ||
+      out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch prepared write requires pouch, namespace, key, "
+                        "options, callback and output",
+                        NULL, NULL, "pouch");
+  }
+  memset(&context, 0, sizeof(context));
+  context.pouch = pouch;
+  context.namespace_name = namespace_name;
+  context.key = key;
+  context.options = options;
+  context.prepare = prepare;
+  context.prepare_context = prepare_context;
+  context.out = out;
+  rc = lc_pouch_state_with_key_lock(pouch, namespace_name, key,
+                                    lc_pouch_state_write_prepared_locked,
+                                    &context, error);
+  lc_pouch_state_log_write_result(pouch, namespace_name, key, options,
+                                  context.body, out, rc, error);
+  if (context.body != NULL) {
+    lc_source_close(context.body);
+  }
+  return rc;
+}
+
+int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
+                         const char *key, lc_source *body,
+                         const lc_pouch_state_write_options *options,
+                         lc_pouch_state_write_result *out, lc_error *error) {
+  lc_pouch_state_commit_group *commit_group;
+  lc_pouch_state_key_lock lock;
+  int owns_commit_group;
+  int rc;
+
+  commit_group = NULL;
+  owns_commit_group = 0;
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_pouch_state_write_locked(pouch, namespace_name, key, body,
+                                       options, out, error);
+  }
+  rc = lc_pouch_state_key_mutation_begin(pouch, namespace_name, key, &lock,
+                                         error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_state_commit_group_begin(pouch, &commit_group,
+                                         &owns_commit_group, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_key_mutation_end(pouch, &lock);
+    return rc;
+  }
+  rc = lc_pouch_state_write_locked(pouch, namespace_name, key, body, options,
+                                   out, error);
+  rc = lc_pouch_state_finish_commit_group_after_mutation(
+      pouch, &lock, commit_group, owns_commit_group, rc, error);
+  if (rc == LC_OK) {
+    lc_pouch_janitor_note_mutation(pouch);
+  }
+  lc_pouch_state_log_write_result(pouch, namespace_name, key, options, body,
+                                  out, rc, error);
   return rc;
 }
 
@@ -13041,6 +13144,7 @@ typedef struct lc_pouch_state_prepared_stage_context {
   lc_pouch_state_write_options *options;
   lc_pouch_state_stage_prepare_fn prepare;
   void *prepare_context;
+  lc_pouch_state_stage_body_prepare_fn body_prepare;
   lc_pouch_state_write_result *out;
 } lc_pouch_state_prepared_stage_context;
 
@@ -13052,33 +13156,44 @@ static int lc_pouch_state_stage_write_prepared_locked(void *context,
   lc_pouch_state_prepared_stage_context *stage;
   lc_pouch_state_read_result committed;
   lc_pouch_state_read_result lease;
+  lc_pouch_state_read_result committed_body;
+  lc_pouch_state_read_result staged_body;
   lc_pouch_state_entry staged_entry;
   lc_pouch_namespace_manifest manifest;
   lc_pouch_state_metadata_view committed_view;
   lc_pouch_state_metadata_view staged_view;
   lc_pouch_state_metadata_view lease_view;
   lc_pouch_state_read_result *lease_source;
+  lc_source *body;
+  lc_source *prepared_body;
   char *staged_key;
+  int apply;
   int staged_entry_transferred;
   int rc;
 
   stage = (lc_pouch_state_prepared_stage_context *)context;
   if (stage == NULL || stage->pouch == NULL || stage->namespace_name == NULL ||
       stage->key == NULL || stage->txn_id == NULL || stage->lease_key == NULL ||
-      stage->body == NULL || stage->options == NULL || stage->prepare == NULL ||
-      stage->out == NULL) {
+      ((stage->body == NULL && stage->body_prepare == NULL) ||
+       (stage->body != NULL && stage->body_prepare != NULL)) ||
+      stage->options == NULL || stage->prepare == NULL || stage->out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch prepared stage requires complete context", NULL,
                         NULL, "pouch");
   }
   memset(&committed, 0, sizeof(committed));
   memset(&lease, 0, sizeof(lease));
+  memset(&committed_body, 0, sizeof(committed_body));
+  memset(&staged_body, 0, sizeof(staged_body));
   memset(&staged_entry, 0, sizeof(staged_entry));
   memset(&manifest, 0, sizeof(manifest));
   memset(&committed_view, 0, sizeof(committed_view));
   memset(&staged_view, 0, sizeof(staged_view));
   memset(&lease_view, 0, sizeof(lease_view));
+  body = NULL;
+  prepared_body = NULL;
   staged_key = NULL;
+  apply = 1;
   staged_entry_transferred = 0;
   rc = lc_pouch_state_read_metadata_locked(stage->pouch, stage->namespace_name,
                                            stage->key, &committed, error);
@@ -13107,17 +13222,42 @@ static int lc_pouch_state_stage_write_prepared_locked(void *context,
     lc_pouch_state_metadata_view_from_entry(&staged_entry, &staged_view);
     lc_pouch_state_metadata_view_from_read_result(lease_source, &lease_view);
     rc = stage->prepare(&committed_view, &staged_view, &lease_view,
-                        stage->prepare_context, stage->options, error);
+                        stage->prepare_context, stage->options, &apply, error);
   }
-  if (rc == LC_OK) {
+  if (rc == LC_OK && apply) {
+    body = stage->body;
+    if (stage->body_prepare != NULL) {
+      rc = lc_pouch_state_read_locked(stage->pouch, stage->namespace_name,
+                                      stage->key, &committed_body, error);
+    }
+    if (rc == LC_OK && stage->body_prepare != NULL) {
+      rc = lc_pouch_state_read_locked(stage->pouch, stage->namespace_name,
+                                      staged_key, &staged_body, error);
+    }
+    if (rc == LC_OK && stage->body_prepare != NULL) {
+      rc = stage->body_prepare(&committed_body, &staged_body,
+                               stage->prepare_context, &prepared_body, error);
+      body = prepared_body;
+    }
+    if (rc == LC_OK && body == NULL) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch prepared stage callback returned no body", NULL,
+                        NULL, "pouch");
+    }
+  }
+  if (rc == LC_OK && apply) {
     staged_entry_transferred = 1;
     rc = lc_pouch_state_write_resolved_locked(
-        stage->pouch, stage->namespace_name, staged_key, stage->body,
-        stage->options, &staged_entry, &manifest, manifest.borrowed, stage->out,
-        error);
+        stage->pouch, stage->namespace_name, staged_key, body, stage->options,
+        &staged_entry, &manifest, manifest.borrowed, stage->out, error);
+  }
+  if (prepared_body != NULL) {
+    lc_source_close(prepared_body);
   }
   lc_free_with_allocator(&stage->pouch->allocator, staged_key);
   lc_pouch_state_read_result_cleanup(&stage->pouch->allocator, &lease);
+  lc_pouch_state_read_result_cleanup(&stage->pouch->allocator, &staged_body);
+  lc_pouch_state_read_result_cleanup(&stage->pouch->allocator, &committed_body);
   if (!staged_entry_transferred) {
     lc_pouch_state_entry_cleanup(&stage->pouch->allocator, &staged_entry);
     lc_pouch_namespace_manifest_cleanup(&stage->pouch->allocator, &manifest);
@@ -13131,17 +13271,20 @@ int lc_pouch_state_stage_write_prepared(
     const char *txn_id, const char *lease_key, lc_source *body,
     lc_pouch_state_write_options *options,
     lc_pouch_state_stage_prepare_fn prepare, void *prepare_context,
+    lc_pouch_state_stage_body_prepare_fn body_prepare,
     lc_pouch_state_write_result *out, lc_error *error) {
   lc_pouch_state_prepared_stage_context context;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
       key == NULL || key[0] == '\0' || txn_id == NULL || txn_id[0] == '\0' ||
-      lease_key == NULL || lease_key[0] == '\0' || body == NULL ||
+      lease_key == NULL || lease_key[0] == '\0' ||
+      ((body == NULL && body_prepare == NULL) ||
+       (body != NULL && body_prepare != NULL)) ||
       options == NULL || prepare == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch prepared stage requires pouch, namespace, key, "
-                        "transaction, lease key, body, options, callback and "
-                        "output",
+                        "transaction, lease key, body callback, options, "
+                        "callback and output",
                         NULL, NULL, "pouch");
   }
   memset(&context, 0, sizeof(context));
@@ -13154,6 +13297,7 @@ int lc_pouch_state_stage_write_prepared(
   context.options = options;
   context.prepare = prepare;
   context.prepare_context = prepare_context;
+  context.body_prepare = body_prepare;
   context.out = out;
   return lc_pouch_state_with_namespace_lock(
       pouch, namespace_name, lc_pouch_state_stage_write_prepared_locked,
@@ -13824,12 +13968,16 @@ int lc_pouch_state_read_metadata_view_locked(
     if (record != NULL && record->found) {
       out->found = 1;
       out->etag = record->etag;
+      out->content_type = record->content_type;
       out->version = record->version;
       out->metadata = record->metadata;
       out->metadata_length = record->metadata_length;
       out->has_query_hidden = record->has_query_hidden;
       out->query_hidden = record->query_hidden;
       out->has_body = record->payload_span.present;
+      out->is_delete_marker =
+          record->content_type != NULL &&
+          strcmp(record->content_type, LC_POUCH_STATE_DELETE_CONTENT_TYPE) == 0;
     }
     return LC_OK;
   }
@@ -13838,12 +13986,16 @@ int lc_pouch_state_read_metadata_view_locked(
   if (rc == LC_OK && owned_fallback->found) {
     out->found = 1;
     out->etag = owned_fallback->etag;
+    out->content_type = owned_fallback->content_type;
     out->version = owned_fallback->version;
     out->metadata = owned_fallback->metadata;
     out->metadata_length = owned_fallback->metadata_length;
     out->has_query_hidden = owned_fallback->has_query_hidden;
     out->query_hidden = owned_fallback->query_hidden;
     out->has_body = owned_fallback->has_body;
+    out->is_delete_marker = owned_fallback->content_type != NULL &&
+                            strcmp(owned_fallback->content_type,
+                                   LC_POUCH_STATE_DELETE_CONTENT_TYPE) == 0;
   }
   return rc;
 }

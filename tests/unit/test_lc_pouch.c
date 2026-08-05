@@ -309,6 +309,16 @@ typedef struct pouch_parallel_lease_acquire {
   int rc;
 } pouch_parallel_lease_acquire;
 
+typedef struct pouch_parallel_client_mutate {
+  lc_client *client;
+  pthread_barrier_t *start;
+  const char *key;
+  unsigned int attempts;
+  unsigned int completed;
+  lc_error error;
+  int rc;
+} pouch_parallel_client_mutate;
+
 typedef struct pouch_parallel_queue_dequeue {
   lc_client *client;
   pthread_barrier_t *start;
@@ -1040,6 +1050,43 @@ static void *pouch_acquire_lease_in_parallel(void *context) {
         ++acquire->completed;
       }
     }
+  }
+  return NULL;
+}
+
+static void *pouch_client_mutate_in_parallel(void *context) {
+  pouch_parallel_client_mutate *mutate;
+  lc_mutate_op request;
+  const char *mutations[1];
+  unsigned int attempt;
+  int barrier_rc;
+
+  mutate = (pouch_parallel_client_mutate *)context;
+  lc_error_init(&mutate->error);
+  lc_mutate_op_init(&request);
+  mutations[0] = "/counter++";
+  request.lease.key = mutate->key;
+  request.mutations = mutations;
+  request.mutation_count = 1U;
+  barrier_rc = pthread_barrier_wait(mutate->start);
+  if (barrier_rc != 0 && barrier_rc != PTHREAD_BARRIER_SERIAL_THREAD) {
+    mutate->rc = lc_error_set(&mutate->error, LC_ERR_TRANSPORT, 0L,
+                              "parallel pouch mutate barrier failed", NULL,
+                              NULL, "pouch");
+    return NULL;
+  }
+  mutate->rc = LC_OK;
+  for (attempt = 0U; attempt < mutate->attempts && mutate->rc == LC_OK;
+       ++attempt) {
+    lc_mutate_res result;
+
+    memset(&result, 0, sizeof(result));
+    mutate->rc = mutate->client->mutate(mutate->client, &request, &result,
+                                        &mutate->error);
+    if (mutate->rc == LC_OK) {
+      ++mutate->completed;
+    }
+    lc_mutate_res_cleanup(&result);
   }
   return NULL;
 }
@@ -14013,6 +14060,73 @@ static void test_client_mutate_applies_plan_and_preconditions(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_client_mutate_serializes_concurrent_transforms(void **state) {
+  lc_client *client;
+  lc_sink *sink;
+  lc_update_res update_res;
+  lc_get_res get_res;
+  pouch_parallel_client_mutate mutations[2];
+  pthread_barrier_t start;
+  pthread_t threads[2];
+  const void *bytes;
+  size_t length;
+  size_t index;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&get_res, 0, sizeof(get_res));
+  memset(mutations, 0, sizeof(mutations));
+  lc_error_init(&error);
+  make_root("client-mutate-parallel", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/mutate-parallel/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, key, "{\"counter\":0}", NULL, 0L, 0, &update_res,
+                     &error);
+  lc_update_res_cleanup(&update_res);
+  assert_int_equal(pthread_barrier_init(&start, NULL, 2U), 0);
+  for (index = 0U; index < 2U; ++index) {
+    mutations[index].client = client;
+    mutations[index].start = &start;
+    mutations[index].key = key;
+    mutations[index].attempts = 8U;
+    assert_int_equal(pthread_create(&threads[index], NULL,
+                                    pouch_client_mutate_in_parallel,
+                                    &mutations[index]),
+                     0);
+  }
+  for (index = 0U; index < 2U; ++index) {
+    assert_int_equal(pthread_join(threads[index], NULL), 0);
+    assert_int_equal(mutations[index].rc, LC_OK);
+    assert_int_equal(mutations[index].completed, 8U);
+    lc_error_cleanup(&mutations[index].error);
+  }
+  assert_int_equal(pthread_barrier_destroy(&start), 0);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(bytes, length, "\"counter\":16"));
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_client_get_missing_and_public_state_behavior(void **state) {
   lc_client *client;
   lc_source *source;
@@ -19974,6 +20088,112 @@ static void test_transaction_bound_remove_stages_until_decision(void **state) {
   rc = client->get(client, key, NULL, sink, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(get_res.no_content);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_transaction_bound_remove_then_mutate_recreates_logical_value(
+    void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_sink *sink;
+  lc_acquire_req acquire_req;
+  lc_remove_op remove_op;
+  lc_remove_res remove_res;
+  lc_mutate_req mutate_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_update_res update_res;
+  lc_get_res get_res;
+  const char *mutations[1];
+  const void *bytes;
+  size_t length;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_acquire_req_init(&acquire_req);
+  lc_remove_op_init(&remove_op);
+  memset(&remove_res, 0, sizeof(remove_res));
+  lc_mutate_req_init(&mutate_req);
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  make_root("txn-remove-mutate", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/txn-remove-mutate/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, key, "{\"counter\":1}", NULL, 0L, 0, &update_res,
+                     &error);
+  lc_update_res_cleanup(&update_res);
+
+  acquire_req.key = key;
+  acquire_req.owner = "txn-remove-mutate-owner";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "txn-remove-mutate";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+
+  remove_op.lease.namespace_name = lease->namespace_name;
+  remove_op.lease.key = lease->key;
+  remove_op.lease.lease_id = lease->lease_id;
+  remove_op.lease.txn_id = lease->txn_id;
+  remove_op.lease.fencing_token = lease->fencing_token;
+  rc = client->remove(client, &remove_op, &remove_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(remove_res.removed);
+  lc_remove_res_cleanup(&remove_res);
+  memset(&remove_res, 0, sizeof(remove_res));
+
+  /* The transaction now sees an absent logical value, so repeated remove is
+   * a no-op rather than another staged delete record. */
+  rc = client->remove(client, &remove_op, &remove_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(remove_res.removed);
+  assert_int_equal(remove_res.new_version, 0L);
+  lc_remove_res_cleanup(&remove_res);
+  memset(&remove_res, 0, sizeof(remove_res));
+
+  mutations[0] = "/counter++";
+  mutate_req.mutations = mutations;
+  mutate_req.mutation_count = 1U;
+  rc = lease->mutate(lease, &mutate_req, &error);
+  assert_int_equal(rc, LC_OK);
+
+  participant.namespace_name = "default";
+  participant.key = key;
+  decision_req.txn_id = acquire_req.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(lease);
+  lease = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(bytes, length, "\"counter\":2"));
   lc_get_res_cleanup(&get_res);
   sink->close(sink);
 
@@ -26252,6 +26472,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_client_update_enforces_state_preconditions),
       cmocka_unit_test(test_client_update_waits_for_namespace_mutation_lock),
       cmocka_unit_test(test_client_mutate_applies_plan_and_preconditions),
+      cmocka_unit_test(test_client_mutate_serializes_concurrent_transforms),
       cmocka_unit_test(test_client_get_missing_and_public_state_behavior),
       cmocka_unit_test(test_client_attachments_roundtrip_and_delete),
       cmocka_unit_test(test_attachment_rejects_missing_timestamp_metadata),
@@ -26392,6 +26613,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_transaction_bound_lease_rollback_clears_matching_lease),
       cmocka_unit_test(test_transaction_bound_remove_stages_until_decision),
+      cmocka_unit_test(
+          test_transaction_bound_remove_then_mutate_recreates_logical_value),
       cmocka_unit_test(test_txn_decision_skips_newer_state_lease),
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),

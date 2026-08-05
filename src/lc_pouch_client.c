@@ -370,6 +370,21 @@ typedef struct lc_pouch_counting_source {
   int has_max_bytes;
 } lc_pouch_counting_source;
 
+typedef struct lc_pouch_mutation_prepare_context {
+  lc_client_handle *client;
+  const char *namespace_name;
+  const char *key;
+  lc_mutation_plan *plan;
+  lc_pouch_mutate_file mutated;
+  lc_pouch_counting_source counting_source;
+  lc_source *source;
+} lc_pouch_mutation_prepare_context;
+
+typedef struct lc_pouch_txn_mutation_context {
+  lc_pouch_txn_stage_write_context stage;
+  lc_pouch_mutation_prepare_context mutation;
+} lc_pouch_txn_mutation_context;
+
 static size_t lc_pouch_counting_source_read(void *context, void *buffer,
                                             size_t count, lc_error *error);
 static int lc_pouch_counting_source_reset(void *context, lc_error *error);
@@ -5361,37 +5376,35 @@ static int lc_pouch_mutate_seed_empty(FILE *fp, lc_error *error) {
   return LC_OK;
 }
 
-static int lc_pouch_prepare_mutation_file(
-    lc_client_handle *client, const char *namespace_name, const char *key,
-    const char *const *mutations, size_t mutation_count,
-    const lc_mutation_parse_options *parse_options, lc_pouch_mutate_file *out,
-    lc_error *error) {
-  lc_mutation_plan *plan;
-  lc_pouch_state_read_result read_result;
+static int lc_pouch_state_result_is_delete_marker(
+    const lc_pouch_state_read_result *read_result) {
+  return read_result != NULL && read_result->found &&
+         read_result->content_type != NULL &&
+         strcmp(read_result->content_type,
+                LC_POUCH_STATE_DELETE_CONTENT_TYPE) == 0;
+}
+
+static int lc_pouch_prepare_mutation_file_from_plan(
+    lc_client_handle *client, const lc_pouch_state_read_result *read_result,
+    lc_mutation_plan *plan, lc_pouch_mutate_file *out, lc_error *error) {
   FILE *input_fp;
   FILE *final_fp;
   char *etag;
+  int logical_found;
   int rc;
 
-  if (client == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      key == NULL || key[0] == '\0' || out == NULL) {
+  if (client == NULL || read_result == NULL || plan == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch mutate requires client, namespace, key, and "
-                        "out",
+                        "pouch mutate preparation requires client, state, "
+                        "plan, and out",
                         NULL, NULL, NULL);
   }
   memset(out, 0, sizeof(*out));
-  memset(&read_result, 0, sizeof(read_result));
-  plan = NULL;
   input_fp = NULL;
   final_fp = NULL;
   etag = NULL;
-
-  rc = lc_mutation_plan_build(mutations, mutation_count, parse_options, &plan,
-                              error);
-  if (rc != LC_OK) {
-    goto cleanup;
-  }
+  logical_found = read_result->found && read_result->has_body &&
+                  !lc_pouch_state_result_is_delete_marker(read_result);
   input_fp = tmpfile();
   if (input_fp == NULL) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -5399,18 +5412,13 @@ static int lc_pouch_prepare_mutation_file(
                       strerror(errno), NULL, NULL);
     goto cleanup;
   }
-  rc = lc_pouch_state_read(client->pouch, namespace_name, key, &read_result,
-                           error);
-  if (rc != LC_OK) {
-    goto cleanup;
-  }
-  if (read_result.found) {
-    rc = lc_pouch_copy_source_to_file(read_result.body, input_fp, error);
+  if (logical_found) {
+    rc = lc_pouch_copy_source_to_file(read_result->body, input_fp, error);
     if (rc != LC_OK) {
       goto cleanup;
     }
-    etag = lc_strdup_local(read_result.etag);
-    if (read_result.etag != NULL && etag == NULL) {
+    etag = lc_strdup_local(read_result->etag);
+    if (read_result->etag != NULL && etag == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch mutate fetched etag", NULL,
                         NULL, NULL);
@@ -5428,9 +5436,9 @@ static int lc_pouch_prepare_mutation_file(
   }
 
   out->fp = final_fp;
-  out->found = read_result.found;
+  out->found = logical_found;
   out->etag = etag;
-  out->version = read_result.version;
+  out->version = logical_found ? read_result->version : 0UL;
   final_fp = NULL;
   etag = NULL;
 
@@ -5441,6 +5449,37 @@ cleanup:
   }
   if (input_fp != NULL) {
     fclose(input_fp);
+  }
+  return rc;
+}
+
+static int lc_pouch_prepare_mutation_file(
+    lc_client_handle *client, const char *namespace_name, const char *key,
+    const char *const *mutations, size_t mutation_count,
+    const lc_mutation_parse_options *parse_options, lc_pouch_mutate_file *out,
+    lc_error *error) {
+  lc_mutation_plan *plan;
+  lc_pouch_state_read_result read_result;
+  int rc;
+
+  if (client == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      key == NULL || key[0] == '\0' || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch mutate requires client, namespace, key, and "
+                        "out",
+                        NULL, NULL, NULL);
+  }
+  plan = NULL;
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_mutation_plan_build(mutations, mutation_count, parse_options, &plan,
+                              error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_read(client->pouch, namespace_name, key, &read_result,
+                             error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_prepare_mutation_file_from_plan(client, &read_result, plan,
+                                                  out, error);
   }
   lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
   if (plan != NULL) {
@@ -5765,7 +5804,13 @@ static int lc_pouch_client_prepare_txn_mutation_file(
   rc = lc_pouch_state_read_metadata(client->pouch, namespace_name, staged_key,
                                     &staged, error);
   if (rc == LC_OK) {
-    mutation_key = staged.found ? staged_key : key;
+    /* A staged delete is the transaction's absent-value projection. Mutating
+     * it must seed an empty JSON value from the committed key, not parse the
+     * zero-byte delete marker as a document body. */
+    mutation_key =
+        staged.found && !lc_pouch_state_result_is_delete_marker(&staged)
+            ? staged_key
+            : key;
     rc = lc_pouch_prepare_mutation_file(client, namespace_name, mutation_key,
                                         mutations, mutation_count,
                                         parse_options, out, error);
@@ -6015,6 +6060,54 @@ static int lc_pouch_counting_source_reset(void *context, lc_error *error) {
   }
   source->bytes = 0UL;
   return source->inner->reset(source->inner, error);
+}
+
+/* The state layer invokes this only after acquiring mutation authority, so the
+ * input snapshot and the resulting body form one linearizable transform. */
+static int lc_pouch_client_prepare_mutation_source(
+    const lc_pouch_state_read_result *current, void *context, lc_source **out,
+    lc_error *error) {
+  lc_pouch_mutation_prepare_context *mutation;
+  lc_source *counted_source;
+  int rc;
+
+  mutation = (lc_pouch_mutation_prepare_context *)context;
+  if (mutation == NULL || mutation->client == NULL || current == NULL ||
+      mutation->plan == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch mutation source preparation requires state and "
+                        "plan context",
+                        NULL, NULL, "pouch");
+  }
+  *out = NULL;
+  mutation->source = NULL;
+  counted_source = NULL;
+  rc = lc_pouch_prepare_mutation_file_from_plan(
+      mutation->client, current, mutation->plan, &mutation->mutated, error);
+  if (rc == LC_OK) {
+    mutation->source = lc_source_from_open_file(mutation->mutated.fp, 0);
+    if (mutation->source == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to wrap pouch mutate result source", NULL, NULL,
+                        NULL);
+    }
+  }
+  if (rc == LC_OK) {
+    mutation->counting_source.inner = mutation->source;
+    mutation->counting_source.max_bytes = LONG_MAX;
+    mutation->counting_source.has_max_bytes = 1;
+    rc = lc_source_from_callbacks(
+        lc_pouch_counting_source_read, lc_pouch_counting_source_reset, NULL,
+        &mutation->counting_source, &counted_source, error);
+  }
+  if (rc != LC_OK && mutation->source != NULL) {
+    lc_source_close(mutation->source);
+    mutation->source = NULL;
+  }
+  if (rc == LC_OK) {
+    *out = counted_source;
+  }
+  return rc;
 }
 
 static int lc_pouch_attach_write_locked(void *context, lc_error *error) {
@@ -8147,7 +8240,7 @@ static int lc_pouch_client_prepare_txn_stage_write(
     const lc_pouch_state_metadata_view *committed,
     const lc_pouch_state_metadata_view *staged,
     const lc_pouch_state_metadata_view *lease_state, void *context,
-    lc_pouch_state_write_options *options, lc_error *error) {
+    lc_pouch_state_write_options *options, int *apply, lc_error *error) {
   lc_pouch_txn_stage_write_context *stage;
   const lc_pouch_state_metadata_view *precondition_source;
   int rc;
@@ -8157,16 +8250,19 @@ static int lc_pouch_client_prepare_txn_stage_write(
       stage->namespace_name == NULL || stage->key == NULL ||
       stage->lease->key == NULL || stage->lease->key[0] == '\0' ||
       !lc_pouch_txn_id_present(stage->txn_id) || committed == NULL ||
-      staged == NULL || lease_state == NULL || options == NULL) {
+      staged == NULL || lease_state == NULL || options == NULL ||
+      apply == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch transaction stage preparation requires context",
                         NULL, NULL, "pouch");
   }
+  *apply = 1;
   rc = lc_pouch_validate_lease_metadata_view(
       stage->client, stage->lease, stage->namespace_name, stage->lease->key,
       lease_state, NULL, error);
   if (rc == LC_OK) {
-    precondition_source = staged->found ? staged : committed;
+    precondition_source =
+        staged->found && !staged->is_delete_marker ? staged : committed;
     if (options->expected_etag != NULL &&
         (!precondition_source->found || precondition_source->etag == NULL ||
          strcmp(precondition_source->etag, options->expected_etag) != 0)) {
@@ -8176,7 +8272,8 @@ static int lc_pouch_client_prepare_txn_stage_write(
     }
   }
   if (rc == LC_OK) {
-    precondition_source = staged->found ? staged : committed;
+    precondition_source =
+        staged->found && !staged->is_delete_marker ? staged : committed;
     if (options->has_expected_version &&
         (!precondition_source->found ||
          precondition_source->version != options->expected_version)) {
@@ -8186,17 +8283,23 @@ static int lc_pouch_client_prepare_txn_stage_write(
     }
   }
   if (rc == LC_OK && stage->removed != NULL) {
-    precondition_source = staged->found ? staged : committed;
-    *stage->removed =
-        precondition_source->found && precondition_source->has_body;
+    if (staged->found && staged->is_delete_marker) {
+      *stage->removed = 0;
+      *apply = 0;
+    } else {
+      precondition_source = staged->found ? staged : committed;
+      *stage->removed =
+          precondition_source->found && precondition_source->has_body;
+    }
   }
   /* Lease-only metadata must not hide its first staged body write. */
-  if (rc == LC_OK && !options->has_query_hidden && precondition_source->found &&
-      precondition_source->has_body && precondition_source->has_query_hidden) {
+  if (rc == LC_OK && *apply && !options->has_query_hidden &&
+      precondition_source->found && precondition_source->has_body &&
+      precondition_source->has_query_hidden) {
     options->has_query_hidden = 1;
     options->query_hidden = precondition_source->query_hidden;
   }
-  if (rc == LC_OK && !staged->found) {
+  if (rc == LC_OK && *apply && (!staged->found || staged->is_delete_marker)) {
     options->expected_etag = NULL;
     options->has_expected_version = 0;
     options->expected_version = 0UL;
@@ -8221,7 +8324,62 @@ static int lc_pouch_client_stage_transaction_write(
   return lc_pouch_state_stage_write_prepared(
       client != NULL ? client->pouch : NULL, namespace_name, key, txn_id,
       lease != NULL ? lease->key : NULL, source, options,
-      lc_pouch_client_prepare_txn_stage_write, &context, out, error);
+      lc_pouch_client_prepare_txn_stage_write, &context, NULL, out, error);
+}
+
+static int lc_pouch_client_prepare_txn_mutation_stage_write(
+    const lc_pouch_state_metadata_view *committed,
+    const lc_pouch_state_metadata_view *staged,
+    const lc_pouch_state_metadata_view *lease_state, void *context,
+    lc_pouch_state_write_options *options, int *apply, lc_error *error) {
+  lc_pouch_txn_mutation_context *mutation;
+
+  mutation = (lc_pouch_txn_mutation_context *)context;
+  if (mutation == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction mutation requires context", NULL,
+                        NULL, "pouch");
+  }
+  return lc_pouch_client_prepare_txn_stage_write(
+      committed, staged, lease_state, &mutation->stage, options, apply, error);
+}
+
+static int lc_pouch_client_prepare_txn_mutation_source(
+    const lc_pouch_state_read_result *committed,
+    const lc_pouch_state_read_result *staged, void *context, lc_source **out,
+    lc_error *error) {
+  lc_pouch_txn_mutation_context *mutation;
+  const lc_pouch_state_read_result *current;
+
+  mutation = (lc_pouch_txn_mutation_context *)context;
+  if (mutation == NULL || committed == NULL || staged == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction mutation requires state context",
+                        NULL, NULL, "pouch");
+  }
+  current = staged->found && !lc_pouch_state_result_is_delete_marker(staged)
+                ? staged
+                : committed;
+  return lc_pouch_client_prepare_mutation_source(current, &mutation->mutation,
+                                                 out, error);
+}
+
+static int lc_pouch_client_stage_transaction_mutation(
+    lc_pouch_txn_mutation_context *mutation,
+    lc_pouch_state_write_options *options, lc_pouch_state_write_result *out,
+    lc_error *error) {
+  if (mutation == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction mutation requires context", NULL,
+                        NULL, "pouch");
+  }
+  return lc_pouch_state_stage_write_prepared(
+      mutation->stage.client != NULL ? mutation->stage.client->pouch : NULL,
+      mutation->stage.namespace_name, mutation->stage.key,
+      mutation->stage.txn_id,
+      mutation->stage.lease != NULL ? mutation->stage.lease->key : NULL, NULL,
+      options, lc_pouch_client_prepare_txn_mutation_stage_write, mutation,
+      lc_pouch_client_prepare_txn_mutation_source, out, error);
 }
 
 static int lc_pouch_client_stage_transaction_remove(
@@ -11914,13 +12072,12 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
 int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
                                   lc_mutate_res *out, lc_error *error) {
   lc_client_handle *client;
-  lc_pouch_counting_source counting_source;
   lc_pouch_lease_precondition lease_precondition;
-  lc_pouch_mutate_file mutated;
+  lc_pouch_mutation_prepare_context direct_mutation;
+  lc_pouch_mutation_prepare_context *mutation;
+  lc_pouch_txn_mutation_context txn_mutation;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
-  lc_source *counted_source;
-  lc_source *source;
   const char *namespace_name = NULL;
   int rc;
 
@@ -11935,43 +12092,24 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
     return rc;
   }
   memset(out, 0, sizeof(*out));
-  memset(&counting_source, 0, sizeof(counting_source));
   memset(&lease_precondition, 0, sizeof(lease_precondition));
-  memset(&mutated, 0, sizeof(mutated));
+  memset(&direct_mutation, 0, sizeof(direct_mutation));
+  memset(&txn_mutation, 0, sizeof(txn_mutation));
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
-  counted_source = NULL;
-  source = NULL;
+  mutation = NULL;
   rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
                                         &namespace_name, error);
   if (rc != LC_OK) {
     goto cleanup;
   }
-  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
-    rc = lc_pouch_client_prepare_txn_mutation_file(
-        client, namespace_name, req->lease.key, req->lease.txn_id,
-        req->mutations, req->mutation_count, NULL, &mutated, error);
-  } else {
-    rc = lc_pouch_prepare_mutation_file(client, namespace_name, req->lease.key,
-                                        req->mutations, req->mutation_count,
-                                        NULL, &mutated, error);
-  }
-  if (rc != LC_OK) {
-    goto cleanup;
-  }
-  source = lc_source_from_open_file(mutated.fp, 0);
-  if (source == NULL) {
-    rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                      "failed to wrap pouch mutate result source", NULL, NULL,
-                      NULL);
-    goto cleanup;
-  }
-  counting_source.inner = source;
-  counting_source.max_bytes = LONG_MAX;
-  counting_source.has_max_bytes = 1;
-  rc = lc_source_from_callbacks(lc_pouch_counting_source_read,
-                                lc_pouch_counting_source_reset, NULL,
-                                &counting_source, &counted_source, error);
+  mutation = lc_pouch_txn_id_present(req->lease.txn_id) ? &txn_mutation.mutation
+                                                        : &direct_mutation;
+  mutation->client = client;
+  mutation->namespace_name = namespace_name;
+  mutation->key = req->lease.key;
+  rc = lc_mutation_plan_build(req->mutations, req->mutation_count, NULL,
+                              &mutation->plan, error);
   if (rc != LC_OK) {
     goto cleanup;
   }
@@ -11994,29 +12132,37 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
     options.has_expected_version = 1;
   }
   if (lc_pouch_txn_id_present(req->lease.txn_id)) {
-    rc = lc_pouch_client_stage_transaction_write(
-        client, &req->lease, namespace_name, req->lease.key, req->lease.txn_id,
-        counted_source, &options, &write_result, NULL, error);
+    txn_mutation.stage.client = client;
+    txn_mutation.stage.lease = &req->lease;
+    txn_mutation.stage.namespace_name = namespace_name;
+    txn_mutation.stage.key = req->lease.key;
+    txn_mutation.stage.txn_id = req->lease.txn_id;
+    rc = lc_pouch_client_stage_transaction_mutation(&txn_mutation, &options,
+                                                    &write_result, error);
   } else {
-    rc = lc_pouch_state_write(client->pouch, namespace_name, req->lease.key,
-                              counted_source, &options, &write_result, error);
+    rc = lc_pouch_state_write_prepared(client->pouch, namespace_name,
+                                       req->lease.key, &options,
+                                       lc_pouch_client_prepare_mutation_source,
+                                       mutation, &write_result, error);
   }
-  if (counted_source != NULL) {
-    lc_source_close(counted_source);
-    counted_source = NULL;
+  if (mutation->source != NULL) {
+    lc_source_close(mutation->source);
+    mutation->source = NULL;
   }
   if (rc == LC_OK) {
     rc = lc_pouch_client_copy_mutate_metadata(&write_result, out, error);
   }
 
 cleanup:
-  if (counted_source != NULL) {
-    lc_source_close(counted_source);
+  if (mutation != NULL && mutation->source != NULL) {
+    lc_source_close(mutation->source);
   }
-  if (source != NULL) {
-    lc_source_close(source);
+  if (mutation != NULL) {
+    lc_pouch_mutate_file_cleanup(&mutation->mutated);
+    if (mutation->plan != NULL) {
+      lc_mutation_plan_close(mutation->plan);
+    }
   }
-  lc_pouch_mutate_file_cleanup(&mutated);
   lc_pouch_state_write_result_cleanup(&client->allocator, &write_result);
   return rc;
 }

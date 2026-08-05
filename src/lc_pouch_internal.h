@@ -77,13 +77,22 @@ typedef struct lc_pouch_state_scan_summaries_result {
 typedef struct lc_pouch_state_metadata_view {
   int found;
   const char *etag;
+  const char *content_type;
   lc_pouch_generation version;
   const unsigned char *metadata;
   size_t metadata_length;
   int has_query_hidden;
   int query_hidden;
   int has_body;
+  int is_delete_marker;
 } lc_pouch_state_metadata_view;
+
+/* Builds a body from one current state projection while exact-key mutation
+ * authority is held. The state layer closes the returned source after it has
+ * recorded the write and queued index projection work. */
+typedef int (*lc_pouch_state_body_prepare_fn)(
+    const lc_pouch_state_read_result *current, void *context, lc_source **body,
+    lc_error *error);
 
 /* Builds a metadata mutation from the current key projection while the key
  * mutation lock is held. Set `apply` to zero for a successful read-only
@@ -98,7 +107,15 @@ typedef int (*lc_pouch_state_stage_prepare_fn)(
     const lc_pouch_state_metadata_view *committed,
     const lc_pouch_state_metadata_view *staged,
     const lc_pouch_state_metadata_view *lease_state, void *context,
-    lc_pouch_state_write_options *options, lc_error *error);
+    lc_pouch_state_write_options *options, int *apply, lc_error *error);
+
+/* Builds a staged body from the committed and transaction-local projections
+ * while namespace mutation authority is held. The state layer closes the
+ * returned source after the staged record is finalized. */
+typedef int (*lc_pouch_state_stage_body_prepare_fn)(
+    const lc_pouch_state_read_result *committed,
+    const lc_pouch_state_read_result *staged, void *context, lc_source **body,
+    lc_error *error);
 
 typedef int (*lc_pouch_state_scan_summary_visit_fn)(
     const lc_pouch_state_scan_summary_entry *entry, void *context,
@@ -328,6 +345,18 @@ int lc_pouch_state_write_locked(lc_pouch *pouch, const char *namespace_name,
                                 const lc_pouch_state_write_options *options,
                                 lc_pouch_state_write_result *out,
                                 lc_error *error);
+/**
+ * Prepares and writes one state body while exact-key mutation authority is
+ * held. This keeps read-transform-write mutations linearizable without
+ * materializing the stored body in memory.
+ */
+int lc_pouch_state_write_prepared(lc_pouch *pouch, const char *namespace_name,
+                                  const char *key,
+                                  const lc_pouch_state_write_options *options,
+                                  lc_pouch_state_body_prepare_fn prepare,
+                                  void *prepare_context,
+                                  lc_pouch_state_write_result *out,
+                                  lc_error *error);
 /** Commits staged state under target mutation authority. */
 int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
                                         const char *namespace_name,
@@ -371,6 +400,7 @@ int lc_pouch_state_stage_write_prepared(
     const char *txn_id, const char *lease_key, lc_source *body,
     lc_pouch_state_write_options *options,
     lc_pouch_state_stage_prepare_fn prepare, void *prepare_context,
+    lc_pouch_state_stage_body_prepare_fn body_prepare,
     lc_pouch_state_write_result *out, lc_error *error);
 int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_generation after_version,
