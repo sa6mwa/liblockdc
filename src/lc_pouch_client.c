@@ -6201,30 +6201,39 @@ static int lc_pouch_attach_write_locked(void *context, lc_error *error) {
   const char *write_key;
   unsigned char metadata[LC_POUCH_ATTACHMENT_METADATA_BYTES];
   int current_is_attachment;
+  int transaction_bound;
   int rc;
 
   ctx = (lc_pouch_attach_write_context *)context;
   memset(&current, 0, sizeof(current));
   created_at_unix = 0L;
-  write_key = lc_pouch_txn_id_present(ctx->req->lease.txn_id)
-                  ? ctx->staged_attachment_key
-                  : ctx->attachment_key;
+  transaction_bound = lc_pouch_txn_id_present(ctx->req->lease.txn_id);
+  write_key =
+      transaction_bound ? ctx->staged_attachment_key : ctx->attachment_key;
   rc = lc_pouch_state_read(ctx->client->pouch, ctx->namespace_name, write_key,
                            &current, error);
   current_is_attachment =
       current.found &&
       !lc_pouch_attachment_is_delete_marker(current.content_type);
+  if (rc == LC_OK && ctx->req->prevent_overwrite && current.found) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch attachment already exists", NULL, NULL, NULL);
+  }
   if (rc == LC_OK && current_is_attachment) {
     rc = lc_pouch_attachment_created_at_decode(
         current.metadata, current.metadata_length, &created_at_unix, error);
   }
   lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &current);
   memset(&current, 0, sizeof(current));
-  if (rc == LC_OK && created_at_unix == 0L &&
-      lc_pouch_txn_id_present(ctx->req->lease.txn_id)) {
+  if (rc == LC_OK && transaction_bound &&
+      (ctx->req->prevent_overwrite || created_at_unix == 0L)) {
     rc = lc_pouch_state_read(ctx->client->pouch, ctx->namespace_name,
                              ctx->attachment_key, &current, error);
-    if (rc == LC_OK && current.found) {
+    if (rc == LC_OK && ctx->req->prevent_overwrite && current.found) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch attachment already exists", NULL, NULL, NULL);
+    }
+    if (rc == LC_OK && current.found && created_at_unix == 0L) {
       rc = lc_pouch_attachment_created_at_decode(
           current.metadata, current.metadata_length, &created_at_unix, error);
     }
@@ -12727,7 +12736,6 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   lc_pouch_attach_write_context attach_context;
   lc_pouch_counting_source counting_source;
   lc_pouch_lease_precondition lease_precondition;
-  lc_pouch_state_read_result existing;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
   lc_source *counted_source;
@@ -12756,7 +12764,6 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
   memset(&attach_context, 0, sizeof(attach_context));
   memset(&counting_source, 0, sizeof(counting_source));
   memset(&lease_precondition, 0, sizeof(lease_precondition));
-  memset(&existing, 0, sizeof(existing));
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
   counted_source = NULL;
@@ -12797,32 +12804,6 @@ int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
     if (staged_key == NULL) {
       rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
       goto cleanup;
-    }
-  }
-  if (req->prevent_overwrite) {
-    rc = lc_pouch_state_read(client->pouch, namespace_name, attachment_key,
-                             &existing, error);
-    if (rc != LC_OK) {
-      goto cleanup;
-    }
-    if (existing.found) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch attachment already exists", NULL, NULL, NULL);
-      goto cleanup;
-    }
-    if (lc_pouch_txn_id_present(req->lease.txn_id)) {
-      lc_pouch_state_read_result_cleanup(&client->allocator, &existing);
-      memset(&existing, 0, sizeof(existing));
-      rc = lc_pouch_state_read(client->pouch, namespace_name, staged_key,
-                               &existing, error);
-      if (rc != LC_OK) {
-        goto cleanup;
-      }
-      if (existing.found) {
-        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch attachment already exists", NULL, NULL, NULL);
-        goto cleanup;
-      }
     }
   }
   counting_source.inner = src;
@@ -12880,7 +12861,6 @@ cleanup:
   }
   lc_free_with_allocator(NULL, attachment_key);
   lc_free_with_allocator(NULL, staged_key);
-  lc_pouch_state_read_result_cleanup(&client->allocator, &existing);
   lc_pouch_state_write_result_cleanup(&client->allocator, &result);
   if (rc != LC_OK) {
     lc_attach_res_cleanup(out);

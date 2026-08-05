@@ -25913,6 +25913,19 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   pouch_acquire_test_lease(client, "objects/txn", "state/object-1",
                            attach_op.lease.txn_id, &rollback_lease, &error);
   pouch_copy_lease_ref(&attach_op.lease, rollback_lease);
+  attach_op.name = "report.txt";
+  rc = lc_source_from_memory("replacement", strlen("replacement"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->attach(client, &attach_op, source, &attach_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_non_null(strstr(error.message, "already exists"));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_attach_res_cleanup(&attach_res);
+
   attach_op.name = "rolled-back.txt";
   rc = lc_source_from_memory("rolled-back-object", strlen("rolled-back-object"),
                              &source, &error);
