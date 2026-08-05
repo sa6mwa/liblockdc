@@ -748,7 +748,9 @@ typedef struct lc_enqueue_res {
   int max_attempts;
   int failure_attempts;
   lc_unix_seconds not_visible_until_unix;
+  /** Returned visibility timeout. Values outside `long` are rejected. */
   long visibility_timeout_seconds;
+  /** Returned payload byte count. Values outside `long` are rejected. */
   long payload_bytes;
   char *correlation_id;
 } lc_enqueue_res;
@@ -1165,6 +1167,7 @@ typedef struct lc_attachment_selector {
 typedef struct lc_attachment_info {
   char *id;
   char *name;
+  /** Attachment byte count. Values outside `long` are rejected. */
   long size;
   char *plaintext_sha256;
   char *content_type;

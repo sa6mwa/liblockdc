@@ -591,6 +591,36 @@ static void test_attach_response_parses_with_thread_runtime(void **state) {
   lc_engine_error_cleanup(&error);
 }
 
+static void test_attach_response_checks_public_size_range(void **state) {
+  lc_engine_attach_response response;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  memset(&response, 0, sizeof(response));
+  memset(&error, 0, sizeof(error));
+
+  rc = lc_engine_parse_attach_response_json(
+      "{\"attachment\":{\"id\":\"att-1\",\"size\":2147483648},"
+      "\"noop\":false,\"version\":1}",
+      "corr-attach", &response, &error);
+
+  if (sizeof(long) < sizeof(lonejson_int64)) {
+    assert_int_equal(rc, LC_ENGINE_ERROR_PROTOCOL);
+    assert_int_equal(error.code, LC_ENGINE_ERROR_PROTOCOL);
+    assert_string_equal(error.message, "attachment size is out of range");
+    assert_null(response.attachment.id);
+    assert_int_equal(response.attachment.size, 0L);
+  } else {
+    assert_int_equal(rc, LC_ENGINE_OK);
+    assert_string_equal(response.attachment.id, "att-1");
+    assert_true(response.attachment.size > 0L);
+  }
+
+  lc_engine_attach_response_cleanup(&response);
+  lc_engine_error_cleanup(&error);
+}
+
 static void
 test_list_attachments_response_parses_with_thread_runtime(void **state) {
   lc_engine_list_attachments_response response;
@@ -736,6 +766,7 @@ int main(void) {
       cmocka_unit_test(
           test_list_attachments_reports_thread_runtime_allocation_failure),
       cmocka_unit_test(test_attach_response_parses_with_thread_runtime),
+      cmocka_unit_test(test_attach_response_checks_public_size_range),
       cmocka_unit_test(
           test_list_attachments_response_parses_with_thread_runtime),
       cmocka_unit_test(test_subscribe_meta_builds_queue_state_handle),

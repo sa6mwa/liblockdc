@@ -4637,6 +4637,98 @@ test_enqueue_from_retries_node_passive_and_cleans_parser_state(void **state) {
   https_tls_material_cleanup(&material);
 }
 
+static void test_enqueue_from_checks_public_metadata_range(void **state) {
+  static const char *queue_headers[] = {"Content-Type: application/json"};
+  static const char *enqueue_response_headers[] = {
+      "Content-Type: application/json"};
+  static const char *const request_body_substrings[] = {
+      "\"namespace\":\"transport-ns\"", "\"queue\":\"jobs\"", "name=\"meta\"",
+      "name=\"payload\""};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/queue/enqueue", queue_headers, 1U, request_body_substrings,
+       sizeof(request_body_substrings) / sizeof(request_body_substrings[0]), 0,
+       200, enqueue_response_headers,
+       sizeof(enqueue_response_headers) / sizeof(enqueue_response_headers[0]),
+       "{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
+       "\"message_id\":\"msg-timeout\",\"attempts\":0,"
+       "\"max_attempts\":5,\"failure_attempts\":0,"
+       "\"not_visible_until_unix\":123,"
+       "\"visibility_timeout_seconds\":2147483648,\"payload_bytes\":0}",
+       "liblockdc test client"},
+      {"POST", "/v1/queue/enqueue", queue_headers, 1U, request_body_substrings,
+       sizeof(request_body_substrings) / sizeof(request_body_substrings[0]), 0,
+       200, enqueue_response_headers,
+       sizeof(enqueue_response_headers) / sizeof(enqueue_response_headers[0]),
+       "{\"namespace\":\"transport-ns\",\"queue\":\"jobs\","
+       "\"message_id\":\"msg-payload\",\"attempts\":0,"
+       "\"max_attempts\":5,\"failure_attempts\":0,"
+       "\"not_visible_until_unix\":123,"
+       "\"visibility_timeout_seconds\":30,\"payload_bytes\":2147483648}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_enqueue_request req;
+  lc_engine_enqueue_response res;
+  lc_engine_error error;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&req, 0, sizeof(req));
+  memset(&res, 0, sizeof(res));
+  memset(&error, 0, sizeof(error));
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+
+  memset(&config, 0, sizeof(config));
+  init_client_config(&config, server.port, material.client_bundle_path);
+  rc = lc_engine_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ENGINE_OK);
+
+  req.namespace_name = "transport-ns";
+  req.queue = "jobs";
+  req.payload_content_type = "application/json";
+  rc = lc_engine_client_enqueue_from(client, &req, NULL, NULL, &res, &error);
+  if (sizeof(long) < sizeof(lonejson_int64)) {
+    assert_int_equal(rc, LC_ENGINE_ERROR_PROTOCOL);
+    assert_int_equal(error.code, LC_ENGINE_ERROR_PROTOCOL);
+    assert_string_equal(error.message,
+                        "enqueue visibility_timeout_seconds is out of range");
+    assert_null(res.message_id);
+  } else {
+    assert_int_equal(rc, LC_ENGINE_OK);
+    assert_string_equal(res.message_id, "msg-timeout");
+    assert_true(res.visibility_timeout_seconds > 0L);
+  }
+  lc_engine_enqueue_response_cleanup(&res);
+  lc_engine_error_cleanup(&error);
+  memset(&res, 0, sizeof(res));
+  memset(&error, 0, sizeof(error));
+
+  rc = lc_engine_client_enqueue_from(client, &req, NULL, NULL, &res, &error);
+  if (sizeof(long) < sizeof(lonejson_int64)) {
+    assert_int_equal(rc, LC_ENGINE_ERROR_PROTOCOL);
+    assert_int_equal(error.code, LC_ENGINE_ERROR_PROTOCOL);
+    assert_string_equal(error.message, "enqueue payload_bytes is out of range");
+    assert_null(res.message_id);
+  } else {
+    assert_int_equal(rc, LC_ENGINE_OK);
+    assert_string_equal(res.message_id, "msg-payload");
+    assert_true(res.payload_bytes > 0L);
+  }
+
+  lc_engine_enqueue_response_cleanup(&res);
+  lc_engine_client_close(client);
+  https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
 static void
 test_enqueue_from_rejects_non_rewindable_retry_source(void **state) {
   static const char *queue_headers[] = {"Content-Type: application/json"};
@@ -7509,6 +7601,9 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(                                                            \
       test_enqueue_from_retries_node_passive_and_cleans_parser_state)
+#elif defined(LC_HTTPS_CASE_ENQUEUE_FROM_CHECKS_PUBLIC_METADATA_RANGE)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_enqueue_from_checks_public_metadata_range)
 #elif defined(LC_HTTPS_CASE_ENQUEUE_FROM_REJECTS_NON_REWINDABLE_RETRY_SOURCE)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_enqueue_from_rejects_non_rewindable_retry_source)
@@ -7695,6 +7790,7 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
           test_queue_transport_retries_node_passive_and_cleans_parser_state),     \
       cmocka_unit_test(                                                           \
           test_enqueue_from_retries_node_passive_and_cleans_parser_state),        \
+      cmocka_unit_test(test_enqueue_from_checks_public_metadata_range),           \
       cmocka_unit_test(test_enqueue_from_rejects_non_rewindable_retry_source),    \
       cmocka_unit_test(test_public_lease_save_uses_mapped_lonejson_upload),       \
       cmocka_unit_test(                                                           \

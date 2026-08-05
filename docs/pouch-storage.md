@@ -179,10 +179,13 @@ Pouch additionally uses `uint64_t` payload lengths and offsets. This is an
 accepted divergence from Go's 32-bit physical payload length because Pouch's
 large-payload/file-size invariant is stronger.
 
-The generic C API retains its established `long` byte-count fields for update
-and mutate responses. Pouch client update and mutate operations therefore
-reject a streamed state write before it commits when its payload would exceed
-`LONG_MAX` on the calling architecture; they never narrow a durable `uint64_t`
+The generic C API retains its established `long` byte-count fields for update,
+mutate, attachment, and queue-enqueue responses. Pouch client update and
+mutate operations reject a streamed state write before it commits when its
+payload would exceed `LONG_MAX` on the calling architecture. Pouch and the
+remote transport reject attachment sizes and enqueue payload or visibility
+metadata outside the public `long` range. Remote values are protocol errors;
+Pouch rejects impossible public results. No path narrows a durable `uint64_t`
 count into an incorrect public result.
 
 All authoritative Pouch storage identities that may outlive a process are

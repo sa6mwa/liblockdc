@@ -1141,6 +1141,20 @@ static int lc_engine_i64_assign(lonejson_int64 value, lonejson_int64 *out_value,
   return LC_ENGINE_OK;
 }
 
+static int lc_engine_i64_to_long_checked(lonejson_int64 value,
+                                         const char *label, long *out_value,
+                                         lc_engine_error *error) {
+  if (out_value == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing long destination");
+  }
+  if (value < (lonejson_int64)LONG_MIN || value > (lonejson_int64)LONG_MAX) {
+    return lc_engine_set_protocol_error(error, label);
+  }
+  *out_value = (long)value;
+  return LC_ENGINE_OK;
+}
+
 static int lc_engine_i64_to_int_checked(lonejson_int64 value, const char *label,
                                         int *out_value,
                                         lc_engine_error *error) {
@@ -1160,6 +1174,11 @@ static int lc_engine_attachment_info_from_json(
     const lc_engine_attachment_info_json *parsed, lc_engine_error *error) {
   int rc;
 
+  rc = lc_engine_i64_to_long_checked(
+      parsed->size, "attachment size is out of range", &info->size, error);
+  if (rc != LC_ENGINE_OK) {
+    return rc;
+  }
   info->id = lc_engine_strdup_local(parsed->id);
   info->name = lc_engine_strdup_local(parsed->name);
   info->plaintext_sha256 = lc_engine_strdup_local(parsed->plaintext_sha256);
@@ -1171,10 +1190,6 @@ static int lc_engine_attachment_info_from_json(
     lc_engine_attachment_info_cleanup(info);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to copy attachment strings");
-  }
-  rc = lc_engine_i64_assign(parsed->size, &info->size, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
   }
   rc = lc_engine_i64_assign(parsed->created_at_unix, &info->created_at_unix,
                             error);
@@ -1774,12 +1789,15 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
                               &response->not_visible_until_unix, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_assign(parsed.visibility_timeout_seconds,
-                              &response->visibility_timeout_seconds, error);
+    rc = lc_engine_i64_to_long_checked(
+        parsed.visibility_timeout_seconds,
+        "enqueue visibility_timeout_seconds is out of range",
+        &response->visibility_timeout_seconds, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_assign(parsed.payload_bytes, &response->payload_bytes,
-                              error);
+    rc = lc_engine_i64_to_long_checked(parsed.payload_bytes,
+                                       "enqueue payload_bytes is out of range",
+                                       &response->payload_bytes, error);
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_lonejson_cleanup(client, &lc_engine_enqueue_response_map,

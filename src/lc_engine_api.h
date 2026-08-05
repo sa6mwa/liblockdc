@@ -303,8 +303,8 @@ typedef struct lc_engine_enqueue_response {
   int max_attempts;
   int failure_attempts;
   lonejson_int64 not_visible_until_unix;
-  lonejson_int64 visibility_timeout_seconds;
-  lonejson_int64 payload_bytes;
+  long visibility_timeout_seconds;
+  long payload_bytes;
   char *correlation_id;
 } lc_engine_enqueue_response;
 
@@ -434,7 +434,7 @@ typedef struct lc_engine_attachment_selector {
 typedef struct lc_engine_attachment_info {
   char *id;
   char *name;
-  lonejson_int64 size;
+  long size;
   char *plaintext_sha256;
   char *content_type;
   lonejson_int64 created_at_unix;
