@@ -25,7 +25,7 @@ That will:
 Convenience wrapper:
 
 ```bash
-scripts/dev-up.sh
+make dev-up
 ```
 
 That wrapper now just drives the same compose stack and waits for the generated bundles/socket to appear. It no longer performs out-of-band bootstrap work.
@@ -39,20 +39,14 @@ Plain `nerdctl compose up -d` will:
 ## Stop
 
 ```bash
-scripts/dev-down.sh
+make dev-down
 ```
 
 ## Inspect
 
 ```bash
-scripts/dev-ps.sh
-scripts/compose.sh logs -f lockd-disk-a
-scripts/deps.sh deps-x86_64-linux-gnu
-scripts/test-e2e.sh
-make build
-make test
-make fuzz
-scripts/fuzz.sh
+make dev-ps
+make dev-logs
 make test-e2e
 ```
 
@@ -85,7 +79,7 @@ LOCKDC_DISK_B_PORT=20442 \
 LOCKDC_S3_PORT=20443 \
 LOCKDC_MINIO_API_PORT=20000 \
 LOCKDC_MINIO_CONSOLE_PORT=20001 \
-scripts/dev-up.sh
+make dev-up
 ```
 
 ## Generated client bundles
@@ -102,20 +96,17 @@ Those bundles contain the CA certificate, client certificate, and private key an
 Normal local flows:
 
 ```bash
-scripts/deps.sh deps-x86_64-linux-gnu
 make build
 make test
 make test-e2e
 make test-all
 make coverage
-make fuzz
-scripts/fuzz.sh
+make fuzz-smoke
 ```
 
 Equivalent CMake preset flows:
 
 ```bash
-scripts/deps.sh deps-x86_64-linux-gnu
 cmake --preset debug
 cmake --build --preset debug
 
@@ -123,19 +114,15 @@ cmake --preset e2e
 cmake --build --preset e2e
 ctest --preset debug
 ctest --preset e2e
-
-cmake --preset fuzz
-cmake --build --preset fuzz
-ctest --preset fuzz
 ```
 
-Dependency bootstrap is split from the low-level script workflow:
-
-- `scripts/deps.sh deps-x86_64-linux-gnu` builds the shared host GNU third-party stack into `./.cache/deps/x86_64-linux-gnu`
-- `scripts/deps.sh deps-host-debug` remains as a compatibility alias to the same host GNU dependency root
-- it skips dependency work if the dependency manifest and artifacts still match
-- the primary Makefile workflow provisions the required dependency roots automatically for the common host and release paths
-- the low-level `scripts/build.sh` entry point assumes the required dependency tree already exists
+The normal Make and CMake workflows provision the pinned Bootlin compiler
+collection and matching dependency roots automatically. Linux builds never
+fall back to host or distro compilers. Toolchains and verified dependency
+archives are shared outside the checkout under `CPKT_TOOLCHAIN_CACHE` and
+`CPKT_DEPENDENCY_CACHE`; repository-local `.cache/` remains disposable build
+and staging state. Low-level scripts are implementation helpers, not the
+normal developer command surface.
 
 ## Packaging
 
@@ -169,13 +156,14 @@ Makefile release flow provisions the dependency roots it needs.
 
 ## Fuzzing
 
-The repo also carries a separate clang/libFuzzer build for hermetic parser and stream hardening:
+The repository uses the lifecycle-owned fuzz build for parser, record, stream,
+and storage-state hardening:
 
 ```bash
-scripts/fuzz.sh
+make fuzz-smoke
 ```
 
-Or via presets:
+Or via the fuzz preset:
 
 ```bash
 cmake --preset fuzz
@@ -183,12 +171,10 @@ cmake --build --preset fuzz
 ctest --preset fuzz
 ```
 
-The fuzz build:
-
-- uses `clang`
-- enables `libFuzzer`, `ASan`, and `UBSan`
-- keeps fuzzing out of the normal package/test presets
-- runs bounded smoke fuzzing under CTest so CI/local verification stays finite
+The fuzz build uses pinned AFL++ GCC-plugin instrumentation over the native
+x86_64 Bootlin collection. It remains host-native only, keeps fuzzing outside
+ordinary package/test presets, and runs bounded committed-corpus smoke jobs
+through `make fuzz-smoke`.
 
 Current fuzz targets cover:
 
@@ -219,12 +205,13 @@ The e2e binary defaults to this devenv layout, but you can override endpoints an
 - `LOCKDC_E2E_S3_BUNDLE`
 - `LOCKDC_E2E_MEM_SOCKET`
 
-Or just run:
+Or just run the lifecycle entrypoint:
 
 ```bash
-scripts/test-e2e.sh
+make test-e2e
 ```
 
-`test-e2e.sh` exports the default bundle/socket paths for this repo layout before invoking CMake/CTest.
+`make test-e2e` exports the default bundle/socket paths for this repo layout,
+then invokes the e2e CMake/CTest flow.
 
 The current devenv certs are generated for local development only, so the e2e client enables `lc_client_config.insecure_skip_verify=1` for the mTLS test nodes only. The normal client default remains strict verification.

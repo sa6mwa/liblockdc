@@ -61,14 +61,20 @@ Normal development expects:
 
 - CMake 3.24 or later
 - Ninja
-- a C compiler
-- `musl-gcc` for host musl packaging
-- GNU cross compilers on `PATH` for `aarch64-linux-gnu-*` and `arm-linux-gnueabihf-*`
-- musl cross compilers on `PATH` for `aarch64-linux-musl-*` and `arm-linux-musleabihf-*`
+- GNU Make
+- host `clang-format` for `make format`
+- host Valgrind for the native Memcheck gate
 - `qemu-aarch64` and `qemu-arm` for the non-host release test matrix
 - `nerdctl compose` preferred for the local development environment, with `docker compose` as a fallback
 
-Third-party dependency roots are cached under `.cache/deps`.
+Every Linux build uses its matching pinned Bootlin GCC collection, including
+the compiler, linker, binutils, sysroot, headers, and runtime. The Make and
+CMake workflows provision those collections automatically; do not substitute
+host or distro cross compilers. Toolchains are shared under
+`${CPKT_TOOLCHAIN_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/toolchains}`
+and verified dependency archives under
+`${CPKT_DEPENDENCY_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/deps}`.
+Repository-local `.cache/` directories are disposable build and staging state.
 
 ## Common workflows
 
@@ -449,18 +455,18 @@ The examples in the repository at <https://github.com/sa6mwa/liblockdc/tree/main
 
 ## Low-level entry points
 
-If you need direct control over the underlying build or test preset, the lower-level scripts remain available:
+`make help` is the authoritative command index. For direct control over a
+configured CMake preset, use CMake after the normal lifecycle entrypoint has
+provisioned its inputs:
 
 ```bash
-scripts/deps.sh deps-x86_64-linux-gnu
-scripts/build.sh debug
-scripts/build.sh e2e
-scripts/build.sh x86_64-linux-gnu-release
-scripts/cross_build.sh
-scripts/cross_test.sh release
-scripts/fuzz.sh
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug
 ```
 
-Unlike the primary Makefile workflow, these lower-level scripts do not generally provision dependency roots implicitly. `scripts/cross_build.sh` prepares the non-host release build trees, and `scripts/cross_test.sh release` runs the cross release tests against those existing build trees. Use them when you want direct preset control and are prepared to manage the prerequisite dependency tree yourself.
+The CMake presets resolve the matching pinned Bootlin collection and dependency
+root. Use the Make targets for normal builds, package production, verification,
+and release orchestration.
 
 See <https://github.com/sa6mwa/liblockdc> for the full source code.
