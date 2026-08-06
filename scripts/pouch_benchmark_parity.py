@@ -8,18 +8,23 @@ BENCH_RE = re.compile(
 )
 
 # These are public end-to-end operations whose Pouch and Go disk measurements
-# have matching meanings. Aggregate wall time and lifecycle/flush diagnostics
-# remain in the report, but are not independent parity gates.
+# have matching meanings. Aggregate wall time and Pouch-only C timing remain
+# diagnostics, but index publication is a core observable operation.
 CORE_METRICS = frozenset(
     (
         "acquire-one-ns/op",
         "update-one-ns/op",
         "release-one-ns/op",
+        "stale-ns/op",
         "get-public-ns/op",
         "get-lease-ns/op",
         "attachment-write-ns/op",
         "attachment-read-ns/op",
         "queue-one-ns/op",
+        "flush-intermediate-ns/op",
+        "flush-final-ns/op",
+        "flush-noop-ns/op",
+        "flush-reopen-ns/op",
         "index-query-keys-ns/op",
         "index-query-keys-warm-ns/op",
         "index-query-docs-ns/op",

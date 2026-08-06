@@ -9389,9 +9389,9 @@ lc_pouch_query_index_term_add_trigram_fallback(const lc_allocator *allocator,
 
 /* The normal builder is intentionally retained for summaries that need raw
  * parsing. Single-writer summaries carry sorted derived keys, so merge those
- * sources directly into lexical term and posting order. The synthetic /...
- * field is a derived all-text projection: it keeps the public selector
- * logical while making whole-document text queries one field lookup. */
+ * sources directly into lexical term and posting order. `/...` remains a
+ * logical selector: readers union concrete fields instead of duplicating
+ * every posting into a synthetic all-text field. */
 static int lc_pouch_query_index_trigram_generation_build_sorted(
     const lc_allocator *allocator, lc_pouch_query_index_summary *summary,
     lc_pouch_index_term_generation *generation, lc_error *error) {
@@ -9463,7 +9463,6 @@ static int lc_pouch_query_index_trigram_generation_build_sorted(
                         "pouch sorted trigram build exceeds local limit", NULL,
                         NULL, NULL);
   }
-  ++field_count;
   if (source_count > (size_t)-1 / sizeof(*doc_ids) ||
       field_count > (size_t)-1 / sizeof(*fields)) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -9490,7 +9489,6 @@ static int lc_pouch_query_index_trigram_generation_build_sorted(
       fields[field_index++] = term->field_hex;
     }
   }
-  fields[field_index++] = LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX;
   qsort(fields, field_count, sizeof(fields[0]),
         lc_pouch_query_index_field_hex_ref_compare);
   write_index = 0U;
@@ -9514,8 +9512,7 @@ static int lc_pouch_query_index_trigram_generation_build_sorted(
 
       term = &summary->terms[source_index];
       if (term->value_type != 's' || term->trigram_key_count == 0U ||
-          (!lc_pouch_query_index_field_hex_is_any_text(fields[field_index]) &&
-           strcmp(term->field_hex, fields[field_index]) != 0)) {
+          strcmp(term->field_hex, fields[field_index]) != 0) {
         continue;
       }
       if (term->trigram_key_count > (size_t)-1 - pair_count) {
@@ -9556,8 +9553,7 @@ static int lc_pouch_query_index_trigram_generation_build_sorted(
 
       term = &summary->terms[source_index];
       if (term->value_type != 's' || term->trigram_key_count == 0U ||
-          (!lc_pouch_query_index_field_hex_is_any_text(fields[field_index]) &&
-           strcmp(term->field_hex, fields[field_index]) != 0)) {
+          strcmp(term->field_hex, fields[field_index]) != 0) {
         continue;
       }
       for (key_index = 0U; key_index < term->trigram_key_count; ++key_index) {
@@ -9950,19 +9946,13 @@ static int lc_pouch_query_index_build_text(
       }
       if (rc == LC_OK && term->value_type == 's') {
         char *date_text;
-        const char *any_trigram_field_hex;
         const char *trigram_field_hex;
         lc_pouch_index_instant ignored_instant;
-        unsigned long any_trigram_field_hash;
-        unsigned long any_trigram_field_id;
         unsigned long trigram_field_hash;
         unsigned long trigram_field_id;
 
         date_text = NULL;
-        any_trigram_field_hex = NULL;
         trigram_field_hex = NULL;
-        any_trigram_field_hash = 0UL;
-        any_trigram_field_id = 0UL;
         trigram_field_hash = 0UL;
         trigram_field_id = 0UL;
         if (term->derived_terms_ready) {
@@ -9971,26 +9961,11 @@ static int lc_pouch_query_index_build_text(
                 summary->allocator, &text_generation, &text_accumulator,
                 &text_term_cache, term->field_hex, term->text_prefix_hex,
                 LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE, term->doc_id, error);
-            if (rc == LC_OK &&
-                !lc_pouch_query_index_field_hex_is_any_text(term->field_hex)) {
-              rc = lc_pouch_query_index_text_generation_add_term(
-                  summary->allocator, &text_generation, &text_accumulator,
-                  &text_term_cache, LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX,
-                  term->text_prefix_hex, LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE,
-                  term->doc_id, error);
-            }
           } else {
             rc = lc_pouch_query_index_text_generation_add_value(
                 summary->allocator, &text_generation, &text_accumulator,
                 &text_term_cache, term->field_hex, exact_value_hex,
                 term->doc_id, error);
-            if (rc == LC_OK &&
-                !lc_pouch_query_index_field_hex_is_any_text(term->field_hex)) {
-              rc = lc_pouch_query_index_text_generation_add_value(
-                  summary->allocator, &text_generation, &text_accumulator,
-                  &text_term_cache, LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX,
-                  exact_value_hex, term->doc_id, error);
-            }
           }
           if (rc == LC_OK && !use_sorted_trigrams &&
               term->trigram_key_count > 0U) {
@@ -9998,14 +9973,6 @@ static int lc_pouch_query_index_build_text(
                 summary->allocator, &trigram_field_cache, term->field_hex,
                 &trigram_field_id, &trigram_field_hash, &trigram_field_hex,
                 error);
-          }
-          if (rc == LC_OK && !use_sorted_trigrams &&
-              term->trigram_key_count > 0U &&
-              !lc_pouch_query_index_field_hex_is_any_text(term->field_hex)) {
-            rc = lc_pouch_query_index_field_cache_find_or_add(
-                summary->allocator, &trigram_field_cache,
-                LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX, &any_trigram_field_id,
-                &any_trigram_field_hash, &any_trigram_field_hex, error);
           }
           if (rc == LC_OK && !use_sorted_trigrams) {
             size_t derived_index;
@@ -10019,15 +9986,6 @@ static int lc_pouch_query_index_build_text(
                       &trigram_accumulator, &trigram_term_cache,
                       trigram_field_hex, trigram_field_id, trigram_field_hash,
                       term->trigram_keys[derived_index], term->doc_id, error);
-              if (rc == LC_OK && any_trigram_field_hex != NULL) {
-                rc =
-                    lc_pouch_query_index_trigram_generation_append_docid_for_field(
-                        summary->allocator, &trigram_generation,
-                        &trigram_accumulator, &trigram_term_cache,
-                        any_trigram_field_hex, any_trigram_field_id,
-                        any_trigram_field_hash,
-                        term->trigram_keys[derived_index], term->doc_id, error);
-              }
             }
           }
           if (rc == LC_OK && term->temporal_value_hex != NULL) {
@@ -10049,52 +10007,22 @@ static int lc_pouch_query_index_build_text(
               summary->allocator, &text_generation, &text_accumulator,
               &text_term_cache, term->field_hex, term->long_value,
               term->long_value_len, term->doc_id, error);
-          if (rc == LC_OK &&
-              !lc_pouch_query_index_field_hex_is_any_text(term->field_hex)) {
-            rc = lc_pouch_query_index_text_generation_add_raw_long_value(
-                summary->allocator, &text_generation, &text_accumulator,
-                &text_term_cache, LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX,
-                term->long_value, term->long_value_len, term->doc_id, error);
-          }
           if (rc == LC_OK) {
             rc = lc_pouch_query_index_trigram_generation_add_raw_value(
                 summary->allocator, &trigram_generation, &trigram_accumulator,
                 &trigram_field_cache, &trigram_term_cache, term->field_hex,
                 term->long_value, term->long_value_len, term->doc_id, error);
-          }
-          if (rc == LC_OK &&
-              !lc_pouch_query_index_field_hex_is_any_text(term->field_hex)) {
-            rc = lc_pouch_query_index_trigram_generation_add_raw_value(
-                summary->allocator, &trigram_generation, &trigram_accumulator,
-                &trigram_field_cache, &trigram_term_cache,
-                LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX, term->long_value,
-                term->long_value_len, term->doc_id, error);
           }
         } else {
           rc = lc_pouch_query_index_text_generation_add_value(
               summary->allocator, &text_generation, &text_accumulator,
               &text_term_cache, term->field_hex, exact_value_hex, term->doc_id,
               error);
-          if (rc == LC_OK &&
-              !lc_pouch_query_index_field_hex_is_any_text(term->field_hex)) {
-            rc = lc_pouch_query_index_text_generation_add_value(
-                summary->allocator, &text_generation, &text_accumulator,
-                &text_term_cache, LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX,
-                exact_value_hex, term->doc_id, error);
-          }
           if (rc == LC_OK) {
             rc = lc_pouch_query_index_trigram_generation_add_value(
                 summary->allocator, &trigram_generation, &trigram_accumulator,
                 &trigram_field_cache, &trigram_term_cache, term->field_hex,
                 exact_value_hex, term->doc_id, error);
-          }
-          if (rc == LC_OK &&
-              !lc_pouch_query_index_field_hex_is_any_text(term->field_hex)) {
-            rc = lc_pouch_query_index_trigram_generation_add_value(
-                summary->allocator, &trigram_generation, &trigram_accumulator,
-                &trigram_field_cache, &trigram_term_cache,
-                LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX, exact_value_hex,
-                term->doc_id, error);
           }
         }
         if (rc == LC_OK && !term->derived_terms_ready &&

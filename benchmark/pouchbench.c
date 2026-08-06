@@ -38,6 +38,9 @@ struct lockdc_pouch_bench_fixture {
 
 static char *lockdc_bench_document(long row, long generation,
                                    long payload_bytes, size_t *out_len);
+static long lockdc_bench_count_files_with_prefix_in(const char *path,
+                                                    const char *prefix,
+                                                    const char *suffix);
 
 static void lockdc_bench_fill_production_payload(char *payload,
                                                  size_t payload_len, long row,
@@ -398,6 +401,26 @@ static void lockdc_bench_cleanup_root(const char *path) {
   }
   (void)closedir(dir);
   (void)rmdir(path);
+}
+
+static int lockdc_bench_wait_for_snapshots(const char *root,
+                                           unsigned long timeout_seconds) {
+  time_t deadline;
+
+  if (root == NULL || timeout_seconds == 0UL) {
+    return 0;
+  }
+  deadline = time(NULL) + (time_t)timeout_seconds;
+  for (;;) {
+    if (lockdc_bench_count_files_with_prefix_in(root, "snapshot-", ".log") >
+        0L) {
+      return 1;
+    }
+    if (time(NULL) >= deadline) {
+      return 0;
+    }
+    (void)sleep(1U);
+  }
 }
 
 static int lockdc_bench_open_client(const char *root, const char *crypto_key,
@@ -2366,6 +2389,8 @@ int lockdc_pouch_bench_compaction_run(
       (unsigned long)compaction_min_segment_count;
   open_options.compaction_min_reclaimable_bytes =
       (unsigned long)compaction_min_reclaimable_bytes;
+  /* Exercise the documented idle-debounced worker without a long test wait. */
+  open_options.compaction_interval_seconds = scheduled != 0 ? 1U : 0U;
   open_options.background_compaction_enabled = scheduled != 0 ? 1 : 0;
   open_options.single_writer = 1;
   open_options.query_engine = "index";
@@ -2416,12 +2441,21 @@ int lockdc_pouch_bench_compaction_run(
   out->snapshots =
       lockdc_bench_count_files_with_prefix_in(root, "snapshot-", ".log");
   if (scheduled != 0) {
+    if (!lockdc_bench_wait_for_snapshots(root, 10UL)) {
+      rc = LC_ERR_INVALID;
+      snprintf(out->error, sizeof(out->error),
+               "scheduled compaction benchmark did not compact while idle");
+      goto done_without_error_message;
+    }
+    out->snapshots =
+        lockdc_bench_count_files_with_prefix_in(root, "snapshot-", ".log");
     out->compactions = out->snapshots;
   }
-  if (scheduled == 0 && (out->compactions <= 0L || out->snapshots <= 0L)) {
+  if (out->compactions <= 0L || out->snapshots <= 0L) {
     rc = LC_ERR_INVALID;
     snprintf(out->error, sizeof(out->error),
-             "forced compaction benchmark did not compact");
+             "%s compaction benchmark did not compact",
+             scheduled != 0 ? "scheduled" : "forced");
     goto done_without_error_message;
   }
 

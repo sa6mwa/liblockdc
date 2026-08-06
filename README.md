@@ -149,6 +149,14 @@ smoke, deterministic local e2e, native benchmarks, and the Pouch-versus-disk
 performance parity gate. The complete artifact rehearsal remains
 `make release-matrix`.
 
+`make prerelease-hardening` is the longer pre-release layer. It keeps the
+normal release gate bounded, then adds the finite multi-mode Pouch core churn
+soak, reclaim proof, shared-root contention coverage, full fuzzing, and the
+release matrix. The Pouch comparison gates every core storage invariant
+separately: acquire, update and stale-precondition rejection, release, public
+and leased reads, attachment write/read, queue delivery, all index-publication
+phases, indexed/scan/full-text queries, and restart recovery.
+
 Run focused verification layers:
 
 ```bash

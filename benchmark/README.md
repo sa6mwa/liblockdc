@@ -66,6 +66,12 @@ variants selected by the full-name `POUCH_GO_PARITY_BENCH` expression;
 compression remains reported evidence in the complete six-mode production
 matrix rather than a synthetic cross-engine ratio. `POUCH_GO_PARITY_TIMEOUT=15m`
 is the finite budget for the three-sample, three-scenario release comparison.
+The contract is per operation: acquire, update, stale-precondition rejection,
+release, public and leased reads, attachment write/read, queue delivery,
+intermediate/final/no-op/
+post-reopen index publication, indexed and scan queries, full-text search, and
+restart recovery must all satisfy the same budget. A faster aggregate cannot
+hide a slower lock or index invariant.
 
 `make benchmark-pouch-go-durable` is the separate strict-durability matrix.
 It compares Pouch `durable_sync=true` with a one-server Go disk `--ha auto`
@@ -76,8 +82,9 @@ same production operation metrics. Its default 12-row, two-update, 128 KiB,
 `POUCH_GO_DURABLE_*` variables for another profile. `make
 benchmark-pouch-go-durable-gate` uses the same three-sample and 1.25x policy
 when that opt-in durability mode must meet the release performance budget.
-Neither command is folded into the default parity gate, because strict sync is
-not Go disk's default disk policy.
+Strict sync is not Go disk's default disk policy, but it is a first-class Pouch
+mode: `make perf-gate` runs the default and durable comparison gates
+separately, each against its matching Go disk durability boundary.
 Attachment output separates `attachment-write-ns/op` from
 `attachment-read-ns/op`; the legacy combined `attachment-ns/op` remains a
 diagnostic only.
@@ -105,8 +112,8 @@ Production output reports `restart-recovery-ns/op`, the complete close/reopen
 plus first post-reopen index-flush path. This is the cross-engine recovery
 metric: lockd disk eagerly restores state during server startup, while Pouch
 loads the namespace lazily when the first operation needs it. The existing
-`reopen-ns/op` and `flush-reopen-ns/op` metrics remain diagnostic sub-phases and
-must not be compared independently across the two implementations.
+`reopen-ns/op` remains a diagnostic sub-phase. `flush-reopen-ns/op` is the
+post-recovery index-publication operation and is independently gated.
 
 The production indexed-query pair distinguishes reader readiness from steady
 state. `index-query-keys-ns/op` is the first indexed `RangeHalf` query after a
@@ -162,6 +169,8 @@ benchmarks. It reports forced maintenance compaction time as `compaction-ns/op`
 and background-scheduled compaction impact through `write-ns/op` plus
 `max-write-ns/op`. A Pouch pthread worker performs scheduled work after a
 mutation signals it, so foreground writes do not execute the compaction pass.
+The scheduled profile waits for an actual idle-debounced compaction snapshot;
+it cannot pass merely because it queued background work before close.
 Forced compaction keeps both default profiles; scheduled compaction uses a
 bounded default profile so the target is usable as a routine gate while still
 exercising an early compaction threshold. Setting any
@@ -174,3 +183,11 @@ scenario. Use these environment knobs to simulate different schedules:
 - `POUCH_GO_COMPACTION_SEGMENT_TARGET_BYTES`
 - `POUCH_GO_COMPACTION_MIN_SEGMENTS`
 - `POUCH_GO_COMPACTION_MIN_RECLAIMABLE_BYTES`
+
+`make benchmark-pouch-go-core-soak` is a finite Pouch-only churn run for
+prerelease hardening. It repeats the full production operation set on one root
+under plaintext, crypto, compression, and crypto-plus-compression. The
+hardening graph follows it with forced and scheduled reclaim and with
+same-key/independent-key shared-root contention. Its ten-minute outer budget
+and workload controls are intentionally separate from the normal release
+gate: it is a sustained-invariant proof, not a release-time benchmark tax.

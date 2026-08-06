@@ -65,6 +65,13 @@ POUCH_GO_DURABLE_PAYLOAD_BYTES ?= 131072
 POUCH_GO_DURABLE_SEGMENT_TARGET_BYTES ?= 16384
 POUCH_GO_DURABLE_TIMEOUT ?= 90s
 POUCH_GO_DURABLE_GATE_TIMEOUT ?= 3m
+POUCH_GO_CORE_SOAK_BENCH ?= ProductionPouch(PT|Crypto|Compression|CryptoCompression)
+POUCH_GO_CORE_SOAK_BENCHTIME ?= 4x
+POUCH_GO_CORE_SOAK_ROWS ?= 96
+POUCH_GO_CORE_SOAK_UPDATES ?= 8
+POUCH_GO_CORE_SOAK_PAYLOAD_BYTES ?= 32768
+POUCH_GO_CORE_SOAK_SEGMENT_TARGET_BYTES ?= 262144
+POUCH_GO_CORE_SOAK_TIMEOUT ?= 10m
 POUCH_GO_PRODUCTION_ROWS ?=
 POUCH_GO_PRODUCTION_UPDATES ?=
 POUCH_GO_PRODUCTION_PAYLOAD_BYTES ?=
@@ -90,6 +97,15 @@ POUCH_GO_CONCURRENCY_WRITERS ?= 2
 POUCH_GO_CONCURRENCY_WRITES_PER_WRITER ?= 32
 POUCH_GO_CONCURRENCY_PAYLOAD_BYTES ?= 256
 POUCH_GO_CONCURRENCY_TIMEOUT ?= 2m
+POUCH_GO_HARDENING_COMPACTION_TIMEOUT ?= 3m
+POUCH_GO_HARDENING_COMPACTION_ROWS ?= 96
+POUCH_GO_HARDENING_COMPACTION_UPDATES ?= 3
+POUCH_GO_HARDENING_COMPACTION_PAYLOAD_BYTES ?= 32768
+POUCH_GO_HARDENING_COMPACTION_SEGMENT_TARGET_BYTES ?= 65536
+POUCH_GO_HARDENING_CONCURRENCY_TIMEOUT ?= 3m
+POUCH_GO_HARDENING_CONCURRENCY_WRITERS ?= 4
+POUCH_GO_HARDENING_CONCURRENCY_WRITES_PER_WRITER ?= 48
+POUCH_GO_HARDENING_CONCURRENCY_PAYLOAD_BYTES ?= 4096
 POUCH_GO_ROUTINE_TIMEOUT ?= 90s
 POUCH_GO_ROUTINE_CONCURRENCY_WRITERS ?= 2
 POUCH_GO_ROUTINE_CONCURRENCY_WRITES_PER_WRITER ?= 8
@@ -136,7 +152,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__build-debug __build-host __build-x86_64-linux-gnu-release __build-release __build-e2e __build-coverage __build-fuzz \
 	__test-debug __test-host __test-cross __test-e2e __test-install-tree __example-smoke-local __test-all __test-coverage \
 	__format \
-	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate \
+	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate __benchmark-pouch-go-core-soak __pouch-core-hardening \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __verify-release-privacy __clean-dist \
 	__lua-rock __lua-test __lua-env __release-lua-artifacts \
 	__dev-up __dev-down __dev-reset __dev-ps __dev-logs __cross-build __cross-preset-test __cross-test \
@@ -145,7 +161,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	build build-debug build-host build-release build-e2e build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-install-tree example-smoke-local test-all test-coverage \
 	format \
-	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate \
+	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate benchmark-pouch-go-core-soak \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives verify-release-privacy clean-dist \
 	lua-rock lua-test lua-env release-lua-artifacts \
 	dev-up dev-down dev-reset dev-ps dev-logs cross-build cross-preset-test cross-test \
@@ -189,7 +205,7 @@ help:
 		'make bench-check        Run native benchmarks and enforce Pouch-vs-disk parity.' \
 		'make bench-gate         Run native benchmarks and enforce Pouch-vs-disk parity.' \
 		'make benchmarks-go      Run Go parity benchmarks through the standard lifecycle name.' \
-		'make perf-gate          Run the Pouch Go parity performance gate.' \
+		'make perf-gate          Enforce Pouch-vs-disk core-operation parity for default and strict-durable I/O.' \
 		'make benchmark-pouch-perf Prepare native artifacts, then run one sub-minute pouch perf case (POUCH_PERF_CASE=$(POUCH_PERF_CASE), POUCH_PERF_ROWS=$(POUCH_PERF_ROWS), POUCH_PERF_CRYPTO=$(POUCH_PERF_CRYPTO)).' \
 		'make benchmark-pouch-routine Prepare benchmark artifacts, then run all bounded native phase probes plus production and shared-root concurrency comparison in at most $(POUCH_GO_ROUTINE_TIMEOUT).' \
 		'make benchmark-pouch-perf-index-docs Run the isolated public-API indexed narrative document query perf case.' \
@@ -209,6 +225,7 @@ help:
 		'make benchmark-pouch-go-concurrency Run bounded pouch-vs-disk key-lock contention and shared-root concurrency matrix with crypto off/on.' \
 		'make benchmark-pouch-go-parity-gate Run production pouch-vs-disk benchmarks and require at least $(POUCH_GO_PARITY_MIN_SPEEDUP)x Pouch speedup on each comparable core metric.' \
 		'make benchmark-pouch-go-durable-gate Run strict-durability production metrics and require the same Pouch speedup policy.' \
+		'make benchmark-pouch-go-core-soak Run the bounded, long-duration Pouch core-operation churn soak used by prerelease hardening.' \
 		'make package            Build a clean native Bootlin release package with source, Lua, and checksums under dist/.' \
 		'make package-source     Build the source-only release archive.' \
 		'make package-source-smoke  Build and verify the source-only release archive.' \
@@ -459,6 +476,7 @@ perf-gate:
 __perf-gate:
 	$(TIMED) 'perf-gate benchmark-prepare' $(MAKE) __benchmark-pouch-go-prepare
 	$(TIMED) 'perf-gate pouch-go-parity' $(MAKE) __benchmark-pouch-go-parity-gate
+	$(TIMED) 'perf-gate pouch-go-durable-parity' $(MAKE) __benchmark-pouch-go-durable-gate
 
 benchmark-pouch-perf: __benchmark-pouch-perf-prepare
 	$(TIMED) benchmark-pouch-perf timeout --kill-after=5s \
@@ -683,6 +701,36 @@ __benchmark-pouch-go-durable-gate:
 	  2>&1 | tee $(ROOT)/build/pouch-go-durable.bench.txt
 	python3 scripts/pouch_benchmark_parity.py --mode durable --min-speedup $(POUCH_GO_PARITY_MIN_SPEEDUP) $(ROOT)/build/pouch-go-durable.bench.txt
 
+benchmark-pouch-go-core-soak: __benchmark-pouch-go-prepare
+	$(TIMED) benchmark-pouch-go-core-soak timeout --kill-after=5s \
+	  '$(POUCH_GO_CORE_SOAK_TIMEOUT)' $(MAKE) __benchmark-pouch-go-core-soak
+
+__benchmark-pouch-go-core-soak:
+	$(MAKE) __benchmark-pouch-go-run \
+	  POUCH_GO_BENCH='$(POUCH_GO_CORE_SOAK_BENCH)' \
+	  POUCH_GO_BENCHTIME='$(POUCH_GO_CORE_SOAK_BENCHTIME)' \
+	  POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_CORE_SOAK_TIMEOUT)' \
+	  LOCKDC_BENCH_PRODUCTION_ROWS='$(POUCH_GO_CORE_SOAK_ROWS)' \
+	  LOCKDC_BENCH_PRODUCTION_UPDATES='$(POUCH_GO_CORE_SOAK_UPDATES)' \
+	  LOCKDC_BENCH_PRODUCTION_PAYLOAD_BYTES='$(POUCH_GO_CORE_SOAK_PAYLOAD_BYTES)' \
+	  LOCKDC_BENCH_PRODUCTION_SEGMENT_TARGET_BYTES='$(POUCH_GO_CORE_SOAK_SEGMENT_TARGET_BYTES)'
+
+__pouch-core-hardening: __benchmark-pouch-go-prepare
+	$(TIMED) 'pouch-core-hardening soak' $(MAKE) __benchmark-pouch-go-core-soak
+	$(TIMED) 'pouch-core-hardening reclaim' timeout --kill-after=5s \
+	  '$(POUCH_GO_HARDENING_COMPACTION_TIMEOUT)' $(MAKE) __benchmark-pouch-go-compaction \
+	  POUCH_GO_COMPACTION_TIMEOUT='$(POUCH_GO_HARDENING_COMPACTION_TIMEOUT)' \
+	  POUCH_GO_COMPACTION_ROWS='$(POUCH_GO_HARDENING_COMPACTION_ROWS)' \
+	  POUCH_GO_COMPACTION_UPDATES='$(POUCH_GO_HARDENING_COMPACTION_UPDATES)' \
+	  POUCH_GO_COMPACTION_PAYLOAD_BYTES='$(POUCH_GO_HARDENING_COMPACTION_PAYLOAD_BYTES)' \
+	  POUCH_GO_COMPACTION_SEGMENT_TARGET_BYTES='$(POUCH_GO_HARDENING_COMPACTION_SEGMENT_TARGET_BYTES)'
+	$(TIMED) 'pouch-core-hardening shared-root' timeout --kill-after=5s \
+	  '$(POUCH_GO_HARDENING_CONCURRENCY_TIMEOUT)' $(MAKE) __benchmark-pouch-go-concurrency \
+	  POUCH_GO_CONCURRENCY_TIMEOUT='$(POUCH_GO_HARDENING_CONCURRENCY_TIMEOUT)' \
+	  POUCH_GO_CONCURRENCY_WRITERS='$(POUCH_GO_HARDENING_CONCURRENCY_WRITERS)' \
+	  POUCH_GO_CONCURRENCY_WRITES_PER_WRITER='$(POUCH_GO_HARDENING_CONCURRENCY_WRITES_PER_WRITER)' \
+	  POUCH_GO_CONCURRENCY_PAYLOAD_BYTES='$(POUCH_GO_HARDENING_CONCURRENCY_PAYLOAD_BYTES)'
+
 package:
 	$(TIMED) package $(MAKE) __package
 
@@ -812,7 +860,7 @@ __prerelease-live:
 prerelease-hardening:
 	$(TIMED) prerelease-hardening $(MAKE) __prerelease-hardening
 
-__prerelease-hardening: __prerelease __fuzz __release-matrix
+__prerelease-hardening: __prerelease __pouch-core-hardening __fuzz __release-matrix
 
 lifecycle-version-contract:
 	$(TIMED) lifecycle-version-contract $(MAKE) __lifecycle-version-contract

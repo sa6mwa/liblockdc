@@ -856,10 +856,14 @@ the public API or durable format.
 - Indexer batching:
   `indexer_flush_docs` and `indexer_flush_interval_seconds` are fixed-width
   direct Pouch open options and `pouch://` endpoint options. Zero selects the
-  Go disk-store defaults of 2,000 mutations and ten seconds. They only govern
-  asynchronous derived-index publication; durable state visibility and
-  `flush_index(mode=wait)` correctness are unchanged. Deployments that tune
-  Go disk's index writer may set the same bounds on Pouch, for example
+  Go disk-store defaults of 2,000 mutations and ten seconds. In exclusive
+  Pouch, the in-memory index summary coalesces repeated writes to one key, so
+  the document budget requires that many distinct ready projections; repeated
+  updates are published at the idle deadline or an explicit
+  `flush_index(mode=wait)`. This prevents a hot key from repeatedly rebuilding
+  a namespace snapshot while preserving state visibility and explicit-flush
+  correctness. Deployments that tune Go disk's index writer may set comparable
+  bounds on Pouch, for example
   `pouch://...?pouch_indexer_flush_docs=64&pouch_indexer_flush_interval_seconds=1`.
 
 - Filesystem capability policy and queue wake-up:
@@ -1363,15 +1367,18 @@ ref. A writer pipeline may batch independent operations but may not
 acknowledge, reorder, or expose an operation before that point.
 
 Pouch follows Go disk's asynchronous index-writer boundary. After a successful
-state mutation, the foreground path records only a small namespace marker on
-the opened Pouch handle. It never parses the document again, constructs
-postings, or retains a document body for later indexing. That handle's pthread
-indexer coalesces its markers and incrementally replays the authoritative state
-log for a namespace after its configured distinct-document bound (2,000 by default) or
-its configured interval (ten seconds by default) from its first unflushed
+state mutation, the exclusive foreground path captures a compact, body-free
+derived projection while the source is still available. It does not retain the
+source body or construct durable index postings. One-shot, oversized, or
+otherwise non-replayable sources explicitly mark the pending projection
+incomplete; their next flush incrementally reads the authoritative state log.
+That handle's pthread indexer coalesces ready projections and authoritative-log
+tail changes after its configured distinct-document bound (2,000 by default)
+or its configured interval (ten seconds by default) from its first unflushed
 mutation. Repeated updates to one key replace that key's pending projection and
-do not advance the exclusive-writer document bound. The deadline is not restarted by later writes. Shared-root handles can each run an indexer, but still serialize
-publication through the durable namespace lock below.
+do not advance the exclusive-writer document bound. The deadline is not
+restarted by later writes. Shared-root handles can each run an indexer, but
+still serialize publication through the durable namespace lock below.
 
 The durable state-index sequence is the sole index freshness boundary. A query
 or explicit `flush_index` compares it with the manifest sequence; on a
@@ -1384,10 +1391,10 @@ from durable state without any lost document or in-memory body dependency.
 not deserialize every just-written derived artifact solely to populate a
 handle-local cache. This matches Go disk's flush boundary and keeps durable
 publication out of the query-cache hot path. The exclusive writer transfers a
-newly built, body-free trigram generation, including its internal all-text
-postings, directly into its full-text cache; other query representations load
-lazily on first use, while open-time cache warming remains best effort. The
-packed binary artifact remains the sole
+newly built, body-free concrete-field trigram generation directly into its
+full-text cache; logical whole-document text queries union those fields. Other
+query representations load lazily on first use, while open-time cache warming
+remains best effort. The packed binary artifact remains the sole
 durable source: reopened handles, shared roots, and cache-allocation failure
 use the normal validated packed-artifact decoder. No cache retains source JSON
 or full document bodies.
@@ -1631,16 +1638,12 @@ Indexed query requirements:
 - full-text search must cover text in the full JSON document, including nested
   fields and long text fields, through the selected indexed engine;
 - `/...` is a logical whole-document text selector, not a public state field.
-  Pouch also materializes a private derived all-text projection in the text
-  and trigram generations. It contains the same individual string values as
-  the concrete fields, so indexed matching still proves a substring against
-  one source value rather than against a concatenated document. The projection
-  eliminates per-query field fan-out for the default exclusive-writer path;
-  its bounded index-size cost is deliberate so Pouch remains materially ahead
-  of Go disk on whole-document full-text queries. Trigrams remain a candidate
-  filter and text terms reject false positives. Older segments without the
-  projection remain readable: their reader falls back to the concrete-field
-  union until a derived-index rebuild replaces them.
+  Pouch resolves it by unioning the concrete string fields, matching Go disk's
+  index contract. It never duplicates each text or trigram posting into a
+  synthetic all-text field, so index publication remains bounded by the real
+  document projections. Trigrams remain a candidate filter and text terms
+  reject false positives. Older segments carrying the former private all-text
+  projection remain readable, but newly published segments omit it.
 
 ## Staged State
 
@@ -1838,13 +1841,13 @@ format failure merely because compression correctly reduces stored bytes below
 the rollover threshold.
 
 The exclusive-writer comparison gate has an explicit allowlist of comparable
-end-to-end core metrics: acquire, lease/public get, update, release, queue,
-attachment write and attachment retrieve, cold and warm indexed key queries, indexed document
-queries, scan/full-text queries, and restart recovery. Each metric must be
-reported by both engines. `reopen`, `flush-reopen`, aggregate `ns/op`, and
+end-to-end core metrics: acquire, update and stale-precondition rejection,
+lease/public get, release, queue, attachment write and attachment retrieve,
+intermediate/final/no-op/post-reopen index publication, cold and warm indexed
+key queries, indexed document queries, scan/full-text queries, and restart
+recovery. Each metric must be reported by both engines. Aggregate `ns/op` and
 Pouch-only C timing remain diagnostics, not independent cross-engine parity
-metrics, because Go disk eagerly restores state at server startup while Pouch
-can recover lazily. Aggregate timing must not hide a slower core operation.
+metrics. Aggregate timing must not hide a slower core operation.
 
 Acceptance target: exclusive Pouch must materially outperform the matching Go
 lockd disk plaintext or crypto configuration on every gated core metric. The
@@ -1861,6 +1864,22 @@ gate runs only plaintext and crypto Pouch/Go pairs, with three production
 samples each and a finite `POUCH_GO_PARITY_TIMEOUT=15m` budget. Shared root has
 separate correctness, contention, handoff, and bounded-performance coverage
 and does not dilute the exclusive release target.
+
+Strict durable sync uses the same complete core-metric contract in `make
+benchmark-pouch-go-durable-gate`; it is part of `make perf-gate` rather than an
+opt-in diagnostic. Compression has no format-equivalent Go disk counterpart,
+so its core-operation churn remains measured by the hardening soak rather than
+a synthetic cross-engine threshold.
+
+`make prerelease-hardening` additionally runs a finite ten-minute Pouch core
+soak outside the normal release gate. It repeats an exclusive root's acquire,
+update, stale-precondition, leased/public read, attachment, queue, indexing,
+query, reopen, and recovery cycles under plaintext, crypto, compression, and
+crypto-plus-compression. It then proves forced and idle-debounced background
+reclaim on rolling segments and exercises same-key and independent-key
+shared-root contention. The soak has fixed workload and timeout controls in
+the root Makefile; it is deliberate release hardening, not an unbounded burn-in
+or a normal release prerequisite.
 
 ## Fuzzing And Failure Modes
 
