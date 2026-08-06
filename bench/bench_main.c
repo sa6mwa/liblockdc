@@ -265,14 +265,50 @@ static char *bench_pouch_perf_document(long row, long generation,
   return json;
 }
 
+static int bench_pouch_seed_update(lc_client *client, const char *key,
+                                   lc_source *source, lc_error *error) {
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  lc_release_req release_req;
+  lc_update_opts update_opts;
+  int rc;
+
+  if (client == NULL || key == NULL || source == NULL) {
+    return 1;
+  }
+  lease = NULL;
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  lc_update_opts_init(&update_opts);
+  acquire_req.namespace_name = "bench";
+  acquire_req.key = key;
+  acquire_req.owner = "lockdc-bench";
+  acquire_req.ttl_seconds = 30L;
+  update_opts.content_type = "application/json";
+  rc = client->acquire(client, &acquire_req, &lease, error);
+  if (rc == LC_OK) {
+    rc = lease->update(lease, source, &update_opts, error);
+  }
+  if (lease != NULL) {
+    if (rc == LC_OK) {
+      rc = lease->release(lease, &release_req, error);
+      if (rc == LC_OK) {
+        lease = NULL;
+      }
+    }
+    if (lease != NULL) {
+      lease->close(lease);
+    }
+  }
+  return rc;
+}
+
 static int bench_pouch_seed_perf_docs(lc_client *client, long rows,
                                       long generation, long payload_bytes,
                                       lc_error *error) {
   long row;
 
   for (row = 0L; row < rows; ++row) {
-    lc_update_req req;
-    lc_update_res res;
     lc_source *source;
     char key[64];
     char *json;
@@ -286,13 +322,7 @@ static int bench_pouch_seed_perf_docs(lc_client *client, long rows,
     rc = lc_source_from_memory(json, strlen(json), &source, error);
     if (rc == LC_OK) {
       snprintf(key, sizeof(key), "doc/%08ld", row);
-      lc_update_req_init(&req);
-      memset(&res, 0, sizeof(res));
-      req.lease.namespace_name = "bench";
-      req.lease.key = key;
-      req.content_type = "application/json";
-      rc = client->update(client, &req, source, &res, error);
-      lc_update_res_cleanup(&res);
+      rc = bench_pouch_seed_update(client, key, source, error);
     }
     if (source != NULL) {
       lc_source_close(source);
@@ -550,8 +580,6 @@ static int bench_pouch_perf_flush_reopen(long iterations) {
 
 static int bench_pouch_seed_query_docs(lc_client *client, long count,
                                        lc_error *error) {
-  lc_update_req req;
-  lc_update_res res;
   long i;
 
   for (i = 0; i < count; ++i) {
@@ -608,14 +636,8 @@ static int bench_pouch_seed_query_docs(lc_client *client, long count,
     if (rc != LC_OK) {
       return rc;
     }
-    lc_update_req_init(&req);
-    memset(&res, 0, sizeof(res));
-    req.lease.namespace_name = "bench";
-    req.lease.key = key;
-    req.content_type = "application/json";
-    rc = client->update(client, &req, source, &res, error);
+    rc = bench_pouch_seed_update(client, key, source, error);
     lc_source_close(source);
-    lc_update_res_cleanup(&res);
     if (rc != LC_OK) {
       return rc;
     }
