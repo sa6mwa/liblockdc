@@ -1384,9 +1384,10 @@ from durable state without any lost document or in-memory body dependency.
 not deserialize every just-written derived artifact solely to populate a
 handle-local cache. This matches Go disk's flush boundary and keeps durable
 publication out of the query-cache hot path. The exclusive writer transfers a
-newly built, body-free trigram generation directly into its full-text cache;
-other query representations load lazily on first use, while open-time cache
-warming remains best effort. The packed binary artifact remains the sole
+newly built, body-free trigram generation, including its internal all-text
+postings, directly into its full-text cache; other query representations load
+lazily on first use, while open-time cache warming remains best effort. The
+packed binary artifact remains the sole
 durable source: reopened handles, shared roots, and cache-allocation failure
 use the normal validated packed-artifact decoder. No cache retains source JSON
 or full document bodies.
@@ -1629,13 +1630,17 @@ Indexed query requirements:
   performance intent rather than rebuilding the full corpus on each flush;
 - full-text search must cover text in the full JSON document, including nested
   fields and long text fields, through the selected indexed engine;
-- `/...` is a logical whole-document text selector, not a synthetic index
-  field. Pouch writes the same per-field raw trigrams as Go disk's default
-  index policy and unions matching field postings through the generation
-  cache's field directory. This avoids a second document scan and duplicate
-  aggregate postings during index publication; the normal text matcher still
-  verifies candidates against each concrete field. Older derived artifacts
-  with aggregate token postings remain readable and are replaced on rebuild.
+- `/...` is a logical whole-document text selector, not a public state field.
+  Pouch also materializes a private derived all-text projection in the text
+  and trigram generations. It contains the same individual string values as
+  the concrete fields, so indexed matching still proves a substring against
+  one source value rather than against a concatenated document. The projection
+  eliminates per-query field fan-out for the default exclusive-writer path;
+  its bounded index-size cost is deliberate so Pouch remains materially ahead
+  of Go disk on whole-document full-text queries. Trigrams remain a candidate
+  filter and text terms reject false positives. Older segments without the
+  projection remain readable: their reader falls back to the concrete-field
+  union until a derived-index rebuild replaces them.
 
 ## Staged State
 

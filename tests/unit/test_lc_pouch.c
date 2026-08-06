@@ -22040,6 +22040,18 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 
+  rc = lc_source_from_memory(
+      "{\"first\":\"abc\",\"second\":\"bcd\",\"third\":\"cde\"}",
+      strlen("{\"first\":\"abc\",\"second\":\"bcd\",\"third\":\"cde\"}"),
+      &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-index-in", "doc/trigram-split",
+                            source, NULL, &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
   hidden_options.has_query_hidden = 1;
   hidden_options.query_hidden = 1;
   rc = lc_source_from_memory("{\"tags\":[\"planning\"],\"n\":4}",
@@ -22104,8 +22116,10 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
                                       "706c616e6e696e67");
   assert_query_index_segment_contains(namespace_path, "query.index.lcpt3g",
                                       "6e616e");
-  assert_query_index_segment_not_contains(namespace_path, "query.index.lcpt3g",
-                                          "2f2e2e2e");
+  assert_query_index_segment_contains(namespace_path, "query.index.lcpttg",
+                                      "2f2e2e2e");
+  assert_query_index_segment_contains(namespace_path, "query.index.lcpt3g",
+                                      "2f2e2e2e");
 
   snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
   query_req.cursor = cursor;
@@ -22141,6 +22155,22 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
   assert_true(pouch_query_capture_has(&exists_page, "doc/c"));
   assert_false(pouch_query_capture_has(&exists_page, "doc/hidden"));
   assert_false(pouch_query_capture_has(&exists_page, "doc/deleted"));
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"engine\":\"index\""));
+  lc_query_res_cleanup(&query_res);
+
+  memset(&trigram_false_positive_page, 0, sizeof(trigram_false_positive_page));
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.cursor = NULL;
+  query_req.selector_json =
+      "{\"icontains\":{\"field\":\"/...\",\"value\":\"abcde\"}}";
+  query_req.limit = 0L;
+  rc = client->query_keys(client, &query_req, &handler,
+                          &trigram_false_positive_page, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(trigram_false_positive_page.count, 0);
+  assert_null(query_res.cursor);
   assert_true(bytes_contain_text(query_res.metadata_json,
                                  strlen(query_res.metadata_json),
                                  "\"engine\":\"index\""));
