@@ -9,6 +9,9 @@ CTEST := ctest
 CLANG_FORMAT := clang-format
 GO := go
 TIMED := bash ./scripts/run_timed.sh
+# Keep recursive calls print-only under `make -n`. GNU Make executes recipe
+# lines that directly reference $(MAKE), even in dry-run mode.
+MAKE_RECURSE := $(MAKE)
 
 DEBUG_PRESET := debug
 E2E_PRESET := e2e
@@ -253,20 +256,20 @@ help:
 build: build-debug
 
 deps-debug:
-	$(TIMED) deps-debug $(MAKE) __deps-debug
+	$(TIMED) deps-debug $(MAKE_RECURSE) __deps-debug
 
 __deps-debug:
 	bash ./scripts/deps.sh deps-x86_64-linux-gnu
 
 deps-release:
-	$(TIMED) deps-release $(MAKE) __deps-release
+	$(TIMED) deps-release $(MAKE_RECURSE) __deps-release
 
 __deps-release:
 	bash ./scripts/deps.sh deps-x86_64-linux-gnu
 	bash ./scripts/deps.sh deps-x86_64-linux-musl
 
 deps-cross:
-	$(TIMED) deps-cross $(MAKE) __deps-cross
+	$(TIMED) deps-cross $(MAKE_RECURSE) __deps-cross
 
 __deps-cross:
 	bash ./scripts/deps.sh deps-aarch64-linux-gnu
@@ -276,20 +279,20 @@ __deps-cross:
 	if bash ./scripts/osxcross_available.sh; then bash ./scripts/deps.sh deps-arm64-apple-darwin; else printf '[deps] skipping deps-arm64-apple-darwin: osxcross toolchain not available\n'; fi
 
 build-debug:
-	$(TIMED) build-debug $(MAKE) __build-debug
+	$(TIMED) build-debug $(MAKE_RECURSE) __build-debug
 
 __build-debug: __deps-debug
 	$(CMAKE) --preset $(DEBUG_PRESET)
 	$(CMAKE) --build --preset $(DEBUG_PRESET)
 
 build-host:
-	$(TIMED) build-host $(MAKE) __build-host
+	$(TIMED) build-host $(MAKE_RECURSE) __build-host
 
 __build-host:
 	bash ./scripts/host_test.sh build
 
 build-release:
-	$(TIMED) build-release $(MAKE) __build-release
+	$(TIMED) build-release $(MAKE_RECURSE) __build-release
 
 __build-x86_64-linux-gnu-release: __deps-release
 	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)
@@ -299,21 +302,21 @@ __build-release: __deps-release __deps-cross
 	bash ./scripts/run_linux_build_matrix.sh
 
 build-e2e:
-	$(TIMED) build-e2e $(MAKE) __build-e2e
+	$(TIMED) build-e2e $(MAKE_RECURSE) __build-e2e
 
 __build-e2e: __deps-debug
 	$(CMAKE) --preset $(E2E_PRESET)
 	$(CMAKE) --build --preset $(E2E_PRESET)
 
 build-coverage:
-	$(TIMED) build-coverage $(MAKE) __build-coverage
+	$(TIMED) build-coverage $(MAKE_RECURSE) __build-coverage
 
 __build-coverage: __deps-debug
 	$(CMAKE) --preset $(COVERAGE_PRESET)
 	$(CMAKE) --build --preset $(COVERAGE_PRESET)
 
 build-fuzz:
-	$(TIMED) build-fuzz $(MAKE) __build-fuzz
+	$(TIMED) build-fuzz $(MAKE_RECURSE) __build-fuzz
 
 __build-fuzz: __deps-debug
 	$(CMAKE) --preset $(FUZZ_PRESET)
@@ -322,165 +325,165 @@ __build-fuzz: __deps-debug
 test: test-host
 
 test-debug:
-	$(TIMED) test-debug $(MAKE) __test-debug
+	$(TIMED) test-debug $(MAKE_RECURSE) __test-debug
 
 __test-debug: __build-debug
 	$(CTEST) --preset $(DEBUG_PRESET)
 
 test-host:
-	$(TIMED) test-host $(MAKE) __test-host
+	$(TIMED) test-host $(MAKE_RECURSE) __test-host
 
 __test-host:
 	bash ./scripts/host_test.sh
 
 test-cross:
-	$(TIMED) test-cross $(MAKE) __test-cross
+	$(TIMED) test-cross $(MAKE_RECURSE) __test-cross
 
 __test-cross: __cross-build
 	bash ./scripts/cross_test.sh release
 
 test-e2e:
-	$(TIMED) test-e2e $(MAKE) __test-e2e
+	$(TIMED) test-e2e $(MAKE_RECURSE) __test-e2e
 
 __test-e2e:
 	bash ./scripts/test-e2e.sh
 
 test-install-tree:
-	$(TIMED) test-install-tree $(MAKE) __test-install-tree
+	$(TIMED) test-install-tree $(MAKE_RECURSE) __test-install-tree
 
 __test-install-tree: __build-x86_64-linux-gnu-release
 	$(CTEST) --preset $(X86_64_GNU_RELEASE_PRESET) --output-on-failure \
 		--progress --stop-on-failure -R '^install_tree_sdk_test$$'
 
 example-smoke-local:
-	$(TIMED) example-smoke-local $(MAKE) __example-smoke-local
+	$(TIMED) example-smoke-local $(MAKE_RECURSE) __example-smoke-local
 
 __example-smoke-local:
 	bash ./scripts/test-e2e.sh examples
 
 test-all:
-	$(TIMED) test-all $(MAKE) __test-all
+	$(TIMED) test-all $(MAKE_RECURSE) __test-all
 
 __test-all: __test-debug __test-host __test-cross __valgrind __fuzz-smoke __test-e2e __bench-gate
 
 dev-up:
-	$(TIMED) dev-up $(MAKE) __dev-up
+	$(TIMED) dev-up $(MAKE_RECURSE) __dev-up
 
 __dev-up:
 	bash ./scripts/dev-up.sh
 
 dev-down:
-	$(TIMED) dev-down $(MAKE) __dev-down
+	$(TIMED) dev-down $(MAKE_RECURSE) __dev-down
 
 __dev-down:
 	bash ./scripts/dev-down.sh
 
 dev-reset:
-	$(TIMED) dev-reset $(MAKE) __dev-reset
+	$(TIMED) dev-reset $(MAKE_RECURSE) __dev-reset
 
 __dev-reset:
 	bash ./scripts/dev-reset.sh
 
 dev-ps:
-	$(TIMED) dev-ps $(MAKE) __dev-ps
+	$(TIMED) dev-ps $(MAKE_RECURSE) __dev-ps
 
 __dev-ps:
 	bash ./scripts/dev-ps.sh
 
 dev-logs:
-	$(TIMED) dev-logs $(MAKE) __dev-logs
+	$(TIMED) dev-logs $(MAKE_RECURSE) __dev-logs
 
 __dev-logs:
 	bash ./scripts/dev-logs.sh
 
 format:
-	$(TIMED) format $(MAKE) __format
+	$(TIMED) format $(MAKE_RECURSE) __format
 
 __format:
 	rg --files -g '*.c' -g '*.h' | xargs $(CLANG_FORMAT) -i
 
 finalize-slice:
-	$(TIMED) finalize-slice $(MAKE) __finalize-slice
+	$(TIMED) finalize-slice $(MAKE_RECURSE) __finalize-slice
 
 __finalize-slice:
-	$(TIMED) 'finalize-slice format' $(MAKE) __format
-	$(TIMED) 'finalize-slice test-debug' $(MAKE) __test-debug
+	$(TIMED) 'finalize-slice format' $(MAKE_RECURSE) __format
+	$(TIMED) 'finalize-slice test-debug' $(MAKE_RECURSE) __test-debug
 
 valgrind:
-	$(TIMED) valgrind $(MAKE) __valgrind
+	$(TIMED) valgrind $(MAKE_RECURSE) __valgrind
 
 __valgrind:
 	bash ./scripts/valgrind.sh
 
 test-coverage:
-	$(TIMED) test-coverage $(MAKE) __test-coverage
+	$(TIMED) test-coverage $(MAKE_RECURSE) __test-coverage
 
 __test-coverage: __build-coverage
 	$(CTEST) --preset $(COVERAGE_PRESET)
 	$(CMAKE) --build --preset coverage-report
 
 coverage:
-	$(TIMED) coverage $(MAKE) __coverage
+	$(TIMED) coverage $(MAKE_RECURSE) __coverage
 
 __coverage: __test-coverage
 
 fuzz:
-	$(TIMED) fuzz $(MAKE) __fuzz
+	$(TIMED) fuzz $(MAKE_RECURSE) __fuzz
 
 __fuzz:
 	bash ./scripts/fuzz.sh $(FUZZ_TIME)
 
 fuzz-smoke:
-	$(TIMED) fuzz-smoke $(MAKE) __fuzz-smoke
+	$(TIMED) fuzz-smoke $(MAKE_RECURSE) __fuzz-smoke
 
 __fuzz-smoke:
 	bash ./scripts/fuzz.sh 5
 
 fuzz-long:
-	$(TIMED) fuzz-long $(MAKE) __fuzz-long
+	$(TIMED) fuzz-long $(MAKE_RECURSE) __fuzz-long
 
 __fuzz-long:
 	bash ./scripts/fuzz.sh $(FUZZ_LONG_TIME)
 
 bench:
-	$(TIMED) bench $(MAKE) __bench
+	$(TIMED) bench $(MAKE_RECURSE) __bench
 
 __bench: __benchmarks
 
 benchmarks:
-	$(TIMED) benchmarks $(MAKE) __benchmarks
+	$(TIMED) benchmarks $(MAKE_RECURSE) __benchmarks
 
 __benchmarks: __build-x86_64-linux-gnu-release
 	./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench $(BENCH_ITERS) all
 
 bench-gate:
-	$(TIMED) bench-gate $(MAKE) __bench-gate
+	$(TIMED) bench-gate $(MAKE_RECURSE) __bench-gate
 
 __bench-gate:
-	$(TIMED) 'bench-gate benchmarks' $(MAKE) __benchmarks
-	$(TIMED) 'bench-gate perf-gate' $(MAKE) __perf-gate
+	$(TIMED) 'bench-gate benchmarks' $(MAKE_RECURSE) __benchmarks
+	$(TIMED) 'bench-gate perf-gate' $(MAKE_RECURSE) __perf-gate
 
 bench-check:
-	$(TIMED) bench-check $(MAKE) __bench-check
+	$(TIMED) bench-check $(MAKE_RECURSE) __bench-check
 
 __bench-check: __bench-gate
 
 benchmarks-go:
-	$(TIMED) benchmarks-go $(MAKE) __benchmarks-go
+	$(TIMED) benchmarks-go $(MAKE_RECURSE) __benchmarks-go
 
 __benchmarks-go: __benchmark-pouch-go
 
 perf-gate:
-	$(TIMED) perf-gate $(MAKE) __perf-gate
+	$(TIMED) perf-gate $(MAKE_RECURSE) __perf-gate
 
 __perf-gate:
-	$(TIMED) 'perf-gate benchmark-prepare' $(MAKE) __benchmark-pouch-go-prepare
-	$(TIMED) 'perf-gate pouch-go-parity' $(MAKE) __benchmark-pouch-go-parity-gate
-	$(TIMED) 'perf-gate pouch-go-durable-parity' $(MAKE) __benchmark-pouch-go-durable-gate
+	$(TIMED) 'perf-gate benchmark-prepare' $(MAKE_RECURSE) __benchmark-pouch-go-prepare
+	$(TIMED) 'perf-gate pouch-go-parity' $(MAKE_RECURSE) __benchmark-pouch-go-parity-gate
+	$(TIMED) 'perf-gate pouch-go-durable-parity' $(MAKE_RECURSE) __benchmark-pouch-go-durable-gate
 
 benchmark-pouch-perf: __benchmark-pouch-perf-prepare
 	$(TIMED) benchmark-pouch-perf timeout --kill-after=5s \
-	  '$(POUCH_PERF_TIMEOUT)' $(MAKE) __benchmark-pouch-perf
+	  '$(POUCH_PERF_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-perf
 
 __benchmark-pouch-perf-prepare:
 	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)
@@ -493,36 +496,36 @@ __benchmark-pouch-perf:
 	    $(POUCH_PERF_ROWS) $(POUCH_PERF_CASE)
 
 benchmark-pouch-perf-index-docs:
-	$(MAKE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-index-docs
+	$(MAKE_RECURSE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-index-docs
 
 benchmark-pouch-perf-full-text-keys:
-	$(MAKE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-full-text-keys
+	$(MAKE_RECURSE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-full-text-keys
 
 benchmark-pouch-perf-full-text-reopen-keys:
-	$(MAKE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-full-text-reopen-keys
+	$(MAKE_RECURSE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-full-text-reopen-keys
 
 benchmark-pouch-perf-scan-keys:
-	$(MAKE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-scan-keys
+	$(MAKE_RECURSE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-scan-keys
 
 benchmark-pouch-perf-flush-intermediate:
-	$(MAKE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-flush-intermediate
+	$(MAKE_RECURSE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-flush-intermediate
 
 benchmark-pouch-perf-flush-reopen:
-	$(MAKE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-flush-reopen
+	$(MAKE_RECURSE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-flush-reopen
 
 benchmark-pouch-routine: __benchmark-pouch-perf-prepare __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-routine timeout --kill-after=5s \
-	  '$(POUCH_GO_ROUTINE_TIMEOUT)' $(MAKE) __benchmark-pouch-routine
+	  '$(POUCH_GO_ROUTINE_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-routine
 
 __benchmark-pouch-routine:
-	$(MAKE) __benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-index-docs POUCH_PERF_ROWS='$(POUCH_PERF_ROUTINE_ROWS)' POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_ROUTINE_PAYLOAD_BYTES)'
-	$(MAKE) __benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-full-text-keys POUCH_PERF_ROWS='$(POUCH_PERF_ROUTINE_ROWS)' POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_ROUTINE_PAYLOAD_BYTES)'
-	$(MAKE) __benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-full-text-reopen-keys POUCH_PERF_ROWS='$(POUCH_PERF_ROUTINE_ROWS)' POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_ROUTINE_PAYLOAD_BYTES)'
-	$(MAKE) __benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-scan-keys POUCH_PERF_ROWS='$(POUCH_PERF_ROUTINE_ROWS)' POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_ROUTINE_PAYLOAD_BYTES)'
-	$(MAKE) __benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-flush-intermediate POUCH_PERF_ROWS='$(POUCH_PERF_ROUTINE_ROWS)' POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_ROUTINE_PAYLOAD_BYTES)'
-	$(MAKE) __benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-flush-reopen POUCH_PERF_ROWS='$(POUCH_PERF_ROUTINE_ROWS)' POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_ROUTINE_PAYLOAD_BYTES)'
-	$(MAKE) __benchmark-pouch-go-production-bounded POUCH_GO_BOUNDED_PRODUCTION_TIMEOUT='$(POUCH_GO_ROUTINE_TIMEOUT)'
-	$(MAKE) __benchmark-pouch-go-concurrency POUCH_GO_CONCURRENCY_TIMEOUT='$(POUCH_GO_ROUTINE_TIMEOUT)' POUCH_GO_CONCURRENCY_WRITERS='$(POUCH_GO_ROUTINE_CONCURRENCY_WRITERS)' POUCH_GO_CONCURRENCY_WRITES_PER_WRITER='$(POUCH_GO_ROUTINE_CONCURRENCY_WRITES_PER_WRITER)' POUCH_GO_CONCURRENCY_PAYLOAD_BYTES='$(POUCH_GO_ROUTINE_CONCURRENCY_PAYLOAD_BYTES)'
+	$(MAKE_RECURSE) __benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-index-docs POUCH_PERF_ROWS='$(POUCH_PERF_ROUTINE_ROWS)' POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_ROUTINE_PAYLOAD_BYTES)'
+	$(MAKE_RECURSE) __benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-full-text-keys POUCH_PERF_ROWS='$(POUCH_PERF_ROUTINE_ROWS)' POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_ROUTINE_PAYLOAD_BYTES)'
+	$(MAKE_RECURSE) __benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-full-text-reopen-keys POUCH_PERF_ROWS='$(POUCH_PERF_ROUTINE_ROWS)' POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_ROUTINE_PAYLOAD_BYTES)'
+	$(MAKE_RECURSE) __benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-scan-keys POUCH_PERF_ROWS='$(POUCH_PERF_ROUTINE_ROWS)' POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_ROUTINE_PAYLOAD_BYTES)'
+	$(MAKE_RECURSE) __benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-flush-intermediate POUCH_PERF_ROWS='$(POUCH_PERF_ROUTINE_ROWS)' POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_ROUTINE_PAYLOAD_BYTES)'
+	$(MAKE_RECURSE) __benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-flush-reopen POUCH_PERF_ROWS='$(POUCH_PERF_ROUTINE_ROWS)' POUCH_PERF_PAYLOAD_BYTES='$(POUCH_PERF_ROUTINE_PAYLOAD_BYTES)'
+	$(MAKE_RECURSE) __benchmark-pouch-go-production-bounded POUCH_GO_BOUNDED_PRODUCTION_TIMEOUT='$(POUCH_GO_ROUTINE_TIMEOUT)'
+	$(MAKE_RECURSE) __benchmark-pouch-go-concurrency POUCH_GO_CONCURRENCY_TIMEOUT='$(POUCH_GO_ROUTINE_TIMEOUT)' POUCH_GO_CONCURRENCY_WRITERS='$(POUCH_GO_ROUTINE_CONCURRENCY_WRITERS)' POUCH_GO_CONCURRENCY_WRITES_PER_WRITER='$(POUCH_GO_ROUTINE_CONCURRENCY_WRITES_PER_WRITER)' POUCH_GO_CONCURRENCY_PAYLOAD_BYTES='$(POUCH_GO_ROUTINE_CONCURRENCY_PAYLOAD_BYTES)'
 
 __benchmark-pouch-go-prepare: __build-x86_64-linux-gnu-release
 	mkdir -p $(ROOT)/.cache/go/pkg/mod $(ROOT)/.cache/go/build $(ROOT)/.cache/go/bin
@@ -530,10 +533,10 @@ __benchmark-pouch-go-prepare: __build-x86_64-linux-gnu-release
 	cd $(LOCKD_GO_MODULE_DIR) && $(LOCKD_GO_CACHE_ENV) $(GO) build -o $(ROOT)/.cache/go/bin/lockd ./cmd/lockd
 
 benchmark-pouch-go: __benchmark-pouch-go-prepare
-	$(TIMED) benchmark-pouch-go $(MAKE) __benchmark-pouch-go-run
+	$(TIMED) benchmark-pouch-go $(MAKE_RECURSE) __benchmark-pouch-go-run
 
 __benchmark-pouch-go: __benchmark-pouch-go-prepare
-	$(MAKE) __benchmark-pouch-go-run
+	$(MAKE_RECURSE) __benchmark-pouch-go-run
 
 __benchmark-pouch-go-run:
 	cd benchmark && \
@@ -563,10 +566,10 @@ __benchmark-pouch-go-run:
 
 benchmark-pouch-go-fast: __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-go-fast timeout --kill-after=5s \
-	  '$(POUCH_GO_FAST_TIMEOUT)' $(MAKE) __benchmark-pouch-go-fast
+	  '$(POUCH_GO_FAST_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-fast
 
 __benchmark-pouch-go-fast:
-	$(MAKE) __benchmark-pouch-go-run \
+	$(MAKE_RECURSE) __benchmark-pouch-go-run \
 	  POUCH_GO_BENCH='$(POUCH_GO_FAST_BENCH)' \
 	  POUCH_GO_BENCHTIME='$(POUCH_GO_FAST_BENCHTIME)' \
 	  POUCH_GO_SEED_ROWS='$(POUCH_GO_FAST_SEED_ROWS)' \
@@ -574,10 +577,10 @@ __benchmark-pouch-go-fast:
 
 benchmark-pouch-go-medium: __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-go-medium timeout --kill-after=5s \
-	  '$(POUCH_GO_MEDIUM_TIMEOUT)' $(MAKE) __benchmark-pouch-go-medium
+	  '$(POUCH_GO_MEDIUM_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-medium
 
 __benchmark-pouch-go-medium:
-	$(MAKE) __benchmark-pouch-go-run \
+	$(MAKE_RECURSE) __benchmark-pouch-go-run \
 	  POUCH_GO_BENCH='$(POUCH_GO_MEDIUM_BENCH)' \
 	  POUCH_GO_BENCHTIME='$(POUCH_GO_MEDIUM_BENCHTIME)' \
 	  POUCH_GO_SEED_ROWS='$(POUCH_GO_MEDIUM_SEED_ROWS)' \
@@ -587,10 +590,10 @@ __benchmark-pouch-go-medium:
 
 benchmark-pouch-go-acceptance: __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-go-acceptance timeout --kill-after=5s \
-	  '$(POUCH_GO_ACCEPTANCE_TIMEOUT)' $(MAKE) __benchmark-pouch-go-acceptance
+	  '$(POUCH_GO_ACCEPTANCE_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-acceptance
 
 __benchmark-pouch-go-acceptance:
-	$(MAKE) __benchmark-pouch-go-run \
+	$(MAKE_RECURSE) __benchmark-pouch-go-run \
 	  POUCH_GO_BENCH='$(POUCH_GO_ACCEPTANCE_BENCH)' \
 	  POUCH_GO_BENCHTIME='$(POUCH_GO_ACCEPTANCE_BENCHTIME)' \
 	  POUCH_GO_SEED_ROWS='$(POUCH_GO_ACCEPTANCE_SEED_ROWS)' \
@@ -600,10 +603,10 @@ __benchmark-pouch-go-acceptance:
 
 benchmark-pouch-go-production: __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-go-production timeout --kill-after=5s \
-	  '$(POUCH_GO_PRODUCTION_TIMEOUT)' $(MAKE) __benchmark-pouch-go-production
+	  '$(POUCH_GO_PRODUCTION_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-production
 
 __benchmark-pouch-go-production:
-	$(MAKE) __benchmark-pouch-go-run \
+	$(MAKE_RECURSE) __benchmark-pouch-go-run \
 	  POUCH_GO_BENCH='$(POUCH_GO_PRODUCTION_BENCH)' \
 	  POUCH_GO_BENCHTIME='$(POUCH_GO_PRODUCTION_BENCHTIME)' \
 	  POUCH_GO_SEED_ROWS='$(POUCH_GO_FAST_SEED_ROWS)' \
@@ -615,10 +618,10 @@ __benchmark-pouch-go-production:
 
 benchmark-pouch-go-durable: __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-go-durable timeout --kill-after=5s \
-	  '$(POUCH_GO_DURABLE_TIMEOUT)' $(MAKE) __benchmark-pouch-go-durable
+	  '$(POUCH_GO_DURABLE_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-durable
 
 __benchmark-pouch-go-durable:
-	$(MAKE) __benchmark-pouch-go-run \
+	$(MAKE_RECURSE) __benchmark-pouch-go-run \
 	  POUCH_GO_BENCH='$(POUCH_GO_DURABLE_BENCH)' \
 	  POUCH_GO_BENCHTIME='$(POUCH_GO_DURABLE_BENCHTIME)' \
 	  POUCH_GO_BENCH_COUNT='$(POUCH_GO_DURABLE_COUNT)' \
@@ -631,10 +634,10 @@ __benchmark-pouch-go-durable:
 
 benchmark-pouch-go-production-bounded: __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-go-production-bounded timeout --kill-after=5s \
-	  '$(POUCH_GO_BOUNDED_PRODUCTION_TIMEOUT)' $(MAKE) __benchmark-pouch-go-production-bounded
+	  '$(POUCH_GO_BOUNDED_PRODUCTION_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-production-bounded
 
 __benchmark-pouch-go-production-bounded:
-	$(MAKE) __benchmark-pouch-go-production \
+	$(MAKE_RECURSE) __benchmark-pouch-go-production \
 	  POUCH_GO_PRODUCTION_BENCHTIME='1x' \
 	  POUCH_GO_PRODUCTION_ROWS='$(POUCH_GO_BOUNDED_PRODUCTION_ROWS)' \
 	  POUCH_GO_PRODUCTION_UPDATES='$(POUCH_GO_BOUNDED_PRODUCTION_UPDATES)' \
@@ -644,10 +647,10 @@ __benchmark-pouch-go-production-bounded:
 
 benchmark-pouch-go-compaction: __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-go-compaction timeout --kill-after=5s \
-	  '$(POUCH_GO_COMPACTION_TIMEOUT)' $(MAKE) __benchmark-pouch-go-compaction
+	  '$(POUCH_GO_COMPACTION_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-compaction
 
 __benchmark-pouch-go-compaction:
-	$(MAKE) __benchmark-pouch-go-run \
+	$(MAKE_RECURSE) __benchmark-pouch-go-run \
 	  POUCH_GO_BENCH='$(POUCH_GO_COMPACTION_BENCH)' \
 	  POUCH_GO_BENCHTIME='$(POUCH_GO_COMPACTION_BENCHTIME)' \
 	  POUCH_GO_SEED_ROWS='$(POUCH_GO_FAST_SEED_ROWS)' \
@@ -661,10 +664,10 @@ __benchmark-pouch-go-compaction:
 
 benchmark-pouch-go-concurrency: __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-go-concurrency timeout --kill-after=5s \
-	  '$(POUCH_GO_CONCURRENCY_TIMEOUT)' $(MAKE) __benchmark-pouch-go-concurrency
+	  '$(POUCH_GO_CONCURRENCY_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-concurrency
 
 __benchmark-pouch-go-concurrency:
-	$(MAKE) __benchmark-pouch-go-run \
+	$(MAKE_RECURSE) __benchmark-pouch-go-run \
 	  POUCH_GO_BENCH='$(POUCH_GO_CONCURRENCY_BENCH)' \
 	  POUCH_GO_BENCHTIME='$(POUCH_GO_CONCURRENCY_BENCHTIME)' \
 	  POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_CONCURRENCY_TIMEOUT)' \
@@ -674,12 +677,12 @@ __benchmark-pouch-go-concurrency:
 
 benchmark-pouch-go-parity-gate: __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-go-parity-gate timeout --kill-after=5s \
-	  '$(POUCH_GO_PARITY_TIMEOUT)' $(MAKE) __benchmark-pouch-go-parity-gate
+	  '$(POUCH_GO_PARITY_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-parity-gate
 
 __benchmark-pouch-go-parity-gate:
 	mkdir -p $(ROOT)/build
 	set -o pipefail; \
-	$(MAKE) __benchmark-pouch-go-production \
+	$(MAKE_RECURSE) __benchmark-pouch-go-production \
 	    POUCH_GO_PRODUCTION_BENCH='$(POUCH_GO_PARITY_BENCH)' \
 	    POUCH_GO_PRODUCTION_BENCHTIME='$(POUCH_GO_PARITY_BENCHTIME)' \
 	    POUCH_GO_BENCH_COUNT='$(POUCH_GO_PARITY_COUNT)' \
@@ -689,12 +692,12 @@ __benchmark-pouch-go-parity-gate:
 
 benchmark-pouch-go-durable-gate: __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-go-durable-gate timeout --kill-after=5s \
-	  '$(POUCH_GO_DURABLE_GATE_TIMEOUT)' $(MAKE) __benchmark-pouch-go-durable-gate
+	  '$(POUCH_GO_DURABLE_GATE_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-durable-gate
 
 __benchmark-pouch-go-durable-gate:
 	mkdir -p $(ROOT)/build
 	set -o pipefail; \
-	  $(MAKE) __benchmark-pouch-go-durable \
+	  $(MAKE_RECURSE) __benchmark-pouch-go-durable \
 	    POUCH_GO_DURABLE_BENCHTIME='$(POUCH_GO_PARITY_BENCHTIME)' \
 	    POUCH_GO_DURABLE_COUNT='$(POUCH_GO_PARITY_COUNT)' \
 	    POUCH_GO_DURABLE_TIMEOUT='$(POUCH_GO_DURABLE_GATE_TIMEOUT)' \
@@ -703,10 +706,10 @@ __benchmark-pouch-go-durable-gate:
 
 benchmark-pouch-go-core-soak: __benchmark-pouch-go-prepare
 	$(TIMED) benchmark-pouch-go-core-soak timeout --kill-after=5s \
-	  '$(POUCH_GO_CORE_SOAK_TIMEOUT)' $(MAKE) __benchmark-pouch-go-core-soak
+	  '$(POUCH_GO_CORE_SOAK_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-core-soak
 
 __benchmark-pouch-go-core-soak:
-	$(MAKE) __benchmark-pouch-go-run \
+	$(MAKE_RECURSE) __benchmark-pouch-go-run \
 	  POUCH_GO_BENCH='$(POUCH_GO_CORE_SOAK_BENCH)' \
 	  POUCH_GO_BENCHTIME='$(POUCH_GO_CORE_SOAK_BENCHTIME)' \
 	  POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_CORE_SOAK_TIMEOUT)' \
@@ -716,73 +719,74 @@ __benchmark-pouch-go-core-soak:
 	  LOCKDC_BENCH_PRODUCTION_SEGMENT_TARGET_BYTES='$(POUCH_GO_CORE_SOAK_SEGMENT_TARGET_BYTES)'
 
 __pouch-core-hardening: __benchmark-pouch-go-prepare
-	$(TIMED) 'pouch-core-hardening soak' $(MAKE) __benchmark-pouch-go-core-soak
+	$(TIMED) 'pouch-core-hardening soak' timeout --kill-after=5s \
+	  '$(POUCH_GO_CORE_SOAK_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-core-soak
 	$(TIMED) 'pouch-core-hardening reclaim' timeout --kill-after=5s \
-	  '$(POUCH_GO_HARDENING_COMPACTION_TIMEOUT)' $(MAKE) __benchmark-pouch-go-compaction \
+	  '$(POUCH_GO_HARDENING_COMPACTION_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-compaction \
 	  POUCH_GO_COMPACTION_TIMEOUT='$(POUCH_GO_HARDENING_COMPACTION_TIMEOUT)' \
 	  POUCH_GO_COMPACTION_ROWS='$(POUCH_GO_HARDENING_COMPACTION_ROWS)' \
 	  POUCH_GO_COMPACTION_UPDATES='$(POUCH_GO_HARDENING_COMPACTION_UPDATES)' \
 	  POUCH_GO_COMPACTION_PAYLOAD_BYTES='$(POUCH_GO_HARDENING_COMPACTION_PAYLOAD_BYTES)' \
 	  POUCH_GO_COMPACTION_SEGMENT_TARGET_BYTES='$(POUCH_GO_HARDENING_COMPACTION_SEGMENT_TARGET_BYTES)'
 	$(TIMED) 'pouch-core-hardening shared-root' timeout --kill-after=5s \
-	  '$(POUCH_GO_HARDENING_CONCURRENCY_TIMEOUT)' $(MAKE) __benchmark-pouch-go-concurrency \
+	  '$(POUCH_GO_HARDENING_CONCURRENCY_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-concurrency \
 	  POUCH_GO_CONCURRENCY_TIMEOUT='$(POUCH_GO_HARDENING_CONCURRENCY_TIMEOUT)' \
 	  POUCH_GO_CONCURRENCY_WRITERS='$(POUCH_GO_HARDENING_CONCURRENCY_WRITERS)' \
 	  POUCH_GO_CONCURRENCY_WRITES_PER_WRITER='$(POUCH_GO_HARDENING_CONCURRENCY_WRITES_PER_WRITER)' \
 	  POUCH_GO_CONCURRENCY_PAYLOAD_BYTES='$(POUCH_GO_HARDENING_CONCURRENCY_PAYLOAD_BYTES)'
 
 package:
-	$(TIMED) package $(MAKE) __package
+	$(TIMED) package $(MAKE_RECURSE) __package
 
 __package: __build-x86_64-linux-gnu-release
-	$(MAKE) __clean-dist
+	$(MAKE_RECURSE) __clean-dist
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_archive.cmake
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_source.cmake
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_lua_rock.cmake
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_checksums.cmake
 
 package-source:
-	$(TIMED) package-source $(MAKE) __package-source
+	$(TIMED) package-source $(MAKE_RECURSE) __package-source
 
 __package-source: __build-x86_64-linux-gnu-release
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_source.cmake
 
 package-source-smoke:
-	$(TIMED) package-source-smoke $(MAKE) __package-source-smoke
+	$(TIMED) package-source-smoke $(MAKE_RECURSE) __package-source-smoke
 
 __package-source-smoke: __package-source
 	bash ./scripts/test_release_from_source.sh $(ROOT) $$(ls -t $(DIST_DIR)/liblockdc-*.tar.gz | grep -v -- 'liblockdc-lua-' | grep -v -- '-linux-' | grep -v -- '-apple-darwin' | head -n1)
 
 package-checksums:
-	$(TIMED) package-checksums $(MAKE) __package-checksums
+	$(TIMED) package-checksums $(MAKE_RECURSE) __package-checksums
 
 __package-checksums: __package
 
 package-verify:
-	$(TIMED) package-verify $(MAKE) __package-verify
+	$(TIMED) package-verify $(MAKE_RECURSE) __package-verify
 
 __package-verify: __release-matrix __verify-release-privacy
 
 verify-release-privacy:
-	$(TIMED) verify-release-privacy $(MAKE) __verify-release-privacy
+	$(TIMED) verify-release-privacy $(MAKE_RECURSE) __verify-release-privacy
 
 __verify-release-privacy:
 	bash ./scripts/verify_release_privacy.sh
 
 lua-rock:
-	$(TIMED) lua-rock $(MAKE) __lua-rock
+	$(TIMED) lua-rock $(MAKE_RECURSE) __lua-rock
 
 __lua-rock: __build-x86_64-linux-gnu-release
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_lua_rock.cmake
 
 lua-test:
-	$(TIMED) lua-test $(MAKE) __lua-test
+	$(TIMED) lua-test $(MAKE_RECURSE) __lua-test
 
 __lua-test: __build-debug
 	$(CTEST) --preset debug-lua
 
 lua-env:
-	$(TIMED) lua-env $(MAKE) __lua-env
+	$(TIMED) lua-env $(MAKE_RECURSE) __lua-env
 
 __lua-env:
 	@printf 'export LOCKDC_PREFIX=%s\n' '$(X86_64_GNU_RELEASE_BUILD_DIR)/package/liblockdc-$$(sed -n '"'"'s/^set(LOCKDC_VERSION "\(.*\)")$$/\1/p'"'"' $(X86_64_GNU_RELEASE_BUILD_DIR)/package-metadata.cmake)-x86_64-linux-gnu'
@@ -790,7 +794,7 @@ __lua-env:
 	@printf 'export LUA_CPATH=%s\n' '$(ROOT)/.luarocks-build/lockdc/?.so;;'
 
 release-lua-artifacts:
-	$(TIMED) release-lua-artifacts $(MAKE) __release-lua-artifacts
+	$(TIMED) release-lua-artifacts $(MAKE_RECURSE) __release-lua-artifacts
 
 __release-lua-artifacts: __lua-rock
 
@@ -800,46 +804,46 @@ verify-release-archives:
 	$(CMAKE) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -DLOCKDC_RELEASE_PRESETS="$$release_presets" -P $(ROOT)/tests/release_matrix_archives_test.cmake
 
 clean-dist:
-	$(TIMED) clean-dist $(MAKE) __clean-dist
+	$(TIMED) clean-dist $(MAKE_RECURSE) __clean-dist
 
 __clean-dist:
 	$(CMAKE) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_clean_dist.cmake
 
 cross-build:
-	$(TIMED) cross-build $(MAKE) __cross-build
+	$(TIMED) cross-build $(MAKE_RECURSE) __cross-build
 
 __cross-build: __deps-cross
 	bash ./scripts/cross_build.sh
 
 cross-preset-test:
-	$(TIMED) cross-preset-test $(MAKE) __cross-preset-test
+	$(TIMED) cross-preset-test $(MAKE_RECURSE) __cross-preset-test
 
 __cross-preset-test:
 	bash ./scripts/cross_test.sh preset
 
 cross-test:
-	$(TIMED) cross-test $(MAKE) __cross-test
+	$(TIMED) cross-test $(MAKE_RECURSE) __cross-test
 
 __cross-test: __cross-build
 	bash ./scripts/cross_test.sh all
 
 release:
-	$(TIMED) release $(MAKE) __release
+	$(TIMED) release $(MAKE_RECURSE) __release
 
 prerelease:
-	$(TIMED) prerelease $(MAKE) __prerelease
+	$(TIMED) prerelease $(MAKE_RECURSE) __prerelease
 
 __prerelease-ordinary:
-	$(TIMED) 'prerelease finalize-slice' $(MAKE) __finalize-slice
-	$(TIMED) 'prerelease valgrind' $(MAKE) __valgrind
-	$(TIMED) 'prerelease fuzz-smoke' $(MAKE) __fuzz-smoke
-	$(TIMED) 'prerelease e2e' $(MAKE) __test-e2e
-	$(TIMED) 'prerelease bench-gate' $(MAKE) __bench-gate
+	$(TIMED) 'prerelease finalize-slice' $(MAKE_RECURSE) __finalize-slice
+	$(TIMED) 'prerelease valgrind' $(MAKE_RECURSE) __valgrind
+	$(TIMED) 'prerelease fuzz-smoke' $(MAKE_RECURSE) __fuzz-smoke
+	$(TIMED) 'prerelease e2e' $(MAKE_RECURSE) __test-e2e
+	$(TIMED) 'prerelease bench-gate' $(MAKE_RECURSE) __bench-gate
 
 __prerelease: __prerelease-ordinary
 
 prerelease-live:
-	$(TIMED) prerelease-live $(MAKE) __prerelease-live
+	$(TIMED) prerelease-live $(MAKE_RECURSE) __prerelease-live
 
 __prerelease-live:
 	@if [ "$${LOCKDC_PRERELEASE_LIVE:-}" != "1" ]; then \
@@ -858,12 +862,12 @@ __prerelease-live:
 	@printf '%s\n' '[prerelease-live] no live-provider checks are currently defined'
 
 prerelease-hardening:
-	$(TIMED) prerelease-hardening $(MAKE) __prerelease-hardening
+	$(TIMED) prerelease-hardening $(MAKE_RECURSE) __prerelease-hardening
 
 __prerelease-hardening: __prerelease __pouch-core-hardening __fuzz __release-matrix
 
 lifecycle-version-contract:
-	$(TIMED) lifecycle-version-contract $(MAKE) __lifecycle-version-contract
+	$(TIMED) lifecycle-version-contract $(MAKE_RECURSE) __lifecycle-version-contract
 
 __lifecycle-version-contract:
 	bash ./scripts/lifecycle-version-contract.sh
@@ -877,13 +881,13 @@ __release:
 __release-pipeline: __prerelease __release-matrix
 
 release-matrix:
-	$(TIMED) release-matrix $(MAKE) __release-matrix
+	$(TIMED) release-matrix $(MAKE_RECURSE) __release-matrix
 
 __release-matrix:
 	bash ./scripts/run_linux_release_matrix.sh
 
 clean:
-	$(TIMED) clean $(MAKE) __clean
+	$(TIMED) clean $(MAKE_RECURSE) __clean
 
 __clean:
 	bash ./scripts/clean.sh

@@ -22,12 +22,23 @@ foreach(snippet
         "POUCH_GO_BENCH='$(POUCH_GO_CORE_SOAK_BENCH)'"
         "POUCH_GO_BENCHTIME='$(POUCH_GO_CORE_SOAK_BENCHTIME)'"
         "POUCH_GO_TEST_TIMEOUT='$(POUCH_GO_CORE_SOAK_TIMEOUT)'"
+        "'$(POUCH_GO_CORE_SOAK_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-core-soak"
         "LOCKDC_BENCH_PRODUCTION_PAYLOAD_BYTES='$(POUCH_GO_PRODUCTION_PAYLOAD_BYTES)'")
     string(FIND "${root_makefile}" "${snippet}" snippet_index)
     if(snippet_index EQUAL -1)
         message(FATAL_ERROR "Makefile is missing Go benchmark timeout contract snippet: ${snippet}")
     endif()
 endforeach()
+
+# GNU Make executes recipe lines containing a direct $(MAKE) reference even
+# under `make -n`. All recursive lifecycle calls must go through the indirect
+# command variable so dry-runs cannot start builds, tests, or benchmarks.
+string(REGEX MATCH "\n\t[^\n]*\\$\\(MAKE\\)"
+                   direct_recursive_make_recipe "${root_makefile}")
+if(NOT direct_recursive_make_recipe STREQUAL "")
+    message(FATAL_ERROR
+        "Makefile contains a direct $(MAKE) recipe reference; make -n would execute it")
+endif()
 
 # Every production speed claim is a core lockd invariant. Keep the parser
 # allowlist explicit so a benchmark refactor cannot silently drop one from the
