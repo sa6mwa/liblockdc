@@ -994,6 +994,32 @@ static void lc_pouch_indexer_deadline(const lc_pouch *pouch,
   }
 }
 
+/* The idle debounce remains anchored to the first pending mutation. A live
+ * lease guard can only shorten that wait so expiration resumes publication
+ * promptly; it never resets the batching boundary on later signals. */
+static void lc_pouch_indexer_cap_deadline_for_operation_expiry_locked(
+    lc_pouch *pouch, struct timespec *deadline) {
+  lc_pouch_indexer_pending_namespace *entry;
+
+  if (pouch == NULL || deadline == NULL) {
+    return;
+  }
+  for (entry = pouch->indexer_pending_namespaces; entry != NULL;
+       entry = entry->next) {
+    lc_pouch_unix_seconds expires_at_unix;
+
+    expires_at_unix = lc_pouch_query_index_next_operation_expiry_locked(
+        pouch, entry->namespace_name);
+    if (expires_at_unix <= 0L || (lc_u64)expires_at_unix > (lc_u64)LONG_MAX) {
+      continue;
+    }
+    if ((time_t)expires_at_unix < deadline->tv_sec) {
+      deadline->tv_sec = (time_t)expires_at_unix;
+      deadline->tv_nsec = 0L;
+    }
+  }
+}
+
 #ifdef LOCKDC_TEST_BUILD
 void lc_pouch_test_indexer_deadline(lc_pouch *pouch,
                                     struct timespec *deadline) {
@@ -1210,6 +1236,7 @@ static void *lc_pouch_indexer_worker(void *arg) {
   pthread_mutex_lock(&pouch->indexer_mutex);
   while (!pouch->indexer_stop) {
     lc_pouch_indexer_pending_namespace *batch;
+    struct timespec idle_deadline;
     struct timespec deadline;
     int wait_rc;
 
@@ -1219,11 +1246,14 @@ static void *lc_pouch_indexer_worker(void *arg) {
     if (pouch->indexer_stop) {
       break;
     }
-    lc_pouch_indexer_deadline(pouch, &deadline);
+    lc_pouch_indexer_deadline(pouch, &idle_deadline);
     wait_rc = 0;
     while (!pouch->indexer_stop &&
            !lc_pouch_indexer_flush_limit_reached_locked(pouch) &&
            wait_rc != ETIMEDOUT) {
+      deadline = idle_deadline;
+      lc_pouch_indexer_cap_deadline_for_operation_expiry_locked(pouch,
+                                                                &deadline);
       wait_rc = pthread_cond_timedwait(&pouch->indexer_cond,
                                        &pouch->indexer_mutex, &deadline);
     }
@@ -1359,14 +1389,15 @@ void lc_pouch_indexer_note_mutation(lc_pouch *pouch,
 
 void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch,
                                               const char *namespace_name,
-                                              const char *key) {
+                                              const char *key,
+                                              const char *operation_id) {
   lc_pouch_indexer_pending_namespace *threshold_batch;
   int eager_publish;
   int published;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      key == NULL || key[0] == '\0' || pouch->aborted ||
-      !pouch->indexer_thread_started) {
+      key == NULL || key[0] == '\0' || pouch->aborted || operation_id == NULL ||
+      operation_id[0] == '\0' || !pouch->indexer_thread_started) {
     return;
   }
   eager_publish = 0;
@@ -1374,7 +1405,7 @@ void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch,
   pthread_mutex_lock(&pouch->indexer_mutex);
   if (!pouch->indexer_stop && lc_pouch_single_writer_enabled(pouch)) {
     if (lc_pouch_query_index_pending_operation_complete_locked(
-            pouch, namespace_name, key)) {
+            pouch, namespace_name, key, operation_id)) {
       eager_publish = lc_pouch_indexer_namespace_flush_limit_reached_locked(
           pouch, namespace_name);
       if (eager_publish) {

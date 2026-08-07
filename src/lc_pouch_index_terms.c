@@ -1391,6 +1391,19 @@ void lc_pouch_index_term_generation_cleanup(
   memset(generation, 0, sizeof(*generation));
 }
 
+void lc_pouch_index_term_generation_sort_terms(
+    lc_pouch_index_term_generation *generation) {
+  if (generation == NULL) {
+    return;
+  }
+  if (generation->terms.count > 1U) {
+    qsort(generation->terms.items, generation->terms.count,
+          sizeof(generation->terms.items[0]),
+          lc_pouch_index_term_entry_compare);
+  }
+  generation->terms_sorted = 1;
+}
+
 int lc_pouch_index_term_generation_encode(
     const lc_pouch_index_term_generation *generation,
     const lc_allocator *allocator, char **out_bytes, size_t *out_length,

@@ -344,6 +344,7 @@ typedef struct lc_pouch_lease_precondition {
   const lc_lease_ref *lease;
   const char *namespace_name;
   const char *key;
+  lc_pouch_unix_seconds lease_expires_at_unix;
 } lc_pouch_lease_precondition;
 
 typedef struct lc_pouch_lease_write_context {
@@ -8317,7 +8318,9 @@ static int lc_pouch_lease_view_precondition_check(
     const lc_pouch_state_precondition_view *current, void *context,
     lc_error *error) {
   lc_pouch_lease_precondition *precondition;
+  lc_pouch_lease_record lease_record;
   lc_pouch_state_metadata_view state_view;
+  int rc;
 
   precondition = (lc_pouch_lease_precondition *)context;
   if (precondition == NULL || current == NULL) {
@@ -8326,6 +8329,7 @@ static int lc_pouch_lease_view_precondition_check(
                         NULL, "pouch");
   }
   memset(&state_view, 0, sizeof(state_view));
+  memset(&lease_record, 0, sizeof(lease_record));
   state_view.found = current->found;
   state_view.version = current->version;
   state_view.metadata = current->metadata;
@@ -8333,9 +8337,14 @@ static int lc_pouch_lease_view_precondition_check(
   state_view.has_query_hidden = current->has_query_hidden;
   state_view.query_hidden = current->query_hidden;
   state_view.has_body = current->has_body;
-  return lc_pouch_validate_lease_metadata_view(
+  rc = lc_pouch_validate_lease_metadata_view(
       precondition->client, precondition->lease, precondition->namespace_name,
-      precondition->key, &state_view, NULL, error);
+      precondition->key, &state_view, &lease_record, error);
+  if (rc == LC_OK) {
+    precondition->lease_expires_at_unix = lease_record.expires_at_unix;
+  }
+  lc_pouch_lease_record_cleanup(&lease_record);
+  return rc;
 }
 
 /* The state layer supplies all three resident views while namespace mutation
@@ -11079,6 +11088,11 @@ static int lc_pouch_txn_apply_state_participant_locked(void *context,
   }
 
 cleanup:
+  if (rc != LC_OK && write_result.query_index_operation_guard_started) {
+    lc_pouch_query_index_operation_cancel(
+        ctx->client->pouch, ctx->namespace_name, ctx->key, ctx->txn_id);
+    write_result.query_index_operation_guard_started = 0;
+  }
   lc_pouch_state_write_result_cleanup(&ctx->client->allocator, &write_result);
   lc_pouch_lease_record_cleanup(&lease_record);
   lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &fallback);
@@ -11249,8 +11263,8 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
     if (rc != LC_OK) {
       return rc;
     }
-    lc_pouch_indexer_note_operation_complete(client->pouch, namespace_name,
-                                             req->participants[i].key);
+    lc_pouch_indexer_note_operation_complete(
+        client->pouch, namespace_name, req->participants[i].key, req->txn_id);
   }
   return LC_OK;
 }
@@ -12164,11 +12178,14 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
   options.content_type =
       req->content_type != NULL ? req->content_type : "application/json";
   options.query_index_operation_active = 1;
+  options.query_index_operation_id = req->lease.lease_id;
   options.expected_etag = req->if_state_etag;
   lease_precondition.client = client;
   lease_precondition.lease = &req->lease;
   lease_precondition.namespace_name = namespace_name;
   lease_precondition.key = req->lease.key;
+  options.query_index_operation_expires_at_unix =
+      &lease_precondition.lease_expires_at_unix;
   if (!lc_pouch_txn_id_present(req->lease.txn_id)) {
     options.view_precondition = lc_pouch_lease_view_precondition_check;
     options.view_precondition_context = &lease_precondition;
@@ -12258,11 +12275,14 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
   }
   options.content_type = "application/json";
   options.query_index_operation_active = 1;
+  options.query_index_operation_id = req->lease.lease_id;
   options.expected_etag = req->if_state_etag;
   lease_precondition.client = client;
   lease_precondition.lease = &req->lease;
   lease_precondition.namespace_name = namespace_name;
   lease_precondition.key = req->lease.key;
+  options.query_index_operation_expires_at_unix =
+      &lease_precondition.lease_expires_at_unix;
   if (!lc_pouch_txn_id_present(req->lease.txn_id)) {
     options.view_precondition = lc_pouch_lease_view_precondition_check;
     options.view_precondition_context = &lease_precondition;
@@ -12424,6 +12444,7 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
   memset(&result, 0, sizeof(result));
   staged_removed = 0;
   options.query_index_operation_active = 1;
+  options.query_index_operation_id = req->lease.lease_id;
   options.expected_etag = req->if_state_etag;
   rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
                                         &namespace_name, error);
@@ -12446,6 +12467,8 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
   lease_precondition.lease = &req->lease;
   lease_precondition.namespace_name = namespace_name;
   lease_precondition.key = req->lease.key;
+  options.query_index_operation_expires_at_unix =
+      &lease_precondition.lease_expires_at_unix;
   if (lc_pouch_txn_id_present(req->lease.txn_id)) {
     rc = lc_pouch_client_stage_transaction_remove(
         client, &req->lease, namespace_name, req->lease.key, req->lease.txn_id,
@@ -12463,8 +12486,8 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
       /* Removing a non-transactional document consumes its lease metadata,
        * so remove itself is the final operation boundary for foreground
        * indexing. A later lease release cannot observe this lease. */
-      lc_pouch_indexer_note_operation_complete(client->pouch, namespace_name,
-                                               req->lease.key);
+      lc_pouch_indexer_note_operation_complete(
+          client->pouch, namespace_name, req->lease.key, req->lease.lease_id);
     }
   }
   if (rc == LC_OK) {
@@ -12519,6 +12542,13 @@ int lc_pouch_client_keepalive_method(lc_client *self,
   rc = lc_pouch_state_with_key_lock(client->pouch, namespace_name,
                                     req->lease.key, lc_pouch_keepalive_locked,
                                     &keepalive_context, error);
+  if (rc == LC_OK) {
+    lc_pouch_query_index_operation_refresh(
+        client->pouch, namespace_name, req->lease.key,
+        lc_pouch_txn_id_present(req->lease.txn_id) ? req->lease.txn_id
+                                                   : req->lease.lease_id,
+        lease_expires_at_unix);
+  }
   if (rc == LC_OK && keepalive_context.write_result.etag != NULL) {
     state_etag = lc_strdup_local(keepalive_context.write_result.etag);
   }
@@ -12762,8 +12792,10 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
   if (rc != LC_OK) {
     return rc;
   }
-  lc_pouch_indexer_note_operation_complete(client->pouch, namespace_name,
-                                           req->lease.key);
+  lc_pouch_indexer_note_operation_complete(
+      client->pouch, namespace_name, req->lease.key,
+      lc_pouch_txn_id_present(req->lease.txn_id) ? req->lease.txn_id
+                                                 : req->lease.lease_id);
   memset(out, 0, sizeof(*out));
   out->released = 1;
   return LC_OK;
@@ -18368,7 +18400,9 @@ int lc_pouch_lease_release_method(lc_lease *self, const lc_release_req *req,
                                         &write_result);
     if (rc == LC_OK) {
       lc_pouch_indexer_note_operation_complete(
-          lease->client->pouch, lease->namespace_name, lease->key);
+          lease->client->pouch, lease->namespace_name, lease->key,
+          lc_pouch_txn_id_present(lease->txn_id) ? lease->txn_id
+                                                 : lease->lease_id);
     }
     return rc;
   }

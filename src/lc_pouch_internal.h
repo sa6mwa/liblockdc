@@ -21,6 +21,8 @@ typedef struct lc_pouch_query_index_manifest_trust_entry
     lc_pouch_query_index_manifest_trust_entry;
 typedef struct lc_pouch_query_index_pending_entry
     lc_pouch_query_index_pending_entry;
+typedef struct lc_pouch_query_index_active_operation
+    lc_pouch_query_index_active_operation;
 typedef struct lc_pouch_fsync_request lc_pouch_fsync_request;
 typedef struct lc_pouch_fsync_batcher lc_pouch_fsync_batcher;
 typedef struct lc_pouch_state_metadata_append_batcher
@@ -237,6 +239,10 @@ struct lc_pouch {
   /* Exclusive-writer derived postings awaiting immutable publication. This is
    * protected by indexer_mutex and deliberately stores no document bodies. */
   lc_pouch_query_index_pending_entry *query_pending_index;
+  /* Lease- and transaction-scoped publication guards. Kept independently of
+   * a pending projection so installing a guard never performs filesystem I/O
+   * on the foreground write path. Protected by indexer_mutex. */
+  lc_pouch_query_index_active_operation *query_active_operations;
 };
 
 #ifdef LOCKDC_TEST_BUILD
@@ -320,12 +326,14 @@ void lc_pouch_indexer_note_mutation(lc_pouch *pouch,
  * roots retain asynchronous replay. */
 void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch,
                                               const char *namespace_name,
-                                              const char *key);
-/** Removes one completed key from the exclusive writer's pending-operation
- * set. The caller holds `indexer_mutex`; allocation failure is conservative
- * and leaves derived publication queued. */
+                                              const char *key,
+                                              const char *operation_id);
+/** Removes one matching completed operation from the exclusive writer's
+ * pending-operation set. The caller holds `indexer_mutex`; allocation failure
+ * is conservative and leaves derived publication queued. */
 int lc_pouch_query_index_pending_operation_complete_locked(
-    lc_pouch *pouch, const char *namespace_name, const char *key);
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *operation_id);
 void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch);
 int lc_pouch_state_metadata_append_worker_init(lc_pouch *pouch,
                                                lc_error *error);

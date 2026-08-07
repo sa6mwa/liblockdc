@@ -6176,6 +6176,9 @@ static int lc_pouch_state_meta_set_snapshot_index_sequences(
   int has_query_index_seq;
   int rc;
 
+  trailer_offset = 0U;
+  has_query_index_seq = 0;
+
   if (meta_io == NULL || meta_length_io == NULL || *meta_io == NULL ||
       *meta_length_io > LC_POUCH_STATE_RECORD_META_MAX_BYTES -
                             LC_POUCH_STATE_INDEX_TRAILER_BYTES) {
@@ -11196,6 +11199,7 @@ static int lc_pouch_state_write_resolved_locked(
   int streaming_projection_mutex_released;
   int projection_rc;
   int use_prepared_current;
+  int query_index_guard_started;
   uint64_t writer_mode_epoch;
   unsigned char put_record_type;
   lc_pouch_state_precondition_view precondition_view;
@@ -11219,6 +11223,7 @@ static int lc_pouch_state_write_resolved_locked(
       lc_pouch_state_namespace_lock_is_held(pouch, namespace_name);
   body_batch_plain = NULL;
   body_batch_plain_len = 0U;
+  query_index_guard_started = 0;
   if (!single_writer && !namespace_locked &&
       !lc_pouch_state_body_append_worker_active() &&
       lc_source_memory_view(body, &body_batch_plain, &body_batch_plain_len) &&
@@ -11840,6 +11845,17 @@ static int lc_pouch_state_write_resolved_locked(
       rc = lc_pouch_state_defer_fsync(pouch, fd, error);
     }
   }
+  if (rc == LC_OK && options != NULL && options->query_index_operation_active &&
+      !options->object_record) {
+    lc_pouch_unix_seconds expires_at_unix;
+
+    expires_at_unix = options->query_index_operation_expires_at_unix != NULL
+                          ? *options->query_index_operation_expires_at_unix
+                          : 0L;
+    rc = lc_pouch_query_index_operation_begin(
+        pouch, namespace_name, key, options->query_index_operation_id,
+        expires_at_unix, &query_index_guard_started, error);
+  }
   if (!retain_active_append_fd && close(fd) != 0 && rc == LC_OK) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                       "failed to close pouch state segment", strerror(errno),
@@ -11908,6 +11924,7 @@ static int lc_pouch_state_write_resolved_locked(
     out->updated_at_unix = updated_at_unix;
     out->has_query_hidden = has_query_hidden;
     out->query_hidden = query_hidden;
+    out->query_index_operation_guard_started = query_index_guard_started;
     etag = NULL;
     descriptor = NULL;
   }
@@ -11921,6 +11938,10 @@ static int lc_pouch_state_write_resolved_locked(
   lc_free_with_allocator(&pouch->allocator, segment_path);
   lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  if (rc != LC_OK && query_index_guard_started) {
+    lc_pouch_query_index_operation_cancel(pouch, namespace_name, key,
+                                          options->query_index_operation_id);
+  }
   return rc;
 }
 
@@ -12054,6 +12075,12 @@ int lc_pouch_state_write_prepared(lc_pouch *pouch, const char *namespace_name,
   rc = lc_pouch_state_with_key_lock(pouch, namespace_name, key,
                                     lc_pouch_state_write_prepared_locked,
                                     &context, error);
+  if (rc != LC_OK && out->query_index_operation_guard_started &&
+      options->query_index_operation_id != NULL) {
+    lc_pouch_query_index_operation_cancel(pouch, namespace_name, key,
+                                          options->query_index_operation_id);
+    out->query_index_operation_guard_started = 0;
+  }
   lc_pouch_state_log_write_result(pouch, namespace_name, key, options,
                                   context.body, out, rc, error);
   if (context.body != NULL) {
@@ -12092,6 +12119,12 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
                                    out, error);
   rc = lc_pouch_state_finish_commit_group_after_mutation(
       pouch, &lock, commit_group, owns_commit_group, rc, error);
+  if (rc != LC_OK && out->query_index_operation_guard_started &&
+      options != NULL && options->query_index_operation_id != NULL) {
+    lc_pouch_query_index_operation_cancel(pouch, namespace_name, key,
+                                          options->query_index_operation_id);
+    out->query_index_operation_guard_started = 0;
+  }
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }
@@ -13287,6 +13320,7 @@ static int lc_pouch_state_delete_locked(
   lc_pouch_generation version;
   lc_pouch_generation index_seq;
   lc_pouch_unix_seconds updated_at_unix;
+  int query_index_guard_started;
   int rc;
   lc_pouch_state_precondition_view precondition_view;
 
@@ -13299,6 +13333,7 @@ static int lc_pouch_state_delete_locked(
   }
   memset(out, 0, sizeof(*out));
   index_seq = 0UL;
+  query_index_guard_started = 0;
   rc = lc_pouch_state_manifest_lookup_cached_for_mutation(
       pouch, namespace_name, key, &manifest, &current, &max_version, error);
   if (rc != LC_OK) {
@@ -13365,6 +13400,23 @@ static int lc_pouch_state_delete_locked(
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
   updated_at_unix = lc_pouch_maintenance_now_seconds();
+  if (options != NULL && options->query_index_operation_active &&
+      !options->object_record) {
+    lc_pouch_unix_seconds expires_at_unix;
+
+    expires_at_unix = options->query_index_operation_expires_at_unix != NULL
+                          ? *options->query_index_operation_expires_at_unix
+                          : 0L;
+    rc = lc_pouch_query_index_operation_begin(
+        pouch, namespace_name, key, options->query_index_operation_id,
+        expires_at_unix, &query_index_guard_started, error);
+    if (rc != LC_OK) {
+      lc_free_with_allocator(&pouch->allocator, etag);
+      lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
+      lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+      return rc;
+    }
+  }
   rc = lc_pouch_state_append_tombstone(pouch, namespace_name, &manifest, key,
                                        etag, version, updated_at_unix,
                                        options != NULL && options->object_record
@@ -13385,11 +13437,16 @@ static int lc_pouch_state_delete_locked(
     out->version = version;
     out->bytes = 0UL;
     out->updated_at_unix = updated_at_unix;
+    out->query_index_operation_guard_started = query_index_guard_started;
     etag = NULL;
   }
   lc_free_with_allocator(&pouch->allocator, etag);
   lc_pouch_state_entry_cleanup(&pouch->allocator, &current);
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
+  if (rc != LC_OK && query_index_guard_started) {
+    lc_pouch_query_index_operation_cancel(pouch, namespace_name, key,
+                                          options->query_index_operation_id);
+  }
   return rc;
 }
 
@@ -13423,6 +13480,12 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
                                     error);
   rc = lc_pouch_state_finish_commit_group_after_mutation(
       pouch, &lock, commit_group, owns_commit_group, rc, error);
+  if (rc != LC_OK && out->query_index_operation_guard_started &&
+      options != NULL && options->query_index_operation_id != NULL) {
+    lc_pouch_query_index_operation_cancel(pouch, namespace_name, key,
+                                          options->query_index_operation_id);
+    out->query_index_operation_guard_started = 0;
+  }
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }
@@ -13666,6 +13729,7 @@ static int lc_pouch_state_promote_staged_locked(
   const unsigned char *promoted_metadata;
   size_t promoted_metadata_length;
   lc_pouch_unix_seconds updated_at_unix;
+  int query_index_guard_started;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -13686,6 +13750,7 @@ static int lc_pouch_state_promote_staged_locked(
   memset(&manifest, 0, sizeof(manifest));
   memset(&committed, 0, sizeof(committed));
   memset(&staged, 0, sizeof(staged));
+  query_index_guard_started = 0;
   rc = lc_pouch_state_manifest_lookup_cached_for_mutation(
       pouch, namespace_name, key, &manifest, &committed, NULL, error);
   if (rc == LC_OK) {
@@ -13708,10 +13773,22 @@ static int lc_pouch_state_promote_staged_locked(
                       NULL);
     goto cleanup;
   }
+  if (operation_active &&
+      !lc_pouch_state_record_type_is_object(staged.record_type)) {
+    rc = lc_pouch_query_index_operation_begin(
+        pouch, namespace_name, key, txn_id, 0L, &query_index_guard_started,
+        error);
+    if (rc != LC_OK) {
+      goto cleanup;
+    }
+  }
   if (lc_pouch_state_is_staged_delete_marker(&staged)) {
     rc = lc_pouch_state_commit_staged_delete_locked(
         pouch, namespace_name, &manifest, key, staged_key, &committed, &staged,
         out, operation_active, error);
+    if (rc == LC_OK) {
+      out->query_index_operation_guard_started = query_index_guard_started;
+    }
     goto cleanup;
   }
   if (expected_committed_etag != NULL) {
@@ -13783,6 +13860,7 @@ static int lc_pouch_state_promote_staged_locked(
     }
   }
   out->updated_at_unix = updated_at_unix;
+  out->query_index_operation_guard_started = query_index_guard_started;
   if (!lc_pouch_state_record_type_is_object(staged.record_type)) {
     lc_pouch_query_index_note_state_write(
         pouch, namespace_name, key,
@@ -13795,6 +13873,9 @@ cleanup:
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
   lc_free_with_allocator(&pouch->allocator, staged_key);
   if (rc != LC_OK) {
+    if (query_index_guard_started) {
+      lc_pouch_query_index_operation_cancel(pouch, namespace_name, key, txn_id);
+    }
     lc_pouch_state_write_result_cleanup(&pouch->allocator, out);
   }
   return rc;
@@ -13832,6 +13913,10 @@ static int lc_pouch_state_promote_staged_with_operation(
                                             operation_active, error);
   rc = lc_pouch_state_finish_commit_group_after_mutation(
       pouch, &lock, commit_group, owns_commit_group, rc, error);
+  if (rc != LC_OK && out->query_index_operation_guard_started) {
+    lc_pouch_query_index_operation_cancel(pouch, namespace_name, key, txn_id);
+    out->query_index_operation_guard_started = 0;
+  }
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }
@@ -13873,6 +13958,7 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   const unsigned char *promoted_metadata;
   size_t promoted_metadata_length;
   lc_pouch_unix_seconds updated_at_unix;
+  int query_index_guard_started;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -13893,6 +13979,7 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   memset(&manifest, 0, sizeof(manifest));
   memset(&committed, 0, sizeof(committed));
   memset(&staged, 0, sizeof(staged));
+  query_index_guard_started = 0;
   rc = lc_pouch_state_manifest_lookup_cached_for_mutation(
       pouch, namespace_name, key, &manifest, &committed, NULL, error);
   if (rc == LC_OK) {
@@ -13912,10 +13999,22 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   if (!staged.found) {
     goto cleanup;
   }
+  if (operation_active &&
+      !lc_pouch_state_record_type_is_object(staged.record_type)) {
+    rc = lc_pouch_query_index_operation_begin(
+        pouch, namespace_name, key, txn_id, 0L, &query_index_guard_started,
+        error);
+    if (rc != LC_OK) {
+      goto cleanup;
+    }
+  }
   if (lc_pouch_state_is_staged_delete_marker(&staged)) {
     rc = lc_pouch_state_commit_staged_delete_locked(
         pouch, namespace_name, &manifest, key, staged_key, &committed, &staged,
         out, operation_active, error);
+    if (rc == LC_OK) {
+      out->query_index_operation_guard_started = query_index_guard_started;
+    }
     goto cleanup;
   }
   promoted_metadata = staged.metadata;
@@ -13975,6 +14074,7 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   out->updated_at_unix = updated_at_unix;
   out->has_query_hidden = staged.has_query_hidden;
   out->query_hidden = staged.query_hidden;
+  out->query_index_operation_guard_started = query_index_guard_started;
   if (!lc_pouch_state_record_type_is_object(staged.record_type)) {
     lc_pouch_query_index_note_state_write(
         pouch, namespace_name, key,
@@ -13987,6 +14087,9 @@ cleanup:
   lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
   lc_free_with_allocator(&pouch->allocator, staged_key);
   if (rc != LC_OK) {
+    if (query_index_guard_started) {
+      lc_pouch_query_index_operation_cancel(pouch, namespace_name, key, txn_id);
+    }
     lc_pouch_state_write_result_cleanup(&pouch->allocator, out);
   }
   return rc;
@@ -14022,6 +14125,10 @@ static int lc_pouch_state_commit_staged_with_operation(
                                            out, operation_active, error);
   rc = lc_pouch_state_finish_commit_group_after_mutation(
       pouch, &lock, commit_group, owns_commit_group, rc, error);
+  if (rc != LC_OK && out->query_index_operation_guard_started) {
+    lc_pouch_query_index_operation_cancel(pouch, namespace_name, key, txn_id);
+    out->query_index_operation_guard_started = 0;
+  }
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }

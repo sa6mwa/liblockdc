@@ -95,6 +95,31 @@ void lc_pouch_query_index_note_state_write(
 void lc_pouch_query_index_note_state_delete(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const lc_pouch_state_write_result *result, int operation_active);
+/** Installs an exclusive-writer publication guard before a lease- or
+ * transaction-owned state mutation becomes visible. `operation_id` identifies
+ * that exact operation; a positive expiration is pruned after lease expiry.
+ * `started_out` is non-zero only when a guard was installed. */
+int lc_pouch_query_index_operation_begin(lc_pouch *pouch,
+                                         const char *namespace_name,
+                                         const char *key,
+                                         const char *operation_id,
+                                         lc_pouch_unix_seconds expires_at_unix,
+                                         int *started_out, lc_error *error);
+/** Cancels a guard for a mutation that did not become durable. */
+void lc_pouch_query_index_operation_cancel(lc_pouch *pouch,
+                                           const char *namespace_name,
+                                           const char *key,
+                                           const char *operation_id);
+/** Extends an existing lease guard without creating one for metadata-only
+ * keepalive traffic. */
+void lc_pouch_query_index_operation_refresh(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *operation_id, lc_pouch_unix_seconds expires_at_unix);
+/** Returns the earliest live guard expiration in `namespace_name`. The caller
+ * holds `pouch->indexer_mutex`; zero means no expiring guard is present. */
+lc_pouch_unix_seconds
+lc_pouch_query_index_next_operation_expiry_locked(lc_pouch *pouch,
+                                                  const char *namespace_name);
 /** Returns whether a complete exclusive-writer pending memtable has reached
  * `document_limit`. The caller must hold `pouch->indexer_mutex`. */
 int lc_pouch_query_index_pending_document_limit_reached_locked(

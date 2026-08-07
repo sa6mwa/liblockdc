@@ -2299,6 +2299,70 @@ static void test_index_term_generation_roundtrips_typed_postings(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_index_term_generation_sorts_trusted_terms_without_changing_ids(
+    void **state) {
+  lc_allocator allocator;
+  lc_error error;
+  lc_pouch_index_term_generation generation;
+  lc_pouch_index_term_generation decoded;
+  char *bytes;
+  size_t length;
+  unsigned long first_id;
+  unsigned long second_id;
+  unsigned long doc_ids[1];
+  int rc;
+
+  (void)state;
+  lc_allocator_init(&allocator);
+  lc_error_init(&error);
+  memset(&generation, 0, sizeof(generation));
+  memset(&decoded, 0, sizeof(decoded));
+  bytes = NULL;
+  length = 0U;
+  doc_ids[0] = 7UL;
+
+  generation.namespace_name =
+      lc_strdup_with_allocator(&allocator, "docs/sorted-generation");
+  assert_non_null(generation.namespace_name);
+  generation.index_seq = 23UL;
+  generation.row_count = 1UL;
+  generation.row_hash = 99UL;
+  rc = lc_pouch_index_term_table_append_trusted(
+      &allocator, &generation.terms, "2f7a", "7a", 's', &first_id, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_term_table_append_trusted(
+      &allocator, &generation.terms, "2f61", "61", 's', &second_id, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_term_posting_table_put(&allocator, &generation.postings,
+                                             first_id, doc_ids, 1U, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_term_posting_table_put(&allocator, &generation.postings,
+                                             second_id, doc_ids, 1U, &error);
+  assert_int_equal(rc, LC_OK);
+
+  lc_pouch_index_term_generation_sort_terms(&generation);
+  assert_true(generation.terms_sorted);
+  assert_string_equal(generation.terms.items[0].field_hex, "2f61");
+  assert_int_equal(generation.terms.items[0].term_id, second_id);
+  assert_string_equal(generation.terms.items[1].field_hex, "2f7a");
+  assert_int_equal(generation.terms.items[1].term_id, first_id);
+  rc = lc_pouch_index_term_generation_encode(&generation, &allocator, &bytes,
+                                             &length, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_index_term_generation_decode(&allocator, bytes, length, 23UL,
+                                             1UL, 99UL, &decoded, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(
+      lc_pouch_index_term_table_find(&decoded.terms, "2f7a", "7a", 's', NULL));
+  assert_true(
+      lc_pouch_index_term_table_find(&decoded.terms, "2f61", "61", 's', NULL));
+
+  lc_pouch_index_term_generation_cleanup(&allocator, &decoded);
+  lc_pouch_index_term_generation_cleanup(&allocator, &generation);
+  lc_free_with_allocator(&allocator, bytes);
+  lc_error_cleanup(&error);
+}
+
 static void test_index_term_generation_reads_v1_artifact(void **state) {
   static const unsigned char legacy_bytes[] = {'L',
                                                'P',
@@ -8741,6 +8805,136 @@ test_exclusive_indexer_waits_for_all_active_operations(void **state) {
   lc_update_res_cleanup(&update_b);
   lc_update_res_cleanup(&update_a);
   lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_exclusive_indexer_operation_guards_are_lease_scoped(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_query_index_flush_result flush_result;
+  lc_source *source;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_error error;
+  char root[512];
+  int guard_started;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  guard_started = 0;
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_error_init(&error);
+  make_root("indexer-lease-identity", root, sizeof(root));
+  cleanup_root(root);
+  options.indexer_flush_docs = 1U;
+  options.indexer_flush_interval_seconds = 3600U;
+
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_operation_begin(
+      pouch, "default", "doc/reused", "lease-a", 0L, &guard_started, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(guard_started);
+  rc = lc_source_from_memory("{\"kind\":\"reused\"}",
+                             strlen("{\"kind\":\"reused\"}"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "doc/reused", source, NULL,
+                            &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  guard_started = 0;
+  rc = lc_pouch_query_index_operation_begin(
+      pouch, "default", "doc/reused", "lease-b", 0L, &guard_started, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(guard_started);
+
+  /* A late completion from the old lease must not clear the new lease's
+   * publication boundary for the reused key. */
+  lc_pouch_indexer_note_operation_complete(pouch, "default", "doc/reused",
+                                           "lease-a");
+  rc = lc_pouch_state_query_index_seq(pouch, "default", &query_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(pouch, "default", &manifest_seq,
+                                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(manifest_seq < query_seq);
+
+  lc_pouch_indexer_note_operation_complete(pouch, "default", "doc/reused",
+                                           "lease-b");
+  rc = lc_pouch_query_index_manifest_seq(pouch, "default", &manifest_seq,
+                                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_exclusive_indexer_retires_expired_operation_guard(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_query_index_flush_result flush_result;
+  lc_source *source;
+  lc_pouch_generation query_seq;
+  lc_error error;
+  char root[512];
+  int guard_started;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  guard_started = 0;
+  query_seq = 0UL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_error_init(&error);
+  make_root("indexer-expired-operation", root, sizeof(root));
+  cleanup_root(root);
+  options.indexer_flush_docs = 64U;
+  options.indexer_flush_interval_seconds = 3600U;
+
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  /* A guard from a lease that has already expired must not indefinitely hold
+   * the derived index behind an operation that can no longer complete. */
+  rc = lc_pouch_query_index_operation_begin(pouch, "default", "doc/expired",
+                                            "expired-lease", 1L, &guard_started,
+                                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(guard_started);
+  rc = lc_source_from_memory("{\"kind\":\"expired\"}",
+                             strlen("{\"kind\":\"expired\"}"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "doc/expired", source, NULL,
+                            &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_query_index_seq(pouch, "default", &query_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_flush_threshold(pouch, "default", query_seq,
+                                            &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, query_seq);
+
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -26132,6 +26326,65 @@ test_exclusive_manifest_seq_trusts_published_snapshot(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_exclusive_manifest_flush_uses_trusted_snapshot(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_query_index_flush_result flush_result;
+  lc_pouch_generation state_index_seq;
+  lc_error error;
+  char *namespace_path;
+  char manifest_path[1024];
+  char root[512];
+  int rc;
+  int written;
+
+  (void)state;
+  pouch = NULL;
+  namespace_path = NULL;
+  state_index_seq = 0UL;
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_error_init(&error);
+  make_root("exclusive-manifest-flush-trust", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  pouch_write_json_state(pouch, "docs/manifest-flush-trust", "doc/a",
+                         "{\"kind\":\"trusted\"}", NULL, &error);
+  rc = lc_pouch_state_query_index_seq(pouch, "docs/manifest-flush-trust",
+                                      &state_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_flush(pouch, "docs/manifest-flush-trust",
+                                  state_index_seq, &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+
+  namespace_path =
+      lc_pouch_namespace_path(NULL, root, "docs/manifest-flush-trust");
+  assert_non_null(namespace_path);
+  written = snprintf(manifest_path, sizeof(manifest_path),
+                     "%s/index/query.manifest", namespace_path);
+  assert_true(written > 0 && (size_t)written < sizeof(manifest_path));
+  write_text_file(manifest_path, "invalid manifest\\n");
+
+  /* The exclusive owner can advance from the generation it already
+   * published without rereading a manifest that a validated flush will
+   * subsequently inspect and repair. */
+  pouch_write_json_state(pouch, "docs/manifest-flush-trust", "doc/b",
+                         "{\"kind\":\"trusted\"}", NULL, &error);
+  rc = lc_pouch_state_query_index_seq(pouch, "docs/manifest-flush-trust",
+                                      &state_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  memset(&flush_result, 0, sizeof(flush_result));
+  rc = lc_pouch_query_index_flush(pouch, "docs/manifest-flush-trust",
+                                  state_index_seq, &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, state_index_seq);
+
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_flush_index_external_accept_invalidates_cached_summary(void **state) {
   static const char selector[] =
@@ -28684,6 +28937,8 @@ int main(int argc, char **argv) {
           test_index_term_keys_build_exact_for_field_rejects_invalid_values),
       cmocka_unit_test(test_index_term_fields_select_merged_range),
       cmocka_unit_test(test_index_term_generation_roundtrips_typed_postings),
+      cmocka_unit_test(
+          test_index_term_generation_sorts_trusted_terms_without_changing_ids),
       cmocka_unit_test(test_index_term_generation_reads_v1_artifact),
       cmocka_unit_test(
           test_index_term_generation_rejects_corrupt_identity_and_payload),
@@ -28775,6 +29030,9 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_exclusive_indexer_publishes_delete_batch_at_document_threshold),
       cmocka_unit_test(test_exclusive_indexer_waits_for_all_active_operations),
+      cmocka_unit_test(
+          test_exclusive_indexer_operation_guards_are_lease_scoped),
+      cmocka_unit_test(test_exclusive_indexer_retires_expired_operation_guard),
       cmocka_unit_test(
           test_exclusive_indexer_idle_flush_waits_for_active_operation),
       cmocka_unit_test(
@@ -28971,6 +29229,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_query_documents_index_uses_scalar_postings),
       cmocka_unit_test(test_flush_index_reports_projection_high_water),
       cmocka_unit_test(test_exclusive_manifest_seq_trusts_published_snapshot),
+      cmocka_unit_test(test_exclusive_manifest_flush_uses_trusted_snapshot),
       cmocka_unit_test(
           test_flush_index_external_accept_invalidates_cached_summary),
       cmocka_unit_test(

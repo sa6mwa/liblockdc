@@ -414,6 +414,11 @@ int lc_pouch_index_term_posting_table_append_to_set(
     lc_error *error);
 void lc_pouch_index_term_generation_cleanup(
     const lc_allocator *allocator, lc_pouch_index_term_generation *generation);
+/** Orders terms for immutable generation encoding without changing term IDs or
+ * their postings. Call only after the generation has stopped accepting terms.
+ */
+void lc_pouch_index_term_generation_sort_terms(
+    lc_pouch_index_term_generation *generation);
 /** Encodes the current compact term artifact: field names are dictionary
  * entries and trusted trigrams remain three-byte values. Decoders retain
  * compatibility with the legacy field-per-term artifact. */

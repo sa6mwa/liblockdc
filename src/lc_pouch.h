@@ -211,6 +211,14 @@ typedef struct lc_pouch_state_write_options {
    * Low-level lc_pouch_state_* callers leave this clear so idle indexing can
    * publish their durable writes without a separate completion callback. */
   int query_index_operation_active;
+  /* Internal identity for the active public operation. It is distinct for
+   * every lease or transaction so an older completion cannot retire a newer
+   * operation on the same document. */
+  const char *query_index_operation_id;
+  /* Internal pointer populated by the validated lease precondition. A
+   * positive expiration lets the idle indexer retire an abandoned guard after
+   * its owning lease is no longer valid. */
+  const lc_pouch_unix_seconds *query_index_operation_expires_at_unix;
   /* Internal only: marks a staged transactional delete in durable metadata.
    * Public content types remain ordinary content types unless this field is
    * set by the delete path. */
@@ -229,6 +237,9 @@ typedef struct lc_pouch_state_write_result {
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  /* Internal state-layer handoff: the enclosing durable commit cancels this
+   * newly installed guard if its fsync group fails. */
+  int query_index_operation_guard_started;
 } lc_pouch_state_write_result;
 
 typedef struct lc_pouch_state_read_result {
