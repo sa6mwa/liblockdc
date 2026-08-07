@@ -394,10 +394,8 @@ int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
                              lc_pouch_generation *out, lc_error *error);
 /* Returns the durable sequence that can change indexed query candidates.
  * Lease-only metadata records intentionally do not advance this value. */
-int lc_pouch_state_query_index_seq(lc_pouch *pouch,
-                                   const char *namespace_name,
-                                   lc_pouch_generation *out,
-                                   lc_error *error);
+int lc_pouch_state_query_index_seq(lc_pouch *pouch, const char *namespace_name,
+                                   lc_pouch_generation *out, lc_error *error);
 void lc_pouch_state_read_result_cleanup(const lc_allocator *allocator,
                                         lc_pouch_state_read_result *result);
 

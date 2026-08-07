@@ -1350,8 +1350,8 @@ void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch,
   int published;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      key == NULL || key[0] == '\0' ||
-      pouch->aborted || !pouch->indexer_thread_started) {
+      key == NULL || key[0] == '\0' || pouch->aborted ||
+      !pouch->indexer_thread_started) {
     return;
   }
   eager_publish = 0;

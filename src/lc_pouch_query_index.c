@@ -77,7 +77,7 @@
 /* Lucene-style bounded text indexing: exact hashes and a retained prefix keep
  * long values searchable while candidate verification avoids blob-sized
  * trigram posting lists on the write path. */
-#define LC_POUCH_QUERY_INDEX_TRIGRAM_INDEXED_BYTES_MAX \
+#define LC_POUCH_QUERY_INDEX_TRIGRAM_INDEXED_BYTES_MAX                         \
   LC_POUCH_QUERY_INDEX_EXACT_LONG_STRING_BYTES
 /* Small writes feed the exclusive memtable synchronously. Larger bodies are
  * indexed from their durable span when the indexer publishes the segment. */
@@ -496,12 +496,12 @@ struct lc_pouch_query_index_memtable {
   lc_pouch_query_index_trigram_term_cache trigram_term_cache;
 };
 
-static void lc_pouch_query_index_memtable_cleanup(
-    const lc_allocator *allocator, lc_pouch_query_index_memtable *memtable);
+static void
+lc_pouch_query_index_memtable_cleanup(const lc_allocator *allocator,
+                                      lc_pouch_query_index_memtable *memtable);
 static int lc_pouch_query_index_memtable_note_write(
     lc_pouch_query_index_pending_entry *pending,
-    lc_pouch_query_index_summary *update, const char *key_hex,
-    lc_error *error);
+    lc_pouch_query_index_summary *update, const char *key_hex, lc_error *error);
 static int lc_pouch_query_index_memtable_note_delete(
     lc_pouch_query_index_pending_entry *pending, const char *key_hex,
     lc_error *error);
@@ -801,8 +801,8 @@ lc_pouch_query_index_exact_hash_value(const lc_allocator *allocator,
 static char *lc_pouch_query_index_exact_hash_format(
     const lc_allocator *allocator, unsigned long length, unsigned long hash,
     unsigned long folded_hash, lc_error *error);
-static unsigned long
-lc_pouch_query_index_exact_hash_update(unsigned long hash, unsigned char byte);
+static unsigned long lc_pouch_query_index_exact_hash_update(unsigned long hash,
+                                                            unsigned char byte);
 static int lc_pouch_query_index_visit_exact_generation(
     lc_pouch *pouch, const char *namespace_name,
     const lc_pouch_index_term_key *exact_terms, size_t exact_term_count,
@@ -850,9 +850,10 @@ lc_pouch_query_index_manifest_trust_valid(const lc_pouch *pouch,
 /* In exclusive-writer mode, this is the durable manifest sequence Pouch
  * published under the current ownership epoch.  It is intentionally not used
  * by validated flushes, which must still inspect the files. */
-static int lc_pouch_query_index_manifest_trust_seq(
-    const lc_pouch *pouch, const char *namespace_name,
-    lc_pouch_generation *index_seq);
+static int
+lc_pouch_query_index_manifest_trust_seq(const lc_pouch *pouch,
+                                        const char *namespace_name,
+                                        lc_pouch_generation *index_seq);
 static void lc_pouch_query_index_manifest_trust_remember(
     lc_pouch *pouch, const char *namespace_name, lc_pouch_generation index_seq,
     const lc_pouch_query_index_manifest *manifest);
@@ -1274,19 +1275,19 @@ static int lc_pouch_query_index_term_add_streamed_long(
   }
   term = &summary->terms[summary->term_count];
   memset(term, 0, sizeof(*term));
-  term->field_hex = lc_pouch_query_index_hex_encode_bytes(
-      summary->allocator, field, field_len);
+  term->field_hex = lc_pouch_query_index_hex_encode_bytes(summary->allocator,
+                                                          field, field_len);
   term->value_hex = lc_pouch_query_index_exact_hash_format(
       summary->allocator, value_length, value_hash, value_folded_hash, error);
   term->key_hex = lc_strdup_with_allocator(summary->allocator, key_hex);
   if (term->field_hex == NULL || term->value_hex == NULL ||
       term->key_hex == NULL) {
-    rc = error != NULL && error->code != LC_OK ? error->code
-                                                : lc_error_set(
-                                                      error, LC_ERR_NOMEM, 0L,
-                                                      "failed to allocate pouch "
-                                                      "query-index term",
-                                                      NULL, NULL, NULL);
+    rc = error != NULL && error->code != LC_OK
+             ? error->code
+             : lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "failed to allocate pouch "
+                            "query-index term",
+                            NULL, NULL, NULL);
     goto cleanup;
   }
   if (value_length > LC_POUCH_QUERY_INDEX_TRIGRAM_INDEXED_BYTES_MAX) {
@@ -1886,27 +1887,25 @@ lc_pouch_query_index_string_chunk(void *user, const lonejson_value_path *path,
       unsigned char folded;
 
       byte = (unsigned char)data[index];
-      folded = byte >= 'A' && byte <= 'Z'
-                   ? (unsigned char)(byte - 'A' + 'a')
-                   : byte;
-      context->string_hash = lc_pouch_query_index_exact_hash_update(
-          context->string_hash, byte);
+      folded =
+          byte >= 'A' && byte <= 'Z' ? (unsigned char)(byte - 'A' + 'a') : byte;
+      context->string_hash =
+          lc_pouch_query_index_exact_hash_update(context->string_hash, byte);
       context->string_folded_hash = lc_pouch_query_index_exact_hash_update(
           context->string_folded_hash, folded);
     }
     context->string_length += (unsigned long)len;
     captured = 0U;
     if (context->value_len < LC_POUCH_QUERY_INDEX_TRIGRAM_INDEXED_BYTES_MAX) {
-      captured = LC_POUCH_QUERY_INDEX_TRIGRAM_INDEXED_BYTES_MAX -
-                 context->value_len;
+      captured =
+          LC_POUCH_QUERY_INDEX_TRIGRAM_INDEXED_BYTES_MAX - context->value_len;
       if (captured > len) {
         captured = len;
       }
     }
-    rc = captured == 0U
-             ? LC_OK
-             : lc_pouch_query_index_extract_append(context, 0, data, captured,
-                                                   &error);
+    rc = captured == 0U ? LC_OK
+                        : lc_pouch_query_index_extract_append(context, 0, data,
+                                                              captured, &error);
   }
   if (rc != LC_OK) {
     return lc_pouch_query_index_lonejson_error(lj_error, &error);
@@ -1926,7 +1925,7 @@ lc_pouch_query_index_string_end(void *user, const lonejson_value_path *path,
   lc_error_init(&error);
   rc = context->string_length > LC_POUCH_QUERY_INDEX_EXACT_LONG_STRING_BYTES
            ? lc_pouch_query_index_add_streamed_long_for_current_field(context,
-                                                                       &error)
+                                                                      &error)
            : lc_pouch_query_index_add_term_for_current_field(
                  context, context->value, context->value_len, 's', &error);
   if (rc != LC_OK) {
@@ -2229,8 +2228,8 @@ static void lc_pouch_query_index_summary_presence_cleanup(
   memset(presence, 0, sizeof(*presence));
 }
 
-static void
-lc_pouch_query_index_summary_clear_derived(lc_pouch_query_index_summary *summary) {
+static void lc_pouch_query_index_summary_clear_derived(
+    lc_pouch_query_index_summary *summary) {
   size_t index;
 
   if (summary == NULL) {
@@ -2240,8 +2239,8 @@ lc_pouch_query_index_summary_clear_derived(lc_pouch_query_index_summary *summary
     lc_pouch_query_index_summary_term_cleanup(summary, &summary->terms[index]);
   }
   for (index = 0U; index < summary->presence_count; ++index) {
-    lc_pouch_query_index_summary_presence_cleanup(
-        summary, &summary->presences[index]);
+    lc_pouch_query_index_summary_presence_cleanup(summary,
+                                                  &summary->presences[index]);
   }
   summary->term_count = 0U;
   summary->presence_count = 0U;
@@ -5359,8 +5358,7 @@ lc_pouch_query_index_open_temp_artifact(const lc_allocator *allocator,
 
 static int lc_pouch_query_index_write_artifact_bytes(
     lc_pouch *pouch, const char *namespace_name, const char *path,
-    const char *bytes, size_t length, int unpublished_path,
-    lc_error *error) {
+    const char *bytes, size_t length, int unpublished_path, lc_error *error) {
   lc_source *source;
   char *context;
   char *descriptor;
@@ -6658,14 +6656,14 @@ static int lc_pouch_query_index_pending_prepare_write(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *content_type, lc_source *body,
     const lc_pouch_state_write_result *result,
-    lc_pouch_query_index_summary *summary, int *deferred_out,
-    lc_error *error) {
+    lc_pouch_query_index_summary *summary, int *deferred_out, lc_error *error) {
   lc_pouch_state_visit_entry entry;
   lc_pouch_query_index_row *row;
   int rc;
 
-  if (pouch == NULL || namespace_name == NULL || key == NULL || result == NULL ||
-      result->index_seq == 0UL || summary == NULL || deferred_out == NULL) {
+  if (pouch == NULL || namespace_name == NULL || key == NULL ||
+      result == NULL || result->index_seq == 0UL || summary == NULL ||
+      deferred_out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index pending write is not replayable",
                         NULL, NULL, NULL);
@@ -6675,9 +6673,9 @@ static int lc_pouch_query_index_pending_prepare_write(
    * bounded large-body capture: the foreground flush extracts it from state
    * after the transaction decision rather than invalidating the whole pending
    * batch and falling back to the background worker. */
-  *deferred_out = body == NULL || body->reset == NULL ||
-                  result->bytes >
-                      LC_POUCH_QUERY_INDEX_FOREGROUND_CAPTURE_BYTES_MAX;
+  *deferred_out =
+      body == NULL || body->reset == NULL ||
+      result->bytes > LC_POUCH_QUERY_INDEX_FOREGROUND_CAPTURE_BYTES_MAX;
   if (!*deferred_out &&
       result->bytes > LC_POUCH_QUERY_INDEX_PENDING_SOURCE_BYTES_MAX) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -6760,9 +6758,9 @@ static void lc_pouch_query_index_pending_note_write(
   memset(&update, 0, sizeof(update));
   deferred = 0;
   lc_error_init(&error);
-  rc = lc_pouch_query_index_pending_prepare_write(
-      pouch, namespace_name, key, content_type, body, result, &update,
-      &deferred, &error);
+  rc = lc_pouch_query_index_pending_prepare_write(pouch, namespace_name, key,
+                                                  content_type, body, result,
+                                                  &update, &deferred, &error);
   if (rc != LC_OK) {
     lc_pouch_query_index_summary_cleanup(&update);
     lc_error_cleanup(&error);
@@ -6852,10 +6850,9 @@ static void lc_pouch_query_index_pending_note_write(
   if (pending->deferred && !deferred) {
     lc_pouch_query_index_summary_mark_rows_deferred(&update);
   }
-  rc = pending->deferred || deferred
-           ? LC_OK
-           : lc_pouch_query_index_memtable_note_write(pending, &update,
-                                                      key_hex, &error);
+  rc = pending->deferred || deferred ? LC_OK
+                                     : lc_pouch_query_index_memtable_note_write(
+                                           pending, &update, key_hex, &error);
   if (rc == LC_OK) {
     lc_pouch_query_index_summary_remove_key(&pending->summary, key, key_hex);
     lc_pouch_query_index_key_hex_set_remove(&pouch->allocator,
@@ -6864,9 +6861,8 @@ static void lc_pouch_query_index_pending_note_write(
                                                  &error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_query_index_key_hex_set_add(&pouch->allocator,
-                                              &pending->active_keys, key_hex,
-                                              &error);
+    rc = lc_pouch_query_index_key_hex_set_add(
+        &pouch->allocator, &pending->active_keys, key_hex, &error);
   }
   if (rc == LC_OK) {
     pending->last_index_seq = result->index_seq;
@@ -6974,20 +6970,18 @@ static void lc_pouch_query_index_pending_note_delete(
     lc_error_cleanup(&error);
     return;
   }
-  rc = pending->deferred
-           ? LC_OK
-           : lc_pouch_query_index_memtable_note_delete(pending, key_hex,
-                                                       &error);
+  rc =
+      pending->deferred
+          ? LC_OK
+          : lc_pouch_query_index_memtable_note_delete(pending, key_hex, &error);
   if (rc == LC_OK) {
     lc_pouch_query_index_summary_remove_key(&pending->summary, key, key_hex);
-    rc = lc_pouch_query_index_key_hex_set_add(&pouch->allocator,
-                                              &pending->deletes, key_hex,
-                                              &error);
+    rc = lc_pouch_query_index_key_hex_set_add(
+        &pouch->allocator, &pending->deletes, key_hex, &error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_query_index_key_hex_set_add(&pouch->allocator,
-                                              &pending->active_keys, key_hex,
-                                              &error);
+    rc = lc_pouch_query_index_key_hex_set_add(
+        &pouch->allocator, &pending->active_keys, key_hex, &error);
   }
   if (rc == LC_OK) {
     pending->last_index_seq = result->index_seq;
@@ -7004,8 +6998,7 @@ static int lc_pouch_query_index_pending_take(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_generation base_index_seq, lc_pouch_generation state_index_seq,
     int require_namespace_coverage, int require_completed_operations,
-    int *deferred_for_active_operation,
-    lc_pouch_query_index_summary *summary,
+    int *deferred_for_active_operation, lc_pouch_query_index_summary *summary,
     lc_pouch_query_index_key_hex_set *deletes,
     lc_pouch_generation *last_index_seq,
     lc_pouch_query_index_memtable **memtable_out) {
@@ -7092,7 +7085,9 @@ int lc_pouch_query_index_pending_document_limit_reached_locked(
   pending = lc_pouch_query_index_pending_find(pouch, namespace_name, NULL);
   return pending != NULL && !pending->incomplete &&
          pending->active_keys.count == 0U &&
-         (uint64_t)pending->summary.count >= document_limit;
+         ((uint64_t)pending->summary.count >= document_limit ||
+          (uint64_t)pending->deletes.count >=
+              document_limit - (uint64_t)pending->summary.count);
 }
 
 static int lc_pouch_query_index_pending_apply_tail_deletes(
@@ -9311,8 +9306,9 @@ static void lc_pouch_query_index_trigram_term_cache_cleanup(
  * under a low-bit modulo (especially for high-cardinality text), so mix the
  * field/trigram pair before deriving a slot. This is only an in-memory
  * builder hash; it has no persisted-format or query-order effect. */
-static unsigned long lc_pouch_query_index_trigram_term_cache_hash(
-    unsigned long field_hash, unsigned long trigram_key) {
+static unsigned long
+lc_pouch_query_index_trigram_term_cache_hash(unsigned long field_hash,
+                                             unsigned long trigram_key) {
   unsigned long hash;
 
   hash = (field_hash ^ (trigram_key * 0x9e3779b1UL)) & 0xffffffffUL;
@@ -9396,8 +9392,8 @@ static int lc_pouch_query_index_trigram_term_cache_find(
       field_hex == NULL) {
     return 0;
   }
-  slot = (size_t)(lc_pouch_query_index_trigram_term_cache_hash(
-                      field_hash, trigram_key) %
+  slot = (size_t)(lc_pouch_query_index_trigram_term_cache_hash(field_hash,
+                                                               trigram_key) %
                   (unsigned long)cache->capacity);
   visited = 0U;
   while (visited < cache->capacity && cache->items[slot].used) {
@@ -9431,8 +9427,8 @@ static int lc_pouch_query_index_trigram_term_cache_put(
   if (rc != LC_OK) {
     return rc;
   }
-  slot = (size_t)(lc_pouch_query_index_trigram_term_cache_hash(
-                      field_hash, trigram_key) %
+  slot = (size_t)(lc_pouch_query_index_trigram_term_cache_hash(field_hash,
+                                                               trigram_key) %
                   (unsigned long)cache->capacity);
   while (cache->items[slot].used) {
     if ((field_id != 0UL
@@ -9540,9 +9536,9 @@ static int lc_pouch_query_index_trigram_generation_append_docid(
 
 static void lc_pouch_query_index_trigram_generation_remove_docid_for_field(
     lc_pouch_query_index_exact_generation_accumulator *accumulator,
-    lc_pouch_query_index_trigram_term_cache *term_cache,
-    const char *field_hex, unsigned long field_id, unsigned long field_hash,
-    unsigned long trigram_key, unsigned long doc_id) {
+    lc_pouch_query_index_trigram_term_cache *term_cache, const char *field_hex,
+    unsigned long field_id, unsigned long field_hash, unsigned long trigram_key,
+    unsigned long doc_id) {
   unsigned long term_id;
 
   if (accumulator == NULL || term_cache == NULL || field_hex == NULL) {
@@ -9550,8 +9546,7 @@ static void lc_pouch_query_index_trigram_generation_remove_docid_for_field(
   }
   term_id = 0UL;
   if (lc_pouch_query_index_trigram_term_cache_find(
-          term_cache, field_hex, field_id, field_hash, trigram_key,
-          &term_id)) {
+          term_cache, field_hex, field_id, field_hash, trigram_key, &term_id)) {
     lc_pouch_query_index_exact_generation_accumulator_remove(accumulator,
                                                              term_id, doc_id);
   }
@@ -10900,8 +10895,9 @@ static int lc_pouch_query_index_memtable_generation_init(
   return LC_OK;
 }
 
-static lc_pouch_query_index_memtable *lc_pouch_query_index_memtable_new(
-    const lc_allocator *allocator, const char *namespace_name, lc_error *error) {
+static lc_pouch_query_index_memtable *
+lc_pouch_query_index_memtable_new(const lc_allocator *allocator,
+                                  const char *namespace_name, lc_error *error) {
   lc_pouch_query_index_memtable *memtable;
   int rc;
 
@@ -10943,16 +10939,19 @@ static lc_pouch_query_index_memtable *lc_pouch_query_index_memtable_new(
   return memtable;
 }
 
-static void lc_pouch_query_index_memtable_cleanup(
-    const lc_allocator *allocator, lc_pouch_query_index_memtable *memtable) {
+static void
+lc_pouch_query_index_memtable_cleanup(const lc_allocator *allocator,
+                                      lc_pouch_query_index_memtable *memtable) {
   if (memtable == NULL) {
     return;
   }
   lc_pouch_index_doc_table_cleanup(allocator, &memtable->doc_table);
-  lc_pouch_index_term_generation_cleanup(allocator, &memtable->exact_generation);
+  lc_pouch_index_term_generation_cleanup(allocator,
+                                         &memtable->exact_generation);
   lc_pouch_index_term_generation_cleanup(allocator,
                                          &memtable->presence_generation);
-  lc_pouch_index_term_generation_cleanup(allocator, &memtable->range_generation);
+  lc_pouch_index_term_generation_cleanup(allocator,
+                                         &memtable->range_generation);
   lc_pouch_index_term_generation_cleanup(allocator, &memtable->text_generation);
   lc_pouch_index_term_generation_cleanup(allocator,
                                          &memtable->trigram_generation);
@@ -10970,11 +10969,14 @@ static void lc_pouch_query_index_memtable_cleanup(
       allocator, &memtable->trigram_accumulator);
   lc_pouch_query_index_exact_generation_accumulator_cleanup(
       allocator, &memtable->temporal_accumulator);
-  lc_pouch_query_index_term_cache_cleanup(allocator, &memtable->exact_term_cache);
+  lc_pouch_query_index_term_cache_cleanup(allocator,
+                                          &memtable->exact_term_cache);
   lc_pouch_query_index_term_cache_cleanup(allocator,
                                           &memtable->presence_term_cache);
-  lc_pouch_query_index_term_cache_cleanup(allocator, &memtable->range_term_cache);
-  lc_pouch_query_index_term_cache_cleanup(allocator, &memtable->text_term_cache);
+  lc_pouch_query_index_term_cache_cleanup(allocator,
+                                          &memtable->range_term_cache);
+  lc_pouch_query_index_term_cache_cleanup(allocator,
+                                          &memtable->text_term_cache);
   lc_pouch_query_index_term_cache_cleanup(allocator,
                                           &memtable->temporal_term_cache);
   lc_pouch_query_index_field_cache_cleanup(allocator,
@@ -11021,8 +11023,8 @@ static int lc_pouch_query_index_memtable_add_term(
 
   if (allocator == NULL || memtable == NULL || term == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch index memtable add requires a term", NULL,
-                        NULL, "pouch");
+                        "pouch index memtable add requires a term", NULL, NULL,
+                        "pouch");
   }
   allocated_exact_value_hex = NULL;
   trigram_field_hex = NULL;
@@ -11095,7 +11097,7 @@ static int lc_pouch_query_index_memtable_add_term(
     }
     if (rc == LC_OK) {
       rc = lc_pouch_query_index_term_add_trigram_fallback(allocator, term,
-                                                           error);
+                                                          error);
     }
     if (rc == LC_OK && term->trigram_key_count > 0U) {
       rc = lc_pouch_query_index_field_cache_find_or_add(
@@ -11119,8 +11121,7 @@ static int lc_pouch_query_index_memtable_add_term(
           term->temporal_value_hex, 'n', &term_id, error);
       if (rc == LC_OK) {
         rc = lc_pouch_query_index_exact_generation_accumulator_append(
-            allocator, &memtable->temporal_accumulator, term_id, doc_id,
-            error);
+            allocator, &memtable->temporal_accumulator, term_id, doc_id, error);
       }
     }
   }
@@ -11198,12 +11199,11 @@ static int lc_pouch_query_index_memtable_remove_term(
             doc_id);
       }
       rc = lc_pouch_query_index_term_add_trigram_fallback(allocator, term,
-                                                           error);
+                                                          error);
       if (rc == LC_OK && term->trigram_key_count > 0U) {
         rc = lc_pouch_query_index_field_cache_find_or_add(
             allocator, &memtable->trigram_field_cache, term->field_hex,
-            &trigram_field_id, &trigram_field_hash, &trigram_field_hex,
-            error);
+            &trigram_field_id, &trigram_field_hash, &trigram_field_hex, error);
       }
       for (index = 0U; rc == LC_OK && index < term->trigram_key_count;
            ++index) {
@@ -11239,10 +11239,10 @@ static int lc_pouch_query_index_memtable_apply_terms(
     if (strcmp(term->key_hex, key_hex) != 0) {
       continue;
     }
-    rc = add ? lc_pouch_query_index_memtable_add_term(allocator, memtable,
-                                                        term, doc_id, error)
+    rc = add ? lc_pouch_query_index_memtable_add_term(allocator, memtable, term,
+                                                      doc_id, error)
              : lc_pouch_query_index_memtable_remove_term(allocator, memtable,
-                                                          term, doc_id, error);
+                                                         term, doc_id, error);
   }
   return rc;
 }
@@ -11273,8 +11273,8 @@ static int lc_pouch_query_index_memtable_apply_presences(
     term_id = 0UL;
     rc = lc_pouch_query_index_term_find_or_add_cached(
         allocator, &memtable->presence_generation,
-        &memtable->presence_term_cache, presence->field_hex, "-", 'z',
-        &term_id, error);
+        &memtable->presence_term_cache, presence->field_hex, "-", 'z', &term_id,
+        error);
     if (rc == LC_OK) {
       rc = lc_pouch_query_index_exact_generation_accumulator_append(
           allocator, &memtable->presence_accumulator, term_id, doc_id, error);
@@ -11346,8 +11346,8 @@ static int lc_pouch_query_index_memtable_add_deferred_rows(
     one_row.term_count = summary->term_count;
     one_row.presences = summary->presences;
     one_row.presence_count = summary->presence_count;
-    rc = lc_pouch_query_index_memtable_append_summary(
-        allocator, *memtable_io, &one_row, error);
+    rc = lc_pouch_query_index_memtable_append_summary(allocator, *memtable_io,
+                                                      &one_row, error);
     if (rc == LC_OK) {
       summary->rows[index].needs_extraction = 0;
     }
@@ -11375,7 +11375,8 @@ static int lc_pouch_query_index_memtable_replace_summary(
   found = 0;
   rc = lc_pouch_index_doc_table_find_key_hex(&memtable->doc_table, key_hex,
                                              &doc_id, &found, error);
-  if (rc != LC_OK || !found || doc_id >= (unsigned long)memtable->doc_table.count) {
+  if (rc != LC_OK || !found ||
+      doc_id >= (unsigned long)memtable->doc_table.count) {
     return rc != LC_OK
                ? rc
                : lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -11401,8 +11402,8 @@ static int lc_pouch_query_index_memtable_replace_summary(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_memtable_apply_presences(
-        allocator, memtable, new_summary, new_summary->rows[0].key_hex,
-        doc_id, 1, error);
+        allocator, memtable, new_summary, new_summary->rows[0].key_hex, doc_id,
+        1, error);
   }
   return rc;
 }
@@ -11426,15 +11427,15 @@ static int lc_pouch_query_index_memtable_note_write(
     }
   }
   previous_row = lc_pouch_query_index_summary_find_row(&pending->summary,
-                                                        update->rows[0].key);
+                                                       update->rows[0].key);
   if (previous_row == NULL || previous_row->needs_extraction) {
     return lc_pouch_query_index_memtable_append_summary(
         pending->summary.allocator, pending->memtable, update, error);
   }
   (void)previous_row;
   return lc_pouch_query_index_memtable_replace_summary(
-      pending->summary.allocator, pending->memtable, &pending->summary,
-      update, key_hex, error);
+      pending->summary.allocator, pending->memtable, &pending->summary, update,
+      key_hex, error);
 }
 
 static int lc_pouch_query_index_memtable_note_delete(
@@ -11448,9 +11449,8 @@ static int lc_pouch_query_index_memtable_note_delete(
                         NULL, NULL, "pouch");
   }
   row = NULL;
-  for (row = pending->summary.rows; row != NULL &&
-                                     row < pending->summary.rows +
-                                               pending->summary.count;
+  for (row = pending->summary.rows;
+       row != NULL && row < pending->summary.rows + pending->summary.count;
        ++row) {
     if (strcmp(row->key_hex, key_hex) == 0) {
       break;
@@ -11497,8 +11497,8 @@ static int lc_pouch_query_index_memtable_tail_compatible(
     lc_error_init(&ignored);
     if (lc_pouch_index_doc_table_find_key_hex(&memtable->doc_table,
                                               row->key_hex, &doc_id, &found,
-                                              &ignored) != LC_OK || !found ||
-        doc_id >= (unsigned long)memtable->doc_table.count) {
+                                              &ignored) != LC_OK ||
+        !found || doc_id >= (unsigned long)memtable->doc_table.count) {
       lc_error_cleanup(&ignored);
       return 0;
     }
@@ -11512,9 +11512,10 @@ static int lc_pouch_query_index_memtable_tail_compatible(
   return 1;
 }
 
-static int lc_pouch_query_index_memtable_hash_rows(
-    lc_pouch_query_index_summary *summary, unsigned long *row_hash_out,
-    lc_error *error) {
+static int
+lc_pouch_query_index_memtable_hash_rows(lc_pouch_query_index_summary *summary,
+                                        unsigned long *row_hash_out,
+                                        lc_error *error) {
   char line[256];
   unsigned long row_hash;
   size_t index;
@@ -11522,8 +11523,8 @@ static int lc_pouch_query_index_memtable_hash_rows(
 
   if (summary == NULL || row_hash_out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch index memtable row hash requires outputs",
-                        NULL, NULL, "pouch");
+                        "pouch index memtable row hash requires outputs", NULL,
+                        NULL, "pouch");
   }
   if (summary->count > 1U) {
     qsort(summary->rows, summary->count, sizeof(summary->rows[0]),
@@ -11543,22 +11544,22 @@ static int lc_pouch_query_index_memtable_hash_rows(
         lc_u64_format_base10((lc_u64)row->bytes, bytes_text,
                              sizeof(bytes_text)) < 0) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch index memtable row exceeds local limit",
-                          NULL, NULL, "pouch");
+                          "pouch index memtable row exceeds local limit", NULL,
+                          NULL, "pouch");
     }
     written = snprintf(line, sizeof(line), "row %s %s %d %d ", version_text,
                        bytes_text, row->has_query_hidden ? 1 : 0,
                        row->query_hidden ? 1 : 0);
     if (written < 0 || (size_t)written >= sizeof(line)) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch index memtable row exceeds local limit",
-                          NULL, NULL, "pouch");
+                          "pouch index memtable row exceeds local limit", NULL,
+                          NULL, "pouch");
     }
     rc = lc_pouch_query_index_text_append(NULL, line, (size_t)written,
                                           &row_hash, error);
     if (rc == LC_OK) {
-      rc = lc_pouch_query_index_text_append_cstr(NULL, row->key_hex,
-                                                 &row_hash, error);
+      rc = lc_pouch_query_index_text_append_cstr(NULL, row->key_hex, &row_hash,
+                                                 error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_query_index_text_append_cstr(NULL, " ", &row_hash, error);
@@ -11571,12 +11572,11 @@ static int lc_pouch_query_index_memtable_hash_rows(
       rc = lc_pouch_query_index_text_append_cstr(NULL, " ", &row_hash, error);
     }
     if (rc == LC_OK) {
-      rc = lc_pouch_query_index_text_append_cstr(NULL, row->etag_hex,
-                                                 &row_hash, error);
+      rc = lc_pouch_query_index_text_append_cstr(NULL, row->etag_hex, &row_hash,
+                                                 error);
     }
     if (rc == LC_OK) {
-      rc = lc_pouch_query_index_text_append_cstr(NULL, "\n", &row_hash,
-                                                 error);
+      rc = lc_pouch_query_index_text_append_cstr(NULL, "\n", &row_hash, error);
     }
   }
   if (rc == LC_OK) {
@@ -11596,8 +11596,9 @@ static int lc_pouch_query_index_memtable_encode_generation(
                                                out_length, error);
 }
 
-static int lc_pouch_query_index_memtable_trigram_term_compare(
-    const void *left, const void *right) {
+static int
+lc_pouch_query_index_memtable_trigram_term_compare(const void *left,
+                                                   const void *right) {
   const lc_pouch_index_term_entry *a;
   const lc_pouch_index_term_entry *b;
   int field_compare;
@@ -11769,8 +11770,8 @@ static int lc_pouch_query_index_memtable_encode(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "term_index_complete", summary->term_index_complete ? 1UL : 0UL,
-        error);
+        &header, "term_index_complete",
+        summary->term_index_complete ? 1UL : 0UL, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_text_append_ulong_line(
@@ -11787,14 +11788,12 @@ static int lc_pouch_query_index_memtable_encode(
         summary->presence_index_complete ? 1UL : 0UL, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(&header,
-                                                     "term_field_count", 0UL,
-                                                     error);
+    rc = lc_pouch_query_index_text_append_ulong_line(
+        &header, "term_field_count", 0UL, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(&header,
-                                                     "term_value_count", 0UL,
-                                                     error);
+    rc = lc_pouch_query_index_text_append_ulong_line(
+        &header, "term_value_count", 0UL, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_doc_table_generation_encode(
@@ -11827,8 +11826,8 @@ static int lc_pouch_query_index_memtable_encode(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_memtable_encode_generation(
-        summary->allocator, &memtable->trigram_generation, index_seq,
-        row_count, row_hash, trigram_term_generation_out,
+        summary->allocator, &memtable->trigram_generation, index_seq, row_count,
+        row_hash, trigram_term_generation_out,
         trigram_term_generation_length_out, error);
   }
   if (rc == LC_OK) {
@@ -11839,8 +11838,7 @@ static int lc_pouch_query_index_memtable_encode(
   }
   if (rc == LC_OK) {
     *text_cache_generation_out = memtable->text_generation;
-    memset(&memtable->text_generation, 0,
-           sizeof(memtable->text_generation));
+    memset(&memtable->text_generation, 0, sizeof(memtable->text_generation));
     *trigram_cache_generation_out = memtable->trigram_generation;
     memset(&memtable->trigram_generation, 0,
            sizeof(memtable->trigram_generation));
@@ -11884,8 +11882,7 @@ static int lc_pouch_query_index_memtable_encode(
 static int
 lc_pouch_query_index_write_header_text(lc_pouch *pouch, const char *path,
                                        lc_pouch_query_index_text *text,
-                                       int unpublished_path,
-                                       lc_error *error) {
+                                       int unpublished_path, lc_error *error) {
   if (pouch == NULL || path == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index header write requires pouch and "
@@ -12327,8 +12324,8 @@ static int lc_pouch_query_index_manifest_segments_validate(
 static int lc_pouch_query_index_flush_segmented(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_generation state_index_seq, int validate_existing_segments,
-    int require_completed_operations,
-    lc_pouch_query_index_flush_result *out, lc_error *error) {
+    int require_completed_operations, lc_pouch_query_index_flush_result *out,
+    lc_error *error) {
   lc_pouch_query_index_manifest manifest;
   lc_pouch_query_index_manifest retired_manifest;
   lc_pouch_query_index_summary summary;
@@ -12518,8 +12515,8 @@ static int lc_pouch_query_index_flush_segmented(
    * leave only an unreferenced artifact, which the next publish replaces or
    * reclaims. Rebuilds that may replace a current generation keep rename
    * publication so concurrent readers never observe an in-place rewrite. */
-  packed_path_unpublished =
-      manifest.present && manifest.valid && manifest.index_seq < state_index_seq;
+  packed_path_unpublished = manifest.present && manifest.valid &&
+                            manifest.index_seq < state_index_seq;
   /* The first manifest cannot reference stale artifacts. Do not turn its
    * foreground publication into a directory sweep; a later validated repair
    * or rebuild from an existing manifest reclaims interrupted bootstrap
@@ -12566,7 +12563,7 @@ static int lc_pouch_query_index_flush_segmented(
       if (rc == LC_OK && memtable != NULL &&
           !lc_pouch_query_index_summary_has_deferred_rows(&summary) &&
           lc_pouch_query_index_memtable_tail_compatible(memtable, &summary,
-                                                         &incremental)) {
+                                                        &incremental)) {
         memtable_usable = 1;
       } else if (rc == LC_OK) {
         lc_pouch_query_index_memtable_cleanup(&pouch->allocator, memtable);
@@ -12671,10 +12668,9 @@ extracted:
         &presence_term_generation, &presence_term_generation_length,
         &range_term_generation, &range_term_generation_length,
         &text_term_generation, &text_term_generation_length,
-        &text_cache_generation,
-        &trigram_term_generation, &trigram_term_generation_length,
-        &trigram_cache_generation, &temporal_term_generation,
-        &temporal_term_generation_length, error);
+        &text_cache_generation, &trigram_term_generation,
+        &trigram_term_generation_length, &trigram_cache_generation,
+        &temporal_term_generation, &temporal_term_generation_length, error);
   } else {
     rc = lc_pouch_query_index_build_text(
         state_index_seq, &summary, &text, &row_hash, &term_count, &term_hash,
@@ -12708,8 +12704,8 @@ extracted:
         error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_query_index_write_header_text(
-        pouch, header_path, &text, packed_path_unpublished, error);
+    rc = lc_pouch_query_index_write_header_text(pouch, header_path, &text,
+                                                packed_path_unpublished, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_pack_components(
@@ -12912,15 +12908,15 @@ int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_generation state_index_seq,
                                lc_pouch_query_index_flush_result *out,
                                lc_error *error) {
-  return lc_pouch_query_index_flush_coordinated(pouch, namespace_name,
-                                                state_index_seq, 0, 0, out,
-                                                error);
+  return lc_pouch_query_index_flush_coordinated(
+      pouch, namespace_name, state_index_seq, 0, 0, out, error);
 }
 
-int lc_pouch_query_index_flush_threshold(
-    lc_pouch *pouch, const char *namespace_name,
-    lc_pouch_generation state_index_seq, lc_pouch_query_index_flush_result *out,
-    lc_error *error) {
+int lc_pouch_query_index_flush_threshold(lc_pouch *pouch,
+                                         const char *namespace_name,
+                                         lc_pouch_generation state_index_seq,
+                                         lc_pouch_query_index_flush_result *out,
+                                         lc_error *error) {
   return lc_pouch_query_index_flush_coordinated(
       pouch, namespace_name, state_index_seq, 0, 1, out, error);
 }
@@ -12930,9 +12926,8 @@ int lc_pouch_query_index_flush_validated(lc_pouch *pouch,
                                          lc_pouch_generation state_index_seq,
                                          lc_pouch_query_index_flush_result *out,
                                          lc_error *error) {
-  return lc_pouch_query_index_flush_coordinated(pouch, namespace_name,
-                                                state_index_seq, 1, 0, out,
-                                                error);
+  return lc_pouch_query_index_flush_coordinated(
+      pouch, namespace_name, state_index_seq, 1, 0, out, error);
 }
 
 int lc_pouch_query_index_manifest_seq(lc_pouch *pouch,
@@ -13783,9 +13778,10 @@ lc_pouch_query_index_manifest_trust_valid(const lc_pouch *pouch,
   return 0;
 }
 
-static int lc_pouch_query_index_manifest_trust_seq(
-    const lc_pouch *pouch, const char *namespace_name,
-    lc_pouch_generation *index_seq) {
+static int
+lc_pouch_query_index_manifest_trust_seq(const lc_pouch *pouch,
+                                        const char *namespace_name,
+                                        lc_pouch_generation *index_seq) {
   lc_pouch_query_index_manifest_trust_entry *entry;
   uint64_t writer_mode_epoch;
 
@@ -13796,7 +13792,8 @@ static int lc_pouch_query_index_manifest_trust_seq(
   }
   entry = pouch->query_manifest_trust;
   while (entry != NULL) {
-    if (entry->manifest_cached && entry->writer_mode_epoch == writer_mode_epoch &&
+    if (entry->manifest_cached &&
+        entry->writer_mode_epoch == writer_mode_epoch &&
         entry->namespace_name != NULL &&
         strcmp(entry->namespace_name, namespace_name) == 0) {
       *index_seq = entry->index_seq;
@@ -14347,8 +14344,9 @@ static int lc_pouch_query_index_generation_cache_adopt_text(
       generation->namespace_name == NULL) {
     return 0;
   }
-  entry = (lc_pouch_query_index_generation_cache_entry *)
-      lc_calloc_with_allocator(&pouch->allocator, 1U, sizeof(*entry));
+  entry =
+      (lc_pouch_query_index_generation_cache_entry *)lc_calloc_with_allocator(
+          &pouch->allocator, 1U, sizeof(*entry));
   if (entry == NULL) {
     return 0;
   }
@@ -16053,8 +16051,8 @@ static int lc_pouch_query_index_direct_collect_text_docids(
   if (pouch == NULL || entry == NULL || field_hex == NULL ||
       needle_hex == NULL || needle_text == NULL || docids == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch direct text lookup requires inputs", NULL,
-                        NULL, "pouch");
+                        "pouch direct text lookup requires inputs", NULL, NULL,
+                        "pouch");
   }
   generation = &entry->direct_generation;
   any_text_lookup = lc_pouch_query_index_field_hex_is_any_text(field_hex);
@@ -16077,8 +16075,8 @@ static int lc_pouch_query_index_direct_collect_text_docids(
     if (term->field_hex == NULL || term->value_hex == NULL ||
         term->value_is_trigram_key) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch direct text generation is invalid", NULL,
-                          NULL, "pouch");
+                          "pouch direct text generation is invalid", NULL, NULL,
+                          "pouch");
     }
     if ((any_text_direct || !any_text_lookup) &&
         strcmp(term->field_hex, field_hex) != 0) {
@@ -16620,8 +16618,8 @@ static int lc_pouch_query_index_segmented_collect(
   *index_seq = 0UL;
   rc = LC_OK;
   if (lc_pouch_single_writer_enabled(pouch)) {
-    rc = lc_pouch_state_query_index_seq(pouch, namespace_name,
-                                        &state_index_seq, error);
+    rc = lc_pouch_state_query_index_seq(pouch, namespace_name, &state_index_seq,
+                                        error);
     if (rc == LC_OK) {
       cached_manifest = lc_pouch_query_index_manifest_trust_snapshot(
           pouch, namespace_name, state_index_seq);

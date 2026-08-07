@@ -9,8 +9,8 @@
 #define LC_POUCH_INDEX_DENSE_TRACK_MIN_COUNT 4U
 #define LC_POUCH_INDEX_DENSE_TRACK_SPARSE_MULTIPLIER 2U
 
-static void lc_pouch_index_posting_rebind_inline_storage(
-    lc_pouch_index_posting *posting) {
+static void
+lc_pouch_index_posting_rebind_inline_storage(lc_pouch_index_posting *posting) {
   if (posting != NULL && posting->using_inline_bytes) {
     posting->bytes = posting->inline_bytes;
     posting->capacity = sizeof(posting->inline_bytes);

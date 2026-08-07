@@ -59,10 +59,11 @@ int lc_pouch_query_index_flush(lc_pouch *pouch, const char *namespace_name,
 /* Exclusive foreground threshold publication. If a pending operation becomes
  * active before the batch is taken, this returns LC_OK with index_seq zero so
  * the caller can preserve the batch for a later completion boundary. */
-int lc_pouch_query_index_flush_threshold(
-    lc_pouch *pouch, const char *namespace_name,
-    lc_pouch_generation state_index_seq, lc_pouch_query_index_flush_result *out,
-    lc_error *error);
+int lc_pouch_query_index_flush_threshold(lc_pouch *pouch,
+                                         const char *namespace_name,
+                                         lc_pouch_generation state_index_seq,
+                                         lc_pouch_query_index_flush_result *out,
+                                         lc_error *error);
 int lc_pouch_query_index_flush_validated(lc_pouch *pouch,
                                          const char *namespace_name,
                                          lc_pouch_generation state_index_seq,

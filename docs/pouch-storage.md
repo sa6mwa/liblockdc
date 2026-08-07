@@ -295,13 +295,16 @@ A complete record without that trailer is rejected as corruption; replay never
 synthesizes ordering from physical file position. The high-water control record
 carries its sequence as its sole generation field.
 
-Snapshots extend the state and delete trailers with each record's last
-query-visible sequence. This preserves the distinction between a document
-mutation and a later lease-only metadata mutation across compaction and reopen:
+Snapshots retain the legacy `[LCSI][state-sequence]` trailer and append a
+second `[LCSQ][query-sequence]` trailer for each state or delete record. This
+unambiguous 24-byte tail preserves the distinction between a document mutation
+and a later lease-only metadata mutation across compaction and reopen:
 query-index flushes do not republish metadata-only changes. Replay continues to
 accept earlier snapshot trailers without that extension and derives their
 per-record query freshness conservatively; newly written snapshots always use
-the extended form.
+the appended form. The `LCSQ` marker is valid only after a complete legacy
+`LCSI` trailer, so caller metadata cannot be mistaken for snapshot freshness
+metadata.
 
 ### State Records
 

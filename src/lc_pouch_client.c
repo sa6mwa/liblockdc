@@ -4692,8 +4692,8 @@ static int lc_pouch_query_flush_summary_index(lc_client_handle *client,
                         NULL, NULL, NULL);
   }
   *index_seq = 0UL;
-  rc = lc_pouch_state_query_index_seq(client->pouch, namespace_name,
-                                      index_seq, error);
+  rc = lc_pouch_state_query_index_seq(client->pouch, namespace_name, index_seq,
+                                      error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -12457,6 +12457,11 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
                                &options, &result, error);
     if (rc == LC_OK) {
       out->removed = result.version > 0UL;
+      /* Removing a non-transactional document consumes its lease metadata,
+       * so remove itself is the final operation boundary for foreground
+       * indexing. A later lease release cannot observe this lease. */
+      lc_pouch_indexer_note_operation_complete(client->pouch, namespace_name,
+                                               req->lease.key);
     }
   }
   if (rc == LC_OK) {
@@ -18359,9 +18364,8 @@ int lc_pouch_lease_release_method(lc_lease *self, const lc_release_req *req,
     lc_pouch_state_write_result_cleanup(&lease->client->allocator,
                                         &write_result);
     if (rc == LC_OK) {
-      lc_pouch_indexer_note_operation_complete(lease->client->pouch,
-                                               lease->namespace_name,
-                                               lease->key);
+      lc_pouch_indexer_note_operation_complete(
+          lease->client->pouch, lease->namespace_name, lease->key);
     }
     return rc;
   }

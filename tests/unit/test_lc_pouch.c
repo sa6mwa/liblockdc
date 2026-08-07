@@ -8471,8 +8471,8 @@ test_exclusive_indexer_publishes_at_document_threshold(void **state) {
   open_pouch_client_endpoint(endpoint, &client, &error);
   handle = (lc_client_handle *)client;
   assert_non_null(handle->pouch);
-  write_client_state(client, "doc/one", "{\"kind\":\"threshold\"}",
-                     NULL, 0L, 0, &first, &error);
+  write_client_state(client, "doc/one", "{\"kind\":\"threshold\"}", NULL, 0L, 0,
+                     &first, &error);
 
   acquire_req.key = "doc/two";
   acquire_req.owner = "pouch-indexer-threshold";
@@ -8482,16 +8482,15 @@ test_exclusive_indexer_publishes_at_document_threshold(void **state) {
   assert_non_null(lease);
   pouch_copy_lease_ref(&update_req.lease, lease);
   rc = lc_source_from_memory("{\"kind\":\"intermediate\"}",
-                             strlen("{\"kind\":\"intermediate\"}"),
-                             &source, &error);
+                             strlen("{\"kind\":\"intermediate\"}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = client->update(client, &update_req, source, &intermediate, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("{\"kind\":\"final\"}",
-                             strlen("{\"kind\":\"final\"}"), &source,
-                             &error);
+                             strlen("{\"kind\":\"final\"}"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->update(client, &update_req, source, &second, &error);
   lc_source_close(source);
@@ -8524,6 +8523,93 @@ test_exclusive_indexer_publishes_at_document_threshold(void **state) {
   lc_update_res_cleanup(&second);
   lc_update_res_cleanup(&intermediate);
   lc_update_res_cleanup(&first);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_exclusive_indexer_publishes_delete_batch_at_document_threshold(
+    void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_lease *lease;
+  lc_remove_op remove_op;
+  lc_remove_res first_delete;
+  lc_remove_res second_delete;
+  lc_update_res first_write;
+  lc_update_res second_write;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_error error;
+  char endpoint[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&first_delete, 0, sizeof(first_delete));
+  memset(&second_delete, 0, sizeof(second_delete));
+  memset(&first_write, 0, sizeof(first_write));
+  memset(&second_write, 0, sizeof(second_write));
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  lc_error_init(&error);
+  make_root("indexer-threshold-deletes", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?indexer_flush_docs=2&"
+                       "indexer_flush_interval_seconds=3600",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  write_client_state(client, "doc/delete-one", "{\"kind\":\"one\"}", NULL, 0L,
+                     0, &first_write, &error);
+  write_client_state(client, "doc/delete-two", "{\"kind\":\"two\"}", NULL, 0L,
+                     0, &second_write, &error);
+
+  lc_remove_op_init(&remove_op);
+  pouch_acquire_test_lease(client, NULL, "doc/delete-one", NULL, &lease,
+                           &error);
+  pouch_copy_lease_ref(&remove_op.lease, lease);
+  rc = client->remove(client, &remove_op, &first_delete, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(first_delete.removed);
+  lease->close(lease);
+  lease = NULL;
+
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(manifest_seq < query_seq);
+
+  lc_remove_op_init(&remove_op);
+  pouch_acquire_test_lease(client, NULL, "doc/delete-two", NULL, &lease,
+                           &error);
+  pouch_copy_lease_ref(&remove_op.lease, lease);
+  rc = client->remove(client, &remove_op, &second_delete, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(second_delete.removed);
+  lease->close(lease);
+  lease = NULL;
+
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+  assert_false(lc_pouch_query_index_has_pending(handle->pouch, "default"));
+
+  lc_remove_res_cleanup(&second_delete);
+  lc_remove_res_cleanup(&first_delete);
+  lc_update_res_cleanup(&second_write);
+  lc_update_res_cleanup(&first_write);
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -8581,8 +8667,8 @@ test_exclusive_indexer_waits_for_all_active_operations(void **state) {
   assert_int_equal(rc, LC_OK);
   pouch_copy_lease_ref(&update_req.lease, lease_a);
   rc = lc_source_from_memory("{\"kind\":\"a-initial\"}",
-                             strlen("{\"kind\":\"a-initial\"}"),
-                             &source, &error);
+                             strlen("{\"kind\":\"a-initial\"}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = client->update(client, &update_req, source, &update_a, &error);
   lc_source_close(source);
@@ -8597,8 +8683,7 @@ test_exclusive_indexer_waits_for_all_active_operations(void **state) {
   lc_update_req_init(&update_req);
   pouch_copy_lease_ref(&update_req.lease, lease_b);
   rc = lc_source_from_memory("{\"kind\":\"b-final\"}",
-                             strlen("{\"kind\":\"b-final\"}"),
-                             &source, &error);
+                             strlen("{\"kind\":\"b-final\"}"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->update(client, &update_req, source, &update_b, &error);
   lc_source_close(source);
@@ -8611,9 +8696,8 @@ test_exclusive_indexer_waits_for_all_active_operations(void **state) {
   rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
                                       &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_query_index_flush_threshold(handle->pouch, "default",
-                                            query_seq, &threshold_result,
-                                            &error);
+  rc = lc_pouch_query_index_flush_threshold(handle->pouch, "default", query_seq,
+                                            &threshold_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(threshold_result.index_seq, 0UL);
   rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
@@ -8636,8 +8720,7 @@ test_exclusive_indexer_waits_for_all_active_operations(void **state) {
   lc_update_req_init(&update_req);
   pouch_copy_lease_ref(&update_req.lease, lease_a);
   rc = lc_source_from_memory("{\"kind\":\"a-final\"}",
-                             strlen("{\"kind\":\"a-final\"}"),
-                             &source, &error);
+                             strlen("{\"kind\":\"a-final\"}"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->update(client, &update_req, source, &update_a_final, &error);
   lc_source_close(source);
@@ -8662,8 +8745,8 @@ test_exclusive_indexer_waits_for_all_active_operations(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void
-test_exclusive_indexer_publishes_transaction_decision_at_threshold(void **state) {
+static void test_exclusive_indexer_publishes_transaction_decision_at_threshold(
+    void **state) {
   lc_client *client;
   lc_client_handle *handle;
   lc_lease *lease;
@@ -8713,8 +8796,8 @@ test_exclusive_indexer_publishes_transaction_decision_at_threshold(void **state)
 
   pouch_copy_lease_ref(&update_req.lease, lease);
   rc = lc_source_from_memory("{\"kind\":\"transaction\"}",
-                             strlen("{\"kind\":\"transaction\"}"),
-                             &source, &error);
+                             strlen("{\"kind\":\"transaction\"}"), &source,
+                             &error);
   assert_int_equal(rc, LC_OK);
   rc = client->update(client, &update_req, source, &update_res, &error);
   lc_source_close(source);
@@ -8789,10 +8872,10 @@ static void test_query_index_sequence_ignores_lease_metadata(void **state) {
 
   open_pouch_client_endpoint(endpoint, &client, &error);
   handle = (lc_client_handle *)client;
-  write_client_state(client, "doc/one", "{\"kind\":\"first\"}", NULL, 0L,
-                     0, &first, &error);
-  write_client_state(client, "doc/two", "{\"kind\":\"second\"}", NULL,
-                     0L, 0, &second, &error);
+  write_client_state(client, "doc/one", "{\"kind\":\"first\"}", NULL, 0L, 0,
+                     &first, &error);
+  write_client_state(client, "doc/two", "{\"kind\":\"second\"}", NULL, 0L, 0,
+                     &second, &error);
 
   rc = lc_pouch_state_index_seq(handle->pouch, "default", &state_seq, &error);
   assert_int_equal(rc, LC_OK);
@@ -8853,7 +8936,13 @@ static void test_query_index_ignores_internal_objects(void **state) {
   lc_enqueue_res enqueue_res;
   lc_dequeue_req dequeue_req;
   lc_dequeue_batch_res batch;
+  lc_nack_op transaction_nack;
+  lc_nack_res transaction_nack_res;
+  lc_txn_participant transaction_participant;
+  lc_txn_decision_req transaction_decision;
+  lc_txn_decision_res transaction_decision_res;
   lc_lease *lease;
+  lc_message *transaction_message;
   lc_source *source;
   lc_update_res first;
   lc_update_res second;
@@ -8863,6 +8952,7 @@ static void test_query_index_ignores_internal_objects(void **state) {
   lc_error error;
   char endpoint[1024];
   char root[512];
+  char transaction_participant_key[256];
   long message_index;
   size_t message_offset;
   int rc;
@@ -8870,6 +8960,7 @@ static void test_query_index_ignores_internal_objects(void **state) {
   (void)state;
   client = NULL;
   lease = NULL;
+  transaction_message = NULL;
   source = NULL;
   memset(&first, 0, sizeof(first));
   memset(&second, 0, sizeof(second));
@@ -8878,6 +8969,11 @@ static void test_query_index_ignores_internal_objects(void **state) {
   memset(&enqueue_res, 0, sizeof(enqueue_res));
   lc_dequeue_req_init(&dequeue_req);
   memset(&batch, 0, sizeof(batch));
+  lc_nack_op_init(&transaction_nack);
+  memset(&transaction_nack_res, 0, sizeof(transaction_nack_res));
+  memset(&transaction_participant, 0, sizeof(transaction_participant));
+  lc_txn_decision_req_init(&transaction_decision);
+  memset(&transaction_decision_res, 0, sizeof(transaction_decision_res));
   manifest_seq = 0UL;
   query_seq = 0UL;
   state_seq = 0UL;
@@ -8891,10 +8987,10 @@ static void test_query_index_ignores_internal_objects(void **state) {
 
   open_pouch_client_endpoint(endpoint, &client, &error);
   handle = (lc_client_handle *)client;
-  write_client_state(client, "doc/one", "{\"kind\":\"first\"}", NULL,
-                     0L, 0, &first, &error);
-  write_client_state(client, "doc/two", "{\"kind\":\"second\"}", NULL,
-                     0L, 0, &second, &error);
+  write_client_state(client, "doc/one", "{\"kind\":\"first\"}", NULL, 0L, 0,
+                     &first, &error);
+  write_client_state(client, "doc/two", "{\"kind\":\"second\"}", NULL, 0L, 0,
+                     &second, &error);
   rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
                                       &error);
   assert_int_equal(rc, LC_OK);
@@ -8925,8 +9021,7 @@ static void test_query_index_ignores_internal_objects(void **state) {
   assert_int_equal(rc, LC_OK);
   lease = NULL;
 
-  rc = lc_pouch_state_index_seq(handle->pouch, "default", &state_seq,
-                                &error);
+  rc = lc_pouch_state_index_seq(handle->pouch, "default", &state_seq, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(state_seq > query_seq);
   rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
@@ -8943,8 +9038,7 @@ static void test_query_index_ignores_internal_objects(void **state) {
   enqueue_req.queue = "internal-objects";
   enqueue_req.visibility_timeout_seconds = 30L;
   for (message_index = 0L; message_index < 4L; ++message_index) {
-    rc = lc_source_from_memory("payload", strlen("payload"), &source,
-                               &error);
+    rc = lc_source_from_memory("payload", strlen("payload"), &source, &error);
     assert_int_equal(rc, LC_OK);
     rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
     lc_source_close(source);
@@ -8969,8 +9063,7 @@ static void test_query_index_ignores_internal_objects(void **state) {
     batch.messages[message_offset] = NULL;
   }
   lc_dequeue_batch_cleanup(&batch);
-  rc = lc_pouch_state_index_seq(handle->pouch, "default", &state_seq,
-                                &error);
+  rc = lc_pouch_state_index_seq(handle->pouch, "default", &state_seq, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(state_seq > query_seq);
   rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
@@ -8981,6 +9074,69 @@ static void test_query_index_ignores_internal_objects(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(manifest_seq, query_seq);
   lc_enqueue_res_cleanup(&enqueue_res);
+
+  /* A queue update staged in a transaction is also an internal object. Its
+   * promotion must neither enter the query projection nor leave an
+   * uncompleted foreground-index operation behind. */
+  enqueue_req.queue = "internal-objects-transaction";
+  rc = lc_source_from_memory("payload", strlen("payload"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  lc_dequeue_req_init(&dequeue_req);
+  dequeue_req.queue = "internal-objects-transaction";
+  dequeue_req.owner = "pouch-index-object-transaction";
+  dequeue_req.txn_id = "pouch-index-object-transaction";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  dequeue_req.wait_seconds = 0L;
+  rc = client->dequeue(client, &dequeue_req, &transaction_message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(transaction_message);
+
+  transaction_nack.message.namespace_name = transaction_message->namespace_name;
+  transaction_nack.message.queue = transaction_message->queue;
+  transaction_nack.message.message_id = transaction_message->message_id;
+  transaction_nack.message.lease_id = transaction_message->lease_id;
+  transaction_nack.message.txn_id = transaction_message->txn_id;
+  transaction_nack.message.fencing_token = transaction_message->fencing_token;
+  transaction_nack.message.meta_etag = transaction_message->meta_etag;
+  transaction_nack.intent = LC_NACK_INTENT_DEFER;
+  rc = client->queue_nack(client, &transaction_nack, &transaction_nack_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(transaction_nack_res.requeued);
+  lc_nack_res_cleanup(&transaction_nack_res);
+
+  pouch_queue_message_participant_key(transaction_message,
+                                      transaction_participant_key,
+                                      sizeof(transaction_participant_key));
+  transaction_participant.namespace_name = transaction_message->namespace_name;
+  transaction_participant.key = transaction_participant_key;
+  transaction_decision.txn_id = transaction_message->txn_id;
+  transaction_decision.participants = &transaction_participant;
+  transaction_decision.participant_count = 1U;
+  rc = client->txn_commit(client, &transaction_decision,
+                          &transaction_decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&transaction_decision_res);
+  transaction_message->close(transaction_message);
+  transaction_message = NULL;
+
+  rc = lc_pouch_state_index_seq(handle->pouch, "default", &state_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(state_seq > query_seq);
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+  assert_false(lc_pouch_query_index_has_pending(handle->pouch, "default"));
 
   lc_client_close(client);
   client = NULL;
@@ -8995,17 +9151,22 @@ static void test_query_index_ignores_internal_objects(void **state) {
   assert_int_equal(manifest_seq, query_seq);
 
   lc_attach_res_cleanup(&attach_res);
+  lc_nack_res_cleanup(&transaction_nack_res);
+  lc_txn_decision_res_cleanup(&transaction_decision_res);
   lc_dequeue_batch_cleanup(&batch);
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_update_res_cleanup(&second);
   lc_update_res_cleanup(&first);
+  if (transaction_message != NULL) {
+    transaction_message->close(transaction_message);
+  }
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
 
-static void test_query_index_threshold_handles_repeated_lease_updates(
-    void **state) {
+static void
+test_query_index_threshold_handles_repeated_lease_updates(void **state) {
   lc_client *client;
   lc_client_handle *handle;
   lc_acquire_req acquire_req;
@@ -9058,8 +9219,8 @@ static void test_query_index_threshold_handles_repeated_lease_updates(
     assert_non_null(lease);
     for (update = 0L; update < 2L; ++update) {
       assert_true(snprintf(value, sizeof(value),
-                           "{\"kind\":\"doc-%ld-update-%ld\"}",
-                           document, update) > 0);
+                           "{\"kind\":\"doc-%ld-update-%ld\"}", document,
+                           update) > 0);
       lc_update_req_init(&update_req);
       pouch_copy_lease_ref(&update_req.lease, lease);
       source = NULL;
@@ -9073,8 +9234,8 @@ static void test_query_index_threshold_handles_repeated_lease_updates(
       lc_update_res_cleanup(&update_res);
     }
     if (document == 1L) {
-      rc = lc_pouch_state_query_index_seq(handle->pouch, "default",
-                                          &query_seq, &error);
+      rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                          &error);
       assert_int_equal(rc, LC_OK);
       rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
                                              &manifest_seq, &error);
@@ -11077,6 +11238,62 @@ static void fill_repeated_payload(char *buffer, size_t length) {
     buffer[offset++] = 'x';
   }
   buffer[offset] = '\0';
+}
+
+static void
+test_state_legacy_metadata_does_not_mimic_snapshot_query_trailer(void **state) {
+  static const unsigned char metadata[] = {'L', 'C', 'S', 'Q',
+                                           't', 'a', 'i', 'l'};
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("state-legacy-query-trailer", root, sizeof(root));
+  cleanup_root(root);
+
+  options.content_type = "application/json";
+  options.has_metadata = 1;
+  options.metadata = metadata;
+  options.metadata_length = sizeof(metadata);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{}", 2U, &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "state/legacy-trailer", body,
+                            &options, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(write_result.index_seq != 0UL);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "default", "state/legacy-trailer",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_int_equal(read_result.metadata_length, sizeof(metadata));
+  assert_memory_equal(read_result.metadata, metadata, sizeof(metadata));
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
 }
 
 static void test_state_compression_streams_segment_payloads(void **state) {
@@ -14076,8 +14293,7 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("{\"kind\":\"gone\"}",
-                             strlen("{\"kind\":\"gone\"}"), &body,
-                             &error);
+                             strlen("{\"kind\":\"gone\"}"), &body, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_write(pouch, "docs/query-freshness", "doc/gone", body,
                             NULL, &write_result, &error);
@@ -24145,8 +24361,7 @@ test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
   selector = (char *)malloc(selector_length);
   assert_non_null(selector);
   snprintf(selector, selector_length,
-           "{\"eq\":{\"field\":\"/payload\",\"value\":\"%s\"}}",
-           match_value);
+           "{\"eq\":{\"field\":\"/payload\",\"value\":\"%s\"}}", match_value);
   query_req.selector_json = selector;
   rc = client->query_keys(client, &query_req, &handler, &equality_page,
                           &query_res, &error);
@@ -24162,8 +24377,7 @@ test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
   selector = (char *)malloc(selector_length);
   assert_non_null(selector);
   snprintf(selector, selector_length,
-           "{\"prefix\":{\"field\":\"/payload\",\"value\":\"%s\"}}",
-           prefix);
+           "{\"prefix\":{\"field\":\"/payload\",\"value\":\"%s\"}}", prefix);
   query_req.selector_json = selector;
   query_req.refresh = NULL;
   rc = client->query_keys(client, &query_req, &handler, &prefix_page,
@@ -25479,13 +25693,12 @@ test_exclusive_manifest_seq_trusts_published_snapshot(void **state) {
   rc = lc_pouch_state_query_index_seq(pouch, "docs/manifest-trust",
                                       &state_index_seq, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_query_index_flush(pouch, "docs/manifest-trust",
-                                  state_index_seq, &flush_result, &error);
+  rc = lc_pouch_query_index_flush(pouch, "docs/manifest-trust", state_index_seq,
+                                  &flush_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(flush_result.index_seq, state_index_seq);
 
-  namespace_path =
-      lc_pouch_namespace_path(NULL, root, "docs/manifest-trust");
+  namespace_path = lc_pouch_namespace_path(NULL, root, "docs/manifest-trust");
   assert_non_null(namespace_path);
   newest_query_index_path(namespace_path, "query.index", header_path,
                           sizeof(header_path));
@@ -28099,6 +28312,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_public_core_contract_roundtrips_all_transforms),
       cmocka_unit_test(test_state_etag_is_plaintext_sha256_content_hash),
       cmocka_unit_test(test_state_write_read_replays_segment_after_reopen),
+      cmocka_unit_test(
+          test_state_legacy_metadata_does_not_mimic_snapshot_query_trailer),
       cmocka_unit_test(test_state_compression_streams_segment_payloads),
       cmocka_unit_test(test_state_compression_mode_is_root_invariant),
       cmocka_unit_test(test_state_crypto_compression_round_trips),
@@ -28149,8 +28364,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_maintenance_runs_immediately_despite_interval),
       cmocka_unit_test(test_compaction_reclaims_expired_obsolete_files),
       cmocka_unit_test(test_snapshot_high_water_survives_compaction_reopen),
-      cmocka_unit_test(
-          test_query_freshness_delete_survives_compaction_reopen),
+      cmocka_unit_test(test_query_freshness_delete_survives_compaction_reopen),
       cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),
       cmocka_unit_test(test_namespace_manifest_repairs_from_existing_segments),
       cmocka_unit_test(test_staged_state_writes_durable_decision_records),
@@ -28158,10 +28372,10 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_staged_decision_recovery_tombstones_interrupted_discard),
       cmocka_unit_test(test_client_update_get_load_roundtrips_state),
+      cmocka_unit_test(test_exclusive_indexer_publishes_at_document_threshold),
       cmocka_unit_test(
-          test_exclusive_indexer_publishes_at_document_threshold),
-      cmocka_unit_test(
-          test_exclusive_indexer_waits_for_all_active_operations),
+          test_exclusive_indexer_publishes_delete_batch_at_document_threshold),
+      cmocka_unit_test(test_exclusive_indexer_waits_for_all_active_operations),
       cmocka_unit_test(
           test_exclusive_indexer_publishes_transaction_decision_at_threshold),
       cmocka_unit_test(test_query_index_sequence_ignores_lease_metadata),
