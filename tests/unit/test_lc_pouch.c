@@ -148,6 +148,7 @@ typedef struct pouch_acquire_for_update_state {
   int saw_staged_invisible;
   int saw_staging_key_rejected;
   int fail;
+  unsigned int delay_seconds;
 } pouch_acquire_for_update_state;
 
 typedef struct pouch_query_key_capture {
@@ -9265,6 +9266,108 @@ static void test_exclusive_indexer_publishes_transaction_decision_at_threshold(
   lc_error_cleanup(&error);
 }
 
+static void
+test_exclusive_indexer_clears_guards_after_failed_transaction_decision(
+    void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire_req;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_txn_participant participants[2];
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_pouch_query_index_flush_result flush_result;
+  lc_error error;
+  char endpoint[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  lc_acquire_req_init(&acquire_req);
+  lc_update_req_init(&update_req);
+  memset(&update_res, 0, sizeof(update_res));
+  memset(participants, 0, sizeof(participants));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_error_init(&error);
+  make_root("indexer-failed-transaction-guard", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?indexer_flush_docs=1&"
+                       "indexer_flush_interval_seconds=3600",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  acquire_req.key = "doc/failed-transaction";
+  acquire_req.owner = "pouch-indexer-failed-transaction";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "pouch-indexer-failed-transaction";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  pouch_copy_lease_ref(&update_req.lease, lease);
+  rc = lc_source_from_memory("{\"kind\":\"transaction\"}",
+                             strlen("{\"kind\":\"transaction\"}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  participants[0].namespace_name = "default";
+  participants[0].key = acquire_req.key;
+  /* The second entry is rejected only after the first staged participant has
+   * become durable and installed its indexer guard. */
+  participants[1].namespace_name = "default";
+  participants[1].key = "doc/.staging/invalid";
+  decision_req.txn_id = acquire_req.txn_id;
+  decision_req.participants = participants;
+  decision_req.participant_count = 2U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch staging keys are reserved for internal state");
+
+  /* A decision error has no completion loop. Its earlier participants must
+   * not leave a non-expiring guard that blocks every later batch. */
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(query_seq != 0UL);
+  rc = lc_pouch_query_index_flush_threshold(handle->pouch, "default", query_seq,
+                                            &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, query_seq);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+  assert_false(lc_pouch_query_index_has_pending(handle->pouch, "default"));
+
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_update_res_cleanup(&update_res);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_query_index_sequence_ignores_lease_metadata(void **state) {
   lc_client *client;
   lc_client_handle *handle;
@@ -10558,6 +10661,9 @@ static int pouch_acquire_for_update_handler(
   rc = update->lease->update(update->lease, source, NULL, error);
   source->close(source);
   assert_int_equal(rc, LC_OK);
+  if (state->delay_seconds > 0U) {
+    sleep(state->delay_seconds);
+  }
   if (state->observer != NULL) {
     lc_sink *sink;
     lc_get_res get_res;
@@ -28693,6 +28799,71 @@ static void test_acquire_for_update_success_and_rollback(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_exclusive_indexer_retires_expired_acquire_for_update_guard(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_acquire_req acquire_req;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_pouch_query_index_flush_result flush_result;
+  lc_error error;
+  pouch_acquire_for_update_state handler_state;
+  char endpoint[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  lc_acquire_req_init(&acquire_req);
+  memset(&handler_state, 0, sizeof(handler_state));
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_error_init(&error);
+  make_root("indexer-expired-acquire-for-update-guard", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?indexer_flush_docs=1&"
+                       "indexer_flush_interval_seconds=3600",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  handler_state.replacement = "{\"kind\":\"late\"}";
+  handler_state.delay_seconds = 2U;
+  acquire_req.key = "doc/expired-acquire-for-update";
+  acquire_req.owner = "pouch-indexer-expired-acquire-for-update";
+  acquire_req.ttl_seconds = 1L;
+  rc = client->acquire_for_update(client, &acquire_req,
+                                  pouch_acquire_for_update_handler,
+                                  &handler_state, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+
+  /* Promotion is durable, but the expired release cannot signal completion.
+   * Its lease-scoped guard must retire instead of deferring this namespace
+   * until the client closes. */
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(query_seq != 0UL);
+  rc = lc_pouch_query_index_flush_threshold(handle->pouch, "default", query_seq,
+                                            &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, query_seq);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+  assert_false(lc_pouch_query_index_has_pending(handle->pouch, "default"));
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_acquire_for_update_first_body_is_queryable(void **state) {
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
@@ -29041,6 +29212,8 @@ int main(int argc, char **argv) {
           test_exclusive_indexer_idle_flush_waits_for_incomplete_active_operation),
       cmocka_unit_test(
           test_exclusive_indexer_publishes_transaction_decision_at_threshold),
+      cmocka_unit_test(
+          test_exclusive_indexer_clears_guards_after_failed_transaction_decision),
       cmocka_unit_test(test_query_index_sequence_ignores_lease_metadata),
       cmocka_unit_test(test_query_index_ignores_internal_objects),
       cmocka_unit_test(test_staged_object_delete_does_not_queue_query_index),
@@ -29256,6 +29429,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_txn_recovery_applies_decisions_on_client_open),
       cmocka_unit_test(test_lease_remove_tombstones_state_and_refreshes_view),
       cmocka_unit_test(test_acquire_for_update_success_and_rollback),
+      cmocka_unit_test(
+          test_exclusive_indexer_retires_expired_acquire_for_update_guard),
       cmocka_unit_test(test_acquire_for_update_first_body_is_queryable),
       cmocka_unit_test(test_acquire_for_update_rollback_removes_new_state),
   };

@@ -374,10 +374,13 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
                                   lc_error *error);
 /** Internal client coordinator variant. The caller must later signal the
  * public operation's completion with lc_pouch_indexer_note_operation_complete.
+ * `operation_expires_at_unix` is the owning lease's expiry, so a failed final
+ * completion cannot retain the exclusive indexer guard indefinitely.
  */
 int lc_pouch_state_promote_staged_for_active_operation(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *txn_id, const char *expected_committed_etag,
+    lc_pouch_unix_seconds operation_expires_at_unix,
     lc_pouch_state_write_result *out, lc_error *error);
 int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
                                  const char *key, const char *txn_id,

@@ -11126,6 +11126,45 @@ static int lc_pouch_txn_is_queue_lease_mismatch(const lc_error *error) {
          strcmp(error->message, "pouch queue transaction lease expired") == 0;
 }
 
+static void lc_pouch_txn_cancel_applied_operation_guards(
+    lc_client_handle *client, const lc_txn_decision_req *req,
+    const char *local_backend_hash, int requires_backend_hash,
+    size_t participant_count) {
+  size_t i;
+
+  if (client == NULL || req == NULL || req->participants == NULL ||
+      req->txn_id == NULL || req->txn_id[0] == '\0') {
+    return;
+  }
+  for (i = 0U; i < participant_count; ++i) {
+    const char *participant_backend_hash;
+    const char *namespace_name;
+    size_t participant_backend_hash_length;
+
+    lc_pouch_txn_trim_bounds(req->participants[i].backend_hash,
+                             &participant_backend_hash,
+                             &participant_backend_hash_length);
+    if (participant_backend_hash_length != 0U &&
+        (!requires_backend_hash ||
+         strlen(local_backend_hash) != participant_backend_hash_length ||
+         strncmp(local_backend_hash, participant_backend_hash,
+                 participant_backend_hash_length) != 0)) {
+      continue;
+    }
+    if (lc_pouch_queue_is_message_lease_key(req->participants[i].key) ||
+        lc_pouch_queue_is_state_lease_key(req->participants[i].key)) {
+      continue;
+    }
+    namespace_name =
+        lc_pouch_client_namespace(client, req->participants[i].namespace_name);
+    if (lc_pouch_client_namespace_reserved(namespace_name)) {
+      continue;
+    }
+    lc_pouch_query_index_operation_cancel(
+        client->pouch, namespace_name, req->participants[i].key, req->txn_id);
+  }
+}
+
 static int lc_pouch_txn_apply_participants(lc_client_handle *client,
                                            const lc_txn_decision_req *req,
                                            const char *state,
@@ -11181,12 +11220,16 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
         !lc_pouch_queue_is_state_lease_key(req->participants[i].key)) {
       rc = lc_pouch_client_validate_public_key(req->participants[i].key, error);
       if (rc != LC_OK) {
+        lc_pouch_txn_cancel_applied_operation_guards(
+            client, req, local_backend_hash, requires_backend_hash, i);
         return rc;
       }
     }
     rc = lc_pouch_client_public_namespace(
         client, req->participants[i].namespace_name, &namespace_name, error);
     if (rc != LC_OK) {
+      lc_pouch_txn_cancel_applied_operation_guards(
+          client, req, local_backend_hash, requires_backend_hash, i);
       return rc;
     }
     if (lc_pouch_queue_is_message_lease_key(req->participants[i].key)) {
@@ -11200,6 +11243,8 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
           lc_error_init(error);
           continue;
         }
+        lc_pouch_txn_cancel_applied_operation_guards(
+            client, req, local_backend_hash, requires_backend_hash, i + 1U);
         return rc;
       }
       continue;
@@ -11215,6 +11260,8 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
           lc_error_init(error);
           continue;
         }
+        lc_pouch_txn_cancel_applied_operation_guards(
+            client, req, local_backend_hash, requires_backend_hash, i + 1U);
         return rc;
       }
       continue;
@@ -11228,11 +11275,15 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
                                                 req->participants[i].key,
                                                 req->txn_id, state, error);
     } else {
+      lc_pouch_txn_cancel_applied_operation_guards(
+          client, req, local_backend_hash, requires_backend_hash, i);
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch transaction state is unsupported", NULL, NULL,
                           NULL);
     }
     if (rc != LC_OK) {
+      lc_pouch_txn_cancel_applied_operation_guards(
+          client, req, local_backend_hash, requires_backend_hash, i + 1U);
       return rc;
     }
   }
@@ -11261,6 +11312,9 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
     rc = lc_pouch_client_public_namespace(
         client, req->participants[i].namespace_name, &namespace_name, error);
     if (rc != LC_OK) {
+      lc_pouch_txn_cancel_applied_operation_guards(
+          client, req, local_backend_hash, requires_backend_hash,
+          req->participant_count);
       return rc;
     }
     lc_pouch_indexer_note_operation_complete(
@@ -11930,8 +11984,8 @@ int lc_pouch_client_acquire_for_update_method(
   } else if (lease_handle->pouch_stage_dirty) {
     rc = lc_pouch_state_promote_staged_for_active_operation(
         client->pouch, lease_handle->namespace_name, lease_handle->key,
-        stage_txn_id, get_res.no_content ? NULL : get_res.etag, &promote_result,
-        error);
+        stage_txn_id, get_res.no_content ? NULL : get_res.etag,
+        lease_handle->lease_expires_at_unix, &promote_result, error);
     if (rc == LC_OK) {
       lc_version version = 0L;
 

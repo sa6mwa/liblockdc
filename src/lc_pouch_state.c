@@ -13717,7 +13717,8 @@ int lc_pouch_state_stage_write_prepared(
 static int lc_pouch_state_promote_staged_locked(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *txn_id, const char *expected_committed_etag,
-    lc_pouch_state_write_result *out, int operation_active, lc_error *error) {
+    lc_pouch_state_write_result *out, int operation_active,
+    lc_pouch_unix_seconds operation_expires_at_unix, lc_error *error) {
   lc_pouch_state_entry committed;
   lc_pouch_state_entry staged;
   lc_pouch_namespace_manifest manifest;
@@ -13776,8 +13777,8 @@ static int lc_pouch_state_promote_staged_locked(
   if (operation_active &&
       !lc_pouch_state_record_type_is_object(staged.record_type)) {
     rc = lc_pouch_query_index_operation_begin(
-        pouch, namespace_name, key, txn_id, 0L, &query_index_guard_started,
-        error);
+        pouch, namespace_name, key, txn_id, operation_expires_at_unix,
+        &query_index_guard_started, error);
     if (rc != LC_OK) {
       goto cleanup;
     }
@@ -13884,7 +13885,8 @@ cleanup:
 static int lc_pouch_state_promote_staged_with_operation(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *txn_id, const char *expected_committed_etag,
-    lc_pouch_state_write_result *out, int operation_active, lc_error *error) {
+    lc_pouch_state_write_result *out, int operation_active,
+    lc_pouch_unix_seconds operation_expires_at_unix, lc_error *error) {
   lc_pouch_state_commit_group *commit_group;
   lc_pouch_state_key_lock lock;
   int owns_commit_group;
@@ -13893,9 +13895,9 @@ static int lc_pouch_state_promote_staged_with_operation(
   commit_group = NULL;
   owns_commit_group = 0;
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
-    return lc_pouch_state_promote_staged_locked(pouch, namespace_name, key,
-                                                txn_id, expected_committed_etag,
-                                                out, operation_active, error);
+    return lc_pouch_state_promote_staged_locked(
+        pouch, namespace_name, key, txn_id, expected_committed_etag, out,
+        operation_active, operation_expires_at_unix, error);
   }
   rc = lc_pouch_state_key_mutation_begin(pouch, namespace_name, key, &lock,
                                          error);
@@ -13908,9 +13910,9 @@ static int lc_pouch_state_promote_staged_with_operation(
     lc_pouch_state_key_mutation_end(pouch, &lock);
     return rc;
   }
-  rc = lc_pouch_state_promote_staged_locked(pouch, namespace_name, key, txn_id,
-                                            expected_committed_etag, out,
-                                            operation_active, error);
+  rc = lc_pouch_state_promote_staged_locked(
+      pouch, namespace_name, key, txn_id, expected_committed_etag, out,
+      operation_active, operation_expires_at_unix, error);
   rc = lc_pouch_state_finish_commit_group_after_mutation(
       pouch, &lock, commit_group, owns_commit_group, rc, error);
   if (rc != LC_OK && out->query_index_operation_guard_started) {
@@ -13929,17 +13931,18 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
                                   lc_pouch_state_write_result *out,
                                   lc_error *error) {
   return lc_pouch_state_promote_staged_with_operation(
-      pouch, namespace_name, key, txn_id, expected_committed_etag, out, 0,
+      pouch, namespace_name, key, txn_id, expected_committed_etag, out, 0, 0L,
       error);
 }
 
 int lc_pouch_state_promote_staged_for_active_operation(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *txn_id, const char *expected_committed_etag,
+    lc_pouch_unix_seconds operation_expires_at_unix,
     lc_pouch_state_write_result *out, lc_error *error) {
   return lc_pouch_state_promote_staged_with_operation(
       pouch, namespace_name, key, txn_id, expected_committed_etag, out, 1,
-      error);
+      operation_expires_at_unix, error);
 }
 
 int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
