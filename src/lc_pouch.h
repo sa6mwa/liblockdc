@@ -14,12 +14,14 @@ typedef lc_i64 lc_pouch_unix_seconds;
 
 typedef struct lc_pouch_open_options {
   uint64_t segment_target_bytes;
-  /** Maximum namespace mutations accumulated by the asynchronous indexer
-   * before it publishes an immutable generation. Zero selects the Go-disk
+  /** Maximum distinct ready projections before an exclusive writer publishes
+   * its immutable generation synchronously. Shared-root handles use the same
+   * bound on their asynchronous replay indexer. Zero selects Go disk's
    * default of 2,000. */
   uint64_t indexer_flush_docs;
-  /** Maximum seconds the asynchronous indexer retains its first unflushed
-   * mutation. Zero selects the Go-disk disk-store default of ten seconds. */
+  /** Maximum seconds the indexer retains its first unflushed mutation before
+   * asynchronous publication. Zero selects Go disk's disk-store default of
+   * ten seconds. */
   uint64_t indexer_flush_interval_seconds;
   unsigned long compaction_min_segment_count;
   uint64_t compaction_min_reclaimable_bytes;
@@ -198,6 +200,9 @@ typedef struct lc_pouch_state_write_options {
   int has_query_hidden;
   int query_hidden;
   int disable_compression;
+  /* Stores an internal object (attachments, queues, control records) rather
+   * than public document state. Object records are excluded from query-index
+   * capture and never advance its freshness generation. */
   int object_record;
   /* Internal only: marks a staged transactional delete in durable metadata.
    * Public content types remain ordinary content types unless this field is
@@ -252,6 +257,8 @@ typedef struct lc_pouch_state_visit_entry {
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  /* Non-zero for internal object records, which are not public query state. */
+  int object_record;
 } lc_pouch_state_visit_entry;
 
 typedef int (*lc_pouch_state_visit_fn)(const lc_pouch_state_visit_entry *entry,
@@ -262,10 +269,18 @@ typedef int (*lc_pouch_state_read_many_fn)(
     lc_error *error);
 
 /**
- * Opens a Pouch root and starts its owned worker threads. Its indexer batches
- * derived-index replay from durable state after 2,000 namespace mutations or
- * 10 seconds, so mutation completion neither parses nor retains document
- * bodies for index construction.
+ * Opens a Pouch root and starts its owned worker threads. Its exclusive
+ * indexer publishes a bounded, body-free projection synchronously at a
+ * completed public lease or transaction boundary when it reaches
+ * `indexer_flush_docs` (2,000 by default) and no other pending key remains
+ * active. The batch take rechecks that active-key invariant before it can
+ * publish, matching Go disk's memtable threshold without indexing an
+ * intermediate in-lease body version. A successful foreground publication
+ * consumes its queued batch, so a later below-threshold mutation begins a
+ * fresh worker interval. Below that bound, and for shared roots, the worker
+ * publishes after
+ * `indexer_flush_interval_seconds` (ten seconds by default). Mutation
+ * completion never retains source document bodies for indexing.
  *
  * A process must fork before opening Pouch, or exec before using Pouch in the
  * child. Re-entering an inherited Pouch handle after fork is unsupported:
@@ -377,6 +392,12 @@ int lc_pouch_state_visit(lc_pouch *pouch, const char *namespace_name,
                          lc_error *error);
 int lc_pouch_state_index_seq(lc_pouch *pouch, const char *namespace_name,
                              lc_pouch_generation *out, lc_error *error);
+/* Returns the durable sequence that can change indexed query candidates.
+ * Lease-only metadata records intentionally do not advance this value. */
+int lc_pouch_state_query_index_seq(lc_pouch *pouch,
+                                   const char *namespace_name,
+                                   lc_pouch_generation *out,
+                                   lc_error *error);
 void lc_pouch_state_read_result_cleanup(const lc_allocator *allocator,
                                         lc_pouch_state_read_result *result);
 

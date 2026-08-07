@@ -61,7 +61,9 @@ options. Common options are:
   group commit
 - `segment_target_bytes=<u64>` for rolling segment sizing
 - `indexer_flush_docs=<u64>` and `indexer_flush_interval_seconds=<u64>` for
-  asynchronous query-index publication
+  bounded query-index publication: exclusive roots publish at the document
+  threshold after all pending leases or transactions have completed, while
+  shared roots publish asynchronously
 - `background_compaction=false` to disable the default idle-debounced
   compaction worker, and `disable_compaction_throttling=true` to remove its
   default throughput bound

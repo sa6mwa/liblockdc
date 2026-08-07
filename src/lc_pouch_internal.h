@@ -48,6 +48,7 @@ typedef struct lc_pouch_state_change_visit_entry {
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  int object_record;
   int found;
 } lc_pouch_state_change_visit_entry;
 
@@ -308,10 +309,23 @@ void lc_pouch_writer_mode_operation_end(lc_pouch *pouch);
  * does not compact at open or while successful mutations keep arriving.
  */
 void lc_pouch_compaction_note_mutation(lc_pouch *pouch);
-/** Schedules asynchronous incremental index publication after a mutation.
- * This queues only the namespace and never retains a document body. */
+/** Schedules derived index publication after a mutation. The queue and bounded
+ * normalized projection never retain a document body, and a failed derived
+ * publication cannot revoke an already durable mutation. */
 void lc_pouch_indexer_note_mutation(lc_pouch *pouch,
                                     const char *namespace_name);
+/** Marks a durable public operation boundary. In exclusive-writer mode this
+ * synchronously publishes a queued namespace once its configured distinct
+ * document threshold is reached and no pending key is still active; shared
+ * roots retain asynchronous replay. */
+void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch,
+                                              const char *namespace_name,
+                                              const char *key);
+/** Removes one completed key from the exclusive writer's pending-operation
+ * set. The caller holds `indexer_mutex`; allocation failure is conservative
+ * and leaves derived publication queued. */
+int lc_pouch_query_index_pending_operation_complete_locked(
+    lc_pouch *pouch, const char *namespace_name, const char *key);
 void lc_pouch_state_source_cache_cleanup(lc_pouch *pouch);
 int lc_pouch_state_metadata_append_worker_init(lc_pouch *pouch,
                                                lc_error *error);

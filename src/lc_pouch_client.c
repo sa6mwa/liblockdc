@@ -4692,8 +4692,8 @@ static int lc_pouch_query_flush_summary_index(lc_client_handle *client,
                         NULL, NULL, NULL);
   }
   *index_seq = 0UL;
-  rc =
-      lc_pouch_state_index_seq(client->pouch, namespace_name, index_seq, error);
+  rc = lc_pouch_state_query_index_seq(client->pouch, namespace_name,
+                                      index_seq, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -11222,6 +11222,36 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
       return rc;
     }
   }
+  /* A transaction decision is the logical completion boundary for every
+   * staged participant. Delay exclusive threshold publication until all local
+   * participants have reached their committed or discarded final state. */
+  for (i = 0U; i < req->participant_count; ++i) {
+    const char *participant_backend_hash;
+    size_t participant_backend_hash_length;
+    const char *namespace_name;
+
+    lc_pouch_txn_trim_bounds(req->participants[i].backend_hash,
+                             &participant_backend_hash,
+                             &participant_backend_hash_length);
+    if (participant_backend_hash_length != 0U &&
+        (strlen(local_backend_hash) != participant_backend_hash_length ||
+         strncmp(participant_backend_hash, local_backend_hash,
+                 participant_backend_hash_length) != 0)) {
+      continue;
+    }
+    if (lc_pouch_queue_is_message_lease_key(req->participants[i].key) ||
+        lc_pouch_queue_is_state_lease_key(req->participants[i].key)) {
+      continue;
+    }
+    namespace_name = NULL;
+    rc = lc_pouch_client_public_namespace(
+        client, req->participants[i].namespace_name, &namespace_name, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    lc_pouch_indexer_note_operation_complete(client->pouch, namespace_name,
+                                             req->participants[i].key);
+  }
   return LC_OK;
 }
 
@@ -12724,6 +12754,8 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
   if (rc != LC_OK) {
     return rc;
   }
+  lc_pouch_indexer_note_operation_complete(client->pouch, namespace_name,
+                                           req->lease.key);
   memset(out, 0, sizeof(*out));
   out->released = 1;
   return LC_OK;
@@ -15395,8 +15427,8 @@ int lc_pouch_client_flush_index_method(lc_client *self,
   index_seq = 0UL;
   memset(&index_result, 0, sizeof(index_result));
   if (strcmp(mode, "sync") == 0) {
-    rc = lc_pouch_state_index_seq(client->pouch, namespace_name, &index_seq,
-                                  error);
+    rc = lc_pouch_state_query_index_seq(client->pouch, namespace_name,
+                                        &index_seq, error);
     if (rc != LC_OK) {
       return rc;
     }
@@ -15405,8 +15437,8 @@ int lc_pouch_client_flush_index_method(lc_client *self,
   } else {
     lc_pouch_generation manifest_seq;
 
-    rc = lc_pouch_state_index_seq(client->pouch, namespace_name, &index_seq,
-                                  error);
+    rc = lc_pouch_state_query_index_seq(client->pouch, namespace_name,
+                                        &index_seq, error);
     if (rc != LC_OK) {
       return rc;
     }
@@ -18326,6 +18358,11 @@ int lc_pouch_lease_release_method(lc_lease *self, const lc_release_req *req,
                                        &write_result, error);
     lc_pouch_state_write_result_cleanup(&lease->client->allocator,
                                         &write_result);
+    if (rc == LC_OK) {
+      lc_pouch_indexer_note_operation_complete(lease->client->pouch,
+                                               lease->namespace_name,
+                                               lease->key);
+    }
     return rc;
   }
   lc_release_op_init(&op);

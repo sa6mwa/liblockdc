@@ -8431,6 +8431,646 @@ static void pouch_update_with_test_lease(lc_client *client,
   assert_int_equal(rc, LC_OK);
 }
 
+static void
+test_exclusive_indexer_publishes_at_document_threshold(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_update_res first;
+  lc_update_res intermediate;
+  lc_update_res second;
+  lc_acquire_req acquire_req;
+  lc_update_req update_req;
+  lc_lease *lease;
+  lc_source *source;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation state_seq;
+  lc_error error;
+  char endpoint[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&first, 0, sizeof(first));
+  memset(&intermediate, 0, sizeof(intermediate));
+  memset(&second, 0, sizeof(second));
+  lc_acquire_req_init(&acquire_req);
+  lc_update_req_init(&update_req);
+  lease = NULL;
+  source = NULL;
+  manifest_seq = 0UL;
+  state_seq = 0UL;
+  lc_error_init(&error);
+  make_root("indexer-threshold-foreground", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?indexer_flush_docs=2&"
+                       "indexer_flush_interval_seconds=3600",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  assert_non_null(handle->pouch);
+  write_client_state(client, "doc/one", "{\"kind\":\"threshold\"}",
+                     NULL, 0L, 0, &first, &error);
+
+  acquire_req.key = "doc/two";
+  acquire_req.owner = "pouch-indexer-threshold";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  pouch_copy_lease_ref(&update_req.lease, lease);
+  rc = lc_source_from_memory("{\"kind\":\"intermediate\"}",
+                             strlen("{\"kind\":\"intermediate\"}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &intermediate, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"kind\":\"final\"}",
+                             strlen("{\"kind\":\"final\"}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &second, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &state_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(manifest_seq < state_seq);
+
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &state_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, state_seq);
+  assert_false(lc_pouch_query_index_has_pending(handle->pouch, "default"));
+  /* A successful foreground publication consumes its worker queue entry, so
+   * the next below-threshold mutation establishes a fresh debounce window. */
+  assert_null(handle->pouch->indexer_pending_namespaces);
+
+  lc_update_res_cleanup(&second);
+  lc_update_res_cleanup(&intermediate);
+  lc_update_res_cleanup(&first);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_exclusive_indexer_waits_for_all_active_operations(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_acquire_req acquire_a;
+  lc_acquire_req acquire_b;
+  lc_update_req update_req;
+  lc_update_res update_a;
+  lc_update_res update_b;
+  lc_update_res update_a_final;
+  lc_lease *lease_a;
+  lc_lease *lease_b;
+  lc_source *source;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_pouch_query_index_flush_result threshold_result;
+  lc_error error;
+  char endpoint[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease_a = NULL;
+  lease_b = NULL;
+  source = NULL;
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  memset(&threshold_result, 0, sizeof(threshold_result));
+  memset(&update_a, 0, sizeof(update_a));
+  memset(&update_b, 0, sizeof(update_b));
+  memset(&update_a_final, 0, sizeof(update_a_final));
+  lc_acquire_req_init(&acquire_a);
+  lc_acquire_req_init(&acquire_b);
+  lc_update_req_init(&update_req);
+  lc_error_init(&error);
+  make_root("indexer-threshold-active-operations", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?indexer_flush_docs=2&"
+                       "indexer_flush_interval_seconds=3600",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  acquire_a.key = "doc/a";
+  acquire_a.owner = "pouch-indexer-active-a";
+  acquire_a.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_a, &lease_a, &error);
+  assert_int_equal(rc, LC_OK);
+  pouch_copy_lease_ref(&update_req.lease, lease_a);
+  rc = lc_source_from_memory("{\"kind\":\"a-initial\"}",
+                             strlen("{\"kind\":\"a-initial\"}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_a, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  acquire_b.key = "doc/b";
+  acquire_b.owner = "pouch-indexer-active-b";
+  acquire_b.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_b, &lease_b, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_update_req_init(&update_req);
+  pouch_copy_lease_ref(&update_req.lease, lease_b);
+  rc = lc_source_from_memory("{\"kind\":\"b-final\"}",
+                             strlen("{\"kind\":\"b-final\"}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_b, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  /* The foreground batch must take its pending projection under the active
+   * key guard. A direct threshold attempt while both leases remain open must
+   * defer rather than scan and publish either provisional body. */
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_flush_threshold(handle->pouch, "default",
+                                            query_seq, &threshold_result,
+                                            &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(threshold_result.index_seq, 0UL);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(manifest_seq < query_seq);
+
+  rc = lease_b->release(lease_b, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease_b = NULL;
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  /* B's completion cannot publish A's still-active provisional value. */
+  assert_true(manifest_seq < query_seq);
+
+  lc_update_req_init(&update_req);
+  pouch_copy_lease_ref(&update_req.lease, lease_a);
+  rc = lc_source_from_memory("{\"kind\":\"a-final\"}",
+                             strlen("{\"kind\":\"a-final\"}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_a_final, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lease_a->release(lease_a, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease_a = NULL;
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+
+  lc_update_res_cleanup(&update_a_final);
+  lc_update_res_cleanup(&update_b);
+  lc_update_res_cleanup(&update_a);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_exclusive_indexer_publishes_transaction_decision_at_threshold(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_lease *lease;
+  lc_source *source;
+  lc_acquire_req acquire_req;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_error error;
+  char endpoint[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  lc_acquire_req_init(&acquire_req);
+  lc_update_req_init(&update_req);
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  lc_error_init(&error);
+  make_root("indexer-threshold-transaction", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?indexer_flush_docs=1&"
+                       "indexer_flush_interval_seconds=3600",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  acquire_req.key = "doc/transaction";
+  acquire_req.owner = "pouch-indexer-transaction";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "pouch-indexer-transaction";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  pouch_copy_lease_ref(&update_req.lease, lease);
+  rc = lc_source_from_memory("{\"kind\":\"transaction\"}",
+                             strlen("{\"kind\":\"transaction\"}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  participant.namespace_name = "default";
+  participant.key = acquire_req.key;
+  decision_req.txn_id = acquire_req.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+
+  /* Promotion has no caller-owned source. Its finalized durable span must be
+   * extracted during this decision-boundary foreground publication, not left
+   * incomplete for the one-hour background worker. */
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(query_seq != 0UL);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+  assert_false(lc_pouch_query_index_has_pending(handle->pouch, "default"));
+
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_update_res_cleanup(&update_res);
+  lc_lease_close(lease);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_query_index_sequence_ignores_lease_metadata(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_update_res first;
+  lc_update_res second;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_pouch_generation state_seq;
+  lc_error error;
+  char endpoint[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  state_seq = 0UL;
+  lc_error_init(&error);
+  make_root("query-index-lease-metadata", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?indexer_flush_docs=2&"
+                       "indexer_flush_interval_seconds=3600",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  write_client_state(client, "doc/one", "{\"kind\":\"first\"}", NULL, 0L,
+                     0, &first, &error);
+  write_client_state(client, "doc/two", "{\"kind\":\"second\"}", NULL,
+                     0L, 0, &second, &error);
+
+  rc = lc_pouch_state_index_seq(handle->pouch, "default", &state_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(state_seq > query_seq);
+  assert_int_equal(manifest_seq, query_seq);
+
+  lc_update_res_cleanup(&second);
+  lc_update_res_cleanup(&first);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_query_index_ignores_internal_objects(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_acquire_req acquire_req;
+  lc_attach_op attach_op;
+  lc_attach_res attach_res;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_dequeue_batch_res batch;
+  lc_lease *lease;
+  lc_source *source;
+  lc_update_res first;
+  lc_update_res second;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_pouch_generation state_seq;
+  lc_error error;
+  char endpoint[1024];
+  char root[512];
+  long message_index;
+  size_t message_offset;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&first, 0, sizeof(first));
+  memset(&second, 0, sizeof(second));
+  memset(&attach_res, 0, sizeof(attach_res));
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  memset(&batch, 0, sizeof(batch));
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  state_seq = 0UL;
+  lc_error_init(&error);
+  make_root("query-index-internal-objects", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?indexer_flush_docs=2&"
+                       "indexer_flush_interval_seconds=3600",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  write_client_state(client, "doc/one", "{\"kind\":\"first\"}", NULL,
+                     0L, 0, &first, &error);
+  write_client_state(client, "doc/two", "{\"kind\":\"second\"}", NULL,
+                     0L, 0, &second, &error);
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = "doc/one";
+  acquire_req.owner = "pouch-index-object";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  lc_attach_op_init(&attach_op);
+  pouch_copy_lease_ref(&attach_op.lease, lease);
+  attach_op.name = "opaque.bin";
+  attach_op.content_type = "application/octet-stream";
+  rc = lc_source_from_memory("\001\002not-json", 10U, &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->attach(client, &attach_op, source, &attach_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_attach_res_cleanup(&attach_res);
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  rc = lc_pouch_state_index_seq(handle->pouch, "default", &state_seq,
+                                &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(state_seq > query_seq);
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+
+  /* Batch delivery creates one fresh metadata-only delivery lease per message.
+   * These control records must not advance public query freshness before or
+   * after replay. This matches the production queue roundtrip workload. */
+  enqueue_req.queue = "internal-objects";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  for (message_index = 0L; message_index < 4L; ++message_index) {
+    rc = lc_source_from_memory("payload", strlen("payload"), &source,
+                               &error);
+    assert_int_equal(rc, LC_OK);
+    rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+    lc_source_close(source);
+    source = NULL;
+    assert_int_equal(rc, LC_OK);
+    lc_enqueue_res_cleanup(&enqueue_res);
+  }
+  dequeue_req.queue = "internal-objects";
+  dequeue_req.owner = "pouch-index-object";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  dequeue_req.wait_seconds = 0L;
+  dequeue_req.page_size = 4;
+  rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(batch.count, 4U);
+  for (message_offset = 0U; message_offset < batch.count; ++message_offset) {
+    assert_non_null(batch.messages[message_offset]);
+    rc = batch.messages[message_offset]->ack(batch.messages[message_offset],
+                                             &error);
+    assert_int_equal(rc, LC_OK);
+    batch.messages[message_offset]->close(batch.messages[message_offset]);
+    batch.messages[message_offset] = NULL;
+  }
+  lc_dequeue_batch_cleanup(&batch);
+  rc = lc_pouch_state_index_seq(handle->pouch, "default", &state_seq,
+                                &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(state_seq > query_seq);
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  lc_client_close(client);
+  client = NULL;
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+
+  lc_attach_res_cleanup(&attach_res);
+  lc_dequeue_batch_cleanup(&batch);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_update_res_cleanup(&second);
+  lc_update_res_cleanup(&first);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_query_index_threshold_handles_repeated_lease_updates(
+    void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  lc_source *source;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_error error;
+  char endpoint[1024];
+  char key[32];
+  char value[64];
+  char root[512];
+  long document;
+  long update;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_index_flush_req_init(&flush_req);
+  flush_req.mode = "wait";
+  memset(&flush_res, 0, sizeof(flush_res));
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  lc_error_init(&error);
+  make_root("query-index-repeated-lease-updates", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?indexer_flush_docs=2&"
+                       "indexer_flush_interval_seconds=3600",
+                       root) > 0);
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+
+  for (document = 0L; document < 2L; ++document) {
+    assert_true(snprintf(key, sizeof(key), "doc/%ld", document) > 0);
+    lc_acquire_req_init(&acquire_req);
+    acquire_req.key = key;
+    acquire_req.owner = "pouch-index-threshold";
+    acquire_req.ttl_seconds = 30L;
+    lease = NULL;
+    rc = client->acquire(client, &acquire_req, &lease, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_non_null(lease);
+    for (update = 0L; update < 2L; ++update) {
+      assert_true(snprintf(value, sizeof(value),
+                           "{\"kind\":\"doc-%ld-update-%ld\"}",
+                           document, update) > 0);
+      lc_update_req_init(&update_req);
+      pouch_copy_lease_ref(&update_req.lease, lease);
+      source = NULL;
+      rc = lc_source_from_memory(value, strlen(value), &source, &error);
+      assert_int_equal(rc, LC_OK);
+      memset(&update_res, 0, sizeof(update_res));
+      rc = client->update(client, &update_req, source, &update_res, &error);
+      source->close(source);
+      source = NULL;
+      assert_int_equal(rc, LC_OK);
+      lc_update_res_cleanup(&update_res);
+    }
+    if (document == 1L) {
+      rc = lc_pouch_state_query_index_seq(handle->pouch, "default",
+                                          &query_seq, &error);
+      assert_int_equal(rc, LC_OK);
+      rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                             &manifest_seq, &error);
+      assert_int_equal(rc, LC_OK);
+      /* Go disk also flushes at the first mutation which reaches the
+       * distinct-document threshold.  The second update of this key is a
+       * valid one-document mutable tail until an explicit flush. */
+      assert_true(manifest_seq < query_seq);
+      rc = client->flush_index(client, &flush_req, &flush_res, &error);
+      assert_int_equal(rc, LC_OK);
+      assert_true(flush_res.flushed);
+      lc_index_flush_res_cleanup(&flush_res);
+      rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                             &manifest_seq, &error);
+      assert_int_equal(rc, LC_OK);
+      assert_int_equal(manifest_seq, query_seq);
+    }
+    rc = lease->release(lease, NULL, &error);
+    assert_int_equal(rc, LC_OK);
+    lease = NULL;
+  }
+
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void pouch_remove_with_test_lease(lc_client *client,
                                          lc_remove_op *operation,
                                          lc_remove_res *out, lc_error *error) {
@@ -13348,6 +13988,125 @@ static void test_snapshot_high_water_survives_compaction_reopen(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &delete_a);
   lc_pouch_state_write_result_cleanup(NULL, &write_b);
   lc_free_with_allocator(NULL, namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_query_freshness_delete_survives_compaction_reopen(void **state) {
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_pouch_state_write_result internal_result;
+  lc_pouch_state_write_options internal_options;
+  lc_pouch_query_index_flush_result flush_result;
+  lc_pouch_generation initial_query_seq;
+  lc_pouch_generation query_seq_before;
+  lc_pouch_generation query_seq_after;
+  lc_pouch_generation state_seq;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  initial_query_seq = 0UL;
+  query_seq_before = 0UL;
+  query_seq_after = 0UL;
+  state_seq = 0UL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  memset(&internal_result, 0, sizeof(internal_result));
+  memset(&internal_options, 0, sizeof(internal_options));
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_error_init(&error);
+  make_root("query-freshness-delete-compaction", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1U;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"kind\":\"gone\"}",
+                             strlen("{\"kind\":\"gone\"}"), &body,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-freshness", "doc/gone", body,
+                            NULL, &write_result, &error);
+  lc_source_close(body);
+  body = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_query_index_seq(pouch, "docs/query-freshness",
+                                      &query_seq_before, &error);
+  assert_int_equal(rc, LC_OK);
+  initial_query_seq = query_seq_before;
+  rc = lc_pouch_query_index_flush(pouch, "docs/query-freshness",
+                                  query_seq_before, &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, query_seq_before);
+  memset(&flush_result, 0, sizeof(flush_result));
+
+  rc = lc_pouch_state_delete(pouch, "docs/query-freshness", "doc/gone", NULL,
+                             &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_query_index_seq(pouch, "docs/query-freshness",
+                                      &query_seq_before, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(query_seq_before > initial_query_seq);
+  assert_int_equal(query_seq_before, delete_result.index_seq);
+
+  /* Internal records advance state ordering but are not query candidates.
+   * This distinguishes the durable query high water from generic state
+   * ordering after the delete tombstone is compacted away. */
+  internal_options.object_record = 1;
+  rc = lc_source_from_memory("{}", 2U, &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "docs/query-freshness", "internal/marker",
+                            body, &internal_options, &internal_result, &error);
+  lc_source_close(body);
+  body = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_index_seq(pouch, "docs/query-freshness", &state_seq,
+                                &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(state_seq > query_seq_before);
+  rc = lc_pouch_state_query_index_seq(pouch, "docs/query-freshness",
+                                      &query_seq_after, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(query_seq_after, query_seq_before);
+
+  maintenance_options.namespace_name = "docs/query-freshness";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.compacted);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_query_index_seq(pouch, "docs/query-freshness",
+                                      &query_seq_after, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(query_seq_after, query_seq_before);
+  rc = lc_pouch_query_index_flush(pouch, "docs/query-freshness",
+                                  query_seq_after, &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, query_seq_before);
+
+  lc_pouch_state_write_result_cleanup(NULL, &internal_result);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -21666,10 +22425,11 @@ static void test_query_index_sync_flush_uses_durable_state(void **state) {
 
   namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
   assert_non_null(namespace_path);
-  /* Flush indexes the authoritative current projection, not historical
-   * per-mutation overlays. Only doc/live and doc/a remain visible here. */
+  /* The delete fallback rebuilds the authoritative current projection rather
+   * than retaining historical per-mutation overlays. The original warmup,
+   * doc/live, and doc/a remain current; the two removed documents do not. */
   assert_query_index_segment_contains(namespace_path, "query.index",
-                                      "row_count=2");
+                                      "row_count=3");
   assert_query_index_segment_contains(namespace_path, "query.index.lcpdel",
                                       "646f632f72656d6f766564");
   assert_query_index_segment_contains(namespace_path, "query.index.lcpttg",
@@ -22116,10 +22876,12 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
                                       "706c616e6e696e67");
   assert_query_index_segment_contains(namespace_path, "query.index.lcpt3g",
                                       "6e616e");
-  assert_query_index_segment_contains(namespace_path, "query.index.lcpttg",
-                                      "2f2e2e2e");
-  assert_query_index_segment_contains(namespace_path, "query.index.lcpt3g",
-                                      "2f2e2e2e");
+  /* `/...` is a logical whole-document selector. The compact index unions
+   * concrete fields at query time instead of persisting duplicate postings. */
+  assert_query_index_segment_not_contains(namespace_path, "query.index.lcpttg",
+                                          "2f2e2e2e");
+  assert_query_index_segment_not_contains(namespace_path, "query.index.lcpt3g",
+                                          "2f2e2e2e");
 
   snprintf(cursor, sizeof(cursor), "%s", query_res.cursor);
   query_req.cursor = cursor;
@@ -23255,14 +24017,19 @@ test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
   lc_query_req query_req;
   lc_query_res query_res;
   lc_query_key_handler handler;
+  pouch_query_key_capture equality_page;
+  pouch_query_key_capture prefix_page;
   pouch_query_key_capture contains_page;
   lc_error error;
   char root[512];
+  char prefix[65];
   char *match_value;
   char *other_value;
   char *json;
+  char *selector;
   size_t value_length;
   size_t json_length;
+  size_t selector_length;
   int rc;
 
   (void)state;
@@ -23271,9 +24038,12 @@ test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
   match_value = NULL;
   other_value = NULL;
   json = NULL;
+  selector = NULL;
   memset(&update_res, 0, sizeof(update_res));
   memset(&query_res, 0, sizeof(query_res));
   memset(&handler, 0, sizeof(handler));
+  memset(&equality_page, 0, sizeof(equality_page));
+  memset(&prefix_page, 0, sizeof(prefix_page));
   memset(&contains_page, 0, sizeof(contains_page));
   lc_query_req_init(&query_req);
   lc_error_init(&error);
@@ -23281,13 +24051,17 @@ test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
   cleanup_root(root);
   open_pouch_client(root, &client, &error);
 
-  value_length = (64U * 1024U) + 128U;
+  /* Values above Pouch's 256-byte trigram-materialization boundary must retain
+   * exact, prefix, and contains semantics through fallback candidates. */
+  value_length = 256U + 128U;
   match_value = (char *)malloc(value_length + 1U);
   other_value = (char *)malloc(value_length + 1U);
   assert_non_null(match_value);
   assert_non_null(other_value);
   memset(match_value, 'a', value_length);
   memset(other_value, 'b', value_length);
+  memset(prefix, 'a', sizeof(prefix) - 1U);
+  prefix[sizeof(prefix) - 1U] = '\0';
   memcpy(match_value + (value_length / 2U), "needle", sizeof("needle") - 1U);
   match_value[value_length] = '\0';
   other_value[value_length] = '\0';
@@ -23323,11 +24097,48 @@ test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
   handler.chunk = pouch_query_key_chunk;
   handler.end = pouch_query_key_end;
   query_req.namespace_name = "docs/query-index-large-strings";
-  query_req.selector_json =
-      "{\"contains\":{\"field\":\"/payload\",\"value\":\"needle\"}}";
   query_req.engine = "index";
   query_req.refresh = "wait_for";
   query_req.limit = 10L;
+
+  selector_length = value_length + 64U;
+  selector = (char *)malloc(selector_length);
+  assert_non_null(selector);
+  snprintf(selector, selector_length,
+           "{\"eq\":{\"field\":\"/payload\",\"value\":\"%s\"}}",
+           match_value);
+  query_req.selector_json = selector;
+  rc = client->query_keys(client, &query_req, &handler, &equality_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(equality_page.count, 1);
+  assert_true(pouch_query_capture_has(&equality_page, "doc/match"));
+  assert_false(pouch_query_capture_has(&equality_page, "doc/other"));
+  lc_query_res_cleanup(&query_res);
+  free(selector);
+  selector = NULL;
+
+  selector_length = sizeof(prefix) + 64U;
+  selector = (char *)malloc(selector_length);
+  assert_non_null(selector);
+  snprintf(selector, selector_length,
+           "{\"prefix\":{\"field\":\"/payload\",\"value\":\"%s\"}}",
+           prefix);
+  query_req.selector_json = selector;
+  query_req.refresh = NULL;
+  rc = client->query_keys(client, &query_req, &handler, &prefix_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(prefix_page.count, 1);
+  assert_true(pouch_query_capture_has(&prefix_page, "doc/match"));
+  assert_false(pouch_query_capture_has(&prefix_page, "doc/other"));
+  lc_query_res_cleanup(&query_res);
+  free(selector);
+  selector = NULL;
+
+  query_req.selector_json =
+      "{\"contains\":{\"field\":\"/payload\",\"value\":\"needle\"}}";
+  query_req.refresh = "wait_for";
   rc = client->query_keys(client, &query_req, &handler, &contains_page,
                           &query_res, &error);
   assert_int_equal(rc, LC_OK);
@@ -23336,6 +24147,7 @@ test_query_keys_index_large_strings_use_fallback_candidates(void **state) {
   assert_false(pouch_query_capture_has(&contains_page, "doc/other"));
 
   lc_query_res_cleanup(&query_res);
+  free(selector);
   free(json);
   free(other_value);
   free(match_value);
@@ -24595,6 +25407,80 @@ static void test_flush_index_reports_projection_high_water(void **state) {
 }
 
 static void
+test_exclusive_manifest_seq_trusts_published_snapshot(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_query_index_flush_result flush_result;
+  lc_pouch_generation state_index_seq;
+  lc_pouch_generation manifest_index_seq;
+  lc_error error;
+  char *namespace_path;
+  char header_path[1024];
+  char manifest_path[1024];
+  char root[512];
+  struct stat header_before;
+  struct stat header_after;
+  int rc;
+  int written;
+
+  (void)state;
+  pouch = NULL;
+  namespace_path = NULL;
+  state_index_seq = 0UL;
+  manifest_index_seq = 0UL;
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_error_init(&error);
+  make_root("exclusive-manifest-trust", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  pouch_write_json_state(pouch, "docs/manifest-trust", "doc/a",
+                         "{\"kind\":\"trusted\"}", NULL, &error);
+  rc = lc_pouch_state_query_index_seq(pouch, "docs/manifest-trust",
+                                      &state_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_flush(pouch, "docs/manifest-trust",
+                                  state_index_seq, &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, state_index_seq);
+
+  namespace_path =
+      lc_pouch_namespace_path(NULL, root, "docs/manifest-trust");
+  assert_non_null(namespace_path);
+  newest_query_index_path(namespace_path, "query.index", header_path,
+                          sizeof(header_path));
+  assert_int_equal(stat(header_path, &header_before), 0);
+  written = snprintf(manifest_path, sizeof(manifest_path),
+                     "%s/index/query.manifest", namespace_path);
+  assert_true(written > 0 && (size_t)written < sizeof(manifest_path));
+  write_text_file(manifest_path, "invalid manifest\\n");
+
+  /* A wait-mode caller only needs the indexer publication it has already
+   * observed. The exclusive writer owns this root, so its epoch-scoped
+   * trusted manifest is authoritative until synchronous validation inspects
+   * the artifacts. */
+  rc = lc_pouch_query_index_manifest_seq(pouch, "docs/manifest-trust",
+                                         &manifest_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_index_seq, state_index_seq);
+
+  memset(&flush_result, 0, sizeof(flush_result));
+  rc = lc_pouch_query_index_flush_validated(
+      pouch, "docs/manifest-trust", state_index_seq, &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, state_index_seq);
+  assert_true(flush_result.repaired);
+  assert_int_equal(stat(header_path, &header_after), 0);
+  /* A repair never truncates the generation an in-flight reader may hold. */
+  assert_true(header_after.st_ino != header_before.st_ino);
+
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_flush_index_external_accept_invalidates_cached_summary(void **state) {
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"beta\"}}";
@@ -24752,8 +25638,8 @@ test_query_index_rebuilds_manifest_missing_newest_segment(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_index_flush_res_cleanup(&flush_res);
 
-  rc = lc_pouch_state_index_seq(((lc_client_handle *)client)->pouch, "default",
-                                &expected_index_seq, &error);
+  rc = lc_pouch_state_query_index_seq(((lc_client_handle *)client)->pouch,
+                                      "default", &expected_index_seq, &error);
   assert_int_equal(rc, LC_OK);
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "default");
@@ -24833,8 +25719,8 @@ test_query_index_rebuilds_manifest_missing_oldest_segment(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_index_flush_res_cleanup(&flush_res);
 
-  rc = lc_pouch_state_index_seq(((lc_client_handle *)client)->pouch, "default",
-                                &expected_index_seq, &error);
+  rc = lc_pouch_state_query_index_seq(((lc_client_handle *)client)->pouch,
+                                      "default", &expected_index_seq, &error);
   assert_int_equal(rc, LC_OK);
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "default");
@@ -27223,6 +28109,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_maintenance_runs_immediately_despite_interval),
       cmocka_unit_test(test_compaction_reclaims_expired_obsolete_files),
       cmocka_unit_test(test_snapshot_high_water_survives_compaction_reopen),
+      cmocka_unit_test(
+          test_query_freshness_delete_survives_compaction_reopen),
       cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),
       cmocka_unit_test(test_namespace_manifest_repairs_from_existing_segments),
       cmocka_unit_test(test_staged_state_writes_durable_decision_records),
@@ -27230,6 +28118,16 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_staged_decision_recovery_tombstones_interrupted_discard),
       cmocka_unit_test(test_client_update_get_load_roundtrips_state),
+      cmocka_unit_test(
+          test_exclusive_indexer_publishes_at_document_threshold),
+      cmocka_unit_test(
+          test_exclusive_indexer_waits_for_all_active_operations),
+      cmocka_unit_test(
+          test_exclusive_indexer_publishes_transaction_decision_at_threshold),
+      cmocka_unit_test(test_query_index_sequence_ignores_lease_metadata),
+      cmocka_unit_test(test_query_index_ignores_internal_objects),
+      cmocka_unit_test(
+          test_query_index_threshold_handles_repeated_lease_updates),
       cmocka_unit_test(test_client_get_preserves_cached_binary_payload_length),
       cmocka_unit_test(test_client_update_enforces_state_preconditions),
       cmocka_unit_test(test_client_update_waits_for_namespace_mutation_lock),
@@ -27410,6 +28308,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_query_documents_scan_streams_rows),
       cmocka_unit_test(test_query_documents_index_uses_scalar_postings),
       cmocka_unit_test(test_flush_index_reports_projection_high_water),
+      cmocka_unit_test(test_exclusive_manifest_seq_trusts_published_snapshot),
       cmocka_unit_test(
           test_flush_index_external_accept_invalidates_cached_summary),
       cmocka_unit_test(

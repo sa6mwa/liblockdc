@@ -9,12 +9,22 @@
 #define LC_POUCH_INDEX_DENSE_TRACK_MIN_COUNT 4U
 #define LC_POUCH_INDEX_DENSE_TRACK_SPARSE_MULTIPLIER 2U
 
+static void lc_pouch_index_posting_rebind_inline_storage(
+    lc_pouch_index_posting *posting) {
+  if (posting != NULL && posting->using_inline_bytes) {
+    posting->bytes = posting->inline_bytes;
+    posting->capacity = sizeof(posting->inline_bytes);
+  }
+}
+
 void lc_pouch_index_posting_cleanup(const lc_allocator *allocator,
                                     lc_pouch_index_posting *posting) {
   if (posting == NULL) {
     return;
   }
-  lc_free_with_allocator(allocator, posting->bytes);
+  if (!posting->using_inline_bytes) {
+    lc_free_with_allocator(allocator, posting->bytes);
+  }
   memset(posting, 0, sizeof(*posting));
 }
 
@@ -29,6 +39,11 @@ static int lc_pouch_index_posting_reserve(lc_pouch_index_posting *posting,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch index posting reserve requires posting", NULL,
                         NULL, NULL);
+  }
+  if (posting->bytes == NULL) {
+    posting->bytes = posting->inline_bytes;
+    posting->capacity = sizeof(posting->inline_bytes);
+    posting->using_inline_bytes = 1;
   }
   if (needed <= posting->capacity) {
     return LC_OK;
@@ -51,10 +66,13 @@ static int lc_pouch_index_posting_reserve(lc_pouch_index_posting *posting,
   }
   if (posting->bytes != NULL) {
     memcpy(next_bytes, posting->bytes, posting->length);
-    lc_free_with_allocator(allocator, posting->bytes);
+    if (!posting->using_inline_bytes) {
+      lc_free_with_allocator(allocator, posting->bytes);
+    }
   }
   posting->bytes = next_bytes;
   posting->capacity = next_capacity;
+  posting->using_inline_bytes = 0;
   return LC_OK;
 }
 
@@ -379,6 +397,14 @@ void lc_pouch_index_adaptive_posting_cleanup(
   lc_pouch_index_posting_cleanup(allocator, &posting->sparse);
   lc_pouch_index_dense_posting_cleanup(allocator, &posting->dense);
   memset(posting, 0, sizeof(*posting));
+}
+
+void lc_pouch_index_adaptive_posting_rebind_inline_storage(
+    lc_pouch_index_adaptive_posting *posting) {
+  if (posting == NULL) {
+    return;
+  }
+  lc_pouch_index_posting_rebind_inline_storage(&posting->sparse);
 }
 
 static int lc_pouch_index_adaptive_should_track_dense(

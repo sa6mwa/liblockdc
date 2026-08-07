@@ -1036,6 +1036,7 @@ static int lc_pouch_index_term_posting_table_reserve(
     size_t needed, lc_error *error) {
   lc_pouch_index_term_posting_entry *next_items;
   size_t next_capacity;
+  size_t index;
 
   if (table == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -1071,7 +1072,24 @@ static int lc_pouch_index_term_posting_table_reserve(
          (next_capacity - table->count) * sizeof(*next_items));
   table->items = next_items;
   table->capacity = next_capacity;
+  for (index = 0U; index < table->count; ++index) {
+    lc_pouch_index_adaptive_posting_rebind_inline_storage(
+        &table->items[index].posting);
+  }
   return LC_OK;
+}
+
+static void lc_pouch_index_term_posting_table_rebind_inline_storage(
+    lc_pouch_index_term_posting_table *table) {
+  size_t index;
+
+  if (table == NULL) {
+    return;
+  }
+  for (index = 0U; index < table->count; ++index) {
+    lc_pouch_index_adaptive_posting_rebind_inline_storage(
+        &table->items[index].posting);
+  }
 }
 
 void lc_pouch_index_term_posting_table_cleanup(
@@ -1121,6 +1139,8 @@ int lc_pouch_index_term_posting_table_put(
     lc_pouch_index_adaptive_posting_cleanup(allocator,
                                             &table->items[position].posting);
     table->items[position].posting = posting;
+    lc_pouch_index_adaptive_posting_rebind_inline_storage(
+        &table->items[position].posting);
     return LC_OK;
   }
   rc = lc_pouch_index_term_posting_table_reserve(allocator, table,
@@ -1136,6 +1156,7 @@ int lc_pouch_index_term_posting_table_put(
   table->items[position].term_id = term_id;
   table->items[position].posting = posting;
   ++table->count;
+  lc_pouch_index_term_posting_table_rebind_inline_storage(table);
   return LC_OK;
 }
 
@@ -1165,6 +1186,8 @@ int lc_pouch_index_term_posting_table_put_sorted_unique_trusted(
     lc_pouch_index_adaptive_posting_cleanup(allocator,
                                             &table->items[position].posting);
     table->items[position].posting = posting;
+    lc_pouch_index_adaptive_posting_rebind_inline_storage(
+        &table->items[position].posting);
     return LC_OK;
   }
   rc = lc_pouch_index_term_posting_table_reserve(allocator, table,
@@ -1180,6 +1203,7 @@ int lc_pouch_index_term_posting_table_put_sorted_unique_trusted(
   table->items[position].term_id = term_id;
   table->items[position].posting = posting;
   ++table->count;
+  lc_pouch_index_term_posting_table_rebind_inline_storage(table);
   return LC_OK;
 }
 
@@ -1218,6 +1242,8 @@ int lc_pouch_index_term_posting_table_append_sorted_unique_trusted(
   table->items[table->count].term_id = term_id;
   table->items[table->count].posting = posting;
   ++table->count;
+  lc_pouch_index_adaptive_posting_rebind_inline_storage(
+      &table->items[table->count - 1U].posting);
   return LC_OK;
 }
 

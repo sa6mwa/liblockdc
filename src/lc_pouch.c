@@ -1043,15 +1043,66 @@ static int lc_pouch_indexer_queue_namespace_locked(lc_pouch *pouch,
   return LC_OK;
 }
 
+static int lc_pouch_indexer_namespace_flush_limit_reached_locked(
+    lc_pouch *pouch, const char *namespace_name) {
+  lc_pouch_indexer_pending_namespace *entry;
+
+  if (pouch == NULL || namespace_name == NULL ||
+      pouch->indexer_flush_docs == 0U) {
+    return 0;
+  }
+  for (entry = pouch->indexer_pending_namespaces; entry != NULL;
+       entry = entry->next) {
+    if (strcmp(entry->namespace_name, namespace_name) == 0) {
+      return entry->write_count >= pouch->indexer_flush_docs &&
+             (!lc_pouch_single_writer_enabled(pouch) ||
+              lc_pouch_query_index_pending_document_limit_reached_locked(
+                  pouch, namespace_name, pouch->indexer_flush_docs));
+    }
+  }
+  return 0;
+}
+
+/* Moves one foreground threshold batch out of the worker queue. New writes
+ * then establish their own debounce window while publication runs. A failed
+ * or deferred attempt requeues this entry under the same mutex. */
+static lc_pouch_indexer_pending_namespace *
+lc_pouch_indexer_take_namespace_locked(lc_pouch *pouch,
+                                       const char *namespace_name) {
+  lc_pouch_indexer_pending_namespace **link;
+
+  if (pouch == NULL || namespace_name == NULL) {
+    return NULL;
+  }
+  link = &pouch->indexer_pending_namespaces;
+  while (*link != NULL) {
+    lc_pouch_indexer_pending_namespace *entry;
+
+    entry = *link;
+    if (strcmp(entry->namespace_name, namespace_name) == 0) {
+      *link = entry->next;
+      entry->next = NULL;
+      return entry;
+    }
+    link = &entry->next;
+  }
+  return NULL;
+}
+
+/* Shared roots do not have a local mutation authority, so their threshold
+ * stays on the asynchronous replay worker.  An exclusive writer has a
+ * complete body-free projection and publishes at the threshold in the
+ * foreground, matching Go disk's bounded memtable boundary. */
 static int lc_pouch_indexer_flush_limit_reached_locked(lc_pouch *pouch) {
   lc_pouch_indexer_pending_namespace *entry;
 
+  if (pouch == NULL || lc_pouch_single_writer_enabled(pouch)) {
+    return 0;
+  }
   for (entry = pouch->indexer_pending_namespaces; entry != NULL;
        entry = entry->next) {
-    if (entry->write_count >= pouch->indexer_flush_docs &&
-        (!lc_pouch_single_writer_enabled(pouch) ||
-         lc_pouch_query_index_pending_document_limit_reached_locked(
-             pouch, entry->namespace_name, pouch->indexer_flush_docs))) {
+    if (lc_pouch_indexer_namespace_flush_limit_reached_locked(
+            pouch, entry->namespace_name)) {
       return 1;
     }
   }
@@ -1107,8 +1158,8 @@ lc_pouch_indexer_run_batch(lc_pouch *pouch,
     memset(&flush_result, 0, sizeof(flush_result));
     state_index_seq = 0UL;
     lc_error_init(&error);
-    rc = lc_pouch_state_index_seq(pouch, entry->namespace_name,
-                                  &state_index_seq, &error);
+    rc = lc_pouch_state_query_index_seq(pouch, entry->namespace_name,
+                                        &state_index_seq, &error);
     if (rc == LC_OK) {
       rc = lc_pouch_query_index_flush(pouch, entry->namespace_name,
                                       state_index_seq, &flush_result, &error);
@@ -1230,6 +1281,43 @@ static void lc_pouch_indexer_worker_close(lc_pouch *pouch) {
   }
 }
 
+static int lc_pouch_indexer_publish_threshold(lc_pouch *pouch,
+                                              const char *namespace_name) {
+  lc_pouch_query_index_flush_result flush_result;
+  lc_pouch_generation state_index_seq;
+  lc_error error;
+  int published;
+  int rc;
+
+  /* State durability was already acknowledged before this derived-artifact
+   * publication.  Preserve that boundary: a failed index write is retained
+   * in the local queue for recovery instead of turning a successful mutation
+   * into an error. */
+  memset(&flush_result, 0, sizeof(flush_result));
+  state_index_seq = 0UL;
+  published = 0;
+  lc_error_init(&error);
+  rc = lc_pouch_state_query_index_seq(pouch, namespace_name, &state_index_seq,
+                                      &error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_flush_threshold(
+        pouch, namespace_name, state_index_seq, &flush_result, &error);
+  }
+  if (rc == LC_OK && flush_result.index_seq != 0UL) {
+    published = 1;
+  }
+  if (rc != LC_OK) {
+    pslog_field fields[3];
+
+    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[1] = lc_log_error_field("error", &error);
+    fields[2] = lc_log_code_field(&error);
+    lc_log_warn(pouch->logger, "index.threshold.error", fields, 3U);
+  }
+  lc_error_cleanup(&error);
+  return published;
+}
+
 void lc_pouch_indexer_note_mutation(lc_pouch *pouch,
                                     const char *namespace_name) {
   int rc;
@@ -1251,6 +1339,47 @@ void lc_pouch_indexer_note_mutation(lc_pouch *pouch,
 
     fields[0] = lc_log_str_field("ns", namespace_name);
     lc_log_warn(pouch->logger, "index.background.queue.error", fields, 1U);
+  }
+}
+
+void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch,
+                                              const char *namespace_name,
+                                              const char *key) {
+  lc_pouch_indexer_pending_namespace *threshold_batch;
+  int eager_publish;
+  int published;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      key == NULL || key[0] == '\0' ||
+      pouch->aborted || !pouch->indexer_thread_started) {
+    return;
+  }
+  eager_publish = 0;
+  threshold_batch = NULL;
+  pthread_mutex_lock(&pouch->indexer_mutex);
+  if (!pouch->indexer_stop && lc_pouch_single_writer_enabled(pouch)) {
+    if (lc_pouch_query_index_pending_operation_complete_locked(
+            pouch, namespace_name, key)) {
+      eager_publish = lc_pouch_indexer_namespace_flush_limit_reached_locked(
+          pouch, namespace_name);
+      if (eager_publish) {
+        threshold_batch =
+            lc_pouch_indexer_take_namespace_locked(pouch, namespace_name);
+        eager_publish = threshold_batch != NULL;
+      }
+    }
+  }
+  pthread_mutex_unlock(&pouch->indexer_mutex);
+  if (eager_publish) {
+    published = lc_pouch_indexer_publish_threshold(pouch, namespace_name);
+    if (published) {
+      lc_pouch_indexer_pending_namespaces_cleanup(pouch, threshold_batch);
+    } else {
+      pthread_mutex_lock(&pouch->indexer_mutex);
+      lc_pouch_indexer_requeue(pouch, threshold_batch);
+      pthread_cond_signal(&pouch->indexer_cond);
+      pthread_mutex_unlock(&pouch->indexer_mutex);
+    }
   }
 }
 

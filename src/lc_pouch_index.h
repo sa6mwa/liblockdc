@@ -157,6 +157,10 @@ typedef struct lc_pouch_index_posting {
   size_t count;
   unsigned long last_doc_id;
   int has_last_doc_id;
+  /* Most trigram terms occur in one document per immutable generation. Keep
+   * that varint local so a flush does not allocate one heap block per term. */
+  unsigned char inline_bytes[sizeof(unsigned long) * 2U];
+  int using_inline_bytes;
 } lc_pouch_index_posting;
 
 typedef struct lc_pouch_index_dense_posting {
@@ -473,6 +477,8 @@ int lc_pouch_index_dense_posting_append_to_set(
     const lc_allocator *allocator, lc_error *error);
 void lc_pouch_index_adaptive_posting_cleanup(
     const lc_allocator *allocator, lc_pouch_index_adaptive_posting *posting);
+void lc_pouch_index_adaptive_posting_rebind_inline_storage(
+    lc_pouch_index_adaptive_posting *posting);
 int lc_pouch_index_adaptive_posting_append_sorted_unique(
     lc_pouch_index_adaptive_posting *posting, unsigned long doc_id, int *added,
     const lc_allocator *allocator, lc_error *error);

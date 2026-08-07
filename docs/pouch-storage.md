@@ -856,14 +856,22 @@ the public API or durable format.
 - Indexer batching:
   `indexer_flush_docs` and `indexer_flush_interval_seconds` are fixed-width
   direct Pouch open options and `pouch://` endpoint options. Zero selects the
-  Go disk-store defaults of 2,000 mutations and ten seconds. In exclusive
-  Pouch, the in-memory index summary coalesces repeated writes to one key, so
-  the document budget requires that many distinct ready projections; repeated
-  updates are published at the idle deadline or an explicit
-  `flush_index(mode=wait)`. This prevents a hot key from repeatedly rebuilding
-  a namespace snapshot while preserving state visibility and explicit-flush
-  correctness. Deployments that tune Go disk's index writer may set comparable
-  bounds on Pouch, for example
+  Go disk-store defaults of 2,000 distinct documents and ten seconds. In
+  exclusive Pouch, completed public lease releases or transaction decisions
+  synchronously publish the bounded, body-free index segment when its final
+  ready projection reaches the distinct-document limit and no other pending
+  key is still active. This preserves final-version-only publication across
+  overlapping leases, matching Go disk's memtable boundary without emitting
+  an intermediate in-lease version.
+  Repeated updates to one pending key do not advance that document budget;
+  direct storage mutations without a public completion boundary publish at the
+  idle deadline or an explicit `flush_index(mode=wait)`. Shared-root handles
+  retain asynchronous, namespace-locked durable replay at either bound because
+  no handle owns the complete local mutation stream. Index-artifact failure is
+  recoverable worker work and never changes the success of an already durable
+  state mutation.
+  Deployments that tune Go disk's index writer may set comparable bounds on
+  Pouch, for example
   `pouch://...?pouch_indexer_flush_docs=64&pouch_indexer_flush_interval_seconds=1`.
 
 - Filesystem capability policy and queue wake-up:
@@ -1366,19 +1374,36 @@ requested sync boundary, and the resident projection has accepted the new
 ref. A writer pipeline may batch independent operations but may not
 acknowledge, reorder, or expose an operation before that point.
 
-Pouch follows Go disk's asynchronous index-writer boundary. After a successful
+Pouch follows Go disk's bounded index-writer boundary. After a successful
 state mutation, the exclusive foreground path captures a compact, body-free
-derived projection while the source is still available. It does not retain the
-source body or construct durable index postings. One-shot, oversized, or
-otherwise non-replayable sources explicitly mark the pending projection
-incomplete; their next flush incrementally reads the authoritative state log.
-That handle's pthread indexer coalesces ready projections and authoritative-log
-tail changes after its configured distinct-document bound (2,000 by default)
-or its configured interval (ten seconds by default) from its first unflushed
-mutation. Repeated updates to one key replace that key's pending projection and
-do not advance the exclusive-writer document bound. The deadline is not
-restarted by later writes. Shared-root handles can each run an indexer, but
-still serialize publication through the durable namespace lock below.
+derived projection while the source is still available. It never retains the
+source body. A staged transaction promotion has no caller-owned source at its
+decision boundary, so its pending row is deferred and extracted from the
+already-finalized durable payload span during that foreground publication.
+When completed public lease releases or transaction decisions
+leave that projection at the configured distinct-document bound (2,000 by
+default), with no other pending key still active, it publishes the immutable
+index segment synchronously, just as Go disk flushes its full memtable.
+Deferring the threshold check until every captured operation has reached its
+completion boundary deliberately coalesces multiple updates under overlapping
+leases into their final document versions. The batch take repeats the
+active-key check while it claims the pending projection; if another operation
+became active, foreground publication defers without reading the live tail. A
+successful foreground publication consumes its worker queue entry, so a later
+below-threshold mutation begins a full fresh worker interval rather than
+inheriting the earlier batch deadline. Below the bound, and for direct storage
+mutations without a public completion boundary, Pouch's pthread indexer
+coalesces ready projections and authoritative-log tail changes at the
+configured interval (ten seconds by default) from the first unflushed
+mutation. Repeated updates to one key replace that key's pending projection
+and do not advance the exclusive-writer document bound. The deadline is not
+restarted by later writes. One-shot, oversized, or otherwise non-replayable
+sources explicitly mark the pending projection incomplete; their next flush
+incrementally reads the authoritative state log. Shared-root handles can each
+run an indexer, but retain asynchronous, namespace-locked durable replay
+because no one handle owns every writer's projection. Index publication is
+derived work: a publication failure remains queued for retry and cannot revoke
+an already durable state mutation.
 
 The durable state-index sequence is the sole index freshness boundary. A query
 or explicit `flush_index` compares it with the manifest sequence; on a
@@ -1386,15 +1411,20 @@ mismatch, it performs the same incremental replay synchronously when the
 background indexer has not yet published. Process exit can therefore leave
 only derived artifacts behind: the next synchronous query/flush repairs them
 from durable state without any lost document or in-memory body dependency.
+For an exclusive writer, a `flush_index(mode=wait)` may satisfy an equal
+sequence from the manifest snapshot that this ownership epoch already
+published; it does not reopen derived artifacts merely to validate a no-op.
+`flush_index(mode=sync)` and recovery paths remain the explicit validating
+operations and rebuild damaged artifacts from durable state.
 
 `flush_index(mode=wait)` publishes all state accepted by the indexer but does
 not deserialize every just-written derived artifact solely to populate a
 handle-local cache. This matches Go disk's flush boundary and keeps durable
-publication out of the query-cache hot path. The exclusive writer transfers a
-newly built, body-free concrete-field trigram generation directly into its
-full-text cache; logical whole-document text queries union those fields. Other
-query representations load lazily on first use, while open-time cache warming
-remains best effort. The packed binary artifact remains the sole
+publication out of the query-cache hot path. The exclusive writer transfers
+newly built, body-free concrete-field text and trigram generations directly
+into its full-text cache; logical whole-document text queries union those
+fields. Other query representations load lazily on first use, while open-time
+cache warming remains best effort. The packed binary artifact remains the sole
 durable source: reopened handles, shared roots, and cache-allocation failure
 use the normal validated packed-artifact decoder. No cache retains source JSON
 or full document bodies.
@@ -1597,10 +1627,14 @@ Indexed query requirements:
   the packed artifact. The manifest's `delete_count=0` and empty-set hash are
   the authoritative empty value; non-empty delete components must match the
   manifest count and hash;
-- query-index segment artifacts and their manifest are installed by same-
-  directory temporary-file rename without fsync because they are derived files.
-  Recovery validates the manifest, header, and packed artifact signatures and
-  rebuilds from the logstore if any derived write was interrupted or torn;
+- query-index manifests and any artifact that could be referenced by the
+  current manifest are installed by same-directory temporary-file rename
+  without fsync because they are derived files. A new segment/header whose
+  path is proven newer than a valid current manifest may be written directly:
+  an interrupted write leaves only an unreachable artifact, and the manifest
+  switch still remains the atomic publication point. Recovery validates the
+  manifest, header, and packed artifact signatures and rebuilds from the
+  logstore if any derived write was interrupted or torn;
 - normal append flushes do not sweep the index directory for orphaned derived
   artifacts. Initial manifest bootstrap also skips a sweep because no artifact
   can be referenced before that manifest is published; an interrupted
@@ -1637,6 +1671,11 @@ Indexed query requirements:
   performance intent rather than rebuilding the full corpus on each flush;
 - full-text search must cover text in the full JSON document, including nested
   fields and long text fields, through the selected indexed engine;
+- string values of at most 256 bytes receive complete trigram postings. Longer
+  strings retain their exact hash and first 256-byte prefix and receive a
+  fallback candidate posting, so exact, prefix, and contains results remain
+  complete through body-level verification without creating blob-sized
+  posting lists;
 - `/...` is a logical whole-document text selector, not a public state field.
   Pouch resolves it by unioning the concrete string fields, matching Go disk's
   index contract. It never duplicates each text or trigram posting into a
