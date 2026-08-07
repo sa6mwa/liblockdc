@@ -64,6 +64,9 @@ make dev-up
   enqueue a JSON payload, dequeue it, inspect it, and acknowledge it
 - `namespace_config.lua`
   read namespace engine configuration and trigger an index flush
+- `pouch_local_storage.lua`
+  open encrypted, compressed local Pouch storage with first-run key generation
+  through Lua's `pouch_*` client configuration fields
 - `consumer_handler.lua`
   run a stateful queue consumer with explicit message and lease handling
 

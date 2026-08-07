@@ -25,16 +25,17 @@ function(lc_add_e2e_shard target_name group_macro)
 endfunction()
 
 function(lc_add_lua_e2e_test test_name script_path)
-  if(NOT TARGET lockdc_lua_core)
+  set(options PACKAGE_ONLY)
+  set(one_value_args POUCH_ROOT)
+  set(multi_value_args ENV_OVERRIDES)
+  cmake_parse_arguments(LUA_E2E "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
+
+  if(NOT LUA_E2E_PACKAGE_ONLY AND NOT TARGET lockdc_lua_core)
     return()
   endif()
   if(NOT LOCKDC_LUA_BIN OR NOT LOCKDC_LUAROCKS_BIN)
     return()
   endif()
-
-  set(options)
-  set(multi_value_args ENV_OVERRIDES)
-  cmake_parse_arguments(LUA_E2E "${options}" "" "${multi_value_args}" ${ARGN})
 
   set(lua_e2e_command
     "${CMAKE_COMMAND}"
@@ -49,8 +50,18 @@ function(lc_add_lua_e2e_test test_name script_path)
       "-DLOCKDC_LUA_TEST_ENV=${lua_e2e_env_overrides}"
     )
   endif()
+  if(LUA_E2E_POUCH_ROOT)
+    list(APPEND lua_e2e_command
+      "-DLOCKDC_POUCH_ROOT=${LUA_E2E_POUCH_ROOT}"
+    )
+  endif()
+  if(LUA_E2E_POUCH_ROOT)
+    set(lua_e2e_runner "${CMAKE_SOURCE_DIR}/tests/lua_pouch_rock_install_and_run_test.cmake")
+  else()
+    set(lua_e2e_runner "${CMAKE_SOURCE_DIR}/tests/lua_rock_install_and_run_test.cmake")
+  endif()
   list(APPEND lua_e2e_command
-    -P "${CMAKE_SOURCE_DIR}/tests/lua_rock_install_and_run_test.cmake"
+    -P "${lua_e2e_runner}"
   )
 
   add_test(NAME ${test_name} COMMAND ${lua_e2e_command})
@@ -216,5 +227,12 @@ lc_add_lua_e2e_test(
   lc_e2e_lua_bundle_sources
   "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_bundle_sources.lua"
   ENV_OVERRIDES "LOCKDC_KEY_PREFIX=tests/lua/e2e-bundle-sources;LOCKDC_OWNER=lua-e2e-bundle-sources"
+)
+
+lc_add_lua_e2e_test(
+  lc_e2e_lua_pouch_config
+  "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_pouch.lua"
+  PACKAGE_ONLY
+  POUCH_ROOT "${CMAKE_BINARY_DIR}/lua-pouch-e2e/lc_e2e_lua_pouch_config"
 )
 lc_apply_default_test_timeouts()

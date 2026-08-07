@@ -126,6 +126,30 @@ local client, err = lockdc.open({
 `client_bundle_path` remains available for compatibility, but new Lua code
 should prefer `client_bundle_source`.
 
+### Local Pouch storage
+
+Use exactly one absolute `pouch://` endpoint for local storage. Lua exposes the
+same Pouch client configuration fields as `lc_client_config`: `pouch_crypto_key`,
+`pouch_crypto_key_file`, `pouch_crypto_generate_key_file`, and
+`pouch_compression`. Explicit Lua configuration takes the same precedence over
+endpoint query options as the C client configuration.
+
+```lua
+local client, err = lockdc.open({
+  endpoints = { "pouch:///var/lib/my-service/lockd-root" },
+  default_namespace = "default",
+  pouch_crypto_key_file = "/var/lib/my-service/lockd-root/pouch.key",
+  pouch_crypto_generate_key_file = true,
+  pouch_compression = "zlib",
+})
+```
+
+The supported compression values are `"none"` and `"zlib"`. Pouch remains
+exclusive single-writer by default; opening another writer for the same root
+returns the normal structured `lockdc.open` error. Endpoint query options stay
+supported for compatibility, including `?single_writer=false` where shared
+writers are explicitly required.
+
 Common client methods:
 
 - `client:info()`
@@ -300,6 +324,7 @@ Pedagogic examples live in:
 - `examples/lua/acquire_for_update.lua`
 - `examples/lua/queue_roundtrip.lua`
 - `examples/lua/namespace_config.lua`
+- `examples/lua/pouch_local_storage.lua`
 - `examples/lua/consumer_handler.lua`
 
 See also:

@@ -765,6 +765,12 @@ static int lcdc_open(lua_State *L) {
   lcdc_opt_boolean_field(L, 1, "prefer_http_2", &config.prefer_http_2);
   lcdc_opt_boolean_field(L, 1, "disable_logger_sys_field",
                          &config.disable_logger_sys_field);
+  config.pouch_crypto_key = lcdc_opt_string_field(L, 1, "pouch_crypto_key");
+  config.pouch_crypto_key_file =
+      lcdc_opt_string_field(L, 1, "pouch_crypto_key_file");
+  lcdc_opt_boolean_field(L, 1, "pouch_crypto_generate_key_file",
+                         &config.pouch_crypto_generate_key_file);
+  config.pouch_compression = lcdc_opt_string_field(L, 1, "pouch_compression");
   {
     long limit;
 
