@@ -1415,9 +1415,10 @@ idle worker; only client lease and transaction orchestration marks a pending
 key active until its explicit completion callback. Repeated updates to one key
 replace that key's pending projection and do not advance the exclusive-writer
 document bound. The deadline is not restarted by later writes. One-shot,
-oversized, or otherwise non-replayable
-sources explicitly mark the pending projection incomplete; their next flush
-incrementally reads the authoritative state log. Shared-root handles can each
+oversized, or otherwise non-replayable sources explicitly mark the pending
+projection incomplete; that fallback retains every active operation key until
+its completion callback, and its next eligible flush incrementally reads the
+authoritative state log. Shared-root handles can each
 run an indexer, but retain asynchronous, namespace-locked durable replay
 because no one handle owns every writer's projection. Index publication is
 derived work: a publication failure remains queued for retry and cannot revoke

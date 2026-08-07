@@ -8901,6 +8901,88 @@ test_exclusive_indexer_idle_flushes_direct_state_mutations(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_exclusive_indexer_idle_flush_waits_for_incomplete_active_operation(
+    void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_acquire_req acquire_req;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_lease *lease;
+  lc_source *source;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_error error;
+  char endpoint[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_acquire_req_init(&acquire_req);
+  lc_update_req_init(&update_req);
+  lc_error_init(&error);
+  make_root("indexer-idle-incomplete-active", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?indexer_flush_docs=64&"
+                       "indexer_flush_interval_seconds=1",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  acquire_req.key = "doc/incomplete-active";
+  acquire_req.owner = "pouch-indexer-incomplete-active";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  pouch_copy_lease_ref(&update_req.lease, lease);
+  rc = lc_source_from_memory("{invalid-json", strlen("{invalid-json"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  /* Parsing falls back to durable replay, but that derived-capture failure
+   * must not weaken the active lease's final-version-only boundary. */
+  sleep(2U);
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(query_seq != 0UL);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(manifest_seq < query_seq);
+
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+  sleep(2U);
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+  assert_false(lc_pouch_query_index_has_pending(handle->pouch, "default"));
+
+  lc_update_res_cleanup(&update_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_exclusive_indexer_publishes_transaction_decision_at_threshold(
     void **state) {
   lc_client *client;
@@ -28600,6 +28682,8 @@ int main(int argc, char **argv) {
           test_exclusive_indexer_idle_flush_waits_for_active_operation),
       cmocka_unit_test(
           test_exclusive_indexer_idle_flushes_direct_state_mutations),
+      cmocka_unit_test(
+          test_exclusive_indexer_idle_flush_waits_for_incomplete_active_operation),
       cmocka_unit_test(
           test_exclusive_indexer_publishes_transaction_decision_at_threshold),
       cmocka_unit_test(test_query_index_sequence_ignores_lease_metadata),

@@ -6557,7 +6557,9 @@ lc_pouch_query_index_pending_create(lc_pouch *pouch, const char *namespace_name,
 }
 
 /* Keep an overflowed capture as a lightweight marker. Removing it would let a
- * later suffix look complete relative to the same manifest generation. */
+ * later suffix look complete relative to the same manifest generation. Active
+ * keys are operation lifecycle state, so an incomplete derived capture must
+ * retain them until its lease or transaction reaches completion. */
 static void lc_pouch_query_index_pending_invalidate_locked(
     lc_pouch *pouch, lc_pouch_query_index_pending_entry *pending,
     lc_pouch_generation index_seq) {
@@ -6565,8 +6567,6 @@ static void lc_pouch_query_index_pending_invalidate_locked(
     return;
   }
   lc_pouch_query_index_summary_cleanup(&pending->summary);
-  lc_pouch_query_index_key_hex_set_cleanup(&pouch->allocator,
-                                           &pending->active_keys);
   lc_pouch_query_index_key_hex_set_cleanup(&pouch->allocator,
                                            &pending->deletes);
   lc_pouch_query_index_memtable_cleanup(&pouch->allocator, pending->memtable);
@@ -6579,10 +6579,30 @@ static void lc_pouch_query_index_pending_invalidate_locked(
   }
 }
 
-static void
-lc_pouch_query_index_pending_mark_incomplete(lc_pouch *pouch,
-                                             const char *namespace_name,
-                                             lc_pouch_generation index_seq) {
+static void lc_pouch_query_index_pending_mark_active_locked(
+    lc_pouch *pouch, lc_pouch_query_index_pending_entry *pending,
+    const char *key, int operation_active) {
+  char *key_hex;
+  lc_error error;
+
+  if (pouch == NULL || pending == NULL || key == NULL || key[0] == '\0' ||
+      !operation_active) {
+    return;
+  }
+  key_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, key);
+  if (key_hex == NULL) {
+    return;
+  }
+  lc_error_init(&error);
+  (void)lc_pouch_query_index_key_hex_set_add(
+      &pouch->allocator, &pending->active_keys, key_hex, &error);
+  lc_error_cleanup(&error);
+  lc_free_with_allocator(&pouch->allocator, key_hex);
+}
+
+static void lc_pouch_query_index_pending_mark_incomplete(
+    lc_pouch *pouch, const char *namespace_name, lc_pouch_generation index_seq,
+    const char *key, int operation_active) {
   lc_pouch_query_index_pending_entry *pending;
   lc_pouch_query_index_pending_entry *previous;
   lc_pouch_generation base_index_seq = 0UL;
@@ -6610,6 +6630,8 @@ lc_pouch_query_index_pending_mark_incomplete(lc_pouch *pouch,
   }
   if (pending != NULL) {
     lc_pouch_query_index_pending_invalidate_locked(pouch, pending, index_seq);
+    lc_pouch_query_index_pending_mark_active_locked(pouch, pending, key,
+                                                    operation_active);
   }
   pthread_mutex_unlock(&pouch->indexer_mutex);
 }
@@ -6752,6 +6774,8 @@ static void lc_pouch_query_index_pending_note_write(
     if (result->index_seq > pending->last_index_seq) {
       pending->last_index_seq = result->index_seq;
     }
+    lc_pouch_query_index_pending_mark_active_locked(pouch, pending, key,
+                                                    operation_active);
     pthread_mutex_unlock(&pouch->indexer_mutex);
     return;
   }
@@ -6765,16 +6789,16 @@ static void lc_pouch_query_index_pending_note_write(
   if (rc != LC_OK) {
     lc_pouch_query_index_summary_cleanup(&update);
     lc_error_cleanup(&error);
-    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name,
-                                                 result->index_seq);
+    lc_pouch_query_index_pending_mark_incomplete(
+        pouch, namespace_name, result->index_seq, key, operation_active);
     return;
   }
   key_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, key);
   if (key_hex == NULL) {
     lc_pouch_query_index_summary_cleanup(&update);
     lc_error_cleanup(&error);
-    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name,
-                                                 result->index_seq);
+    lc_pouch_query_index_pending_mark_incomplete(
+        pouch, namespace_name, result->index_seq, key, operation_active);
     return;
   }
   pthread_mutex_lock(&pouch->indexer_mutex);
@@ -6792,8 +6816,8 @@ static void lc_pouch_query_index_pending_note_write(
       lc_free_with_allocator(&pouch->allocator, key_hex);
       lc_pouch_query_index_summary_cleanup(&update);
       lc_error_cleanup(&error);
-      lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name,
-                                                   result->index_seq);
+      lc_pouch_query_index_pending_mark_incomplete(
+          pouch, namespace_name, result->index_seq, key, operation_active);
       return;
     }
   }
@@ -6811,8 +6835,8 @@ static void lc_pouch_query_index_pending_note_write(
       lc_free_with_allocator(&pouch->allocator, key_hex);
       lc_pouch_query_index_summary_cleanup(&update);
       lc_error_cleanup(&error);
-      lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name,
-                                                   result->index_seq);
+      lc_pouch_query_index_pending_mark_incomplete(
+          pouch, namespace_name, result->index_seq, key, operation_active);
       return;
     }
     pthread_mutex_lock(&pouch->indexer_mutex);
@@ -6828,11 +6852,13 @@ static void lc_pouch_query_index_pending_note_write(
     if (pending != NULL) {
       lc_pouch_query_index_pending_invalidate_locked(pouch, pending,
                                                      result->index_seq);
+      lc_pouch_query_index_pending_mark_active_locked(pouch, pending, key,
+                                                      operation_active);
     }
     pthread_mutex_unlock(&pouch->indexer_mutex);
     if (pending == NULL) {
-      lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name,
-                                                   result->index_seq);
+      lc_pouch_query_index_pending_mark_incomplete(
+          pouch, namespace_name, result->index_seq, key, operation_active);
     }
     lc_free_with_allocator(&pouch->allocator, key_hex);
     lc_pouch_query_index_summary_cleanup(&update);
@@ -6874,6 +6900,8 @@ static void lc_pouch_query_index_pending_note_write(
   if (rc != LC_OK) {
     lc_pouch_query_index_pending_invalidate_locked(pouch, pending,
                                                    result->index_seq);
+    lc_pouch_query_index_pending_mark_active_locked(pouch, pending, key,
+                                                    operation_active);
   }
   pthread_mutex_unlock(&pouch->indexer_mutex);
   lc_free_with_allocator(&pouch->allocator, key_hex);
@@ -6900,8 +6928,8 @@ static void lc_pouch_query_index_pending_note_delete(
   }
   key_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, key);
   if (key_hex == NULL) {
-    lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name,
-                                                 result->index_seq);
+    lc_pouch_query_index_pending_mark_incomplete(
+        pouch, namespace_name, result->index_seq, key, operation_active);
     return;
   }
   lc_error_init(&error);
@@ -6912,6 +6940,8 @@ static void lc_pouch_query_index_pending_note_delete(
     if (result->index_seq > pending->last_index_seq) {
       pending->last_index_seq = result->index_seq;
     }
+    lc_pouch_query_index_pending_mark_active_locked(pouch, pending, key,
+                                                    operation_active);
     pthread_mutex_unlock(&pouch->indexer_mutex);
     lc_free_with_allocator(&pouch->allocator, key_hex);
     lc_error_cleanup(&error);
@@ -6927,8 +6957,8 @@ static void lc_pouch_query_index_pending_note_delete(
     if (rc != LC_OK) {
       lc_free_with_allocator(&pouch->allocator, key_hex);
       lc_error_cleanup(&error);
-      lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name,
-                                                   result->index_seq);
+      lc_pouch_query_index_pending_mark_incomplete(
+          pouch, namespace_name, result->index_seq, key, operation_active);
       return;
     }
   }
@@ -6944,8 +6974,8 @@ static void lc_pouch_query_index_pending_note_delete(
     if (rc != LC_OK) {
       lc_free_with_allocator(&pouch->allocator, key_hex);
       lc_error_cleanup(&error);
-      lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name,
-                                                   result->index_seq);
+      lc_pouch_query_index_pending_mark_incomplete(
+          pouch, namespace_name, result->index_seq, key, operation_active);
       return;
     }
     pthread_mutex_lock(&pouch->indexer_mutex);
@@ -6961,11 +6991,13 @@ static void lc_pouch_query_index_pending_note_delete(
     if (pending != NULL) {
       lc_pouch_query_index_pending_invalidate_locked(pouch, pending,
                                                      result->index_seq);
+      lc_pouch_query_index_pending_mark_active_locked(pouch, pending, key,
+                                                      operation_active);
     }
     pthread_mutex_unlock(&pouch->indexer_mutex);
     if (pending == NULL) {
-      lc_pouch_query_index_pending_mark_incomplete(pouch, namespace_name,
-                                                   result->index_seq);
+      lc_pouch_query_index_pending_mark_incomplete(
+          pouch, namespace_name, result->index_seq, key, operation_active);
     }
     lc_free_with_allocator(&pouch->allocator, key_hex);
     lc_error_cleanup(&error);
@@ -6989,6 +7021,8 @@ static void lc_pouch_query_index_pending_note_delete(
   } else {
     lc_pouch_query_index_pending_invalidate_locked(pouch, pending,
                                                    result->index_seq);
+    lc_pouch_query_index_pending_mark_active_locked(pouch, pending, key,
+                                                    operation_active);
   }
   pthread_mutex_unlock(&pouch->indexer_mutex);
   lc_free_with_allocator(&pouch->allocator, key_hex);
