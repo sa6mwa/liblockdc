@@ -49,6 +49,11 @@
 #define LC_POUCH_STATE_HIGH_WATER_KEY ".lockd/high-water"
 #define LC_POUCH_STATE_INDEX_TRAILER_BYTES 12U
 #define LC_POUCH_STATE_INDEX_TRAILER_MAGIC 0x4c435349UL
+/* Snapshot records retain their per-key query freshness in an extended trailer.
+ * Normal log records keep the compact legacy trailer and derive freshness as
+ * they are applied. */
+#define LC_POUCH_STATE_QUERY_INDEX_TRAILER_BYTES 20U
+#define LC_POUCH_STATE_QUERY_INDEX_TRAILER_MAGIC 0x4c435351UL
 #define LC_POUCH_STATE_CLEAN_INDEX_CHECKPOINT_LEAF "sequence.clean"
 
 #ifdef LOCKDC_TEST_BUILD
@@ -1100,6 +1105,9 @@ struct lc_pouch_state_entry {
   /* HIGH_WATER records persist the last public-query mutation independently
    * from their state sequence so delete-only snapshots retain freshness. */
   lc_pouch_generation query_index_seq;
+  /* Snapshot records carry the per-key value explicitly. Live records derive
+   * it from their predecessor so ordinary appends retain their compact format. */
+  int has_query_index_seq;
   lc_pouch_generation version;
   uint64_t bytes;
   uint64_t cipher_bytes;
@@ -4481,27 +4489,31 @@ static int lc_pouch_state_cache_apply_entry(lc_pouch *pouch,
    * placeholder for a newly acquired lease, not a document: it remains
    * query-neutral until a later state put supplies a body. Once a body exists,
    * retain the prior public generation across lease metadata changes. */
-  query_index_seq = entry->index_seq;
-  if ((entry->record_type == LC_POUCH_STATE_RECORD_OBJECT_PUT ||
-       entry->record_type == LC_POUCH_STATE_RECORD_OBJECT_DELETE) &&
-      record != NULL) {
-    query_index_seq = record->query_index_seq;
-  } else if (entry->record_type == LC_POUCH_STATE_RECORD_OBJECT_PUT ||
-             entry->record_type == LC_POUCH_STATE_RECORD_OBJECT_DELETE) {
-    query_index_seq = 0UL;
-  } else if (entry->record_type == LC_POUCH_STATE_RECORD_STATE_META &&
-             prior_object_record) {
-    query_index_seq = record->query_index_seq;
-  } else if (entry->record_type == LC_POUCH_STATE_RECORD_STATE_META &&
-             !entry->payload_span.present &&
-             (record == NULL || !record->payload_span.present)) {
-    query_index_seq = record != NULL ? record->query_index_seq : 0UL;
-  } else if (entry->record_type == LC_POUCH_STATE_RECORD_STATE_META &&
-             record != NULL && record->found == entry->found &&
-             record->has_query_hidden == entry->has_query_hidden &&
-             record->query_hidden == entry->query_hidden &&
-             record->query_index_seq != 0UL) {
-    query_index_seq = record->query_index_seq;
+  if (entry->has_query_index_seq) {
+    query_index_seq = entry->query_index_seq;
+  } else {
+    query_index_seq = entry->index_seq;
+    if ((entry->record_type == LC_POUCH_STATE_RECORD_OBJECT_PUT ||
+         entry->record_type == LC_POUCH_STATE_RECORD_OBJECT_DELETE) &&
+        record != NULL) {
+      query_index_seq = record->query_index_seq;
+    } else if (entry->record_type == LC_POUCH_STATE_RECORD_OBJECT_PUT ||
+               entry->record_type == LC_POUCH_STATE_RECORD_OBJECT_DELETE) {
+      query_index_seq = 0UL;
+    } else if (entry->record_type == LC_POUCH_STATE_RECORD_STATE_META &&
+               prior_object_record) {
+      query_index_seq = record->query_index_seq;
+    } else if (entry->record_type == LC_POUCH_STATE_RECORD_STATE_META &&
+               !entry->payload_span.present &&
+               (record == NULL || !record->payload_span.present)) {
+      query_index_seq = record != NULL ? record->query_index_seq : 0UL;
+    } else if (entry->record_type == LC_POUCH_STATE_RECORD_STATE_META &&
+               record != NULL && record->found == entry->found &&
+               record->has_query_hidden == entry->has_query_hidden &&
+               record->query_hidden == entry->query_hidden &&
+               record->query_index_seq != 0UL) {
+      query_index_seq = record->query_index_seq;
+    }
   }
   if (record == NULL) {
     rc = lc_pouch_state_cache_record_index_ensure(pouch, ns,
@@ -4740,6 +4752,8 @@ static int lc_pouch_state_entry_from_cache_record(
                         NULL);
   }
   out->index_seq = record->index_seq;
+  out->query_index_seq = record->query_index_seq;
+  out->has_query_index_seq = 1;
   out->version = record->version;
   out->bytes = record->bytes;
   out->cipher_bytes = record->cipher_bytes;
@@ -4772,6 +4786,8 @@ static void lc_pouch_state_entry_borrow_cache_record(
   out->metadata = record->metadata;
   out->metadata_length = record->metadata_length;
   out->index_seq = record->index_seq;
+  out->query_index_seq = record->query_index_seq;
+  out->has_query_index_seq = 1;
   out->version = record->version;
   out->bytes = record->bytes;
   out->cipher_bytes = record->cipher_bytes;
@@ -6028,24 +6044,51 @@ static int lc_pouch_state_meta_new(const lc_allocator *allocator, size_t length,
   return LC_OK;
 }
 
-static int lc_pouch_state_meta_set_index_seq(unsigned char *meta,
-                                             size_t meta_len,
-                                             lc_pouch_generation index_seq,
-                                             lc_error *error) {
-  size_t trailer_offset;
-
-  if (meta == NULL || meta_len < LC_POUCH_STATE_INDEX_TRAILER_BYTES) {
+static int lc_pouch_state_meta_trailer(const unsigned char *meta,
+                                       size_t meta_len,
+                                       size_t *trailer_offset,
+                                       int *has_query_index_seq,
+                                       lc_error *error) {
+  if (meta == NULL || trailer_offset == NULL || has_query_index_seq == NULL ||
+      meta_len < LC_POUCH_STATE_INDEX_TRAILER_BYTES) {
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                        "pouch state metadata has no index trailer", NULL, NULL,
-                        "pouch");
+                        "pouch state metadata has no index trailer", NULL,
+                        NULL, "pouch");
   }
-  trailer_offset = meta_len - LC_POUCH_STATE_INDEX_TRAILER_BYTES;
-  if (lc_pouch_state_get32(meta + trailer_offset) !=
+  if (meta_len >= LC_POUCH_STATE_QUERY_INDEX_TRAILER_BYTES &&
+      lc_pouch_state_get32(
+          meta + meta_len - LC_POUCH_STATE_QUERY_INDEX_TRAILER_BYTES) ==
+          LC_POUCH_STATE_QUERY_INDEX_TRAILER_MAGIC) {
+    *trailer_offset =
+        meta_len - LC_POUCH_STATE_QUERY_INDEX_TRAILER_BYTES;
+    *has_query_index_seq = 1;
+    return LC_OK;
+  }
+  *trailer_offset = meta_len - LC_POUCH_STATE_INDEX_TRAILER_BYTES;
+  if (lc_pouch_state_get32(meta + *trailer_offset) !=
       LC_POUCH_STATE_INDEX_TRAILER_MAGIC) {
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "pouch state metadata index trailer is invalid", NULL,
                         NULL, "pouch");
   }
+  *has_query_index_seq = 0;
+  return LC_OK;
+}
+
+static int lc_pouch_state_meta_set_index_seq(unsigned char *meta,
+                                             size_t meta_len,
+                                             lc_pouch_generation index_seq,
+                                             lc_error *error) {
+  size_t trailer_offset;
+  int has_query_index_seq;
+  int rc;
+
+  rc = lc_pouch_state_meta_trailer(meta, meta_len, &trailer_offset,
+                                   &has_query_index_seq, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  (void)has_query_index_seq;
   lc_pouch_state_put64(meta + trailer_offset + 4U, (uint64_t)index_seq);
   return LC_OK;
 }
@@ -6055,21 +6098,20 @@ static int lc_pouch_state_meta_index_seq(const unsigned char *meta,
                                          lc_pouch_generation *out,
                                          lc_error *error) {
   size_t trailer_offset;
+  int has_query_index_seq;
   int rc;
 
-  if (meta == NULL || out == NULL ||
-      meta_len < LC_POUCH_STATE_INDEX_TRAILER_BYTES) {
+  if (out == NULL) {
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "pouch state metadata index trailer is missing", NULL,
                         NULL, "pouch");
   }
-  trailer_offset = meta_len - LC_POUCH_STATE_INDEX_TRAILER_BYTES;
-  if (lc_pouch_state_get32(meta + trailer_offset) !=
-      LC_POUCH_STATE_INDEX_TRAILER_MAGIC) {
-    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                        "pouch state metadata index trailer is invalid", NULL,
-                        NULL, "pouch");
+  rc = lc_pouch_state_meta_trailer(meta, meta_len, &trailer_offset,
+                                   &has_query_index_seq, error);
+  if (rc != LC_OK) {
+    return rc;
   }
+  (void)has_query_index_seq;
   rc = lc_pouch_state_decode_generation(
       lc_pouch_state_get64(meta + trailer_offset + 4U), out, error);
   if (rc != LC_OK) {
@@ -6080,6 +6122,81 @@ static int lc_pouch_state_meta_index_seq(const unsigned char *meta,
                         "pouch state metadata index sequence is invalid", NULL,
                         NULL, "pouch");
   }
+  return LC_OK;
+}
+
+static int lc_pouch_state_meta_query_index_seq(
+    const unsigned char *meta, size_t meta_len, lc_pouch_generation *out,
+    int *present, lc_error *error) {
+  size_t trailer_offset;
+  int has_query_index_seq;
+  int rc;
+
+  if (out == NULL || present == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index metadata requires outputs", NULL,
+                        NULL, "pouch");
+  }
+  *out = 0UL;
+  *present = 0;
+  rc = lc_pouch_state_meta_trailer(meta, meta_len, &trailer_offset,
+                                   &has_query_index_seq, error);
+  if (rc != LC_OK || !has_query_index_seq) {
+    return rc;
+  }
+  rc = lc_pouch_state_decode_generation(
+      lc_pouch_state_get64(meta + trailer_offset + 12U), out, error);
+  if (rc == LC_OK) {
+    *present = 1;
+  }
+  return rc;
+}
+
+static int lc_pouch_state_meta_set_snapshot_index_sequences(
+    const lc_allocator *allocator, unsigned char **meta_io,
+    size_t *meta_length_io, lc_pouch_generation index_seq,
+    lc_pouch_generation query_index_seq, lc_error *error) {
+  unsigned char *extended;
+  size_t trailer_offset;
+  int has_query_index_seq;
+  int rc;
+
+  if (meta_io == NULL || meta_length_io == NULL || *meta_io == NULL ||
+      *meta_length_io > LC_POUCH_STATE_RECORD_META_MAX_BYTES - 8U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch snapshot metadata cannot retain query sequence",
+                        NULL, NULL, "pouch");
+  }
+  rc = lc_pouch_state_meta_trailer(*meta_io, *meta_length_io,
+                                   &trailer_offset, &has_query_index_seq,
+                                   error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (has_query_index_seq) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch snapshot metadata query sequence is duplicated",
+                        NULL, NULL, "pouch");
+  }
+  extended = (unsigned char *)lc_alloc_with_allocator(
+      allocator, *meta_length_io + 8U);
+  if (extended == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to extend pouch snapshot metadata", NULL,
+                        NULL, NULL);
+  }
+  if (trailer_offset > 0U) {
+    memcpy(extended, *meta_io, trailer_offset);
+  }
+  lc_pouch_state_put32(extended + trailer_offset,
+                       LC_POUCH_STATE_QUERY_INDEX_TRAILER_MAGIC);
+  lc_pouch_state_put64(extended + trailer_offset + 4U,
+                       (uint64_t)index_seq);
+  lc_pouch_state_put64(extended + trailer_offset + 12U,
+                       (uint64_t)query_index_seq);
+  lc_free_with_allocator(allocator, *meta_io);
+  *meta_io = extended;
+  *meta_length_io += 8U;
   return LC_OK;
 }
 
@@ -6519,6 +6636,13 @@ payload_ref_decoded:
     lc_pouch_state_entry_cleanup(allocator, entry);
     return rc;
   }
+  rc = lc_pouch_state_meta_query_index_seq(
+      meta, meta_len, &entry->query_index_seq, &entry->has_query_index_seq,
+      error);
+  if (rc != LC_OK) {
+    lc_pouch_state_entry_cleanup(allocator, entry);
+    return rc;
+  }
   entry->version = version;
   entry->bytes = plain_bytes;
   entry->cipher_bytes = stored_bytes;
@@ -6579,6 +6703,13 @@ static int lc_pouch_state_decode_delete_meta(
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
   rc = lc_pouch_state_meta_index_seq(meta, meta_len, &entry->index_seq, error);
+  if (rc != LC_OK) {
+    lc_pouch_state_entry_cleanup(allocator, entry);
+    return rc;
+  }
+  rc = lc_pouch_state_meta_query_index_seq(
+      meta, meta_len, &entry->query_index_seq, &entry->has_query_index_seq,
+      error);
   if (rc != LC_OK) {
     lc_pouch_state_entry_cleanup(allocator, entry);
     return rc;
@@ -7143,11 +7274,13 @@ static int lc_pouch_state_scan_file_max_version(
   for (;;) {
     lc_pouch_record_header header;
     unsigned char encoded[LC_POUCH_STATE_RECORD_HEADER_BYTES];
-    unsigned char index_meta[LC_POUCH_STATE_INDEX_TRAILER_BYTES];
+    unsigned char index_meta[LC_POUCH_STATE_QUERY_INDEX_TRAILER_BYTES];
     lc_pouch_generation index_seq;
     size_t got;
+    size_t trailer_len;
 
     index_seq = 0UL;
+    trailer_len = 0U;
     got = fread(encoded, 1U, sizeof(encoded), fp);
     if (got == 0U) {
       if (ferror(fp)) {
@@ -7227,17 +7360,21 @@ static int lc_pouch_state_scan_file_max_version(
     if (header.type == LC_POUCH_STATE_RECORD_HIGH_WATER) {
       got = fread(index_meta, 1U, 8U, fp);
     } else {
+      trailer_len =
+          header.meta_len >= LC_POUCH_STATE_QUERY_INDEX_TRAILER_BYTES
+              ? LC_POUCH_STATE_QUERY_INDEX_TRAILER_BYTES
+              : LC_POUCH_STATE_INDEX_TRAILER_BYTES;
       rc = lc_pouch_state_skip_file_bytes(
-          fp, (uint64_t)(header.meta_len - LC_POUCH_STATE_INDEX_TRAILER_BYTES),
+          fp, (uint64_t)(header.meta_len - trailer_len),
           error);
       if (rc != LC_OK) {
         break;
       }
-      got = fread(index_meta, 1U, sizeof(index_meta), fp);
+      got = fread(index_meta, 1U, trailer_len, fp);
     }
     if (got != (header.type == LC_POUCH_STATE_RECORD_HIGH_WATER
                     ? 8U
-                    : sizeof(index_meta))) {
+                    : trailer_len)) {
       if (allow_truncated_tail && !ferror(fp)) {
         break;
       }
@@ -7250,8 +7387,8 @@ static int lc_pouch_state_scan_file_max_version(
       rc = lc_pouch_state_decode_generation(lc_pouch_state_get64(index_meta),
                                             &index_seq, error);
     } else {
-      rc = lc_pouch_state_meta_index_seq(index_meta, sizeof(index_meta),
-                                         &index_seq, error);
+      rc = lc_pouch_state_meta_index_seq(index_meta, trailer_len, &index_seq,
+                                         error);
     }
     if (rc != LC_OK) {
       break;
@@ -8614,8 +8751,9 @@ static int lc_pouch_state_snapshot_write_record(
           record->has_query_hidden, record->query_hidden,
           record->staged_delete_marker, &meta, &meta_len, error);
       if (rc == LC_OK) {
-        rc = lc_pouch_state_meta_set_index_seq(meta, meta_len,
-                                               record->index_seq, error);
+        rc = lc_pouch_state_meta_set_snapshot_index_sequences(
+            &pouch->allocator, &meta, &meta_len, record->index_seq,
+            record->query_index_seq, error);
       }
       if (rc == LC_OK) {
         rc = lc_pouch_state_record_write_prefix(
@@ -8639,6 +8777,14 @@ static int lc_pouch_state_snapshot_write_record(
         record->query_hidden, record->staged_delete_marker, &meta, &meta_len,
         error);
     if (rc != LC_OK) {
+      return rc;
+    }
+    rc = lc_pouch_state_meta_set_snapshot_index_sequences(
+        &pouch->allocator, &meta, &meta_len, record->index_seq,
+        record->query_index_seq, error);
+    if (rc != LC_OK) {
+      lc_free_with_allocator(&pouch->allocator, meta);
+      lc_pouch_state_payload_span_cleanup(&pouch->allocator, &snapshot_span);
       return rc;
     }
     if (record_start > LC_U64_MAX - LC_POUCH_STATE_RECORD_HEADER_BYTES ||
@@ -8690,14 +8836,15 @@ static int lc_pouch_state_snapshot_write_record(
           LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE, record->has_query_hidden,
           record->query_hidden, record->staged_delete_marker, &final_meta,
           &final_meta_len, error);
+      if (rc == LC_OK) {
+        rc = lc_pouch_state_meta_set_snapshot_index_sequences(
+            &pouch->allocator, &final_meta, &final_meta_len,
+            record->index_seq, record->query_index_seq, error);
+      }
       if (rc == LC_OK && final_meta_len != meta_len) {
         rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch snapshot metadata reservation changed size",
                           NULL, NULL, "pouch");
-      }
-      if (rc == LC_OK) {
-        rc = lc_pouch_state_meta_set_index_seq(final_meta, final_meta_len,
-                                               record->index_seq, error);
       }
     }
     if (rc == LC_OK) {
@@ -8725,8 +8872,9 @@ static int lc_pouch_state_snapshot_write_record(
         &pouch->allocator, record->version, record->updated_at_unix,
         record->etag, &meta, &meta_len, error);
     if (rc == LC_OK) {
-      rc = lc_pouch_state_meta_set_index_seq(meta, meta_len, record->index_seq,
-                                             error);
+      rc = lc_pouch_state_meta_set_snapshot_index_sequences(
+          &pouch->allocator, &meta, &meta_len, record->index_seq,
+          record->query_index_seq, error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_state_record_write_prefix(

@@ -295,6 +295,14 @@ A complete record without that trailer is rejected as corruption; replay never
 synthesizes ordering from physical file position. The high-water control record
 carries its sequence as its sole generation field.
 
+Snapshots extend the state and delete trailers with each record's last
+query-visible sequence. This preserves the distinction between a document
+mutation and a later lease-only metadata mutation across compaction and reopen:
+query-index flushes do not republish metadata-only changes. Replay continues to
+accept earlier snapshot trailers without that extension and derives their
+per-record query freshness conservatively; newly written snapshots always use
+the extended form.
+
 ### State Records
 
 Go disk stores JSON state payloads as state records under the caller namespace

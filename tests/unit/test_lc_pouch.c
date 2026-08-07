@@ -8755,6 +8755,10 @@ static void test_query_index_sequence_ignores_lease_metadata(void **state) {
   lc_client_handle *handle;
   lc_update_res first;
   lc_update_res second;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
   lc_pouch_generation manifest_seq;
   lc_pouch_generation query_seq;
   lc_pouch_generation state_seq;
@@ -8767,6 +8771,10 @@ static void test_query_index_sequence_ignores_lease_metadata(void **state) {
   client = NULL;
   memset(&first, 0, sizeof(first));
   memset(&second, 0, sizeof(second));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
   manifest_seq = 0UL;
   query_seq = 0UL;
   state_seq = 0UL;
@@ -8774,7 +8782,8 @@ static void test_query_index_sequence_ignores_lease_metadata(void **state) {
   make_root("query-index-lease-metadata", root, sizeof(root));
   cleanup_root(root);
   assert_true(snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?indexer_flush_docs=2&"
+                       "pouch://%s?segment_target_bytes=1&"
+                       "indexer_flush_docs=2&"
                        "indexer_flush_interval_seconds=3600",
                        root) > 0);
 
@@ -8795,6 +8804,37 @@ static void test_query_index_sequence_ignores_lease_metadata(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(state_seq > query_seq);
   assert_int_equal(manifest_seq, query_seq);
+
+  maintenance_options.namespace_name = "default";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(handle->pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.compacted);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+
+  lc_client_close(client);
+  client = NULL;
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  rc = lc_pouch_state_index_seq(handle->pouch, "default", &state_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(state_seq > query_seq);
+  assert_int_equal(manifest_seq, query_seq);
+
+  /* The snapshot retained the last query-visible sequence for each document.
+   * A wait flush must therefore remain a no-op despite newer lease metadata. */
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_res.index_seq, query_seq);
+  lc_index_flush_res_cleanup(&flush_res);
 
   lc_update_res_cleanup(&second);
   lc_update_res_cleanup(&first);
