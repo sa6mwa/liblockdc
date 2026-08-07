@@ -8440,6 +8440,25 @@ static int lc_pouch_client_stage_transaction_write(
       lc_pouch_client_prepare_txn_stage_write, &context, NULL, out, error);
 }
 
+static int lc_pouch_client_stage_transaction_metadata(
+    lc_client_handle *client, const lc_lease_ref *lease,
+    const char *namespace_name, const char *key, const char *txn_id,
+    lc_pouch_state_write_options *options, lc_pouch_state_write_result *out,
+    lc_error *error) {
+  lc_pouch_txn_stage_write_context context;
+
+  memset(&context, 0, sizeof(context));
+  context.client = client;
+  context.lease = lease;
+  context.namespace_name = namespace_name;
+  context.key = key;
+  context.txn_id = txn_id;
+  return lc_pouch_state_stage_metadata_prepared(
+      client != NULL ? client->pouch : NULL, namespace_name, key, txn_id,
+      lease != NULL ? lease->key : NULL, options,
+      lc_pouch_client_prepare_txn_stage_write, &context, out, error);
+}
+
 static int lc_pouch_client_prepare_txn_mutation_stage_write(
     const lc_pouch_state_metadata_view *committed,
     const lc_pouch_state_metadata_view *staged,
@@ -12417,6 +12436,8 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
   memset(&result, 0, sizeof(result));
   options.has_query_hidden = 1;
   options.query_hidden = req->query_hidden;
+  options.query_index_operation_active = 1;
+  options.query_index_operation_id = req->lease.lease_id;
   if (req->has_if_version) {
     rc = lc_pouch_version_to_generation(req->if_version,
                                         &options.expected_version, error);
@@ -12440,10 +12461,19 @@ int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
   lease_precondition.lease = &req->lease;
   lease_precondition.namespace_name = namespace_name;
   lease_precondition.key = req->lease.key;
-  options.view_precondition = lc_pouch_lease_view_precondition_check;
-  options.view_precondition_context = &lease_precondition;
-  rc = lc_pouch_state_update_metadata(client->pouch, namespace_name,
-                                      req->lease.key, &options, &result, error);
+  options.query_index_operation_expires_at_unix =
+      &lease_precondition.lease_expires_at_unix;
+  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+    rc = lc_pouch_client_stage_transaction_metadata(
+        client, &req->lease, namespace_name, req->lease.key, req->lease.txn_id,
+        &options, &result, error);
+  } else {
+    options.view_precondition = lc_pouch_lease_view_precondition_check;
+    options.view_precondition_context = &lease_precondition;
+    rc = lc_pouch_state_update_metadata(client->pouch, namespace_name,
+                                        req->lease.key, &options, &result,
+                                        error);
+  }
   if (rc != LC_OK) {
     lc_pouch_state_write_result_cleanup(&client->allocator, &result);
     return rc;

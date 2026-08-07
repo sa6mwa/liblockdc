@@ -424,6 +424,17 @@ int lc_pouch_state_stage_write_prepared(
     lc_pouch_state_stage_prepare_fn prepare, void *prepare_context,
     lc_pouch_state_stage_body_prepare_fn body_prepare,
     lc_pouch_state_write_result *out, lc_error *error);
+/**
+ * Stages metadata-only state while preserving the selected transaction-local
+ * payload projection. The prepare callback makes the same namespace-atomic
+ * lease and CAS decision as staged body writes.
+ */
+int lc_pouch_state_stage_metadata_prepared(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *txn_id, const char *lease_key,
+    lc_pouch_state_write_options *options,
+    lc_pouch_state_stage_prepare_fn prepare, void *prepare_context,
+    lc_pouch_state_write_result *out, lc_error *error);
 int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
                                lc_pouch_generation after_version,
                                lc_pouch_state_change_visit_fn visitor,

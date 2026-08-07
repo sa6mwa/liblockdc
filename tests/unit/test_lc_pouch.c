@@ -9614,6 +9614,223 @@ test_exclusive_indexer_clears_guards_after_failed_transaction_decision(
   lc_error_cleanup(&error);
 }
 
+static void
+test_transaction_metadata_stays_staged_until_rollback(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_lease *lease;
+  lc_update_res update_res;
+  lc_metadata_op metadata_op;
+  lc_metadata_res metadata_res;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_pouch_state_read_result read_result;
+  lc_acquire_req acquire_req;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_metadata_op_init(&metadata_op);
+  memset(&metadata_res, 0, sizeof(metadata_res));
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_acquire_req_init(&acquire_req);
+  lc_error_init(&error);
+  make_root("transaction-metadata-staging", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  handle = (lc_client_handle *)client;
+  write_client_state(client, "doc/transaction-metadata",
+                     "{\"kind\":\"visible\"}", NULL, 0L, 0, &update_res,
+                     &error);
+  lc_update_res_cleanup(&update_res);
+
+  acquire_req.key = "doc/transaction-metadata";
+  acquire_req.owner = "pouch-transaction-metadata";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "pouch-transaction-metadata";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  pouch_copy_lease_ref(&metadata_op.lease, lease);
+  metadata_op.has_query_hidden = 1;
+  metadata_op.query_hidden = 1;
+  rc = client->metadata(client, &metadata_op, &metadata_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(metadata_res.has_query_hidden);
+  assert_true(metadata_res.query_hidden);
+  lc_metadata_res_cleanup(&metadata_res);
+
+  /* The public projection remains committed-only until a transaction decision
+   * promotes the staged metadata record. */
+  rc = lc_pouch_state_read_metadata(handle->pouch, "default", acquire_req.key,
+                                    &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.has_query_hidden);
+  assert_false(read_result.query_hidden);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  participant.namespace_name = "default";
+  participant.key = acquire_req.key;
+  decision_req.txn_id = acquire_req.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  rc = lc_pouch_state_read_metadata(handle->pouch, "default", acquire_req.key,
+                                    &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.has_query_hidden);
+  assert_false(read_result.query_hidden);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  lc_lease_close(lease);
+  lease = NULL;
+
+  /* The same staged operation becomes visible only after a commit decision. */
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = "doc/transaction-metadata";
+  acquire_req.owner = "pouch-transaction-metadata";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "pouch-transaction-metadata-commit";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  lc_metadata_op_init(&metadata_op);
+  pouch_copy_lease_ref(&metadata_op.lease, lease);
+  metadata_op.has_query_hidden = 1;
+  metadata_op.query_hidden = 1;
+  rc = client->metadata(client, &metadata_op, &metadata_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_metadata_res_cleanup(&metadata_res);
+
+  lc_txn_decision_req_init(&decision_req);
+  decision_req.txn_id = acquire_req.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  rc = lc_pouch_state_read_metadata(handle->pouch, "default", acquire_req.key,
+                                    &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.has_query_hidden);
+  assert_true(read_result.query_hidden);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  lc_lease_close(lease);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_exclusive_indexer_defers_lease_metadata_until_release(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_lease *lease;
+  lc_update_res update_res;
+  lc_metadata_op metadata_op;
+  lc_metadata_res metadata_res;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_acquire_req acquire_req;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_error error;
+  char endpoint[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_metadata_op_init(&metadata_op);
+  memset(&metadata_res, 0, sizeof(metadata_res));
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
+  lc_acquire_req_init(&acquire_req);
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  lc_error_init(&error);
+  make_root("indexer-lease-metadata-boundary", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?indexer_flush_docs=64&"
+                       "indexer_flush_interval_seconds=1",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  write_client_state(client, "doc/lease-metadata", "{\"kind\":\"visible\"}",
+                     NULL, 0L, 0, &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_index_flush_res_cleanup(&flush_res);
+
+  acquire_req.key = "doc/lease-metadata";
+  acquire_req.owner = "pouch-indexer-lease-metadata";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  pouch_copy_lease_ref(&metadata_op.lease, lease);
+  metadata_op.has_query_hidden = 1;
+  metadata_op.query_hidden = 1;
+  rc = client->metadata(client, &metadata_op, &metadata_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_metadata_res_cleanup(&metadata_res);
+
+  /* Metadata itself does not advance the query sequence. A later ordinary
+   * write forces the background indexer to consider this namespace, where the
+   * metadata operation guard must hold publication until its lease completes.
+   */
+  write_client_state(client, "doc/lease-metadata-trigger",
+                     "{\"kind\":\"trigger\"}", NULL, 0L, 0, &update_res,
+                     &error);
+  lc_update_res_cleanup(&update_res);
+
+  sleep(2U);
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(query_seq != 0UL);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(manifest_seq < query_seq);
+
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+  sleep(2U);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+  assert_false(lc_pouch_query_index_has_pending(handle->pouch, "default"));
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_query_index_sequence_ignores_lease_metadata(void **state) {
   lc_client *client;
   lc_client_handle *handle;
@@ -29460,6 +29677,9 @@ int main(int argc, char **argv) {
           test_exclusive_indexer_publishes_transaction_decision_at_threshold),
       cmocka_unit_test(
           test_exclusive_indexer_clears_guards_after_failed_transaction_decision),
+      cmocka_unit_test(test_transaction_metadata_stays_staged_until_rollback),
+      cmocka_unit_test(
+          test_exclusive_indexer_defers_lease_metadata_until_release),
       cmocka_unit_test(test_query_index_sequence_ignores_lease_metadata),
       cmocka_unit_test(test_query_index_ignores_internal_objects),
       cmocka_unit_test(test_staged_object_delete_does_not_queue_query_index),

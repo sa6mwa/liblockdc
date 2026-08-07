@@ -13120,6 +13120,7 @@ static int lc_pouch_state_update_metadata_from_current_locked(
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  int query_index_guard_started;
   int rc;
   lc_pouch_state_precondition_view precondition_view;
 
@@ -13130,6 +13131,8 @@ static int lc_pouch_state_update_metadata_from_current_locked(
                         NULL, "pouch");
   }
   memset(out, 0, sizeof(*out));
+  query_index_guard_started = 0;
+  rc = LC_OK;
   if (options->view_precondition != NULL) {
     lc_pouch_state_precondition_view_from_entry(current, &precondition_view);
     rc = options->view_precondition(&precondition_view,
@@ -13168,6 +13171,19 @@ static int lc_pouch_state_update_metadata_from_current_locked(
   }
   version = logical_version;
   updated_at_unix = lc_pouch_maintenance_now_seconds();
+  if (options->query_index_operation_active && !options->object_record) {
+    lc_pouch_unix_seconds expires_at_unix;
+
+    expires_at_unix = options->query_index_operation_expires_at_unix != NULL
+                          ? *options->query_index_operation_expires_at_unix
+                          : 0L;
+    rc = lc_pouch_query_index_operation_begin(
+        pouch, namespace_name, key, options->query_index_operation_id,
+        expires_at_unix, &query_index_guard_started, error);
+  }
+  if (rc != LC_OK) {
+    return rc;
+  }
   rc = lc_pouch_state_append_record(
       pouch, namespace_name, manifest, LC_POUCH_STATE_RECORD_STATE_META, key,
       current->content_type != NULL ? current->content_type
@@ -13184,6 +13200,9 @@ static int lc_pouch_state_update_metadata_from_current_locked(
     rc = lc_pouch_state_metadata_write_result_build(
         pouch, manifest, current, options, version, updated_at_unix,
         has_query_hidden, query_hidden, out, error);
+    if (rc == LC_OK) {
+      out->query_index_operation_guard_started = query_index_guard_started;
+    }
     (void)lc_pouch_state_cache_apply_write(
         pouch, namespace_name, manifest, key,
         current->content_type != NULL ? current->content_type
@@ -13199,6 +13218,10 @@ static int lc_pouch_state_update_metadata_from_current_locked(
   }
   if (rc != LC_OK) {
     lc_pouch_state_write_result_cleanup(&pouch->allocator, out);
+    if (query_index_guard_started) {
+      lc_pouch_query_index_operation_cancel(pouch, namespace_name, key,
+                                            options->query_index_operation_id);
+    }
   }
   return rc;
 }
@@ -13216,6 +13239,7 @@ static int lc_pouch_state_metadata_append_schedule_from_current_locked(
   lc_pouch_generation logical_version;
   int has_query_hidden;
   int query_hidden;
+  int query_index_guard_started;
   int rc;
   lc_pouch_state_precondition_view precondition_view;
 
@@ -13226,6 +13250,7 @@ static int lc_pouch_state_metadata_append_schedule_from_current_locked(
                         NULL, NULL, "pouch");
   }
   memset(out, 0, sizeof(*out));
+  query_index_guard_started = 0;
   if (options->view_precondition != NULL) {
     lc_pouch_state_precondition_view_from_entry(current, &precondition_view);
     rc = options->view_precondition(&precondition_view,
@@ -13262,6 +13287,19 @@ static int lc_pouch_state_metadata_append_schedule_from_current_locked(
     has_query_hidden = 1;
     query_hidden = 1;
   }
+  if (options->query_index_operation_active && !options->object_record) {
+    lc_pouch_unix_seconds expires_at_unix;
+
+    expires_at_unix = options->query_index_operation_expires_at_unix != NULL
+                          ? *options->query_index_operation_expires_at_unix
+                          : 0L;
+    rc = lc_pouch_query_index_operation_begin(
+        pouch, namespace_name, key, options->query_index_operation_id,
+        expires_at_unix, &query_index_guard_started, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
   memset(&request, 0, sizeof(request));
   memset(&scheduled_current, 0, sizeof(scheduled_current));
   if (current_is_borrowed) {
@@ -13281,6 +13319,12 @@ static int lc_pouch_state_metadata_append_schedule_from_current_locked(
   request.out = out;
   request.error = error;
   rc = lc_pouch_state_metadata_append_submit_locked(pouch, &request, error);
+  if (rc == LC_OK) {
+    out->query_index_operation_guard_started = query_index_guard_started;
+  } else if (query_index_guard_started) {
+    lc_pouch_query_index_operation_cancel(pouch, namespace_name, key,
+                                          options->query_index_operation_id);
+  }
   lc_pouch_state_entry_cleanup(&pouch->allocator, &scheduled_current);
   return rc;
 }
@@ -13440,6 +13484,12 @@ int lc_pouch_state_update_metadata(lc_pouch *pouch, const char *namespace_name,
                                              options, out, error);
   rc = lc_pouch_state_finish_commit_group_after_mutation(
       pouch, &lock, commit_group, owns_commit_group, rc, error);
+  if (rc != LC_OK && out->query_index_operation_guard_started &&
+      options != NULL && options->query_index_operation_id != NULL) {
+    lc_pouch_query_index_operation_cancel(pouch, namespace_name, key,
+                                          options->query_index_operation_id);
+    out->query_index_operation_guard_started = 0;
+  }
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }
@@ -13848,6 +13898,192 @@ int lc_pouch_state_stage_write_prepared(
   context.out = out;
   return lc_pouch_state_with_namespace_lock(
       pouch, namespace_name, lc_pouch_state_stage_write_prepared_locked,
+      &context, error);
+}
+
+typedef struct lc_pouch_state_prepared_metadata_stage_context {
+  lc_pouch *pouch;
+  const char *namespace_name;
+  const char *key;
+  const char *txn_id;
+  const char *lease_key;
+  lc_pouch_state_write_options *options;
+  lc_pouch_state_stage_prepare_fn prepare;
+  void *prepare_context;
+  lc_pouch_state_write_result *out;
+} lc_pouch_state_prepared_metadata_stage_context;
+
+/* Metadata staging cannot use the regular source writer: a lease may protect
+ * an absent value, and materializing an empty source would turn that absence
+ * into a zero-byte state body. Preserve the committed or transaction-local
+ * payload span directly in a staged metadata record instead. */
+static int lc_pouch_state_stage_metadata_prepared_locked(void *context,
+                                                         lc_error *error) {
+  lc_pouch_state_prepared_metadata_stage_context *stage;
+  lc_pouch_state_entry committed;
+  lc_pouch_state_entry staged;
+  lc_pouch_namespace_manifest manifest;
+  lc_pouch_state_read_result lease;
+  lc_pouch_state_metadata_view committed_view;
+  lc_pouch_state_metadata_view staged_view;
+  lc_pouch_state_metadata_view lease_view;
+  lc_pouch_state_entry *current;
+  char *staged_key;
+  lc_pouch_generation logical_version;
+  lc_pouch_unix_seconds updated_at_unix;
+  int apply;
+  int has_query_hidden;
+  int query_hidden;
+  int rc;
+
+  stage = (lc_pouch_state_prepared_metadata_stage_context *)context;
+  if (stage == NULL || stage->pouch == NULL || stage->namespace_name == NULL ||
+      stage->key == NULL || stage->txn_id == NULL || stage->lease_key == NULL ||
+      stage->options == NULL || stage->prepare == NULL || stage->out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch prepared metadata stage requires complete "
+                        "context",
+                        NULL, NULL, "pouch");
+  }
+  memset(stage->out, 0, sizeof(*stage->out));
+  memset(&committed, 0, sizeof(committed));
+  memset(&staged, 0, sizeof(staged));
+  memset(&manifest, 0, sizeof(manifest));
+  memset(&lease, 0, sizeof(lease));
+  memset(&committed_view, 0, sizeof(committed_view));
+  memset(&staged_view, 0, sizeof(staged_view));
+  memset(&lease_view, 0, sizeof(lease_view));
+  staged_key = NULL;
+  current = NULL;
+  apply = 1;
+  rc = lc_pouch_state_manifest_lookup_cached_for_mutation(
+      stage->pouch, stage->namespace_name, stage->key, &manifest, &committed,
+      NULL, error);
+  if (rc == LC_OK) {
+    staged_key = lc_pouch_state_staged_key(&stage->pouch->allocator, stage->key,
+                                           stage->txn_id);
+    if (staged_key == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch staged state key", NULL, NULL,
+                        "pouch");
+    }
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_state_scan(stage->pouch, &manifest, staged_key, &staged, NULL,
+                             error);
+  }
+  if (rc == LC_OK && strcmp(stage->lease_key, stage->key) != 0) {
+    rc = lc_pouch_state_read_metadata_locked(
+        stage->pouch, stage->namespace_name, stage->lease_key, &lease, error);
+  }
+  if (rc == LC_OK) {
+    lc_pouch_state_metadata_view_from_entry(&committed, &committed_view);
+    lc_pouch_state_metadata_view_from_entry(&staged, &staged_view);
+    if (strcmp(stage->lease_key, stage->key) == 0) {
+      lease_view = committed_view;
+    } else {
+      lc_pouch_state_metadata_view_from_read_result(&lease, &lease_view);
+    }
+    rc = stage->prepare(&committed_view, &staged_view, &lease_view,
+                        stage->prepare_context, stage->options, &apply, error);
+  }
+  if (rc == LC_OK && apply) {
+    current =
+        staged.found && !staged.staged_delete_marker ? &staged : &committed;
+    if (!current->found && !stage->options->has_metadata) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata update requires existing state", NULL,
+                        NULL, NULL);
+    }
+  }
+  if (rc == LC_OK && apply) {
+    logical_version = current->payload_span.present ? current->version : 0UL;
+    has_query_hidden = current->has_query_hidden;
+    query_hidden = current->query_hidden;
+    if (stage->options->has_query_hidden) {
+      has_query_hidden = 1;
+      query_hidden = stage->options->query_hidden;
+    } else if (!current->found) {
+      has_query_hidden = 1;
+      query_hidden = 1;
+    }
+    updated_at_unix = lc_pouch_maintenance_now_seconds();
+    rc = lc_pouch_state_append_record(
+        stage->pouch, stage->namespace_name, &manifest,
+        LC_POUCH_STATE_RECORD_STATE_META, staged_key,
+        current->content_type != NULL ? current->content_type
+                                      : "application/octet-stream",
+        current->etag != NULL ? current->etag : "", &current->payload_span,
+        current->payload_context,
+        stage->options->has_metadata ? stage->options->metadata
+                                     : current->metadata,
+        stage->options->has_metadata ? stage->options->metadata_length
+                                     : current->metadata_length,
+        logical_version, current->bytes, current->cipher_bytes,
+        current->descriptor, updated_at_unix, has_query_hidden, query_hidden,
+        current->staged_delete_marker, error);
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_metadata_write_result_build(
+          stage->pouch, &manifest, current, stage->options, logical_version,
+          updated_at_unix, has_query_hidden, query_hidden, stage->out, error);
+    }
+    if (rc == LC_OK) {
+      (void)lc_pouch_state_cache_apply_write(
+          stage->pouch, stage->namespace_name, &manifest, staged_key,
+          current->content_type != NULL ? current->content_type
+                                        : "application/octet-stream",
+          current->etag != NULL ? current->etag : "", &current->payload_span,
+          current->payload_context,
+          stage->options->has_metadata ? stage->options->metadata
+                                       : current->metadata,
+          stage->options->has_metadata ? stage->options->metadata_length
+                                       : current->metadata_length,
+          logical_version, current->bytes, current->cipher_bytes,
+          current->descriptor, updated_at_unix, has_query_hidden, query_hidden,
+          current->staged_delete_marker, 1, LC_POUCH_STATE_RECORD_STATE_META);
+    }
+  }
+  if (rc != LC_OK) {
+    lc_pouch_state_write_result_cleanup(&stage->pouch->allocator, stage->out);
+  }
+  lc_pouch_state_read_result_cleanup(&stage->pouch->allocator, &lease);
+  lc_pouch_state_entry_cleanup(&stage->pouch->allocator, &staged);
+  lc_pouch_state_entry_cleanup(&stage->pouch->allocator, &committed);
+  lc_pouch_namespace_manifest_cleanup(&stage->pouch->allocator, &manifest);
+  lc_free_with_allocator(&stage->pouch->allocator, staged_key);
+  return rc;
+}
+
+int lc_pouch_state_stage_metadata_prepared(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *txn_id, const char *lease_key,
+    lc_pouch_state_write_options *options,
+    lc_pouch_state_stage_prepare_fn prepare, void *prepare_context,
+    lc_pouch_state_write_result *out, lc_error *error) {
+  lc_pouch_state_prepared_metadata_stage_context context;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      key == NULL || key[0] == '\0' || txn_id == NULL || txn_id[0] == '\0' ||
+      lease_key == NULL || lease_key[0] == '\0' || options == NULL ||
+      prepare == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch prepared metadata stage requires pouch, "
+                        "namespace, key, transaction, lease key, options, "
+                        "callback and output",
+                        NULL, NULL, "pouch");
+  }
+  memset(&context, 0, sizeof(context));
+  context.pouch = pouch;
+  context.namespace_name = namespace_name;
+  context.key = key;
+  context.txn_id = txn_id;
+  context.lease_key = lease_key;
+  context.options = options;
+  context.prepare = prepare;
+  context.prepare_context = prepare_context;
+  context.out = out;
+  return lc_pouch_state_with_namespace_lock(
+      pouch, namespace_name, lc_pouch_state_stage_metadata_prepared_locked,
       &context, error);
 }
 
