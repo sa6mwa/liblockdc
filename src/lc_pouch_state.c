@@ -89,6 +89,7 @@ typedef struct lc_pouch_state_key_lock {
   lc_pouch *pouch;
   const char *namespace_name;
   int projection_uses_namespace_mutex;
+  int writer_mode_operation_active;
   struct lc_pouch_state_key_lock *previous_projection_lock;
 } lc_pouch_state_key_lock;
 
@@ -1261,8 +1262,10 @@ typedef struct lc_pouch_state_body_cache_entry {
   unsigned char *bytes;
   size_t length;
   lc_pouch_generation version;
+  pthread_mutex_t ref_mutex;
   unsigned long refcount;
   int retired;
+  int ref_mutex_initialized;
 } lc_pouch_state_body_cache_entry;
 
 struct lc_pouch_source_cache_entry {
@@ -1431,8 +1434,20 @@ static int lc_pouch_state_read_text_file(lc_pouch *pouch, const char *path,
 static char *lc_pouch_state_child_path(const lc_allocator *allocator,
                                        const char *namespace_path,
                                        const char *child_dir, const char *leaf);
+static int
+lc_pouch_state_body_cache_entry_init(lc_pouch_state_body_cache_entry *entry,
+                                     lc_error *error);
+static int
+lc_pouch_state_body_cache_entry_retain(lc_pouch_state_body_cache_entry *entry,
+                                       lc_error *error);
 static void
 lc_pouch_state_body_cache_entry_release(const lc_allocator *allocator,
+                                        lc_pouch_state_body_cache_entry *entry);
+static void
+lc_pouch_state_body_cache_entry_retire(const lc_allocator *allocator,
+                                       lc_pouch_state_body_cache_entry *entry);
+static void
+lc_pouch_state_body_cache_entry_destroy(const lc_allocator *allocator,
                                         lc_pouch_state_body_cache_entry *entry);
 static int lc_pouch_state_recover_staged_decisions_locked(
     lc_pouch *pouch, const char *namespace_name, lc_error *error);
@@ -1543,8 +1558,7 @@ static void lc_pouch_state_body_cache_source_close(lc_source *self) {
   if (source == NULL) {
     return;
   }
-  if (source->entry != NULL && source->entry->refcount > 0UL) {
-    source->entry->refcount -= 1UL;
+  if (source->entry != NULL) {
     lc_pouch_state_body_cache_entry_release(&source->allocator, source->entry);
   }
   lc_free_with_allocator(&source->allocator, source);
@@ -1574,7 +1588,11 @@ lc_pouch_state_body_cache_source_open(const lc_allocator *allocator,
   } else {
     lc_allocator_init(&source->allocator);
   }
-  entry->refcount += 1UL;
+  if (lc_pouch_state_body_cache_entry_retain(entry, error) != LC_OK) {
+    lc_free_with_allocator(&source->allocator, source);
+    return error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_TRANSPORT;
+  }
   source->entry = entry;
   source->pub.read = lc_pouch_state_body_cache_source_read;
   source->pub.reset = lc_pouch_state_body_cache_source_reset;
@@ -2032,6 +2050,7 @@ static int lc_pouch_state_key_lock_acquire(lc_pouch *pouch,
   lock->pouch = pouch;
   lock->namespace_name = namespace_name;
   lock->projection_uses_namespace_mutex = 0;
+  lock->writer_mode_operation_active = 0;
   lock->previous_projection_lock = NULL;
   if (lc_pouch_state_namespace_lock_is_held(pouch, namespace_name)) {
     lock->projection_uses_namespace_mutex =
@@ -2282,8 +2301,10 @@ static int lc_pouch_state_key_mutation_begin(lc_pouch *pouch,
                                              const char *key,
                                              lc_pouch_state_key_lock *lock,
                                              lc_error *error) {
+  int namespace_locked;
   int pthread_rc;
   int rc;
+  int writer_mode_operation_active;
 
   if (pouch == NULL || !pouch->state_mutation_mutex_initialized) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -2292,29 +2313,39 @@ static int lc_pouch_state_key_mutation_begin(lc_pouch *pouch,
   }
   /* Recovery has its own mutation authority. Complete it first so this
    * operation can pin one writer mode through append and durable completion. */
-  rc = lc_pouch_state_namespace_lock_is_held(pouch, namespace_name)
-           ? LC_OK
-           : lc_pouch_state_recover_staged_decisions(pouch, namespace_name,
-                                                     error);
+  namespace_locked =
+      lc_pouch_state_namespace_lock_is_held(pouch, namespace_name);
+  rc = namespace_locked ? LC_OK
+                        : lc_pouch_state_recover_staged_decisions(
+                              pouch, namespace_name, error);
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_writer_mode_operation_begin(pouch, error);
-  if (rc != LC_OK) {
-    return rc;
+  writer_mode_operation_active = 0;
+  if (!namespace_locked) {
+    rc = lc_pouch_writer_mode_operation_begin(pouch, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    writer_mode_operation_active = 1;
   }
   /* Exact-key ownership is independent of the resident projection. Take it
    * first so a conflicting key/file lock never occupies the short projection
    * mutex; this also gives maintenance a clear key/namespace barrier. */
   rc = lc_pouch_state_key_lock_acquire(pouch, namespace_name, key, lock, error);
   if (rc != LC_OK) {
-    lc_pouch_writer_mode_operation_end(pouch);
+    if (writer_mode_operation_active) {
+      lc_pouch_writer_mode_operation_end(pouch);
+    }
     return rc;
   }
+  lock->writer_mode_operation_active = writer_mode_operation_active;
   rc = lc_pouch_state_projection_lock_track(lock, error);
   if (rc != LC_OK) {
     lc_pouch_state_key_lock_release(lock);
-    lc_pouch_writer_mode_operation_end(pouch);
+    if (writer_mode_operation_active) {
+      lc_pouch_writer_mode_operation_end(pouch);
+    }
     return rc;
   }
   if (lock->projection_uses_namespace_mutex) {
@@ -2324,7 +2355,9 @@ static int lc_pouch_state_key_mutation_begin(lc_pouch *pouch,
   if (pthread_rc != 0) {
     lc_pouch_state_projection_lock_untrack(lock);
     lc_pouch_state_key_lock_release(lock);
-    lc_pouch_writer_mode_operation_end(pouch);
+    if (writer_mode_operation_active) {
+      lc_pouch_writer_mode_operation_end(pouch);
+    }
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to lock pouch mutation state",
                         strerror(pthread_rc), NULL, "pouch");
@@ -2334,13 +2367,19 @@ static int lc_pouch_state_key_mutation_begin(lc_pouch *pouch,
 
 static void lc_pouch_state_key_mutation_end(lc_pouch *pouch,
                                             lc_pouch_state_key_lock *lock) {
+  int writer_mode_operation_active;
+
+  writer_mode_operation_active =
+      lock != NULL && lock->writer_mode_operation_active;
   if (pouch != NULL && lock != NULL && !lock->projection_uses_namespace_mutex &&
       pouch->state_mutation_mutex_initialized) {
     pthread_mutex_unlock(&pouch->state_mutation_mutex);
   }
   lc_pouch_state_projection_lock_untrack(lock);
   lc_pouch_state_key_lock_release(lock);
-  lc_pouch_writer_mode_operation_end(pouch);
+  if (writer_mode_operation_active) {
+    lc_pouch_writer_mode_operation_end(pouch);
+  }
 }
 
 /* Keep the per-key lock through durable completion, but let independent
@@ -2350,7 +2389,10 @@ static int lc_pouch_state_finish_commit_group_after_mutation(
     lc_pouch *pouch, lc_pouch_state_key_lock *lock,
     lc_pouch_state_commit_group *group, int owned, int rc, lc_error *error) {
   int projection_released;
+  int writer_mode_operation_active;
 
+  writer_mode_operation_active =
+      lock != NULL && lock->writer_mode_operation_active;
   projection_released = 0;
   if (pouch != NULL && lock != NULL && lock->projection_uses_namespace_mutex &&
       lock->process_mutex != NULL) {
@@ -2370,7 +2412,9 @@ static int lc_pouch_state_finish_commit_group_after_mutation(
             LC_OK) {
           lc_pouch_state_projection_lock_untrack(lock);
           lc_pouch_state_key_lock_release(lock);
-          lc_pouch_writer_mode_operation_end(pouch);
+          if (writer_mode_operation_active) {
+            lc_pouch_writer_mode_operation_end(pouch);
+          }
           return rc;
         }
       }
@@ -2383,7 +2427,9 @@ static int lc_pouch_state_finish_commit_group_after_mutation(
   }
   lc_pouch_state_projection_lock_untrack(lock);
   lc_pouch_state_key_lock_release(lock);
-  lc_pouch_writer_mode_operation_end(pouch);
+  if (writer_mode_operation_active) {
+    lc_pouch_writer_mode_operation_end(pouch);
+  }
   return rc;
 }
 
@@ -2870,16 +2916,101 @@ static int lc_pouch_state_string_equal(const char *left, const char *right) {
   return strcmp(left, right) == 0;
 }
 
-static void lc_pouch_state_body_cache_entry_release(
+static void lc_pouch_state_body_cache_entry_destroy(
     const lc_allocator *allocator, lc_pouch_state_body_cache_entry *entry) {
-  if (entry == NULL || entry->refcount > 0UL || !entry->retired) {
+  if (entry == NULL) {
     return;
   }
   if (entry->bytes != NULL) {
     OPENSSL_cleanse(entry->bytes, entry->length);
     lc_free_with_allocator(allocator, entry->bytes);
   }
+  if (entry->ref_mutex_initialized) {
+    (void)pthread_mutex_destroy(&entry->ref_mutex);
+  }
   lc_free_with_allocator(allocator, entry);
+}
+
+static int
+lc_pouch_state_body_cache_entry_init(lc_pouch_state_body_cache_entry *entry,
+                                     lc_error *error) {
+  int pthread_rc;
+
+  if (entry == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch body cache entry requires storage", NULL, NULL,
+                        "pouch");
+  }
+  pthread_rc = pthread_mutex_init(&entry->ref_mutex, NULL);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to initialize pouch body cache reference lock",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  entry->ref_mutex_initialized = 1;
+  return LC_OK;
+}
+
+static int
+lc_pouch_state_body_cache_entry_retain(lc_pouch_state_body_cache_entry *entry,
+                                       lc_error *error) {
+  int pthread_rc;
+
+  if (entry == NULL || !entry->ref_mutex_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch body cache entry is unavailable", NULL, NULL,
+                        "pouch");
+  }
+  pthread_rc = pthread_mutex_lock(&entry->ref_mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch body cache reference",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  if (entry->retired) {
+    (void)pthread_mutex_unlock(&entry->ref_mutex);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch body cache entry was retired", NULL, NULL,
+                        "pouch");
+  }
+  entry->refcount += 1UL;
+  (void)pthread_mutex_unlock(&entry->ref_mutex);
+  return LC_OK;
+}
+
+static void lc_pouch_state_body_cache_entry_release(
+    const lc_allocator *allocator, lc_pouch_state_body_cache_entry *entry) {
+  int destroy;
+
+  if (entry == NULL || !entry->ref_mutex_initialized ||
+      pthread_mutex_lock(&entry->ref_mutex) != 0) {
+    return;
+  }
+  if (entry->refcount > 0UL) {
+    entry->refcount -= 1UL;
+  }
+  destroy = entry->retired && entry->refcount == 0UL;
+  (void)pthread_mutex_unlock(&entry->ref_mutex);
+  if (destroy) {
+    lc_pouch_state_body_cache_entry_destroy(allocator, entry);
+  }
+}
+
+static void
+lc_pouch_state_body_cache_entry_retire(const lc_allocator *allocator,
+                                       lc_pouch_state_body_cache_entry *entry) {
+  int destroy;
+
+  if (entry == NULL || !entry->ref_mutex_initialized ||
+      pthread_mutex_lock(&entry->ref_mutex) != 0) {
+    return;
+  }
+  entry->retired = 1;
+  destroy = entry->refcount == 0UL;
+  (void)pthread_mutex_unlock(&entry->ref_mutex);
+  if (destroy) {
+    lc_pouch_state_body_cache_entry_destroy(allocator, entry);
+  }
 }
 
 static void
@@ -2900,8 +3031,7 @@ lc_pouch_state_cache_record_body_clear(const lc_allocator *allocator,
       ns->body_cache_bytes = 0U;
     }
   }
-  entry->retired = 1;
-  lc_pouch_state_body_cache_entry_release(allocator, entry);
+  lc_pouch_state_body_cache_entry_retire(allocator, entry);
 }
 
 static void
@@ -3148,8 +3278,7 @@ static void lc_pouch_state_scan_body_snapshot_cleanup(
   lc_free_with_allocator(allocator, snapshot->payload_context);
   lc_free_with_allocator(allocator, snapshot->descriptor);
   lc_free_with_allocator(allocator, snapshot->metadata);
-  if (snapshot->body_cache != NULL && snapshot->body_cache->refcount > 0UL) {
-    snapshot->body_cache->refcount -= 1UL;
+  if (snapshot->body_cache != NULL) {
     lc_pouch_state_body_cache_entry_release(allocator, snapshot->body_cache);
   }
   memset(snapshot, 0, sizeof(*snapshot));
@@ -3260,7 +3389,12 @@ static int lc_pouch_state_scan_body_snapshot_append(
   if (record->body_cache != NULL &&
       record->body_cache->version == record->version &&
       record->body_cache->length == (size_t)record->bytes) {
-    record->body_cache->refcount += 1UL;
+    if (lc_pouch_state_body_cache_entry_retain(record->body_cache, error) !=
+        LC_OK) {
+      lc_pouch_state_scan_body_snapshot_cleanup(&pouch->allocator, snapshot);
+      return error != NULL && error->code != LC_OK ? error->code
+                                                   : LC_ERR_TRANSPORT;
+    }
     snapshot->body_cache = record->body_cache;
   }
   snapshot->updated_at_unix = record->updated_at_unix;
@@ -3473,11 +3607,12 @@ static int lc_pouch_state_read_many_snapshot_body_from_cache(
                           "failed to allocate pouch body cache", NULL, NULL,
                           "pouch");
       } else {
-        if (length > 0U) {
+        rc = lc_pouch_state_body_cache_entry_init(entry, error);
+        if (rc == LC_OK && length > 0U) {
           entry->bytes = (unsigned char *)lc_alloc_with_allocator(
               &pouch->allocator, length);
           if (entry->bytes == NULL) {
-            lc_free_with_allocator(&pouch->allocator, entry);
+            lc_pouch_state_body_cache_entry_destroy(&pouch->allocator, entry);
             entry = NULL;
             rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                               "failed to allocate pouch body cache", NULL, NULL,
@@ -3497,8 +3632,7 @@ static int lc_pouch_state_read_many_snapshot_body_from_cache(
     }
   }
   if (entry != NULL) {
-    entry->retired = 1;
-    lc_pouch_state_body_cache_entry_release(&pouch->allocator, entry);
+    lc_pouch_state_body_cache_entry_destroy(&pouch->allocator, entry);
   }
   if (rc == LC_OK) {
     if (!copy_cached_body && record->body_cache != NULL &&
@@ -3572,11 +3706,14 @@ static void lc_pouch_state_cache_record_store_body_source(
     entry = (lc_pouch_state_body_cache_entry *)lc_calloc_with_allocator(
         &pouch->allocator, 1U, sizeof(*entry));
     if (entry != NULL) {
-      if (length > 0U) {
+      if (lc_pouch_state_body_cache_entry_init(entry, &error) != LC_OK) {
+        lc_pouch_state_body_cache_entry_destroy(&pouch->allocator, entry);
+        entry = NULL;
+      } else if (length > 0U) {
         entry->bytes =
             (unsigned char *)lc_alloc_with_allocator(&pouch->allocator, length);
         if (entry->bytes == NULL) {
-          lc_free_with_allocator(&pouch->allocator, entry);
+          lc_pouch_state_body_cache_entry_destroy(&pouch->allocator, entry);
           entry = NULL;
         } else {
           memcpy(entry->bytes, data, length);

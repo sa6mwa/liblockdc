@@ -337,11 +337,23 @@ typedef struct pouch_mode_transition_context {
   int allow_key_lock_exit;
   int transition_started;
   int transition_finished;
+  int operation_finished;
   int key_lock_rc;
   int transition_rc;
+  int namespace_lock_rc;
   lc_error key_lock_error;
   lc_error transition_error;
+  lc_error namespace_lock_error;
 } pouch_mode_transition_context;
+
+typedef struct pouch_body_cache_retire_context {
+  lc_pouch *pouch;
+  lc_source *source;
+  pthread_barrier_t start;
+  lc_pouch_state_write_result write_result;
+  lc_error write_error;
+  int write_rc;
+} pouch_body_cache_retire_context;
 
 typedef struct pouch_maintenance_barrier_context {
   lc_pouch *pouch;
@@ -964,6 +976,57 @@ static void *pouch_mode_transition_hold_key(void *context) {
   return NULL;
 }
 
+static int pouch_mode_transition_nested_key_lock(void *context,
+                                                 lc_error *error) {
+  (void)context;
+  (void)error;
+  return LC_OK;
+}
+
+static int pouch_mode_transition_hold_namespace_lock(void *context,
+                                                     lc_error *error) {
+  pouch_mode_transition_context *transition;
+  int pthread_rc;
+
+  transition = (pouch_mode_transition_context *)context;
+  pthread_rc = pthread_mutex_lock(&transition->mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock namespace transition callback",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  transition->key_lock_entered = 1;
+  (void)pthread_cond_broadcast(&transition->cond);
+  while (!transition->allow_key_lock_exit) {
+    pthread_rc = pthread_cond_wait(&transition->cond, &transition->mutex);
+    if (pthread_rc != 0) {
+      (void)pthread_mutex_unlock(&transition->mutex);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to wait for namespace transition callback",
+                          strerror(pthread_rc), NULL, "pouch");
+    }
+  }
+  (void)pthread_mutex_unlock(&transition->mutex);
+  return lc_pouch_state_with_key_lock(
+      transition->pouch, "default", "mode-transition/nested-key",
+      pouch_mode_transition_nested_key_lock, transition, error);
+}
+
+static void *pouch_mode_transition_hold_namespace(void *context) {
+  pouch_mode_transition_context *transition;
+
+  transition = (pouch_mode_transition_context *)context;
+  lc_error_init(&transition->namespace_lock_error);
+  transition->namespace_lock_rc = lc_pouch_state_with_namespace_lock(
+      transition->pouch, "default", pouch_mode_transition_hold_namespace_lock,
+      transition, &transition->namespace_lock_error);
+  assert_int_equal(pthread_mutex_lock(&transition->mutex), 0);
+  transition->operation_finished = 1;
+  assert_int_equal(pthread_cond_broadcast(&transition->cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&transition->mutex), 0);
+  return NULL;
+}
+
 static void *pouch_mode_transition_change_mode(void *context) {
   pouch_mode_transition_context *transition;
 
@@ -983,6 +1046,41 @@ static void *pouch_mode_transition_change_mode(void *context) {
   transition->transition_finished = 1;
   (void)pthread_cond_broadcast(&transition->cond);
   (void)pthread_mutex_unlock(&transition->mutex);
+  return NULL;
+}
+
+static void *pouch_body_cache_retire_close_source(void *context) {
+  pouch_body_cache_retire_context *retire;
+  int barrier_rc;
+
+  retire = (pouch_body_cache_retire_context *)context;
+  barrier_rc = pthread_barrier_wait(&retire->start);
+  assert_true(barrier_rc == 0 || barrier_rc == PTHREAD_BARRIER_SERIAL_THREAD);
+  lc_source_close(retire->source);
+  retire->source = NULL;
+  return NULL;
+}
+
+static void *pouch_body_cache_retire_replace_state(void *context) {
+  pouch_body_cache_retire_context *retire;
+  lc_source *source;
+  int barrier_rc;
+
+  retire = (pouch_body_cache_retire_context *)context;
+  source = NULL;
+  lc_error_init(&retire->write_error);
+  barrier_rc = pthread_barrier_wait(&retire->start);
+  assert_true(barrier_rc == 0 || barrier_rc == PTHREAD_BARRIER_SERIAL_THREAD);
+  retire->write_rc =
+      lc_source_from_memory("replacement", 11U, &source, &retire->write_error);
+  if (retire->write_rc == LC_OK) {
+    retire->write_rc =
+        lc_pouch_state_write(retire->pouch, "default", "cache/retire", source,
+                             NULL, &retire->write_result, &retire->write_error);
+  }
+  if (source != NULL) {
+    lc_source_close(source);
+  }
   return NULL;
 }
 
@@ -4568,6 +4666,79 @@ static void test_single_writer_state_read_uses_projection_cache(void **state) {
 }
 
 static void
+test_single_writer_body_cache_source_survives_concurrent_invalidation(
+    void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_result initial_write;
+  lc_pouch_state_read_result read_result;
+  lc_source *source;
+  lc_error error;
+  char root[512];
+  size_t index;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&initial_write, 0, sizeof(initial_write));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("single-writer-cache-retire", root, sizeof(root));
+  cleanup_root(root);
+
+  options.single_writer = 1;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("initial", 7U, &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "cache/retire", source, NULL,
+                            &initial_write, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  source = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &initial_write);
+
+  for (index = 0U; index < 32U; ++index) {
+    pouch_body_cache_retire_context retire;
+    pthread_t close_thread;
+    pthread_t writer_thread;
+
+    memset(&retire, 0, sizeof(retire));
+    memset(&read_result, 0, sizeof(read_result));
+    rc = lc_pouch_state_read(pouch, "default", "cache/retire", &read_result,
+                             &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(read_result.found);
+    assert_non_null(read_result.body);
+    retire.pouch = pouch;
+    retire.source = read_result.body;
+    read_result.body = NULL;
+    assert_int_equal(pthread_barrier_init(&retire.start, NULL, 2U), 0);
+    assert_int_equal(pthread_create(&close_thread, NULL,
+                                    pouch_body_cache_retire_close_source,
+                                    &retire),
+                     0);
+    assert_int_equal(pthread_create(&writer_thread, NULL,
+                                    pouch_body_cache_retire_replace_state,
+                                    &retire),
+                     0);
+    assert_int_equal(pthread_join(close_thread, NULL), 0);
+    assert_int_equal(pthread_join(writer_thread, NULL), 0);
+    assert_int_equal(retire.write_rc, LC_OK);
+    assert_int_equal(pthread_barrier_destroy(&retire.start), 0);
+    lc_pouch_state_write_result_cleanup(NULL, &retire.write_result);
+    lc_error_cleanup(&retire.write_error);
+    lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  }
+
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_single_writer_acquire_preserves_projection_cache(void **state) {
   lc_client *client;
   lc_client_handle *handle;
@@ -4963,6 +5134,81 @@ test_single_writer_transition_waits_for_active_append_operation(void **state) {
   lc_pouch_status_cleanup(NULL, &status);
   lc_error_cleanup(&transition.transition_error);
   lc_error_cleanup(&transition.key_lock_error);
+  assert_int_equal(pthread_cond_destroy(&transition.cond), 0);
+  assert_int_equal(pthread_mutex_destroy(&transition.mutex), 0);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_namespace_callback_key_lock_does_not_reacquire_writer_mode(void **state) {
+  lc_pouch *pouch;
+  pouch_mode_transition_context transition;
+  pthread_t namespace_thread;
+  pthread_t transition_thread;
+  struct timespec deadline;
+  struct timespec transition_delay;
+  int wait_rc;
+  int rc;
+  lc_error error;
+  char root[512];
+
+  (void)state;
+  pouch = NULL;
+  memset(&transition, 0, sizeof(transition));
+  lc_error_init(&error);
+  make_root("namespace-key-writer-mode", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  transition.pouch = pouch;
+  assert_int_equal(pthread_mutex_init(&transition.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&transition.cond, NULL), 0);
+  assert_int_equal(pthread_create(&namespace_thread, NULL,
+                                  pouch_mode_transition_hold_namespace,
+                                  &transition),
+                   0);
+  assert_int_equal(pthread_mutex_lock(&transition.mutex), 0);
+  while (!transition.key_lock_entered) {
+    assert_int_equal(pthread_cond_wait(&transition.cond, &transition.mutex), 0);
+  }
+  assert_int_equal(pthread_mutex_unlock(&transition.mutex), 0);
+
+  assert_int_equal(pthread_create(&transition_thread, NULL,
+                                  pouch_mode_transition_change_mode,
+                                  &transition),
+                   0);
+  assert_int_equal(pthread_mutex_lock(&transition.mutex), 0);
+  while (!transition.transition_started) {
+    assert_int_equal(pthread_cond_wait(&transition.cond, &transition.mutex), 0);
+  }
+  assert_int_equal(pthread_mutex_unlock(&transition.mutex), 0);
+  transition_delay.tv_sec = 0;
+  transition_delay.tv_nsec = 20L * 1000L * 1000L;
+  assert_int_equal(nanosleep(&transition_delay, NULL), 0);
+
+  assert_int_equal(pthread_mutex_lock(&transition.mutex), 0);
+  transition.allow_key_lock_exit = 1;
+  assert_int_equal(pthread_cond_broadcast(&transition.cond), 0);
+  assert_int_equal(clock_gettime(CLOCK_REALTIME, &deadline), 0);
+  deadline.tv_sec += 1;
+  wait_rc = 0;
+  while (!transition.operation_finished && wait_rc == 0) {
+    wait_rc =
+        pthread_cond_timedwait(&transition.cond, &transition.mutex, &deadline);
+  }
+  assert_int_equal(wait_rc, 0);
+  assert_true(transition.operation_finished);
+  assert_int_equal(pthread_mutex_unlock(&transition.mutex), 0);
+
+  assert_int_equal(pthread_join(namespace_thread, NULL), 0);
+  assert_int_equal(pthread_join(transition_thread, NULL), 0);
+  assert_int_equal(transition.namespace_lock_rc, LC_OK);
+  assert_int_equal(transition.transition_rc, LC_OK);
+  lc_error_cleanup(&transition.namespace_lock_error);
+  lc_error_cleanup(&transition.transition_error);
   assert_int_equal(pthread_cond_destroy(&transition.cond), 0);
   assert_int_equal(pthread_mutex_destroy(&transition.mutex), 0);
   lc_pouch_close(pouch);
@@ -29294,6 +29540,8 @@ int main(int argc, char **argv) {
           test_marker_snapshots_treat_same_process_handles_as_peers),
       cmocka_unit_test(test_marker_refresh_uses_directory_fast_path_and_force),
       cmocka_unit_test(test_single_writer_state_read_uses_projection_cache),
+      cmocka_unit_test(
+          test_single_writer_body_cache_source_survives_concurrent_invalidation),
       cmocka_unit_test(test_single_writer_acquire_preserves_projection_cache),
       cmocka_unit_test(
           test_single_writer_rebuilds_index_without_advisory_sequence),
@@ -29302,6 +29550,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_writer_root_lock_retains_creating_allocator),
       cmocka_unit_test(
           test_single_writer_transition_waits_for_active_append_operation),
+      cmocka_unit_test(
+          test_namespace_callback_key_lock_does_not_reacquire_writer_mode),
       cmocka_unit_test(test_maintenance_waits_for_active_key_operation),
       cmocka_unit_test(test_pouch_disk_runtime_controls),
       cmocka_unit_test(test_resident_descriptors_stay_bounded_across_lifecycle),
