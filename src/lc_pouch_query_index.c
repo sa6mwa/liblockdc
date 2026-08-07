@@ -338,10 +338,9 @@ struct lc_pouch_query_index_pending_entry {
   /* Set only when this handle observed every query-visible row since an empty
    * index generation. It permits a safe initial single-writer build. */
   int covers_namespace;
-  /* Once bounded capture drops any durable tail, this entry remains a replay
-   * marker until publication. It must never seed a partial index segment. */
+  /* A capture failure leaves this entry as a replay marker until publication.
+   * It must never seed a partial index segment. */
   int incomplete;
-  int deferred;
   lc_pouch_query_index_summary summary;
   lc_pouch_query_index_key_hex_set deletes;
   lc_pouch_query_index_memtable *memtable;
@@ -7010,6 +7009,7 @@ static void lc_pouch_query_index_pending_note_write(
   lc_pouch_query_index_summary update;
   lc_pouch_query_index_pending_entry *pending;
   lc_pouch_query_index_pending_entry *previous;
+  lc_pouch_query_index_row *previous_row;
   lc_pouch_generation base_index_seq;
   char *key_hex;
   lc_error error;
@@ -7118,22 +7118,19 @@ static void lc_pouch_query_index_pending_note_write(
     lc_error_cleanup(&error);
     return;
   }
-  if (deferred && !pending->deferred) {
-    /* A source-less or oversized first write has no prior row to signal the
-     * transition, but it still makes the pending memtable incomplete. From
-     * this point every row is extracted from durable state at publication. */
+  previous_row = lc_pouch_query_index_summary_find_row(&pending->summary, key);
+  if (deferred && previous_row != NULL && !previous_row->needs_extraction) {
+    /* Replacing a captured row without its new derived terms invalidates the
+     * resident projection. A newly deferred row has no memtable entry yet, so
+     * it can remain row-local until extraction or a bounded replacement. */
     lc_pouch_query_index_memtable_cleanup(&pouch->allocator, pending->memtable);
     lc_free_with_allocator(&pouch->allocator, pending->memtable);
     pending->memtable = NULL;
     lc_pouch_query_index_summary_mark_rows_deferred(&pending->summary);
-    pending->deferred = 1;
   }
-  if (pending->deferred && !deferred) {
-    lc_pouch_query_index_summary_mark_rows_deferred(&update);
-  }
-  rc = pending->deferred || deferred ? LC_OK
-                                     : lc_pouch_query_index_memtable_note_write(
-                                           pending, &update, key_hex, &error);
+  rc = deferred ? LC_OK
+                : lc_pouch_query_index_memtable_note_write(pending, &update,
+                                                           key_hex, &error);
   if (rc == LC_OK) {
     lc_pouch_query_index_summary_remove_key(&pending->summary, key, key_hex);
     lc_pouch_query_index_key_hex_set_remove(&pouch->allocator,
@@ -7162,6 +7159,7 @@ static void lc_pouch_query_index_pending_note_delete(
     const lc_pouch_state_write_result *result, int operation_active) {
   lc_pouch_query_index_pending_entry *pending;
   lc_pouch_query_index_pending_entry *previous;
+  lc_pouch_query_index_row *previous_row;
   lc_pouch_generation base_index_seq;
   char *key_hex;
   lc_error error;
@@ -7248,8 +7246,10 @@ static void lc_pouch_query_index_pending_note_delete(
     lc_error_cleanup(&error);
     return;
   }
+  previous_row = lc_pouch_query_index_summary_find_row(&pending->summary, key);
   rc =
-      pending->deferred
+      pending->memtable == NULL || previous_row == NULL ||
+              previous_row->needs_extraction
           ? LC_OK
           : lc_pouch_query_index_memtable_note_delete(pending, key_hex, &error);
   if (rc == LC_OK) {
