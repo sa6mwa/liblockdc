@@ -21,7 +21,9 @@ typedef struct lc_pouch_open_options {
   uint64_t indexer_flush_docs;
   /** Maximum seconds the indexer retains its first unflushed mutation before
    * asynchronous publication. Zero selects Go disk's disk-store default of
-   * ten seconds. */
+   * ten seconds. In exclusive mode, this deadline never publishes an active
+   * public lease or transaction; its final body waits for that operation's
+   * completion boundary. */
   uint64_t indexer_flush_interval_seconds;
   unsigned long compaction_min_segment_count;
   uint64_t compaction_min_reclaimable_bytes;
@@ -278,9 +280,11 @@ typedef int (*lc_pouch_state_read_many_fn)(
  * intermediate in-lease body version. A successful foreground publication
  * consumes its queued batch, so a later below-threshold mutation begins a
  * fresh worker interval. Below that bound, and for shared roots, the worker
- * publishes after
- * `indexer_flush_interval_seconds` (ten seconds by default). Mutation
- * completion never retains source document bodies for indexing.
+ * publishes after `indexer_flush_interval_seconds` (ten seconds by default).
+ * The exclusive worker defers its idle batch while a captured public operation
+ * remains active, then retries after that operation's completion boundary;
+ * direct storage mutations have no such boundary. Mutation completion never
+ * retains source document bodies for indexing.
  *
  * A process must fork before opening Pouch, or exec before using Pouch in the
  * child. Re-entering an inherited Pouch handle after fork is unsupported:

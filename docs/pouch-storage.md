@@ -874,9 +874,12 @@ the public API or durable format.
   key is still active. This preserves final-version-only publication across
   overlapping leases, matching Go disk's memtable boundary without emitting
   an intermediate in-lease version.
-  Repeated updates to one pending key do not advance that document budget;
-  direct storage mutations without a public completion boundary publish at the
-  idle deadline or an explicit `flush_index(mode=wait)`. Shared-root handles
+  Repeated updates to one pending key do not advance that document budget.
+  The exclusive worker never lets the idle deadline publish a body from an
+  active public lease or transaction; it retains that batch until the final
+  completion boundary, then retries under the normal interval policy. Direct
+  storage mutations without a public completion boundary publish at the idle
+  deadline or an explicit `flush_index(mode=wait)`. Shared-root handles
   retain asynchronous, namespace-locked durable replay at either bound because
   no handle owns the complete local mutation stream. Index-artifact failure is
   recoverable worker work and never changes the success of an already durable
@@ -1402,13 +1405,14 @@ active-key check while it claims the pending projection; if another operation
 became active, foreground publication defers without reading the live tail. A
 successful foreground publication consumes its worker queue entry, so a later
 below-threshold mutation begins a full fresh worker interval rather than
-inheriting the earlier batch deadline. Below the bound, and for direct storage
-mutations without a public completion boundary, Pouch's pthread indexer
-coalesces ready projections and authoritative-log tail changes at the
-configured interval (ten seconds by default) from the first unflushed
-mutation. Repeated updates to one key replace that key's pending projection
-and do not advance the exclusive-writer document bound. The deadline is not
-restarted by later writes. One-shot, oversized, or otherwise non-replayable
+inheriting the earlier batch deadline. The exclusive worker applies that same
+active-operation guard at its idle deadline: it keeps an active public lease
+or transaction batch pending until its final completion boundary, then retries
+under the normal interval policy. Direct storage mutations have no public
+completion boundary and still publish at the idle deadline. Repeated updates
+to one key replace that key's pending projection and do not advance the
+exclusive-writer document bound. The deadline is not restarted by later
+writes. One-shot, oversized, or otherwise non-replayable
 sources explicitly mark the pending projection incomplete; their next flush
 incrementally reads the authoritative state log. Shared-root handles can each
 run an indexer, but retain asynchronous, namespace-locked durable replay

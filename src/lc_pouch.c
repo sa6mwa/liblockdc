@@ -1151,26 +1151,41 @@ lc_pouch_indexer_run_batch(lc_pouch *pouch,
     lc_pouch_query_index_flush_result flush_result;
     lc_pouch_generation state_index_seq;
     lc_error error;
+    int deferred_for_active_operation;
     int rc;
 
     next = entry->next;
     entry->next = NULL;
     memset(&flush_result, 0, sizeof(flush_result));
     state_index_seq = 0UL;
+    deferred_for_active_operation = 0;
     lc_error_init(&error);
     rc = lc_pouch_state_query_index_seq(pouch, entry->namespace_name,
                                         &state_index_seq, &error);
     if (rc == LC_OK) {
-      rc = lc_pouch_query_index_flush(pouch, entry->namespace_name,
-                                      state_index_seq, &flush_result, &error);
+      if (lc_pouch_single_writer_enabled(pouch)) {
+        /* An exclusive worker must preserve the same final-version-only
+         * boundary as foreground threshold publication. A zero result with a
+         * nonzero public sequence means active keys deferred this batch. */
+        rc = lc_pouch_query_index_flush_threshold(pouch, entry->namespace_name,
+                                                  state_index_seq,
+                                                  &flush_result, &error);
+        deferred_for_active_operation = rc == LC_OK && state_index_seq != 0UL &&
+                                        flush_result.index_seq == 0UL;
+      } else {
+        rc = lc_pouch_query_index_flush(pouch, entry->namespace_name,
+                                        state_index_seq, &flush_result, &error);
+      }
     }
-    if (rc != LC_OK) {
-      pslog_field fields[3];
+    if (rc != LC_OK || deferred_for_active_operation) {
+      if (rc != LC_OK) {
+        pslog_field fields[3];
 
-      fields[0] = lc_log_str_field("ns", entry->namespace_name);
-      fields[1] = lc_log_error_field("error", &error);
-      fields[2] = lc_log_code_field(&error);
-      lc_log_warn(pouch->logger, "index.background.error", fields, 3U);
+        fields[0] = lc_log_str_field("ns", entry->namespace_name);
+        fields[1] = lc_log_error_field("error", &error);
+        fields[2] = lc_log_code_field(&error);
+        lc_log_warn(pouch->logger, "index.background.error", fields, 3U);
+      }
       entry->next = failed;
       failed = entry;
     } else {

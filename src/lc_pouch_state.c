@@ -10906,6 +10906,7 @@ static int lc_pouch_state_commit_staged_delete_locked(
   lc_pouch_generation discard_version;
   lc_pouch_unix_seconds updated_at_unix;
   int delete_committed;
+  int object_record;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || manifest == NULL ||
@@ -10917,6 +10918,7 @@ static int lc_pouch_state_commit_staged_delete_locked(
   }
   etag = NULL;
   delete_committed = committed->found && committed->payload_span.present;
+  object_record = lc_pouch_state_record_type_is_object(staged->record_type);
   version = delete_committed ? committed->version + 1UL : 0UL;
   updated_at_unix = lc_pouch_maintenance_now_seconds();
   decision_version = staged->version + 1UL;
@@ -10930,15 +10932,13 @@ static int lc_pouch_state_commit_staged_delete_locked(
   rc = lc_pouch_state_append_staged_delete_commit_batch(
       pouch, namespace_name, manifest, key, staged_key, etag, version,
       delete_committed, staged->etag, decision_version, discard_version,
-      updated_at_unix,
-      lc_pouch_state_record_type_is_object(staged->record_type), error);
+      updated_at_unix, object_record, error);
   if (rc == LC_OK && delete_committed) {
     (void)lc_pouch_state_cache_apply_write(
         pouch, namespace_name, manifest, key, NULL, etag, NULL, NULL, NULL, 0U,
         version, 0UL, 0UL, NULL, updated_at_unix, 0, 0, 0, 0,
-        lc_pouch_state_record_type_is_object(staged->record_type)
-            ? LC_POUCH_STATE_RECORD_OBJECT_DELETE
-            : LC_POUCH_STATE_RECORD_STATE_DELETE);
+        object_record ? LC_POUCH_STATE_RECORD_OBJECT_DELETE
+                      : LC_POUCH_STATE_RECORD_STATE_DELETE);
   }
   if (rc == LC_OK) {
     (void)lc_pouch_state_cache_apply_write(
@@ -10952,7 +10952,9 @@ static int lc_pouch_state_commit_staged_delete_locked(
     out->index_seq = manifest->state_max_version;
     out->version = version;
     out->updated_at_unix = updated_at_unix;
-    lc_pouch_query_index_note_state_delete(pouch, namespace_name, key, out);
+    if (!object_record) {
+      lc_pouch_query_index_note_state_delete(pouch, namespace_name, key, out);
+    }
   }
   lc_free_with_allocator(&pouch->allocator, etag);
   return rc;
