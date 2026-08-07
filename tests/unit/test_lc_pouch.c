@@ -9574,6 +9574,103 @@ test_query_index_threshold_handles_repeated_lease_updates(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_query_index_threshold_handles_deferred_first_lease_update(void **state) {
+  static const char json_prefix[] = "{\"blob\":\"";
+  static const char json_suffix[] = "\"}";
+  static const char final_json[] = "{\"kind\":\"final\"}";
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  lc_source *source;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_error error;
+  char endpoint[1024];
+  char root[512];
+  char *large_json;
+  size_t large_body_length;
+  size_t large_json_length;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  large_json = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  lc_error_init(&error);
+  make_root("query-index-deferred-first-lease-update", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?indexer_flush_docs=1&"
+                       "indexer_flush_interval_seconds=3600",
+                       root) > 0);
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = "doc/deferred-first";
+  acquire_req.owner = "pouch-index-deferred-first";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+
+  large_body_length = (64U * 1024U) + 4096U;
+  large_json_length =
+      sizeof(json_prefix) - 1U + large_body_length + sizeof(json_suffix) - 1U;
+  large_json = (char *)malloc(large_json_length + 1U);
+  assert_non_null(large_json);
+  memcpy(large_json, json_prefix, sizeof(json_prefix) - 1U);
+  memset(large_json + sizeof(json_prefix) - 1U, 'a', large_body_length);
+  memcpy(large_json + sizeof(json_prefix) - 1U + large_body_length, json_suffix,
+         sizeof(json_suffix) - 1U);
+  large_json[large_json_length] = '\0';
+
+  lc_update_req_init(&update_req);
+  pouch_copy_lease_ref(&update_req.lease, lease);
+  rc = lc_source_from_memory(large_json, large_json_length, &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_update_res_cleanup(&update_res);
+
+  lc_update_req_init(&update_req);
+  pouch_copy_lease_ref(&update_req.lease, lease);
+  rc = lc_source_from_memory(final_json, strlen(final_json), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_update_res_cleanup(&update_res);
+
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+  rc = lc_pouch_state_query_index_seq(handle->pouch, "default", &query_seq,
+                                      &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_manifest_seq(handle->pouch, "default",
+                                         &manifest_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+  assert_false(lc_pouch_query_index_has_pending(handle->pouch, "default"));
+
+  free(large_json);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void pouch_remove_with_test_lease(lc_client *client,
                                          lc_remove_op *operation,
                                          lc_remove_res *out, lc_error *error) {
@@ -28691,6 +28788,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_staged_object_delete_does_not_queue_query_index),
       cmocka_unit_test(
           test_query_index_threshold_handles_repeated_lease_updates),
+      cmocka_unit_test(
+          test_query_index_threshold_handles_deferred_first_lease_update),
       cmocka_unit_test(test_client_get_preserves_cached_binary_payload_length),
       cmocka_unit_test(test_client_update_enforces_state_preconditions),
       cmocka_unit_test(test_client_update_waits_for_namespace_mutation_lock),

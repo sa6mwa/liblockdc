@@ -6753,7 +6753,6 @@ static void lc_pouch_query_index_pending_note_write(
   lc_pouch_query_index_summary update;
   lc_pouch_query_index_pending_entry *pending;
   lc_pouch_query_index_pending_entry *previous;
-  lc_pouch_query_index_row *previous_row;
   lc_pouch_generation base_index_seq;
   char *key_hex;
   lc_error error;
@@ -6865,9 +6864,10 @@ static void lc_pouch_query_index_pending_note_write(
     lc_error_cleanup(&error);
     return;
   }
-  previous_row = lc_pouch_query_index_summary_find_row(&pending->summary, key);
-  if (deferred && !pending->deferred && previous_row != NULL &&
-      !previous_row->needs_extraction) {
+  if (deferred && !pending->deferred) {
+    /* A source-less or oversized first write has no prior row to signal the
+     * transition, but it still makes the pending memtable incomplete. From
+     * this point every row is extracted from durable state at publication. */
     lc_pouch_query_index_memtable_cleanup(&pouch->allocator, pending->memtable);
     lc_free_with_allocator(&pouch->allocator, pending->memtable);
     pending->memtable = NULL;

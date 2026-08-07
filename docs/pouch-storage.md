@@ -1418,7 +1418,10 @@ document bound. The deadline is not restarted by later writes. One-shot,
 oversized, or otherwise non-replayable sources explicitly mark the pending
 projection incomplete; that fallback retains every active operation key until
 its completion callback, and its next eligible flush incrementally reads the
-authoritative state log. Shared-root handles can each
+authoritative state log. Once a pending exclusive projection contains a
+deferred body, every subsequent row in that projection uses the same durable
+extraction path, preserving one coherent final-version segment. Shared-root
+handles can each
 run an indexer, but retain asynchronous, namespace-locked durable replay
 because no one handle owns every writer's projection. Index publication is
 derived work: a publication failure remains queued for retry and cannot revoke
