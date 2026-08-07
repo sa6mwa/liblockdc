@@ -206,6 +206,11 @@ typedef struct lc_pouch_state_write_options {
    * than public document state. Object records are excluded from query-index
    * capture and never advance its freshness generation. */
   int object_record;
+  /* Internal client coordination: the public lease or transaction that owns
+   * this write remains active and will later signal its completion boundary.
+   * Low-level lc_pouch_state_* callers leave this clear so idle indexing can
+   * publish their durable writes without a separate completion callback. */
+  int query_index_operation_active;
   /* Internal only: marks a staged transactional delete in durable metadata.
    * Public content types remain ordinary content types unless this field is
    * set by the delete path. */
@@ -356,10 +361,23 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
                                   const char *expected_committed_etag,
                                   lc_pouch_state_write_result *out,
                                   lc_error *error);
+/** Internal client coordinator variant. The caller must later signal the
+ * public operation's completion with lc_pouch_indexer_note_operation_complete.
+ */
+int lc_pouch_state_promote_staged_for_active_operation(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *txn_id, const char *expected_committed_etag,
+    lc_pouch_state_write_result *out, lc_error *error);
 int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
                                  const char *key, const char *txn_id,
                                  lc_pouch_state_write_result *out,
                                  lc_error *error);
+/** Internal client coordinator variant. The caller must later signal the
+ * public operation's completion with lc_pouch_indexer_note_operation_complete.
+ */
+int lc_pouch_state_commit_staged_for_active_operation(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *txn_id, lc_pouch_state_write_result *out, lc_error *error);
 int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
                                   const char *key, const char *txn_id,
                                   int *discarded, lc_error *error);

@@ -10618,8 +10618,8 @@ static int lc_pouch_txn_commit_queue_stage(lc_client_handle *client,
                                  &options, &result, error);
     }
   } else if (rc == LC_OK) {
-    rc = lc_pouch_state_commit_staged(client->pouch, namespace_name, base_key,
-                                      txn_id, &result, error);
+    rc = lc_pouch_state_commit_staged_for_active_operation(
+        client->pouch, namespace_name, base_key, txn_id, &result, error);
   }
   if (rc == LC_OK && staged.found) {
     lc_pouch_queue_touch_notification(client, record.namespace_name,
@@ -11056,9 +11056,9 @@ static int lc_pouch_txn_apply_state_participant_locked(void *context,
     goto cleanup;
   }
   if (rc == LC_OK && strcmp(ctx->state, "commit") == 0) {
-    rc = lc_pouch_state_commit_staged_locked(ctx->client->pouch,
-                                             ctx->namespace_name, ctx->key,
-                                             ctx->txn_id, &write_result, error);
+    rc = lc_pouch_state_commit_staged_locked(
+        ctx->client->pouch, ctx->namespace_name, ctx->key, ctx->txn_id,
+        &write_result, 1, error);
   } else if (rc == LC_OK && strcmp(ctx->state, "rollback") == 0) {
     rc = lc_pouch_state_discard_staged_locked(ctx->client->pouch,
                                               ctx->namespace_name, ctx->key,
@@ -11914,7 +11914,7 @@ int lc_pouch_client_acquire_for_update_method(
     }
     rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_INVALID;
   } else if (lease_handle->pouch_stage_dirty) {
-    rc = lc_pouch_state_promote_staged(
+    rc = lc_pouch_state_promote_staged_for_active_operation(
         client->pouch, lease_handle->namespace_name, lease_handle->key,
         stage_txn_id, get_res.no_content ? NULL : get_res.etag, &promote_result,
         error);
@@ -12163,6 +12163,7 @@ int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
   }
   options.content_type =
       req->content_type != NULL ? req->content_type : "application/json";
+  options.query_index_operation_active = 1;
   options.expected_etag = req->if_state_etag;
   lease_precondition.client = client;
   lease_precondition.lease = &req->lease;
@@ -12256,6 +12257,7 @@ int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
     goto cleanup;
   }
   options.content_type = "application/json";
+  options.query_index_operation_active = 1;
   options.expected_etag = req->if_state_etag;
   lease_precondition.client = client;
   lease_precondition.lease = &req->lease;
@@ -12421,6 +12423,7 @@ int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
   staged_removed = 0;
+  options.query_index_operation_active = 1;
   options.expected_etag = req->if_state_etag;
   rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
                                         &namespace_name, error);

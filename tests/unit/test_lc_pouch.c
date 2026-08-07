@@ -8841,6 +8841,66 @@ test_exclusive_indexer_idle_flush_waits_for_active_operation(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_exclusive_indexer_idle_flushes_direct_state_mutations(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_source *source;
+  lc_pouch_generation manifest_seq;
+  lc_pouch_generation query_seq;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  source = NULL;
+  manifest_seq = 0UL;
+  query_seq = 0UL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  lc_error_init(&error);
+  make_root("indexer-idle-direct-state", root, sizeof(root));
+  cleanup_root(root);
+  options.indexer_flush_docs = 64U;
+  options.indexer_flush_interval_seconds = 1U;
+
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"kind\":\"direct\"}",
+                             strlen("{\"kind\":\"direct\"}"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", "doc/direct", source, NULL,
+                            &write_result, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_delete(pouch, "default", "doc/direct", NULL,
+                             &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+
+  /* Raw state APIs have no lease or transaction completion callback. Their
+   * ready projection must therefore publish at the ordinary idle deadline. */
+  sleep(2U);
+  rc = lc_pouch_state_query_index_seq(pouch, "default", &query_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(query_seq != 0UL);
+  rc = lc_pouch_query_index_manifest_seq(pouch, "default", &manifest_seq,
+                                         &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(manifest_seq, query_seq);
+  assert_false(lc_pouch_query_index_has_pending(pouch, "default"));
+
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_exclusive_indexer_publishes_transaction_decision_at_threshold(
     void **state) {
   lc_client *client;
@@ -28538,6 +28598,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_exclusive_indexer_waits_for_all_active_operations),
       cmocka_unit_test(
           test_exclusive_indexer_idle_flush_waits_for_active_operation),
+      cmocka_unit_test(
+          test_exclusive_indexer_idle_flushes_direct_state_mutations),
       cmocka_unit_test(
           test_exclusive_indexer_publishes_transaction_decision_at_threshold),
       cmocka_unit_test(test_query_index_sequence_ignores_lease_metadata),

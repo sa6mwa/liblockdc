@@ -91,10 +91,10 @@ int lc_pouch_query_index_warm_namespace(lc_pouch *pouch,
 void lc_pouch_query_index_note_state_write(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *content_type, lc_source *body,
-    const lc_pouch_state_write_result *result);
+    const lc_pouch_state_write_result *result, int operation_active);
 void lc_pouch_query_index_note_state_delete(
     lc_pouch *pouch, const char *namespace_name, const char *key,
-    const lc_pouch_state_write_result *result);
+    const lc_pouch_state_write_result *result, int operation_active);
 /** Returns whether a complete exclusive-writer pending memtable has reached
  * `document_limit`. The caller must hold `pouch->indexer_mutex`. */
 int lc_pouch_query_index_pending_document_limit_reached_locked(

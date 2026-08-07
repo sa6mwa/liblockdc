@@ -2340,32 +2340,33 @@ static int lc_pouch_query_index_key_is_staged(const char *key) {
 static void lc_pouch_query_index_pending_note_write(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *content_type, lc_source *body,
-    const lc_pouch_state_write_result *result);
+    const lc_pouch_state_write_result *result, int operation_active);
 static void lc_pouch_query_index_pending_note_delete(
     lc_pouch *pouch, const char *namespace_name, const char *key,
-    const lc_pouch_state_write_result *result);
+    const lc_pouch_state_write_result *result, int operation_active);
 
 void lc_pouch_query_index_note_state_write(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *content_type, lc_source *body,
-    const lc_pouch_state_write_result *result) {
+    const lc_pouch_state_write_result *result, int operation_active) {
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '.' ||
       lc_pouch_query_index_key_is_staged(key)) {
     return;
   }
-  lc_pouch_query_index_pending_note_write(pouch, namespace_name, key,
-                                          content_type, body, result);
+  lc_pouch_query_index_pending_note_write(
+      pouch, namespace_name, key, content_type, body, result, operation_active);
   lc_pouch_indexer_note_mutation(pouch, namespace_name);
 }
 
 void lc_pouch_query_index_note_state_delete(
     lc_pouch *pouch, const char *namespace_name, const char *key,
-    const lc_pouch_state_write_result *result) {
+    const lc_pouch_state_write_result *result, int operation_active) {
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '.' ||
       lc_pouch_query_index_key_is_staged(key)) {
     return;
   }
-  lc_pouch_query_index_pending_note_delete(pouch, namespace_name, key, result);
+  lc_pouch_query_index_pending_note_delete(pouch, namespace_name, key, result,
+                                           operation_active);
   lc_pouch_indexer_note_mutation(pouch, namespace_name);
 }
 
@@ -6726,7 +6727,7 @@ static int lc_pouch_query_index_pending_prepare_write(
 static void lc_pouch_query_index_pending_note_write(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *content_type, lc_source *body,
-    const lc_pouch_state_write_result *result) {
+    const lc_pouch_state_write_result *result, int operation_active) {
   lc_pouch_query_index_summary update;
   lc_pouch_query_index_pending_entry *pending;
   lc_pouch_query_index_pending_entry *previous;
@@ -6860,7 +6861,7 @@ static void lc_pouch_query_index_pending_note_write(
     rc = lc_pouch_query_index_summary_merge_move(&pending->summary, &update,
                                                  &error);
   }
-  if (rc == LC_OK) {
+  if (rc == LC_OK && operation_active) {
     rc = lc_pouch_query_index_key_hex_set_add(
         &pouch->allocator, &pending->active_keys, key_hex, &error);
   }
@@ -6882,7 +6883,7 @@ static void lc_pouch_query_index_pending_note_write(
 
 static void lc_pouch_query_index_pending_note_delete(
     lc_pouch *pouch, const char *namespace_name, const char *key,
-    const lc_pouch_state_write_result *result) {
+    const lc_pouch_state_write_result *result, int operation_active) {
   lc_pouch_query_index_pending_entry *pending;
   lc_pouch_query_index_pending_entry *previous;
   lc_pouch_generation base_index_seq;
@@ -6979,7 +6980,7 @@ static void lc_pouch_query_index_pending_note_delete(
     rc = lc_pouch_query_index_key_hex_set_add(
         &pouch->allocator, &pending->deletes, key_hex, &error);
   }
-  if (rc == LC_OK) {
+  if (rc == LC_OK && operation_active) {
     rc = lc_pouch_query_index_key_hex_set_add(
         &pouch->allocator, &pending->active_keys, key_hex, &error);
   }

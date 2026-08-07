@@ -10899,7 +10899,7 @@ static int lc_pouch_state_commit_staged_delete_locked(
     lc_pouch_namespace_manifest *manifest, const char *key,
     const char *staged_key, const lc_pouch_state_entry *committed,
     const lc_pouch_state_entry *staged, lc_pouch_state_write_result *out,
-    lc_error *error) {
+    int operation_active, lc_error *error) {
   char *etag;
   lc_pouch_generation version;
   lc_pouch_generation decision_version;
@@ -10953,7 +10953,8 @@ static int lc_pouch_state_commit_staged_delete_locked(
     out->version = version;
     out->updated_at_unix = updated_at_unix;
     if (!object_record) {
-      lc_pouch_query_index_note_state_delete(pouch, namespace_name, key, out);
+      lc_pouch_query_index_note_state_delete(pouch, namespace_name, key, out,
+                                             operation_active);
     }
   }
   lc_free_with_allocator(&pouch->allocator, etag);
@@ -12011,7 +12012,7 @@ static void lc_pouch_state_log_write_result(
           options != NULL && options->content_type != NULL
               ? options->content_type
               : "application/octet-stream",
-          body, out);
+          body, out, options != NULL && options->query_index_operation_active);
     }
   } else {
     pslog_field fields[4];
@@ -13444,7 +13445,9 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
   }
   if (rc == LC_OK && out != NULL && out->version > 0UL &&
       (options == NULL || !options->object_record)) {
-    lc_pouch_query_index_note_state_delete(pouch, namespace_name, key, out);
+    lc_pouch_query_index_note_state_delete(
+        pouch, namespace_name, key, out,
+        options != NULL && options->query_index_operation_active);
   }
   return rc;
 }
@@ -13651,7 +13654,7 @@ int lc_pouch_state_stage_write_prepared(
 static int lc_pouch_state_promote_staged_locked(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *txn_id, const char *expected_committed_etag,
-    lc_pouch_state_write_result *out, lc_error *error) {
+    lc_pouch_state_write_result *out, int operation_active, lc_error *error) {
   lc_pouch_state_entry committed;
   lc_pouch_state_entry staged;
   lc_pouch_namespace_manifest manifest;
@@ -13708,7 +13711,7 @@ static int lc_pouch_state_promote_staged_locked(
   if (lc_pouch_state_is_staged_delete_marker(&staged)) {
     rc = lc_pouch_state_commit_staged_delete_locked(
         pouch, namespace_name, &manifest, key, staged_key, &committed, &staged,
-        out, error);
+        out, operation_active, error);
     goto cleanup;
   }
   if (expected_committed_etag != NULL) {
@@ -13784,7 +13787,7 @@ static int lc_pouch_state_promote_staged_locked(
     lc_pouch_query_index_note_state_write(
         pouch, namespace_name, key,
         staged.content_type != NULL ? staged.content_type : "application/json",
-        NULL, out);
+        NULL, out, operation_active);
   }
 cleanup:
   lc_pouch_state_entry_cleanup(&pouch->allocator, &staged);
@@ -13797,11 +13800,10 @@ cleanup:
   return rc;
 }
 
-int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
-                                  const char *key, const char *txn_id,
-                                  const char *expected_committed_etag,
-                                  lc_pouch_state_write_result *out,
-                                  lc_error *error) {
+static int lc_pouch_state_promote_staged_with_operation(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *txn_id, const char *expected_committed_etag,
+    lc_pouch_state_write_result *out, int operation_active, lc_error *error) {
   lc_pouch_state_commit_group *commit_group;
   lc_pouch_state_key_lock lock;
   int owns_commit_group;
@@ -13812,7 +13814,7 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
     return lc_pouch_state_promote_staged_locked(pouch, namespace_name, key,
                                                 txn_id, expected_committed_etag,
-                                                out, error);
+                                                out, operation_active, error);
   }
   rc = lc_pouch_state_key_mutation_begin(pouch, namespace_name, key, &lock,
                                          error);
@@ -13825,8 +13827,9 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
     lc_pouch_state_key_mutation_end(pouch, &lock);
     return rc;
   }
-  rc = lc_pouch_state_promote_staged_locked(
-      pouch, namespace_name, key, txn_id, expected_committed_etag, out, error);
+  rc = lc_pouch_state_promote_staged_locked(pouch, namespace_name, key, txn_id,
+                                            expected_committed_etag, out,
+                                            operation_active, error);
   rc = lc_pouch_state_finish_commit_group_after_mutation(
       pouch, &lock, commit_group, owns_commit_group, rc, error);
   if (rc == LC_OK) {
@@ -13835,11 +13838,30 @@ int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
   return rc;
 }
 
+int lc_pouch_state_promote_staged(lc_pouch *pouch, const char *namespace_name,
+                                  const char *key, const char *txn_id,
+                                  const char *expected_committed_etag,
+                                  lc_pouch_state_write_result *out,
+                                  lc_error *error) {
+  return lc_pouch_state_promote_staged_with_operation(
+      pouch, namespace_name, key, txn_id, expected_committed_etag, out, 0,
+      error);
+}
+
+int lc_pouch_state_promote_staged_for_active_operation(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *txn_id, const char *expected_committed_etag,
+    lc_pouch_state_write_result *out, lc_error *error) {
+  return lc_pouch_state_promote_staged_with_operation(
+      pouch, namespace_name, key, txn_id, expected_committed_etag, out, 1,
+      error);
+}
+
 int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
                                         const char *namespace_name,
                                         const char *key, const char *txn_id,
                                         lc_pouch_state_write_result *out,
-                                        lc_error *error) {
+                                        int operation_active, lc_error *error) {
   lc_pouch_state_entry committed;
   lc_pouch_state_entry staged;
   lc_pouch_namespace_manifest manifest;
@@ -13893,7 +13915,7 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   if (lc_pouch_state_is_staged_delete_marker(&staged)) {
     rc = lc_pouch_state_commit_staged_delete_locked(
         pouch, namespace_name, &manifest, key, staged_key, &committed, &staged,
-        out, error);
+        out, operation_active, error);
     goto cleanup;
   }
   promoted_metadata = staged.metadata;
@@ -13957,7 +13979,7 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
     lc_pouch_query_index_note_state_write(
         pouch, namespace_name, key,
         staged.content_type != NULL ? staged.content_type : "application/json",
-        NULL, out);
+        NULL, out, operation_active);
   }
 cleanup:
   lc_pouch_state_entry_cleanup(&pouch->allocator, &staged);
@@ -13970,10 +13992,10 @@ cleanup:
   return rc;
 }
 
-int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
-                                 const char *key, const char *txn_id,
-                                 lc_pouch_state_write_result *out,
-                                 lc_error *error) {
+static int lc_pouch_state_commit_staged_with_operation(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *txn_id, lc_pouch_state_write_result *out, int operation_active,
+    lc_error *error) {
   lc_pouch_state_commit_group *commit_group;
   lc_pouch_state_key_lock lock;
   int owns_commit_group;
@@ -13982,8 +14004,8 @@ int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
   commit_group = NULL;
   owns_commit_group = 0;
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
-    return lc_pouch_state_commit_staged_locked(pouch, namespace_name, key,
-                                               txn_id, out, error);
+    return lc_pouch_state_commit_staged_locked(
+        pouch, namespace_name, key, txn_id, out, operation_active, error);
   }
   rc = lc_pouch_state_key_mutation_begin(pouch, namespace_name, key, &lock,
                                          error);
@@ -13997,13 +14019,28 @@ int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
     return rc;
   }
   rc = lc_pouch_state_commit_staged_locked(pouch, namespace_name, key, txn_id,
-                                           out, error);
+                                           out, operation_active, error);
   rc = lc_pouch_state_finish_commit_group_after_mutation(
       pouch, &lock, commit_group, owns_commit_group, rc, error);
   if (rc == LC_OK) {
     lc_pouch_janitor_note_mutation(pouch);
   }
   return rc;
+}
+
+int lc_pouch_state_commit_staged(lc_pouch *pouch, const char *namespace_name,
+                                 const char *key, const char *txn_id,
+                                 lc_pouch_state_write_result *out,
+                                 lc_error *error) {
+  return lc_pouch_state_commit_staged_with_operation(pouch, namespace_name, key,
+                                                     txn_id, out, 0, error);
+}
+
+int lc_pouch_state_commit_staged_for_active_operation(
+    lc_pouch *pouch, const char *namespace_name, const char *key,
+    const char *txn_id, lc_pouch_state_write_result *out, lc_error *error) {
+  return lc_pouch_state_commit_staged_with_operation(pouch, namespace_name, key,
+                                                     txn_id, out, 1, error);
 }
 
 int lc_pouch_state_discard_staged_locked(lc_pouch *pouch,

@@ -376,7 +376,7 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
                                         const char *namespace_name,
                                         const char *key, const char *txn_id,
                                         lc_pouch_state_write_result *out,
-                                        lc_error *error);
+                                        int operation_active, lc_error *error);
 /** Discards staged state under target mutation authority. */
 int lc_pouch_state_discard_staged_locked(lc_pouch *pouch,
                                          const char *namespace_name,

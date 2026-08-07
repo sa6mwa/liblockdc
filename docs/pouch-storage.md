@@ -1409,10 +1409,13 @@ inheriting the earlier batch deadline. The exclusive worker applies that same
 active-operation guard at its idle deadline: it keeps an active public lease
 or transaction batch pending until its final completion boundary, then retries
 under the normal interval policy. Direct storage mutations have no public
-completion boundary and still publish at the idle deadline. Repeated updates
-to one key replace that key's pending projection and do not advance the
-exclusive-writer document bound. The deadline is not restarted by later
-writes. One-shot, oversized, or otherwise non-replayable
+completion boundary and still publish at the idle deadline. In particular,
+the low-level `lc_pouch_state_*` APIs leave their durable writes ready for the
+idle worker; only client lease and transaction orchestration marks a pending
+key active until its explicit completion callback. Repeated updates to one key
+replace that key's pending projection and do not advance the exclusive-writer
+document bound. The deadline is not restarted by later writes. One-shot,
+oversized, or otherwise non-replayable
 sources explicitly mark the pending projection incomplete; their next flush
 incrementally reads the authoritative state log. Shared-root handles can each
 run an indexer, but retain asynchronous, namespace-locked durable replay
