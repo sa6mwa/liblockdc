@@ -10882,7 +10882,7 @@ static int lc_pouch_state_append_staged_commit_batch(
     const unsigned char *metadata, size_t metadata_length,
     lc_pouch_generation version, lc_pouch_generation decision_version,
     lc_pouch_generation discard_version, lc_pouch_unix_seconds updated_at_unix,
-    lc_error *error) {
+    unsigned char committed_record_type, lc_error *error) {
   lc_pouch_state_binary_append_item items[3];
   unsigned char *link_meta;
   unsigned char *decision_meta;
@@ -10897,6 +10897,12 @@ static int lc_pouch_state_append_staged_commit_batch(
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch staged commit batch requires staged state", NULL,
                         NULL, "pouch");
+  }
+  if (committed_record_type != LC_POUCH_STATE_RECORD_STATE_LINK &&
+      committed_record_type != LC_POUCH_STATE_RECORD_STATE_META) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch staged commit batch record type is invalid",
+                        NULL, NULL, "pouch");
   }
   link_meta = NULL;
   decision_meta = NULL;
@@ -10927,7 +10933,7 @@ static int lc_pouch_state_append_staged_commit_batch(
   }
   if (rc == LC_OK) {
     memset(items, 0, sizeof(items));
-    items[0].record_type = LC_POUCH_STATE_RECORD_STATE_LINK;
+    items[0].record_type = committed_record_type;
     items[0].key = key;
     items[0].key_len = strlen(key);
     items[0].meta = link_meta;
@@ -13923,6 +13929,7 @@ static int lc_pouch_state_stage_metadata_prepared_locked(void *context,
   lc_pouch_state_entry committed;
   lc_pouch_state_entry staged;
   lc_pouch_namespace_manifest manifest;
+  lc_pouch_namespace_logstore *cache;
   lc_pouch_state_read_result lease;
   lc_pouch_state_metadata_view committed_view;
   lc_pouch_state_metadata_view staged_view;
@@ -13969,8 +13976,16 @@ static int lc_pouch_state_stage_metadata_prepared_locked(void *context,
     }
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_state_scan(stage->pouch, &manifest, staged_key, &staged, NULL,
-                             error);
+    cache = lc_pouch_namespace_logstore_find(stage->pouch,
+                                             stage->namespace_name, 0, NULL);
+    if (cache != NULL && cache->initialized) {
+      rc = lc_pouch_state_entry_from_cache_record(
+          stage->pouch, lc_pouch_state_cache_record_find(cache, staged_key),
+          &staged, error);
+    } else {
+      rc = lc_pouch_state_scan(stage->pouch, &manifest, staged_key, &staged,
+                               NULL, error);
+    }
   }
   if (rc == LC_OK && strcmp(stage->lease_key, stage->key) != 0) {
     rc = lc_pouch_state_read_metadata_locked(
@@ -13988,8 +14003,15 @@ static int lc_pouch_state_stage_metadata_prepared_locked(void *context,
                         stage->prepare_context, stage->options, &apply, error);
   }
   if (rc == LC_OK && apply) {
-    current =
-        staged.found && !staged.staged_delete_marker ? &staged : &committed;
+    if (staged.found && staged.staged_delete_marker) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch metadata update conflicts with staged delete",
+                        NULL, NULL, "pouch");
+    } else {
+      current = staged.found ? &staged : &committed;
+    }
+  }
+  if (rc == LC_OK && apply) {
     if (!current->found && !stage->options->has_metadata) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch metadata update requires existing state", NULL,
@@ -14103,6 +14125,7 @@ static int lc_pouch_state_promote_staged_locked(
   const unsigned char *promoted_metadata;
   size_t promoted_metadata_length;
   lc_pouch_unix_seconds updated_at_unix;
+  unsigned char committed_record_type;
   int query_index_guard_started;
   int rc;
 
@@ -14182,20 +14205,28 @@ static int lc_pouch_state_promote_staged_locked(
   }
   promoted_metadata = staged.metadata;
   promoted_metadata_length = staged.metadata_length;
-  if (promoted_metadata_length == 0U && committed.metadata_length > 0U) {
+  if (staged.record_type != LC_POUCH_STATE_RECORD_STATE_META &&
+      promoted_metadata_length == 0U && committed.metadata_length > 0U) {
     promoted_metadata = committed.metadata;
     promoted_metadata_length = committed.metadata_length;
   }
-  version = committed.found && committed.payload_span.present
-                ? committed.version + 1UL
-                : 1UL;
+  committed_record_type = staged.record_type == LC_POUCH_STATE_RECORD_STATE_META
+                              ? LC_POUCH_STATE_RECORD_STATE_META
+                              : LC_POUCH_STATE_RECORD_STATE_LINK;
+  version = committed_record_type == LC_POUCH_STATE_RECORD_STATE_META
+                ? (committed.found && committed.payload_span.present
+                       ? committed.version
+                       : 0UL)
+                : (committed.found && committed.payload_span.present
+                       ? committed.version + 1UL
+                       : 1UL);
   updated_at_unix = lc_pouch_maintenance_now_seconds();
   decision_version = staged.version + 1UL;
   discard_version = decision_version + 1UL;
   rc = lc_pouch_state_append_staged_commit_batch(
       pouch, namespace_name, &manifest, key, staged_key, &staged,
       promoted_metadata, promoted_metadata_length, version, decision_version,
-      discard_version, updated_at_unix, error);
+      discard_version, updated_at_unix, committed_record_type, error);
   if (rc != LC_OK) {
     goto cleanup;
   }
@@ -14205,7 +14236,9 @@ static int lc_pouch_state_promote_staged_locked(
       promoted_metadata_length, version, staged.bytes, staged.cipher_bytes,
       staged.descriptor, updated_at_unix, staged.has_query_hidden,
       staged.query_hidden, 0, 1,
-      lc_pouch_state_record_type_is_object(staged.record_type)
+      committed_record_type == LC_POUCH_STATE_RECORD_STATE_META
+          ? LC_POUCH_STATE_RECORD_STATE_META
+      : lc_pouch_state_record_type_is_object(staged.record_type)
           ? LC_POUCH_STATE_RECORD_OBJECT_PUT
           : LC_POUCH_STATE_RECORD_STATE_PUT);
   (void)lc_pouch_state_cache_apply_write(
@@ -14235,7 +14268,8 @@ static int lc_pouch_state_promote_staged_locked(
   }
   out->updated_at_unix = updated_at_unix;
   out->query_index_operation_guard_started = query_index_guard_started;
-  if (!lc_pouch_state_record_type_is_object(staged.record_type)) {
+  if (committed_record_type != LC_POUCH_STATE_RECORD_STATE_META &&
+      !lc_pouch_state_record_type_is_object(staged.record_type)) {
     lc_pouch_query_index_note_state_write(
         pouch, namespace_name, key,
         staged.content_type != NULL ? staged.content_type : "application/json",
@@ -14334,6 +14368,7 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   const unsigned char *promoted_metadata;
   size_t promoted_metadata_length;
   lc_pouch_unix_seconds updated_at_unix;
+  unsigned char committed_record_type;
   int query_index_guard_started;
   int rc;
 
@@ -14395,21 +14430,29 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   }
   promoted_metadata = staged.metadata;
   promoted_metadata_length = staged.metadata_length;
-  if (promoted_metadata_length == 0U && committed.metadata_length > 0U) {
+  if (staged.record_type != LC_POUCH_STATE_RECORD_STATE_META &&
+      promoted_metadata_length == 0U && committed.metadata_length > 0U) {
     promoted_metadata = committed.metadata;
     promoted_metadata_length = committed.metadata_length;
   }
 
-  version = committed.found && committed.payload_span.present
-                ? committed.version + 1UL
-                : 1UL;
+  committed_record_type = staged.record_type == LC_POUCH_STATE_RECORD_STATE_META
+                              ? LC_POUCH_STATE_RECORD_STATE_META
+                              : LC_POUCH_STATE_RECORD_STATE_LINK;
+  version = committed_record_type == LC_POUCH_STATE_RECORD_STATE_META
+                ? (committed.found && committed.payload_span.present
+                       ? committed.version
+                       : 0UL)
+                : (committed.found && committed.payload_span.present
+                       ? committed.version + 1UL
+                       : 1UL);
   updated_at_unix = lc_pouch_maintenance_now_seconds();
   decision_version = staged.version + 1UL;
   discard_version = decision_version + 1UL;
   rc = lc_pouch_state_append_staged_commit_batch(
       pouch, namespace_name, &manifest, key, staged_key, &staged,
       promoted_metadata, promoted_metadata_length, version, decision_version,
-      discard_version, updated_at_unix, error);
+      discard_version, updated_at_unix, committed_record_type, error);
   if (rc != LC_OK) {
     goto cleanup;
   }
@@ -14419,7 +14462,9 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
       promoted_metadata_length, version, staged.bytes, staged.cipher_bytes,
       staged.descriptor, updated_at_unix, staged.has_query_hidden,
       staged.query_hidden, 0, 1,
-      lc_pouch_state_record_type_is_object(staged.record_type)
+      committed_record_type == LC_POUCH_STATE_RECORD_STATE_META
+          ? LC_POUCH_STATE_RECORD_STATE_META
+      : lc_pouch_state_record_type_is_object(staged.record_type)
           ? LC_POUCH_STATE_RECORD_OBJECT_PUT
           : LC_POUCH_STATE_RECORD_STATE_PUT);
   (void)lc_pouch_state_cache_apply_write(
@@ -14451,7 +14496,8 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   out->has_query_hidden = staged.has_query_hidden;
   out->query_hidden = staged.query_hidden;
   out->query_index_operation_guard_started = query_index_guard_started;
-  if (!lc_pouch_state_record_type_is_object(staged.record_type)) {
+  if (committed_record_type != LC_POUCH_STATE_RECORD_STATE_META &&
+      !lc_pouch_state_record_type_is_object(staged.record_type)) {
     lc_pouch_query_index_note_state_write(
         pouch, namespace_name, key,
         staged.content_type != NULL ? staged.content_type : "application/json",

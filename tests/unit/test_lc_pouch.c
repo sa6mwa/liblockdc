@@ -9728,6 +9728,94 @@ test_transaction_metadata_stays_staged_until_rollback(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.has_query_hidden);
   assert_true(read_result.query_hidden);
+  assert_int_equal(read_result.version, 1UL);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  lc_lease_close(lease);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_transaction_metadata_rejects_staged_delete(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_lease *lease;
+  lc_acquire_req acquire_req;
+  lc_remove_op remove_op;
+  lc_remove_res remove_res;
+  lc_metadata_op metadata_op;
+  lc_metadata_res metadata_res;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_update_res update_res;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&update_res, 0, sizeof(update_res));
+  lc_acquire_req_init(&acquire_req);
+  lc_remove_op_init(&remove_op);
+  memset(&remove_res, 0, sizeof(remove_res));
+  lc_metadata_op_init(&metadata_op);
+  memset(&metadata_res, 0, sizeof(metadata_res));
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("transaction-metadata-staged-delete", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  handle = (lc_client_handle *)client;
+  write_client_state(client, "doc/transaction-metadata-delete",
+                     "{\"kind\":\"visible\"}", NULL, 0L, 0, &update_res,
+                     &error);
+  lc_update_res_cleanup(&update_res);
+
+  acquire_req.key = "doc/transaction-metadata-delete";
+  acquire_req.owner = "pouch-transaction-metadata-delete";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "pouch-transaction-metadata-delete";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  pouch_copy_lease_ref(&remove_op.lease, lease);
+  rc = client->remove(client, &remove_op, &remove_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(remove_res.removed);
+  lc_remove_res_cleanup(&remove_res);
+
+  pouch_copy_lease_ref(&metadata_op.lease, lease);
+  metadata_op.has_query_hidden = 1;
+  metadata_op.query_hidden = 1;
+  rc = client->metadata(client, &metadata_op, &metadata_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch metadata update conflicts with staged delete");
+  lc_metadata_res_cleanup(&metadata_res);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  participant.namespace_name = "default";
+  participant.key = acquire_req.key;
+  decision_req.txn_id = acquire_req.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+
+  rc = lc_pouch_state_read(handle->pouch, "default", acquire_req.key,
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
 
   lc_lease_close(lease);
@@ -29678,6 +29766,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_exclusive_indexer_clears_guards_after_failed_transaction_decision),
       cmocka_unit_test(test_transaction_metadata_stays_staged_until_rollback),
+      cmocka_unit_test(test_transaction_metadata_rejects_staged_delete),
       cmocka_unit_test(
           test_exclusive_indexer_defers_lease_metadata_until_release),
       cmocka_unit_test(test_query_index_sequence_ignores_lease_metadata),
