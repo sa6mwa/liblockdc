@@ -4,6 +4,7 @@ endif()
 if(NOT DEFINED LOCKDC_ROOT)
     message(FATAL_ERROR "LOCKDC_ROOT is required")
 endif()
+include("${CMAKE_CURRENT_LIST_DIR}/LcGeneratedPath.cmake")
 get_filename_component(LOCKDC_BINARY_DIR "${LOCKDC_BINARY_DIR}" ABSOLUTE)
 get_filename_component(LOCKDC_ROOT "${LOCKDC_ROOT}" ABSOLUTE)
 if(DEFINED LOCKDC_DIST_DIR AND NOT "${LOCKDC_DIST_DIR}" STREQUAL "")
@@ -25,6 +26,7 @@ function(lockdc_import_cache_path var_name)
 endfunction()
 
 lockdc_import_cache_path(CMAKE_C_COMPILER)
+lockdc_import_cache_path(CMAKE_LINKER)
 lockdc_import_cache_path(CMAKE_TOOLCHAIN_FILE)
 lockdc_import_cache_path(CMAKE_BUILD_TYPE)
 lockdc_import_cache_path(LOCKDC_OTOOL)
@@ -37,6 +39,12 @@ endif()
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
+if(NOT CMAKE_LINKER OR NOT EXISTS "${CMAKE_LINKER}")
+    message(FATAL_ERROR "Darwin smoke bundle requires a configured target linker")
+endif()
+
+get_filename_component(lockdc_darwin_tool_bin "${CMAKE_LINKER}" DIRECTORY)
+set(lockdc_darwin_tool_path "${lockdc_darwin_tool_bin}:$ENV{PATH}")
 
 set(bundle_root "${LOCKDC_BINARY_DIR}/darwin-smoke-bundle")
 set(bundle_dist "${bundle_root}/dist")
@@ -49,6 +57,9 @@ set(release_archive "${bundle_dist}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_
 set(release_prefix "${extract_root}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}")
 set(smoke_archive "${bundle_root}/${stage_name}.zip")
 
+lockdc_assert_generated_path("${LOCKDC_ROOT}" "${LOCKDC_BINARY_DIR}")
+lockdc_assert_generated_path("${LOCKDC_ROOT}" "${lockdc_dist_dir}")
+lockdc_assert_generated_path("${LOCKDC_ROOT}" "${bundle_root}")
 file(REMOVE_RECURSE "${bundle_root}")
 file(MAKE_DIRECTORY "${bundle_dist}" "${extract_root}" "${consumer_src_dir}" "${consumer_bin_dir}")
 
@@ -96,6 +107,7 @@ set(LOCKDC_EXTERNAL_INCLUDE_DIRS
     "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/liblql/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
 set(LOCKDC_EXTERNAL_LIBRARY_DIRS
@@ -104,6 +116,7 @@ set(LOCKDC_EXTERNAL_LIBRARY_DIRS
     "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
 
@@ -160,7 +173,8 @@ if(CMAKE_TOOLCHAIN_FILE)
 endif()
 
 execute_process(
-    COMMAND "${CMAKE_COMMAND}" ${configure_args}
+    COMMAND "${CMAKE_COMMAND}" -E env "PATH=${lockdc_darwin_tool_path}"
+        "${CMAKE_COMMAND}" ${configure_args}
     RESULT_VARIABLE configure_result
     OUTPUT_VARIABLE configure_stdout
     ERROR_VARIABLE configure_stderr
@@ -173,7 +187,8 @@ if(NOT configure_result EQUAL 0)
 endif()
 
 execute_process(
-    COMMAND "${CMAKE_COMMAND}" --build "${consumer_bin_dir}"
+    COMMAND "${CMAKE_COMMAND}" -E env "PATH=${lockdc_darwin_tool_path}"
+        "${CMAKE_COMMAND}" --build "${consumer_bin_dir}"
     RESULT_VARIABLE build_result
     OUTPUT_VARIABLE build_stdout
     ERROR_VARIABLE build_stderr

@@ -7,7 +7,15 @@ if(NOT DEFINED LOCKDC_ROOT)
 endif()
 
 set(lockdc_test_root "${LOCKDC_BINARY_DIR}/lua-release-package-test-artifacts")
-set(lockdc_dist_dir "${lockdc_test_root}/dist")
+if(DEFINED LOCKDC_USE_EXISTING_ARCHIVE AND LOCKDC_USE_EXISTING_ARCHIVE)
+    if(NOT DEFINED LOCKDC_DIST_DIR OR LOCKDC_DIST_DIR STREQUAL "")
+        message(FATAL_ERROR
+            "LOCKDC_DIST_DIR is required when LOCKDC_USE_EXISTING_ARCHIVE is enabled")
+    endif()
+    set(lockdc_dist_dir "${LOCKDC_DIST_DIR}")
+else()
+    set(lockdc_dist_dir "${lockdc_test_root}/dist")
+endif()
 
 if(NOT EXISTS "${LOCKDC_BINARY_DIR}/package-metadata.cmake")
     message(FATAL_ERROR "missing package metadata: ${LOCKDC_BINARY_DIR}/package-metadata.cmake")
@@ -46,61 +54,57 @@ endfunction()
 
 set(lockdc_lua_rockspec_path "${lockdc_dist_dir}/lockdc-${LOCKDC_VERSION}-1.rockspec")
 set(lockdc_lua_src_rock_path "${lockdc_dist_dir}/lockdc-${LOCKDC_VERSION}-1.src.rock")
+set(lockdc_lua_source_archive_path "${lockdc_dist_dir}/liblockdc-lua-${LOCKDC_VERSION}.tar.gz")
 set(lockdc_release_archive "${lockdc_dist_dir}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}.tar.gz")
 set(lockdc_extract_root "${LOCKDC_BINARY_DIR}/lua-release-package-test")
 set(lockdc_release_prefix "${lockdc_extract_root}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}")
 set(lockdc_lua_rock_extract_root "${LOCKDC_BINARY_DIR}/lua-release-package-src-rock")
-set(lockdc_lua_inner_archive_path "${lockdc_lua_rock_extract_root}/lockdc-${LOCKDC_VERSION}-1.tar.gz")
+set(lockdc_lua_inner_archive_path "${lockdc_lua_rock_extract_root}/liblockdc-lua-${LOCKDC_VERSION}.tar.gz")
 set(lockdc_lua_inner_rockspec_path "${lockdc_lua_rock_extract_root}/lockdc-${LOCKDC_VERSION}-1.rockspec")
 
 file(REMOVE_RECURSE "${lockdc_test_root}")
-file(MAKE_DIRECTORY "${lockdc_dist_dir}")
+if(NOT (DEFINED LOCKDC_USE_EXISTING_ARCHIVE AND LOCKDC_USE_EXISTING_ARCHIVE))
+    file(MAKE_DIRECTORY "${lockdc_dist_dir}")
 
-execute_process(
-    COMMAND "${CMAKE_COMMAND}"
-        -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
-        -DLOCKDC_ROOT=${LOCKDC_ROOT}
-        -DLOCKDC_DIST_DIR=${lockdc_dist_dir}
-        -P "${LOCKDC_ROOT}/cmake/package_archive.cmake"
-    RESULT_VARIABLE package_archive_result
-    OUTPUT_VARIABLE package_archive_stdout
-    ERROR_VARIABLE package_archive_stderr
-)
-if(NOT package_archive_result EQUAL 0)
-    message(FATAL_ERROR
-        "failed to create C release archive for Lua package test
-"
-        "stdout:
-${package_archive_stdout}
-"
-        "stderr:
-${package_archive_stderr}")
-endif()
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}"
+            -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
+            -DLOCKDC_ROOT=${LOCKDC_ROOT}
+            -DLOCKDC_DIST_DIR=${lockdc_dist_dir}
+            -P "${LOCKDC_ROOT}/cmake/package_archive.cmake"
+        RESULT_VARIABLE package_archive_result
+        OUTPUT_VARIABLE package_archive_stdout
+        ERROR_VARIABLE package_archive_stderr
+    )
+    if(NOT package_archive_result EQUAL 0)
+        message(FATAL_ERROR
+            "failed to create C release archive for Lua package test\n"
+            "stdout:\n${package_archive_stdout}\n"
+            "stderr:\n${package_archive_stderr}")
+    endif()
 
-execute_process(
-    COMMAND "${CMAKE_COMMAND}"
-        -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
-        -DLOCKDC_ROOT=${LOCKDC_ROOT}
-        -DLOCKDC_DIST_DIR=${lockdc_dist_dir}
-        -P "${LOCKDC_ROOT}/cmake/package_lua_rock.cmake"
-    RESULT_VARIABLE package_lua_result
-    OUTPUT_VARIABLE package_lua_stdout
-    ERROR_VARIABLE package_lua_stderr
-)
-if(NOT package_lua_result EQUAL 0)
-    message(FATAL_ERROR
-        "failed to create standalone Lua release package
-"
-        "stdout:
-${package_lua_stdout}
-"
-        "stderr:
-${package_lua_stderr}")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}"
+            -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
+            -DLOCKDC_ROOT=${LOCKDC_ROOT}
+            -DLOCKDC_DIST_DIR=${lockdc_dist_dir}
+            -P "${LOCKDC_ROOT}/cmake/package_lua_rock.cmake"
+        RESULT_VARIABLE package_lua_result
+        OUTPUT_VARIABLE package_lua_stdout
+        ERROR_VARIABLE package_lua_stderr
+    )
+    if(NOT package_lua_result EQUAL 0)
+        message(FATAL_ERROR
+            "failed to create standalone Lua release package\n"
+            "stdout:\n${package_lua_stdout}\n"
+            "stderr:\n${package_lua_stderr}")
+    endif()
 endif()
 
 foreach(required_path
     "${lockdc_lua_rockspec_path}"
     "${lockdc_lua_src_rock_path}"
+    "${lockdc_lua_source_archive_path}"
     "${lockdc_release_archive}"
 )
     if(NOT EXISTS "${required_path}")
@@ -132,6 +136,49 @@ if(NOT EXISTS "${lockdc_lua_inner_rockspec_path}")
 endif()
 
 assert_tar_numeric_owner_group("${lockdc_lua_inner_archive_path}")
+assert_tar_numeric_owner_group("${lockdc_lua_source_archive_path}")
+file(SHA256 "${lockdc_lua_inner_archive_path}" lockdc_lua_inner_archive_sha256)
+file(SHA256 "${lockdc_lua_source_archive_path}" lockdc_lua_source_archive_sha256)
+if(NOT lockdc_lua_inner_archive_sha256 STREQUAL lockdc_lua_source_archive_sha256)
+    message(FATAL_ERROR "Lua source rock does not embed the standalone Lua source package verbatim")
+endif()
+
+set(lockdc_lua_source_unpack_root "${lockdc_lua_rock_extract_root}/source")
+file(MAKE_DIRECTORY "${lockdc_lua_source_unpack_root}")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar xf "${lockdc_lua_inner_archive_path}"
+    WORKING_DIRECTORY "${lockdc_lua_source_unpack_root}"
+    RESULT_VARIABLE source_extract_result
+    OUTPUT_VARIABLE source_extract_stdout
+    ERROR_VARIABLE source_extract_stderr
+)
+if(NOT source_extract_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to extract Lua source archive\n"
+        "stdout:\n${source_extract_stdout}\n"
+        "stderr:\n${source_extract_stderr}")
+endif()
+
+set(lockdc_lua_source_extract_root "${lockdc_lua_source_unpack_root}/liblockdc-lua-${LOCKDC_VERSION}")
+foreach(required_source
+    "LICENSE"
+    "README.md"
+    "RELEASE_MANIFEST"
+    "VERSION"
+    "include/lc/lc.h"
+    "lockdc.rockspec.in"
+    "src/lua/lockdc_lua.c"
+    "src/lc_api_internal.h"
+    "src/lc_engine_api.h"
+    "src/lc_intcompat.h"
+    "src/lc_pouch.h"
+    "scripts/assert_generated_path.sh"
+    "scripts/build_lua_rock.sh"
+)
+    if(NOT EXISTS "${lockdc_lua_source_extract_root}/${required_source}")
+        message(FATAL_ERROR "Lua source rock is missing required source: ${required_source}")
+    endif()
+endforeach()
 
 file(READ "${lockdc_lua_inner_rockspec_path}" lockdc_lua_inner_rockspec_text)
 foreach(disallowed_path "${LOCKDC_ROOT}" "$ENV{HOME}")
@@ -145,10 +192,57 @@ foreach(disallowed_path "${LOCKDC_ROOT}" "$ENV{HOME}")
             "rockspec:\n${lockdc_lua_inner_rockspec_text}")
     endif()
 endforeach()
-string(FIND "${lockdc_lua_inner_rockspec_text}" "url = \"lockdc-${LOCKDC_VERSION}-1.tar.gz\"" inner_source_index)
+string(FIND "${lockdc_lua_inner_rockspec_text}" "url = \"liblockdc-lua-${LOCKDC_VERSION}.tar.gz\"" inner_source_index)
 if(inner_source_index EQUAL -1)
     message(FATAL_ERROR
         "Lua source rock embedded rockspec should reference the embedded source archive by relative name\n"
+        "rockspec:\n${lockdc_lua_inner_rockspec_text}")
+endif()
+string(FIND "${lockdc_lua_inner_rockspec_text}" "dir = \"liblockdc-lua-${LOCKDC_VERSION}\"" inner_source_dir_index)
+if(inner_source_dir_index EQUAL -1)
+    message(FATAL_ERROR
+        "Lua source rock embedded rockspec should name the staged source root\n"
+        "rockspec:\n${lockdc_lua_inner_rockspec_text}")
+endif()
+
+set(lockdc_lua_standalone_unpack_root "${lockdc_extract_root}/lua-source")
+file(REMOVE_RECURSE "${lockdc_lua_standalone_unpack_root}")
+file(MAKE_DIRECTORY "${lockdc_lua_standalone_unpack_root}")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar xf "${lockdc_lua_source_archive_path}"
+    WORKING_DIRECTORY "${lockdc_lua_standalone_unpack_root}"
+    RESULT_VARIABLE standalone_source_extract_result
+    OUTPUT_VARIABLE standalone_source_extract_stdout
+    ERROR_VARIABLE standalone_source_extract_stderr
+)
+if(NOT standalone_source_extract_result EQUAL 0)
+    message(FATAL_ERROR
+        "failed to extract standalone Lua source archive\n"
+        "stdout:\n${standalone_source_extract_stdout}\n"
+        "stderr:\n${standalone_source_extract_stderr}")
+endif()
+if(NOT EXISTS "${lockdc_lua_standalone_unpack_root}/liblockdc-lua-${LOCKDC_VERSION}/RELEASE_MANIFEST")
+    message(FATAL_ERROR "standalone Lua source archive is missing its staged release manifest")
+endif()
+file(STRINGS "${lockdc_lua_source_extract_root}/RELEASE_MANIFEST" lockdc_lua_expected_manifest)
+file(GLOB_RECURSE lockdc_lua_actual_manifest
+    RELATIVE "${lockdc_lua_source_extract_root}"
+    LIST_DIRECTORIES false
+    "${lockdc_lua_source_extract_root}/*")
+list(SORT lockdc_lua_expected_manifest)
+list(SORT lockdc_lua_actual_manifest)
+if(NOT lockdc_lua_expected_manifest STREQUAL lockdc_lua_actual_manifest)
+    list(JOIN lockdc_lua_expected_manifest "\n  " lockdc_lua_expected_manifest_text)
+    list(JOIN lockdc_lua_actual_manifest "\n  " lockdc_lua_actual_manifest_text)
+    message(FATAL_ERROR
+        "standalone Lua source archive does not match its release manifest\n"
+        "expected:\n  ${lockdc_lua_expected_manifest_text}\n"
+        "actual:\n  ${lockdc_lua_actual_manifest_text}")
+endif()
+string(FIND "${lockdc_lua_inner_rockspec_text}" "\"lonejson == 0.42.0-1\"" inner_lonejson_index)
+if(inner_lonejson_index EQUAL -1)
+    message(FATAL_ERROR
+        "Lua source rock embedded rockspec is missing the pinned lonejson dependency\n"
         "rockspec:\n${lockdc_lua_inner_rockspec_text}")
 endif()
 
@@ -158,13 +252,26 @@ foreach(required_snippet
     "version = \"${LOCKDC_VERSION}-1\""
     "url = \"git+https://github.com/sa6mwa/liblockdc.git\""
     "tag = \"v${LOCKDC_VERSION}\""
-    "scripts/build_lockdc_lua_rock.sh"
+    "\"lonejson == 0.42.0-1\""
+    "scripts/build_lua_rock.sh"
 )
     string(FIND "${lockdc_lua_rockspec_text}" "${required_snippet}" snippet_index)
     if(snippet_index EQUAL -1)
         message(FATAL_ERROR
             "standalone Lua rockspec is missing expected snippet '${required_snippet}'\n"
             "rockspec:\n${lockdc_lua_rockspec_text}")
+    endif()
+endforeach()
+
+foreach(stale_snippet
+    "lonejson == 0.41.0-1"
+    "https://github.com/sa6mwa/lonejson/releases/download/v0.41.0/lonejson-0.41.0-1.src.rock"
+)
+    string(FIND "${lockdc_lua_rockspec_text}" "${stale_snippet}" standalone_stale_index)
+    string(FIND "${lockdc_lua_inner_rockspec_text}" "${stale_snippet}" inner_stale_index)
+    if(NOT standalone_stale_index EQUAL -1 OR NOT inner_stale_index EQUAL -1)
+        message(FATAL_ERROR
+            "Lua release rockspec dependency boundary contains stale snippet '${stale_snippet}'")
     endif()
 endforeach()
 
@@ -192,7 +299,7 @@ execute_process(
         -DLOCKDC_SDK_PREFIX=${lockdc_release_prefix}
         -DLOCKDC_ROCK_PATH=${lockdc_lua_src_rock_path}
         -DLOCKDC_LUA_TEST_SCRIPT=${LOCKDC_ROOT}/tests/lua/test_lockdc_luarocks_smoke.lua
-        "-DLOCKDC_LUA_TEST_ENV=LOCKDC_CFLAGS_EXTRA=-I${LOCKDC_EXTERNAL_ROOT}/curl/install/include -I${LOCKDC_EXTERNAL_ROOT}/openssl/install/include -I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include -I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include -I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include -I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include -I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include|LOCKDC_LIBS_EXTRA=-L${LOCKDC_EXTERNAL_ROOT}/curl/install/lib -L${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib -L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib -L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib -L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib -L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib -L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/curl/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib|LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib"
+        "-DLOCKDC_LUA_TEST_ENV=LOCKDC_CFLAGS_EXTRA=-I${LOCKDC_EXTERNAL_ROOT}/curl/install/include -I${LOCKDC_EXTERNAL_ROOT}/openssl/install/include -I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include -I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include -I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include -I${LOCKDC_EXTERNAL_ROOT}/liblql/install/include -I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include -I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include|LOCKDC_LIBS_EXTRA=-L${LOCKDC_EXTERNAL_ROOT}/curl/install/lib -L${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib -L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib -L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib -L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib -L${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib -L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib -L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/curl/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib -Wl,-rpath,${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib|LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib|LONEJSON_LIBDIR=${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
         -P "${LOCKDC_ROOT}/tests/lua_rock_install_and_run_test.cmake"
     RESULT_VARIABLE lua_result
     OUTPUT_VARIABLE lua_stdout

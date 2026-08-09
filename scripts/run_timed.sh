@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -eu
+set -euo pipefail
 
 if [ "$#" -lt 2 ]; then
     printf 'usage: %s <label> <command> [args...]\n' "$0" >&2

@@ -1,6 +1,5 @@
 #include "lc_internal.h"
 
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +12,7 @@ typedef struct lc_engine_namespace_query_json {
 typedef struct lc_engine_namespace_config_response_json {
   char *namespace_name;
   lc_engine_namespace_query_json query;
+  char *etag;
 } lc_engine_namespace_config_response_json;
 
 typedef struct lc_engine_index_flush_response_json {
@@ -22,7 +22,7 @@ typedef struct lc_engine_index_flush_response_json {
   bool accepted;
   bool flushed;
   bool pending;
-  lonejson_int64 index_seq;
+  lonejson_uint64 index_seq;
 } lc_engine_index_flush_response_json;
 
 typedef struct lc_engine_txn_response_json {
@@ -34,7 +34,7 @@ typedef struct lc_engine_tc_lease_response_json {
   bool granted;
   char *leader_id;
   char *leader_endpoint;
-  lonejson_int64 term;
+  lonejson_uint64 term;
   lonejson_int64 expires_at;
 } lc_engine_tc_lease_response_json;
 
@@ -77,7 +77,7 @@ typedef struct lc_engine_txn_decision_body_json {
   char *state;
   lonejson_object_array participants;
   lonejson_int64 expires_at_unix;
-  lonejson_int64 tc_term;
+  lonejson_uint64 tc_term;
   char *target_backend_hash;
 } lc_engine_txn_decision_body_json;
 
@@ -95,7 +95,9 @@ static const lonejson_field lc_engine_namespace_config_response_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_config_response_json,
                                 namespace_name, "namespace"),
     LONEJSON_FIELD_OBJECT(lc_engine_namespace_config_response_json, query,
-                          "query", &lc_engine_namespace_query_map)};
+                          "query", &lc_engine_namespace_query_map),
+    LONEJSON_FIELD_STRING_ALLOC(lc_engine_namespace_config_response_json, etag,
+                                "etag")};
 
 LONEJSON_MAP_DEFINE(lc_engine_namespace_config_response_map,
                     lc_engine_namespace_config_response_json,
@@ -114,7 +116,7 @@ static const lonejson_field lc_engine_index_flush_response_fields[] = {
                         "flushed"),
     LONEJSON_FIELD_BOOL(lc_engine_index_flush_response_json, pending,
                         "pending"),
-    LONEJSON_FIELD_I64(lc_engine_index_flush_response_json, index_seq,
+    LONEJSON_FIELD_U64(lc_engine_index_flush_response_json, index_seq,
                        "index_seq")};
 
 LONEJSON_MAP_DEFINE(lc_engine_index_flush_response_map,
@@ -151,7 +153,7 @@ static const lonejson_field lc_engine_txn_decision_body_fields[] = {
                                 LONEJSON_OVERFLOW_FAIL),
     LONEJSON_FIELD_I64(lc_engine_txn_decision_body_json, expires_at_unix,
                        "expires_at_unix"),
-    LONEJSON_FIELD_I64(lc_engine_txn_decision_body_json, tc_term, "tc_term"),
+    LONEJSON_FIELD_U64(lc_engine_txn_decision_body_json, tc_term, "tc_term"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_txn_decision_body_json,
                                 target_backend_hash, "target_backend_hash")};
 
@@ -160,19 +162,19 @@ static const lonejson_field lc_engine_tc_lease_acquire_body_fields[] = {
                                 candidate_id, "candidate_id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_acquire_request,
                                 candidate_endpoint, "candidate_endpoint"),
-    LONEJSON_FIELD_I64(lc_engine_tc_lease_acquire_request, term, "term"),
+    LONEJSON_FIELD_U64(lc_engine_tc_lease_acquire_request, term, "term"),
     LONEJSON_FIELD_I64(lc_engine_tc_lease_acquire_request, ttl_ms, "ttl_ms")};
 
 static const lonejson_field lc_engine_tc_lease_renew_body_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_renew_request, leader_id,
                                 "leader_id"),
-    LONEJSON_FIELD_I64(lc_engine_tc_lease_renew_request, term, "term"),
+    LONEJSON_FIELD_U64(lc_engine_tc_lease_renew_request, term, "term"),
     LONEJSON_FIELD_I64(lc_engine_tc_lease_renew_request, ttl_ms, "ttl_ms")};
 
 static const lonejson_field lc_engine_tc_lease_release_body_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_release_request, leader_id,
                                 "leader_id"),
-    LONEJSON_FIELD_I64(lc_engine_tc_lease_release_request, term, "term")};
+    LONEJSON_FIELD_U64(lc_engine_tc_lease_release_request, term, "term")};
 
 static const lonejson_field lc_engine_tc_cluster_announce_body_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_cluster_announce_request,
@@ -203,7 +205,7 @@ static const lonejson_field lc_engine_tc_lease_response_fields[] = {
                                 "leader_id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_engine_tc_lease_response_json,
                                 leader_endpoint, "leader_endpoint"),
-    LONEJSON_FIELD_I64(lc_engine_tc_lease_response_json, term, "term"),
+    LONEJSON_FIELD_U64(lc_engine_tc_lease_response_json, term, "term"),
     LONEJSON_FIELD_I64(lc_engine_tc_lease_response_json, expires_at,
                        "expires_at")};
 
@@ -271,20 +273,6 @@ static int lc_engine_mgmt_i64_to_long_checked(lonejson_int64 value,
                                               lonejson_int64 *out_value,
                                               lc_engine_error *error) {
   (void)label;
-  if (out_value == NULL) {
-    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
-                                      "missing i64 output");
-  }
-  *out_value = value;
-  return LC_ENGINE_OK;
-}
-
-static int lc_engine_mgmt_i64_to_int64_checked(lonejson_int64 value,
-                                               const char *label,
-                                               lonejson_int64 *out_value,
-                                               lc_engine_error *error) {
-  (void)label;
-
   if (out_value == NULL) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
                                       "missing i64 output");
@@ -368,6 +356,7 @@ void lc_engine_namespace_config_response_cleanup(
   lc_engine_free_string(&response->namespace_name);
   lc_engine_free_string(&response->preferred_engine);
   lc_engine_free_string(&response->fallback_engine);
+  lc_engine_free_string(&response->etag);
   lc_engine_free_string(&response->correlation_id);
 }
 
@@ -501,11 +490,13 @@ lc_engine_parse_namespace_response(const void *parsed_json,
       lc_engine_strdup_local(parsed->query.preferred_engine);
   response->fallback_engine =
       lc_engine_strdup_local(parsed->query.fallback_engine);
+  response->etag = lc_engine_strdup_local(result->etag);
   if ((parsed->namespace_name != NULL && response->namespace_name == NULL) ||
       (parsed->query.preferred_engine != NULL &&
        response->preferred_engine == NULL) ||
       (parsed->query.fallback_engine != NULL &&
-       response->fallback_engine == NULL)) {
+       response->fallback_engine == NULL) ||
+      (result->etag != NULL && response->etag == NULL)) {
     lc_engine_namespace_config_response_cleanup(response);
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate namespace response");
@@ -537,7 +528,7 @@ static int lc_engine_parse_index_flush_response(
   response->accepted = parsed->accepted ? 1 : 0;
   response->flushed = parsed->flushed ? 1 : 0;
   response->pending = parsed->pending ? 1 : 0;
-  response->index_seq = (unsigned long)parsed->index_seq;
+  response->index_seq = (lc_index_seq)parsed->index_seq;
   lc_engine_mgmt_capture_correlation(result, &response->correlation_id);
   return LC_ENGINE_OK;
 }
@@ -581,11 +572,7 @@ static int lc_engine_parse_tc_lease_acquire_response(
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to allocate tc lease response");
   }
-  if (lc_engine_mgmt_i64_to_int64_checked(
-          parsed->term, "tc lease term is out of range", &response->term,
-          error) != LC_ENGINE_OK) {
-    return LC_ENGINE_ERROR_PROTOCOL;
-  }
+  response->term = parsed->term;
   if (lc_engine_mgmt_i64_to_long_checked(
           parsed->expires_at, "tc lease expires_at is out of range",
           &response->expires_at_unix, error) != LC_ENGINE_OK) {
@@ -857,7 +844,8 @@ int lc_engine_client_update_namespace_config(
   lc_engine_namespace_config_response_json body_src;
   lc_engine_namespace_config_response_json parsed;
   lc_engine_http_result result;
-  lc_engine_header_pair headers[1];
+  lc_engine_header_pair headers[2];
+  size_t header_count;
   int rc;
 
   if (client == NULL || request == NULL || response == NULL || error == NULL) {
@@ -876,12 +864,19 @@ int lc_engine_client_update_namespace_config(
       (char *)lc_engine_effective_namespace(client, request->namespace_name);
   body_src.query.preferred_engine = (char *)request->preferred_engine;
   body_src.query.fallback_engine = (char *)request->fallback_engine;
+  header_count = 0U;
   headers[0].name = "Content-Type";
   headers[0].value = "application/json";
+  header_count += 1U;
+  if (request->if_etag != NULL && request->if_etag[0] != '\0') {
+    headers[header_count].name = "If-Match";
+    headers[header_count].value = request->if_etag;
+    header_count += 1U;
+  }
   rc = lc_engine_http_json_request_stream(
-      client, "PUT", "/v1/namespace", &lc_engine_namespace_config_body_map,
-      &body_src, headers, 1U, &lc_engine_namespace_config_response_map, &parsed,
-      &result, error);
+      client, "POST", "/v1/namespace", &lc_engine_namespace_config_body_map,
+      &body_src, headers, header_count,
+      &lc_engine_namespace_config_response_map, &parsed, &result, error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
@@ -1017,7 +1012,7 @@ static int lc_engine_mgmt_build_txn_decision_body(
   if (request->expires_at_unix > 0L) {
     body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[3];
   }
-  if (request->tc_term > 0 && request->tc_term <= (lonejson_int64)LONG_MAX) {
+  if (request->tc_term > 0U) {
     body_fields[body_field_count++] = lc_engine_txn_decision_body_fields[4];
   }
   if (request->target_backend_hash != NULL &&

@@ -675,8 +675,8 @@ static size_t lc_engine_header_callback(char *buffer, size_t size,
         --end;
       }
       end = lc_engine_trim_http_ows_end(value, end);
-      if (!lc_parse_long_base10_range_checked(value, (size_t)(end - value),
-                                              &result->key_version)) {
+      if (!lc_parse_i64_base10_range_checked(value, (size_t)(end - value),
+                                             &result->key_version)) {
         return lc_engine_header_numeric_parse_failed(
             result, "response X-Key-Version header is invalid");
       }
@@ -826,7 +826,7 @@ int lc_engine_http_json_request(
     order_fields[0] = lc_log_str_field("method", method);
     order_fields[1] = lc_log_str_field("path", path);
     order_fields[2] = lc_log_str_field("endpoints", endpoint_list);
-    lc_log_trace(client->logger, "client.http.order", order_fields, 3U);
+    lc_log_trace(client->logger, "http.order", order_fields, 3U);
     free(endpoint_list);
   }
 
@@ -873,7 +873,7 @@ int lc_engine_http_json_request(
           lc_log_str_field("endpoint", client->endpoints[endpoint_index]);
       attempt_fields[3] = lc_log_u64_field("attempt", endpoint_index + 1U);
       attempt_fields[4] = lc_log_u64_field("total", client->endpoint_count);
-      lc_log_trace(client->logger, "client.http.attempt", attempt_fields, 5U);
+      lc_log_trace(client->logger, "http.attempt", attempt_fields, 5U);
     }
     if (strcmp(method, "POST") != 0) {
       curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, method);
@@ -959,7 +959,7 @@ int lc_engine_http_json_request(
       error_fields[3] = lc_log_u64_field("attempt", endpoint_index + 1U);
       error_fields[4] = lc_log_u64_field("total", client->endpoint_count);
       error_fields[5] = lc_log_str_field("error", error_text);
-      lc_log_trace(client->logger, "client.http.error", error_fields, 6U);
+      lc_log_trace(client->logger, "http.error", error_fields, 6U);
       if (state.limit_exceeded) {
         return_code = error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
         should_retry = 0;
@@ -1073,7 +1073,7 @@ int lc_engine_http_json_request(
       success_fields[4] = lc_log_u64_field("total", client->endpoint_count);
       success_fields[5] = pslog_i64("status", (pslog_int64)result->http_status);
       success_fields[6] = lc_log_str_field("cid", result->correlation_id);
-      lc_log_trace(client->logger, "client.http.success", success_fields, 7U);
+      lc_log_trace(client->logger, "http.success", success_fields, 7U);
     }
     curl_slist_free_all(curl_headers);
     curl_easy_cleanup(easy);
@@ -1102,7 +1102,7 @@ int lc_engine_http_json_request(
     failure_fields[1] = lc_log_str_field("path", path);
     failure_fields[2] =
         lc_log_str_field("error", error != NULL ? error->message : NULL);
-    lc_log_debug(client->logger, "client.http.unreachable", failure_fields, 3U);
+    lc_log_debug(client->logger, "http.unreachable", failure_fields, 3U);
   }
   return lc_engine_set_transport_error(error,
                                        "all configured endpoints failed");
@@ -1136,7 +1136,7 @@ int lc_engine_http_json_request_stream(
     order_fields[0] = lc_log_str_field("method", method);
     order_fields[1] = lc_log_str_field("path", path);
     order_fields[2] = lc_log_str_field("endpoints", endpoint_list);
-    lc_log_trace(client->logger, "client.http.order", order_fields, 3U);
+    lc_log_trace(client->logger, "http.order", order_fields, 3U);
     free(endpoint_list);
   }
 
@@ -1190,7 +1190,7 @@ int lc_engine_http_json_request_stream(
           lc_log_str_field("endpoint", client->endpoints[endpoint_index]);
       attempt_fields[3] = lc_log_u64_field("attempt", endpoint_index + 1U);
       attempt_fields[4] = lc_log_u64_field("total", client->endpoint_count);
-      lc_log_trace(client->logger, "client.http.attempt", attempt_fields, 5U);
+      lc_log_trace(client->logger, "http.attempt", attempt_fields, 5U);
     }
     if (strcmp(method, "POST") != 0) {
       curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, method);
@@ -1303,7 +1303,7 @@ int lc_engine_http_json_request_stream(
       error_fields[3] = lc_log_u64_field("attempt", endpoint_index + 1U);
       error_fields[4] = lc_log_u64_field("total", client->endpoint_count);
       error_fields[5] = lc_log_str_field("error", error_text);
-      lc_log_trace(client->logger, "client.http.error", error_fields, 6U);
+      lc_log_trace(client->logger, "http.error", error_fields, 6U);
       if (state.limit_exceeded) {
         return_code = error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
         should_retry = 0;
@@ -1417,7 +1417,7 @@ int lc_engine_http_json_request_stream(
       success_fields[4] = lc_log_u64_field("total", client->endpoint_count);
       success_fields[5] = pslog_i64("status", (pslog_int64)result->http_status);
       success_fields[6] = lc_log_str_field("cid", result->correlation_id);
-      lc_log_trace(client->logger, "client.http.success", success_fields, 7U);
+      lc_log_trace(client->logger, "http.success", success_fields, 7U);
     }
     curl_slist_free_all(curl_headers);
     curl_easy_cleanup(easy);
@@ -1446,7 +1446,7 @@ int lc_engine_http_json_request_stream(
     failure_fields[1] = lc_log_str_field("path", path);
     failure_fields[2] =
         lc_log_str_field("error", error != NULL ? error->message : NULL);
-    lc_log_debug(client->logger, "client.http.unreachable", failure_fields, 3U);
+    lc_log_debug(client->logger, "http.unreachable", failure_fields, 3U);
   }
   return lc_engine_set_transport_error(error,
                                        "all configured endpoints failed");
@@ -1971,7 +1971,7 @@ int lc_engine_client_open(const lc_engine_client_config *config,
     fields[0] = lc_log_u64_field("endpoint_count", client->endpoint_count);
     fields[1] =
         lc_log_str_field("default_namespace", client->default_namespace);
-    lc_log_info(client->logger, "client.init", fields, 2U);
+    lc_log_info(client->logger, "init", fields, 2U);
   }
   return LC_ENGINE_OK;
 }

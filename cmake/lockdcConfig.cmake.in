@@ -9,7 +9,7 @@ find_dependency(Threads REQUIRED)
 
 if(NOT TARGET lockdc::shared AND NOT "@LOCKDC_SHARED_LINK_NAME@" STREQUAL "" AND EXISTS "${lockdc_LIBRARY_DIR}/@LOCKDC_SHARED_LINK_NAME@")
   set(_lockdc_shared_links)
-  list(APPEND _lockdc_shared_links curl pslog nghttp2 ssh2 ssl crypto z lonejson)
+  list(APPEND _lockdc_shared_links curl pslog nghttp2 ssh2 ssl crypto z lonejson lql)
   list(APPEND _lockdc_shared_links Threads::Threads)
   if(NOT "@CMAKE_DL_LIBS@" STREQUAL "")
     list(APPEND _lockdc_shared_links "@CMAKE_DL_LIBS@")
@@ -28,13 +28,14 @@ if(NOT TARGET lockdc::shared AND NOT "@LOCKDC_SHARED_LINK_NAME@" STREQUAL "" AND
   set_target_properties(lockdc::shared PROPERTIES
     IMPORTED_LOCATION "${lockdc_LIBRARY_DIR}/@LOCKDC_SHARED_LINK_NAME@"
     INTERFACE_INCLUDE_DIRECTORIES "${lockdc_INCLUDE_DIR}"
+    INTERFACE_COMPILE_DEFINITIONS "LONEJSON_WITH_JWT;LONEJSON_WITH_OIDC"
     INTERFACE_LINK_LIBRARIES "${_lockdc_shared_links}"
   )
 endif()
 
 if(NOT TARGET lockdc::static AND EXISTS "${lockdc_LIBRARY_DIR}/liblockdc.a")
   set(_lockdc_static_links)
-  list(APPEND _lockdc_static_links curl pslog nghttp2 ssh2 ssl crypto z lonejson)
+  list(APPEND _lockdc_static_links curl pslog nghttp2 ssh2 ssl crypto z lonejson lql)
   list(APPEND _lockdc_static_links Threads::Threads)
   if(NOT "@CMAKE_DL_LIBS@" STREQUAL "")
     list(APPEND _lockdc_static_links "@CMAKE_DL_LIBS@")
@@ -53,6 +54,7 @@ if(NOT TARGET lockdc::static AND EXISTS "${lockdc_LIBRARY_DIR}/liblockdc.a")
   set_target_properties(lockdc::static PROPERTIES
     IMPORTED_LOCATION "${lockdc_LIBRARY_DIR}/liblockdc.a"
     INTERFACE_INCLUDE_DIRECTORIES "${lockdc_INCLUDE_DIR}"
+    INTERFACE_COMPILE_DEFINITIONS "LONEJSON_WITH_JWT;LONEJSON_WITH_OIDC"
     INTERFACE_LINK_LIBRARIES "${_lockdc_static_links}"
   )
 endif()

@@ -264,7 +264,7 @@ typedef struct lc_engine_query_request {
 
 typedef struct lc_engine_query_response {
   char *cursor;
-  unsigned long index_seq;
+  lc_index_seq index_seq;
   char *correlation_id;
 } lc_engine_query_response;
 
@@ -273,7 +273,7 @@ typedef struct lc_engine_query_stream_response {
   char *correlation_id;
   char *metadata_json;
   char *return_mode;
-  unsigned long index_seq;
+  lc_index_seq index_seq;
   int index_seq_present;
   long http_status;
 } lc_engine_query_stream_response;
@@ -303,8 +303,8 @@ typedef struct lc_engine_enqueue_response {
   int max_attempts;
   int failure_attempts;
   lonejson_int64 not_visible_until_unix;
-  lonejson_int64 visibility_timeout_seconds;
-  lonejson_int64 payload_bytes;
+  long visibility_timeout_seconds;
+  long payload_bytes;
   char *correlation_id;
 } lc_engine_enqueue_response;
 
@@ -419,10 +419,10 @@ typedef struct lc_engine_queue_extend_request {
 } lc_engine_queue_extend_request;
 
 typedef struct lc_engine_queue_extend_response {
-  long lease_expires_at_unix;
+  lc_unix_seconds lease_expires_at_unix;
   long visibility_timeout_seconds;
   char *meta_etag;
-  long state_lease_expires_at_unix;
+  lc_unix_seconds state_lease_expires_at_unix;
   char *correlation_id;
 } lc_engine_queue_extend_response;
 
@@ -434,7 +434,7 @@ typedef struct lc_engine_attachment_selector {
 typedef struct lc_engine_attachment_info {
   char *id;
   char *name;
-  lonejson_int64 size;
+  long size;
   char *plaintext_sha256;
   char *content_type;
   lonejson_int64 created_at_unix;
@@ -566,12 +566,14 @@ typedef struct lc_engine_namespace_config_request {
   const char *namespace_name;
   const char *preferred_engine;
   const char *fallback_engine;
+  const char *if_etag;
 } lc_engine_namespace_config_request;
 
 typedef struct lc_engine_namespace_config_response {
   char *namespace_name;
   char *preferred_engine;
   char *fallback_engine;
+  char *etag;
   char *correlation_id;
 } lc_engine_namespace_config_response;
 
@@ -587,7 +589,7 @@ typedef struct lc_engine_index_flush_response {
   int accepted;
   int flushed;
   int pending;
-  unsigned long index_seq;
+  lc_index_seq index_seq;
   char *correlation_id;
 } lc_engine_index_flush_response;
 
@@ -613,7 +615,7 @@ typedef struct lc_engine_txn_decision_request {
   const lc_engine_txn_participant *participants;
   size_t participant_count;
   lonejson_int64 expires_at_unix;
-  lonejson_int64 tc_term;
+  lc_tc_term tc_term;
   const char *target_backend_hash;
 } lc_engine_txn_decision_request;
 
@@ -626,7 +628,7 @@ typedef struct lc_engine_txn_decision_response {
 typedef struct lc_engine_tc_lease_acquire_request {
   const char *candidate_id;
   const char *candidate_endpoint;
-  lonejson_int64 term;
+  lc_tc_term term;
   lonejson_int64 ttl_ms;
 } lc_engine_tc_lease_acquire_request;
 
@@ -634,14 +636,14 @@ typedef struct lc_engine_tc_lease_acquire_response {
   int granted;
   char *leader_id;
   char *leader_endpoint;
-  lonejson_int64 term;
+  lc_tc_term term;
   lonejson_int64 expires_at_unix;
   char *correlation_id;
 } lc_engine_tc_lease_acquire_response;
 
 typedef struct lc_engine_tc_lease_renew_request {
   const char *leader_id;
-  lonejson_int64 term;
+  lc_tc_term term;
   lonejson_int64 ttl_ms;
 } lc_engine_tc_lease_renew_request;
 
@@ -649,14 +651,14 @@ typedef struct lc_engine_tc_lease_renew_response {
   int renewed;
   char *leader_id;
   char *leader_endpoint;
-  lonejson_int64 term;
+  lc_tc_term term;
   lonejson_int64 expires_at_unix;
   char *correlation_id;
 } lc_engine_tc_lease_renew_response;
 
 typedef struct lc_engine_tc_lease_release_request {
   const char *leader_id;
-  lonejson_int64 term;
+  lc_tc_term term;
 } lc_engine_tc_lease_release_request;
 
 typedef struct lc_engine_tc_lease_release_response {
@@ -667,7 +669,7 @@ typedef struct lc_engine_tc_lease_release_response {
 typedef struct lc_engine_tc_leader_response {
   char *leader_id;
   char *leader_endpoint;
-  lonejson_int64 term;
+  lc_tc_term term;
   lonejson_int64 expires_at_unix;
   char *correlation_id;
 } lc_engine_tc_leader_response;

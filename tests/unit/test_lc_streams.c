@@ -8,7 +8,11 @@
 
 #include <cmocka.h>
 
+#include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
+#include "lc_api_internal.h"
+
+#define STREAMS_TMP_PREFIX "/tmp/liblockdc-streams-"
 
 typedef struct fake_source {
   lc_source pub;
@@ -119,6 +123,66 @@ static void test_copy_memory_source_to_memory_sink(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(length, sizeof(payload) - 1U);
   assert_memory_equal(bytes, payload, sizeof(payload) - 1U);
+
+  lc_source_close(source);
+  lc_sink_close(sink);
+  lc_error_cleanup(&error);
+}
+
+static void test_copy_memory_source_to_discard_sink(void **state) {
+  static const char payload[] = "discarded stream payload";
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  size_t written;
+  int rc;
+
+  (void)state;
+  source = NULL;
+  sink = NULL;
+  written = 0U;
+  lc_error_init(&error);
+
+  rc = lc_source_from_memory(payload, sizeof(payload) - 1U, &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_to_discard(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(lc_sink_is_discard(sink));
+
+  rc = lc_copy(source, sink, &written, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(written, sizeof(payload) - 1U);
+
+  lc_source_close(source);
+  lc_sink_close(sink);
+  lc_error_cleanup(&error);
+}
+
+static void test_copy_clears_a_prior_error_on_clean_eof(void **state) {
+  static const char payload[] = "clean stream";
+  lc_source *source;
+  lc_sink *sink;
+  lc_error error;
+  size_t written;
+  int rc;
+
+  (void)state;
+  source = NULL;
+  sink = NULL;
+  written = 0U;
+  lc_error_init(&error);
+  rc = lc_source_from_memory(payload, sizeof(payload) - 1U, &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_to_discard(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_error_set(&error, LC_ERR_INVALID, 0L, "previous failure", NULL, NULL,
+                    NULL);
+  assert_int_equal(rc, LC_ERR_INVALID);
+
+  rc = lc_copy(source, sink, &written, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(written, sizeof(payload) - 1U);
+  assert_int_equal(error.code, LC_OK);
 
   lc_source_close(source);
   lc_sink_close(sink);
@@ -252,6 +316,7 @@ static void test_file_constructors_report_transport_failures(void **state) {
   lc_sink *sink;
   lc_error error;
   char template_dir[] = "/tmp/liblockdc-streams-XXXXXX";
+  char temp_dir[sizeof(template_dir)];
   int rc;
 
   (void)state;
@@ -265,14 +330,15 @@ static void test_file_constructors_report_transport_failures(void **state) {
   assert_int_equal(error.code, LC_ERR_TRANSPORT);
   assert_null(source);
 
-  assert_non_null(mkdtemp(template_dir));
+  assert_true(lc_test_tmp_mkdtemp(template_dir, temp_dir, sizeof(temp_dir),
+                                  STREAMS_TMP_PREFIX));
   lc_error_cleanup(&error);
   lc_error_init(&error);
-  rc = lc_sink_to_file(template_dir, &sink, &error);
+  rc = lc_sink_to_file(temp_dir, &sink, &error);
   assert_int_equal(rc, LC_ERR_TRANSPORT);
   assert_int_equal(error.code, LC_ERR_TRANSPORT);
   assert_null(sink);
-  rmdir(template_dir);
+  lc_test_tmp_cleanup_path(temp_dir, STREAMS_TMP_PREFIX);
 
   lc_error_cleanup(&error);
 }
@@ -301,6 +367,7 @@ static void test_copy_rejects_null_endpoints(void **state) {
 }
 
 static void test_sink_memory_bytes_rejects_invalid_arguments(void **state) {
+  fake_sink public_sink;
   lc_sink *sink;
   lc_error error;
   const void *bytes;
@@ -312,9 +379,15 @@ static void test_sink_memory_bytes_rejects_invalid_arguments(void **state) {
   bytes = NULL;
   length = 0U;
   lc_error_init(&error);
+  memset(&public_sink, 0, sizeof(public_sink));
+  public_sink.pub.write = fake_sink_write;
+  public_sink.pub.close = fake_sink_close;
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
+  assert_false(lc_sink_is_discard(sink));
+  assert_false(lc_sink_is_discard(&public_sink.pub));
+  assert_false(lc_sink_is_discard(NULL));
 
   rc = lc_sink_memory_bytes(NULL, &bytes, &length, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
@@ -327,9 +400,60 @@ static void test_sink_memory_bytes_rejects_invalid_arguments(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_message_writes_single_pass_stream_payload(void **state) {
+  static const char payload[] = "stream payload";
+  lc_engine_dequeue_response delivery;
+  lc_stream_pipe *pipe;
+  lc_source *source;
+  lc_message *message;
+  lc_sink *sink;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  int rc;
+
+  (void)state;
+  pipe = NULL;
+  source = NULL;
+  message = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  memset(&delivery, 0, sizeof(delivery));
+  lc_error_init(&error);
+
+  rc = lc_stream_pipe_open(64U, NULL, &source, &pipe, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_stream_pipe_write(pipe, payload, sizeof(payload) - 1U, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_stream_pipe_finish(pipe);
+  pipe = NULL;
+
+  message = lc_message_new(NULL, &delivery, source, NULL);
+  assert_non_null(message);
+  source = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_message_write_payload(message, sink, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, sizeof(payload) - 1U);
+  assert_memory_equal(bytes, payload, sizeof(payload) - 1U);
+
+  rc = lc_message_rewind_payload(message, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+
+  lc_sink_close(sink);
+  lc_message_close(message);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_copy_memory_source_to_memory_sink),
+      cmocka_unit_test(test_copy_memory_source_to_discard_sink),
+      cmocka_unit_test(test_copy_clears_a_prior_error_on_clean_eof),
       cmocka_unit_test(test_copy_propagates_source_error_code),
       cmocka_unit_test(
           test_copy_returns_transport_when_sink_write_fails_without_error),
@@ -339,6 +463,7 @@ int main(void) {
       cmocka_unit_test(test_close_helpers_accept_null),
       cmocka_unit_test(test_copy_rejects_null_endpoints),
       cmocka_unit_test(test_sink_memory_bytes_rejects_invalid_arguments),
+      cmocka_unit_test(test_message_writes_single_pass_stream_payload),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

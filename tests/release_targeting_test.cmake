@@ -48,24 +48,27 @@ if(NOT matrix_result EQUAL 0)
         "stderr:\n${matrix_stderr}")
 endif()
 
-string(FIND "${matrix_stdout}" "bash ./scripts/run_linux_release_matrix.sh" old_matrix_match)
-if(NOT old_matrix_match EQUAL -1)
+string(FIND "${matrix_stdout}" "bash ./scripts/run_linux_release_matrix.sh" matrix_script_match)
+if(matrix_script_match EQUAL -1)
     message(FATAL_ERROR
-        "Did not expect __release-matrix to invoke the legacy release matrix script\n"
+        "Expected __release-matrix to invoke the standard release matrix script\n"
         "stdout:\n${matrix_stdout}\n"
         "stderr:\n${matrix_stderr}")
 endif()
 
+file(READ "${LOCKDC_ROOT}/scripts/run_linux_release_matrix.sh" matrix_script)
 foreach(expected_step
-    "make __test-host"
-    "bash ./scripts/cross_test.sh release"
-    "bash ./scripts/run_linux_package_matrix.sh"
+    "unset LD_LIBRARY_PATH"
+    "\"$make_bin\" __build-release"
+    "for preset in x86_64-linux-gnu-release x86_64-linux-musl-release"
+    "ctest --preset \"$preset\""
+    "-LE lifecycle-host"
+    "bash \"$script_dir/cross_test.sh\" release"
+    "bash \"$script_dir/run_linux_package_matrix.sh\""
 )
-    string(FIND "${matrix_stdout}" "${expected_step}" step_match)
+    string(FIND "${matrix_script}" "${expected_step}" step_match)
     if(step_match EQUAL -1)
         message(FATAL_ERROR
-            "Expected __release-matrix to include '${expected_step}'\n"
-            "stdout:\n${matrix_stdout}\n"
-            "stderr:\n${matrix_stderr}")
+            "Expected run_linux_release_matrix.sh to include '${expected_step}'")
     endif()
 endforeach()

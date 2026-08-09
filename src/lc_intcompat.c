@@ -103,6 +103,33 @@ int lc_i64_format_base10(lc_i64 value, char *buffer, size_t buffer_size) {
   return (int)count;
 }
 
+int lc_i64_format_base10_padded(lc_i64 value, size_t width, char *buffer,
+                                size_t buffer_size) {
+  char digits[32];
+  size_t digit_count;
+  size_t zero_count;
+  size_t prefix;
+  int formatted;
+
+  formatted = lc_i64_format_base10(value, digits, sizeof(digits));
+  if (formatted < 0 || buffer == NULL || buffer_size == 0U) {
+    return -1;
+  }
+  digit_count = (size_t)formatted;
+  zero_count = width > digit_count ? width - digit_count : 0U;
+  if (zero_count > buffer_size || digit_count > buffer_size - zero_count - 1U) {
+    return -1;
+  }
+  prefix = digits[0] == '-' ? 1U : 0U;
+  if (prefix != 0U) {
+    buffer[0] = '-';
+  }
+  memset(buffer + prefix, '0', zero_count);
+  memcpy(buffer + prefix + zero_count, digits + prefix,
+         digit_count - prefix + 1U);
+  return (int)(digit_count + zero_count);
+}
+
 int lc_u64_parse_base10(const char *text, lc_u64 *out_value) {
   const unsigned char *cursor;
   lc_u64 value;
@@ -137,6 +164,84 @@ int lc_u64_parse_base10(const char *text, lc_u64 *out_value) {
 
   *out_value = value;
   return 1;
+}
+
+int lc_u64_format_base10(lc_u64 value, char *buffer, size_t buffer_size) {
+  char scratch[32];
+  size_t count;
+  size_t i;
+
+  if (buffer == NULL || buffer_size == 0U) {
+    return -1;
+  }
+  count = 0U;
+  do {
+    scratch[count++] = (char)('0' + (value % 10U));
+    value /= 10U;
+  } while (value != 0U);
+  if (count + 1U > buffer_size) {
+    return -1;
+  }
+  for (i = 0U; i < count; ++i) {
+    buffer[i] = scratch[count - i - 1U];
+  }
+  buffer[count] = '\0';
+  return (int)count;
+}
+
+int lc_u64_format_base10_padded(lc_u64 value, size_t width, char *buffer,
+                                size_t buffer_size) {
+  char digits[32];
+  size_t digit_count;
+  size_t zero_count;
+  size_t i;
+  int formatted;
+
+  formatted = lc_u64_format_base10(value, digits, sizeof(digits));
+  if (formatted < 0 || buffer == NULL) {
+    return -1;
+  }
+  digit_count = (size_t)formatted;
+  zero_count = width > digit_count ? width - digit_count : 0U;
+  if (buffer_size == 0U || zero_count > buffer_size ||
+      digit_count > buffer_size - zero_count - 1U) {
+    return -1;
+  }
+  for (i = 0U; i < zero_count; ++i) {
+    buffer[i] = '0';
+  }
+  memcpy(buffer + zero_count, digits, digit_count + 1U);
+  return (int)(zero_count + digit_count);
+}
+
+int lc_u64_format_base16_padded(lc_u64 value, size_t width, char *buffer,
+                                size_t buffer_size) {
+  static const char digits[] = "0123456789abcdef";
+  char scratch[32];
+  size_t digit_count;
+  size_t zero_count;
+  size_t i;
+
+  if (buffer == NULL || buffer_size == 0U) {
+    return -1;
+  }
+  digit_count = 0U;
+  do {
+    scratch[digit_count++] = digits[(unsigned int)(value & 15U)];
+    value >>= 4U;
+  } while (value != 0U);
+  zero_count = width > digit_count ? width - digit_count : 0U;
+  if (zero_count > buffer_size || digit_count > buffer_size - zero_count - 1U) {
+    return -1;
+  }
+  for (i = 0U; i < zero_count; ++i) {
+    buffer[i] = '0';
+  }
+  for (i = 0U; i < digit_count; ++i) {
+    buffer[zero_count + i] = scratch[digit_count - i - 1U];
+  }
+  buffer[zero_count + digit_count] = '\0';
+  return (int)(zero_count + digit_count);
 }
 
 int lc_i64_to_long_checked(lc_i64 value, long *out_value) {
@@ -265,4 +370,30 @@ int lc_parse_ulong_base10_range_checked(const char *text, size_t length,
   }
   (void)parsed_length;
   return lc_parse_ulong_base10_checked(buffer, out_value);
+}
+
+int lc_parse_i64_base10_range_checked(const char *text, size_t length,
+                                      lc_i64 *out_value) {
+  char buffer[64];
+  size_t parsed_length;
+
+  if (!lc_parse_base10_copy(text, length, buffer, sizeof(buffer),
+                            &parsed_length)) {
+    return 0;
+  }
+  (void)parsed_length;
+  return lc_i64_parse_base10(buffer, out_value);
+}
+
+int lc_parse_u64_base10_range_checked(const char *text, size_t length,
+                                      lc_u64 *out_value) {
+  char buffer[64];
+  size_t parsed_length;
+
+  if (!lc_parse_base10_copy(text, length, buffer, sizeof(buffer),
+                            &parsed_length)) {
+    return 0;
+  }
+  (void)parsed_length;
+  return lc_u64_parse_base10(buffer, out_value);
 }

@@ -36,10 +36,16 @@ SDK root or make `lockdc.pc` visible to `pkg-config`.
 The generated rockspec expects:
 
 - package `lockdc`
-- `lonejson == 0.32.1-1`
+- `lonejson == 0.42.0-1`
 - Lua `>= 5.5, < 5.6`
 
-The C SDK is pinned to the matching `lonejson 0.32.1` native dependency for
+The lifecycle executes and packages only Lua 5.5. Each release includes the
+standalone `liblockdc-lua-<version>.tar.gz` source package, the rendered
+`lockdc-<version>-1.rockspec`, and the matching `.src.rock`. The source rock
+embeds that exact standalone archive; all three artifacts are checksum-listed
+and recursively privacy-scanned before release.
+
+The C SDK is pinned to the matching `lonejson 0.42.0` native dependency for
 mapped state load/save and internal typed JSON parsing. The Lua rock declares
 the corresponding Lua-facing `lonejson` rock so Lua JSON behavior and the C
 SDK JSON boundary stay in the same release line.
@@ -119,6 +125,30 @@ local client, err = lockdc.open({
 
 `client_bundle_path` remains available for compatibility, but new Lua code
 should prefer `client_bundle_source`.
+
+### Local Pouch storage
+
+Use exactly one absolute `pouch://` endpoint for local storage. Lua exposes the
+same Pouch client configuration fields as `lc_client_config`: `pouch_crypto_key`,
+`pouch_crypto_key_file`, `pouch_crypto_generate_key_file`, and
+`pouch_compression`. Explicit Lua configuration takes the same precedence over
+endpoint query options as the C client configuration.
+
+```lua
+local client, err = lockdc.open({
+  endpoints = { "pouch:///var/lib/my-service/lockd-root" },
+  default_namespace = "default",
+  pouch_crypto_key_file = "/var/lib/my-service/lockd-root/pouch.key",
+  pouch_crypto_generate_key_file = true,
+  pouch_compression = "zlib",
+})
+```
+
+The supported compression values are `"none"` and `"zlib"`. Pouch remains
+exclusive single-writer by default; opening another writer for the same root
+returns the normal structured `lockdc.open` error. Endpoint query options stay
+supported for compatibility, including `?single_writer=false` where shared
+writers are explicitly required.
 
 Common client methods:
 
@@ -294,6 +324,7 @@ Pedagogic examples live in:
 - `examples/lua/acquire_for_update.lua`
 - `examples/lua/queue_roundtrip.lua`
 - `examples/lua/namespace_config.lua`
+- `examples/lua/pouch_local_storage.lua`
 - `examples/lua/consumer_handler.lua`
 
 See also:

@@ -14,6 +14,7 @@
 #endif
 #include "lc/lc.h"
 #include "lc_engine_api.h"
+#include "lc_pouch.h"
 
 #include <pslog.h>
 #include <pthread.h>
@@ -31,6 +32,8 @@ typedef struct lc_consumer_service_handle lc_consumer_service_handle;
 struct lc_client_handle {
   lc_client pub;
   lc_engine_client *engine;
+  lc_pouch *pouch;
+  int is_pouch;
   char **endpoints;
   size_t endpoint_count;
   char *unix_socket_path;
@@ -43,10 +46,19 @@ struct lc_client_handle {
   int insecure_skip_verify;
   int prefer_http_2;
   size_t http_json_response_limit_bytes;
+  char *pouch_crypto_key;
+  char *pouch_crypto_key_file;
+  char *pouch_compression;
+  int pouch_crypto_generate_key_file;
+  int pouch_crypto_generate_key_file_set;
   int disable_logger_sys_field;
   pslog_logger *base_logger;
   pslog_logger *logger;
+  int owns_logger;
   lc_allocator allocator;
+  pthread_mutex_t lifecycle_mutex;
+  unsigned long refcount;
+  int lifecycle_mutex_initialized;
 };
 
 struct lc_lease_handle {
@@ -58,10 +70,16 @@ struct lc_lease_handle {
   char *lease_id;
   char *txn_id;
   long fencing_token;
-  long version;
-  long lease_expires_at_unix;
+  lc_version version;
+  lc_unix_seconds lease_expires_at_unix;
   char *state_etag;
   char *queue_state_etag;
+  char *pouch_state_key;
+  int pouch_txn_explicit;
+  int pouch_stage_active;
+  int pouch_stage_dirty;
+  char *pouch_stage_etag;
+  lc_version pouch_stage_version;
   int has_query_hidden;
   int query_hidden;
 };
@@ -75,12 +93,12 @@ struct lc_message_handle {
   int attempts;
   int max_attempts;
   int failure_attempts;
-  long not_visible_until_unix;
+  lc_unix_seconds not_visible_until_unix;
   long visibility_timeout_seconds;
   char *payload_content_type;
   char *correlation_id;
   char *lease_id;
-  long lease_expires_at_unix;
+  lc_unix_seconds lease_expires_at_unix;
   long fencing_token;
   char *txn_id;
   char *meta_etag;
@@ -90,9 +108,10 @@ struct lc_message_handle {
   lc_lease *state_lease;
   char *state_etag;
   char *state_lease_id;
-  long state_lease_expires_at_unix;
+  lc_unix_seconds state_lease_expires_at_unix;
   long state_fencing_token;
   char *state_txn_id;
+  int batch_owned;
 };
 
 typedef struct lc_write_bridge {
@@ -148,11 +167,16 @@ char *lc_strdup_with_allocator(const lc_allocator *allocator,
                                const char *value);
 char *lc_dup_bytes_with_allocator(const lc_allocator *allocator,
                                   const void *bytes, size_t length);
+void lc_secret_wipe(void *ptr, size_t length);
+void lc_secret_free_string_with_allocator(const lc_allocator *allocator,
+                                          char *value);
 void *lc_client_alloc(lc_client_handle *client, size_t size);
 void *lc_client_calloc(lc_client_handle *client, size_t count, size_t size);
 void *lc_client_realloc(lc_client_handle *client, void *ptr, size_t size);
 void lc_client_free(lc_client_handle *client, void *ptr);
 char *lc_client_strdup(lc_client_handle *client, const char *value);
+void *lc_calloc_local(size_t count, size_t size);
+void *lc_realloc_local(void *ptr, size_t size);
 char *lc_strdup_local(const char *value);
 char *lc_dup_bytes_as_text(const void *bytes, size_t length);
 void lc_attachment_info_copy(lc_attachment_info *dst,
@@ -162,6 +186,7 @@ size_t lc_engine_read_bridge(void *context, void *buffer, size_t count,
 int lc_engine_reset_bridge(void *context, lc_engine_error *error);
 int lc_engine_write_bridge(void *context, const void *bytes, size_t count,
                            lc_engine_error *error);
+int lc_sink_memory_reserve(lc_sink *sink, size_t capacity, lc_error *error);
 lc_source *lc_source_from_open_file(FILE *fp, int close_file);
 int lc_stream_pipe_open(size_t capacity, const lc_allocator *allocator,
                         lc_source **out, lc_stream_pipe **pipe,
@@ -170,16 +195,206 @@ int lc_stream_pipe_write(lc_stream_pipe *pipe, const void *bytes, size_t count,
                          lc_error *error);
 void lc_stream_pipe_finish(lc_stream_pipe *pipe);
 void lc_stream_pipe_fail(lc_stream_pipe *pipe, int code, const char *message);
+int lc_source_is_resettable(const lc_source *source);
+/* Returns the unread range for an SDK-owned memory source. This deliberately
+ * rejects callback, file, fd, and externally implemented sources so storage
+ * optimizations cannot turn a streaming call into hidden materialization. */
+int lc_source_memory_view(const lc_source *source,
+                          const unsigned char **bytes_out, size_t *length_out);
+void lc_source_memory_consume(lc_source *source);
 lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
                        const char *key, const char *owner, const char *lease_id,
-                       const char *txn_id, long fencing_token, long version,
-                       const char *state_etag, const char *queue_state_etag);
+                       const char *txn_id, long fencing_token,
+                       lc_version version, const char *state_etag,
+                       const char *queue_state_etag);
 lc_message *lc_message_new(lc_client_handle *client,
                            const lc_engine_dequeue_response *engine,
                            lc_source *payload, int *terminal_flag);
 
 int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                              lc_lease **out, lc_error *error);
+int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
+                                   lc_lease **out, lc_error *error);
+int lc_pouch_client_acquire_for_update_method(
+    lc_client *self, const lc_acquire_req *req,
+    lc_acquire_for_update_handler_fn handler, void *handler_context,
+    lc_error *error);
+int lc_pouch_client_describe_method(lc_client *self, const lc_describe_req *req,
+                                    lc_describe_res *out, lc_error *error);
+int lc_pouch_client_get_method(lc_client *self, const char *key,
+                               const lc_get_opts *opts, lc_sink *dst,
+                               lc_get_res *out, lc_error *error);
+int lc_pouch_client_load_method(lc_client *self, const char *key,
+                                const lonejson_map *map, void *dst,
+                                const lc_get_opts *opts, lc_get_res *out,
+                                lc_error *error);
+int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
+                                  lc_source *src, lc_update_res *out,
+                                  lc_error *error);
+int lc_pouch_client_mutate_method(lc_client *self, const lc_mutate_op *req,
+                                  lc_mutate_res *out, lc_error *error);
+int lc_pouch_client_metadata_method(lc_client *self, const lc_metadata_op *req,
+                                    lc_metadata_res *out, lc_error *error);
+int lc_pouch_client_remove_method(lc_client *self, const lc_remove_op *req,
+                                  lc_remove_res *out, lc_error *error);
+int lc_pouch_client_keepalive_method(lc_client *self,
+                                     const lc_keepalive_op *req,
+                                     lc_keepalive_res *out, lc_error *error);
+int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
+                                   lc_release_res *out, lc_error *error);
+int lc_pouch_client_attach_method(lc_client *self, const lc_attach_op *req,
+                                  lc_source *src, lc_attach_res *out,
+                                  lc_error *error);
+int lc_pouch_client_list_attachments_method(lc_client *self,
+                                            const lc_attachment_list_req *req,
+                                            lc_attachment_list *out,
+                                            lc_error *error);
+int lc_pouch_client_get_attachment_method(lc_client *self,
+                                          const lc_attachment_get_op *req,
+                                          lc_sink *dst,
+                                          lc_attachment_get_res *out,
+                                          lc_error *error);
+int lc_pouch_client_delete_attachment_method(lc_client *self,
+                                             const lc_attachment_delete_op *req,
+                                             int *deleted, lc_error *error);
+int lc_pouch_client_delete_all_attachments_method(
+    lc_client *self, const lc_attachment_delete_all_op *req, int *deleted_count,
+    lc_error *error);
+int lc_pouch_client_queue_stats_method(lc_client *self,
+                                       const lc_queue_stats_req *req,
+                                       lc_queue_stats_res *out,
+                                       lc_error *error);
+int lc_pouch_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
+                                     lc_ack_res *out, lc_error *error);
+int lc_pouch_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
+                                      lc_nack_res *out, lc_error *error);
+int lc_pouch_client_queue_extend_method(lc_client *self,
+                                        const lc_extend_op *req,
+                                        lc_extend_res *out, lc_error *error);
+int lc_pouch_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
+                                   lc_source *src, lc_enqueue_res *out,
+                                   lc_error *error);
+int lc_pouch_client_dequeue_method(lc_client *self, const lc_dequeue_req *req,
+                                   lc_message **out, lc_error *error);
+int lc_pouch_client_dequeue_with_state_method(lc_client *self,
+                                              const lc_dequeue_req *req,
+                                              lc_message **out,
+                                              lc_error *error);
+int lc_pouch_client_dequeue_batch_method(lc_client *self,
+                                         const lc_dequeue_req *req,
+                                         lc_dequeue_batch_res *out,
+                                         lc_error *error);
+int lc_pouch_client_subscribe_method(lc_client *self, const lc_dequeue_req *req,
+                                     const lc_consumer *consumer,
+                                     lc_error *error);
+int lc_pouch_client_subscribe_with_state_method(lc_client *self,
+                                                const lc_dequeue_req *req,
+                                                const lc_consumer *consumer,
+                                                lc_error *error);
+int lc_pouch_client_watch_queue_method(lc_client *self,
+                                       const lc_watch_queue_req *req,
+                                       const lc_watch_handler *handler,
+                                       lc_error *error);
+int lc_pouch_client_query_method(lc_client *self, const lc_query_req *req,
+                                 lc_sink *dst, lc_query_res *out,
+                                 lc_error *error);
+int lc_pouch_client_query_keys_method(lc_client *self, const lc_query_req *req,
+                                      const lc_query_key_handler *handler,
+                                      void *context, lc_query_res *out,
+                                      lc_error *error);
+int lc_pouch_client_get_namespace_config_method(
+    lc_client *self, const lc_namespace_config_req *req,
+    lc_namespace_config_res *out, lc_error *error);
+int lc_pouch_client_update_namespace_config_method(
+    lc_client *self, const lc_namespace_config_req *req,
+    lc_namespace_config_res *out, lc_error *error);
+int lc_pouch_client_flush_index_method(lc_client *self,
+                                       const lc_index_flush_req *req,
+                                       lc_index_flush_res *out,
+                                       lc_error *error);
+int lc_pouch_client_txn_replay_method(lc_client *self,
+                                      const lc_txn_replay_req *req,
+                                      lc_txn_replay_res *out, lc_error *error);
+int lc_pouch_client_txn_prepare_method(lc_client *self,
+                                       const lc_txn_decision_req *req,
+                                       lc_txn_decision_res *out,
+                                       lc_error *error);
+int lc_pouch_client_txn_commit_method(lc_client *self,
+                                      const lc_txn_decision_req *req,
+                                      lc_txn_decision_res *out,
+                                      lc_error *error);
+int lc_pouch_client_txn_rollback_method(lc_client *self,
+                                        const lc_txn_decision_req *req,
+                                        lc_txn_decision_res *out,
+                                        lc_error *error);
+int lc_pouch_client_recover_transactions(lc_client *self, lc_error *error);
+int lc_pouch_client_tc_lease_acquire_method(lc_client *self,
+                                            const lc_tc_lease_acquire_req *req,
+                                            lc_tc_lease_acquire_res *out,
+                                            lc_error *error);
+int lc_pouch_client_tc_lease_renew_method(lc_client *self,
+                                          const lc_tc_lease_renew_req *req,
+                                          lc_tc_lease_renew_res *out,
+                                          lc_error *error);
+int lc_pouch_client_tc_lease_release_method(lc_client *self,
+                                            const lc_tc_lease_release_req *req,
+                                            lc_tc_lease_release_res *out,
+                                            lc_error *error);
+int lc_pouch_client_tc_leader_method(lc_client *self, lc_tc_leader_res *out,
+                                     lc_error *error);
+int lc_pouch_client_tc_cluster_announce_method(
+    lc_client *self, const lc_tc_cluster_announce_req *req,
+    lc_tc_cluster_res *out, lc_error *error);
+int lc_pouch_client_tc_cluster_leave_method(lc_client *self,
+                                            lc_tc_cluster_res *out,
+                                            lc_error *error);
+int lc_pouch_client_tc_cluster_list_method(lc_client *self,
+                                           lc_tc_cluster_res *out,
+                                           lc_error *error);
+int lc_pouch_client_tc_rm_register_method(lc_client *self,
+                                          const lc_tc_rm_register_req *req,
+                                          lc_tc_rm_res *out, lc_error *error);
+int lc_pouch_client_tc_rm_unregister_method(lc_client *self,
+                                            const lc_tc_rm_unregister_req *req,
+                                            lc_tc_rm_res *out, lc_error *error);
+int lc_pouch_client_tc_rm_list_method(lc_client *self, lc_tc_rm_list_res *out,
+                                      lc_error *error);
+int lc_pouch_message_ack_method(lc_message *self, lc_error *error);
+int lc_pouch_message_nack_method(lc_message *self, const lc_nack_req *req,
+                                 lc_error *error);
+int lc_pouch_message_extend_method(lc_message *self, const lc_extend_req *req,
+                                   lc_error *error);
+int lc_pouch_lease_describe_method(lc_lease *self, lc_error *error);
+int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
+                              const lc_get_opts *opts, lc_get_res *out,
+                              lc_error *error);
+int lc_pouch_lease_update_method(lc_lease *self, lc_source *src,
+                                 const lc_update_opts *opts, lc_error *error);
+int lc_pouch_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
+                                   lc_error *error);
+int lc_pouch_lease_remove_method(lc_lease *self, const lc_remove_req *req,
+                                 lc_error *error);
+int lc_pouch_lease_keepalive_method(lc_lease *self, const lc_keepalive_req *req,
+                                    lc_error *error);
+int lc_pouch_lease_release_method(lc_lease *self, const lc_release_req *req,
+                                  lc_error *error);
+int lc_pouch_lease_attach_method(lc_lease *self, const lc_attach_req *req,
+                                 lc_source *src, lc_attach_res *out,
+                                 lc_error *error);
+int lc_pouch_lease_list_attachments_method(lc_lease *self,
+                                           lc_attachment_list *out,
+                                           lc_error *error);
+int lc_pouch_lease_get_attachment_method(lc_lease *self,
+                                         const lc_attachment_get_req *req,
+                                         lc_sink *dst,
+                                         lc_attachment_get_res *out,
+                                         lc_error *error);
+int lc_pouch_lease_delete_attachment_method(
+    lc_lease *self, const lc_attachment_selector *selector, int *deleted,
+    lc_error *error);
+int lc_pouch_lease_delete_all_attachments_method(lc_lease *self,
+                                                 int *deleted_count,
+                                                 lc_error *error);
 int lc_client_acquire_for_update_method(
     lc_client *self, const lc_acquire_req *req,
     lc_acquire_for_update_handler_fn handler, void *handler_context,
@@ -308,6 +523,7 @@ int lc_client_new_consumer_service_method(
 int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
                                  const lc_watch_handler *handler,
                                  lc_error *error);
+void lc_client_handle_retain(lc_client_handle *client);
 void lc_client_close_method(lc_client *self);
 
 int lc_lease_describe_method(lc_lease *self, lc_error *error);

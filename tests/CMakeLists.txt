@@ -17,6 +17,19 @@ if(LOCKDC_EXTERNAL_ROOT)
       -DLOCKDC_LONEJSON_ABI_VERSION=${LOCKDC_LONEJSON_ABI_VERSION}
       -P "${CMAKE_SOURCE_DIR}/tests/lonejson_dependency_interface_test.cmake"
   )
+  add_test(NAME liblql_dependency_interface
+    COMMAND "${CMAKE_COMMAND}"
+      -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+      -DLOCKDC_DEPENDENCY_BUILD_ROOT=${LOCKDC_DEPENDENCY_BUILD_ROOT}
+      -DLOCKDC_LIBLQL_VERSION=${LOCKDC_LIBLQL_VERSION}
+      -DLOCKDC_LIBLQL_ABI_VERSION=${LOCKDC_LIBLQL_ABI_VERSION}
+      -DLOCKDC_TARGET_ARCH=${LOCKDC_TARGET_ARCH}
+      -DLOCKDC_TARGET_OS=${LOCKDC_TARGET_OS}
+      -DLOCKDC_TARGET_LIBC=${LOCKDC_TARGET_LIBC}
+      -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+      -DLOCKDC_CROSSCOMPILING=${CMAKE_CROSSCOMPILING}
+      -P "${CMAKE_SOURCE_DIR}/tests/liblql_dependency_interface_test.cmake"
+  )
   add_test(NAME zlib_dependency_interface
     COMMAND "${CMAKE_COMMAND}"
       -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
@@ -36,10 +49,32 @@ add_test(NAME public_api_boundary
     -P "${CMAKE_SOURCE_DIR}/tests/public_api_boundary_test.cmake"
 )
 
-add_test(NAME release_target_clang_guard_test
+add_test(NAME example_receiver_style
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
-    -P "${CMAKE_SOURCE_DIR}/tests/release_target_clang_guard_test.cmake"
+    -P "${CMAKE_SOURCE_DIR}/tests/example_receiver_style_test.cmake"
+)
+
+add_test(NAME pouch_liblql_storage_boundary
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/pouch_liblql_storage_boundary_test.cmake"
+)
+
+add_test(NAME release_fuzz_targeting_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/release_fuzz_targeting_test.cmake"
+)
+
+add_test(NAME benchmark_go_timeout_contract_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/benchmark_go_timeout_contract_test.cmake"
+)
+set_tests_properties(benchmark_go_timeout_contract_test PROPERTIES
+  LABELS "unit;local;benchmark"
+  TIMEOUT 10
 )
 
 add_test(NAME lua_binding_source_layout_test
@@ -66,6 +101,69 @@ add_test(NAME release_targeting_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
     -P "${CMAKE_SOURCE_DIR}/tests/release_targeting_test.cmake"
+)
+
+add_test(NAME release_werror_contract_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/release_werror_contract_test.cmake"
+)
+set_tests_properties(release_werror_contract_test PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 10
+)
+
+add_test(NAME release_compile_werror_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -DLOCKDC_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+    -P "${CMAKE_SOURCE_DIR}/tests/release_compile_werror_test.cmake"
+)
+set_tests_properties(release_compile_werror_test PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 10
+)
+
+add_test(NAME release_privacy_recursive_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/release_privacy_recursive_test.cmake"
+)
+set_tests_properties(release_privacy_recursive_test PROPERTIES
+  LABELS "unit;local;packaging"
+  TIMEOUT 10
+)
+
+add_test(NAME darwin_macho_lifecycle_contract_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/darwin_macho_lifecycle_contract_test.cmake"
+)
+set_tests_properties(darwin_macho_lifecycle_contract_test PROPERTIES
+  LABELS "unit;local;packaging"
+  TIMEOUT 10
+)
+
+add_test(NAME bootlin_toolchain_contract_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/bootlin_toolchain_contract_test.cmake"
+)
+set_tests_properties(bootlin_toolchain_contract_test PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 10
+)
+
+add_test(NAME pouch_storage_allocator_contract_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/pouch_storage_allocator_contract_test.cmake"
+)
+set_tests_properties(pouch_storage_allocator_contract_test PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 10
 )
 
 add_test(NAME packaging_portability_source_test
@@ -106,7 +204,7 @@ if(lockdc_lua_test_sanitizer_flags MATCHES "(^|[ \t])-fsanitize=([^ \t,]+,)*addr
   endif()
 endif()
 
-find_program(LOCKDC_LUA_BIN NAMES lua lua5.5)
+find_program(LOCKDC_LUA_BIN NAMES lua5.5)
 if(LOCKDC_LUA_BIN)
   add_test(NAME lua_facade_unit_test
     COMMAND "${LOCKDC_LUA_BIN}" "${CMAKE_SOURCE_DIR}/tests/lua/test_lockdc_facade_unit.lua"
@@ -125,7 +223,7 @@ if(TARGET lockdc_lua_core AND LOCKDC_LUA_BIN AND NOT CMAKE_CROSSCOMPILING AND NO
   )
   if(UNIX AND NOT APPLE)
     list(APPEND lockdc_lua_core_smoke_env
-      "LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib"
+      "LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib"
     )
   endif()
   set_tests_properties(lua_binding_core_smoke_test PROPERTIES
@@ -134,6 +232,8 @@ if(TARGET lockdc_lua_core AND LOCKDC_LUA_BIN AND NOT CMAKE_CROSSCOMPILING AND NO
 endif()
 
 add_subdirectory(unit)
+add_subdirectory(integration)
 if(LOCKDC_BUILD_E2E_TESTS)
   add_subdirectory(e2e)
 endif()
+lc_apply_default_test_timeouts()

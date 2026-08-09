@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
+set -euo pipefail
 
-set -eu
-
-script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-repo_root="$(CDPATH= cd -- "$script_dir/.." && pwd)"
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+repo_root="$(CDPATH= cd -- "$script_dir/.." && pwd -P)"
 make_bin="${MAKE:-make}"
 dry_run="${LOCKDC_RELEASE_DRY_RUN:-0}"
-clang_bin="${LOCKDC_RELEASE_CLANG_BIN:-clang}"
+timed_bin="$repo_root/scripts/run_timed.sh"
 
 run_step() {
     step="$1"
@@ -16,28 +15,11 @@ run_step() {
         return 0
     fi
 
-    "$make_bin" "$step"
-}
-
-should_run_fuzz() {
-    if command -v "$clang_bin" >/dev/null 2>&1; then
-        return 0
-    fi
-    return 1
+    "$timed_bin" "release $step" "$make_bin" "$step"
 }
 
 cd "$repo_root"
 
+run_step __lifecycle-version-contract
 run_step __clean
-run_step __format
-run_step __test-debug
-run_step __test-host
-run_step __cross-test
-if should_run_fuzz; then
-    run_step __fuzz
-else
-    printf '[release] skipping __fuzz: clang not available (%s)\n' "$clang_bin"
-fi
-run_step __test-e2e
-run_step __benchmarks
-run_step __release-package-only
+run_step __release-pipeline

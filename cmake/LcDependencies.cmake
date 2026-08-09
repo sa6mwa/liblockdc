@@ -70,6 +70,13 @@ function(lc_configure_lonejson_package_root)
   set(lonejson_DIR "${lonejson_DIR}" PARENT_SCOPE)
 endfunction()
 
+function(lc_configure_liblql_package_root)
+  set(liblql_root "${LOCKDC_EXTERNAL_ROOT}/liblql/install")
+  lc_require_cpkt_config("liblql" "${liblql_root}/lib/cmake/liblql/liblqlConfig.cmake")
+  set(liblql_DIR "${liblql_root}/lib/cmake/liblql" CACHE PATH "liblql CMake package directory." FORCE)
+  set(liblql_DIR "${liblql_DIR}" PARENT_SCOPE)
+endfunction()
+
 function(lc_get_external_c_flags out_var)
   set(_flags "-O2 -DNDEBUG -g0")
   if(CMAKE_C_COMPILER_ID MATCHES "^(AppleClang|Clang|GNU)$")
@@ -170,8 +177,19 @@ endfunction()
 
 function(lc_add_lonejson)
   find_package(lonejson ${LOCKDC_LONEJSON_VERSION} CONFIG REQUIRED)
+  if(TARGET lonejson::lonejson_static)
+    set_target_properties(lonejson::lonejson_static PROPERTIES
+      INTERFACE_LINK_LIBRARIES lc::openssl_crypto_static
+    )
+  endif()
   lc_add_interface_alias(lc::lonejson_static lonejson::lonejson_static)
   lc_add_interface_alias(lc::lonejson_shared lonejson::lonejson)
+endfunction()
+
+function(lc_add_liblql)
+  find_package(liblql ${LOCKDC_LIBLQL_VERSION} CONFIG REQUIRED)
+  lc_add_interface_alias(lc::liblql_static liblql::lql_static)
+  lc_add_interface_alias(lc::liblql_shared liblql::lql_shared)
 endfunction()
 
 function(lc_add_cmocka)
@@ -187,8 +205,15 @@ function(lc_add_cmocka)
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
 
   if(LOCKDC_BUILD_DEPENDENCIES)
+    set(cmocka_archive_url "https://cmocka.org/files/2.0/cmocka-${LOCKDC_CMOCKA_VERSION}.tar.xz")
+    if(NOT LOCKDC_CMOCKA_ARCHIVE_PATH STREQUAL "")
+      if(NOT EXISTS "${LOCKDC_CMOCKA_ARCHIVE_PATH}")
+        message(FATAL_ERROR "configured cmocka archive does not exist: ${LOCKDC_CMOCKA_ARCHIVE_PATH}")
+      endif()
+      set(cmocka_archive_url "${LOCKDC_CMOCKA_ARCHIVE_PATH}")
+    endif()
     ExternalProject_Add(${project_name}
-      URL "https://cmocka.org/files/2.0/cmocka-${LOCKDC_CMOCKA_VERSION}.tar.xz"
+      URL "${cmocka_archive_url}"
       URL_HASH "SHA256=39f92f366bdf3f1a02af4da75b4a5c52df6c9f7e736c7d65de13283f9f0ef416"
       PREFIX "${prefix_dir}"
       DOWNLOAD_DIR "${LOCKDC_DOWNLOAD_ROOT}"
@@ -231,20 +256,20 @@ endfunction()
 function(lc_get_pslog_asset_info out_name out_hash)
   set(asset_name "libpslog-${LOCKDC_PSLOG_VERSION}-${LOCKDC_TARGET_ID}.tar.gz")
 
-  if(asset_name STREQUAL "libpslog-0.4.1-x86_64-linux-gnu.tar.gz")
-    set(asset_hash "91d2f93bc07bc66cf83d6a27a80cb6439c384d56bf84a2d11cd903215430d1d8")
-  elseif(asset_name STREQUAL "libpslog-0.4.1-x86_64-linux-musl.tar.gz")
-    set(asset_hash "b628d32f9207e5102c9a8ae3f7ad32ce36e61178c7db67e6aa4548eb9cae567d")
-  elseif(asset_name STREQUAL "libpslog-0.4.1-aarch64-linux-gnu.tar.gz")
-    set(asset_hash "d936ae9416f539c4f40aeaa023b9147cbd568bc87b7a3c3b091adfd217d935bb")
-  elseif(asset_name STREQUAL "libpslog-0.4.1-aarch64-linux-musl.tar.gz")
-    set(asset_hash "638725174cf39f3c5337fc6f118bc88c2a41d385a01be98170ff4bef3d57fcae")
-  elseif(asset_name STREQUAL "libpslog-0.4.1-armhf-linux-gnu.tar.gz")
-    set(asset_hash "bc8530a3773666deb6d551263c7dd59a64c92629fa56d1e89c278d637472f2dc")
-  elseif(asset_name STREQUAL "libpslog-0.4.1-armhf-linux-musl.tar.gz")
-    set(asset_hash "503d2bd882c053dc8f34dbfe718a328303a4973789bbb8fb37261e4822b3babe")
-  elseif(asset_name STREQUAL "libpslog-0.4.1-arm64-apple-darwin.tar.gz")
-    set(asset_hash "f8f4e18810ecad7278eb341fbfe7e3f9d85eb654891c4d08149f425f3a4c9b3d")
+  if(asset_name STREQUAL "libpslog-0.9.0-x86_64-linux-gnu.tar.gz")
+    set(asset_hash "7981ce7e60f6f1e144042e7a9192bb661472756ae34336fb0c2ed8316b31945f")
+  elseif(asset_name STREQUAL "libpslog-0.9.0-x86_64-linux-musl.tar.gz")
+    set(asset_hash "d05e59e8d88018a2e78e0941d2db211f3c08e4fd7539065ed2de79ce7e371055")
+  elseif(asset_name STREQUAL "libpslog-0.9.0-aarch64-linux-gnu.tar.gz")
+    set(asset_hash "38bb08ca6646cf186925a724b61fb534fa49ec0d5e77ca95953dd7a5b18f76e1")
+  elseif(asset_name STREQUAL "libpslog-0.9.0-aarch64-linux-musl.tar.gz")
+    set(asset_hash "fce3c4f95b317563427437313ef2eb1987dc43973b0b0bf5169763d0a2705f69")
+  elseif(asset_name STREQUAL "libpslog-0.9.0-armhf-linux-gnu.tar.gz")
+    set(asset_hash "eff69fe9223cd2ad56572ad6acd768b560ac3e863e379c65367ad6338dbfffef")
+  elseif(asset_name STREQUAL "libpslog-0.9.0-armhf-linux-musl.tar.gz")
+    set(asset_hash "19eeadacfb82b7eba4187b1fc405225bf85a8866ea81939e2eaa841a23d3785c")
+  elseif(asset_name STREQUAL "libpslog-0.9.0-arm64-apple-darwin.tar.gz")
+    set(asset_hash "ff5d2106bcbc5ea5bce8dfdbca54d21650f350e50fd214a4b52ac65b4f834073")
   else()
     message(FATAL_ERROR "Unsupported libpslog asset: ${asset_name}")
   endif()
@@ -267,8 +292,15 @@ function(lc_add_pslog)
   file(MAKE_DIRECTORY "${install_dir}/include" "${install_dir}/lib")
 
   if(LOCKDC_BUILD_DEPENDENCIES)
+    set(pslog_archive_url "https://github.com/sa6mwa/libpslog/releases/download/v${LOCKDC_PSLOG_VERSION}/${asset_name}")
+    if(NOT LOCKDC_PSLOG_ARCHIVE_PATH STREQUAL "")
+      if(NOT EXISTS "${LOCKDC_PSLOG_ARCHIVE_PATH}")
+        message(FATAL_ERROR "configured libpslog archive does not exist: ${LOCKDC_PSLOG_ARCHIVE_PATH}")
+      endif()
+      set(pslog_archive_url "${LOCKDC_PSLOG_ARCHIVE_PATH}")
+    endif()
     ExternalProject_Add(${project_name}
-      URL "https://github.com/sa6mwa/libpslog/releases/download/v${LOCKDC_PSLOG_VERSION}/${asset_name}"
+      URL "${pslog_archive_url}"
       URL_HASH "SHA256=${asset_hash}"
       DOWNLOAD_NAME "${asset_name}"
       PREFIX "${prefix_dir}"
@@ -326,6 +358,7 @@ function(lc_configure_dependencies)
   if(LOCKDC_BUILD_STATIC OR LOCKDC_BUILD_SHARED)
     lc_configure_cpkt_package_roots()
     lc_configure_lonejson_package_root()
+    lc_configure_liblql_package_root()
     lc_add_openssl()
   endif()
 
@@ -337,6 +370,7 @@ function(lc_configure_dependencies)
     lc_add_nghttp2()
     lc_add_curl()
     lc_add_lonejson()
+    lc_add_liblql()
   endif()
 
   if(LOCKDC_BUILD_TESTS)

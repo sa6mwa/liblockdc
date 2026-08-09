@@ -765,6 +765,13 @@ static int lcdc_open(lua_State *L) {
   lcdc_opt_boolean_field(L, 1, "prefer_http_2", &config.prefer_http_2);
   lcdc_opt_boolean_field(L, 1, "disable_logger_sys_field",
                          &config.disable_logger_sys_field);
+  config.pouch_crypto_key = lcdc_opt_string_field(L, 1, "pouch_crypto_key");
+  config.pouch_crypto_key_file =
+      lcdc_opt_string_field(L, 1, "pouch_crypto_key_file");
+  config.pouch_crypto_generate_key_file_set =
+      lcdc_opt_boolean_field(L, 1, "pouch_crypto_generate_key_file",
+                             &config.pouch_crypto_generate_key_file);
+  config.pouch_compression = lcdc_opt_string_field(L, 1, "pouch_compression");
   {
     long limit;
 
@@ -1639,7 +1646,12 @@ static int lcdc_client_query(lua_State *L) {
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
   req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
-  lcdc_require_string_field(L, 2, "selector_json", &req.selector_json);
+  req.selector_lql = lcdc_opt_string_field(L, 2, "selector_lql");
+  req.selector_json = lcdc_opt_string_field(L, 2, "selector_json");
+  if ((req.selector_lql == NULL || req.selector_lql[0] == '\0') &&
+      (req.selector_json == NULL || req.selector_json[0] == '\0')) {
+    return luaL_error(L, "query requires selector_lql or selector_json");
+  }
   lcdc_opt_integer_field(L, 2, "limit", &req.limit);
   req.cursor = lcdc_opt_string_field(L, 2, "cursor");
   req.fields_json = lcdc_opt_string_field(L, 2, "fields_json");
@@ -1696,6 +1708,7 @@ static int lcdc_client_get_namespace_config(lua_State *L) {
   lcdc_set_string_field(L, "namespace_name", res.namespace_name);
   lcdc_set_string_field(L, "preferred_engine", res.preferred_engine);
   lcdc_set_string_field(L, "fallback_engine", res.fallback_engine);
+  lcdc_set_string_field(L, "etag", res.etag);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_namespace_config_res_cleanup(&res);
   lc_error_cleanup(&error);
@@ -1717,6 +1730,7 @@ static int lcdc_client_update_namespace_config(lua_State *L) {
   lcdc_require_string_field(L, 2, "namespace_name", &req.namespace_name);
   req.preferred_engine = lcdc_opt_string_field(L, 2, "preferred_engine");
   req.fallback_engine = lcdc_opt_string_field(L, 2, "fallback_engine");
+  req.if_etag = lcdc_opt_string_field(L, 2, "if_etag");
   rc = lc_update_namespace_config(ud->client, &req, &res, &error);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
@@ -1727,6 +1741,7 @@ static int lcdc_client_update_namespace_config(lua_State *L) {
   lcdc_set_string_field(L, "namespace_name", res.namespace_name);
   lcdc_set_string_field(L, "preferred_engine", res.preferred_engine);
   lcdc_set_string_field(L, "fallback_engine", res.fallback_engine);
+  lcdc_set_string_field(L, "etag", res.etag);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_namespace_config_res_cleanup(&res);
   lc_error_cleanup(&error);

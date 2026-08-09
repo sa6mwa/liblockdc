@@ -1,15 +1,37 @@
+#include "../tests/support/lc_test_tmp.h"
 #include "lc/lc.h"
-#include "lc_mutate_stream.h"
+#include "lc_pouch.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
+
+#define BENCH_POUCH_TMP_PREFIX "/tmp/liblockdc-pouch-bench-"
 
 typedef struct bench_case {
   const char *name;
+  long default_iterations;
   int (*run)(long iterations);
 } bench_case;
+
+typedef struct bench_query_key_count {
+  size_t rows;
+} bench_query_key_count;
+
+typedef struct bench_pouch_query_case {
+  const char *selector_json;
+  const char *selector_lql;
+  const char *engine;
+  int documents;
+} bench_pouch_query_case;
+
+typedef struct bench_pouch_perf_fixture {
+  lc_client *client;
+  char *crypto_key;
+  char root[512];
+} bench_pouch_perf_fixture;
 
 static double bench_now_seconds(void) {
   struct timespec ts;
@@ -20,27 +42,9 @@ static double bench_now_seconds(void) {
   return (double)ts.tv_sec + ((double)ts.tv_nsec / 1000000000.0);
 }
 
-static int bench_mutate_open(void *context, const char *resolved_path,
-                             lc_source **out, lc_error *error) {
-  static const unsigned char binary_payload[] = {0x00, 0x01, 0x02, 0xff, 'a'};
-  const void *bytes;
-  size_t length;
-
-  (void)context;
-  bytes = (const void *)"stream-text";
-  length = strlen((const char *)bytes);
-  if (resolved_path != NULL && (strstr(resolved_path, ".bin") != NULL ||
-                                strstr(resolved_path, "base64") != NULL)) {
-    bytes = (const void *)binary_payload;
-    length = sizeof(binary_payload);
-  }
-  return lc_source_from_memory(bytes, length, out, error);
-}
-
 static int bench_stream_copy(long iterations) {
   static const char payload[] =
-      "{\"key\":\"orders/"
-      "42\",\"state\":{\"items\":[1,2,3],\"owner\":\"bench\"}}";
+      "{\"key\":\"orders/42\",\"state\":{\"items\":[1,2,3]}}";
   lc_error error;
   long i;
 
@@ -76,218 +80,1078 @@ static int bench_stream_copy(long iterations) {
   return 0;
 }
 
-static int bench_json_stream(long iterations) {
-  static const char json_payload[] =
-      "{\"items\":[{\"id\":1},{\"id\":2},{\"id\":3}],\"owner\":\"bench\"}";
-  unsigned char scratch[257];
-  lc_error error;
-  long i;
+static int bench_pouch_root_path(char *buffer, size_t buffer_size,
+                                 const char *suffix) {
+  char template_path[512];
+  int written;
 
-  lc_error_init(&error);
-  for (i = 0; i < iterations; ++i) {
-    lc_source *source;
-    size_t got;
-
-    source = NULL;
-    if (lc_source_from_memory(json_payload, sizeof(json_payload) - 1U, &source,
-                              &error) != LC_OK) {
-      lc_error_cleanup(&error);
-      return 1;
-    }
-    got = source->read(source, scratch, sizeof(scratch) - 1U, &error);
-    if (got >= sizeof(scratch)) {
-      got = sizeof(scratch) - 1U;
-    }
-    scratch[got] = '\0';
-    if (source->reset(source, &error) != LC_OK) {
-      lc_source_close(source);
-      lc_error_cleanup(&error);
-      return 1;
-    }
-    (void)source->read(source, scratch, 64U, &error);
-    lc_source_close(source);
-  }
-  lc_error_cleanup(&error);
-  return 0;
-}
-
-static int bench_mutate_parse(long iterations) {
-  static const char *exprs[] = {"/name=bench", "/counter=3",
-                                "textfile:/nested/value=payload.txt",
-                                "base64file:/blob=blob.bin"};
-  lc_mutation_parse_options options;
-  lc_file_value_resolver resolver;
-  lc_error error;
-  long i;
-
-  memset(&options, 0, sizeof(options));
-  memset(&resolver, 0, sizeof(resolver));
-  resolver.open = bench_mutate_open;
-  options.file_value_base_dir = "/virtual";
-  options.file_value_resolver = &resolver;
-  options.now.tv_sec = 1700000000;
-  options.now.tv_nsec = 123456789L;
-  options.has_now = 1;
-  lc_error_init(&error);
-
-  for (i = 0; i < iterations; ++i) {
-    lc_mutation_plan *plan;
-
-    plan = NULL;
-    if (lc_mutation_plan_build(exprs, sizeof(exprs) / sizeof(exprs[0]),
-                               &options, &plan, &error) != LC_OK) {
-      lc_error_cleanup(&error);
-      return 1;
-    }
-    lc_mutation_plan_close(plan);
-  }
-
-  lc_error_cleanup(&error);
-  return 0;
-}
-
-static int bench_mutate_apply(long iterations) {
-  static const char *exprs[] = {"/name=bench", "/counter=3",
-                                "textfile:/nested/value=payload.txt"};
-  static const char input_json[] =
-      "{\"counter\":1,\"nested\":{\"old\":\"value\"},\"name\":\"before\"}";
-  lc_mutation_parse_options options;
-  lc_file_value_resolver resolver;
-  lc_mutation_plan *plan;
-  lc_error error;
-  long i;
-
-  memset(&options, 0, sizeof(options));
-  memset(&resolver, 0, sizeof(resolver));
-  resolver.open = bench_mutate_open;
-  options.file_value_base_dir = "/virtual";
-  options.file_value_resolver = &resolver;
-  options.now.tv_sec = 1700000000;
-  options.now.tv_nsec = 123456789L;
-  options.has_now = 1;
-  plan = NULL;
-  lc_error_init(&error);
-
-  if (lc_mutation_plan_build(exprs, sizeof(exprs) / sizeof(exprs[0]), &options,
-                             &plan, &error) != LC_OK) {
-    lc_error_cleanup(&error);
+  written = snprintf(template_path, sizeof(template_path),
+                     BENCH_POUCH_TMP_PREFIX "%s-XXXXXX", suffix);
+  if (written < 0 || (size_t)written >= sizeof(template_path)) {
     return 1;
   }
+  return lc_test_tmp_mkdtemp(template_path, buffer, buffer_size,
+                             BENCH_POUCH_TMP_PREFIX)
+             ? 0
+             : 1;
+}
 
-  for (i = 0; i < iterations; ++i) {
-    FILE *input;
-    FILE *output;
+static void bench_pouch_cleanup_root(const char *root) {
+  lc_test_tmp_cleanup_path(root, BENCH_POUCH_TMP_PREFIX);
+}
 
-    input = tmpfile();
-    output = NULL;
-    if (input == NULL) {
-      lc_mutation_plan_close(plan);
-      lc_error_cleanup(&error);
-      return 1;
+static int bench_query_key_begin(void *context, lc_error *error) {
+  (void)context;
+  (void)error;
+  return 1;
+}
+
+static int bench_query_key_chunk(void *context, const char *bytes, size_t len,
+                                 lc_error *error) {
+  (void)context;
+  (void)bytes;
+  (void)len;
+  (void)error;
+  return 1;
+}
+
+static int bench_query_key_end(void *context, lc_error *error) {
+  bench_query_key_count *count;
+
+  (void)error;
+  count = (bench_query_key_count *)context;
+  count->rows++;
+  return 1;
+}
+
+static int bench_pouch_client_open(const char *root, lc_client **out,
+                                   lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+  char endpoint[640];
+
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  return lc_client_open(&config, out, error);
+}
+
+static int bench_env_enabled(const char *name) {
+  const char *value;
+
+  value = getenv(name);
+  return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0 &&
+         strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0;
+}
+
+static int bench_pouch_client_open_crypto(const char *root,
+                                          const char *crypto_key,
+                                          lc_client **out, lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+  char endpoint[640];
+
+  snprintf(endpoint, sizeof(endpoint), "pouch://%s", root);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "bench";
+  config.pouch_crypto_key = crypto_key;
+  return lc_client_open(&config, out, error);
+}
+
+static int bench_pouch_perf_fixture_open(bench_pouch_perf_fixture *fixture,
+                                         lc_error *error) {
+  int rc;
+
+  if (fixture == NULL) {
+    return 1;
+  }
+  memset(fixture, 0, sizeof(*fixture));
+  if (bench_pouch_root_path(fixture->root, sizeof(fixture->root), "perf") !=
+      0) {
+    return 1;
+  }
+  if (bench_env_enabled("LOCKDC_POUCH_PERF_CRYPTO")) {
+    rc = lc_pouch_crypto_generate_key_string(&fixture->crypto_key, error);
+    if (rc != LC_OK) {
+      return rc;
     }
-    if (fwrite(input_json, 1U, sizeof(input_json) - 1U, input) !=
-        sizeof(input_json) - 1U) {
-      fclose(input);
-      lc_mutation_plan_close(plan);
-      lc_error_cleanup(&error);
-      return 1;
+  }
+  return bench_pouch_client_open_crypto(fixture->root, fixture->crypto_key,
+                                        &fixture->client, error);
+}
+
+static void bench_pouch_perf_fixture_close(bench_pouch_perf_fixture *fixture) {
+  if (fixture == NULL) {
+    return;
+  }
+  if (fixture->client != NULL) {
+    fixture->client->close(fixture->client);
+  }
+  lc_pouch_crypto_key_string_free(fixture->crypto_key);
+  bench_pouch_cleanup_root(fixture->root);
+  memset(fixture, 0, sizeof(*fixture));
+}
+
+static char *bench_pouch_perf_document(long row, long generation,
+                                       long payload_bytes) {
+  const char *summary;
+  const char *description;
+  const char *stage;
+  const char *tier;
+  const char *risk;
+  size_t capacity;
+  size_t used;
+  char *json;
+  int written;
+
+  if (payload_bytes < 1024L) {
+    payload_bytes = 1024L;
+  }
+  capacity = (size_t)payload_bytes + 2048U;
+  json = (char *)malloc(capacity);
+  if (json == NULL) {
+    return NULL;
+  }
+  summary = row % 2L == 0L ? "remediation audit workflow timeout risk narrative"
+                           : "ordinary audit workflow context narrative";
+  description = row % 3L == 0L
+                    ? "audit evidence remediation plan with timeout handling"
+                    : "audit evidence review plan with normal handling";
+  stage = row % 5L == 0L ? "escalated" : "review";
+  tier = row % 4L == 0L ? "enterprise" : "standard";
+  risk = row % 7L == 0L ? "timeout pressure" : "routine pressure";
+  written =
+      snprintf(json, capacity,
+               "{\"tenant\":{\"id\":\"tenant-%03ld\",\"tier\":\"%s\"},"
+               "\"workflow\":{\"id\":\"wf-%03ld\",\"stage\":\"%s\","
+               "\"owner\":{\"team\":\"ops\",\"region\":\"%s\"}},"
+               "\"metrics\":{\"amount_usd\":%ld,\"risk_score\":%ld},"
+               "\"risk\":{\"summary\":\"%s\"},"
+               "\"narrative\":{\"summary\":\"%s row %ld generation %ld\","
+               "\"description\":\"%s row %ld generation %ld\"},"
+               "\"tags\":[\"audit\",\"finance\",\"planning\"],"
+               "\"created_at\":\"2026-01-01T00:00:00Z\",\"payload\":\"",
+               row % 17L, tier, row % 23L, stage, row % 3L == 0L ? "us" : "eu",
+               1000L + (row * 37L), row % 100L, risk, summary, row, generation,
+               description, row, generation);
+  if (written <= 0 || (size_t)written >= capacity) {
+    free(json);
+    return NULL;
+  }
+  used = (size_t)written;
+  while (used + 96U < capacity && (long)used < payload_bytes) {
+    written = snprintf(json + used, capacity - used,
+                       " audit remediation evidence workflow row %ld gen %ld;",
+                       row, generation);
+    if (written <= 0 || (size_t)written >= capacity - used) {
+      free(json);
+      return NULL;
     }
-    fflush(input);
-    rewind(input);
-    if (lc_mutation_plan_apply(plan, input, &output, &error) != LC_OK) {
-      if (output != NULL) {
-        fclose(output);
+    used += (size_t)written;
+  }
+  if (used + 3U >= capacity) {
+    free(json);
+    return NULL;
+  }
+  json[used++] = '"';
+  json[used++] = '}';
+  json[used] = '\0';
+  return json;
+}
+
+static int bench_pouch_seed_update(lc_client *client, const char *key,
+                                   lc_source *source, lc_error *error) {
+  lc_acquire_req acquire_req;
+  lc_lease *lease;
+  lc_release_req release_req;
+  lc_update_opts update_opts;
+  int rc;
+
+  if (client == NULL || key == NULL || source == NULL) {
+    return 1;
+  }
+  lease = NULL;
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  lc_update_opts_init(&update_opts);
+  acquire_req.namespace_name = "bench";
+  acquire_req.key = key;
+  acquire_req.owner = "lockdc-bench";
+  acquire_req.ttl_seconds = 30L;
+  update_opts.content_type = "application/json";
+  rc = client->acquire(client, &acquire_req, &lease, error);
+  if (rc == LC_OK) {
+    rc = lease->update(lease, source, &update_opts, error);
+  }
+  if (lease != NULL) {
+    if (rc == LC_OK) {
+      rc = lease->release(lease, &release_req, error);
+      if (rc == LC_OK) {
+        lease = NULL;
       }
-      fclose(input);
-      lc_mutation_plan_close(plan);
-      lc_error_cleanup(&error);
+    }
+    if (lease != NULL) {
+      lease->close(lease);
+    }
+  }
+  return rc;
+}
+
+static int bench_pouch_seed_perf_docs(lc_client *client, long rows,
+                                      long generation, long payload_bytes,
+                                      lc_error *error) {
+  long row;
+
+  for (row = 0L; row < rows; ++row) {
+    lc_source *source;
+    char key[64];
+    char *json;
+    int rc;
+
+    json = bench_pouch_perf_document(row, generation, payload_bytes);
+    if (json == NULL) {
       return 1;
     }
-    if (output != NULL) {
-      fclose(output);
+    source = NULL;
+    rc = lc_source_from_memory(json, strlen(json), &source, error);
+    if (rc == LC_OK) {
+      snprintf(key, sizeof(key), "doc/%08ld", row);
+      rc = bench_pouch_seed_update(client, key, source, error);
     }
-    fclose(input);
+    if (source != NULL) {
+      lc_source_close(source);
+    }
+    free(json);
+    if (rc != LC_OK) {
+      return rc;
+    }
   }
+  return LC_OK;
+}
 
-  lc_mutation_plan_close(plan);
+static int bench_pouch_perf_flush(lc_client *client, lc_error *error) {
+  lc_index_flush_req req;
+  lc_index_flush_res res;
+  int rc;
+
+  lc_index_flush_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.namespace_name = "bench";
+  req.mode = "wait";
+  rc = client->flush_index(client, &req, &res, error);
+  lc_index_flush_res_cleanup(&res);
+  return rc;
+}
+
+static int bench_pouch_perf_query(lc_client *client, const char *selector_lql,
+                                  const char *engine, int documents, long limit,
+                                  lc_error *error) {
+  lc_query_req req;
+  lc_query_res res;
+  int rc;
+
+  lc_query_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  req.namespace_name = "bench";
+  req.selector_lql = selector_lql;
+  req.engine = engine;
+  req.limit = limit > 0L ? limit : 1L;
+  if (documents) {
+    lc_sink *sink;
+
+    sink = NULL;
+    rc = lc_sink_to_discard(&sink, error);
+    if (rc == LC_OK) {
+      rc = client->query(client, &req, sink, &res, error);
+    }
+    if (sink != NULL) {
+      lc_sink_close(sink);
+    }
+  } else {
+    lc_query_key_handler handler;
+    bench_query_key_count key_count;
+
+    memset(&handler, 0, sizeof(handler));
+    memset(&key_count, 0, sizeof(key_count));
+    handler.begin = bench_query_key_begin;
+    handler.chunk = bench_query_key_chunk;
+    handler.end = bench_query_key_end;
+    rc = client->query_keys(client, &req, &handler, &key_count, &res, error);
+  }
+  lc_query_res_cleanup(&res);
+  return rc;
+}
+
+static long bench_pouch_perf_rows(long iterations) {
+  return iterations > 0L ? iterations : 128L;
+}
+
+static long bench_pouch_perf_payload_bytes(void) {
+  const char *value;
+  long parsed;
+
+  value = getenv("LOCKDC_POUCH_PERF_PAYLOAD_BYTES");
+  if (value == NULL || value[0] == '\0') {
+    return 4096L;
+  }
+  parsed = strtol(value, NULL, 10);
+  return parsed > 0L ? parsed : 4096L;
+}
+
+static int bench_pouch_perf_prepare(bench_pouch_perf_fixture *fixture,
+                                    long rows, long payload_bytes,
+                                    lc_error *error) {
+  int rc;
+
+  rc = bench_pouch_perf_fixture_open(fixture, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = bench_pouch_seed_perf_docs(fixture->client, rows, 0L, payload_bytes,
+                                  error);
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_flush(fixture->client, error);
+  }
+  return rc;
+}
+
+static int bench_pouch_perf_query_case(long iterations, const char *name,
+                                       const char *selector_lql,
+                                       const char *engine, int documents) {
+  bench_pouch_perf_fixture fixture;
+  lc_error error;
+  double start;
+  double elapsed;
+  long rows;
+  int rc;
+
+  lc_error_init(&error);
+  rows = bench_pouch_perf_rows(iterations);
+  memset(&fixture, 0, sizeof(fixture));
+  rc = bench_pouch_perf_prepare(&fixture, rows,
+                                bench_pouch_perf_payload_bytes(), &error);
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_query(fixture.client, selector_lql, engine, documents,
+                                rows, &error);
+  }
+  start = bench_now_seconds();
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_query(fixture.client, selector_lql, engine, documents,
+                                rows, &error);
+  }
+  elapsed = bench_now_seconds() - start;
+  printf("metric=%s rows=%ld crypto=%d seconds=%.6f per_row_us=%.3f rc=%d\n",
+         name, rows, bench_env_enabled("LOCKDC_POUCH_PERF_CRYPTO"), elapsed,
+         rows > 0L ? (elapsed * 1000000.0) / (double)rows : 0.0, rc);
+  bench_pouch_perf_fixture_close(&fixture);
   lc_error_cleanup(&error);
-  return 0;
+  return rc == LC_OK ? 0 : 1;
 }
 
-static int run_case(const bench_case *test_case, long iterations) {
-  double start_seconds;
-  double end_seconds;
-  double elapsed_seconds;
-  double ops_per_sec;
-  double ns_per_op;
-
-  start_seconds = bench_now_seconds();
-  if (test_case->run(iterations) != 0) {
-    return 1;
-  }
-  end_seconds = bench_now_seconds();
-  elapsed_seconds = end_seconds - start_seconds;
-  if (elapsed_seconds <= 0.0) {
-    elapsed_seconds = 0.000000001;
-  }
-
-  ops_per_sec = (double)iterations / elapsed_seconds;
-  ns_per_op = (elapsed_seconds * 1000000000.0) / (double)iterations;
-  printf("%-16s %12ld %14.2f %14.2f\n", test_case->name, iterations,
-         ops_per_sec, ns_per_op);
-  return 0;
+static int bench_pouch_perf_index_docs(long iterations) {
+  return bench_pouch_perf_query_case(
+      iterations, "pouch-perf-index-docs",
+      "icontains{field=/narrative/summary,value=remediation}", "index", 1);
 }
 
-static void print_usage(const char *argv0) {
-  fprintf(
-      stderr,
-      "usage: %s [iterations] [all|streams|json|mutate-parse|mutate-apply]\n",
-      argv0);
+static int bench_pouch_perf_full_text_keys(long iterations) {
+  return bench_pouch_perf_query_case(iterations, "pouch-perf-full-text-keys",
+                                     "icontains{field=/...,value=audit}",
+                                     "index", 0);
+}
+
+static int bench_pouch_perf_full_text_reopen_keys(long iterations) {
+  bench_pouch_perf_fixture fixture;
+  lc_error error;
+  double start;
+  double elapsed;
+  long rows;
+  int rc;
+
+  lc_error_init(&error);
+  rows = bench_pouch_perf_rows(iterations);
+  memset(&fixture, 0, sizeof(fixture));
+  rc = bench_pouch_perf_prepare(&fixture, rows,
+                                bench_pouch_perf_payload_bytes(), &error);
+  if (fixture.client != NULL) {
+    fixture.client->close(fixture.client);
+    fixture.client = NULL;
+  }
+  if (rc == LC_OK) {
+    rc = bench_pouch_client_open_crypto(fixture.root, fixture.crypto_key,
+                                        &fixture.client, &error);
+  }
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_flush(fixture.client, &error);
+  }
+  start = bench_now_seconds();
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_query(fixture.client,
+                                "icontains{field=/...,value=audit}", "index", 0,
+                                rows, &error);
+  }
+  elapsed = bench_now_seconds() - start;
+  printf("metric=pouch-perf-full-text-reopen-keys rows=%ld crypto=%d "
+         "seconds=%.6f per_row_us=%.3f rc=%d\n",
+         rows, bench_env_enabled("LOCKDC_POUCH_PERF_CRYPTO"), elapsed,
+         rows > 0L ? (elapsed * 1000000.0) / (double)rows : 0.0, rc);
+  bench_pouch_perf_fixture_close(&fixture);
+  lc_error_cleanup(&error);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_perf_scan_keys(long iterations) {
+  return bench_pouch_perf_query_case(
+      iterations, "pouch-perf-scan-keys",
+      "in{field=/workflow/stage,any=review|escalated}", "scan", 0);
+}
+
+static int bench_pouch_perf_flush_intermediate(long iterations) {
+  bench_pouch_perf_fixture fixture;
+  lc_error error;
+  double start;
+  double elapsed;
+  long rows;
+  int rc;
+
+  lc_error_init(&error);
+  rows = bench_pouch_perf_rows(iterations);
+  memset(&fixture, 0, sizeof(fixture));
+  rc = bench_pouch_perf_prepare(&fixture, rows,
+                                bench_pouch_perf_payload_bytes(), &error);
+  if (rc == LC_OK) {
+    rc = bench_pouch_seed_perf_docs(fixture.client, rows, 1L,
+                                    bench_pouch_perf_payload_bytes(), &error);
+  }
+  start = bench_now_seconds();
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_flush(fixture.client, &error);
+  }
+  elapsed = bench_now_seconds() - start;
+  printf("metric=pouch-perf-flush-intermediate rows=%ld crypto=%d "
+         "seconds=%.6f per_row_us=%.3f rc=%d\n",
+         rows, bench_env_enabled("LOCKDC_POUCH_PERF_CRYPTO"), elapsed,
+         rows > 0L ? (elapsed * 1000000.0) / (double)rows : 0.0, rc);
+  bench_pouch_perf_fixture_close(&fixture);
+  lc_error_cleanup(&error);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_perf_flush_reopen(long iterations) {
+  bench_pouch_perf_fixture fixture;
+  lc_error error;
+  double start;
+  double elapsed;
+  long rows;
+  int rc;
+
+  lc_error_init(&error);
+  rows = bench_pouch_perf_rows(iterations);
+  memset(&fixture, 0, sizeof(fixture));
+  rc = bench_pouch_perf_prepare(&fixture, rows,
+                                bench_pouch_perf_payload_bytes(), &error);
+  if (fixture.client != NULL) {
+    fixture.client->close(fixture.client);
+    fixture.client = NULL;
+  }
+  if (rc == LC_OK) {
+    rc = bench_pouch_client_open_crypto(fixture.root, fixture.crypto_key,
+                                        &fixture.client, &error);
+  }
+  start = bench_now_seconds();
+  if (rc == LC_OK) {
+    rc = bench_pouch_perf_flush(fixture.client, &error);
+  }
+  elapsed = bench_now_seconds() - start;
+  printf("metric=pouch-perf-flush-reopen rows=%ld crypto=%d seconds=%.6f "
+         "per_row_us=%.3f rc=%d\n",
+         rows, bench_env_enabled("LOCKDC_POUCH_PERF_CRYPTO"), elapsed,
+         rows > 0L ? (elapsed * 1000000.0) / (double)rows : 0.0, rc);
+  bench_pouch_perf_fixture_close(&fixture);
+  lc_error_cleanup(&error);
+  return rc == LC_OK ? 0 : 1;
+}
+
+static int bench_pouch_seed_query_docs(lc_client *client, long count,
+                                       lc_error *error) {
+  long i;
+
+  for (i = 0; i < count; ++i) {
+    lc_source *source;
+    char key[64];
+    const char *bucket;
+    const char *group;
+    const char *region;
+    const char *tag0;
+    const char *tag1;
+    const char *created_at;
+    const char *message;
+    const char *flag;
+    char json[512];
+    int match;
+    int written;
+    int rc;
+
+    match = (i % 2L) == 0L;
+    bucket = i % 64L == 0L ? "needle" : "haystack";
+    group = match ? "even" : "odd";
+    if (i % 3L == 0L) {
+      region = "us";
+    } else if (i % 3L == 1L) {
+      region = "eu";
+    } else {
+      region = "apac";
+    }
+    tag0 = match ? "planning" : "runtime";
+    tag1 = i % 4L == 0L ? "finance" : "ops";
+    if (i % 5L == 0L) {
+      created_at = "2026-01-01T00:00:00Z";
+    } else if (i % 5L == 1L) {
+      created_at = "not-a-date";
+    } else {
+      created_at = "2024-01-01T00:00:00Z";
+    }
+    message = i % 8L == 0L ? "timeout" : "ordinary";
+    flag = i % 7L == 0L ? "true" : "false";
+    snprintf(key, sizeof(key), "doc/%08ld", i);
+    written = snprintf(
+        json, sizeof(json),
+        "{\"n\":%ld,\"owner\":\"%s\",\"bucket\":\"%s\",\"group\":\"%s\","
+        "\"region\":\"%s\",\"value\":%ld,\"tags\":[\"%s\",\"%s\"],"
+        "\"created_at\":\"%s\",\"details\":{\"message\":\"%s benchmark "
+        "document %ld\"},\"flag\":%s}",
+        i, match ? "alpha" : "beta", bucket, group, region, i, tag0, tag1,
+        created_at, message, i, flag);
+    if (written <= 0 || (size_t)written >= sizeof(json)) {
+      return 1;
+    }
+    source = NULL;
+    rc = lc_source_from_memory(json, strlen(json), &source, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    rc = bench_pouch_seed_update(client, key, source, error);
+    lc_source_close(source);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  return LC_OK;
+}
+
+static int bench_pouch_query_once(lc_client *client,
+                                  const bench_pouch_query_case *query_case,
+                                  long count, lc_error *error) {
+  lc_query_req req;
+  lc_query_res res;
+  int rc;
+
+  memset(&res, 0, sizeof(res));
+  lc_query_req_init(&req);
+  req.namespace_name = "bench";
+  req.selector_json = query_case->selector_json;
+  req.selector_lql = query_case->selector_lql;
+  req.engine = query_case->engine;
+  req.limit = count > 0L ? count : 1L;
+  if (query_case->documents) {
+    lc_sink *sink;
+
+    sink = NULL;
+    rc = lc_sink_to_memory(&sink, error);
+    if (rc == LC_OK) {
+      rc = client->query(client, &req, sink, &res, error);
+    }
+    if (sink != NULL) {
+      lc_sink_close(sink);
+    }
+  } else {
+    lc_query_key_handler handler;
+    bench_query_key_count key_count;
+
+    memset(&handler, 0, sizeof(handler));
+    memset(&key_count, 0, sizeof(key_count));
+    handler.begin = bench_query_key_begin;
+    handler.chunk = bench_query_key_chunk;
+    handler.end = bench_query_key_end;
+    rc = client->query_keys(client, &req, &handler, &key_count, &res, error);
+  }
+  lc_query_res_cleanup(&res);
+  return rc;
+}
+
+static int bench_pouch_query_text(long iterations,
+                                  const bench_pouch_query_case *query_case) {
+  lc_client *client;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  lc_error_init(&error);
+  client = NULL;
+  root[0] = '\0';
+  rc = 0;
+  if (iterations <= 0L) {
+    iterations = 1L;
+  }
+  if (bench_pouch_root_path(root, sizeof(root), "query-text") != 0) {
+    rc = 1;
+    goto done;
+  }
+  if (bench_pouch_client_open(root, &client, &error) != LC_OK) {
+    rc = 1;
+    goto done;
+  }
+  if (bench_pouch_seed_query_docs(client, iterations, &error) != LC_OK) {
+    rc = 1;
+    goto done;
+  }
+  if (bench_pouch_query_once(client, query_case, iterations, &error) != LC_OK) {
+    rc = 1;
+    goto done;
+  }
+
+done:
+  if (client != NULL) {
+    client->close(client);
+  }
+  bench_pouch_cleanup_root(root);
+  lc_error_cleanup(&error);
+  return rc;
+}
+
+static int bench_pouch_open(long iterations) {
+  lc_error error;
+  char root[512];
+  long i;
+  int rc;
+
+  lc_error_init(&error);
+  root[0] = '\0';
+  rc = 0;
+  if (bench_pouch_root_path(root, sizeof(root), "open") != 0) {
+    rc = 1;
+    goto done;
+  }
+  for (i = 0; i < iterations; ++i) {
+    lc_pouch *pouch;
+
+    pouch = NULL;
+    if (lc_pouch_open(root, NULL, NULL, &pouch, &error) != LC_OK) {
+      rc = 1;
+      goto done;
+    }
+    lc_pouch_close(pouch);
+  }
+
+done:
+  bench_pouch_cleanup_root(root);
+  lc_error_cleanup(&error);
+  return rc;
+}
+
+static int bench_pouch_namespace(long iterations) {
+  lc_error error;
+  lc_pouch *pouch;
+  char root[512];
+  long i;
+  int rc;
+
+  lc_error_init(&error);
+  pouch = NULL;
+  root[0] = '\0';
+  rc = 0;
+  if (bench_pouch_root_path(root, sizeof(root), "namespace") != 0) {
+    rc = 1;
+    goto done;
+  }
+  if (lc_pouch_open(root, NULL, NULL, &pouch, &error) != LC_OK) {
+    rc = 1;
+    goto done;
+  }
+  for (i = 0; i < iterations; ++i) {
+    char namespace_name[64];
+
+    snprintf(namespace_name, sizeof(namespace_name), "bench/%ld", i);
+    if (lc_pouch_ensure_namespace(pouch, namespace_name, &error) != LC_OK) {
+      rc = 1;
+      goto done;
+    }
+  }
+
+done:
+  if (pouch != NULL) {
+    lc_pouch_close(pouch);
+  }
+  bench_pouch_cleanup_root(root);
+  lc_error_cleanup(&error);
+  return rc;
+}
+
+static int bench_pouch_query_iprefix_index_keys(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", NULL, "index",
+      0};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_iprefix_scan_keys(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", NULL, "scan",
+      0};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_iprefix_index_documents(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", NULL, "index",
+      1};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_iprefix_scan_documents(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"iprefix\":{\"field\":\"/tags[]\",\"value\":\"FIN\"}}", NULL, "scan",
+      1};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_icontains_index_keys(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}", NULL,
+      "index", 0};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_icontains_scan_keys(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}", NULL, "scan",
+      0};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_icontains_index_documents(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}", NULL,
+      "index", 1};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_icontains_scan_documents(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"icontains\":{\"field\":\"/tags[]\",\"value\":\"INA\"}}", NULL, "scan",
+      1};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_recursive_exists_index_keys(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"exists\":\"/details/**\"}", NULL, "index", 0};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_recursive_exists_scan_keys(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"exists\":\"/details/**\"}", NULL, "scan", 0};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_recursive_exists_index_documents(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"exists\":\"/details/**\"}", NULL, "index", 1};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+static int bench_pouch_query_recursive_exists_scan_documents(long iterations) {
+  static const bench_pouch_query_case query_case = {
+      "{\"exists\":\"/details/**\"}", NULL, "scan", 1};
+
+  return bench_pouch_query_text(iterations, &query_case);
+}
+
+#define BENCH_POUCH_LQL_FUNC(function_name, selector_text, engine_text,        \
+                             documents_value)                                  \
+  static int function_name(long iterations) {                                  \
+    static const bench_pouch_query_case query_case = {                         \
+        NULL, selector_text, engine_text, documents_value};                    \
+                                                                               \
+    return bench_pouch_query_text(iterations, &query_case);                    \
+  }
+
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_sparse_index_keys,
+                     "eq{field=/bucket,value=needle}", "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_sparse_scan_keys,
+                     "eq{field=/bucket,value=needle}", "scan", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_sparse_index_documents,
+                     "eq{field=/bucket,value=needle}", "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_sparse_scan_documents,
+                     "eq{field=/bucket,value=needle}", "scan", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_dense_index_keys,
+                     "eq{field=/group,value=even}", "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_dense_scan_keys,
+                     "eq{field=/group,value=even}", "scan", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_dense_index_documents,
+                     "eq{field=/group,value=even}", "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_eq_dense_scan_documents,
+                     "eq{field=/group,value=even}", "scan", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_range_half_index_keys,
+                     "range{field=/value,gte=0}", "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_range_half_scan_keys,
+                     "range{field=/value,gte=0}", "scan", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_range_half_index_documents,
+                     "range{field=/value,gte=0}", "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_range_half_scan_documents,
+                     "range{field=/value,gte=0}", "scan", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_region_single_index_keys,
+                     "in{field=/region,any=us}", "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_region_single_scan_keys,
+                     "in{field=/region,any=us}", "scan", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_region_single_index_documents,
+                     "in{field=/region,any=us}", "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_region_single_scan_documents,
+                     "in{field=/region,any=us}", "scan", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_tags_index_keys,
+                     "in{field=/tags[],any=planning|finance}", "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_tags_scan_keys,
+                     "in{field=/tags[],any=planning|finance}", "scan", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_tags_index_documents,
+                     "in{field=/tags[],any=planning|finance}", "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_in_tags_scan_documents,
+                     "in{field=/tags[],any=planning|finance}", "scan", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_contains_message_index_keys,
+                     "contains{field=/details/message,value=timeout}", "index",
+                     0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_contains_message_scan_keys,
+                     "contains{field=/details/message,value=timeout}", "scan",
+                     0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_contains_message_index_documents,
+                     "contains{field=/details/message,value=timeout}", "index",
+                     1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_contains_message_scan_documents,
+                     "contains{field=/details/message,value=timeout}", "scan",
+                     1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_date_after_index_keys,
+                     "date{field=/created_at,after=2025-01-01T00:00:00Z}",
+                     "index", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_date_after_scan_keys,
+                     "date{field=/created_at,after=2025-01-01T00:00:00Z}",
+                     "scan", 0)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_date_after_index_documents,
+                     "date{field=/created_at,after=2025-01-01T00:00:00Z}",
+                     "index", 1)
+BENCH_POUCH_LQL_FUNC(bench_pouch_query_date_after_scan_documents,
+                     "date{field=/created_at,after=2025-01-01T00:00:00Z}",
+                     "scan", 1)
+BENCH_POUCH_LQL_FUNC(
+    bench_pouch_query_or_sparse_or_flag_index_keys,
+    "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}", "index",
+    0)
+BENCH_POUCH_LQL_FUNC(
+    bench_pouch_query_or_sparse_or_flag_scan_keys,
+    "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}", "scan",
+    0)
+BENCH_POUCH_LQL_FUNC(
+    bench_pouch_query_or_sparse_or_flag_index_documents,
+    "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}", "index",
+    1)
+BENCH_POUCH_LQL_FUNC(
+    bench_pouch_query_or_sparse_or_flag_scan_documents,
+    "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}", "scan",
+    1)
+
+static const bench_case *bench_cases(void) {
+  static const bench_case cases[] = {
+      {"stream-copy", 1000L, bench_stream_copy},
+      {"pouch-open", 1000L, bench_pouch_open},
+      {"pouch-namespace", 1000L, bench_pouch_namespace},
+      {"pouch-perf-index-docs", 128L, bench_pouch_perf_index_docs},
+      {"pouch-perf-full-text-keys", 128L, bench_pouch_perf_full_text_keys},
+      {"pouch-perf-full-text-reopen-keys", 128L,
+       bench_pouch_perf_full_text_reopen_keys},
+      {"pouch-perf-scan-keys", 128L, bench_pouch_perf_scan_keys},
+      {"pouch-perf-flush-intermediate", 128L,
+       bench_pouch_perf_flush_intermediate},
+      {"pouch-perf-flush-reopen", 128L, bench_pouch_perf_flush_reopen},
+      {"pouch-query-eq-sparse-index-keys", 1024L,
+       bench_pouch_query_eq_sparse_index_keys},
+      {"pouch-query-eq-sparse-scan-keys", 1024L,
+       bench_pouch_query_eq_sparse_scan_keys},
+      {"pouch-query-eq-sparse-index-documents", 1024L,
+       bench_pouch_query_eq_sparse_index_documents},
+      {"pouch-query-eq-sparse-scan-documents", 1024L,
+       bench_pouch_query_eq_sparse_scan_documents},
+      {"pouch-query-eq-dense-index-keys", 1024L,
+       bench_pouch_query_eq_dense_index_keys},
+      {"pouch-query-eq-dense-scan-keys", 1024L,
+       bench_pouch_query_eq_dense_scan_keys},
+      {"pouch-query-eq-dense-index-documents", 1024L,
+       bench_pouch_query_eq_dense_index_documents},
+      {"pouch-query-eq-dense-scan-documents", 1024L,
+       bench_pouch_query_eq_dense_scan_documents},
+      {"pouch-query-range-half-index-keys", 1024L,
+       bench_pouch_query_range_half_index_keys},
+      {"pouch-query-range-half-scan-keys", 1024L,
+       bench_pouch_query_range_half_scan_keys},
+      {"pouch-query-range-half-index-documents", 1024L,
+       bench_pouch_query_range_half_index_documents},
+      {"pouch-query-range-half-scan-documents", 1024L,
+       bench_pouch_query_range_half_scan_documents},
+      {"pouch-query-in-region-single-index-keys", 1024L,
+       bench_pouch_query_in_region_single_index_keys},
+      {"pouch-query-in-region-single-scan-keys", 1024L,
+       bench_pouch_query_in_region_single_scan_keys},
+      {"pouch-query-in-region-single-index-documents", 1024L,
+       bench_pouch_query_in_region_single_index_documents},
+      {"pouch-query-in-region-single-scan-documents", 1024L,
+       bench_pouch_query_in_region_single_scan_documents},
+      {"pouch-query-in-tags-index-keys", 1024L,
+       bench_pouch_query_in_tags_index_keys},
+      {"pouch-query-in-tags-scan-keys", 1024L,
+       bench_pouch_query_in_tags_scan_keys},
+      {"pouch-query-in-tags-index-documents", 1024L,
+       bench_pouch_query_in_tags_index_documents},
+      {"pouch-query-in-tags-scan-documents", 1024L,
+       bench_pouch_query_in_tags_scan_documents},
+      {"pouch-query-contains-message-index-keys", 1024L,
+       bench_pouch_query_contains_message_index_keys},
+      {"pouch-query-contains-message-scan-keys", 1024L,
+       bench_pouch_query_contains_message_scan_keys},
+      {"pouch-query-contains-message-index-documents", 1024L,
+       bench_pouch_query_contains_message_index_documents},
+      {"pouch-query-contains-message-scan-documents", 1024L,
+       bench_pouch_query_contains_message_scan_documents},
+      {"pouch-query-date-after-index-keys", 1024L,
+       bench_pouch_query_date_after_index_keys},
+      {"pouch-query-date-after-scan-keys", 1024L,
+       bench_pouch_query_date_after_scan_keys},
+      {"pouch-query-date-after-index-documents", 1024L,
+       bench_pouch_query_date_after_index_documents},
+      {"pouch-query-date-after-scan-documents", 1024L,
+       bench_pouch_query_date_after_scan_documents},
+      {"pouch-query-or-sparse-or-flag-index-keys", 1024L,
+       bench_pouch_query_or_sparse_or_flag_index_keys},
+      {"pouch-query-or-sparse-or-flag-scan-keys", 1024L,
+       bench_pouch_query_or_sparse_or_flag_scan_keys},
+      {"pouch-query-or-sparse-or-flag-index-documents", 1024L,
+       bench_pouch_query_or_sparse_or_flag_index_documents},
+      {"pouch-query-or-sparse-or-flag-scan-documents", 1024L,
+       bench_pouch_query_or_sparse_or_flag_scan_documents},
+      {"pouch-query-iprefix-index-keys", 1024L,
+       bench_pouch_query_iprefix_index_keys},
+      {"pouch-query-iprefix-scan-keys", 1024L,
+       bench_pouch_query_iprefix_scan_keys},
+      {"pouch-query-iprefix-index-documents", 1024L,
+       bench_pouch_query_iprefix_index_documents},
+      {"pouch-query-iprefix-scan-documents", 1024L,
+       bench_pouch_query_iprefix_scan_documents},
+      {"pouch-query-icontains-index-keys", 1024L,
+       bench_pouch_query_icontains_index_keys},
+      {"pouch-query-icontains-scan-keys", 1024L,
+       bench_pouch_query_icontains_scan_keys},
+      {"pouch-query-icontains-index-documents", 1024L,
+       bench_pouch_query_icontains_index_documents},
+      {"pouch-query-icontains-scan-documents", 1024L,
+       bench_pouch_query_icontains_scan_documents},
+      {"pouch-query-recursive-exists-index-keys", 1024L,
+       bench_pouch_query_recursive_exists_index_keys},
+      {"pouch-query-recursive-exists-scan-keys", 1024L,
+       bench_pouch_query_recursive_exists_scan_keys},
+      {"pouch-query-recursive-exists-index-documents", 1024L,
+       bench_pouch_query_recursive_exists_index_documents},
+      {"pouch-query-recursive-exists-scan-documents", 1024L,
+       bench_pouch_query_recursive_exists_scan_documents},
+      {NULL, 0L, NULL}};
+
+  return cases;
+}
+
+static void bench_usage(const char *argv0) {
+  const bench_case *bench;
+
+  fprintf(stderr, "usage: %s [iterations] [all", argv0);
+  for (bench = bench_cases(); bench->name != NULL; ++bench) {
+    fprintf(stderr, "|%s", bench->name);
+  }
+  fprintf(stderr, "]\n");
+}
+
+static const bench_case *bench_find(const char *name) {
+  const bench_case *bench;
+
+  for (bench = bench_cases(); bench->name != NULL; ++bench) {
+    if (strcmp(bench->name, name) == 0) {
+      return bench;
+    }
+  }
+  return NULL;
+}
+
+static int bench_run_one(const bench_case *bench, long iterations) {
+  double start;
+  double elapsed;
+  int rc;
+
+  start = bench_now_seconds();
+  rc = bench->run(iterations);
+  elapsed = bench_now_seconds() - start;
+  printf("%s iterations=%ld seconds=%.6f per_op_us=%.3f rc=%d\n", bench->name,
+         iterations, elapsed,
+         iterations > 0L ? (elapsed * 1000000.0) / (double)iterations : 0.0,
+         rc);
+  return rc;
 }
 
 int main(int argc, char **argv) {
-  static const bench_case bench_cases[] = {
-      {"streams", bench_stream_copy},
-      {"json", bench_json_stream},
-      {"mutate-parse", bench_mutate_parse},
-      {"mutate-apply", bench_mutate_apply}};
-  const char *scenario;
+  const bench_case *bench;
   long iterations;
-  size_t i;
-  int ran;
+  const char *name;
+  int failed;
 
-  iterations = 200000L;
-  scenario = "all";
-  if (argc >= 2) {
-    iterations = strtol(argv[1], NULL, 10);
+  if (argc > 1 &&
+      (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0)) {
+    bench_usage(argv[0]);
+    return 0;
   }
-  if (argc >= 3) {
-    scenario = argv[2];
-  }
-  if (iterations <= 0L) {
-    print_usage(argv[0]);
-    return 2;
-  }
+  iterations = argc > 1 ? strtol(argv[1], NULL, 10) : 0L;
+  name = argc > 2 ? argv[2] : "all";
+  failed = 0;
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-pouch-bench-",
+                            BENCH_POUCH_TMP_PREFIX);
 
-  printf("%-16s %12s %14s %14s\n", "benchmark", "iterations", "ops/sec",
-         "ns/op");
+  if (strcmp(name, "all") == 0) {
+    for (bench = bench_cases(); bench->name != NULL; ++bench) {
+      long selected_iterations;
 
-  ran = 0;
-  for (i = 0U; i < sizeof(bench_cases) / sizeof(bench_cases[0]); ++i) {
-    if (strcmp(scenario, "all") != 0 &&
-        strcmp(scenario, bench_cases[i].name) != 0) {
-      continue;
+      selected_iterations =
+          iterations > 0L ? iterations : bench->default_iterations;
+      if (bench_run_one(bench, selected_iterations) != 0) {
+        failed = 1;
+      }
     }
-    ran = 1;
-    if (run_case(&bench_cases[i], iterations) != 0) {
-      return 1;
-    }
+    return failed ? 1 : 0;
   }
 
-  if (!ran) {
-    print_usage(argv[0]);
-    return 2;
+  bench = bench_find(name);
+  if (bench == NULL) {
+    bench_usage(argv[0]);
+    return 1;
   }
-
-  return 0;
+  return bench_run_one(bench, iterations > 0L ? iterations
+                                              : bench->default_iterations);
 }

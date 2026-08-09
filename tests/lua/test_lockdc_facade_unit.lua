@@ -152,6 +152,33 @@ local function test_request_flattening_and_default_content_type()
   client:close()
 end
 
+local function test_pouch_open_config_passthrough()
+  local captured = {}
+  local client_core = {
+    close = function() end,
+  }
+
+  core_stub.open = function(config)
+    captured.config = config
+    return client_core
+  end
+
+  local client = assert(lockdc.open({
+    endpoints = { 'pouch:///var/lib/lockdc-lua-unit' },
+    pouch_crypto_key = 'lc-pouch-key-v1:test-key',
+    pouch_crypto_key_file = '/var/lib/lockdc-lua-unit/root.key',
+    pouch_crypto_generate_key_file = true,
+    pouch_compression = 'zlib',
+  }))
+
+  assert_eq(captured.config.endpoints[1], 'pouch:///var/lib/lockdc-lua-unit', 'pouch endpoint should pass through')
+  assert_eq(captured.config.pouch_crypto_key, 'lc-pouch-key-v1:test-key', 'pouch_crypto_key should pass through')
+  assert_eq(captured.config.pouch_crypto_key_file, '/var/lib/lockdc-lua-unit/root.key', 'pouch_crypto_key_file should pass through')
+  assert_eq(captured.config.pouch_crypto_generate_key_file, true, 'pouch key-file generation should pass through')
+  assert_eq(captured.config.pouch_compression, 'zlib', 'pouch compression should pass through')
+  client:close()
+end
+
 local function test_subscribe_ack_and_error_paths()
   local function new_message()
     local msg = {
@@ -514,6 +541,7 @@ end
 
 test_json_helpers()
 test_request_flattening_and_default_content_type()
+test_pouch_open_config_passthrough()
 test_subscribe_ack_and_error_paths()
 test_acquire_for_update_propagates_sdk_failure_shape()
 test_subscribe_with_state_and_service_lifecycle()

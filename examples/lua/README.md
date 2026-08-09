@@ -22,15 +22,15 @@ not for a normal `luarocks install` flow.
 declared by `lockdc` rather than repackaging a separate `lockd` Lua client or a
 competing JSON binding.
 
-For this release line, the `lockdc` rock declares `lonejson == 0.32.1-1`. That
-matches the native `lonejson 0.32.1` dependency used by the C SDK for mapped
+For this release line, the `lockdc` rock declares `lonejson == 0.42.0-1`. That
+matches the native `lonejson 0.42.0` dependency used by the C SDK for mapped
 state load/save and internal JSON response parsing.
 
 When running from this repository after building and staging the SDK locally,
 one workable path is:
 
 ```bash
-eval "$(luarocks --tree ./build/luarocks path --lua-version 5.5)"
+eval "$(make -s lua-env)"
 export LD_LIBRARY_PATH="$PWD/build/install-tree-sdk-test/prefix/lib:${LD_LIBRARY_PATH:-}"
 ```
 
@@ -64,6 +64,9 @@ make dev-up
   enqueue a JSON payload, dequeue it, inspect it, and acknowledge it
 - `namespace_config.lua`
   read namespace engine configuration and trigger an index flush
+- `pouch_local_storage.lua`
+  open encrypted, compressed local Pouch storage with first-run key generation
+  through Lua's `pouch_*` client configuration fields
 - `consumer_handler.lua`
   run a stateful queue consumer with explicit message and lease handling
 

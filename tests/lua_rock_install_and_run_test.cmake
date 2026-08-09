@@ -29,6 +29,7 @@ lockdc_import_cache_value(CMAKE_C_COMPILER)
 lockdc_import_cache_value(CMAKE_C_FLAGS)
 lockdc_import_cache_value(CMAKE_C_FLAGS_DEBUG)
 lockdc_import_cache_value(CMAKE_BUILD_TYPE)
+lockdc_import_cache_value(LOCKDC_EXTERNAL_ROOT)
 
 if(NOT DEFINED LOCKDC_TEST_NAME OR LOCKDC_TEST_NAME STREQUAL "")
     message(FATAL_ERROR "LOCKDC_TEST_NAME is required")
@@ -78,7 +79,7 @@ if(DEFINED LOCKDC_TARGET_ID AND NOT LOCKDC_TARGET_ID STREQUAL "")
 endif()
 
 find_program(LOCKDC_BASH_BIN NAMES bash)
-find_program(LOCKDC_LUA_BIN NAMES lua lua5.5)
+find_program(LOCKDC_LUA_BIN NAMES lua5.5)
 find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks)
 
 if(NOT LOCKDC_RUN_LUAROCKS_VALIDATION)
@@ -127,9 +128,9 @@ else()
 endif()
 
 set(lonejson_cache_dir "${LOCKDC_BINARY_DIR}/lua-rock-cache")
-set(lonejson_src_rock "${lonejson_cache_dir}/lonejson-0.32.1-1.src.rock")
-set(lonejson_src_rock_url "https://github.com/sa6mwa/lonejson/releases/download/v0.32.1/lonejson-0.32.1-1.src.rock")
-set(lonejson_src_rock_sha256 "0991c3029539c3716688f53d0ccbefe09cec199816389b865ecb146a665f013d")
+set(lonejson_src_rock "${lonejson_cache_dir}/lonejson-0.42.0-1.src.rock")
+set(lonejson_src_rock_url "https://github.com/sa6mwa/lonejson/releases/download/v0.42.0/lonejson-0.42.0-1.src.rock")
+set(lonejson_src_rock_sha256 "54d3435da2b46632ba157ac2f5c2241ecc96432630a3b938ad3cf52eb9789db2")
 set(lua_tree_dir "${LOCKDC_BINARY_DIR}/lua-rock-tests/${LOCKDC_TEST_NAME}/tree")
 set(lua_rock_workdir "${LOCKDC_ROOT}")
 
@@ -198,7 +199,7 @@ if(DEFINED LOCKDC_EXTERNAL_ROOT AND NOT LOCKDC_EXTERNAL_ROOT STREQUAL "")
     set(lockdc_lua_external_include_flags "")
     set(lockdc_lua_external_link_flags "")
     set(lockdc_lua_external_library_path "")
-    foreach(lockdc_lua_external_dep curl openssl nghttp2 pslog lonejson libssh2 zlib)
+    foreach(lockdc_lua_external_dep curl openssl nghttp2 pslog lonejson liblql libssh2 zlib)
         set(lockdc_lua_external_prefix "${LOCKDC_EXTERNAL_ROOT}/${lockdc_lua_external_dep}/install")
         if(EXISTS "${lockdc_lua_external_prefix}/include")
             string(APPEND lockdc_lua_external_include_flags " -I${lockdc_lua_external_prefix}/include")
@@ -224,6 +225,10 @@ if(DEFINED LOCKDC_EXTERNAL_ROOT AND NOT LOCKDC_EXTERNAL_ROOT STREQUAL "")
     if(NOT lockdc_lua_external_library_path STREQUAL "")
         list(APPEND test_env "LD_LIBRARY_PATH=${lockdc_lua_external_library_path}")
     endif()
+    if(EXISTS "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib")
+        list(APPEND test_env
+            "LONEJSON_LIBDIR=${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib")
+    endif()
 endif()
 
 if(DEFINED LOCKDC_LUA_TEST_ENV AND NOT LOCKDC_LUA_TEST_ENV STREQUAL "")
@@ -248,7 +253,7 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env
         ${test_env}
         "LOCKDC_RUN_LUA_SMOKE=${lockdc_run_lua_smoke_env}"
-        "${LOCKDC_BASH_BIN}" "${LOCKDC_ROOT}/scripts/validate_lockdc_luarocks.sh"
+        "${LOCKDC_BASH_BIN}" "${LOCKDC_ROOT}/scripts/validate_luarocks.sh"
         "${lua_tree_dir}"
         "${LOCKDC_SDK_PREFIX}"
         "${LOCKDC_LUA_PACKAGE_PATH}"

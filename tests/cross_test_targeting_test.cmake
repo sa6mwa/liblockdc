@@ -12,13 +12,23 @@ set(bin_dir "${test_root}/bin")
 set(log_path "${test_root}/invocations.log")
 set(fake_build "${script_dir}/build.sh")
 set(fake_ctest "${bin_dir}/ctest")
+set(fake_qemu "${bin_dir}/qemu")
+set(fake_sysroot "${test_root}/sysroot")
 
 file(REMOVE_RECURSE "${test_root}")
 file(MAKE_DIRECTORY "${script_dir}")
 file(MAKE_DIRECTORY "${bin_dir}")
+file(MAKE_DIRECTORY "${fake_sysroot}")
 
 file(COPY "${LOCKDC_ROOT}/scripts/cross_test.sh" DESTINATION "${script_dir}")
+file(COPY "${LOCKDC_ROOT}/scripts/run_timed.sh" DESTINATION "${script_dir}")
 file(CHMOD "${script_dir}/cross_test.sh"
+    PERMISSIONS
+        OWNER_READ OWNER_WRITE OWNER_EXECUTE
+        GROUP_READ GROUP_EXECUTE
+        WORLD_READ WORLD_EXECUTE
+)
+file(CHMOD "${script_dir}/run_timed.sh"
     PERMISSIONS
         OWNER_READ OWNER_WRITE OWNER_EXECUTE
         GROUP_READ GROUP_EXECUTE
@@ -31,7 +41,8 @@ foreach(preset
         armhf-linux-gnu-release
         armhf-linux-musl-release)
     file(MAKE_DIRECTORY "${test_root}/build/${preset}")
-    file(WRITE "${test_root}/build/${preset}/CMakeCache.txt" "# fake cache for ${preset}\n")
+    file(WRITE "${test_root}/build/${preset}/CMakeCache.txt"
+        "# fake cache for ${preset}\nCMAKE_CROSSCOMPILING_EMULATOR:STRING=${fake_qemu};-L;${fake_sysroot}\n")
 endforeach()
 
 file(WRITE "${fake_build}" [=[
@@ -66,6 +77,14 @@ set -eu
 exit 0
 ]=])
 file(CHMOD "${fake_ctest}"
+    PERMISSIONS
+        OWNER_READ OWNER_WRITE OWNER_EXECUTE
+        GROUP_READ GROUP_EXECUTE
+        WORLD_READ WORLD_EXECUTE
+)
+
+file(WRITE "${fake_qemu}" "#!/usr/bin/env bash\nexit 0\n")
+file(CHMOD "${fake_qemu}"
     PERMISSIONS
         OWNER_READ OWNER_WRITE OWNER_EXECUTE
         GROUP_READ GROUP_EXECUTE
@@ -107,6 +126,7 @@ assert_log_contains("ctest\\|--preset\\|aarch64-linux-gnu-release\\|--output-on-
 assert_log_contains("ctest\\|--preset\\|aarch64-linux-musl-release\\|--output-on-failure\\|" "aarch64 musl ctest invocation")
 assert_log_contains("ctest\\|--preset\\|armhf-linux-gnu-release\\|--output-on-failure\\|" "armhf gnu ctest invocation")
 assert_log_contains("ctest\\|--preset\\|armhf-linux-musl-release\\|--output-on-failure\\|" "armhf musl ctest invocation")
+assert_log_contains("-L\\|cross-runtime\\|" "curated target-runtime test label")
 assert_log_not_contains("build\\|" "release preset build invocation")
 
 file(WRITE "${fake_build}" [=[

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-set -eu
+set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+timed_bin="$script_dir/run_timed.sh"
 mode=${1:-all}
 
 cross_release_presets=(
@@ -29,9 +30,42 @@ require_release_build_tree() {
   fi
 }
 
+cache_value() {
+  local cache_file=$1
+  local key=$2
+
+  awk -F= -v key="$key" '$1 ~ "^" key "(:[^=]+)?$" { print substr($0, index($0, "=") + 1); exit }' "$cache_file"
+}
+
+require_release_runner() {
+  local preset=$1
+  local cache_file="$repo_root/build/$preset/CMakeCache.txt"
+  local emulator
+  local runner
+  local ignored_runner_arg
+  local sysroot
+
+  emulator=$(cache_value "$cache_file" CMAKE_CROSSCOMPILING_EMULATOR || true)
+  IFS=';' read -r runner ignored_runner_arg sysroot <<<"$emulator"
+  if [ -z "$runner" ] || [ ! -x "$runner" ] || [ -z "$sysroot" ] || [ ! -d "$sysroot" ]; then
+    printf '%s\n' \
+      'PKT_DIAGNOSTIC_BEGIN' \
+      'surface=make test-cross' \
+      'phase=target-runner-preflight' \
+      'status=failed' \
+      'class=external-tool-unavailable' \
+      'reason=missing-qemu-runner-or-sysroot' \
+      "artifact=$preset" \
+      "next=configure $preset with an executable CMAKE_CROSSCOMPILING_EMULATOR and target sysroot" \
+      'PKT_DIAGNOSTIC_END' >&2
+    return 1
+  fi
+}
+
 run_cross_preset_package_isolation() {
-  "$script_dir/build.sh" debug
-  ctest --preset debug --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout" -R "$cross_preset_package_regex"
+  "$timed_bin" "cross-preset build debug" "$script_dir/build.sh" debug
+  "$timed_bin" "cross-preset package-isolation" \
+    ctest --preset debug --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout" -R "$cross_preset_package_regex"
 }
 
 run_cross_release_matrix() {
@@ -39,7 +73,10 @@ run_cross_release_matrix() {
 
   for preset in "${cross_release_presets[@]}"; do
     require_release_build_tree "$preset"
-    ctest --preset "$preset" --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout"
+    require_release_runner "$preset"
+    "$timed_bin" "release-matrix test $preset" env LOCKDC_SLOW_TEST_RUNTIME=1 \
+      ctest --preset "$preset" --output-on-failure --progress --stop-on-failure \
+        --timeout "$ctest_timeout" -L cross-runtime
   done
 }
 

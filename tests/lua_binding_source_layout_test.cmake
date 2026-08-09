@@ -20,7 +20,10 @@ list(GET generated_rockspec 0 generated_rockspec_path)
 foreach(required_path
     "${LOCKDC_ROOT}/lua/lockdc/init.lua"
     "${LOCKDC_ROOT}/src/lua/lockdc_lua.c"
-    "${LOCKDC_ROOT}/scripts/build_lockdc_lua_rock.sh"
+    "${LOCKDC_ROOT}/src/lc_api_internal.h"
+    "${LOCKDC_ROOT}/src/lc_engine_api.h"
+    "${LOCKDC_ROOT}/src/lc_pouch.h"
+    "${LOCKDC_ROOT}/scripts/build_lua_rock.sh"
     "${LOCKDC_ROOT}/lockdc.rockspec.in"
     "${generated_rockspec_path}"
 )
@@ -30,14 +33,16 @@ foreach(required_path
 endforeach()
 
 file(READ "${generated_rockspec_path}" rockspec_text)
-file(READ "${LOCKDC_ROOT}/scripts/validate_lockdc_luarocks.sh" validate_luarocks_script)
+file(READ "${LOCKDC_ROOT}/scripts/validate_luarocks.sh" validate_luarocks_script)
+file(READ "${LOCKDC_ROOT}/scripts/build_lua_rock.sh" build_luarock_script)
 foreach(required_snippet
     "package = \"lockdc\""
-    "\"lonejson == 0.32.1-1\""
+    "\"lonejson == 0.42.0-1\""
     "url = \"git+https://github.com/sa6mwa/liblockdc.git\""
     "tag = \"v"
-    "scripts/build_lockdc_lua_rock.sh"
-    "\\"$(LUA_INCDIR)\\" \\"${LOCKDC_VERSION}\\""
+    "scripts/build_lua_rock.sh"
+    [==[\"$(LUA_INCDIR)\"]==]
+    "\\\"${LOCKDC_VERSION}\\\""
     "[\"lockdc.init\"] = \"lua/lockdc/init.lua\""
     "[\"lockdc.core\"] = \".luarocks-build/lockdc/core.so\""
 )
@@ -50,7 +55,34 @@ foreach(required_snippet
 endforeach()
 
 foreach(required_snippet
-    "https://github.com/sa6mwa/lonejson/releases/download/v0.32.1/lonejson-0.32.1-1.src.rock"
+    "set -euo pipefail"
+    "-llockdc"
+    "LOCKDC_CFLAGS_EXTRA"
+    "LOCKDC_LIBS_EXTRA")
+    string(FIND "${build_luarock_script}" "${required_snippet}" snippet_index)
+    if(snippet_index EQUAL -1)
+        message(FATAL_ERROR
+            "Lua rock builder is missing expected public-SDK linkage snippet '${required_snippet}'")
+    endif()
+endforeach()
+
+foreach(forbidden_snippet
+    "PSLOG_IMPLEMENTATION"
+    "pslog-${LOCKDC_PSLOG_VERSION}.h"
+    "pslog.c"
+    "pslog.o")
+    string(FIND "${build_luarock_script}" "${forbidden_snippet}" snippet_index)
+    if(NOT snippet_index EQUAL -1)
+        message(FATAL_ERROR
+            "Lua rock builder embeds pslog implementation instead of using the public SDK ABI.\n"
+            "Unexpected snippet: ${forbidden_snippet}")
+    endif()
+endforeach()
+
+foreach(required_snippet
+    "set -euo pipefail"
+    "https://github.com/sa6mwa/lonejson/releases/download/v0.42.0/lonejson-0.42.0-1.src.rock"
+    "export LONEJSON_LIBDIR"
 )
     string(FIND "${validate_luarocks_script}" "${required_snippet}" snippet_index)
     if(snippet_index EQUAL -1)
@@ -60,11 +92,14 @@ foreach(required_snippet
 endforeach()
 
 foreach(stale_snippet
+    "lonejson == 0.41.0-1"
+    "https://github.com/sa6mwa/lonejson/releases/download/v0.41.0/lonejson-0.41.0-1.src.rock"
     "https://github.com/sa6mwa/lonejson/releases/download/v0.16.0/lonejson-0.16.0-1.src.rock"
 )
-    string(FIND "${validate_luarocks_script}" "${stale_snippet}" snippet_index)
-    if(NOT snippet_index EQUAL -1)
+    string(FIND "${rockspec_text}" "${stale_snippet}" rockspec_stale_index)
+    string(FIND "${validate_luarocks_script}" "${stale_snippet}" script_stale_index)
+    if(NOT rockspec_stale_index EQUAL -1 OR NOT script_stale_index EQUAL -1)
         message(FATAL_ERROR
-            "LuaRocks validation script contains stale snippet '${stale_snippet}'")
+            "Lua rock dependency boundary contains stale snippet '${stale_snippet}'")
     endif()
 endforeach()

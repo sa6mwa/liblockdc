@@ -12,7 +12,13 @@
 
 #include <cmocka.h>
 
+#include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
+#include "lc_pouch.h"
+
+#define POUCH_E2E_TMP_PREFIX "/tmp/liblockdc-e2e-pouch-"
+#define LOCAL_MUTATE_TMP_PREFIX "/tmp/liblockdc-local-mutate-"
+#define S3_LOCAL_MUTATE_TMP_PREFIX "/tmp/liblockdc-s3-local-mutate-"
 
 typedef struct e2e_status_doc {
   char *status;
@@ -107,6 +113,10 @@ typedef struct query_keys_e2e_capture {
   unsigned char seen[512];
 } query_keys_e2e_capture;
 
+typedef struct pouch_e2e_key_count {
+  size_t rows;
+} pouch_e2e_key_count;
+
 static int query_keys_e2e_begin(void *context, lc_error *error) {
   query_keys_e2e_capture *capture;
 
@@ -157,6 +167,30 @@ static int query_keys_e2e_end(void *context, lc_error *error) {
   capture->end_calls += 1U;
   capture->current_length = 0U;
   capture->current[0] = '\0';
+  return 1;
+}
+
+static int pouch_e2e_key_begin(void *context, lc_error *error) {
+  (void)context;
+  (void)error;
+  return 1;
+}
+
+static int pouch_e2e_key_chunk(void *context, const char *bytes, size_t len,
+                               lc_error *error) {
+  (void)context;
+  (void)bytes;
+  (void)len;
+  (void)error;
+  return 1;
+}
+
+static int pouch_e2e_key_end(void *context, lc_error *error) {
+  pouch_e2e_key_count *count;
+
+  (void)error;
+  count = (pouch_e2e_key_count *)context;
+  count->rows++;
   return 1;
 }
 
@@ -225,11 +259,12 @@ static int acquire_for_update_failing_handler(
 }
 
 static void write_temp_file_or_die(char *template_path,
+                                   const char *allowed_prefix,
                                    const unsigned char *bytes, size_t length) {
   int fd;
   FILE *fp;
 
-  fd = mkstemp(template_path);
+  fd = lc_test_tmp_mkstemp(template_path, allowed_prefix);
   assert_true(fd >= 0);
   fp = fdopen(fd, "wb");
   assert_non_null(fp);
@@ -408,10 +443,11 @@ static void assert_local_mutate_file_variants(lc_lease *lease,
   lc_sink_close(sink);
   lc_get_res_cleanup(&get_res);
 
-  missing_fd = mkstemp(missing_path);
+  missing_fd = lc_test_tmp_mkstemp(missing_path, LOCAL_MUTATE_TMP_PREFIX);
   assert_true(missing_fd >= 0);
   assert_int_equal(close(missing_fd), 0);
   assert_int_equal(unlink(missing_path), 0);
+  lc_test_tmp_untrack_path(missing_path);
   snprintf(missing_file_mutation, sizeof(missing_file_mutation),
            "base64file:/missing=%s", missing_path);
   failure_mutations[0] = missing_file_mutation;
@@ -452,6 +488,51 @@ static void make_unique_name(const char *prefix, char *buffer,
   now = (long)time(NULL);
   pid = (int)getpid();
   snprintf(buffer, capacity, "%s-%ld-%d", prefix, now, pid);
+}
+
+static void make_pouch_root(const char *suffix, char *root,
+                            size_t root_capacity, char *endpoint,
+                            size_t endpoint_capacity) {
+  char template_path[512];
+  int written;
+
+  written = snprintf(template_path, sizeof(template_path),
+                     POUCH_E2E_TMP_PREFIX "%s-XXXXXX", suffix);
+  assert_true(written > 0 && (size_t)written < sizeof(template_path));
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, root_capacity,
+                                  POUCH_E2E_TMP_PREFIX));
+  written = snprintf(endpoint, endpoint_capacity, "pouch://%s", root);
+  assert_true(written > 0 && (size_t)written < endpoint_capacity);
+}
+
+static void cleanup_pouch_root(const char *root) {
+  lc_test_tmp_cleanup_path(root, POUCH_E2E_TMP_PREFIX);
+}
+
+static void cleanup_all_pouch_roots(void) {
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-e2e-pouch-",
+                            POUCH_E2E_TMP_PREFIX);
+}
+
+static void pouch_e2e_write_text_file(const char *path, const char *text) {
+  FILE *fp;
+
+  fp = fopen(path, "wb");
+  assert_non_null(fp);
+  assert_int_equal(fputs(text, fp) < 0 ? -1 : 0, 0);
+  assert_int_equal(fclose(fp), 0);
+}
+
+static int setup_pouch_e2e_group(void **state) {
+  (void)state;
+  cleanup_all_pouch_roots();
+  return 0;
+}
+
+static int teardown_pouch_e2e_group(void **state) {
+  (void)state;
+  cleanup_all_pouch_roots();
+  return 0;
 }
 
 static void open_tcp_client(const char *endpoint, const char *bundle_path,
@@ -499,6 +580,22 @@ static void open_tcp_client_allow_error(const char *endpoint,
   *out = NULL;
   lc_client_open(&config, out, error);
   lc_source_close(bundle_source);
+}
+
+static void open_pouch_client(const char *endpoint, lc_client **out,
+                              lc_error *error) {
+  lc_client_config config;
+  const char *endpoints[1];
+  int rc;
+
+  lc_client_config_init(&config);
+  endpoints[0] = endpoint;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.default_namespace = "default";
+  config.timeout_ms = 5000L;
+  rc = lc_client_open(&config, out, error);
+  assert_lc_ok(rc, error);
 }
 
 static void open_uds_client(const char *socket_path, lc_client **out,
@@ -1084,7 +1181,6 @@ static void test_mem_uds_dequeue_batch_roundtrip(void **state) {
     assert_true(length == sizeof(payload_a) || length == sizeof(payload_b));
     rc = batch.messages[i]->ack(batch.messages[i], &error);
     assert_lc_ok(rc, &error);
-    batch.messages[i] = NULL;
     lc_sink_close(sink);
     sink = NULL;
   }
@@ -1434,10 +1530,12 @@ static void test_disk_local_mutate_stream_roundtrip(void **state) {
   lease = NULL;
   lc_error_init(&error);
   lc_acquire_req_init(&acquire_req);
-  write_temp_file_or_die(text_template,
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-local-mutate-",
+                            LOCAL_MUTATE_TMP_PREFIX);
+  write_temp_file_or_die(text_template, LOCAL_MUTATE_TMP_PREFIX,
                          (const unsigned char *)"hello\n\"quoted\"",
                          sizeof("hello\n\"quoted\"") - 1U);
-  write_temp_file_or_die(binary_template,
+  write_temp_file_or_die(binary_template, LOCAL_MUTATE_TMP_PREFIX,
                          (const unsigned char[]){0x00, 0x01, 0x02, 'a'}, 4U);
 
   open_tcp_client(endpoint, bundle_path, &client, &error);
@@ -1459,8 +1557,8 @@ static void test_disk_local_mutate_stream_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   lease = NULL;
 
-  unlink(text_template);
-  unlink(binary_template);
+  lc_test_tmp_cleanup_path(text_template, LOCAL_MUTATE_TMP_PREFIX);
+  lc_test_tmp_cleanup_path(binary_template, LOCAL_MUTATE_TMP_PREFIX);
   lc_client_close(client);
   lc_error_cleanup(&error);
 }
@@ -1488,10 +1586,12 @@ static void test_s3_local_mutate_stream_roundtrip(void **state) {
   lease = NULL;
   lc_error_init(&error);
   lc_acquire_req_init(&acquire_req);
-  write_temp_file_or_die(text_template,
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-s3-local-mutate-",
+                            S3_LOCAL_MUTATE_TMP_PREFIX);
+  write_temp_file_or_die(text_template, S3_LOCAL_MUTATE_TMP_PREFIX,
                          (const unsigned char *)"hello\n\"quoted\"",
                          sizeof("hello\n\"quoted\"") - 1U);
-  write_temp_file_or_die(binary_template,
+  write_temp_file_or_die(binary_template, S3_LOCAL_MUTATE_TMP_PREFIX,
                          (const unsigned char[]){0x00, 0x01, 0x02, 'a'}, 4U);
 
   open_tcp_client(endpoint, bundle_path, &client, &error);
@@ -1513,8 +1613,8 @@ static void test_s3_local_mutate_stream_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   lease = NULL;
 
-  unlink(text_template);
-  unlink(binary_template);
+  lc_test_tmp_cleanup_path(text_template, S3_LOCAL_MUTATE_TMP_PREFIX);
+  lc_test_tmp_cleanup_path(binary_template, S3_LOCAL_MUTATE_TMP_PREFIX);
   lc_client_close(client);
   lc_error_cleanup(&error);
 }
@@ -3469,6 +3569,699 @@ static void test_s3_dequeue_with_state_roundtrip(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_pouch_direct_state_attachment_reopen_roundtrip(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_source *src;
+  lc_sink *sink;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_list_req list_req;
+  lc_attachment_list attachment_list;
+  lc_attachment_get_op get_attachment_req;
+  lc_attachment_get_res get_attachment_res;
+  const void *bytes;
+  size_t length;
+  char root[256];
+  char endpoint[320];
+  char key[96];
+  static const unsigned char attachment_payload[] = {'p', 'o', 'u', 'c', 'h'};
+  int rc;
+
+  (void)state;
+  make_pouch_root("state-attachment", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?pouch_single_writer=false", root) > 0);
+
+  client = NULL;
+  reader = NULL;
+  lease = NULL;
+  src = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  lc_get_opts_init(&get_opts);
+  memset(&get_res, 0, sizeof(get_res));
+  lc_attach_req_init(&attach_req);
+  memset(&attach_res, 0, sizeof(attach_res));
+  lc_attachment_list_req_init(&list_req);
+  memset(&attachment_list, 0, sizeof(attachment_list));
+  lc_attachment_get_op_init(&get_attachment_req);
+  memset(&get_attachment_res, 0, sizeof(get_attachment_res));
+
+  open_pouch_client(endpoint, &client, &error);
+  make_unique_name("pouch-direct-state", key, sizeof(key));
+  acquire_req.key = key;
+  acquire_req.owner = "lc-e2e-pouch";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease);
+
+  save_json_text_or_die(
+      lease, "{\"kind\":\"pouch-e2e\",\"value\":1,\"tags\":[\"pouch\"]}",
+      &error);
+  assert_true(lease->version >= 1L);
+  assert_non_null(lease->state_etag);
+
+  rc = lc_source_from_memory(attachment_payload, sizeof(attachment_payload),
+                             &src, &error);
+  assert_lc_ok(rc, &error);
+  attach_req.name = "blob.bin";
+  attach_req.content_type = "application/octet-stream";
+  rc = lease->attach(lease, &attach_req, src, &attach_res, &error);
+  lc_source_close(src);
+  src = NULL;
+  assert_lc_ok(rc, &error);
+  assert_string_equal(attach_res.attachment.name, "blob.bin");
+
+  reader = NULL;
+  open_pouch_client(endpoint, &reader, &error);
+  list_req.lease.namespace_name = lease->namespace_name;
+  list_req.lease.key = lease->key;
+  list_req.lease.lease_id = lease->lease_id;
+  list_req.lease.txn_id = lease->txn_id;
+  list_req.lease.fencing_token = lease->fencing_token;
+  rc = reader->list_attachments(reader, &list_req, &attachment_list, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachment_list.count, 1U);
+  assert_string_equal(attachment_list.items[0].name, "blob.bin");
+
+  get_attachment_req.lease = list_req.lease;
+  get_attachment_req.selector.name = "blob.bin";
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = reader->get_attachment(reader, &get_attachment_req, sink,
+                              &get_attachment_res, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(length, sizeof(attachment_payload));
+  assert_memory_equal(bytes, attachment_payload, sizeof(attachment_payload));
+  lc_sink_close(sink);
+  sink = NULL;
+
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  lc_client_close(client);
+  client = NULL;
+  lc_client_close(reader);
+  reader = NULL;
+
+  open_pouch_client(endpoint, &reader, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  get_opts.public_read = 1;
+  rc = reader->get(reader, key, &get_opts, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(get_res.no_content);
+  assert_true(get_res.version >= 1L);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(buffer_contains(bytes, length, "\"kind\":\"pouch-e2e\""));
+  assert_true(buffer_contains(bytes, length, "\"tags\":[\"pouch\"]"));
+
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_attachment_get_res_cleanup(&get_attachment_res);
+  lc_attachment_list_cleanup(&attachment_list);
+  lc_attach_res_cleanup(&attach_res);
+  lc_client_close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void pouch_e2e_run_maintenance(const char *root,
+                                      const char *namespace_name, int force,
+                                      int cleanup_only, long retention_cutoff,
+                                      lc_error *error) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  int rc;
+
+  pouch = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
+  assert_lc_ok(rc, error);
+  maintenance_options.namespace_name = namespace_name;
+  maintenance_options.force = force;
+  maintenance_options.cleanup_only = cleanup_only;
+  maintenance_options.retention_updated_before_unix = retention_cutoff;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, error);
+  assert_lc_ok(rc, error);
+  if (force) {
+    assert_true(maintenance_result.compacted || maintenance_result.skipped);
+  }
+  if (retention_cutoff > 0L) {
+    assert_string_equal(maintenance_result.diagnostic, "retention-complete");
+  }
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
+}
+
+static size_t pouch_e2e_query_key_count(lc_client *client,
+                                        const char *namespace_name,
+                                        const char *selector_json,
+                                        lc_error *error) {
+  lc_query_key_handler handler;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  pouch_e2e_key_count count;
+  int rc;
+
+  memset(&handler, 0, sizeof(handler));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&count, 0, sizeof(count));
+  handler.begin = pouch_e2e_key_begin;
+  handler.chunk = pouch_e2e_key_chunk;
+  handler.end = pouch_e2e_key_end;
+  query_req.namespace_name = namespace_name;
+  query_req.selector_json = selector_json;
+  query_req.engine = "index";
+  query_req.limit = 512L;
+  rc = lc_query_keys(client, &query_req, &handler, &count, &query_res, error);
+  assert_lc_ok(rc, error);
+  lc_query_res_cleanup(&query_res);
+  return count.rows;
+}
+
+static void pouch_e2e_write_segmented_docs_direct(const char *root,
+                                                  const char *namespace_name,
+                                                  const char *kind,
+                                                  size_t doc_count,
+                                                  lc_error *error) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_options write_options;
+  lc_pouch_state_write_result write_result;
+  lc_source *source;
+  char body[1024];
+  char key[192];
+  char pad[640];
+  size_t index;
+  int written;
+  int rc;
+
+  pouch = NULL;
+  source = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_options, 0, sizeof(write_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(pad, 'x', sizeof(pad) - 1U);
+  pad[sizeof(pad) - 1U] = '\0';
+  open_options.segment_target_bytes = 4096UL;
+  open_options.compaction_min_segment_count = 2UL;
+  open_options.compaction_min_reclaimable_bytes = 1UL;
+  open_options.background_compaction_enabled = 0;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.query_engine = "index";
+  write_options.content_type = "application/json";
+
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
+  assert_lc_ok(rc, error);
+  for (index = 0U; index < doc_count; ++index) {
+    written = snprintf(key, sizeof(key), "pouch/large/%s/%04zu", kind, index);
+    assert_true(written > 0 && (size_t)written < sizeof(key));
+    written = snprintf(body, sizeof(body),
+                       "{\"kind\":\"%s\",\"ordinal\":%zu,\"group\":\"%s\","
+                       "\"tags\":[\"pouch\",\"large\",\"%s\"],\"pad\":\"%s\"}",
+                       kind, index, index % 2U == 0U ? "even" : "odd",
+                       index % 3U == 0U ? "planning" : "finance", pad);
+    assert_true(written > 0 && (size_t)written < sizeof(body));
+    rc = lc_source_from_memory(body, strlen(body), &source, error);
+    assert_lc_ok(rc, error);
+    rc = lc_pouch_state_write(pouch, namespace_name, key, source,
+                              &write_options, &write_result, error);
+    lc_source_close(source);
+    source = NULL;
+    assert_lc_ok(rc, error);
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  }
+  lc_pouch_close(pouch);
+}
+
+static void pouch_e2e_force_maintenance_expect_segments(
+    const char *root, const char *namespace_name, lc_error *error) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  int rc;
+
+  pouch = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
+  assert_lc_ok(rc, error);
+  maintenance_options.namespace_name = namespace_name;
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, error);
+  assert_lc_ok(rc, error);
+  assert_true(maintenance_result.compacted);
+  assert_true(maintenance_result.candidate_segment_count > 1UL);
+  assert_true(maintenance_result.candidate_bytes > 4096UL);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
+}
+
+static void
+test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(void **state) {
+  lc_client *client;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_message *message;
+  lc_source *src;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_attach_req attach_req;
+  lc_attach_res attach_res;
+  lc_attachment_list attachment_list;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  char root[256];
+  char endpoint[320];
+  char kind[96];
+  char keep_key[128];
+  char expired_kind[96];
+  char expired_key[128];
+  char selector_json[192];
+  char expired_selector_json[192];
+  char queue_name[160];
+  size_t rows;
+  int rc;
+
+  (void)state;
+  make_pouch_root("lifecycle-maintenance", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+
+  client = NULL;
+  reader = NULL;
+  lease = NULL;
+  message = NULL;
+  src = NULL;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  lc_attach_req_init(&attach_req);
+  memset(&attach_res, 0, sizeof(attach_res));
+  memset(&attachment_list, 0, sizeof(attachment_list));
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+
+  make_unique_name("pouch-life", kind, sizeof(kind));
+  make_unique_name("pouch-expired", expired_kind, sizeof(expired_kind));
+  snprintf(keep_key, sizeof(keep_key), "pouch/lifecycle/%s/keep", kind);
+  snprintf(expired_key, sizeof(expired_key), "pouch/lifecycle/%s/dead",
+           expired_kind);
+  snprintf(selector_json, sizeof(selector_json),
+           "{\"eq\":{\"field\":\"/kind\",\"value\":\"%s\"}}", kind);
+  snprintf(expired_selector_json, sizeof(expired_selector_json),
+           "{\"eq\":{\"field\":\"/kind\",\"value\":\"%s\"}}", expired_kind);
+  snprintf(queue_name, sizeof(queue_name), "pouch-life-%s", kind);
+
+  open_pouch_client(endpoint, &client, &error);
+  acquire_req.namespace_name = "life";
+  acquire_req.key = keep_key;
+  acquire_req.owner = "lc-e2e-pouch-life";
+  acquire_req.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  {
+    char body[256];
+
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"%s\",\"status\":\"keep\",\"value\":1}", kind);
+    save_json_text_or_die(lease, body, &error);
+  }
+  attach_req.name = "life.txt";
+  attach_req.content_type = "text/plain";
+  rc =
+      lc_source_from_memory("life-object", strlen("life-object"), &src, &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->attach(lease, &attach_req, src, &attach_res, &error);
+  lc_source_close(src);
+  src = NULL;
+  assert_lc_ok(rc, &error);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  acquire_req.namespace_name = "life-retention";
+  acquire_req.key = expired_key;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  {
+    char body[256];
+
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"%s\",\"status\":\"expired\",\"value\":2}",
+             expired_kind);
+    save_json_text_or_die(lease, body, &error);
+  }
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  enqueue_req.namespace_name = "life";
+  enqueue_req.queue = queue_name;
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 300L;
+  enqueue_req.max_attempts = 3;
+  rc = lc_source_from_memory("life-queue", strlen("life-queue"), &src, &error);
+  assert_lc_ok(rc, &error);
+  rc = client->enqueue(client, &enqueue_req, src, &enqueue_res, &error);
+  lc_source_close(src);
+  src = NULL;
+  assert_lc_ok(rc, &error);
+
+  rows = pouch_e2e_query_key_count(client, "life", selector_json, &error);
+  assert_int_equal(rows, 1U);
+  rows = pouch_e2e_query_key_count(client, "life-retention",
+                                   expired_selector_json, &error);
+  assert_int_equal(rows, 1U);
+  lc_client_close(client);
+  client = NULL;
+
+  pouch_e2e_run_maintenance(root, "life", 1, 0, 0L, &error);
+  pouch_e2e_run_maintenance(root, "life", 0, 1, 0L, &error);
+  pouch_e2e_run_maintenance(root, "life-retention", 0, 0, 2147483647L, &error);
+
+  open_pouch_client(endpoint, &reader, &error);
+  rows = pouch_e2e_query_key_count(reader, "life", selector_json, &error);
+  assert_int_equal(rows, 1U);
+  rows = pouch_e2e_query_key_count(reader, "life-retention",
+                                   expired_selector_json, &error);
+  assert_int_equal(rows, 0U);
+
+  acquire_req.namespace_name = "life";
+  acquire_req.key = keep_key;
+  acquire_req.owner = "lc-e2e-pouch-life-reader";
+  rc = reader->acquire(reader, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  rc = lease->list_attachments(lease, &attachment_list, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(attachment_list.count, 1U);
+  assert_string_equal(attachment_list.items[0].name, "life.txt");
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  dequeue_req.namespace_name = "life";
+  dequeue_req.queue = queue_name;
+  dequeue_req.owner = "lc-e2e-pouch-life-worker";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = reader->dequeue(reader, &dequeue_req, &message, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(message);
+  rc = message->ack(message, &error);
+  assert_lc_ok(rc, &error);
+  message = NULL;
+
+  lc_attachment_list_cleanup(&attachment_list);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_attach_res_cleanup(&attach_res);
+  lc_client_close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void
+test_pouch_direct_large_namespace_segmented_index_reopen(void **state) {
+  lc_client *client;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_error error;
+  char root[256];
+  char endpoint[320];
+  char kind[96];
+  char selector_json[192];
+  size_t rows;
+  const size_t doc_count = 72U;
+  int rc;
+
+  (void)state;
+  make_pouch_root("large-namespace", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+
+  client = NULL;
+  memset(&flush_res, 0, sizeof(flush_res));
+  lc_index_flush_req_init(&flush_req);
+  lc_error_init(&error);
+
+  make_unique_name("pouch-large", kind, sizeof(kind));
+  snprintf(selector_json, sizeof(selector_json),
+           "{\"eq\":{\"field\":\"/kind\",\"value\":\"%s\"}}", kind);
+
+  pouch_e2e_write_segmented_docs_direct(root, "large", kind, doc_count, &error);
+
+  open_pouch_client(endpoint, &client, &error);
+  flush_req.namespace_name = "large";
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+  rows = pouch_e2e_query_key_count(client, "large", selector_json, &error);
+  assert_int_equal(rows, doc_count);
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  client = NULL;
+
+  pouch_e2e_force_maintenance_expect_segments(root, "large", &error);
+  pouch_e2e_run_maintenance(root, "large", 0, 1, 0L, &error);
+
+  open_pouch_client(endpoint, &client, &error);
+  memset(&flush_res, 0, sizeof(flush_res));
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+  rows = pouch_e2e_query_key_count(client, "large", selector_json, &error);
+  assert_int_equal(rows, doc_count);
+
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void
+test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot(void **state) {
+  lc_client *client;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_error error;
+  char root[256];
+  char endpoint[320];
+  char kind[96];
+  char selector_json[192];
+  char namespace_path[512];
+  char manifest_path[640];
+  char marker_path[640];
+  size_t rows;
+  const size_t doc_count = 36U;
+  int written;
+  int rc;
+
+  (void)state;
+  make_pouch_root("marker-index-repair", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+
+  client = NULL;
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
+  lc_error_init(&error);
+
+  make_unique_name("pouch-repair", kind, sizeof(kind));
+  snprintf(selector_json, sizeof(selector_json),
+           "{\"eq\":{\"field\":\"/kind\",\"value\":\"%s\"}}", kind);
+  written = snprintf(namespace_path, sizeof(namespace_path),
+                     "%s/namespaces/repair", root);
+  assert_true(written > 0 && (size_t)written < sizeof(namespace_path));
+  written = snprintf(manifest_path, sizeof(manifest_path),
+                     "%s/index/query.manifest", namespace_path);
+  assert_true(written > 0 && (size_t)written < sizeof(manifest_path));
+  written = snprintf(marker_path, sizeof(marker_path),
+                     "%s/markers/writer-damaged.marker", namespace_path);
+  assert_true(written > 0 && (size_t)written < sizeof(marker_path));
+
+  pouch_e2e_write_segmented_docs_direct(root, "repair", kind, doc_count,
+                                        &error);
+
+  open_pouch_client(endpoint, &client, &error);
+  flush_req.namespace_name = "repair";
+  flush_req.mode = "wait";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+  rows = pouch_e2e_query_key_count(client, "repair", selector_json, &error);
+  assert_int_equal(rows, doc_count);
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  client = NULL;
+
+  pouch_e2e_force_maintenance_expect_segments(root, "repair", &error);
+  pouch_e2e_run_maintenance(root, "repair", 0, 1, 0L, &error);
+
+  /* Recreate the post-snapshot derived index, then remove its manifest. */
+  open_pouch_client(endpoint, &client, &error);
+  memset(&flush_res, 0, sizeof(flush_res));
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  client = NULL;
+
+  assert_int_equal(unlink(manifest_path), 0);
+  pouch_e2e_write_text_file(marker_path, "damaged-marker\n");
+
+  open_pouch_client(endpoint, &client, &error);
+  memset(&flush_res, 0, sizeof(flush_res));
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+  rows = pouch_e2e_query_key_count(client, "repair", selector_json, &error);
+  assert_int_equal(rows, doc_count);
+
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_direct_consumer_service_with_state(void **state) {
+  lc_client *client;
+  lc_consumer_service *service;
+  lc_error error;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_consumer_config consumer;
+  lc_consumer_service_config service_config;
+  e2e_consumer_context consumer_context;
+  lc_source *src;
+  char root[256];
+  char endpoint[320];
+  char queue_name[96];
+  static const unsigned char payload[] = {'p', 'o', 'u', 'c', 'h',
+                                          '-', 'w', 'o', 'r', 'k'};
+  int rc;
+
+  (void)state;
+  make_pouch_root("consumer", root, sizeof(root), endpoint, sizeof(endpoint));
+
+  client = NULL;
+  service = NULL;
+  src = NULL;
+  lc_error_init(&error);
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_consumer_config_init(&consumer);
+  lc_consumer_service_config_init(&service_config);
+  memset(&consumer_context, 0, sizeof(consumer_context));
+  assert_int_equal(pthread_mutex_init(&consumer_context.mutex, NULL), 0);
+  consumer_context.backend_label = "pouch";
+  consumer_context.first_delivery_mode = E2E_CONSUMER_FIRST_DELIVERY_NONE;
+  consumer_context.expect_state = 1;
+  consumer_context.read_payload = 1;
+  consumer_context.enqueue_count = 1;
+  consumer_context.worker_count = 1U;
+  consumer_context.max_failures = 5;
+
+  open_pouch_client(endpoint, &client, &error);
+  make_unique_name("pouch-consumer", queue_name, sizeof(queue_name));
+  consumer_context.queue_name = queue_name;
+
+  consumer.name = "pouch";
+  consumer.request.queue = queue_name;
+  consumer.request.owner = "lc-e2e-pouch-consumer";
+  consumer.request.visibility_timeout_seconds = 30L;
+  consumer.request.wait_seconds = 1L;
+  consumer.with_state = 1;
+  consumer.handle = e2e_consumer_handle;
+  consumer.on_error = e2e_consumer_on_error;
+  consumer.on_start = e2e_consumer_on_start;
+  consumer.on_stop = e2e_consumer_on_stop;
+  consumer.context = &consumer_context;
+  lc_consumer_restart_policy_init(&consumer.restart_policy);
+  consumer.restart_policy.base_delay_ms = 100L;
+  consumer.restart_policy.max_delay_ms = 250L;
+  consumer.restart_policy.max_failures = 5;
+
+  service_config.consumers = &consumer;
+  service_config.consumer_count = 1U;
+  rc = client->new_consumer_service(client, &service_config, &service, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(service);
+
+  enqueue_req.queue = queue_name;
+  enqueue_req.content_type = "text/plain";
+  enqueue_req.visibility_timeout_seconds = 30L;
+  enqueue_req.ttl_seconds = 300L;
+  enqueue_req.max_attempts = 5;
+  rc = lc_source_from_memory(payload, sizeof(payload), &src, &error);
+  assert_lc_ok(rc, &error);
+  rc = client->enqueue(client, &enqueue_req, src, &enqueue_res, &error);
+  lc_source_close(src);
+  src = NULL;
+  assert_lc_ok(rc, &error);
+
+  /* The service retains Pouch's exclusive local session after its caller
+   * closes the source client. */
+  lc_client_close(client);
+  client = NULL;
+
+  rc = service->start(service, &error);
+  assert_lc_ok(rc, &error);
+
+  consumer_context.expected_minimum_count = 1;
+  wait_for_consumer_handled(&consumer_context, 1);
+
+  rc = (service->stop)(service);
+  assert_int_equal(rc, LC_OK);
+  rc = service->wait(service, &error);
+  assert_lc_ok(rc, &error);
+
+  pthread_mutex_lock(&consumer_context.mutex);
+  assert_int_equal(consumer_context.handled, 1);
+  assert_int_equal(consumer_context.error_events, 0);
+  assert_true(consumer_context.start_events >= 1);
+  assert_true(consumer_context.stop_events >= 1);
+  assert_string_equal(consumer_context.payload, "pouch-work");
+  assert_int_equal(consumer_context.saw_state, 1);
+  assert_non_null(strstr(consumer_context.state_json, "from-consumer-service"));
+  assert_non_null(strstr(consumer_context.state_key, "/state/"));
+  assert_non_null(strstr(consumer_context.state_key, queue_name));
+  pthread_mutex_unlock(&consumer_context.mutex);
+
+  pthread_mutex_destroy(&consumer_context.mutex);
+  lc_enqueue_res_cleanup(&enqueue_res);
+  lc_consumer_service_close(service);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 #if defined(LC_E2E_GROUP_DISK_DIRECT)
 int main(void) {
   const struct CMUnitTest tests[] = {
@@ -3489,6 +4282,20 @@ int main(void) {
           test_disk_queue_watch_stream_observes_available_then_unavailable),
       cmocka_unit_test(test_disk_local_mutate_stream_roundtrip)};
   return cmocka_run_group_tests(tests, NULL, NULL);
+}
+#elif defined(LC_E2E_GROUP_POUCH_DIRECT)
+int main(void) {
+  const struct CMUnitTest tests[] = {
+      cmocka_unit_test(test_pouch_direct_state_attachment_reopen_roundtrip),
+      cmocka_unit_test(
+          test_pouch_direct_lifecycle_maintenance_reopen_roundtrip),
+      cmocka_unit_test(
+          test_pouch_direct_large_namespace_segmented_index_reopen),
+      cmocka_unit_test(
+          test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot),
+      cmocka_unit_test(test_pouch_direct_consumer_service_with_state)};
+  return cmocka_run_group_tests(tests, setup_pouch_e2e_group,
+                                teardown_pouch_e2e_group);
 }
 #elif defined(LC_E2E_GROUP_S3_DIRECT)
 int main(void) {

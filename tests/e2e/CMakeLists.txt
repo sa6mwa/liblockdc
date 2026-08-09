@@ -1,14 +1,12 @@
 function(lc_add_e2e_shard target_name group_macro)
-  add_executable(${target_name} test_lc_e2e.c)
+  add_executable(${target_name}
+    test_lc_e2e.c
+    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+  )
   target_link_libraries(${target_name} PRIVATE ${lc_test_link_target} lc::cmocka)
   target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
   target_compile_definitions(${target_name} PRIVATE ${group_macro})
-  set_target_properties(${target_name}
-    PROPERTIES
-      C_STANDARD 99
-      C_STANDARD_REQUIRED ON
-      C_EXTENSIONS ON
-  )
+  lc_configure_c_test_target(${target_name})
   if(LOCKDC_ENABLE_COVERAGE)
     target_compile_options(${target_name} PRIVATE
       $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:--coverage -O0 -g>
@@ -27,16 +25,17 @@ function(lc_add_e2e_shard target_name group_macro)
 endfunction()
 
 function(lc_add_lua_e2e_test test_name script_path)
-  if(NOT TARGET lockdc_lua_core)
+  set(options PACKAGE_ONLY)
+  set(one_value_args POUCH_ROOT)
+  set(multi_value_args ENV_OVERRIDES)
+  cmake_parse_arguments(LUA_E2E "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
+
+  if(NOT LUA_E2E_PACKAGE_ONLY AND NOT TARGET lockdc_lua_core)
     return()
   endif()
   if(NOT LOCKDC_LUA_BIN OR NOT LOCKDC_LUAROCKS_BIN)
     return()
   endif()
-
-  set(options)
-  set(multi_value_args ENV_OVERRIDES)
-  cmake_parse_arguments(LUA_E2E "${options}" "" "${multi_value_args}" ${ARGN})
 
   set(lua_e2e_command
     "${CMAKE_COMMAND}"
@@ -51,8 +50,18 @@ function(lc_add_lua_e2e_test test_name script_path)
       "-DLOCKDC_LUA_TEST_ENV=${lua_e2e_env_overrides}"
     )
   endif()
+  if(LUA_E2E_POUCH_ROOT)
+    list(APPEND lua_e2e_command
+      "-DLOCKDC_POUCH_ROOT=${LUA_E2E_POUCH_ROOT}"
+    )
+  endif()
+  if(LUA_E2E_POUCH_ROOT)
+    set(lua_e2e_runner "${CMAKE_SOURCE_DIR}/tests/lua_pouch_rock_install_and_run_test.cmake")
+  else()
+    set(lua_e2e_runner "${CMAKE_SOURCE_DIR}/tests/lua_rock_install_and_run_test.cmake")
+  endif()
   list(APPEND lua_e2e_command
-    -P "${CMAKE_SOURCE_DIR}/tests/lua_rock_install_and_run_test.cmake"
+    -P "${lua_e2e_runner}"
   )
 
   add_test(NAME ${test_name} COMMAND ${lua_e2e_command})
@@ -65,6 +74,7 @@ function(lc_add_lua_e2e_test test_name script_path)
 endfunction()
 
 lc_add_e2e_shard(lc_e2e_disk_direct LC_E2E_GROUP_DISK_DIRECT)
+lc_add_e2e_shard(lc_e2e_pouch_direct LC_E2E_GROUP_POUCH_DIRECT)
 lc_add_e2e_shard(lc_e2e_s3_direct LC_E2E_GROUP_S3_DIRECT)
 lc_add_e2e_shard(lc_e2e_mem_direct LC_E2E_GROUP_MEM_DIRECT)
 lc_add_e2e_shard(lc_e2e_disk_consumer LC_E2E_GROUP_DISK_CONSUMER)
@@ -78,6 +88,7 @@ if(TARGET lc_example_acquire_lease_lifecycle)
   set_tests_properties(lc_example_smoke_acquire_lease_lifecycle PROPERTIES
     LABELS "e2e;examples"
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -90,6 +101,7 @@ if(TARGET lc_example_acquire_for_update)
     LABELS "e2e;examples"
     PASS_REGULAR_EXPRESSION "acquire_for_update updated key"
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -101,6 +113,7 @@ if(TARGET lc_example_client_and_lease_methods)
   set_tests_properties(lc_example_smoke_client_and_lease_methods PROPERTIES
     LABELS "e2e;examples"
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -112,6 +125,7 @@ if(TARGET lc_example_management_admin)
   set_tests_properties(lc_example_smoke_management_admin PROPERTIES
     LABELS "e2e;examples"
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -123,6 +137,7 @@ if(TARGET lc_example_curl_fetch_into_lockd)
   set_tests_properties(lc_example_smoke_curl_fetch_into_lockd PROPERTIES
     LABELS "e2e;examples"
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -140,6 +155,7 @@ if(TARGET lc_example_local_mutate)
     LABELS "e2e;examples"
     PASS_REGULAR_EXPRESSION "\"kind\":\"example-local-mutate\""
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
@@ -152,11 +168,12 @@ if(TARGET lc_example_startconsumer)
     LABELS "e2e;examples"
     PASS_REGULAR_EXPRESSION "\\{\"counter\":3\\}"
     RUN_SERIAL TRUE
+    TIMEOUT 300
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   )
 endif()
 
-find_program(LOCKDC_LUA_BIN NAMES lua lua5.5)
+find_program(LOCKDC_LUA_BIN NAMES lua5.5)
 find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks)
 
 lc_add_lua_e2e_test(
@@ -211,3 +228,11 @@ lc_add_lua_e2e_test(
   "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_bundle_sources.lua"
   ENV_OVERRIDES "LOCKDC_KEY_PREFIX=tests/lua/e2e-bundle-sources;LOCKDC_OWNER=lua-e2e-bundle-sources"
 )
+
+lc_add_lua_e2e_test(
+  lc_e2e_lua_pouch_config
+  "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_pouch.lua"
+  PACKAGE_ONLY
+  POUCH_ROOT "${CMAKE_BINARY_DIR}/lua-pouch-e2e/lc_e2e_lua_pouch_config"
+)
+lc_apply_default_test_timeouts()

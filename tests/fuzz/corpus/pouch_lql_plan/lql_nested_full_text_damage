@@ -1,0 +1,1 @@
+lql:workflow.state = "escalated" AND customer.tier = "enterprise" AND text ~ "regulatory payment narrative"

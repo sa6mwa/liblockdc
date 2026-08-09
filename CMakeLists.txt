@@ -61,7 +61,7 @@ cmake_dependent_option(LOCKDC_BUILD_E2E_TESTS
     OFF
 )
 option(LOCKDC_BUILD_BENCHMARKS "Build local benchmark targets." ON)
-option(LOCKDC_BUILD_FUZZERS "Build clang/libFuzzer targets for parser and stream hardening." OFF)
+option(LOCKDC_BUILD_FUZZERS "Build AFL++ targets for parser and stream hardening." OFF)
 option(LOCKDC_ENABLE_COVERAGE "Build test targets with gcov coverage instrumentation." OFF)
 option(LOCKDC_INSTALL "Enable install rules." ON)
 
@@ -70,13 +70,34 @@ set(LOCKDC_ZLIB_VERSION "1.3.2" CACHE STRING "Pinned zlib release supplied by c.
 set(LOCKDC_CURL_VERSION "8.20.0" CACHE STRING "Pinned curl release supplied by c.pkt.systems.")
 set(LOCKDC_NGHTTP2_VERSION "1.69.0" CACHE STRING "Pinned nghttp2 release supplied by c.pkt.systems.")
 set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release supplied by c.pkt.systems.")
-set(LOCKDC_LONEJSON_VERSION "0.32.1" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
-set(LOCKDC_LONEJSON_ABI_VERSION "16" CACHE STRING "Pinned lonejson shared-library ABI/SOVERSION." FORCE)
+set(LOCKDC_LONEJSON_VERSION "0.42.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
+set(LOCKDC_LONEJSON_ABI_VERSION "25" CACHE STRING "Pinned lonejson shared-library ABI/SOVERSION." FORCE)
+set(LOCKDC_LIBLQL_VERSION "0.2.0" CACHE STRING "Pinned liblql release used for pouch LQL query support." FORCE)
+set(LOCKDC_LIBLQL_ABI_VERSION "0" CACHE STRING "Pinned liblql shared-library ABI/SOVERSION." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
-set(LOCKDC_PSLOG_VERSION "0.4.1" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
-set(LOCKDC_CPKT_VERSION "0.4.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version.")
-set(LOCKDC_ABI_VERSION "1" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
-set(LOCKDC_DOWNLOAD_ROOT "${CMAKE_SOURCE_DIR}/.cache/downloads" CACHE PATH "Shared download root for vendored dependency archives.")
+set(LOCKDC_PSLOG_VERSION "0.9.0" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
+set(LOCKDC_CPKT_VERSION "0.9.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version." FORCE)
+set(LOCKDC_MIN_ABI_VERSION "2")
+set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
+if(LOCKDC_ABI_VERSION MATCHES "^[0-9]+$" AND LOCKDC_ABI_VERSION LESS LOCKDC_MIN_ABI_VERSION)
+    set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc." FORCE)
+endif()
+if(DEFINED CPKT_DEPENDENCY_CACHE AND NOT "${CPKT_DEPENDENCY_CACHE}" STREQUAL "")
+    set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "${CPKT_DEPENDENCY_CACHE}")
+elseif(DEFINED ENV{CPKT_DEPENDENCY_CACHE} AND NOT "$ENV{CPKT_DEPENDENCY_CACHE}" STREQUAL "")
+    set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "$ENV{CPKT_DEPENDENCY_CACHE}")
+elseif(DEFINED ENV{XDG_CACHE_HOME} AND NOT "$ENV{XDG_CACHE_HOME}" STREQUAL "")
+    set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "$ENV{XDG_CACHE_HOME}/c.pkt.systems/deps")
+elseif(DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
+    set(LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE "$ENV{HOME}/.cache/c.pkt.systems/deps")
+else()
+    message(FATAL_ERROR
+        "CPKT_DEPENDENCY_CACHE, XDG_CACHE_HOME, or HOME is required for the shared verified dependency archive cache. Set -DCPKT_DEPENDENCY_CACHE=<path> when running without a user cache environment.")
+endif()
+set(CPKT_DEPENDENCY_CACHE "${LOCKDC_DEFAULT_CPKT_DEPENDENCY_CACHE}" CACHE PATH "Shared verified c.pkt.systems dependency archive cache.")
+set(LOCKDC_DOWNLOAD_ROOT "${CMAKE_SOURCE_DIR}/.cache/downloads" CACHE PATH "Repository-local verified dependency archive staging root.")
+set(LOCKDC_CMOCKA_ARCHIVE_PATH "" CACHE FILEPATH "Verified local cmocka release archive path.")
+set(LOCKDC_PSLOG_ARCHIVE_PATH "" CACHE FILEPATH "Verified local libpslog release archive path.")
 set(LOCKDC_DIST_DIR "${CMAKE_BINARY_DIR}/dist" CACHE PATH "Output directory for generated package archives and checksum manifests.")
 set(LOCKDC_VERSION_OVERRIDE "" CACHE STRING "Override the detected liblockdc package version with an explicit semantic version.")
 set(LOCKDC_TARGET_ARCH "${CMAKE_SYSTEM_PROCESSOR}" CACHE STRING "Artifact architecture name")
@@ -99,8 +120,8 @@ if(NOT LOCKDC_ABI_VERSION MATCHES "^[0-9]+$")
 endif()
 
 if(LOCKDC_BUILD_FUZZERS)
-    if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
-        message(FATAL_ERROR "LOCKDC_BUILD_FUZZERS=ON requires Clang as the C compiler")
+    if(NOT DEFINED LOCKDC_AFLPP_ROOT OR LOCKDC_AFLPP_ROOT STREQUAL "")
+        message(FATAL_ERROR "LOCKDC_BUILD_FUZZERS=ON requires the pinned AFL++ lifecycle toolchain")
     endif()
     if(NOT LOCKDC_BUILD_STATIC)
         message(FATAL_ERROR "LOCKDC_BUILD_FUZZERS=ON requires LOCKDC_BUILD_STATIC=ON")
@@ -156,6 +177,61 @@ endif()
 if(NOT DEFINED LOCKDC_DEPENDENCY_BUILD_ROOT)
     set(LOCKDC_DEPENDENCY_BUILD_ROOT "${CMAKE_SOURCE_DIR}/.cache/deps-build/${LOCKDC_TARGET_ID}" CACHE PATH "Stable build root for downloaded third-party dependencies.")
 endif()
+if(LOCKDC_BUILD_DEPENDENCIES)
+    include(LcGeneratedPath)
+    lockdc_assert_generated_path("${CMAKE_SOURCE_DIR}" "${LOCKDC_DOWNLOAD_ROOT}")
+    lockdc_assert_generated_path("${CMAKE_SOURCE_DIR}" "${LOCKDC_EXTERNAL_ROOT}")
+    lockdc_assert_generated_path("${CMAKE_SOURCE_DIR}" "${LOCKDC_DEPENDENCY_BUILD_ROOT}")
+endif()
+
+set(LOCKDC_C_TEST_ENVIRONMENT "")
+if(CMAKE_CROSSCOMPILING)
+    list(APPEND LOCKDC_C_TEST_ENVIRONMENT "LOCKDC_SLOW_TEST_RUNTIME=1")
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSROOT AND LOCKDC_TARGET_LIBC STREQUAL "musl")
+    set(lockdc_c_test_runtime_dirs)
+    foreach(lockdc_runtime_dir
+            "${CMAKE_SYSROOT}/lib"
+            "${CMAKE_SYSROOT}/usr/lib"
+            "${CMAKE_SYSROOT}/lib64"
+            "${CMAKE_SYSROOT}/usr/lib64")
+        if(IS_DIRECTORY "${lockdc_runtime_dir}")
+            list(APPEND lockdc_c_test_runtime_dirs "${lockdc_runtime_dir}")
+        endif()
+    endforeach()
+    execute_process(
+        COMMAND "${CMAKE_C_COMPILER}" -print-file-name=libatomic.so.1
+        OUTPUT_VARIABLE lockdc_libatomic_path
+        RESULT_VARIABLE lockdc_libatomic_result
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+    if(lockdc_libatomic_result EQUAL 0
+       AND NOT lockdc_libatomic_path STREQUAL "libatomic.so.1"
+       AND EXISTS "${lockdc_libatomic_path}")
+        get_filename_component(lockdc_libatomic_dir "${lockdc_libatomic_path}" DIRECTORY)
+        list(APPEND lockdc_c_test_runtime_dirs "${lockdc_libatomic_dir}")
+    endif()
+    list(REMOVE_DUPLICATES lockdc_c_test_runtime_dirs)
+    if(lockdc_c_test_runtime_dirs)
+        string(JOIN ":" lockdc_c_test_runtime_path ${lockdc_c_test_runtime_dirs})
+        list(APPEND LOCKDC_C_TEST_ENVIRONMENT "LD_LIBRARY_PATH=${lockdc_c_test_runtime_path}")
+    endif()
+endif()
+
+function(lc_configure_fatal_linker_warnings target)
+    get_target_property(target_type ${target} TYPE)
+    if(NOT target_type STREQUAL "EXECUTABLE" AND
+       NOT target_type STREQUAL "SHARED_LIBRARY" AND
+       NOT target_type STREQUAL "MODULE_LIBRARY")
+        return()
+    endif()
+
+    if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+        target_link_options(${target} PRIVATE "LINKER:-fatal_warnings")
+    elseif(UNIX OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+        target_link_options(${target} PRIVATE "LINKER:--fatal-warnings")
+    endif()
+endfunction()
 
 function(lc_configure_c_target target)
     if(UNIX OR APPLE OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
@@ -165,8 +241,6 @@ function(lc_configure_c_target target)
         target_compile_definitions(${target} PRIVATE _DARWIN_C_SOURCE=1)
     endif()
     set_target_properties(${target} PROPERTIES
-        C_STANDARD 90
-        C_STANDARD_REQUIRED ON
         C_EXTENSIONS OFF
         POSITION_INDEPENDENT_CODE ON
         VISIBILITY_INLINES_HIDDEN NO
@@ -177,8 +251,30 @@ function(lc_configure_c_target target)
             -Wall
             -Wextra
             -Wpedantic
+            -pedantic-errors
+            -Werror
         )
     endif()
+    lc_configure_fatal_linker_warnings(${target})
+endfunction()
+
+function(lc_configure_c_test_target target)
+    set_target_properties(${target} PROPERTIES
+        C_STANDARD 99
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS ON
+    )
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        target_compile_options(${target} PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+            -Wno-missing-field-initializers
+            -Wno-unused-function
+            -Werror
+        )
+    endif()
+    lc_configure_fatal_linker_warnings(${target})
 endfunction()
 
 function(lc_enable_coverage_if_requested target)
@@ -193,52 +289,17 @@ function(lc_enable_coverage_if_requested target)
 endfunction()
 
 function(lc_enable_fuzz_instrumentation_if_requested target)
-    get_target_property(target_type ${target} TYPE)
-    if(LOCKDC_BUILD_FUZZERS AND CMAKE_C_COMPILER_ID MATCHES "Clang")
+    if(LOCKDC_BUILD_FUZZERS)
         target_compile_definitions(${target} PRIVATE FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1)
-        target_compile_options(${target} PRIVATE
-            -fsanitize=fuzzer-no-link,address,undefined
-            -fno-omit-frame-pointer
-            -g
-        )
-        if(NOT target_type STREQUAL "STATIC_LIBRARY")
-            target_link_options(${target} PRIVATE -fsanitize=fuzzer-no-link,address,undefined)
-        endif()
     endif()
 endfunction()
 
 function(lc_assert_fuzz_toolchain_supported)
-    set(fuzz_probe_dir "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/fuzz-toolchain-probe")
-    set(fuzz_probe_source "${fuzz_probe_dir}/probe.c")
-    set(fuzz_probe_binary "${fuzz_probe_dir}/probe")
-
-    file(MAKE_DIRECTORY "${fuzz_probe_dir}")
-    file(WRITE "${fuzz_probe_source}" [=[
-int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) {
-    (void)data;
-    (void)size;
-    return 0;
-}
-]=])
-
-    execute_process(
-        COMMAND "${CMAKE_C_COMPILER}"
-            -v
-            -fsanitize=fuzzer,address
-            -fno-omit-frame-pointer
-            "${fuzz_probe_source}"
-            -o "${fuzz_probe_binary}"
-        RESULT_VARIABLE fuzz_probe_result
-        OUTPUT_VARIABLE fuzz_probe_stdout
-        ERROR_VARIABLE fuzz_probe_stderr
-    )
-
-    if(NOT fuzz_probe_result EQUAL 0)
-        message(FATAL_ERROR
-            "LOCKDC_BUILD_FUZZERS=ON requires a C toolchain that can link -fsanitize=fuzzer,address. "
-            "The selected compiler is '${CMAKE_C_COMPILER}'. Install the matching compiler-rt/libFuzzer runtime "
-            "for this Clang toolchain or use a Clang toolchain that provides those libraries.\n"
-            "clang output:\n${fuzz_probe_stdout}\n${fuzz_probe_stderr}")
+    if(NOT DEFINED LOCKDC_AFLPP_ROOT OR LOCKDC_AFLPP_ROOT STREQUAL "")
+        message(FATAL_ERROR "LOCKDC_BUILD_FUZZERS=ON requires the pinned AFL++ lifecycle toolchain")
+    endif()
+    if(NOT EXISTS "${LOCKDC_AFLPP_ROOT}/bin/afl-fuzz")
+        message(FATAL_ERROR "Pinned AFL++ afl-fuzz is missing: ${LOCKDC_AFLPP_ROOT}/bin/afl-fuzz")
     endif()
 endfunction()
 
@@ -295,6 +356,7 @@ set(LOCKDC_PUBLIC_VERSION_HEADER "${lc_generated_include_dir}/lc/version.h")
 
 include(LcDependencies)
 lc_configure_dependencies()
+lc_get_pslog_asset_info(LOCKDC_PSLOG_ASSET_NAME LOCKDC_PSLOG_ASSET_HASH)
 
 set(lc_sources
     src/lc_api.c
@@ -311,6 +373,19 @@ set(lc_sources
     src/lc_management_api.c
     src/lc_message_api.c
     src/lc_mutate_stream.c
+    src/lc_pouch_client.c
+    src/lc_pouch.c
+    src/lc_pouch_crypto.c
+    src/lc_pouch_index.c
+    src/lc_pouch_index_doc.c
+    src/lc_pouch_index_posting.c
+    src/lc_pouch_index_result.c
+    src/lc_pouch_index_terms.c
+    src/lc_pouch_query_index.c
+    src/lc_pouch_namespace.c
+    src/lc_pouch_path.c
+    src/lc_pouch_record.c
+    src/lc_pouch_state.c
     src/lc_queue_api.c
     src/lc_queue_stream_api.c
     src/lc_log.c
@@ -323,14 +398,26 @@ set(LOCKDC_PSLOG_STATIC_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/pslog/install/inclu
 set(LOCKDC_PSLOG_SHARED_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include")
 set(LOCKDC_LONEJSON_STATIC_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include")
 set(LOCKDC_LONEJSON_SHARED_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include")
+set(LOCKDC_LIBLQL_STATIC_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/liblql/install/include")
+set(LOCKDC_LIBLQL_SHARED_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/liblql/install/include")
 set(LOCKDC_PSLOG_INCLUDE_DIR "")
 set(LOCKDC_LONEJSON_INCLUDE_DIR "")
+set(LOCKDC_LIBLQL_INCLUDE_DIR "")
 foreach(lockdc_pslog_include_candidate
     "${LOCKDC_PSLOG_STATIC_INCLUDE_DIR}"
     "${LOCKDC_PSLOG_SHARED_INCLUDE_DIR}"
 )
     if(EXISTS "${lockdc_pslog_include_candidate}/pslog.h")
         set(LOCKDC_PSLOG_INCLUDE_DIR "${lockdc_pslog_include_candidate}")
+        break()
+    endif()
+endforeach()
+foreach(lockdc_liblql_include_candidate
+    "${LOCKDC_LIBLQL_STATIC_INCLUDE_DIR}"
+    "${LOCKDC_LIBLQL_SHARED_INCLUDE_DIR}"
+)
+    if(EXISTS "${lockdc_liblql_include_candidate}/lql/lql.h")
+        set(LOCKDC_LIBLQL_INCLUDE_DIR "${lockdc_liblql_include_candidate}")
         break()
     endif()
 endforeach()
@@ -357,6 +444,13 @@ if(LOCKDC_LONEJSON_INCLUDE_DIR STREQUAL "")
         set(LOCKDC_LONEJSON_INCLUDE_DIR "${LOCKDC_LONEJSON_STATIC_INCLUDE_DIR}")
     endif()
 endif()
+if(LOCKDC_LIBLQL_INCLUDE_DIR STREQUAL "")
+    if(LOCKDC_BUILD_SHARED AND NOT LOCKDC_BUILD_STATIC)
+        set(LOCKDC_LIBLQL_INCLUDE_DIR "${LOCKDC_LIBLQL_SHARED_INCLUDE_DIR}")
+    else()
+        set(LOCKDC_LIBLQL_INCLUDE_DIR "${LOCKDC_LIBLQL_STATIC_INCLUDE_DIR}")
+    endif()
+endif()
 
 function(lc_configure_library_target target)
     target_sources(${target} PRIVATE ${lc_sources})
@@ -366,11 +460,18 @@ function(lc_configure_library_target target)
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<BUILD_INTERFACE:${LOCKDC_PSLOG_INCLUDE_DIR}>
             $<BUILD_INTERFACE:${LOCKDC_LONEJSON_INCLUDE_DIR}>
+            $<BUILD_INTERFACE:${LOCKDC_LIBLQL_INCLUDE_DIR}>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
         PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
-    target_compile_definitions(${target} PRIVATE LC_VERSION_STRING="${LOCKDC_RESOLVED_VERSION}")
+    target_compile_definitions(${target}
+        PUBLIC
+            LONEJSON_WITH_JWT
+            LONEJSON_WITH_OIDC
+        PRIVATE
+            LC_VERSION_STRING="${LOCKDC_RESOLVED_VERSION}"
+    )
     target_link_libraries(${target} PUBLIC ${LOCKDC_SYSTEM_LIBRARIES})
     lc_configure_c_target(${target})
     lc_enable_coverage_if_requested(${target})
@@ -412,6 +513,7 @@ function(lc_add_build_tree_shared_dependency_lookup target)
         "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
         "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
         "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+        "${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
         "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
         "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib"
     )
@@ -434,6 +536,7 @@ if(LOCKDC_BUILD_STATIC)
         lc::nghttp2_static
         lc::pslog_static
         lc::lonejson_static
+        lc::liblql_static
     )
     set_target_properties(lc_static PROPERTIES
         OUTPUT_NAME lockdc
@@ -460,6 +563,7 @@ if(LOCKDC_BUILD_SHARED)
         lc::nghttp2_shared
         lc::pslog_shared
         lc::lonejson_shared
+        lc::liblql_shared
     )
     lc_add_build_tree_shared_dependency_lookup(lc_shared)
     set_target_properties(lc_shared PROPERTIES
@@ -470,6 +574,7 @@ if(LOCKDC_BUILD_SHARED)
         BUILD_RPATH_USE_ORIGIN ON
         BUILD_WITH_INSTALL_RPATH ON
         INSTALL_RPATH "${lockdc_shared_install_rpath}"
+        INSTALL_NAME_DIR "@rpath"
         INSTALL_RPATH_USE_LINK_PATH OFF
     )
     lc_add_release_privacy_scan(lc_shared)
@@ -478,6 +583,7 @@ endif()
 if(LOCKDC_BUILD_TESTS)
     add_library(lc_test_static STATIC)
     lc_configure_library_target(lc_test_static)
+    target_compile_definitions(lc_test_static PRIVATE LOCKDC_TEST_BUILD=1)
     target_link_libraries(lc_test_static PRIVATE
         lc::curl_static
         lc::openssl_ssl_static
@@ -485,6 +591,7 @@ if(LOCKDC_BUILD_TESTS)
         lc::nghttp2_static
         lc::pslog_static
         lc::lonejson_static
+        lc::liblql_static
     )
     set_target_properties(lc_test_static PROPERTIES
         OUTPUT_NAME lockdc_test
@@ -553,7 +660,7 @@ set(LOCKDC_LUA_LIBRARY "")
 if(LOCKDC_BUILD_LUA_BINDINGS)
     find_path(LOCKDC_LUA_INCLUDE_DIR
         NAMES lua.h
-        PATH_SUFFIXES include include/lua5.5 include/lua-5.5 include/lua lua5.5 lua-5.5 lua
+        PATH_SUFFIXES include include/lua5.5 include/lua-5.5 lua5.5 lua-5.5
         PATHS /usr/local /usr /usr/local/include /usr/include
     )
     if("${LOCKDC_LUA_INCLUDE_DIR}" STREQUAL "" AND EXISTS "/usr/local/include/lua.h")
@@ -561,7 +668,7 @@ if(LOCKDC_BUILD_LUA_BINDINGS)
     endif()
     if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
         find_library(LOCKDC_LUA_LIBRARY
-            NAMES lua5.5 lua-5.5 lua55 lua
+            NAMES lua5.5 lua-5.5 lua55
             PATH_SUFFIXES lib lib64
             PATHS /usr/local /usr /opt/local
         )
@@ -654,8 +761,45 @@ if(LOCKDC_BUILD_TESTS OR LOCKDC_BUILD_FUZZERS)
     enable_testing()
 endif()
 
+macro(lc_apply_default_test_timeouts)
+    get_property(lockdc_registered_tests DIRECTORY PROPERTY TESTS)
+    foreach(lockdc_registered_test IN LISTS lockdc_registered_tests)
+        get_property(lockdc_timeout_is_set
+            TEST "${lockdc_registered_test}" PROPERTY TIMEOUT SET)
+        if(NOT lockdc_timeout_is_set)
+            set_tests_properties("${lockdc_registered_test}" PROPERTIES TIMEOUT 120)
+        endif()
+    endforeach()
+endmacro()
+
 if(LOCKDC_BUILD_TESTS)
     add_subdirectory(tests)
+
+    if(TARGET lockdc_bench)
+        add_test(NAME lockdc_bench_help COMMAND lockdc_bench --help)
+        set_tests_properties(lockdc_bench_help PROPERTIES
+            LABELS "local;smoke"
+            TIMEOUT 10
+            PASS_REGULAR_EXPRESSION "usage: .*lockdc_bench"
+            FAIL_REGULAR_EXPRESSION "benchmark[ ]+iterations|failed during"
+        )
+        if(LOCKDC_C_TEST_ENVIRONMENT)
+            set_tests_properties(lockdc_bench_help PROPERTIES
+                ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+        endif()
+
+        add_test(NAME lockdc_bench_short_help COMMAND lockdc_bench -h)
+        set_tests_properties(lockdc_bench_short_help PROPERTIES
+            LABELS "local;smoke"
+            TIMEOUT 10
+            PASS_REGULAR_EXPRESSION "usage: .*lockdc_bench"
+            FAIL_REGULAR_EXPRESSION "benchmark[ ]+iterations|failed during"
+        )
+        if(LOCKDC_C_TEST_ENVIRONMENT)
+            set_tests_properties(lockdc_bench_short_help PROPERTIES
+                ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+        endif()
+    endif()
 
     if(TARGET lc_shared AND TARGET lc_static)
         add_test(NAME package_archives_test
@@ -723,6 +867,11 @@ if(LOCKDC_BUILD_TESTS)
             -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+            -DLOCKDC_DEPENDENCY_BUILD_ROOT=${LOCKDC_DEPENDENCY_BUILD_ROOT}
+            -DLOCKDC_TARGET_ARCH=${LOCKDC_TARGET_ARCH}
+            -DLOCKDC_TARGET_OS=${LOCKDC_TARGET_OS}
+            -DLOCKDC_TARGET_LIBC=${LOCKDC_TARGET_LIBC}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/c_only_configure_test.cmake
     )
     set_tests_properties(c_only_configure_test PROPERTIES RUN_SERIAL TRUE)
@@ -731,6 +880,10 @@ if(LOCKDC_BUILD_TESTS)
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+            -DLOCKDC_TARGET_ARCH=${LOCKDC_TARGET_ARCH}
+            -DLOCKDC_TARGET_OS=${LOCKDC_TARGET_OS}
+            -DLOCKDC_TARGET_LIBC=${LOCKDC_TARGET_LIBC}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/deferred_vendored_install_manifest_test.cmake
     )
     set_tests_properties(deferred_vendored_install_manifest_test PROPERTIES RUN_SERIAL TRUE)
@@ -744,14 +897,6 @@ if(LOCKDC_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/arch_alias_configure_test.cmake
     )
     set_tests_properties(arch_alias_configure_test PROPERTIES RUN_SERIAL TRUE)
-
-    add_test(NAME package_script_targeting_test
-        COMMAND ${CMAKE_COMMAND}
-            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
-            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
-            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/package_script_targeting_test.cmake
-    )
-    set_tests_properties(package_script_targeting_test PROPERTIES RUN_SERIAL TRUE)
 
     add_test(NAME cross_test_targeting_test
         COMMAND ${CMAKE_COMMAND}
@@ -777,6 +922,7 @@ if(LOCKDC_BUILD_TESTS)
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
             -DLOCKDC_C_FLAGS_DEBUG=${CMAKE_C_FLAGS_DEBUG}
+            -DLOCKDC_ACTIVE_C_FLAGS=${LOCKDC_ACTIVE_C_FLAGS}
             -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
             $<$<BOOL:${CMAKE_BUILD_TYPE}>:-DLOCKDC_BUILD_TYPE=${CMAKE_BUILD_TYPE}>
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/install_tree_sdk_test.cmake
@@ -789,6 +935,13 @@ if(LOCKDC_BUILD_TESTS)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/devenv_compose_config_test.cmake
     )
     set_tests_properties(devenv_compose_config_test PROPERTIES RUN_SERIAL TRUE)
+
+    add_test(NAME pouch_boundary_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/pouch_boundary_test.cmake
+    )
+    set_tests_properties(pouch_boundary_test PROPERTIES RUN_SERIAL TRUE)
 
     add_test(NAME pslog_build_modes_test
         COMMAND ${CMAKE_COMMAND}
@@ -843,11 +996,109 @@ if(LOCKDC_BUILD_TESTS)
     )
     set_tests_properties(dependency_download_timeout_test PROPERTIES RUN_SERIAL TRUE)
 
+    add_test(NAME dependency_archive_cache_contract_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/dependency_archive_cache_contract_test.cmake
+    )
+    set_tests_properties(dependency_archive_cache_contract_test PROPERTIES
+        LABELS "unit;local"
+        RUN_SERIAL TRUE
+        TIMEOUT 20)
+
+    add_test(NAME clean_read_only_cache_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/clean_read_only_cache_test.cmake
+    )
+    set_tests_properties(clean_read_only_cache_test PROPERTIES
+        LABELS "unit;local"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
+    add_test(NAME generated_path_guard_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/generated_path_guard_test.cmake
+    )
+    set_tests_properties(generated_path_guard_test PROPERTIES
+        LABELS "unit;local"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
+    add_test(NAME dependency_prune_path_guard_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/dependency_prune_path_guard_test.cmake
+    )
+    set_tests_properties(dependency_prune_path_guard_test PROPERTIES
+        LABELS "unit;local;packaging"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
+    add_test(NAME ctest_timeout_contract_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ctest_timeout_contract_test.cmake
+    )
+    set_tests_properties(ctest_timeout_contract_test PROPERTIES
+        LABELS "unit;local"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
+    add_test(NAME source_manifest_boundary_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/source_manifest_boundary_test.cmake
+    )
+    set_tests_properties(source_manifest_boundary_test PROPERTIES
+        LABELS "unit;local;packaging"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
+    add_test(NAME lifecycle_command_surface_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lifecycle_command_surface_test.cmake
+    )
+    set_tests_properties(lifecycle_command_surface_test PROPERTIES
+        LABELS "unit;local;lifecycle-host"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
+    add_test(NAME lifecycle_preset_contract_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/lifecycle_preset_contract_test.cmake
+    )
+    set_tests_properties(lifecycle_preset_contract_test PROPERTIES
+        LABELS "unit;local;lifecycle-host"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
+    add_test(NAME discover_target_tools_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/discover_target_tools_test.cmake
+    )
+    set_tests_properties(discover_target_tools_test PROPERTIES
+        LABELS "unit;local;packaging;lifecycle-host"
+        RUN_SERIAL TRUE
+        TIMEOUT 10)
+
+    lc_apply_default_test_timeouts()
+
 endif()
 
 if(LOCKDC_BUILD_FUZZERS)
     lc_assert_fuzz_toolchain_supported()
     add_subdirectory(tests/fuzz)
+    lc_apply_default_test_timeouts()
 endif()
 
 find_program(GCOV_BIN NAMES gcov)

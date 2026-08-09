@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-set -eu
+set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 compose_project=liblockdc-e2e
+
+# shellcheck source=assert_generated_path.sh
+source "$script_dir/assert_generated_path.sh"
 
 container_engine() {
   if command -v nerdctl >/dev/null 2>&1; then
@@ -18,6 +21,7 @@ container_engine() {
 }
 
 remove_if_present() {
+  lockdc_assert_generated_path "$repo_root" "$1"
   if [ -e "$1" ]; then
     rm -rf -- "$1"
   fi

@@ -34,6 +34,7 @@ foreach(lockdc_preset IN LISTS lockdc_release_presets)
             -DLOCKDC_BINARY_DIR=${lockdc_build_dir}
             -DLOCKDC_ROOT=${LOCKDC_ROOT}
             -DLOCKDC_DIST_DIR=${lockdc_dist_dir}
+            -DLOCKDC_USE_EXISTING_ARCHIVE=ON
             -DLOCKDC_RUN_DOWNSTREAM_BINARIES=OFF
             -P "${LOCKDC_ROOT}/tests/release_tarball_sdk_test.cmake"
         RESULT_VARIABLE verify_result

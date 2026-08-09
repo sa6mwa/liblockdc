@@ -10,12 +10,7 @@ function(lc_add_unit_test target_name)
     ${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include
     ${LOCKDC_EXTERNAL_ROOT}/zlib/install/include
   )
-  set_target_properties(${target_name}
-    PROPERTIES
-      C_STANDARD 99
-      C_STANDARD_REQUIRED ON
-      C_EXTENSIONS ON
-  )
+  lc_configure_c_test_target(${target_name})
   if(LOCKDC_ENABLE_COVERAGE)
     target_compile_options(${target_name} PRIVATE
       $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:--coverage -O0 -g>
@@ -25,11 +20,23 @@ function(lc_add_unit_test target_name)
     )
   endif()
   add_test(NAME ${target_name} COMMAND ${target_name})
-  set_tests_properties(${target_name} PROPERTIES TIMEOUT 60)
+  # The QEMU release suite exercises every portable core unit target.  Keep
+  # protocol edge-case permutations on the native sanitizer and host-release
+  # suites, where they provide the same coverage without emulator overhead.
+  set_tests_properties(${target_name} PROPERTIES
+    LABELS "unit;cross-runtime"
+    TIMEOUT 60)
+  if(LOCKDC_C_TEST_ENVIRONMENT)
+    set_tests_properties(${target_name} PROPERTIES
+      ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+  endif()
 endfunction()
 
 function(lc_add_https_unit_test_case target_name case_macro)
-  add_executable(${target_name} test_lc_transport_https.c)
+  add_executable(${target_name}
+    test_lc_transport_https.c
+    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+  )
   target_link_libraries(${target_name} PRIVATE
     ${lc_test_link_target}
     lc::cmocka
@@ -46,12 +53,7 @@ function(lc_add_https_unit_test_case target_name case_macro)
     ${CMAKE_SOURCE_DIR}/src
   )
   target_compile_definitions(${target_name} PRIVATE ${case_macro})
-  set_target_properties(${target_name}
-    PROPERTIES
-      C_STANDARD 99
-      C_STANDARD_REQUIRED ON
-      C_EXTENSIONS ON
-  )
+  lc_configure_c_test_target(${target_name})
   if(LOCKDC_ENABLE_COVERAGE)
     target_compile_options(${target_name} PRIVATE
       $<$<COMPILE_LANG_AND_ID:C,GNU,Clang>:--coverage -O0 -g>
@@ -62,9 +64,88 @@ function(lc_add_https_unit_test_case target_name case_macro)
   endif()
   add_test(NAME ${target_name} COMMAND ${target_name})
   set_tests_properties(${target_name} PROPERTIES TIMEOUT 60)
+  if(LOCKDC_C_TEST_ENVIRONMENT)
+    set_tests_properties(${target_name} PROPERTIES
+      ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")
+  endif()
+endfunction()
+
+function(lc_add_cross_runtime_https_unit_test_case target_name case_macro)
+  lc_add_https_unit_test_case(${target_name} ${case_macro})
+  set_tests_properties(${target_name} PROPERTIES
+    LABELS "unit;transport;cross-runtime")
 endfunction()
 
 lc_add_unit_test(lc_unit_streams test_lc_streams.c)
+add_executable(lc_unit_tmp_cleanup_probe
+  test_lc_tmp_cleanup.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+)
+lc_configure_c_test_target(lc_unit_tmp_cleanup_probe)
+set(lc_unit_tmp_cleanup_probe_command "$<TARGET_FILE:lc_unit_tmp_cleanup_probe>")
+if(CMAKE_CROSSCOMPILING AND CMAKE_CROSSCOMPILING_EMULATOR)
+  set(lc_unit_tmp_cleanup_probe_command
+    ${CMAKE_CROSSCOMPILING_EMULATOR}
+    "$<TARGET_FILE:lc_unit_tmp_cleanup_probe>"
+  )
+endif()
+add_test(NAME lc_unit_tmp_cleanup_signal
+  COMMAND "${CMAKE_COMMAND}"
+    "-DLOCKDC_TMP_CLEANUP_PROBE_COMMAND=${lc_unit_tmp_cleanup_probe_command}"
+    -DLOCKDC_TMP_PATH_FILE=${CMAKE_BINARY_DIR}/tmp-cleanup-signal.path
+    -P "${CMAKE_SOURCE_DIR}/tests/tmp_cleanup_signal_test.cmake"
+)
+set_tests_properties(lc_unit_tmp_cleanup_signal PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 15
+)
+add_test(NAME lc_unit_tmp_cleanup_abort
+  COMMAND "${CMAKE_COMMAND}"
+    "-DLOCKDC_TMP_CLEANUP_PROBE_COMMAND=${lc_unit_tmp_cleanup_probe_command}"
+    -DLOCKDC_TMP_PATH_FILE=${CMAKE_BINARY_DIR}/tmp-cleanup-abort.path
+    -DLOCKDC_TMP_CLEANUP_SIGNAL=ABRT
+    -P "${CMAKE_SOURCE_DIR}/tests/tmp_cleanup_signal_test.cmake"
+)
+set_tests_properties(lc_unit_tmp_cleanup_abort PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 15
+)
+add_test(NAME lc_unit_tmp_cleanup_auto_stale
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "LOCKDC_TMP_CLEANUP_MODE=auto-stale"
+    ${lc_unit_tmp_cleanup_probe_command}
+)
+set_tests_properties(lc_unit_tmp_cleanup_auto_stale PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 15
+)
+add_test(NAME lc_unit_tmp_cleanup_explicit_global_stale
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "LOCKDC_TMP_CLEANUP_MODE=explicit-global-stale"
+    ${lc_unit_tmp_cleanup_probe_command}
+)
+set_tests_properties(lc_unit_tmp_cleanup_explicit_global_stale PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 15
+)
+add_test(NAME lc_unit_tmp_cleanup_orphan_owner_marker
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "LOCKDC_TMP_CLEANUP_MODE=orphan-owner-marker"
+    ${lc_unit_tmp_cleanup_probe_command}
+)
+set_tests_properties(lc_unit_tmp_cleanup_orphan_owner_marker PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 15
+)
+add_test(NAME lc_unit_tmp_cleanup_unmarked_global_prefix
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "LOCKDC_TMP_CLEANUP_MODE=unmarked-global-prefix"
+    ${lc_unit_tmp_cleanup_probe_command}
+)
+set_tests_properties(lc_unit_tmp_cleanup_unmarked_global_prefix PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 15
+)
 lc_add_unit_test(lc_unit_engine_allocator test_lc_engine_allocator.c)
 lc_add_unit_test(lc_unit_contracts test_lc_contracts.c mock_lc_public.c)
 lc_add_unit_test(lc_unit_public_mock_usage test_lc_public_mock_usage.c mock_lc_public.c)
@@ -86,12 +167,45 @@ target_link_options(lc_unit_runtime PRIVATE
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lonejson_new>
 )
 lc_add_unit_test(lc_unit_mutate_stream test_lc_mutate_stream.c)
+target_sources(lc_unit_mutate_stream PRIVATE
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+)
+lc_add_unit_test(lc_unit_pouch test_lc_pouch.c)
+if(CMAKE_CROSSCOMPILING AND CMAKE_CROSSCOMPILING_EMULATOR)
+  set(lc_pouch_cross_emulator ${CMAKE_CROSSCOMPILING_EMULATOR})
+  list(GET lc_pouch_cross_emulator 0 lc_pouch_cross_emulator_program)
+  if(NOT IS_ABSOLUTE "${lc_pouch_cross_emulator_program}")
+    find_program(lc_pouch_cross_emulator_program_path
+      NAMES "${lc_pouch_cross_emulator_program}"
+      REQUIRED
+    )
+    list(REMOVE_AT lc_pouch_cross_emulator 0)
+    list(INSERT lc_pouch_cross_emulator 0
+      "${lc_pouch_cross_emulator_program_path}"
+    )
+  endif()
+  string(REPLACE ";" "|" lc_pouch_cross_emulator_spec
+    "${lc_pouch_cross_emulator}")
+  target_compile_definitions(lc_unit_pouch PRIVATE
+    "LOCKDC_TEST_CROSS_EMULATOR_SPEC=\"${lc_pouch_cross_emulator_spec}\""
+  )
+endif()
+# Pouch combines logstore recovery and durability cases in one debug target;
+# its debug execution exceeds the default unit-test window.
+set_tests_properties(lc_unit_pouch PROPERTIES TIMEOUT 300)
+target_sources(lc_unit_pouch PRIVATE
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+)
+target_compile_definitions(lc_unit_pouch PRIVATE LOCKDC_TEST_BUILD=1)
+target_sources(lc_unit_streams PRIVATE
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+)
 
 lc_add_https_unit_test_case(
   lc_unit_transport_https_client_open_rejects_bundle_without_ca
   LC_HTTPS_CASE_CLIENT_OPEN_REJECTS_BUNDLE_WITHOUT_CA
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_client_open_accepts_memory_bundle_source
   LC_HTTPS_CASE_CLIENT_OPEN_ACCEPTS_MEMORY_BUNDLE_SOURCE
 )
@@ -107,11 +221,11 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_public_client_open_accepts_chunked_callback_bundle_source
   LC_HTTPS_CASE_PUBLIC_CLIENT_OPEN_ACCEPTS_CHUNKED_CALLBACK_BUNDLE_SOURCE
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_state_paths_use_mtls
   LC_HTTPS_CASE_STATE_PATHS_USE_MTLS
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_state_parses_buffered_typed_json_response
   LC_HTTPS_CASE_STATE_PARSES_BUFFERED_TYPED_JSON_RESPONSE
 )
@@ -127,7 +241,7 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_management_paths_use_mtls
   LC_HTTPS_CASE_MANAGEMENT_PATHS_USE_MTLS
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_queue_paths_use_mtls
   LC_HTTPS_CASE_QUEUE_PATHS_USE_MTLS
 )
@@ -139,7 +253,7 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_watch_rejects_oversized_error_body
   LC_HTTPS_CASE_WATCH_REJECTS_OVERSIZED_ERROR_BODY
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_watch_filters_and_finishes_trailing_event
   LC_HTTPS_CASE_WATCH_FILTERS_AND_FINISHES_TRAILING_EVENT
 )
@@ -227,9 +341,13 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_public_lease_attach_rejects_malformed_json_response
   LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_REJECTS_MALFORMED_JSON_RESPONSE
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_public_lease_attach_retries_node_passive_and_cleans_parser_state
   LC_HTTPS_CASE_PUBLIC_LEASE_ATTACH_RETRIES_NODE_PASSIVE_AND_CLEANS_PARSER_STATE
+)
+lc_add_cross_runtime_https_unit_test_case(
+  lc_unit_transport_https_public_attachment_get_preserves_i64_timestamp_headers
+  LC_HTTPS_CASE_PUBLIC_ATTACHMENT_GET_PRESERVES_I64_TIMESTAMP_HEADERS
 )
 lc_add_https_unit_test_case(
   lc_unit_transport_https_public_lease_attach_rejects_non_rewindable_retry_source
@@ -250,6 +368,10 @@ lc_add_https_unit_test_case(
 lc_add_https_unit_test_case(
   lc_unit_transport_https_enqueue_from_retries_node_passive_and_cleans_parser_state
   LC_HTTPS_CASE_ENQUEUE_FROM_RETRIES_NODE_PASSIVE_AND_CLEANS_PARSER_STATE
+)
+lc_add_cross_runtime_https_unit_test_case(
+  lc_unit_transport_https_enqueue_from_checks_public_metadata_range
+  LC_HTTPS_CASE_ENQUEUE_FROM_CHECKS_PUBLIC_METADATA_RANGE
 )
 lc_add_https_unit_test_case(
   lc_unit_transport_https_enqueue_from_rejects_non_rewindable_retry_source
@@ -339,7 +461,7 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_public_query_stream_captures_headers_and_body
   LC_HTTPS_CASE_PUBLIC_QUERY_STREAM_CAPTURES_HEADERS_AND_BODY
 )
-lc_add_https_unit_test_case(
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_public_query_keys_streams_chunks_and_headers
   LC_HTTPS_CASE_PUBLIC_QUERY_KEYS_STREAMS_CHUNKS_AND_HEADERS
 )

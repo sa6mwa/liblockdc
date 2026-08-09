@@ -519,6 +519,21 @@ int lc_engine_file_write_callback(void *context, const void *bytes,
 
 int lc_lonejson_parse_file(lonejson *runtime, FILE *fp, const lonejson_map *map,
                            void *dst, lc_error *error, const char *message) {
+  if (runtime == NULL || fp == NULL || map == NULL || dst == NULL) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        message != NULL
+            ? message
+            : "lonejson parse requires runtime, file, map, and destination",
+        NULL, NULL, NULL);
+  }
+  lc_lonejson_prepare_parse_destination(runtime, map, dst);
+  return lc_lonejson_parse_prepared_file(runtime, fp, map, dst, error, message);
+}
+
+int lc_lonejson_parse_prepared_file(lonejson *runtime, FILE *fp,
+                                    const lonejson_map *map, void *dst,
+                                    lc_error *error, const char *message) {
   lonejson_error lj_error;
   lonejson_status status;
 
@@ -531,7 +546,6 @@ int lc_lonejson_parse_file(lonejson *runtime, FILE *fp, const lonejson_map *map,
             : "lonejson parse requires runtime, file, map, and destination",
         NULL, NULL, NULL);
   }
-  runtime->init(runtime, map, dst);
   status = runtime->parse_filep(runtime, map, dst, fp, &lj_error);
   return lc_lonejson_error_from_status(error, status, &lj_error, message);
 }

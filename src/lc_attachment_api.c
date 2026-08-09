@@ -24,15 +24,15 @@ typedef struct lc_engine_stream_request_state {
   char *correlation_id;
   char *content_type;
   char *etag;
-  long key_version;
+  lc_version key_version;
   long fencing_token;
   char *attachment_id;
   char *attachment_name;
   char *attachment_sha256;
   char *attachment_content_type;
   long attachment_size;
-  long attachment_created_at_unix;
-  long attachment_updated_at_unix;
+  lc_unix_seconds attachment_created_at_unix;
+  lc_unix_seconds attachment_updated_at_unix;
   const lonejson_map *response_map;
   void *response_dst;
   lonejson_curl_parse parse;
@@ -494,8 +494,8 @@ static size_t lc_engine_stream_header_callback(char *buffer, size_t size,
     }
   } else if (lc_engine_header_name_equals(buffer, (size_t)(colon - buffer),
                                           "X-Key-Version")) {
-    if (!lc_parse_long_base10_range_checked(value, (size_t)(end - value),
-                                            &state->key_version)) {
+    if (!lc_parse_i64_base10_range_checked(value, (size_t)(end - value),
+                                           &state->key_version)) {
       lc_engine_set_protocol_error(state->error,
                                    "attachment key version is out of range");
       state->stream_error = 1;
@@ -539,7 +539,7 @@ static size_t lc_engine_stream_header_callback(char *buffer, size_t size,
     }
   } else if (lc_engine_header_name_equals(buffer, (size_t)(colon - buffer),
                                           "X-Attachment-Created-At")) {
-    if (!lc_parse_long_base10_range_checked(
+    if (!lc_parse_i64_base10_range_checked(
             value, (size_t)(end - value), &state->attachment_created_at_unix)) {
       lc_engine_set_protocol_error(state->error,
                                    "attachment created_at is out of range");
@@ -548,7 +548,7 @@ static size_t lc_engine_stream_header_callback(char *buffer, size_t size,
     }
   } else if (lc_engine_header_name_equals(buffer, (size_t)(colon - buffer),
                                           "X-Attachment-Updated-At")) {
-    if (!lc_parse_long_base10_range_checked(
+    if (!lc_parse_i64_base10_range_checked(
             value, (size_t)(end - value), &state->attachment_updated_at_unix)) {
       lc_engine_set_protocol_error(state->error,
                                    "attachment updated_at is out of range");
@@ -793,7 +793,7 @@ static int lc_engine_perform_streaming(
     state->client = client;
     state->http_status = 0L;
     state->stream_error = 0;
-    state->key_version = 0L;
+    state->key_version = 0;
     state->fencing_token = 0L;
     state->attachment_size = 0L;
     state->attachment_created_at_unix = 0L;
@@ -1131,16 +1131,27 @@ static int lc_engine_attachment_info_from_headers(
   return 1;
 }
 
-static int lc_engine_i64_to_long_checked(lonejson_int64 value,
-                                         const char *label,
-                                         lonejson_int64 *out_value,
-                                         lc_engine_error *error) {
-  (void)label;
+static int lc_engine_i64_assign(lonejson_int64 value, lonejson_int64 *out_value,
+                                lc_engine_error *error) {
   if (out_value == NULL) {
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
                                       "missing i64 destination");
   }
   *out_value = value;
+  return LC_ENGINE_OK;
+}
+
+static int lc_engine_i64_to_long_checked(lonejson_int64 value,
+                                         const char *label, long *out_value,
+                                         lc_engine_error *error) {
+  if (out_value == NULL) {
+    return lc_engine_set_client_error(error, LC_ENGINE_ERROR_INVALID_ARGUMENT,
+                                      "missing long destination");
+  }
+  if (value < (lonejson_int64)LONG_MIN || value > (lonejson_int64)LONG_MAX) {
+    return lc_engine_set_protocol_error(error, label);
+  }
+  *out_value = (long)value;
   return LC_ENGINE_OK;
 }
 
@@ -1163,6 +1174,11 @@ static int lc_engine_attachment_info_from_json(
     const lc_engine_attachment_info_json *parsed, lc_engine_error *error) {
   int rc;
 
+  rc = lc_engine_i64_to_long_checked(
+      parsed->size, "attachment size is out of range", &info->size, error);
+  if (rc != LC_ENGINE_OK) {
+    return rc;
+  }
   info->id = lc_engine_strdup_local(parsed->id);
   info->name = lc_engine_strdup_local(parsed->name);
   info->plaintext_sha256 = lc_engine_strdup_local(parsed->plaintext_sha256);
@@ -1175,20 +1191,13 @@ static int lc_engine_attachment_info_from_json(
     return lc_engine_set_client_error(error, LC_ENGINE_ERROR_NO_MEMORY,
                                       "failed to copy attachment strings");
   }
-  rc = lc_engine_i64_to_long_checked(
-      parsed->size, "attachment size is out of range", &info->size, error);
+  rc = lc_engine_i64_assign(parsed->created_at_unix, &info->created_at_unix,
+                            error);
   if (rc != LC_ENGINE_OK) {
     return rc;
   }
-  rc = lc_engine_i64_to_long_checked(
-      parsed->created_at_unix, "attachment created_at_unix is out of range",
-      &info->created_at_unix, error);
-  if (rc != LC_ENGINE_OK) {
-    return rc;
-  }
-  return lc_engine_i64_to_long_checked(
-      parsed->updated_at_unix, "attachment updated_at_unix is out of range",
-      &info->updated_at_unix, error);
+  return lc_engine_i64_assign(parsed->updated_at_unix, &info->updated_at_unix,
+                              error);
 }
 
 int lc_engine_parse_attach_response_json(const char *json,
@@ -1233,9 +1242,7 @@ int lc_engine_parse_attach_response_json(const char *json,
     return rc;
   }
   response->noop = parsed.noop ? 1 : 0;
-  rc = lc_engine_i64_to_long_checked(parsed.version,
-                                     "attach version is out of range",
-                                     &response->version, error);
+  rc = lc_engine_i64_assign(parsed.version, &response->version, error);
   if (rc != LC_ENGINE_OK) {
     runtime->cleanup(runtime, &lc_engine_attach_response_map, &parsed);
     lc_engine_attach_response_cleanup(response);
@@ -1778,10 +1785,8 @@ int lc_engine_client_enqueue_from(lc_engine_client *client,
         &response->failure_attempts, error);
   }
   if (rc == LC_ENGINE_OK) {
-    rc = lc_engine_i64_to_long_checked(
-        parsed.not_visible_until_unix,
-        "enqueue not_visible_until_unix is out of range",
-        &response->not_visible_until_unix, error);
+    rc = lc_engine_i64_assign(parsed.not_visible_until_unix,
+                              &response->not_visible_until_unix, error);
   }
   if (rc == LC_ENGINE_OK) {
     rc = lc_engine_i64_to_long_checked(
@@ -1876,9 +1881,7 @@ int lc_engine_client_attach_from(lc_engine_client *client,
                                            &parsed.attachment, error);
   if (rc == LC_ENGINE_OK) {
     response->noop = parsed.noop ? 1 : 0;
-    rc = lc_engine_i64_to_long_checked(parsed.version,
-                                       "attach version is out of range",
-                                       &response->version, error);
+    rc = lc_engine_i64_assign(parsed.version, &response->version, error);
   }
   if (rc != LC_ENGINE_OK) {
     lc_engine_lonejson_cleanup(client, &lc_engine_attach_response_map, &parsed);
@@ -2157,7 +2160,7 @@ int lc_engine_client_delete_attachment(
     return rc;
   }
   response->deleted = parsed.deleted ? 1 : 0;
-  response->version = (long)parsed.version;
+  response->version = parsed.version;
   if (result.correlation_id != NULL) {
     response->correlation_id = lc_engine_strdup_local(result.correlation_id);
   }
@@ -2225,7 +2228,7 @@ int lc_engine_client_delete_all_attachments(
     lc_engine_http_result_cleanup(&result);
     return rc;
   }
-  response->version = (long)parsed.version;
+  response->version = parsed.version;
   rc = lc_engine_i64_to_int_checked(
       parsed.deleted, "delete attachments deleted count is out of range",
       &response->deleted, error);

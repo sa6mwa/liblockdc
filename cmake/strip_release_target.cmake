@@ -14,7 +14,7 @@ if(NOT EXISTS "${LOCKDC_STRIP_BIN}")
   return()
 endif()
 
-if(LOCKDC_TARGET_ID MATCHES "apple-darwin$" AND LOCKDC_STRIP_TARGET MATCHES "\\.a$")
+if(LOCKDC_TARGET_ID MATCHES "apple-darwin$")
   return()
 endif()
 

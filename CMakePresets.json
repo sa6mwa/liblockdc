@@ -29,11 +29,17 @@
     {
       "name": "debug",
       "inherits": "base",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-linux-gnu.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_C_FLAGS_DEBUG": "-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer",
         "LOCKDC_BUILD_EXAMPLES": "ON"
       }
+    },
+    {
+      "name": "debug-lua",
+      "inherits": "debug",
+      "binaryDir": "${sourceDir}/build/debug"
     },
     {
       "name": "e2e",
@@ -43,8 +49,23 @@
       }
     },
     {
+      "name": "valgrind",
+      "inherits": "debug",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-linux-gnu.cmake",
+      "cacheVariables": {
+        "CMAKE_C_FLAGS_DEBUG": "-O1 -g -fno-omit-frame-pointer",
+        "LOCKDC_TARGET_ARCH": "x86_64",
+        "LOCKDC_TARGET_OS": "linux",
+        "LOCKDC_TARGET_LIBC": "gnu",
+        "LOCKDC_BUILD_EXAMPLES": "OFF",
+        "LOCKDC_BUILD_BENCHMARKS": "OFF",
+        "LOCKDC_BUILD_FUZZERS": "OFF"
+      }
+    },
+    {
       "name": "x86_64-linux-gnu-release",
       "inherits": "base",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-linux-gnu.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "LOCKDC_DIST_DIR": "${sourceDir}/dist",
@@ -64,6 +85,7 @@
       "inherits": "x86_64-linux-gnu-release",
       "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-linux-musl.cmake",
       "cacheVariables": {
+        "LOCKDC_DIST_DIR": "${sourceDir}/dist",
         "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/x86_64-linux-musl",
         "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/x86_64-linux-musl",
         "LOCKDC_TARGET_ARCH": "x86_64",
@@ -76,6 +98,7 @@
       "inherits": "x86_64-linux-gnu-release",
       "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-gnu.cmake",
       "cacheVariables": {
+        "LOCKDC_DIST_DIR": "${sourceDir}/dist",
         "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/aarch64-linux-gnu",
         "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/aarch64-linux-gnu",
         "LOCKDC_TARGET_ARCH": "aarch64",
@@ -88,6 +111,7 @@
       "inherits": "x86_64-linux-gnu-release",
       "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-musl.cmake",
       "cacheVariables": {
+        "LOCKDC_DIST_DIR": "${sourceDir}/dist",
         "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/aarch64-linux-musl",
         "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/aarch64-linux-musl",
         "LOCKDC_TARGET_ARCH": "aarch64",
@@ -100,6 +124,7 @@
       "inherits": "x86_64-linux-gnu-release",
       "toolchainFile": "${sourceDir}/cmake/toolchains/armhf-linux-gnu.cmake",
       "cacheVariables": {
+        "LOCKDC_DIST_DIR": "${sourceDir}/dist",
         "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/armhf-linux-gnu",
         "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/armhf-linux-gnu",
         "LOCKDC_TARGET_ARCH": "armhf",
@@ -112,6 +137,7 @@
       "inherits": "x86_64-linux-gnu-release",
       "toolchainFile": "${sourceDir}/cmake/toolchains/armhf-linux-musl.cmake",
       "cacheVariables": {
+        "LOCKDC_DIST_DIR": "${sourceDir}/dist",
         "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/armhf-linux-musl",
         "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/armhf-linux-musl",
         "LOCKDC_TARGET_ARCH": "armhf",
@@ -124,6 +150,7 @@
       "inherits": "x86_64-linux-gnu-release",
       "toolchainFile": "${sourceDir}/cmake/toolchains/arm64-apple-darwin.cmake",
       "cacheVariables": {
+        "LOCKDC_DIST_DIR": "${sourceDir}/dist",
         "LOCKDC_EXTERNAL_ROOT": "${sourceDir}/.cache/deps/arm64-apple-darwin",
         "LOCKDC_DEPENDENCY_BUILD_ROOT": "${sourceDir}/.cache/deps-build/arm64-apple-darwin",
         "LOCKDC_TARGET_ARCH": "arm64",
@@ -151,9 +178,12 @@
     {
       "name": "fuzz",
       "inherits": "debug",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/fuzz-aflpp.cmake",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "clang",
         "CMAKE_C_FLAGS_DEBUG": "-O1 -g -fno-omit-frame-pointer",
+        "LOCKDC_TARGET_ARCH": "x86_64",
+        "LOCKDC_TARGET_OS": "linux",
+        "LOCKDC_TARGET_LIBC": "gnu",
         "LOCKDC_BUILD_EXAMPLES": "OFF",
         "LOCKDC_BUILD_TESTS": "OFF",
         "LOCKDC_BUILD_E2E_TESTS": "OFF",
@@ -170,6 +200,14 @@
     {
       "name": "e2e",
       "configurePreset": "e2e"
+    },
+    {
+      "name": "debug-lua",
+      "configurePreset": "debug-lua"
+    },
+    {
+      "name": "valgrind",
+      "configurePreset": "valgrind"
     },
     {
       "name": "release",
@@ -244,6 +282,25 @@
       }
     },
     {
+      "name": "debug-lua",
+      "configurePreset": "debug-lua",
+      "filter": {
+        "include": {
+          "name": "^lua_"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "valgrind",
+      "configurePreset": "valgrind",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
       "name": "release",
       "configurePreset": "x86_64-linux-gnu-release",
       "output": {
@@ -288,6 +345,13 @@
     {
       "name": "armhf-linux-musl-release",
       "configurePreset": "armhf-linux-musl-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "arm64-apple-darwin-release",
+      "configurePreset": "arm64-apple-darwin-release",
       "output": {
         "outputOnFailure": true
       }

@@ -268,7 +268,7 @@ static void lc_engine_queue_stream_log_attempt(lc_engine_client *client,
   fields[2] = lc_log_str_field("endpoint", client->endpoints[endpoint_index]);
   fields[3] = lc_log_u64_field("attempt", endpoint_index + 1U);
   fields[4] = lc_log_u64_field("total", client->endpoint_count);
-  lc_log_trace(client->logger, "client.http.attempt", fields, 5U);
+  lc_log_trace(client->logger, "http.attempt", fields, 5U);
 }
 
 static void lc_engine_queue_stream_log_error(lc_engine_client *client,
@@ -283,7 +283,7 @@ static void lc_engine_queue_stream_log_error(lc_engine_client *client,
   fields[3] = lc_log_u64_field("attempt", endpoint_index + 1U);
   fields[4] = lc_log_u64_field("total", client->endpoint_count);
   fields[5] = lc_log_str_field("error", error_text);
-  lc_log_trace(client->logger, "client.http.error", fields, 6U);
+  lc_log_trace(client->logger, "http.error", fields, 6U);
 }
 
 static void lc_engine_queue_stream_log_success(lc_engine_client *client,
@@ -300,7 +300,7 @@ static void lc_engine_queue_stream_log_success(lc_engine_client *client,
   fields[4] = lc_log_u64_field("total", client->endpoint_count);
   fields[5] = lc_log_i64_field("status", http_status);
   fields[6] = lc_log_str_field("cid", correlation_id);
-  lc_log_trace(client->logger, "client.http.success", fields, 7U);
+  lc_log_trace(client->logger, "http.success", fields, 7U);
 }
 
 static int lc_engine_queue_stream_progress(void *client_ptr, curl_off_t dltotal,

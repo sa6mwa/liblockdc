@@ -38,13 +38,25 @@ if(NOT DEFINED LOCKDC_RUN_DOWNSTREAM_BINARIES)
     set(LOCKDC_RUN_DOWNSTREAM_BINARIES ON)
 endif()
 
+if(NOT DEFINED LOCKDC_USE_EXISTING_ARCHIVE)
+    set(LOCKDC_USE_EXISTING_ARCHIVE OFF)
+endif()
+
 if(NOT EXISTS "${LOCKDC_BINARY_DIR}/package-metadata.cmake")
     message(FATAL_ERROR "missing package metadata: ${LOCKDC_BINARY_DIR}/package-metadata.cmake")
 endif()
 include("${LOCKDC_BINARY_DIR}/package-metadata.cmake")
 
 set(test_root "${LOCKDC_BINARY_DIR}/release-tarball-sdk-test")
-set(dist_dir "${test_root}/dist")
+if(LOCKDC_USE_EXISTING_ARCHIVE)
+    if(NOT DEFINED LOCKDC_DIST_DIR OR LOCKDC_DIST_DIR STREQUAL "")
+        message(FATAL_ERROR
+            "LOCKDC_DIST_DIR is required when LOCKDC_USE_EXISTING_ARCHIVE is enabled")
+    endif()
+    set(dist_dir "${LOCKDC_DIST_DIR}")
+else()
+    set(dist_dir "${test_root}/dist")
+endif()
 set(extract_root "${test_root}/release")
 set(consumer_src_dir "${test_root}/consumer")
 set(consumer_bin_dir "${test_root}/consumer-build")
@@ -53,25 +65,28 @@ set(release_archive "${dist_dir}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}
 set(release_prefix "${extract_root}/liblockdc-${LOCKDC_VERSION}-${LOCKDC_TARGET_ID}")
 
 file(REMOVE_RECURSE "${test_root}")
-file(MAKE_DIRECTORY "${extract_root}" "${consumer_src_dir}" "${consumer_bin_dir}" "${dist_dir}")
+file(MAKE_DIRECTORY "${extract_root}" "${consumer_src_dir}" "${consumer_bin_dir}")
 
-file(REMOVE "${release_archive}")
+if(NOT LOCKDC_USE_EXISTING_ARCHIVE)
+    file(MAKE_DIRECTORY "${dist_dir}")
+    file(REMOVE "${release_archive}")
 
-execute_process(
-    COMMAND "${CMAKE_COMMAND}"
-        -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
-        -DLOCKDC_ROOT=${LOCKDC_ROOT}
-        -DLOCKDC_DIST_DIR=${dist_dir}
-        -P "${LOCKDC_ROOT}/cmake/package_archive.cmake"
-    RESULT_VARIABLE package_result
-    OUTPUT_VARIABLE package_stdout
-    ERROR_VARIABLE package_stderr
-)
-if(NOT package_result EQUAL 0)
-    message(FATAL_ERROR
-        "failed to build release archive for SDK test\n"
-        "stdout:\n${package_stdout}\n"
-        "stderr:\n${package_stderr}")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}"
+            -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
+            -DLOCKDC_ROOT=${LOCKDC_ROOT}
+            -DLOCKDC_DIST_DIR=${dist_dir}
+            -P "${LOCKDC_ROOT}/cmake/package_archive.cmake"
+        RESULT_VARIABLE package_result
+        OUTPUT_VARIABLE package_stdout
+        ERROR_VARIABLE package_stderr
+    )
+    if(NOT package_result EQUAL 0)
+        message(FATAL_ERROR
+            "failed to build release archive for SDK test\n"
+            "stdout:\n${package_stdout}\n"
+            "stderr:\n${package_stderr}")
+    endif()
 endif()
 
 if(NOT EXISTS "${release_archive}")
@@ -111,6 +126,7 @@ endforeach()
 
 foreach(forbidden_path
     "${release_prefix}/include/lonejson.h"
+    "${release_prefix}/include/lql"
     "${release_prefix}/include/pslog.h"
     "${release_prefix}/include/curl"
     "${release_prefix}/include/openssl"
@@ -118,6 +134,7 @@ foreach(forbidden_path
     "${release_prefix}/include/libssh2.h"
     "${release_prefix}/include/zlib.h"
     "${release_prefix}/lib/liblonejson.a"
+    "${release_prefix}/lib/liblql.a"
     "${release_prefix}/lib/libpslog.a"
     "${release_prefix}/lib/libcurl.a"
     "${release_prefix}/lib/libssl.a"
@@ -174,6 +191,7 @@ set(LOCKDC_EXTERNAL_INCLUDE_DIRS
     "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "${LOCKDC_EXTERNAL_ROOT}/liblql/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
     "${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
 set(LOCKDC_EXTERNAL_LIBRARY_DIRS
@@ -182,6 +200,7 @@ set(LOCKDC_EXTERNAL_LIBRARY_DIRS
     "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
     "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
 
@@ -465,7 +484,7 @@ if(LOCKDC_RUN_DOWNSTREAM_BINARIES)
     set(lockdc_release_runtime_env)
     if(UNIX AND NOT APPLE)
         set(lockdc_release_runtime_env
-            "LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
+            "LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
     endif()
     foreach(binary_name example_static test_static example_shared test_shared)
         execute_process(
@@ -531,6 +550,7 @@ list(APPEND lockdc_pkgconfig_cflags_list
     "-I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/liblql/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
 list(APPEND lockdc_pkgconfig_libs_list
@@ -539,6 +559,7 @@ list(APPEND lockdc_pkgconfig_libs_list
     "-L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
 set(lockdc_direct_link_flags)
@@ -548,7 +569,7 @@ endif()
 if(LOCKDC_TARGET_ID MATCHES "apple-darwin$"
         AND DEFINED CMAKE_LINKER
         AND NOT "${CMAKE_LINKER}" STREQUAL "")
-    list(PREPEND lockdc_direct_link_flags "-fuse-ld=${CMAKE_LINKER}")
+    list(PREPEND lockdc_direct_link_flags "--ld-path=${CMAKE_LINKER}")
 endif()
 
 set(lockdc_pkgconfig_static_consumer "${consumer_bin_dir}/release_tarball_pkgconfig_static")
@@ -617,6 +638,7 @@ list(APPEND lockdc_pkgconfig_shared_cflags_list
     "-I${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
+    "-I${LOCKDC_EXTERNAL_ROOT}/liblql/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
     "-I${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
 list(APPEND lockdc_pkgconfig_shared_libs_list
@@ -624,6 +646,7 @@ list(APPEND lockdc_pkgconfig_shared_libs_list
     "-L${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
+    "-L${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
     "-L${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")

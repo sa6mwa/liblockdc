@@ -1,4 +1,5 @@
 include("${CMAKE_CURRENT_LIST_DIR}/release_privacy_scan.cmake")
+get_filename_component(LOCKDC_TEST_ROOT "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
 function(assert_contains archive_listing archive_path pattern description)
     if(NOT archive_listing MATCHES "${pattern}")
@@ -27,20 +28,80 @@ endfunction()
 
 function(assert_shared_library_runpath extract_root archive_path shared_lib_name)
     if(shared_lib_name MATCHES "\\.dylib$")
-        if(DEFINED ENV{OSXCROSS_ROOT} AND NOT "$ENV{OSXCROSS_ROOT}" STREQUAL "")
-            set(_lockdc_osxcross_bin_hint "$ENV{OSXCROSS_ROOT}/bin")
-        elseif(DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
-            set(_lockdc_osxcross_bin_hint "$ENV{HOME}/.local/cross/osxcross/bin")
-        else()
-            set(_lockdc_osxcross_bin_hint "")
+        string(REGEX MATCH "^lib[^.]+\\.[0-9]+\\." _darwin_versioned_name_match "${shared_lib_name}")
+        if(NOT _darwin_versioned_name_match)
+            message(FATAL_ERROR
+                "Darwin archive shared-library validation expects a versioned dylib name: "
+                "lib/${shared_lib_name} in ${archive_path}")
         endif()
-        find_program(LOCKDC_OTOOL_BIN
-            NAMES arm64-apple-darwin25-otool otool
-            HINTS "${_lockdc_osxcross_bin_hint}"
+        execute_process(
+            COMMAND "${LOCKDC_TEST_ROOT}/scripts/discover_target_tools.sh"
+                --build-dir "${LOCKDC_BINARY_DIR}"
+                --target-id "${LOCKDC_TARGET_ID}"
+                --tool otool
+            RESULT_VARIABLE otool_discovery_result
+            OUTPUT_VARIABLE LOCKDC_OTOOL_BIN
+            ERROR_VARIABLE otool_discovery_error
+            OUTPUT_STRIP_TRAILING_WHITESPACE
         )
-        if(NOT LOCKDC_OTOOL_BIN)
-            message(FATAL_ERROR "otool is required for Darwin archive shared-library validation")
+        if(NOT otool_discovery_result EQUAL 0 OR NOT EXISTS "${LOCKDC_OTOOL_BIN}")
+            message(FATAL_ERROR
+                "external-tool-unavailable: otool is required for Darwin archive shared-library validation\n"
+                "${otool_discovery_error}")
         endif()
+
+        execute_process(
+            COMMAND "${LOCKDC_OTOOL_BIN}" -D "${extract_root}/lib/${shared_lib_name}"
+            RESULT_VARIABLE otool_id_result
+            OUTPUT_VARIABLE otool_id_output
+            ERROR_VARIABLE otool_id_error
+        )
+        if(NOT otool_id_result EQUAL 0)
+            message(FATAL_ERROR
+                "failed to inspect Darwin shared library install name in ${archive_path}\n"
+                "${otool_id_output}${otool_id_error}")
+        endif()
+        string(REGEX REPLACE "\n$" "" otool_id_output "${otool_id_output}")
+        if(NOT otool_id_output MATCHES "\n@rpath/")
+            message(FATAL_ERROR
+                "archive Darwin shared library install name is not @rpath-relative in "
+                "lib/${shared_lib_name}: ${archive_path}\n${otool_id_output}")
+        endif()
+        if(otool_id_output MATCHES "\n@rpath/liblockdc\\.dylib($|\n)")
+            message(FATAL_ERROR
+                "archive Darwin shared library has an unversioned install name in "
+                "lib/${shared_lib_name}: ${archive_path}\n${otool_id_output}")
+        endif()
+
+        execute_process(
+            COMMAND "${LOCKDC_OTOOL_BIN}" -L "${extract_root}/lib/${shared_lib_name}"
+            RESULT_VARIABLE otool_deps_result
+            OUTPUT_VARIABLE otool_deps_output
+            ERROR_VARIABLE otool_deps_error
+        )
+        if(NOT otool_deps_result EQUAL 0)
+            message(FATAL_ERROR
+                "failed to inspect Darwin shared library dependencies in ${archive_path}\n"
+                "${otool_deps_output}${otool_deps_error}")
+        endif()
+        string(REGEX REPLACE "\n$" "" otool_deps_output "${otool_deps_output}")
+        string(REPLACE "\n" ";" otool_deps_lines "${otool_deps_output}")
+        foreach(otool_deps_line IN LISTS otool_deps_lines)
+            string(STRIP "${otool_deps_line}" dependency_line)
+            if(dependency_line MATCHES ":$")
+                continue()
+            endif()
+            if(NOT dependency_line MATCHES "^/")
+                continue()
+            endif()
+            string(REGEX MATCH "^[^ \t]+" dependency_path "${dependency_line}")
+            if(dependency_path MATCHES "^/usr/lib/" OR dependency_path MATCHES "^/System/Library/")
+                continue()
+            endif()
+            message(FATAL_ERROR
+                "archive Darwin shared library contains non-system absolute dependency path "
+                "'${dependency_path}' in lib/${shared_lib_name}: ${archive_path}\n${otool_deps_output}")
+        endforeach()
 
         execute_process(
             COMMAND "${LOCKDC_OTOOL_BIN}" -l "${extract_root}/lib/${shared_lib_name}"
@@ -63,9 +124,20 @@ function(assert_shared_library_runpath extract_root archive_path shared_lib_name
         return()
     endif()
 
-    find_program(LOCKDC_READELF_BIN NAMES readelf)
-    if(NOT LOCKDC_READELF_BIN)
-        message(FATAL_ERROR "readelf is required for archive shared-library validation")
+    execute_process(
+        COMMAND "${LOCKDC_TEST_ROOT}/scripts/discover_target_tools.sh"
+            --build-dir "${LOCKDC_BINARY_DIR}"
+            --target-id "${LOCKDC_TARGET_ID}"
+            --tool readelf
+        RESULT_VARIABLE readelf_discovery_result
+        OUTPUT_VARIABLE LOCKDC_READELF_BIN
+        ERROR_VARIABLE readelf_discovery_error
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    if(NOT readelf_discovery_result EQUAL 0 OR NOT EXISTS "${LOCKDC_READELF_BIN}")
+        message(FATAL_ERROR
+            "external-tool-unavailable: target readelf is required for archive shared-library validation\n"
+            "${readelf_discovery_error}")
     endif()
 
     execute_process(
@@ -211,6 +283,65 @@ function(assert_packaged_binaries_have_no_sanitizer_runtime extract_root archive
     endforeach()
 endfunction()
 
+function(assert_sdk_metadata extract_root archive_path version target_id shared_lib_name shared_soname shared_link_name)
+    set(metadata_path "${extract_root}/share/lockdc/package-metadata.cmake")
+    set(dependencies_path "${extract_root}/share/lockdc/dependencies.json")
+    if(NOT EXISTS "${metadata_path}")
+        message(FATAL_ERROR "archive missing SDK package metadata: ${archive_path}")
+    endif()
+    if(NOT EXISTS "${dependencies_path}")
+        message(FATAL_ERROR "archive missing SDK dependency provenance: ${archive_path}")
+    endif()
+
+    file(READ "${metadata_path}" metadata_text)
+    foreach(expected_metadata
+            "set(LOCKDC_PACKAGE_NAME \"liblockdc\")"
+            "set(LOCKDC_VERSION \"${version}\")"
+            "set(LOCKDC_TARGET_ID \"${target_id}\")"
+            "set(LOCKDC_SHARED_LIB_NAME \"${shared_lib_name}\")"
+            "set(LOCKDC_SHARED_SONAME \"${shared_soname}\")"
+            "set(LOCKDC_SHARED_LINK_NAME \"${shared_link_name}\")"
+            "set(LOCKDC_DEPENDENCY_MODE \"external\")")
+        string(FIND "${metadata_text}" "${expected_metadata}" metadata_index)
+        if(metadata_index EQUAL -1)
+            message(FATAL_ERROR
+                "archive SDK metadata missing '${expected_metadata}': ${archive_path}\n${metadata_text}")
+        endif()
+    endforeach()
+
+    file(READ "${dependencies_path}" dependencies_text)
+    foreach(expected_dependency
+            "\"schema\": \"lockdc.dependencies.v1\""
+            "\"package\": \"liblockdc\""
+            "\"version\": \"${version}\""
+            "\"target_id\": \"${target_id}\""
+            "\"dependency_mode\": \"external\""
+            "\"name\": \"openssl\""
+            "\"name\": \"zlib\""
+            "\"name\": \"curl\""
+            "\"name\": \"nghttp2\""
+            "\"name\": \"libssh2\""
+            "\"name\": \"libpslog\""
+            "\"name\": \"lonejson\""
+            "\"name\": \"liblql\""
+            "\"bundled\": false"
+            "\"role\": \"external-static-consumer\"")
+        string(FIND "${dependencies_text}" "${expected_dependency}" dependency_index)
+        if(dependency_index EQUAL -1)
+            message(FATAL_ERROR
+                "archive dependency provenance missing '${expected_dependency}': ${archive_path}\n${dependencies_text}")
+        endif()
+    endforeach()
+    string(REGEX MATCHALL "\"sha256\": \"[0-9a-f]+\"" dependency_sha_entries "${dependencies_text}")
+    list(LENGTH dependency_sha_entries dependency_sha_count)
+    if(NOT dependency_sha_count EQUAL 8)
+        message(FATAL_ERROR "archive dependency provenance is missing SHA-256 values: ${archive_path}\n${dependencies_text}")
+    endif()
+    if(dependencies_text MATCHES "\"sha256\": \"\"")
+        message(FATAL_ERROR "archive dependency provenance has an empty SHA-256 value: ${archive_path}\n${dependencies_text}")
+    endif()
+endfunction()
+
 function(assert_archive_layout archive_path version target_id shared_lib_name shared_soname shared_link_name)
     if(NOT EXISTS "${archive_path}")
         message(FATAL_ERROR "missing archive: ${archive_path}")
@@ -247,6 +378,8 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
 
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/LICENSE(\n|$)" "share/doc/liblockdc/LICENSE")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/doc/liblockdc/README.md(\n|$)" "share/doc/liblockdc/README.md")
+    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/lockdc/package-metadata\\.cmake(\n|$)" "share/lockdc/package-metadata.cmake")
+    assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/lockdc/dependencies\\.json(\n|$)" "share/lockdc/dependencies.json")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lc/lc\\.h(\n|$)" "include/lc/lc.h")
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lc/version\\.h(\n|$)" "include/lc/version.h")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/pslog(_version)?\\.h(\n|$)" "libpslog headers")
@@ -256,6 +389,7 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/libssh2(_publickey|_sftp)?\\.h(\n|$)" "libssh2 headers")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/z(conf|lib)\\.h(\n|$)" "zlib headers")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lonejson\\.h(\n|$)" "lonejson header")
+    assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/include/lql(/|\n|$)" "liblql headers")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/liblockdc(/|\n|$)" "engine share/liblockdc path")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/lockdc/luarocks(/|\n|$)" "embedded LuaRocks payload")
     assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/share/lua/5\\.5/lockdc(/|\n|$)" "embedded Lua runtime wrapper")
@@ -282,7 +416,8 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
         libnghttp2
         libssh2
         libz
-        liblonejson)
+        liblonejson
+        liblql)
         assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/${forbidden_dependency_archive}\\.a(\n|$)" "${forbidden_dependency_archive} static archive")
     endforeach()
     assert_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/pkgconfig/lockdc\\.pc(\n|$)" "pkg-config metadata")
@@ -298,7 +433,8 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
             libnghttp2
             libssh2
             libz
-            liblonejson)
+            liblonejson
+            liblql)
             assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/${forbidden_dependency_library}[^/\n]*\\.dylib" "${forbidden_dependency_library} dylib")
         endforeach()
     else()
@@ -310,7 +446,8 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
             libnghttp2
             libssh2
             libz
-            liblonejson)
+            liblonejson
+            liblql)
             assert_not_contains("${archive_listing}" "${archive_path}" "(^|\n)${archive_prefix_regex}/lib/${forbidden_dependency_library}\\.so" "${forbidden_dependency_library} shared library")
         endforeach()
     endif()
@@ -337,6 +474,7 @@ function(assert_archive_layout archive_path version target_id shared_lib_name sh
         assert_symlink_target("${extract_root}" "${archive_path}" "${archive_prefix}/lib/${shared_link_name}")
     endif()
     assert_shared_library_runpath("${extract_root}/${archive_prefix}" "${archive_path}" "${shared_lib_name}")
+    assert_sdk_metadata("${extract_root}/${archive_prefix}" "${archive_path}" "${version}" "${target_id}" "${shared_lib_name}" "${shared_soname}" "${shared_link_name}")
     if(NOT DEFINED LOCKDC_SANITIZER_INSTRUMENTED OR LOCKDC_SANITIZER_INSTRUMENTED STREQUAL "" OR
        LOCKDC_SANITIZER_INSTRUMENTED STREQUAL "0")
         lockdc_assert_tree_has_no_private_traces("${extract_root}/${archive_prefix}" "${archive_path}")

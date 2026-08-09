@@ -17,11 +17,11 @@ int lc_message_ack_method(lc_message *self, lc_error *error) {
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("queue", message->queue);
-    fields[1] = lc_log_str_field("namespace", message->namespace_name);
-    fields[2] = lc_log_str_field("message_id", message->message_id);
+    fields[1] = lc_log_str_field("ns", message->namespace_name);
+    fields[2] = lc_log_str_field("msg_id", message->message_id);
     fields[3] = lc_log_str_field("lease_id", message->lease_id);
     fields[4] = lc_log_str_field("txn_id", message->txn_id);
-    lc_log_trace(message->client->logger, "client.queue.ack.start", fields, 5U);
+    lc_log_trace(message->client->logger, "queue.ack.start", fields, 5U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -44,15 +44,14 @@ int lc_message_ack_method(lc_message *self, lc_error *error) {
       pslog_field fields[8];
 
       fields[0] = lc_log_str_field("queue", message->queue);
-      fields[1] = lc_log_str_field("namespace", message->namespace_name);
-      fields[2] = lc_log_str_field("message_id", message->message_id);
+      fields[1] = lc_log_str_field("ns", message->namespace_name);
+      fields[2] = lc_log_str_field("msg_id", message->message_id);
       fields[3] = lc_log_str_field("lease_id", message->lease_id);
       fields[4] = lc_log_str_field("txn_id", message->txn_id);
       fields[5] = lc_log_code_field(error);
       fields[6] = lc_log_http_status_field(error);
       fields[7] = lc_log_error_field("error", error);
-      lc_log_warn(message->client->logger, "client.queue.ack.error", fields,
-                  8U);
+      lc_log_warn(message->client->logger, "queue.ack.error", fields, 8U);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -61,20 +60,21 @@ int lc_message_ack_method(lc_message *self, lc_error *error) {
     pslog_field fields[6];
 
     fields[0] = lc_log_str_field("queue", message->queue);
-    fields[1] = lc_log_str_field("namespace", message->namespace_name);
-    fields[2] = lc_log_str_field("message_id", message->message_id);
+    fields[1] = lc_log_str_field("ns", message->namespace_name);
+    fields[2] = lc_log_str_field("msg_id", message->message_id);
     fields[3] = lc_log_str_field("lease_id", message->lease_id);
     fields[4] = lc_log_bool_field("acked", engine_res.acked);
     fields[5] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(message->client->logger, "client.queue.ack.success", fields,
-                 6U);
+    lc_log_trace(message->client->logger, "queue.ack.success", fields, 6U);
   }
   if (message->terminal_flag != NULL) {
     *message->terminal_flag = 1;
   }
   lc_engine_queue_ack_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
-  lc_message_close_method(self);
+  if (!message->batch_owned) {
+    lc_message_close_method(self);
+  }
   return LC_OK;
 }
 
@@ -101,14 +101,13 @@ int lc_message_nack_method(lc_message *self, const lc_nack_req *req,
     pslog_field fields[6];
 
     fields[0] = lc_log_str_field("queue", message->queue);
-    fields[1] = lc_log_str_field("namespace", message->namespace_name);
-    fields[2] = lc_log_str_field("message_id", message->message_id);
+    fields[1] = lc_log_str_field("ns", message->namespace_name);
+    fields[2] = lc_log_str_field("msg_id", message->message_id);
     fields[3] = lc_log_str_field("lease_id", message->lease_id);
-    fields[4] = pslog_i64("delay_seconds", (pslog_int64)req->delay_seconds);
+    fields[4] = pslog_i64("delay_s", (pslog_int64)req->delay_seconds);
     fields[5] =
         lc_log_str_field("intent", lc_nack_intent_to_string(req->intent));
-    lc_log_trace(message->client->logger, "client.queue.nack.start", fields,
-                 6U);
+    lc_log_trace(message->client->logger, "queue.nack.start", fields, 6U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -134,17 +133,16 @@ int lc_message_nack_method(lc_message *self, const lc_nack_req *req,
       pslog_field fields[9];
 
       fields[0] = lc_log_str_field("queue", message->queue);
-      fields[1] = lc_log_str_field("namespace", message->namespace_name);
-      fields[2] = lc_log_str_field("message_id", message->message_id);
+      fields[1] = lc_log_str_field("ns", message->namespace_name);
+      fields[2] = lc_log_str_field("msg_id", message->message_id);
       fields[3] = lc_log_str_field("lease_id", message->lease_id);
-      fields[4] = pslog_i64("delay_seconds", (pslog_int64)req->delay_seconds);
+      fields[4] = pslog_i64("delay_s", (pslog_int64)req->delay_seconds);
       fields[5] =
           lc_log_str_field("intent", lc_nack_intent_to_string(req->intent));
       fields[6] = lc_log_code_field(error);
       fields[7] = lc_log_http_status_field(error);
       fields[8] = lc_log_error_field("error", error);
-      lc_log_warn(message->client->logger, "client.queue.nack.error", fields,
-                  9U);
+      lc_log_warn(message->client->logger, "queue.nack.error", fields, 9U);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -153,21 +151,22 @@ int lc_message_nack_method(lc_message *self, const lc_nack_req *req,
     pslog_field fields[7];
 
     fields[0] = lc_log_str_field("queue", message->queue);
-    fields[1] = lc_log_str_field("namespace", message->namespace_name);
-    fields[2] = lc_log_str_field("message_id", message->message_id);
+    fields[1] = lc_log_str_field("ns", message->namespace_name);
+    fields[2] = lc_log_str_field("msg_id", message->message_id);
     fields[3] = lc_log_str_field("lease_id", message->lease_id);
     fields[4] = lc_log_bool_field("requeued", engine_res.requeued);
     fields[5] = lc_log_str_field("meta_etag", engine_res.meta_etag);
     fields[6] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(message->client->logger, "client.queue.nack.success", fields,
-                 7U);
+    lc_log_trace(message->client->logger, "queue.nack.success", fields, 7U);
   }
   if (message->terminal_flag != NULL) {
     *message->terminal_flag = 1;
   }
   lc_engine_queue_nack_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
-  lc_message_close_method(self);
+  if (!message->batch_owned) {
+    lc_message_close_method(self);
+  }
   return LC_OK;
 }
 
@@ -189,13 +188,11 @@ int lc_message_extend_method(lc_message *self, const lc_extend_req *req,
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("queue", message->queue);
-    fields[1] = lc_log_str_field("namespace", message->namespace_name);
-    fields[2] = lc_log_str_field("message_id", message->message_id);
+    fields[1] = lc_log_str_field("ns", message->namespace_name);
+    fields[2] = lc_log_str_field("msg_id", message->message_id);
     fields[3] = lc_log_str_field("lease_id", message->lease_id);
-    fields[4] =
-        pslog_i64("extend_by_seconds", (pslog_int64)req->extend_by_seconds);
-    lc_log_trace(message->client->logger, "client.queue.extend.start", fields,
-                 5U);
+    fields[4] = pslog_i64("extend_s", (pslog_int64)req->extend_by_seconds);
+    lc_log_trace(message->client->logger, "queue.extend.start", fields, 5U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
@@ -218,16 +215,14 @@ int lc_message_extend_method(lc_message *self, const lc_extend_req *req,
       pslog_field fields[8];
 
       fields[0] = lc_log_str_field("queue", message->queue);
-      fields[1] = lc_log_str_field("namespace", message->namespace_name);
-      fields[2] = lc_log_str_field("message_id", message->message_id);
+      fields[1] = lc_log_str_field("ns", message->namespace_name);
+      fields[2] = lc_log_str_field("msg_id", message->message_id);
       fields[3] = lc_log_str_field("lease_id", message->lease_id);
-      fields[4] =
-          pslog_i64("extend_by_seconds", (pslog_int64)req->extend_by_seconds);
+      fields[4] = pslog_i64("extend_s", (pslog_int64)req->extend_by_seconds);
       fields[5] = lc_log_code_field(error);
       fields[6] = lc_log_http_status_field(error);
       fields[7] = lc_log_error_field("error", error);
-      lc_log_warn(message->client->logger, "client.queue.extend.error", fields,
-                  8U);
+      lc_log_warn(message->client->logger, "queue.extend.error", fields, 8U);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
@@ -250,16 +245,15 @@ int lc_message_extend_method(lc_message *self, const lc_extend_req *req,
     pslog_field fields[7];
 
     fields[0] = lc_log_str_field("queue", message->queue);
-    fields[1] = lc_log_str_field("namespace", message->namespace_name);
-    fields[2] = lc_log_str_field("message_id", message->message_id);
+    fields[1] = lc_log_str_field("ns", message->namespace_name);
+    fields[2] = lc_log_str_field("msg_id", message->message_id);
     fields[3] = lc_log_str_field("lease_id", message->lease_id);
     fields[4] = pslog_i64("lease_expires_at",
                           (pslog_int64)engine_res.lease_expires_at_unix);
-    fields[5] = pslog_i64("visibility_timeout_seconds",
+    fields[5] = pslog_i64("visibility_s",
                           (pslog_int64)engine_res.visibility_timeout_seconds);
     fields[6] = lc_log_str_field("cid", engine_res.correlation_id);
-    lc_log_trace(message->client->logger, "client.queue.extend.success", fields,
-                 7U);
+    lc_log_trace(message->client->logger, "queue.extend.success", fields, 7U);
   }
   lc_engine_queue_extend_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
@@ -317,6 +311,14 @@ int lc_message_write_payload_method(lc_message *self, lc_sink *dst,
       *written = 0U;
     }
     return LC_OK;
+  }
+  if (lc_source_is_resettable(message->payload)) {
+    int rc;
+
+    rc = message->payload->reset(message->payload, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
   }
   return lc_copy(message->payload, dst, written, error);
 }

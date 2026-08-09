@@ -8,6 +8,7 @@
 #include <openssl/x509.h>
 #include <pslog.h>
 #include <stddef.h>
+#include <stdio.h>
 
 #ifndef LONEJSON_WITH_CURL
 #define LONEJSON_WITH_CURL
@@ -37,7 +38,7 @@ typedef struct lc_engine_http_result {
   long http_status;
   char *correlation_id;
   char *etag;
-  long key_version;
+  lc_version key_version;
   long fencing_token;
   char *content_type;
   char *header_parse_error_message;
@@ -118,6 +119,14 @@ void lc_engine_lonejson_cleanup(lc_engine_client *client,
 void lc_lonejson_prepare_parse_destination(lonejson *runtime,
                                            const lonejson_map *map,
                                            void *value);
+int lc_lonejson_parse_file(lonejson *runtime, FILE *fp, const lonejson_map *map,
+                           void *dst, lc_error *error, const char *message);
+int lc_lonejson_parse_prepared_file(lonejson *runtime, FILE *fp,
+                                    const lonejson_map *map, void *dst,
+                                    lc_error *error, const char *message);
+int lc_lonejson_serialize_file(lonejson *runtime, FILE *fp,
+                               const lonejson_map *map, const void *src,
+                               lc_error *error, const char *message);
 #ifdef LONEJSON_WITH_CURL
 struct lonejson_curl_parse;
 struct lonejson_curl_upload;

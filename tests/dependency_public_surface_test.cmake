@@ -68,6 +68,14 @@ assert_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/pkgconfig/lonejson.p
 assert_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/cmake/lonejson/lonejsonConfig.cmake" "lonejson CMake metadata")
 assert_exists("${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/cmake/lonejson/lonejsonConfigVersion.cmake" "lonejson CMake version metadata")
 
+assert_exists("${LOCKDC_EXTERNAL_ROOT}/liblql/install/include/lql/lql.h" "liblql public header")
+assert_exists("${LOCKDC_EXTERNAL_ROOT}/liblql/install/include/lql/version.h" "liblql version header")
+assert_exists("${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib/liblql.a" "liblql static archive")
+assert_exists("${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib/liblql.so" "liblql shared library")
+assert_exists("${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib/pkgconfig/liblql.pc" "liblql pkg-config metadata")
+assert_exists("${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib/cmake/liblql/liblqlConfig.cmake" "liblql CMake metadata")
+assert_exists("${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib/cmake/liblql/liblqlConfigVersion.cmake" "liblql CMake version metadata")
+
 assert_exists("${LOCKDC_EXTERNAL_ROOT}/pslog/install/include/pslog.h" "pslog public header")
 assert_exists("${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.a" "pslog static archive")
 assert_exists("${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/libpslog.so" "pslog shared library")

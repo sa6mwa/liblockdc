@@ -1,0 +1,1 @@
+pending state record header with metadata refs transform descriptor snapshot

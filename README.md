@@ -31,6 +31,54 @@ The library itself is delivered as:
 - managed consumer support with blocking and explicit start/stop/wait service modes
 - integrated SDK logging through `libpslog`
 
+## Pouch storage
+
+Pouch is liblockdc's C-native local storage engine. It follows Go lockd disk
+storage semantics while intentionally using its own binary records, manifests,
+`uint64_t` payload/file-size, generation/index, and coordinator-term
+accounting, and `int64_t` Unix timestamps. The current semantic alignment scope
+and every remaining format, operational, API, and portability divergence are
+recorded in [the Pouch storage specification](docs/pouch-storage.md).
+
+Select Pouch through a single absolute `pouch://` endpoint, for example
+`pouch:///var/lib/my-service/lockd-root`. The default is exclusive
+single-writer mode: one live process owns the root append path and normal
+acquire, update, release, queue, attachment, and query operations use the
+resident logstore fast path. Opening a second default writer for the same root
+fails instead of silently downgrading. Explicit shared-root writing remains
+available for callers that need multiple active local writers by adding
+`?single_writer=false` or `?pouch_single_writer=false`; that mode preserves
+correctness and process fencing but is not the primary performance target.
+
+Pouch endpoint options mirror the public C config and direct Pouch storage
+options. Common options are:
+
+- `compression=zlib` or `pouch_compression=zlib` for streaming at-rest zlib
+  compression
+- `pouch_crypto_key_file=/path/to/pouch.key` with
+  `pouch_crypto_generate_key_file=true` for encrypted local roots
+- `durable_sync=true` and `fsync_batch_max_ops=<u64>` for root-scoped durable
+  group commit
+- `segment_target_bytes=<u64>` for rolling segment sizing
+- `indexer_flush_docs=<u64>` and `indexer_flush_interval_seconds=<u64>` for
+  bounded query-index publication: exclusive roots publish at the document
+  threshold after all pending leases or transactions have completed, while
+  shared roots publish asynchronously
+- `background_compaction=false` to disable the default idle-debounced
+  compaction worker, and `disable_compaction_throttling=true` to remove its
+  default throughput bound
+- `retention_seconds=<u64>` and `janitor_interval_seconds=<u64>` for the
+  post-mutation retention worker
+- `queue_watch=true` to request filesystem-assisted queue wake-up where the
+  local filesystem supports it, with polling fallback otherwise
+- `query_engine=index|scan` and `query_fallback_engine=index|scan` for the
+  namespace query preference used at open
+
+The public API remains the same receiver-function SDK surface for remote and
+Pouch clients. State bodies, queue payloads, attachments, scan output,
+query-document output, crypto, and compression use real streaming paths unless
+the caller explicitly chooses an in-memory source or sink.
+
 ## Build system
 
 The repository (<https://github.com/sa6mwa/liblockdc>) uses a Makefile-first workflow with CMake as the build backend:
@@ -44,7 +92,7 @@ The repository (<https://github.com/sa6mwa/liblockdc>) uses a Makefile-first wor
   - exported package metadata
   - test registration
 
-Normal host and release Make targets provision the required dependency trees automatically. Low-level scripts such as `scripts/build.sh` and `scripts/test.sh` assume that the matching dependency root already exists.
+Normal host and release Make targets provision the required dependency trees automatically. The low-level `scripts/build.sh` helper assumes that the matching dependency root already exists.
 
 ## Build prerequisites
 
@@ -52,14 +100,20 @@ Normal development expects:
 
 - CMake 3.24 or later
 - Ninja
-- a C compiler
-- `musl-gcc` for host musl packaging
-- GNU cross compilers on `PATH` for `aarch64-linux-gnu-*` and `arm-linux-gnueabihf-*`
-- musl cross compilers on `PATH` for `aarch64-linux-musl-*` and `arm-linux-musleabihf-*`
+- GNU Make
+- host `clang-format` for `make format`
+- host Valgrind for the native Memcheck gate
 - `qemu-aarch64` and `qemu-arm` for the non-host release test matrix
 - `nerdctl compose` preferred for the local development environment, with `docker compose` as a fallback
 
-Third-party dependency roots are cached under `.cache/deps`.
+Every Linux build uses its matching pinned Bootlin GCC collection, including
+the compiler, linker, binutils, sysroot, headers, and runtime. The Make and
+CMake workflows provision those collections automatically; do not substitute
+host or distro cross compilers. Toolchains are shared under
+`${CPKT_TOOLCHAIN_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/toolchains}`
+and verified dependency archives under
+`${CPKT_DEPENDENCY_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/deps}`.
+Repository-local `.cache/` directories are disposable build and staging state.
 
 ## Common workflows
 
@@ -85,24 +139,38 @@ Run the non-host cross release suites:
 make test-cross
 ```
 
-Run the full release verification path across host and cross targets:
+Run the complete local confidence path:
 
 ```bash
 make test-all
 ```
 
-`make test-all` starts with the sanitizer-instrumented debug suite before the
-host and cross release suites.
+`make test-all` runs the sanitizer-instrumented debug suite, both
+host-executable Bootlin release suites, QEMU cross suites, Valgrind, fuzz
+smoke, deterministic local e2e, native benchmarks, and the Pouch-versus-disk
+performance parity gate. The complete artifact rehearsal remains
+`make release-matrix`.
+
+`make prerelease-hardening` is the longer pre-release layer. It keeps the
+normal release gate bounded, then adds the finite multi-mode Pouch core churn
+soak, reclaim proof, shared-root contention coverage, full fuzzing, and the
+release matrix. The Pouch comparison gates every core storage invariant
+separately: acquire, update and stale-precondition rejection, release, public
+and leased reads, attachment write/read, queue delivery, all index-publication
+phases, indexed/scan/full-text queries, and restart recovery.
 
 Run focused verification layers:
 
 ```bash
 make test-e2e
-make asan
+make test-debug
 make coverage
 make fuzz
 make benchmarks
 ```
+
+`make benchmarks` uses tuned per-case defaults; set `BENCH_ITERS=<n>` to force
+the same iteration count across all benchmark cases.
 
 All significant Make targets print total elapsed time on completion.
 
@@ -150,10 +218,11 @@ Create the complete release set:
 make release
 ```
 
-`make release` is the final clean-slate release workflow. It removes generated
-state, formats the C tree, runs the debug sanitizer, host, cross, e2e,
-benchmark, and optional fuzz layers, then generates and verifies the release
-archive set. Use
+`make release` is the final clean-slate release workflow. It verifies release
+tag semantics, removes generated state, then runs the same proof graph as
+`make prerelease`: formatting, debug sanitizer tests including Lua coverage,
+Valgrind, fuzz smoke, lockd e2e, bounded benchmark smoke, and the release
+matrix. Use
 `make release-matrix` when you explicitly want to reuse existing build and
 dependency caches for a faster release matrix/package rerun.
 
@@ -161,7 +230,6 @@ Create only the `x86_64-linux-gnu` package:
 
 ```bash
 make package
-make package-checksums
 ```
 
 Package archive names follow this pattern:
@@ -170,6 +238,11 @@ Package archive names follow this pattern:
   - `liblockdc-<version>-<target>.tar.gz`
 - checksum manifest:
   - `liblockdc-<version>-CHECKSUMS`
+- standalone Lua source package:
+  - `liblockdc-lua-<version>.tar.gz`
+- rendered Lua release artifacts:
+  - `lockdc-<version>-1.rockspec`
+  - `lockdc-<version>-1.src.rock`
 
 ### Release archive contents
 
@@ -201,6 +274,33 @@ primary public surface and examples use the receiver-function form. New method
 slots are appended to preserve layout stability within the current
 shared-library ABI line.
 
+The installed [public header](include/lc/lc.h) is the detailed API reference;
+the generated `lc/version.h` also documents the compile-time semantic-version
+and ABI macros. Their Doxygen contracts cover every public handle,
+request/result type, field, callback, helper, and compatibility function. The
+conventions are:
+
+- initialize transparent config and request structs with their matching
+  `*_init()` helper before setting fields;
+- input pointers are borrowed for the call unless their documentation says
+  ownership transfers;
+- returned handles and heap-backed result fields are caller-owned and are
+  released with the matching `close()` or `*_cleanup()` helper;
+- close and cleanup helpers accept `NULL`, and cleanup helpers zero their
+  object after releasing nested ownership;
+- fallible calls return `LC_OK` or an `LC_ERR_*` status and may populate an
+  `lc_error`, which is released with `lc_error_cleanup()`;
+- `lc_source_from_fd()` and `lc_sink_to_fd()` borrow the descriptor and do not
+  close it; path-backed constructors own the descriptor they open;
+- streaming APIs use bounded producer-to-consumer buffers. Mapped lonejson
+  loads normally materialize mapped fields, while spool-backed mappings may
+  keep large fields file-backed.
+
+Portable widths are part of that contract: versions and Unix timestamps are
+signed 64-bit values, index sequences and transaction-coordinator terms are
+unsigned 64-bit values, and legacy public `long` byte/count fields reject
+values that cannot be represented on the calling architecture.
+
 - `lc_client`
   - root client handle
 - `lc_lease`
@@ -222,7 +322,7 @@ This keeps lease identity, transaction identifiers, and related lifecycle state 
 
 ### JSON and lonejson
 
-`liblockdc` depends on `lonejson 0.32.1` with shared-library ABI `16`.
+`liblockdc` depends on `lonejson 0.42.0` with shared-library ABI `25`.
 `lonejson` is used for:
 
 - typed JSON response parsing for management, attachment, queue, namespace,
@@ -429,22 +529,18 @@ The examples in the repository at <https://github.com/sa6mwa/liblockdc/tree/main
 
 ## Low-level entry points
 
-If you need direct control over the underlying build or test preset, the lower-level scripts remain available:
+`make help` is the authoritative command index. For direct control over a
+configured CMake preset, use CMake after the normal lifecycle entrypoint has
+provisioned its inputs:
 
 ```bash
-scripts/deps.sh deps-x86_64-linux-gnu
-scripts/build.sh debug
-scripts/build.sh e2e
-scripts/build.sh x86_64-linux-gnu-release
-scripts/cross_build.sh
-scripts/cross_test.sh release
-scripts/test.sh unit
-scripts/test.sh e2e
-scripts/fuzz.sh
-scripts/package.sh all
-scripts/package-verify.sh
+cmake --preset debug
+cmake --build --preset debug
+ctest --preset debug
 ```
 
-Unlike the primary Makefile workflow, these lower-level scripts do not generally provision dependency roots implicitly. `scripts/cross_build.sh` prepares the non-host release build trees, and `scripts/cross_test.sh release` runs the cross release tests against those existing build trees. Use them when you want direct preset control and are prepared to manage the prerequisite dependency tree yourself.
+The CMake presets resolve the matching pinned Bootlin collection and dependency
+root. Use the Make targets for normal builds, package production, verification,
+and release orchestration.
 
 See <https://github.com/sa6mwa/liblockdc> for the full source code.

@@ -1,9 +1,16 @@
 function(lockdc_private_trace_needles out_var)
     set(_needles "")
+    set(_cpkt_dependency_cache "")
+    if(DEFINED CPKT_DEPENDENCY_CACHE AND NOT "${CPKT_DEPENDENCY_CACHE}" STREQUAL "")
+        set(_cpkt_dependency_cache "${CPKT_DEPENDENCY_CACHE}")
+    elseif(DEFINED ENV{CPKT_DEPENDENCY_CACHE} AND NOT "$ENV{CPKT_DEPENDENCY_CACHE}" STREQUAL "")
+        set(_cpkt_dependency_cache "$ENV{CPKT_DEPENDENCY_CACHE}")
+    endif()
 
     foreach(_entry
         "LOCKDC_ROOT=${LOCKDC_ROOT}"
         "HOME=$ENV{HOME}"
+        "CPKT_DEPENDENCY_CACHE=${_cpkt_dependency_cache}"
     )
         if(NOT _entry MATCHES "^([^=]+)=(.*)$")
             continue()
@@ -113,7 +120,7 @@ function(lockdc_assert_tree_has_no_private_traces tree_root source_label)
         if(IS_DIRECTORY "${_entry}")
             continue()
         endif()
-        lockdc_assert_file_has_no_private_traces("${_entry}" "${source_label}")
+        lockdc_assert_release_artifact_has_no_private_traces("${_entry}" "${source_label}")
     endforeach()
 endfunction()
 
@@ -150,10 +157,9 @@ function(lockdc_assert_release_artifact_has_no_private_traces artifact_path sour
         return()
     endif()
     get_filename_component(_artifact_name "${artifact_path}" NAME)
-    if(_artifact_name MATCHES "\\.(tar\\.gz|tgz|rock)$")
+    lockdc_assert_file_has_no_private_traces("${artifact_path}" "${source_label}")
+    if(_artifact_name MATCHES "\\.(tar\\.gz|tgz|tar\\.xz|zip|rock)$")
         lockdc_assert_archive_has_no_private_traces("${artifact_path}" "${source_label}")
-    else()
-        lockdc_assert_file_has_no_private_traces("${artifact_path}" "${source_label}")
     endif()
 endfunction()
 
