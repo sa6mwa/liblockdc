@@ -7,5 +7,6 @@ Name: lockdc
 Description: lockd client library for C
 Version: @PROJECT_VERSION@
 Cflags: -I${includedir} -DLONEJSON_WITH_JWT -DLONEJSON_WITH_OIDC
-Libs: -L${libdir} -llockdc -lpslog -llonejson -llql -lcurl -lssh2 -lz -lssl -lcrypto -lnghttp2 -lpthread @LOCKDC_PC_PRIVATE_EXTRA_LIBS@
-Libs.private: -L${libdir} -lpslog -llonejson -llql -lcurl -lssh2 -lz -lssl -lcrypto -lnghttp2 -lpthread @LOCKDC_PC_PRIVATE_EXTRA_LIBS@
+Requires: pslog lonejson libcurl libssh2 openssl libnghttp2 zlib liblql
+Libs: -L${libdir} -llockdc
+Libs.private: @LOCKDC_PC_PRIVATE_EXTRA_LIBS@

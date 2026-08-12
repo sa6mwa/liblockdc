@@ -5,11 +5,135 @@ include(CMakeFindDependencyMacro)
 set(lockdc_INCLUDE_DIR "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@")
 set(lockdc_LIBRARY_DIR "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@")
 
-find_dependency(Threads REQUIRED)
+find_dependency(Threads)
+find_dependency(CURL @LOCKDC_CURL_VERSION@ CONFIG)
+find_dependency(OpenSSL @LOCKDC_OPENSSL_VERSION@ CONFIG)
+find_dependency(ZLIB @LOCKDC_ZLIB_VERSION@ CONFIG)
+find_dependency(nghttp2 @LOCKDC_NGHTTP2_VERSION@ CONFIG)
+find_dependency(Libssh2 @LOCKDC_LIBSSH2_VERSION@ CONFIG)
+find_dependency(pslog @LOCKDC_PSLOG_VERSION@ CONFIG)
+find_dependency(lonejson @LOCKDC_LONEJSON_VERSION@ CONFIG COMPONENTS curl oidc openssl)
+find_dependency(liblql @LOCKDC_LIBLQL_VERSION@ CONFIG)
 
-if(NOT TARGET lockdc::shared AND NOT "@LOCKDC_SHARED_LINK_NAME@" STREQUAL "" AND EXISTS "${lockdc_LIBRARY_DIR}/@LOCKDC_SHARED_LINK_NAME@")
+macro(_lockdc_mark_not_found message_text)
+  set(lockdc_FOUND FALSE)
+  set(lockdc_NOT_FOUND_MESSAGE "${message_text}")
+  if(lockdc_FIND_REQUIRED)
+    message(FATAL_ERROR "${message_text}")
+  endif()
+  return()
+endmacro()
+
+function(_lockdc_try_select_dependency_target out_var missing_var package_name)
+  foreach(target_name IN LISTS ARGN)
+    if(TARGET "${target_name}")
+      set("${out_var}" "${target_name}" PARENT_SCOPE)
+      set("${missing_var}" "" PARENT_SCOPE)
+      return()
+    endif()
+  endforeach()
+
+  set(candidate_targets ${ARGN})
+  string(REPLACE ";" ", " candidate_target_list "${candidate_targets}")
+  set("${out_var}" "" PARENT_SCOPE)
+  set("${missing_var}"
+    "lockdc requires the selected ${package_name} CMake config to provide one of these imported targets: "
+    "${candidate_target_list}. Set ${package_name}_DIR or CMAKE_PREFIX_PATH to a compatible dependency prefix."
+    PARENT_SCOPE)
+endfunction()
+
+function(_lockdc_append_missing_dependency_target out_var target_name package_name)
+  set(missing_targets ${${out_var}})
+  if(NOT TARGET "${target_name}")
+    list(APPEND missing_targets
+      "lockdc static target requires the selected ${package_name} CMake config to provide imported target '${target_name}'.")
+  endif()
+  set("${out_var}" "${missing_targets}" PARENT_SCOPE)
+endfunction()
+
+set(lockdc_shared_FOUND FALSE)
+if(TARGET lockdc::shared)
+  set(lockdc_shared_FOUND TRUE)
+endif()
+set(lockdc_static_FOUND FALSE)
+if(TARGET lockdc::static)
+  set(lockdc_static_FOUND TRUE)
+endif()
+
+set(_lockdc_has_shared_library FALSE)
+if(NOT "@LOCKDC_SHARED_LINK_NAME@" STREQUAL "" AND EXISTS "${lockdc_LIBRARY_DIR}/@LOCKDC_SHARED_LINK_NAME@")
+  set(_lockdc_has_shared_library TRUE)
+endif()
+
+set(_lockdc_has_static_library FALSE)
+if(EXISTS "${lockdc_LIBRARY_DIR}/liblockdc.a")
+  set(_lockdc_has_static_library TRUE)
+endif()
+
+if(_lockdc_has_shared_library)
+  _lockdc_try_select_dependency_target(_lockdc_curl_shared_target _lockdc_shared_missing_reason CURL
+    cpkt::curl_shared CURL::libcurl)
+  if(_lockdc_shared_missing_reason STREQUAL "")
+    _lockdc_try_select_dependency_target(_lockdc_openssl_ssl_shared_target _lockdc_shared_missing_reason OpenSSL
+      cpkt::openssl_ssl_shared OpenSSL::SSL)
+  endif()
+  if(_lockdc_shared_missing_reason STREQUAL "")
+    _lockdc_try_select_dependency_target(_lockdc_openssl_crypto_shared_target _lockdc_shared_missing_reason OpenSSL
+      cpkt::openssl_crypto_shared OpenSSL::Crypto)
+  endif()
+  if(_lockdc_shared_missing_reason STREQUAL "")
+    _lockdc_try_select_dependency_target(_lockdc_nghttp2_shared_target _lockdc_shared_missing_reason nghttp2
+      cpkt::nghttp2_shared nghttp2::nghttp2)
+  endif()
+  if(_lockdc_shared_missing_reason STREQUAL "")
+    _lockdc_try_select_dependency_target(_lockdc_libssh2_shared_target _lockdc_shared_missing_reason Libssh2
+      cpkt::libssh2_shared Libssh2::libssh2)
+  endif()
+  if(_lockdc_shared_missing_reason STREQUAL "")
+    _lockdc_try_select_dependency_target(_lockdc_zlib_shared_target _lockdc_shared_missing_reason ZLIB
+      cpkt::zlib_shared ZLIB::ZLIB)
+  endif()
+  if(_lockdc_shared_missing_reason STREQUAL "")
+    _lockdc_try_select_dependency_target(_lockdc_pslog_shared_target _lockdc_shared_missing_reason pslog
+      pslog::pslog_shared pslog::pslog)
+  endif()
+  if(_lockdc_shared_missing_reason STREQUAL "" AND NOT TARGET lonejson::lonejson)
+    set(_lockdc_shared_missing_reason
+      "lockdc shared target requires the selected lonejson CMake config to provide imported target 'lonejson::lonejson'. "
+      "Set lonejson_DIR or CMAKE_PREFIX_PATH to a compatible dependency prefix.")
+  endif()
+  if(_lockdc_shared_missing_reason STREQUAL "")
+    _lockdc_try_select_dependency_target(_lockdc_liblql_shared_target _lockdc_shared_missing_reason liblql
+      liblql::lql_shared liblql::lql)
+  endif()
+endif()
+
+set(_lockdc_static_missing_reasons)
+if(_lockdc_has_static_library)
+  _lockdc_append_missing_dependency_target(_lockdc_static_missing_reasons CURL::libcurl CURL)
+  _lockdc_append_missing_dependency_target(_lockdc_static_missing_reasons OpenSSL::SSL OpenSSL)
+  _lockdc_append_missing_dependency_target(_lockdc_static_missing_reasons OpenSSL::Crypto OpenSSL)
+  _lockdc_append_missing_dependency_target(_lockdc_static_missing_reasons nghttp2::nghttp2 nghttp2)
+  _lockdc_append_missing_dependency_target(_lockdc_static_missing_reasons Libssh2::libssh2 Libssh2)
+  _lockdc_append_missing_dependency_target(_lockdc_static_missing_reasons ZLIB::ZLIB ZLIB)
+  _lockdc_append_missing_dependency_target(_lockdc_static_missing_reasons pslog::pslog_static pslog)
+  _lockdc_append_missing_dependency_target(_lockdc_static_missing_reasons lonejson::lonejson_static lonejson)
+  _lockdc_append_missing_dependency_target(_lockdc_static_missing_reasons liblql::lql_static liblql)
+endif()
+
+if(NOT TARGET lockdc::shared AND _lockdc_has_shared_library AND _lockdc_shared_missing_reason STREQUAL "")
   set(_lockdc_shared_links)
-  list(APPEND _lockdc_shared_links curl pslog nghttp2 ssh2 ssl crypto z lonejson lql)
+  list(APPEND _lockdc_shared_links
+    ${_lockdc_curl_shared_target}
+    ${_lockdc_openssl_ssl_shared_target}
+    ${_lockdc_openssl_crypto_shared_target}
+    ${_lockdc_nghttp2_shared_target}
+    ${_lockdc_libssh2_shared_target}
+    ${_lockdc_zlib_shared_target}
+    ${_lockdc_pslog_shared_target}
+    lonejson::lonejson
+    ${_lockdc_liblql_shared_target}
+  )
   list(APPEND _lockdc_shared_links Threads::Threads)
   if(NOT "@CMAKE_DL_LIBS@" STREQUAL "")
     list(APPEND _lockdc_shared_links "@CMAKE_DL_LIBS@")
@@ -31,11 +155,22 @@ if(NOT TARGET lockdc::shared AND NOT "@LOCKDC_SHARED_LINK_NAME@" STREQUAL "" AND
     INTERFACE_COMPILE_DEFINITIONS "LONEJSON_WITH_JWT;LONEJSON_WITH_OIDC"
     INTERFACE_LINK_LIBRARIES "${_lockdc_shared_links}"
   )
+  set(lockdc_shared_FOUND TRUE)
 endif()
 
-if(NOT TARGET lockdc::static AND EXISTS "${lockdc_LIBRARY_DIR}/liblockdc.a")
+if(NOT TARGET lockdc::static AND _lockdc_has_static_library AND NOT _lockdc_static_missing_reasons)
   set(_lockdc_static_links)
-  list(APPEND _lockdc_static_links curl pslog nghttp2 ssh2 ssl crypto z lonejson lql)
+  list(APPEND _lockdc_static_links
+    CURL::libcurl
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    nghttp2::nghttp2
+    Libssh2::libssh2
+    ZLIB::ZLIB
+    pslog::pslog_static
+    lonejson::lonejson_static
+    liblql::lql_static
+  )
   list(APPEND _lockdc_static_links Threads::Threads)
   if(NOT "@CMAKE_DL_LIBS@" STREQUAL "")
     list(APPEND _lockdc_static_links "@CMAKE_DL_LIBS@")
@@ -57,6 +192,40 @@ if(NOT TARGET lockdc::static AND EXISTS "${lockdc_LIBRARY_DIR}/liblockdc.a")
     INTERFACE_COMPILE_DEFINITIONS "LONEJSON_WITH_JWT;LONEJSON_WITH_OIDC"
     INTERFACE_LINK_LIBRARIES "${_lockdc_static_links}"
   )
+  set(lockdc_static_FOUND TRUE)
+endif()
+
+if("shared" IN_LIST lockdc_FIND_COMPONENTS AND lockdc_FIND_REQUIRED_shared AND NOT lockdc_shared_FOUND)
+  if(_lockdc_shared_missing_reason STREQUAL "")
+    set(_lockdc_shared_missing_reason
+      "lockdc shared target is not available in this installation.")
+  endif()
+  _lockdc_mark_not_found("${_lockdc_shared_missing_reason}")
+endif()
+
+if("static" IN_LIST lockdc_FIND_COMPONENTS AND lockdc_FIND_REQUIRED_static AND NOT lockdc_static_FOUND)
+  if(_lockdc_static_missing_reasons)
+    string(REPLACE ";" " " _lockdc_static_missing_message "${_lockdc_static_missing_reasons}")
+    string(APPEND _lockdc_static_missing_message
+      " Set the affected package *_DIR variables or CMAKE_PREFIX_PATH to compatible dependency prefixes.")
+  else()
+    set(_lockdc_static_missing_message
+      "lockdc static target is not available in this installation.")
+  endif()
+  _lockdc_mark_not_found("${_lockdc_static_missing_message}")
+endif()
+
+if(NOT lockdc_FIND_COMPONENTS AND NOT lockdc_shared_FOUND AND NOT lockdc_static_FOUND)
+  if(NOT _lockdc_shared_missing_reason STREQUAL "")
+    _lockdc_mark_not_found("${_lockdc_shared_missing_reason}")
+  elseif(_lockdc_static_missing_reasons)
+    string(REPLACE ";" " " _lockdc_static_missing_message "${_lockdc_static_missing_reasons}")
+    string(APPEND _lockdc_static_missing_message
+      " Set the affected package *_DIR variables or CMAKE_PREFIX_PATH to compatible dependency prefixes.")
+    _lockdc_mark_not_found("${_lockdc_static_missing_message}")
+  else()
+    _lockdc_mark_not_found("lockdc package did not provide any usable imported targets.")
+  endif()
 endif()
 
 check_required_components(lockdc)

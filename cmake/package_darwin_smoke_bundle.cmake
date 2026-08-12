@@ -100,34 +100,24 @@ project(lockdc_darwin_smoke C)
 
 find_package(lockdc CONFIG REQUIRED)
 
-set(LOCKDC_EXTERNAL_ROOT "${LOCKDC_EXTERNAL_ROOT}")
-set(LOCKDC_EXTERNAL_INCLUDE_DIRS
-    "${LOCKDC_EXTERNAL_ROOT}/curl/install/include"
-    "${LOCKDC_EXTERNAL_ROOT}/openssl/install/include"
-    "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/include"
-    "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include"
-    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/include"
-    "${LOCKDC_EXTERNAL_ROOT}/liblql/install/include"
-    "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/include"
-    "${LOCKDC_EXTERNAL_ROOT}/zlib/install/include")
-set(LOCKDC_EXTERNAL_LIBRARY_DIRS
-    "${LOCKDC_EXTERNAL_ROOT}/curl/install/lib"
-    "${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib"
-    "${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib"
-    "${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib"
-    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib"
-    "${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
-    "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
-    "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
+function(lockdc_assert_no_raw_dependency_links target_name)
+  get_target_property(link_items "${target_name}" INTERFACE_LINK_LIBRARIES)
+  foreach(link_item IN LISTS link_items)
+    if(link_item MATCHES "^-l(curl|pslog|nghttp2|ssh2|ssl|crypto|z|lonejson|lql)$" OR
+       link_item MATCHES "^(curl|pslog|nghttp2|ssh2|ssl|crypto|z|lonejson|lql)$")
+      message(FATAL_ERROR
+        "${target_name} exposes raw dependency link item '${link_item}' instead of an imported CMake target")
+    endif()
+  endforeach()
+endfunction()
+
+lockdc_assert_no_raw_dependency_links(lockdc::static)
+lockdc_assert_no_raw_dependency_links(lockdc::shared)
 
 add_executable(lockdc_static_smoke smoke.c)
-target_include_directories(lockdc_static_smoke PRIVATE ${LOCKDC_EXTERNAL_INCLUDE_DIRS})
-target_link_directories(lockdc_static_smoke PRIVATE ${LOCKDC_EXTERNAL_LIBRARY_DIRS})
 target_link_libraries(lockdc_static_smoke PRIVATE lockdc::static)
 
 add_executable(lockdc_shared_smoke smoke.c)
-target_include_directories(lockdc_shared_smoke PRIVATE ${LOCKDC_EXTERNAL_INCLUDE_DIRS})
-target_link_directories(lockdc_shared_smoke PRIVATE ${LOCKDC_EXTERNAL_LIBRARY_DIRS})
 target_link_libraries(lockdc_shared_smoke PRIVATE lockdc::shared)
 set_target_properties(lockdc_shared_smoke PROPERTIES
   BUILD_RPATH "@executable_path/../lib"
@@ -156,14 +146,29 @@ int main(void) {
 }
 ]=])
 
+set(lockdc_consumer_prefix_path
+    "${release_prefix}"
+    "${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install"
+    "${LOCKDC_EXTERNAL_ROOT}/pslog/install"
+    "${LOCKDC_EXTERNAL_ROOT}/lonejson/install"
+    "${LOCKDC_EXTERNAL_ROOT}/liblql/install")
+string(REPLACE ";" "\\;" lockdc_consumer_prefix_path_arg "${lockdc_consumer_prefix_path}")
+
 set(configure_args
     -S "${consumer_src_dir}"
     -B "${consumer_bin_dir}"
     "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
     "-DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}"
-    "-DCMAKE_PREFIX_PATH=${release_prefix}"
+    "-DCMAKE_PREFIX_PATH=${lockdc_consumer_prefix_path_arg}"
     "-Dlockdc_DIR=${release_prefix}/lib/cmake/lockdc"
-    "-DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}"
+    "-DCURL_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/CURL"
+    "-DOpenSSL_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/OpenSSL"
+    "-DZLIB_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/zlib"
+    "-Dnghttp2_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/nghttp2"
+    "-DLibssh2_DIR=${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/cmake/libssh2"
+    "-Dpslog_DIR=${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib/cmake/pslog"
+    "-Dlonejson_DIR=${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib/cmake/lonejson"
+    "-Dliblql_DIR=${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib/cmake/liblql"
     "-DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF"
     "-DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF"
     "-DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON"
