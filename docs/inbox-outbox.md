@@ -1,6 +1,6 @@
 # liblockdc Inbox/Outbox Design Specification
 
-Status: proposed
+Status: proposed; transaction contract reviewed against liblockdc and lockd
 
 ## Purpose
 
@@ -24,6 +24,9 @@ foreign system is the required idempotency mechanism for that boundary.
   attachments, not JSON fields.
 - State change, inbox/outbox intent, and payload attachment commit in one
   existing lockd/Pouch transaction.
+- The workflow owns the transaction identifier after creation or explicit
+  adoption, the participant ledger, and the terminal decision. It does not
+  implement a new coordinator.
 - The normal dispatch path passes the newly committed outbox key directly to a
   local dispatcher thread. It does not query the namespace.
 - Indexed `query_keys()` is a recovery and reconciliation mechanism only.
@@ -33,6 +36,66 @@ foreign system is the required idempotency mechanism for that boundary.
 - The library owns no external broker transport and invokes no host callbacks
   on its dispatcher thread. Host code pulls claimed jobs and reports their
   result.
+
+## Verified Transaction Contract
+
+The workflow layer is an adapter over two existing transaction contracts. It
+must preserve their durable semantics, rather than forcing both through one
+low-level call.
+
+### Remote lockd
+
+`lc_acquire_req.txn_id` joins a key to an existing transaction. A lockd
+acquire without one returns a server-issued xid; a workflow-created identifier
+must therefore use the xid grammar accepted by lockd. Every state, metadata,
+and attachment operation through the resulting `lc_lease` carries that
+transaction id and stages its change.
+
+The normal application-client finalizer is one `lc_lease->release()` call on
+an enrolled lease. `rollback=0` commits and `rollback=1` rolls back. Lockd
+records the durable decision and applies every participant registered while
+staging; it is not a per-key publish loop. The workflow must not call
+`lc_txn_prepare()`, `lc_txn_commit()`, `lc_txn_rollback()`, or the TC decision
+surface for this path: those are coordinator/resource-manager control
+operations, not the ordinary application-client finalizer.
+
+### Local Pouch
+
+Pouch stages every operation made through a lease with a non-empty
+transaction id. Its local transaction decision is
+`lc_client->txn_commit()` or `lc_client->txn_rollback()` with the exact
+participant set. The decision durably merges the participant record, applies
+staged state and attachments, clears matching leases, and supports replay on
+open/recovery. After a successful Pouch decision, participant lease handles
+are closed locally; they are not released one by one.
+
+### Workflow adapter rules
+
+- A normal `begin()` creates one opaque transaction id. It is valid for remote
+  lockd xid validation and Pouch's non-empty/no-slash requirement.
+- An advanced join may supply a compatible existing transaction id solely to
+  transfer a lease already acquired under that id into the workflow. The
+  workflow validates it, then owns its eventual terminal decision; it never
+  invents or silently rewrites an id supplied for this purpose.
+- Every domain, inbox, and outbox lease obtained or adopted by the workflow is
+  recorded exactly once as a `(namespace, key)` participant.
+- On remote lockd, `commit()`/`rollback()` release one enrolled terminal lease
+  with the corresponding rollback flag. On Pouch, they issue one explicit
+  local decision over the ledger.
+- The workflow deterministically selects its first enrolled participant as the
+  remote terminal lease. It retains every enrolled lease until the terminal
+  outcome, so remote release can decide the staged participant set and Pouch
+  can decide the complete local ledger.
+- A successful terminal decision consumes every enrolled lease. Calling
+  `release()` on an enrolled lease independently is impossible through the
+  workflow participant surface.
+- If staging or the terminal decision fails, no post-commit notification is
+  emitted. The transaction remains recoverable according to the selected
+  backend's existing transaction recovery rules.
+
+The E2E remote lockd artifact must implement this implicit-XA contract. The
+repository's compose fixture is an environment dependency, not proof that an
+arbitrary pinned image provides this contract.
 
 ## Scope and Non-goals
 
@@ -97,6 +160,12 @@ zero-initializable configuration/request records:
 ```c
 typedef struct lc_workflow lc_workflow;
 typedef struct lc_workflow_transaction lc_workflow_transaction;
+typedef struct lc_workflow_participant lc_workflow_participant;
+
+typedef struct lc_workflow_begin {
+  /* Optional: only to adopt a raw lease already bound to this transaction. */
+  const char *join_txn_id;
+} lc_workflow_begin;
 
 int (*new_workflow)(lc_client *self, const lc_workflow_config *config,
                     lc_workflow **out, lc_error *error);
@@ -111,6 +180,11 @@ struct lc_workflow {
 };
 
 struct lc_workflow_transaction {
+  int (*acquire)(lc_workflow_transaction *self,
+                 const lc_workflow_participant_request *request,
+                 lc_workflow_participant **out, lc_error *error);
+  int (*adopt_lease)(lc_workflow_transaction *self, lc_lease **lease_io,
+                      lc_workflow_participant **out, lc_error *error);
   int (*append_outbox)(lc_workflow_transaction *self,
                         const lc_outbox_entry *entry, lc_source *payload,
                         lc_outbox_receipt *out, lc_error *error);
@@ -121,23 +195,47 @@ struct lc_workflow_transaction {
   int (*rollback)(lc_workflow_transaction *self, lc_error *error);
   void (*close)(lc_workflow_transaction *self);
 };
+
+struct lc_workflow_participant {
+  /* The non-terminal lc_lease operations: describe, get/load, save/update,
+     mutate/mutate_local, metadata/remove, keepalive, and attachment access. */
+  /* No release or transaction-decision operation is exposed. */
+  void (*close)(lc_workflow_participant *self);
+};
 ```
 
 Exact type and method names remain subject to ABI review, but these interaction
 boundaries are fixed:
 
-- `lc_workflow_config_init()`, `lc_workflow_begin_init()`, and every
-  transparent entry/retry/configuration record have matching initializers.
+- `lc_workflow_config_init()`, `lc_workflow_begin_init()`, participant
+  acquisition records, and every transparent entry/retry/configuration record
+  have matching initializers.
 - Callers pass semantic IDs and routing metadata; liblockdc owns reserved-key
-  construction, payload attachment naming, transaction IDs, post-commit
-  notification, and lease references.
+  construction, payload attachment naming, valid transaction-id generation,
+  participant tracking, post-commit notification, and lease references. A
+  begin request may carry an existing compatible transaction id only for the
+  explicit interoperation/adoption case below.
+- `txn->acquire()` is the normal way to obtain a domain lease inside the
+  workflow transaction. It supplies the workflow transaction id and retains
+  the participant for terminal processing. It returns a workflow participant
+  receiver whose non-terminal surface mirrors the normal lease state,
+  metadata, keepalive, and streaming attachment operations. It deliberately
+  exposes no `release()` or transaction-decision operation.
+- `txn->adopt_lease()` accepts an already-active transaction-bound lease only
+  when its transaction id equals the workflow transaction id. It transfers
+  terminal ownership to the transaction, clears the caller's raw pointer on
+  success, and returns the same constrained participant receiver. This is the
+  compatibility path for a domain lease acquired before entering the workflow
+  surface, and therefore requires the advanced begin request to carry that
+  lease's transaction id.
 - An outbox receipt contains the stable outbox identity and `effect_key` needed
   for logs and foreign-system calls without revealing storage layout.
 - Inbox acceptance reports `accepted` or `duplicate` as successful structured
   outcomes. It does not force callers to inspect an error string to distinguish
   a normal duplicate from a conflict.
-- Transaction commit is the single success boundary. There is no separate
-  `signal()` call for the application to forget.
+- Transaction commit is the single success boundary. It invokes the existing
+  remote-release or Pouch-decision adapter as appropriate; there is no
+  separate `signal()` call for the application to forget.
 - Dispatcher jobs expose immutable envelope metadata, streaming payload access,
   and only the terminal/renewal operations valid for their owned claim.
 
@@ -145,6 +243,24 @@ Errors must identify the failed semantic operation and relevant identity
 (`operation_id`, inbox identity, or outbox receipt) without logging payload
 bytes or credentials. The API must reject contradictory configuration before a
 worker thread starts.
+
+### Transaction creation, joining, and ownership
+
+The normal application path is `begin()` followed by `txn->acquire()`; the
+application never assembles a transaction id or decides a participant itself.
+The begin request's optional `join_txn_id` is for the exceptional case where a
+raw liblockdc lease was acquired first. If absent, liblockdc generates a
+canonical lockd xid (the current contract is the compact 20-character lowercase
+base32 form), which is also valid for Pouch. If present, it must have that form
+and becomes the workflow transaction id. `adopt_lease()` then accepts only a
+lease carrying exactly that id.
+
+Once a lease is acquired through, or transferred to, the transaction, terminal
+ownership belongs to the workflow. Application code receives only its
+participant receiver for staged state/metadata/attachment work; it cannot
+release that underlying lease or independently make a transaction decision.
+`commit()` and `rollback()` consume all enrolled leases, close their handles,
+and perform exactly one backend-appropriate terminal operation.
 
 ### Lua surface
 
@@ -156,6 +272,9 @@ semantics must match the C surface:
 local workflow = client:new_workflow({ namespace = "app-workflow" })
 local txn = workflow:begin({ operation_id = request_id })
 
+local order = txn:acquire({ namespace = "orders", key = order_id,
+                            owner = "orders-api", ttl_seconds = 30 })
+order:update(order_update_source)
 txn:append_outbox(entry, payload_source)
 local result = txn:commit()
 
@@ -279,32 +398,48 @@ wrapper over existing lockd and Pouch transaction facilities. The receiver
 surface in [Consumer Experience and Public Surface](#consumer-experience-and-public-surface)
 is the intended public boundary.
 
-The application stages its domain-state mutations through leases enlisted in
-the same workflow transaction. The wrapper stages the inbox/outbox key and
-attachment in that transaction as well.
+The transaction has an explicit participant ledger. The application obtains a
+domain participant through `txn->acquire()` (or transfers an already matching
+lease through `txn->adopt_lease()`), mutates through that receiver, and leaves
+terminal processing to the workflow. The wrapper acquires and records
+inbox/outbox leases itself. It stages the inbox/outbox key and attachment under
+the same transaction id.
+
+The workflow must choose its duplicate barrier before the application performs
+the associated domain mutation: `append_outbox()` and `accept_inbox()` acquire
+their deterministic record keys with the create-only precondition. A committed
+matching record yields the normal duplicate outcome before a new domain effect
+is staged; an immutable mismatch is a conflict. A currently leased record is
+retried or reported as in-progress according to the bounded request policy,
+never treated as a fresh duplicate.
 
 ### Outbox append
 
-1. The caller begins or joins a workflow transaction and stages domain changes.
-2. `append_outbox()` derives the deterministic outbox key and either stages a
-   new immutable intent or validates that a matching one already exists.
-3. The attachment and metadata stage in the same transaction.
-4. Commit makes the domain changes and the outbox intent visible together, or
-   makes neither visible.
-5. Only after successful commit does liblockdc notify the local dispatcher with
-   the returned outbox key.
+1. The caller begins a workflow transaction and calls `append_outbox()` before
+   staging the associated domain mutation.
+2. `append_outbox()` derives the deterministic outbox key, applies the
+   create-only duplicate barrier, and records its lease as a participant.
+3. The caller acquires/adopts and stages domain mutation leases under the same
+   transaction id. The attachment and envelope metadata stage with the outbox
+   participant.
+4. The backend-specific terminal adapter makes the domain changes, outbox
+   intent, and payload visible together, or rolls all of them back.
+5. Only after a successful terminal decision does liblockdc notify the local
+   dispatcher with the returned outbox key.
 
 Submitting the same `(operation_id, effect_id)` again is idempotent only when
 all immutable fields match. A conflicting repeat fails visibly.
 
 ### Inbox acceptance
 
-1. The caller begins or joins a workflow transaction for the incoming message.
-2. `accept_inbox()` derives the inbox key from its inbox identity.
-3. A new message persists its receipt, domain changes, and resulting outbox
-   intent(s) in one transaction.
-4. A matching existing receipt reports a duplicate and creates no new logical
-   operation or outbox intent.
+1. The caller begins a workflow transaction for the incoming message.
+2. `accept_inbox()` derives the inbox key, applies the create-only duplicate
+   barrier, and records the inbox participant.
+3. For an accepted message, the caller acquires/adopts domain leases and
+   appends resulting outbox intent(s) under that transaction.
+4. The terminal adapter persists the receipt, domain changes, and resulting
+   intent(s) together. A matching committed receipt reports `duplicate` and
+   creates no new logical operation or outbox intent.
 5. The source is acknowledged only after successful durable acceptance.
 
 If an incoming source payload is part of duplicate validation, the supplied
@@ -388,10 +523,20 @@ claimed ---- expiry recovery ----> pending
 claimed / retry_wait ---- dead-letter ----> dead_letter
 ```
 
-After acquiring a lease, the dispatcher rereads and validates the record:
-state, timing, and claim generation must still permit dispatch. Completion,
-retry, and dead-letter transitions require the current claim lease. A stale
-claim cannot change a later claimant's record.
+The active outbox-key lease is the claim authority and remains held while the
+host owns the job. After acquiring it, the dispatcher performs a private
+reread and validates state, timing, and claim generation before handing the
+job out. Completion, retry, and dead-letter transitions require that same
+lease. A stale claim cannot change a later claimant's record.
+
+The envelope's `claimed` fields are durable diagnostics and recovery inputs,
+not the authority. In remote lockd they may remain staged and therefore
+invisible to public reads until the terminal release; Pouch may expose the
+same transition earlier. The v1 portability guarantee is one active lease and
+fenced terminal ownership, not identical mid-claim public projection timing.
+On host loss, remote lockd rolls back the unfinalized lease transaction; Pouch
+allows a later lease holder to reclaim an expired durable claim after the
+envelope recheck.
 
 Retry atomically increments `attempt_count`, records a bounded diagnostic, and
 sets `not_before`. Exhausting the configured retry budget transitions to
@@ -482,50 +627,65 @@ recovery source of truth.
 ## Required Verification
 
 Implementation is not complete until the following behavior is proven for both
-Pouch and a remote lockd endpoint.
+Pouch and a remote lockd endpoint. The remote suite must run a lockd artifact
+that supports implicit multi-key XA; the suite must not silently substitute a
+legacy release implementation.
 
-1. Domain mutation, inbox/outbox key, and payload attachment commit atomically;
-   rollback exposes none of them.
-2. Repeated outbox append with the same operation/effect identity creates one
+1. A normal begin generates a canonical xid accepted by a current remote lockd
+   endpoint and usable across at least two keys; Pouch accepts the same id. An
+   invalid or mismatched `join_txn_id` is rejected before ownership transfer.
+2. One workflow participant ledger containing domain mutation, inbox/outbox
+   key, and payload attachment commits atomically; rollback exposes none of
+   them. The remote case finalizes through one normal lease release; the Pouch
+   case finalizes through one `txn_commit`/`txn_rollback` decision with the
+   ledger.
+3. Repeated outbox append with the same operation/effect identity creates one
    intent; a conflicting immutable repeat fails.
-3. Inbox redelivery is idempotent and a payload-digest conflict is rejected.
-4. The ordinary append-to-dispatch path performs no recovery query.
-5. A process crash after commit and before notification is recovered by another
+4. Inbox redelivery is idempotent and a payload-digest conflict is rejected.
+5. The ordinary append-to-dispatch path performs no recovery query.
+6. A process crash after commit and before notification is recovered by another
    dispatcher from an indexed query.
-6. A crash after the foreign effect and before completion redelivers the same
+7. A crash after the foreign effect and before completion redelivers the same
    `effect_key`.
-7. Stale completion, retry, and dead-letter operations cannot alter a later
+8. Stale completion, retry, and dead-letter operations cannot alter a later
    claim.
-8. Retry scheduling, retry-budget exhaustion, dead-lettering, and replay are
+9. Retry scheduling, retry-budget exhaustion, dead-lettering, and replay are
    durable and observable.
-9. Payload reads remain streaming under fragmented reads, large attachments,
+10. Payload reads remain streaming under fragmented reads, large attachments,
    cancellation, and backend failover/reopen; tests prove no full-payload
    materialization.
-10. Competing remote dispatchers and shared-root Pouch dispatchers produce one
-    active claim and recover abandoned claims.
-11. Indexed recovery has measured latency and bounded I/O with a large retained
+11. Competing remote dispatchers and shared-root Pouch dispatchers produce one
+    active lease-authorized claim and recover abandoned claims. Tests must not
+    assert identical public visibility of a live `claimed` envelope across the
+    two backends.
+12. Indexed recovery has measured latency and bounded I/O with a large retained
     terminal population, continuous state-transition churn, and an
     un-compacted Pouch log. The test records index freshness and verifies that
     payload size does not change discovery cost.
-12. Stop/wait behavior leaves incomplete claims for later expiry recovery and
+13. Stop/wait behavior leaves incomplete claims for later expiry recovery and
     never manufactures completion.
-13. The dispatcher never invokes host callbacks or host-runtime code on its
+14. The dispatcher never invokes host callbacks or host-runtime code on its
     thread; a host worker receives work only through `next()` and owns its
     execution context.
-14. Shutdown stops new claims, wakes blocked `next()` callers, joins the
+15. Shutdown stops new claims, wakes blocked `next()` callers, joins the
     dispatcher within the configured deadline, and permits an active host job
     to recover through lease expiry after its grace period.
-15. C and Lua integration tests prove the same observable workflow outcomes:
+16. C and Lua integration tests prove the same observable workflow outcomes:
     idempotent append/accept, explicit duplicate results, streamed payload
     handoff, and terminal job transitions without dispatcher-thread callbacks.
+17. Transaction ownership is enforced: a workflow participant exposes no
+    release/decision method; adoption from another transaction fails; the Pouch
+    terminal decision contains every enrolled participant; and a consumed
+    participant cannot be reused.
 
 ## Proof Obligations and Open Decisions
 
 The following are not generic lockd deployment concerns; they are the remaining
 component-specific design or proof obligations:
 
-1. Define the public workflow transaction wrapper so it composes naturally
-   with caller-owned domain leases and the existing transaction coordinator.
+1. Finalize ABI names and the precise ownership transfer rules for
+   `txn->acquire()` and `txn->adopt_lease()`; the semantic requirements above
+   are fixed.
 2. Decide the exact v1 routing metadata surface and its limits.
 3. Decide whether ordering-key serialization is part of v1. If yes, define and
    test its lock-key protocol before implementation.
