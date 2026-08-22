@@ -42,7 +42,8 @@
 #define LC_POUCH_LEASE_CONTENT_TYPE "application/x-lockdc-pouch-lease"
 #define LC_POUCH_QUEUE_RECORD_MAGIC "LPQ1"
 #define LC_POUCH_LEASE_RECORD_MAGIC "LPL1"
-#define LC_POUCH_TXN_RECORD_MAGIC "LPT1"
+#define LC_POUCH_TXN_RECORD_MAGIC_V1 "LPT1"
+#define LC_POUCH_TXN_RECORD_MAGIC "LPT2"
 #define LC_POUCH_ATTACHMENT_METADATA_MAGIC "LPA1"
 #define LC_POUCH_TC_RECORD_MAGIC "LPC1"
 #define LC_POUCH_TC_CLUSTER_RECORD_MAGIC "LCC1"
@@ -182,6 +183,7 @@ typedef struct lc_pouch_release_context {
   const char *namespace_name;
   lc_pouch_txn_buffer lease_metadata;
   lc_pouch_state_write_result write_result;
+  int txn_decision_ready;
 } lc_pouch_release_context;
 
 typedef struct lc_pouch_keepalive_context {
@@ -316,6 +318,7 @@ typedef struct lc_pouch_txn_record {
   lc_tc_term tc_term;
   char *target_backend_hash;
   lc_txn_participant *participants;
+  unsigned char *votes;
   size_t participant_count;
   size_t participant_capacity;
 } lc_pouch_txn_record;
@@ -330,6 +333,25 @@ typedef struct lc_pouch_txn_decision_context {
   lc_pouch_generation response_index;
   int apply_decision;
 } lc_pouch_txn_decision_context;
+
+typedef struct lc_pouch_txn_vote_context {
+  lc_client_handle *client;
+  const char *txn_id;
+  const char *namespace_name;
+  const char *participant_key;
+  int rollback;
+  const char *record_key;
+  lc_pouch_txn_record record;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_generation response_index;
+  int apply_decision;
+} lc_pouch_txn_vote_context;
+
+static int lc_pouch_txn_record_vote(lc_client_handle *client,
+                                    const char *txn_id,
+                                    const char *namespace_name,
+                                    const char *participant_key, int rollback,
+                                    int *decision_ready, lc_error *error);
 
 typedef struct lc_pouch_query_source_reader {
   lc_source *source;
@@ -361,6 +383,7 @@ typedef struct lc_pouch_txn_stage_write_context {
   const char *namespace_name;
   const char *key;
   const char *txn_id;
+  lc_pouch_generation projected_version;
   int *removed;
 } lc_pouch_txn_stage_write_context;
 
@@ -6631,6 +6654,7 @@ static void lc_pouch_txn_record_cleanup(lc_pouch_txn_record *record) {
     lc_free_with_allocator(NULL, (char *)record->participants[i].backend_hash);
   }
   lc_free_with_allocator(NULL, record->participants);
+  lc_free_with_allocator(NULL, record->votes);
   memset(record, 0, sizeof(*record));
 }
 
@@ -6639,6 +6663,7 @@ static int lc_pouch_txn_record_add_participant(lc_pouch_txn_record *record,
                                                char *backend_hash,
                                                lc_error *error) {
   lc_txn_participant *next;
+  unsigned char *next_votes;
   size_t capacity;
 
   if (record->participant_count == record->participant_capacity) {
@@ -6653,12 +6678,21 @@ static int lc_pouch_txn_record_add_participant(lc_pouch_txn_record *record,
                           NULL, NULL, NULL);
     }
     record->participants = next;
+    next_votes = (unsigned char *)lc_realloc_with_allocator(
+        NULL, record->votes, capacity * sizeof(*next_votes));
+    if (next_votes == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch transaction votes", NULL,
+                          NULL, NULL);
+    }
+    record->votes = next_votes;
     record->participant_capacity = capacity;
   }
   record->participants[record->participant_count].namespace_name =
       namespace_name;
   record->participants[record->participant_count].key = key;
   record->participants[record->participant_count].backend_hash = backend_hash;
+  record->votes[record->participant_count] = 0U;
   ++record->participant_count;
   return LC_OK;
 }
@@ -6816,6 +6850,12 @@ static int lc_pouch_txn_record_merge_request(lc_pouch_txn_record *record,
           &record->target_backend_hash, request->target_backend_hash, error);
     }
   } else {
+    if (strcmp(requested_state, "prepare") == 0 &&
+        strcmp(record->state, "prepare") != 0) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch transaction is already decided", NULL, NULL,
+                          NULL);
+    }
     if (record->tc_term != 0U && request->tc_term == 0U) {
       return lc_error_set(error, LC_ERR_INVALID, 0L,
                           "pouch transaction tc_term is required", NULL, NULL,
@@ -8417,6 +8457,19 @@ static int lc_pouch_client_prepare_txn_stage_write(
     options->has_expected_version = 0;
     options->expected_version = 0UL;
   }
+  if (rc == LC_OK) {
+    if (committed->found && committed->has_body) {
+      if (committed->version == LC_U64_MAX) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch transaction state version is exhausted", NULL,
+                          NULL, "pouch");
+      } else {
+        stage->projected_version = committed->version + 1UL;
+      }
+    } else {
+      stage->projected_version = 1UL;
+    }
+  }
   return rc;
 }
 
@@ -8426,6 +8479,7 @@ static int lc_pouch_client_stage_transaction_write(
     lc_source *source, lc_pouch_state_write_options *options,
     lc_pouch_state_write_result *out, int *removed, lc_error *error) {
   lc_pouch_txn_stage_write_context context;
+  int rc;
 
   memset(&context, 0, sizeof(context));
   context.client = client;
@@ -8434,10 +8488,14 @@ static int lc_pouch_client_stage_transaction_write(
   context.key = key;
   context.txn_id = txn_id;
   context.removed = removed;
-  return lc_pouch_state_stage_write_prepared(
+  rc = lc_pouch_state_stage_write_prepared(
       client != NULL ? client->pouch : NULL, namespace_name, key, txn_id,
       lease != NULL ? lease->key : NULL, source, options,
       lc_pouch_client_prepare_txn_stage_write, &context, NULL, out, error);
+  if (rc == LC_OK) {
+    out->version = context.projected_version;
+  }
+  return rc;
 }
 
 static int lc_pouch_client_stage_transaction_metadata(
@@ -10167,6 +10225,7 @@ static int lc_pouch_txn_parse_record(const char *bytes, size_t length,
   uint64_t count;
   uint64_t value;
   int64_t signed_value;
+  int has_votes;
   int rc;
 
   memset(record, 0, sizeof(*record));
@@ -10174,10 +10233,20 @@ static int lc_pouch_txn_parse_record(const char *bytes, size_t length,
   count = 0U;
   value = 0U;
   signed_value = 0;
+  has_votes = 0;
   memset(&cursor, 0, sizeof(cursor));
   cursor.bytes = (const unsigned char *)bytes;
   cursor.length = length;
-  rc = lc_pouch_binary_cursor_magic(&cursor, LC_POUCH_TXN_RECORD_MAGIC, error);
+  if (length >= strlen(LC_POUCH_TXN_RECORD_MAGIC) &&
+      memcmp(bytes, LC_POUCH_TXN_RECORD_MAGIC,
+             strlen(LC_POUCH_TXN_RECORD_MAGIC)) == 0) {
+    cursor.offset = strlen(LC_POUCH_TXN_RECORD_MAGIC);
+    has_votes = 1;
+    rc = LC_OK;
+  } else {
+    rc = lc_pouch_binary_cursor_magic(&cursor, LC_POUCH_TXN_RECORD_MAGIC_V1,
+                                      error);
+  }
   if (rc == LC_OK) {
     rc = lc_pouch_binary_cursor_string(&cursor, &record->state, error);
   }
@@ -10218,6 +10287,16 @@ static int lc_pouch_txn_parse_record(const char *bytes, size_t length,
       namespace_name = NULL;
       key = NULL;
       backend_hash = NULL;
+    }
+    if (rc == LC_OK && has_votes) {
+      if (cursor.offset >= cursor.length || cursor.bytes[cursor.offset] > 2U) {
+        rc =
+            lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                         "pouch transaction vote is invalid", NULL, NULL, NULL);
+      } else {
+        record->votes[record->participant_count - 1U] =
+            cursor.bytes[cursor.offset++];
+      }
     }
     lc_free_with_allocator(NULL, namespace_name);
     lc_free_with_allocator(NULL, key);
@@ -10318,7 +10397,8 @@ static int lc_pouch_txn_build_record(const lc_pouch_txn_record *txn_record,
   int rc;
 
   memset(record, 0, sizeof(*record));
-  if (txn_record == NULL || txn_record->state == NULL) {
+  if (txn_record == NULL || txn_record->state == NULL ||
+      (txn_record->participant_count > 0U && txn_record->votes == NULL)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch transaction record is incomplete", NULL, NULL,
                         NULL);
@@ -10354,6 +10434,10 @@ static int lc_pouch_txn_build_record(const lc_pouch_txn_record *txn_record,
     if (rc == LC_OK) {
       rc = lc_pouch_txn_buffer_append_string(
           record, txn_record->participants[i].backend_hash, error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_txn_buffer_append_bytes(record, &txn_record->votes[i], 1U,
+                                            error);
     }
   }
   if (rc != LC_OK) {
@@ -11728,11 +11812,16 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
                                    lc_lease **out, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_acquire_context acquire_context;
+  lc_acquire_req effective_request;
+  lc_txn_participant participant;
+  lc_txn_decision_req transaction_request;
+  lc_txn_decision_res transaction_result;
   const char *namespace_name = NULL;
   lc_version acquired_version = 0L;
   lc_pouch_unix_seconds block_deadline_unix = 0;
   lc_pouch_unix_seconds now_seconds = 0;
   lc_lease *lease;
+  char minted_txn_id[LC_XID_STRING_SIZE];
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -11742,6 +11831,15 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   }
   *out = NULL;
   client = (lc_client_handle *)self;
+  effective_request = *req;
+  minted_txn_id[0] = '\0';
+  if (effective_request.txn_id == NULL || effective_request.txn_id[0] == '\0') {
+    rc = lc_xid_new(minted_txn_id, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    effective_request.txn_id = minted_txn_id;
+  }
   rc = lc_pouch_client_validate_acquire_key(req->key, error);
   if (rc != LC_OK) {
     return rc;
@@ -11766,7 +11864,7 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   }
   memset(&acquire_context, 0, sizeof(acquire_context));
   acquire_context.client = client;
-  acquire_context.req = req;
+  acquire_context.req = &effective_request;
   acquire_context.namespace_name = namespace_name;
   rc = lc_pouch_now_unix(&now_seconds, error);
   if (rc != LC_OK) {
@@ -11832,6 +11930,26 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
     lc_pouch_acquire_context_cleanup(&acquire_context);
     return rollback_rc != LC_OK ? rollback_rc : rc;
   }
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&transaction_request);
+  memset(&transaction_result, 0, sizeof(transaction_result));
+  participant.namespace_name = namespace_name;
+  participant.key = effective_request.key;
+  transaction_request.txn_id = effective_request.txn_id;
+  transaction_request.participants = &participant;
+  transaction_request.participant_count = 1U;
+  transaction_request.expires_at_unix = acquire_context.lease_expires_at_unix;
+  rc =
+      self->txn_prepare(self, &transaction_request, &transaction_result, error);
+  lc_txn_decision_res_cleanup(&transaction_result);
+  if (rc != LC_OK) {
+    int rollback_rc;
+
+    rollback_rc =
+        lc_pouch_rollback_acquire_claim_after_failure(&acquire_context, error);
+    lc_pouch_acquire_context_cleanup(&acquire_context);
+    return rollback_rc != LC_OK ? rollback_rc : rc;
+  }
 #ifdef LOCKDC_TEST_BUILD
   if (lc_pouch_test_after_acquire_claim_hook != NULL) {
     lc_pouch_test_after_acquire_claim_hook(
@@ -11839,8 +11957,9 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   }
 #endif
   lease = lc_lease_new(
-      client, namespace_name, req->key, req->owner, acquire_context.lease_id,
-      req->txn_id, acquire_context.fencing_token, acquired_version,
+      client, namespace_name, effective_request.key, effective_request.owner,
+      acquire_context.lease_id, effective_request.txn_id,
+      acquire_context.fencing_token, acquired_version,
       acquire_context.state_found ? acquire_context.lease_write_result.etag
                                   : NULL,
       NULL);
@@ -12761,6 +12880,12 @@ static int lc_pouch_release_prepare_metadata(
   rc = lc_pouch_validate_lease_metadata_view(
       ctx->client, &ctx->req->lease, ctx->namespace_name, ctx->req->lease.key,
       state_view, &lease_record, error);
+  if (rc == LC_OK && lc_pouch_txn_id_present(ctx->req->lease.txn_id)) {
+    rc = lc_pouch_txn_record_vote(ctx->client, ctx->req->lease.txn_id,
+                                  ctx->namespace_name, ctx->req->lease.key,
+                                  ctx->req->rollback, &ctx->txn_decision_ready,
+                                  error);
+  }
   if (rc == LC_OK) {
     rc = lc_pouch_txn_buffer_append_bytes(
         &ctx->lease_metadata, LC_POUCH_LEASE_RECORD_MAGIC,
@@ -12822,9 +12947,9 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
                                    lc_release_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_release_context release_context;
-  lc_pouch_lease_record validation_record;
+  lc_txn_replay_req replay_request;
+  lc_txn_replay_res replay_result;
   const char *namespace_name = NULL;
-  int discarded;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -12842,27 +12967,12 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
                         "pouch release requires lease_id", NULL, NULL, NULL);
   }
   memset(&release_context, 0, sizeof(release_context));
-  memset(&validation_record, 0, sizeof(validation_record));
+  lc_txn_replay_req_init(&replay_request);
+  memset(&replay_result, 0, sizeof(replay_result));
   rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
                                         &namespace_name, error);
   if (rc != LC_OK) {
     return rc;
-  }
-  if (req->rollback && req->lease.txn_id != NULL &&
-      req->lease.txn_id[0] != '\0') {
-    rc = lc_pouch_validate_lease_record(client, &req->lease, namespace_name,
-                                        req->lease.key, &validation_record,
-                                        error);
-    lc_pouch_lease_record_cleanup(&validation_record);
-    if (rc != LC_OK) {
-      return rc;
-    }
-    rc = lc_pouch_state_discard_staged(client->pouch, namespace_name,
-                                       req->lease.key, req->lease.txn_id,
-                                       &discarded, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
   }
   release_context.client = client;
   release_context.req = req;
@@ -12875,6 +12985,14 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
                                       &release_context.write_result);
   if (rc != LC_OK) {
     return rc;
+  }
+  if (release_context.txn_decision_ready) {
+    replay_request.txn_id = req->lease.txn_id;
+    rc = self->txn_replay(self, &replay_request, &replay_result, error);
+    lc_txn_replay_res_cleanup(&replay_result);
+    if (rc != LC_OK) {
+      return rc;
+    }
   }
   lc_pouch_indexer_note_operation_complete(
       client->pouch, namespace_name, req->lease.key,
@@ -15750,6 +15868,222 @@ static int lc_pouch_txn_decision_record_locked(void *context, lc_error *error) {
   return rc;
 }
 
+static size_t
+lc_pouch_txn_record_find_participant(const lc_pouch_txn_record *record,
+                                     const char *namespace_name,
+                                     const char *key) {
+  size_t i;
+
+  if (record == NULL || namespace_name == NULL || key == NULL) {
+    return (size_t)-1;
+  }
+  for (i = 0U; i < record->participant_count; ++i) {
+    if (strcmp(record->participants[i].namespace_name, namespace_name) == 0 &&
+        strcmp(record->participants[i].key, key) == 0) {
+      return i;
+    }
+  }
+  return (size_t)-1;
+}
+
+static int
+lc_pouch_txn_record_all_commit_votes(const lc_pouch_txn_record *record) {
+  size_t i;
+
+  if (record == NULL || record->participant_count == 0U ||
+      record->votes == NULL) {
+    return 0;
+  }
+  for (i = 0U; i < record->participant_count; ++i) {
+    if (record->votes[i] != 1U) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int lc_pouch_txn_vote_record_locked(void *context, lc_error *error) {
+  lc_pouch_txn_vote_context *ctx;
+  lc_pouch_state_read_result read_result;
+  lc_pouch_txn_buffer buffer;
+  lc_pouch_state_write_options options;
+  lc_source *source;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  size_t participant_index;
+  unsigned char requested_vote;
+  char *record_bytes;
+  int write_record;
+  int rc;
+
+  ctx = (lc_pouch_txn_vote_context *)context;
+  if (ctx == NULL || ctx->client == NULL || ctx->txn_id == NULL ||
+      ctx->namespace_name == NULL || ctx->participant_key == NULL ||
+      ctx->record_key == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction vote requires context", NULL, NULL,
+                        NULL);
+  }
+  memset(&read_result, 0, sizeof(read_result));
+  memset(&buffer, 0, sizeof(buffer));
+  memset(&options, 0, sizeof(options));
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  record_bytes = NULL;
+  write_record = 0;
+  requested_vote = ctx->rollback ? 2U : 1U;
+  rc = lc_pouch_state_read_locked(ctx->client->pouch, LC_POUCH_TXN_NAMESPACE,
+                                  ctx->record_key, &read_result, error);
+  if (rc == LC_OK && !read_result.found) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch transaction record not found for lease release",
+                      NULL, NULL, NULL);
+  }
+  if (rc == LC_OK) {
+    ctx->response_index = read_result.index_seq;
+    rc = lc_sink_to_memory(&sink, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_copy(read_result.body, sink, NULL, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
+  }
+  if (rc == LC_OK) {
+    record_bytes = (char *)lc_alloc_with_allocator(NULL, length + 1U);
+    if (record_bytes == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch transaction vote record",
+                        NULL, NULL, NULL);
+    }
+  }
+  if (rc == LC_OK) {
+    memcpy(record_bytes, bytes, length);
+    record_bytes[length] = '\0';
+    rc = lc_pouch_txn_parse_record(record_bytes, length, &ctx->record, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_txn_validate_target_backend(
+        ctx->client->pouch, ctx->record.target_backend_hash, error);
+  }
+  participant_index = (size_t)-1;
+  if (rc == LC_OK) {
+    participant_index = lc_pouch_txn_record_find_participant(
+        &ctx->record, ctx->namespace_name, ctx->participant_key);
+    if (participant_index == (size_t)-1) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch lease is not a transaction participant", NULL,
+                        NULL, NULL);
+    }
+  }
+  if (rc == LC_OK && strcmp(ctx->record.state, "prepare") == 0) {
+    if (ctx->record.votes[participant_index] != 0U &&
+        ctx->record.votes[participant_index] != requested_vote) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction participant already voted", NULL,
+                        NULL, NULL);
+    } else {
+      if (ctx->record.votes[participant_index] == 0U) {
+        ctx->record.votes[participant_index] = requested_vote;
+        write_record = 1;
+      }
+      if (rc == LC_OK && requested_vote == 2U) {
+        rc = lc_pouch_txn_record_replace_string(&ctx->record.state, "rollback",
+                                                error);
+        if (rc == LC_OK) {
+          write_record = 1;
+          ctx->apply_decision = 1;
+        }
+      } else if (rc == LC_OK &&
+                 lc_pouch_txn_record_all_commit_votes(&ctx->record)) {
+        rc = lc_pouch_txn_record_replace_string(&ctx->record.state, "commit",
+                                                error);
+        if (rc == LC_OK) {
+          write_record = 1;
+          ctx->apply_decision = 1;
+        }
+      }
+    }
+  } else if (rc == LC_OK && (strcmp(ctx->record.state, "commit") == 0 ||
+                             strcmp(ctx->record.state, "rollback") == 0)) {
+    ctx->apply_decision = 1;
+  } else if (rc == LC_OK) {
+    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                      "pouch transaction vote found unsupported state", NULL,
+                      NULL, NULL);
+  }
+  if (rc == LC_OK && write_record) {
+    rc = lc_pouch_txn_build_record(&ctx->record, &buffer, error);
+  }
+  if (rc == LC_OK && write_record) {
+    rc = lc_source_from_memory(buffer.bytes, buffer.length, &source, error);
+  }
+  if (rc == LC_OK && write_record) {
+    options.content_type = "application/x-lockdc-pouch-txn";
+    options.object_record = 1;
+    options.has_expected_version = 1;
+    options.expected_version = read_result.version;
+    rc = lc_pouch_state_write_locked(ctx->client->pouch, LC_POUCH_TXN_NAMESPACE,
+                                     ctx->record_key, source, &options,
+                                     &ctx->write_result, error);
+    if (rc == LC_OK) {
+      ctx->response_index = ctx->write_result.index_seq;
+    }
+  }
+  if (source != NULL) {
+    lc_source_close(source);
+  }
+  if (sink != NULL) {
+    lc_sink_close(sink);
+  }
+  lc_free_with_allocator(NULL, record_bytes);
+  lc_pouch_txn_buffer_cleanup(&buffer);
+  lc_pouch_state_read_result_cleanup(&ctx->client->allocator, &read_result);
+  return rc;
+}
+
+static int lc_pouch_txn_record_vote(lc_client_handle *client,
+                                    const char *txn_id,
+                                    const char *namespace_name,
+                                    const char *participant_key, int rollback,
+                                    int *decision_ready, lc_error *error) {
+  lc_pouch_txn_vote_context context;
+  char *record_key;
+  int rc;
+
+  if (decision_ready == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch transaction vote requires decision output", NULL,
+                        NULL, NULL);
+  }
+  *decision_ready = 0;
+  record_key = lc_pouch_txn_key(txn_id, error);
+  if (record_key == NULL) {
+    return error != NULL ? error->code : LC_ERR_NOMEM;
+  }
+  memset(&context, 0, sizeof(context));
+  context.client = client;
+  context.txn_id = txn_id;
+  context.namespace_name = namespace_name;
+  context.participant_key = participant_key;
+  context.rollback = rollback;
+  context.record_key = record_key;
+  rc = lc_pouch_state_with_key_lock(client->pouch, LC_POUCH_TXN_NAMESPACE,
+                                    record_key, lc_pouch_txn_vote_record_locked,
+                                    &context, error);
+  if (rc == LC_OK) {
+    *decision_ready = context.apply_decision;
+  }
+  lc_pouch_state_write_result_cleanup(&client->allocator,
+                                      &context.write_result);
+  lc_pouch_txn_record_cleanup(&context.record);
+  lc_free_with_allocator(NULL, record_key);
+  return rc;
+}
+
 int lc_pouch_client_txn_replay_method(lc_client *self,
                                       const lc_txn_replay_req *req,
                                       lc_txn_replay_res *out, lc_error *error) {
@@ -17728,6 +18062,39 @@ static const char *lc_pouch_lease_state_storage_key(lc_lease_handle *lease) {
                          : NULL;
 }
 
+static int lc_pouch_lease_read_private_state(lc_lease_handle *lease,
+                                             lc_pouch_state_read_result *out,
+                                             lc_error *error) {
+  const char *state_key;
+  char *staged_key;
+  int rc;
+
+  if (lease == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch private lease state requires context", NULL,
+                        NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  state_key = lc_pouch_lease_state_storage_key(lease);
+  staged_key = NULL;
+  if (lc_pouch_txn_id_present(lease->txn_id)) {
+    staged_key = lc_pouch_staged_storage_key(state_key, lease->txn_id, error);
+    if (staged_key == NULL) {
+      return error != NULL ? error->code : LC_ERR_NOMEM;
+    }
+    rc = lc_pouch_state_read(lease->client->pouch, lease->namespace_name,
+                             staged_key, out, error);
+    lc_free_with_allocator(NULL, staged_key);
+    if (rc != LC_OK || out->found) {
+      return rc;
+    }
+    lc_pouch_state_read_result_cleanup(&lease->client->allocator, out);
+    memset(out, 0, sizeof(*out));
+  }
+  return lc_pouch_state_read(lease->client->pouch, lease->namespace_name,
+                             state_key, out, error);
+}
+
 int lc_pouch_lease_describe_method(lc_lease *self, lc_error *error) {
   lc_lease_handle *lease;
   lc_pouch_state_read_result read_result;
@@ -17767,6 +18134,7 @@ int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
                               const lc_get_opts *opts, lc_get_res *out,
                               lc_error *error) {
   lc_lease_handle *lease;
+  lc_pouch_state_read_result read_result;
   int rc;
 
   if (self == NULL || dst == NULL || out == NULL) {
@@ -17775,9 +18143,30 @@ int lc_pouch_lease_get_method(lc_lease *self, lc_sink *dst,
                         NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
+  memset(&read_result, 0, sizeof(read_result));
   if (opts == NULL || !opts->public_read) {
     rc = lc_pouch_lease_validate_private_read(lease, error);
     if (rc != LC_OK) {
+      return rc;
+    }
+    if (lc_pouch_txn_id_present(lease->txn_id)) {
+      memset(out, 0, sizeof(*out));
+      rc = lc_pouch_lease_read_private_state(lease, &read_result, error);
+      if (rc == LC_OK && !read_result.found) {
+        out->no_content = 1;
+      }
+      if (rc == LC_OK && read_result.found) {
+        rc = lc_copy(read_result.body, dst, NULL, error);
+      }
+      if (rc == LC_OK && read_result.found) {
+        rc = lc_pouch_client_copy_state_metadata(&read_result, out, error);
+      }
+      lc_pouch_state_read_result_cleanup(&lease->client->allocator,
+                                         &read_result);
+      if (rc == LC_OK && !out->no_content) {
+        rc =
+            lc_pouch_lease_refresh_state(lease, out->etag, out->version, error);
+      }
       return rc;
     }
   }
@@ -17794,6 +18183,14 @@ static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
                                       void *dst, const lc_get_opts *opts,
                                       lc_get_res *out, lc_error *error) {
   lc_lease_handle *lease;
+  lc_pouch_state_read_result read_result;
+  lc_sink *memory_sink;
+  const void *bytes;
+  size_t length;
+  char *json;
+  lonejson *runtime;
+  lonejson_error lj_error;
+  lonejson_status status;
   int rc;
 
   if (self == NULL || map == NULL || dst == NULL || out == NULL) {
@@ -17803,9 +18200,65 @@ static int lc_pouch_lease_load_method(lc_lease *self, const lonejson_map *map,
                         NULL, NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
+  memset(&read_result, 0, sizeof(read_result));
+  memory_sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  json = NULL;
   if (opts == NULL || !opts->public_read) {
     rc = lc_pouch_lease_validate_private_read(lease, error);
     if (rc != LC_OK) {
+      return rc;
+    }
+    if (lc_pouch_txn_id_present(lease->txn_id)) {
+      memset(out, 0, sizeof(*out));
+      rc = lc_pouch_lease_read_private_state(lease, &read_result, error);
+      if (rc == LC_OK && !read_result.found) {
+        out->no_content = 1;
+      }
+      if (rc == LC_OK && read_result.found) {
+        rc = lc_sink_to_memory(&memory_sink, error);
+      }
+      if (rc == LC_OK && read_result.found) {
+        rc = lc_copy(read_result.body, memory_sink, NULL, error);
+      }
+      if (rc == LC_OK && read_result.found) {
+        rc = lc_sink_memory_bytes(memory_sink, &bytes, &length, error);
+      }
+      if (rc == LC_OK && read_result.found) {
+        json = (char *)lc_alloc_with_allocator(NULL, length + 1U);
+        if (json == NULL) {
+          rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "failed to allocate pouch mapped lease load", NULL,
+                            NULL, NULL);
+        }
+      }
+      if (rc == LC_OK && read_result.found) {
+        memcpy(json, bytes, length);
+        json[length] = '\0';
+        runtime = lc_thread_lonejson_runtime();
+        lc_lonejson_prepare_parse_destination(runtime, map, dst);
+        memset(&lj_error, 0, sizeof(lj_error));
+        status =
+            lc_lonejson_parse_cstr_value(runtime, map, dst, json, &lj_error);
+        if (status != LONEJSON_STATUS_OK) {
+          rc = lc_lonejson_error_from_status(
+              error, status, &lj_error, "failed to parse pouch lease state");
+        }
+      }
+      if (rc == LC_OK && read_result.found) {
+        rc = lc_pouch_client_copy_state_metadata(&read_result, out, error);
+      }
+      if (memory_sink != NULL) {
+        memory_sink->close(memory_sink);
+      }
+      lc_free_with_allocator(NULL, json);
+      lc_pouch_state_read_result_cleanup(&lease->client->allocator,
+                                         &read_result);
+      if (rc == LC_OK && !out->no_content) {
+        rc =
+            lc_pouch_lease_refresh_state(lease, out->etag, out->version, error);
+      }
       return rc;
     }
   }

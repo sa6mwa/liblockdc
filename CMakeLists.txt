@@ -392,6 +392,7 @@ set(lc_sources
     src/lc_state_api.c
     src/lc_streaming.c
     src/lc_transport.c
+    src/lc_xid.c
 )
 
 set(LOCKDC_PSLOG_STATIC_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include")

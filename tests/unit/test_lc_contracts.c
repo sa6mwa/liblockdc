@@ -593,6 +593,31 @@ static void test_stream_close_wrappers_delegate(void **state) {
   assert_int_equal(sink.close_calls, 1);
 }
 
+static void test_xid_new_mints_canonical_unique_identifiers(void **state) {
+  char first[LC_XID_STRING_SIZE];
+  char second[LC_XID_STRING_SIZE];
+  lc_error error;
+  size_t i;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  rc = lc_xid_new(first, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_xid_new(second, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(strlen(first), LC_XID_STRING_LENGTH);
+  assert_int_equal(strlen(second), LC_XID_STRING_LENGTH);
+  assert_string_not_equal(first, second);
+  for (i = 0U; i < LC_XID_STRING_LENGTH; ++i) {
+    assert_true((first[i] >= '0' && first[i] <= '9') ||
+                (first[i] >= 'a' && first[i] <= 'v'));
+    assert_true((second[i] >= '0' && second[i] <= '9') ||
+                (second[i] >= 'a' && second[i] <= 'v'));
+  }
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_client_wrappers_delegate_full_public_surface),
@@ -601,6 +626,7 @@ int main(void) {
       cmocka_unit_test(
           test_message_and_service_wrappers_delegate_full_public_surface),
       cmocka_unit_test(test_stream_close_wrappers_delegate),
+      cmocka_unit_test(test_xid_new_mints_canonical_unique_identifiers),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

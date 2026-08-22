@@ -118,6 +118,11 @@ typedef struct lc_error {
   char *correlation_id;
 } lc_error;
 
+/** Exact printable size of an rs/xid-compatible identifier, excluding NUL. */
+#define LC_XID_STRING_LENGTH 20U
+/** Buffer size required by `lc_xid_new()`, including the terminating NUL. */
+#define LC_XID_STRING_SIZE (LC_XID_STRING_LENGTH + 1U)
+
 /**
  * Callback invoked while an acquire-for-update lease is held.
  *
@@ -2225,6 +2230,15 @@ void lc_error_init(lc_error *error);
  * Accepts `NULL` and an already-zeroed error.
  */
 void lc_error_cleanup(lc_error *error);
+/**
+ * Mints a sortable, rs/xid-compatible identifier into `out`.
+ *
+ * `out` must provide at least `LC_XID_STRING_SIZE` bytes. The result is the
+ * canonical 20-character lowercase base32-hex form (`[0-9a-v]{20}`), accepted
+ * by lockd wherever it accepts an XID transaction id. The helper returns an
+ * actionable error if its process-wide XID generator cannot initialize.
+ */
+int lc_xid_new(char out[LC_XID_STRING_SIZE], lc_error *error);
 /**
  * Initializes an allocator override to use the default allocator.
  *
