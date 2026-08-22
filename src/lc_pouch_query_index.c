@@ -173,6 +173,7 @@ typedef struct lc_pouch_query_index_incremental_change {
   int has_query_hidden;
   int query_hidden;
   int found;
+  int has_payload;
   /* A metadata-only tail record retains the cached normalized body terms. */
   int preserves_cached_body;
 } lc_pouch_query_index_incremental_change;
@@ -2718,6 +2719,7 @@ static int lc_pouch_query_index_incremental_context_add_change(
   change->has_query_hidden = entry->has_query_hidden;
   change->query_hidden = entry->query_hidden;
   change->found = entry->found;
+  change->has_payload = entry->has_payload;
   ++context->change_count;
   return LC_OK;
 }
@@ -2796,9 +2798,7 @@ static int lc_pouch_query_index_incremental_apply_changes(
     current.updated_at_unix = change->updated_at_unix;
     current.has_query_hidden = change->has_query_hidden;
     current.query_hidden = change->query_hidden;
-    /* Change visits expose the current visible projection only; a found
-     * change therefore carries the body that the incremental extractor reads. */
-    current.has_payload = change->found;
+    current.has_payload = change->has_payload;
     prior_count = incremental->summary->count;
     rc = lc_pouch_query_index_summary_visit(&current, incremental->summary,
                                             error);

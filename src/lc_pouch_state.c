@@ -16004,6 +16004,7 @@ int lc_pouch_state_visit_since(lc_pouch *pouch, const char *namespace_name,
     entry.updated_at_unix = snapshots[i].updated_at_unix;
     entry.has_query_hidden = snapshots[i].has_query_hidden;
     entry.query_hidden = snapshots[i].query_hidden;
+    entry.has_payload = snapshots[i].has_payload;
     entry.object_record =
         snapshots[i].record_type == LC_POUCH_STATE_RECORD_OBJECT_PUT ||
         snapshots[i].record_type == LC_POUCH_STATE_RECORD_OBJECT_DELETE;

@@ -50,6 +50,9 @@ typedef struct lc_pouch_state_change_visit_entry {
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  /* A found record can still be lease metadata or a tombstone without a
+   * readable public state payload. */
+  int has_payload;
   int object_record;
   int found;
 } lc_pouch_state_change_visit_entry;

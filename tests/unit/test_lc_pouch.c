@@ -10202,6 +10202,95 @@ static void test_query_index_sequence_ignores_lease_metadata(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_incremental_query_index_ignores_lease_only_key(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire_req;
+  lc_update_res indexed_update;
+  lc_update_res trigger_update;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture page;
+  lc_error error;
+  char endpoint[1024];
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&indexed_update, 0, sizeof(indexed_update));
+  memset(&trigger_update, 0, sizeof(trigger_update));
+  lc_acquire_req_init(&acquire_req);
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&page, 0, sizeof(page));
+  lc_error_init(&error);
+  make_root("incremental-index-lease-only", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?single_writer=true&"
+                       "indexer_flush_interval_seconds=3600",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  write_client_state(client, "doc/indexed", "{\"kind\":\"indexed\"}", NULL,
+                     0L, 0, &indexed_update, &error);
+  lc_update_res_cleanup(&indexed_update);
+
+  flush_req.mode = "sync";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(flush_res.flushed);
+  lc_index_flush_res_cleanup(&flush_res);
+  memset(&flush_res, 0, sizeof(flush_res));
+
+  acquire_req.key = "doc/lease-only";
+  acquire_req.owner = "pouch-incremental-index";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  write_client_state(client, "doc/trigger", "{\"kind\":\"trigger\"}", NULL,
+                     0L, 0, &trigger_update, &error);
+  lc_update_res_cleanup(&trigger_update);
+
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(flush_res.flushed);
+  lc_index_flush_res_cleanup(&flush_res);
+
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.engine = "index";
+  rc = client->query_keys(client, &query_req, &handler, &page, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(page.count, 2);
+  assert_true(pouch_query_capture_has(&page, "doc/indexed"));
+  assert_true(pouch_query_capture_has(&page, "doc/trigger"));
+  assert_false(pouch_query_capture_has(&page, "doc/lease-only"));
+
+  lc_query_res_cleanup(&query_res);
+  lc_update_res_cleanup(&trigger_update);
+  lc_update_res_cleanup(&indexed_update);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_query_index_ignores_internal_objects(void **state) {
   lc_client *client;
   lc_client_handle *handle;
@@ -31092,6 +31181,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_exclusive_indexer_defers_lease_metadata_until_release),
       cmocka_unit_test(test_query_index_sequence_ignores_lease_metadata),
+      cmocka_unit_test(test_incremental_query_index_ignores_lease_only_key),
       cmocka_unit_test(test_query_index_ignores_internal_objects),
       cmocka_unit_test(test_staged_object_delete_does_not_queue_query_index),
       cmocka_unit_test(
