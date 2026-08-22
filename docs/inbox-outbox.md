@@ -80,6 +80,109 @@ It deliberately does not cover:
   A bounded in-memory handoff containing an already committed outbox key. It is
   a performance hint, not the durable source of work.
 
+## Consumer Experience and Public Surface
+
+The facility is a first-class receiver-style liblockdc surface, not a set of
+key-format helpers or a framework integration. C applications, Lua
+applications, and downstream hosts use the same durable concepts and lifecycle
+without assembling reserved keys, transaction identifiers, leases, or
+dispatcher notifications themselves.
+
+### C receiver surface
+
+The primary C entry point is an opaque workflow handle created from an existing
+client. It follows the public library's receiver-function convention and
+zero-initializable configuration/request records:
+
+```c
+typedef struct lc_workflow lc_workflow;
+typedef struct lc_workflow_transaction lc_workflow_transaction;
+
+int (*new_workflow)(lc_client *self, const lc_workflow_config *config,
+                    lc_workflow **out, lc_error *error);
+
+struct lc_workflow {
+  int (*begin)(lc_workflow *self, const lc_workflow_begin *request,
+               lc_workflow_transaction **out, lc_error *error);
+  int (*new_dispatcher)(lc_workflow *self,
+                        const lc_outbox_dispatcher_config *config,
+                        lc_outbox_dispatcher **out, lc_error *error);
+  void (*close)(lc_workflow *self);
+};
+
+struct lc_workflow_transaction {
+  int (*append_outbox)(lc_workflow_transaction *self,
+                        const lc_outbox_entry *entry, lc_source *payload,
+                        lc_outbox_receipt *out, lc_error *error);
+  int (*accept_inbox)(lc_workflow_transaction *self,
+                      const lc_inbox_message *message,
+                      lc_inbox_accept_result *out, lc_error *error);
+  int (*commit)(lc_workflow_transaction *self, lc_error *error);
+  int (*rollback)(lc_workflow_transaction *self, lc_error *error);
+  void (*close)(lc_workflow_transaction *self);
+};
+```
+
+Exact type and method names remain subject to ABI review, but these interaction
+boundaries are fixed:
+
+- `lc_workflow_config_init()`, `lc_workflow_begin_init()`, and every
+  transparent entry/retry/configuration record have matching initializers.
+- Callers pass semantic IDs and routing metadata; liblockdc owns reserved-key
+  construction, payload attachment naming, transaction IDs, post-commit
+  notification, and lease references.
+- An outbox receipt contains the stable outbox identity and `effect_key` needed
+  for logs and foreign-system calls without revealing storage layout.
+- Inbox acceptance reports `accepted` or `duplicate` as successful structured
+  outcomes. It does not force callers to inspect an error string to distinguish
+  a normal duplicate from a conflict.
+- Transaction commit is the single success boundary. There is no separate
+  `signal()` call for the application to forget.
+- Dispatcher jobs expose immutable envelope metadata, streaming payload access,
+  and only the terminal/renewal operations valid for their owned claim.
+
+Errors must identify the failed semantic operation and relevant identity
+(`operation_id`, inbox identity, or outbox receipt) without logging payload
+bytes or credentials. The API must reject contradictory configuration before a
+worker thread starts.
+
+### Lua surface
+
+The Lua binding exposes the same lifecycle as owned userdata rather than a
+second, callback-based workflow model. Its names may be idiomatic Lua, but its
+semantics must match the C surface:
+
+```lua
+local workflow = client:new_workflow({ namespace = "app-workflow" })
+local txn = workflow:begin({ operation_id = request_id })
+
+txn:append_outbox(entry, payload_source)
+local result = txn:commit()
+
+local dispatcher = workflow:new_dispatcher({ claim_ttl_seconds = 30 })
+dispatcher:start()
+local job = dispatcher:next(1000)
+if job then
+  local payload = job:open_payload()
+  -- host-owned Lua code performs the foreign effect here.
+  job:complete()
+end
+```
+
+Lua receives explicit result values and normal `nil, error` failures. Payload
+objects retain the binding's streaming semantics. `dispatcher:next()` runs in
+the calling Lua context; the native dispatcher thread never enters a Lua VM or
+invokes a Lua callback. This keeps the facility usable by any Lua host without
+assuming its scheduler, mailbox, or runtime-lifetime rules.
+
+### Cross-language parity
+
+The C and Lua surfaces must have parity for workflow creation, transaction
+begin/commit/rollback, outbox append, inbox acceptance, dispatcher lifecycle,
+job inspection, payload streaming, renewal, retry, completion, and
+dead-lettering. Host integrations may add conveniences, but may not weaken the
+durable semantics or replace direct job ownership with dispatcher callbacks.
+
 ## Namespace and Key Layout
 
 `lc_inbox_outbox_config` supplies one non-empty `workflow_namespace`. Both
@@ -171,30 +274,10 @@ payload.
 
 ## Atomic Operations
 
-The public API needs a workflow transaction wrapper over the existing lockd and
-Pouch transaction facilities. Exact C names remain to be chosen; the required
-behavior is:
-
-```c
-int lc_workflow_transaction_begin(lc_client *client,
-                                  const lc_workflow_config *config,
-                                  const char *operation_id,
-                                  lc_workflow_transaction **out,
-                                  lc_error *error);
-
-int lc_workflow_transaction_append_outbox(
-    lc_workflow_transaction *self, const lc_outbox_entry *entry,
-    lc_source *payload, lc_outbox_receipt *out, lc_error *error);
-
-int lc_workflow_transaction_accept_inbox(
-    lc_workflow_transaction *self, const lc_inbox_message *message,
-    lc_inbox_accept_result *out, lc_error *error);
-
-int lc_workflow_transaction_commit(lc_workflow_transaction *self,
-                                   lc_error *error);
-int lc_workflow_transaction_rollback(lc_workflow_transaction *self,
-                                     lc_error *error);
-```
+`lc_workflow` and its transaction receiver provide the workflow transaction
+wrapper over existing lockd and Pouch transaction facilities. The receiver
+surface in [Consumer Experience and Public Surface](#consumer-experience-and-public-surface)
+is the intended public boundary.
 
 The application stages its domain-state mutations through leases enlisted in
 the same workflow transaction. The wrapper stages the inbox/outbox key and
@@ -432,6 +515,9 @@ Pouch and a remote lockd endpoint.
 14. Shutdown stops new claims, wakes blocked `next()` callers, joins the
     dispatcher within the configured deadline, and permits an active host job
     to recover through lease expiry after its grace period.
+15. C and Lua integration tests prove the same observable workflow outcomes:
+    idempotent append/accept, explicit duplicate results, streamed payload
+    handoff, and terminal job transitions without dispatcher-thread callbacks.
 
 ## Proof Obligations and Open Decisions
 
