@@ -695,6 +695,156 @@ static void test_disk_lease_state_roundtrip(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_disk_server_minted_multikey_xa_transaction(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_lease *commit_a;
+  lc_lease *commit_b;
+  lc_lease *rollback_a;
+  lc_lease *rollback_b;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+  char commit_key_a[96];
+  char commit_key_b[96];
+  char rollback_key_a[96];
+  char rollback_key_b[96];
+  int rc;
+  lc_error error;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  commit_a = NULL;
+  commit_b = NULL;
+  rollback_a = NULL;
+  rollback_b = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  lc_get_opts_init(&get_opts);
+  memset(&get_res, 0, sizeof(get_res));
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  make_unique_name("disk-xa-server-commit-a", commit_key_a,
+                   sizeof(commit_key_a));
+  make_unique_name("disk-xa-server-commit-b", commit_key_b,
+                   sizeof(commit_key_b));
+
+  acquire_req.key = commit_key_a;
+  acquire_req.owner = "lc-e2e-xa";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &commit_a, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(commit_a);
+  assert_non_null(commit_a->txn_id);
+  assert_true(commit_a->txn_id[0] != '\0');
+
+  acquire_req.key = commit_key_b;
+  acquire_req.txn_id = commit_a->txn_id;
+  rc = client->acquire(client, &acquire_req, &commit_b, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(commit_b);
+  assert_string_equal(commit_b->txn_id, commit_a->txn_id);
+
+  save_json_text_or_die(commit_a, "{\"transaction\":\"commit-a\"}", &error);
+  save_json_text_or_die(commit_b, "{\"transaction\":\"commit-b\"}", &error);
+  rc = commit_a->release(commit_a, NULL, &error);
+  assert_lc_ok(rc, &error);
+  commit_a = NULL;
+  rc = commit_b->release(commit_b, NULL, &error);
+  assert_lc_ok(rc, &error);
+  commit_b = NULL;
+
+  get_opts.public_read = 1;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = client->get(client, commit_key_a, &get_opts, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(buffer_contains(bytes, length, "\"transaction\":\"commit-a\""));
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = client->get(client, commit_key_b, &get_opts, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(buffer_contains(bytes, length, "\"transaction\":\"commit-b\""));
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  lc_acquire_req_init(&acquire_req);
+  make_unique_name("disk-xa-server-rollback-a", rollback_key_a,
+                   sizeof(rollback_key_a));
+  make_unique_name("disk-xa-server-rollback-b", rollback_key_b,
+                   sizeof(rollback_key_b));
+  acquire_req.key = rollback_key_a;
+  acquire_req.owner = "lc-e2e-xa";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &rollback_a, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(rollback_a);
+  assert_non_null(rollback_a->txn_id);
+
+  acquire_req.key = rollback_key_b;
+  acquire_req.txn_id = rollback_a->txn_id;
+  rc = client->acquire(client, &acquire_req, &rollback_b, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(rollback_b);
+  assert_string_equal(rollback_b->txn_id, rollback_a->txn_id);
+
+  save_json_text_or_die(rollback_a, "{\"transaction\":\"rollback-a\"}", &error);
+  save_json_text_or_die(rollback_b, "{\"transaction\":\"rollback-b\"}", &error);
+  release_req.rollback = 1;
+  rc = rollback_a->release(rollback_a, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  rollback_a = NULL;
+  rc = rollback_b->release(rollback_b, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  rollback_b = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = client->get(client, rollback_key_a, &get_opts, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(get_res.no_content);
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_get_res_cleanup(&get_res);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = client->get(client, rollback_key_b, &get_opts, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(get_res.no_content);
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
 static void test_disk_acquire_for_update_roundtrip(void **state) {
   const char *endpoint;
   const char *bundle_path;
@@ -4266,6 +4416,7 @@ static void test_pouch_direct_consumer_service_with_state(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_disk_lease_state_roundtrip),
+      cmocka_unit_test(test_disk_server_minted_multikey_xa_transaction),
       cmocka_unit_test(test_disk_acquire_for_update_roundtrip),
       cmocka_unit_test(test_disk_acquire_for_update_handler_error_rolls_back),
       cmocka_unit_test(test_disk_acquire_if_not_exists_conflict),

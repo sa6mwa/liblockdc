@@ -51,12 +51,17 @@ must therefore use the xid grammar accepted by lockd. Every state, metadata,
 and attachment operation through the resulting `lc_lease` carries that
 transaction id and stages its change.
 
-The normal application-client finalizer is one `lc_lease->release()` call on
-an enrolled lease. `rollback=0` commits and `rollback=1` rolls back. Lockd
-records the durable decision and applies every participant registered while
-staging; it is not a per-key publish loop. The workflow must not call
-`lc_txn_prepare()`, `lc_txn_commit()`, `lc_txn_rollback()`, or the TC decision
-surface for this path: those are coordinator/resource-manager control
+Remote lockd XA is implicit at the client boundary: acquire the first
+participant without `txn_id`, take its server-issued xid, and supply that xid
+when acquiring every additional participant. Stage through the corresponding
+leases. The workflow then releases every enrolled lease as a vote:
+`rollback=0` on every participant commits, while a rollback vote makes the
+outcome rollback. No state becomes publicly visible merely because one
+participant has released; the final decision occurs only after the complete
+participant set has voted. Lockd records the durable decision and applies the
+staged participant set; it is not a per-key publish loop. The workflow must
+not call `lc_txn_prepare()`, `lc_txn_commit()`, `lc_txn_rollback()`, or the TC
+decision surface for this path: those are coordinator/resource-manager control
 operations, not the ordinary application-client finalizer.
 
 ### Local Pouch
@@ -71,24 +76,26 @@ are closed locally; they are not released one by one.
 
 ### Workflow adapter rules
 
-- A normal `begin()` creates one opaque transaction id. It is valid for remote
-  lockd xid validation and Pouch's non-empty/no-slash requirement.
+- A normal `begin()` creates an unbound workflow transaction. Its first
+  participant acquire omits `txn_id`, captures the backend-issued id from the
+  returned lease, and every later participant acquire joins that id. The
+  transaction is invalid if the first lease does not return a non-empty id.
 - An advanced join may supply a compatible existing transaction id solely to
   transfer a lease already acquired under that id into the workflow. The
   workflow validates it, then owns its eventual terminal decision; it never
   invents or silently rewrites an id supplied for this purpose.
 - Every domain, inbox, and outbox lease obtained or adopted by the workflow is
   recorded exactly once as a `(namespace, key)` participant.
-- On remote lockd, `commit()`/`rollback()` release one enrolled terminal lease
-  with the corresponding rollback flag. On Pouch, they issue one explicit
-  local decision over the ledger.
-- The workflow deterministically selects its first enrolled participant as the
-  remote terminal lease. It retains every enrolled lease until the terminal
-  outcome, so remote release can decide the staged participant set and Pouch
-  can decide the complete local ledger.
+- On remote lockd, `commit()`/`rollback()` release every enrolled lease with
+  the corresponding vote. On Pouch, they issue one explicit local decision
+  over the ledger.
+- The workflow retains every enrolled lease until the terminal outcome. For
+  remote lockd it releases every lease in deterministic participant order; for
+  Pouch it decides the complete local ledger.
 - A successful terminal decision consumes every enrolled lease. Calling
   `release()` on an enrolled lease independently is impossible through the
-  workflow participant surface.
+  workflow participant surface. A remote workflow tracks per-participant vote
+  progress so a retry or recovery release never omits an outstanding vote.
 - If staging or the terminal decision fails, no post-commit notification is
   emitted. The transaction remains recoverable according to the selected
   backend's existing transaction recovery rules.
@@ -244,10 +251,12 @@ worker thread starts.
 
 The normal application path is `begin()` followed by `txn->acquire()`; the
 application never assembles a transaction id or decides a participant itself.
-The begin request's optional `join_txn_id` is for the exceptional case where a
-raw liblockdc lease was acquired first. If absent, liblockdc generates a
-canonical lockd xid (the current contract is the compact 20-character lowercase
-base32 form), which is also valid for Pouch. If present, it must have that form
+Without `join_txn_id`, the first `txn->acquire()` omits `txn_id` and captures
+the non-empty id returned on its lease. Every later acquire carries that exact
+id. This is the implicit XA start path used by remote lockd and Pouch. The
+begin request's optional `join_txn_id` is for the exceptional case where a raw
+liblockdc lease was acquired first. If present, it must be a canonical lockd
+xid (the current contract is the compact 20-character lowercase base32 form)
 and becomes the workflow transaction id. `adopt_lease()` then accepts only a
 lease carrying exactly that id.
 
@@ -625,15 +634,16 @@ recovery source of truth.
 Implementation is not complete until the following behavior is proven for both
 Pouch and the repository's compose-backed remote lockd E2E environment.
 
-1. A normal begin generates a canonical xid accepted by the compose-backed
-   remote lockd endpoint and usable across at least two keys; Pouch accepts the
-   same id. An invalid or mismatched `join_txn_id` is rejected before ownership
-   transfer.
+1. A normal begin starts implicit XA by acquiring its first key without a
+   transaction id, captures the backend-issued id, and uses that exact id for
+   at least one additional key. The compose-backed remote lockd endpoint and
+   Pouch both return a usable non-empty id. An invalid or mismatched
+   `join_txn_id` is rejected before ownership transfer.
 2. One workflow participant ledger containing domain mutation, inbox/outbox
    key, and payload attachment commits atomically; rollback exposes none of
-   them. The remote case finalizes through one normal lease release; the Pouch
-   case finalizes through one `txn_commit`/`txn_rollback` decision with the
-   ledger.
+   them. The remote case finalizes by releasing every enrolled lease with the
+   same commit or rollback vote; the Pouch case finalizes through one
+   `txn_commit`/`txn_rollback` decision with the ledger.
 3. Repeated outbox append with the same operation/effect identity creates one
    intent; a conflicting immutable repeat fails.
 4. Inbox redelivery is idempotent and a payload-digest conflict is rejected.
