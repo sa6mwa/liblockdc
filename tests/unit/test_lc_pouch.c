@@ -23873,7 +23873,8 @@ test_explicit_xa_release_rollback_discards_all_participants(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_expired_explicit_xa_release_persists_rollback(void **state) {
+static void test_expired_explicit_xa_release_discards_only_expired_participant(
+    void **state) {
   lc_client *client;
   lc_lease *first;
   lc_lease *second;
@@ -23883,6 +23884,8 @@ static void test_expired_explicit_xa_release_persists_rollback(void **state) {
   lc_acquire_req acquire_second;
   lc_get_res get_res;
   lc_error error;
+  const void *bytes;
+  size_t length;
   char root[512];
   char first_key[96];
   char second_key[96];
@@ -23894,16 +23897,18 @@ static void test_expired_explicit_xa_release_persists_rollback(void **state) {
   second = NULL;
   source = NULL;
   sink = NULL;
+  bytes = NULL;
+  length = 0U;
   lc_acquire_req_init(&acquire_first);
   lc_acquire_req_init(&acquire_second);
   memset(&get_res, 0, sizeof(get_res));
   lc_error_init(&error);
-  make_root("expired-explicit-xa", root, sizeof(root));
+  make_root("expired-explicit-xa-participant", root, sizeof(root));
   cleanup_root(root);
-  snprintf(first_key, sizeof(first_key), "state/expired-explicit-xa/a/%ld",
-           (long)getpid());
-  snprintf(second_key, sizeof(second_key), "state/expired-explicit-xa/b/%ld",
-           (long)getpid());
+  snprintf(first_key, sizeof(first_key),
+           "state/expired-explicit-xa-participant/a/%ld", (long)getpid());
+  snprintf(second_key, sizeof(second_key),
+           "state/expired-explicit-xa-participant/b/%ld", (long)getpid());
 
   open_pouch_client(root, &client, &error);
   acquire_first.key = first_key;
@@ -23914,7 +23919,7 @@ static void test_expired_explicit_xa_release_persists_rollback(void **state) {
   assert_int_equal(rc, LC_OK);
   acquire_second.key = second_key;
   acquire_second.owner = "expired-explicit-xa-owner";
-  acquire_second.ttl_seconds = 1L;
+  acquire_second.ttl_seconds = 30L;
   acquire_second.txn_id = acquire_first.txn_id;
   rc = client->acquire(client, &acquire_second, &second, &error);
   assert_int_equal(rc, LC_OK);
@@ -23933,17 +23938,12 @@ static void test_expired_explicit_xa_release_persists_rollback(void **state) {
   source = NULL;
 
   sleep(2U);
-  /* A commit-shaped release from an expired XA participant must persist a
-   * rollback decision for every participant. */
+  /* Match lockd: expiry discards only this participant and leaves the
+   * transaction pending for the still-live participant. */
   rc = first->release(first, NULL, &error);
   assert_int_equal(rc, LC_OK);
   first = NULL;
-  second->close(second);
-  second = NULL;
-  lc_client_close(client);
-  client = NULL;
 
-  open_pouch_client(root, &client, &error);
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->get(client, first_key, NULL, sink, &get_res, &error);
@@ -23957,6 +23957,132 @@ static void test_expired_explicit_xa_release_persists_rollback(void **state) {
   rc = client->get(client, second_key, NULL, sink, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(get_res.no_content);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+  sink = NULL;
+
+  rc = second->release(second, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  second = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, first_key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, second_key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("expired-b"));
+  assert_memory_equal(bytes, "expired-b", length);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_explicit_xa_live_terminal_release_commits_expired_peer(void **state) {
+  lc_client *client;
+  lc_lease *first;
+  lc_lease *second;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire_first;
+  lc_acquire_req acquire_second;
+  lc_get_res get_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  char first_key[96];
+  char second_key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  first = NULL;
+  second = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_acquire_req_init(&acquire_first);
+  lc_acquire_req_init(&acquire_second);
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  make_root("explicit-xa-expired-peer", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(first_key, sizeof(first_key), "state/explicit-xa-expired-peer/a/%ld",
+           (long)getpid());
+  snprintf(second_key, sizeof(second_key),
+           "state/explicit-xa-expired-peer/b/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_first.key = first_key;
+  acquire_first.owner = "explicit-xa-expired-peer-owner";
+  acquire_first.ttl_seconds = 1L;
+  acquire_first.txn_id = "explicit-xa-expired-peer";
+  rc = client->acquire(client, &acquire_first, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  acquire_second.key = second_key;
+  acquire_second.owner = "explicit-xa-expired-peer-owner";
+  acquire_second.ttl_seconds = 30L;
+  acquire_second.txn_id = acquire_first.txn_id;
+  rc = client->acquire(client, &acquire_second, &second, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("peer-a", strlen("peer-a"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = first->update(first, source, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  source->close(source);
+  source = NULL;
+  rc = lc_source_from_memory("peer-b", strlen("peer-b"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = second->update(second, source, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  source->close(source);
+  source = NULL;
+
+  sleep(2U);
+  /* An active terminal participant decides the transaction. Its expired peer
+   * remains enrolled and is committed, matching lockd's transaction record. */
+  rc = second->release(second, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  second = NULL;
+  first->close(first);
+  first = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, first_key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("peer-a"));
+  assert_memory_equal(bytes, "peer-a", length);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+  sink = NULL;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, second_key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("peer-b"));
+  assert_memory_equal(bytes, "peer-b", length);
   lc_get_res_cleanup(&get_res);
   sink->close(sink);
 
@@ -31573,7 +31699,10 @@ int main(int argc, char **argv) {
           test_minted_xid_reconstructed_release_validates_lifecycle),
       cmocka_unit_test(
           test_explicit_xa_release_rollback_discards_all_participants),
-      cmocka_unit_test(test_expired_explicit_xa_release_persists_rollback),
+      cmocka_unit_test(
+          test_expired_explicit_xa_release_discards_only_expired_participant),
+      cmocka_unit_test(
+          test_explicit_xa_live_terminal_release_commits_expired_peer),
       cmocka_unit_test(test_explicit_xa_release_survives_pouch_reopen),
       cmocka_unit_test(test_transaction_bound_lease_requires_transaction_id),
       cmocka_unit_test(

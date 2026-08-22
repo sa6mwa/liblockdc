@@ -12988,7 +12988,7 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
   lc_txn_decision_res decision_result;
   const char *namespace_name = NULL;
   lc_pouch_unix_seconds now_seconds;
-  int decision_rollback;
+  int txn_expired;
   int txn_explicit;
   int rc;
 
@@ -13011,7 +13011,7 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
   lc_txn_decision_req_init(&decision_request);
   memset(&decision_result, 0, sizeof(decision_result));
   now_seconds = 0L;
-  decision_rollback = req->rollback ? 1 : 0;
+  txn_expired = 0;
   txn_explicit = 0;
   rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
                                         &namespace_name, error);
@@ -13029,12 +13029,10 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
         lease_record.fencing_token == req->lease.fencing_token &&
         strcmp(lease_record.txn_id, req->lease.txn_id) == 0) {
       txn_explicit = lease_record.txn_explicit;
-      if (txn_explicit && !decision_rollback) {
+      if (txn_explicit) {
         rc = lc_pouch_now_unix(&now_seconds, error);
         if (rc == LC_OK && lease_record.expires_at_unix <= now_seconds) {
-          /* An explicit XA participant that has expired cannot vote to commit.
-           * Persist rollback so recovery applies the same outcome. */
-          decision_rollback = 1;
+          txn_expired = 1;
         }
       }
     }
@@ -13043,12 +13041,20 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
       return rc;
     }
     if (txn_explicit) {
-      decision_request.txn_id = req->lease.txn_id;
-      rc = decision_rollback ? self->txn_rollback(self, &decision_request,
-                                                  &decision_result, error)
-                             : self->txn_commit(self, &decision_request,
-                                                &decision_result, error);
-      lc_txn_decision_res_cleanup(&decision_result);
+      if (txn_expired) {
+        /* Match lockd: expiry releases only this participant's staged work.
+         * The transaction remains pending for any still-live participant. */
+        rc = lc_pouch_txn_apply_state_participant(
+            client, &req->lease, namespace_name, req->lease.key,
+            req->lease.txn_id, "rollback", error);
+      } else {
+        decision_request.txn_id = req->lease.txn_id;
+        rc = req->rollback ? self->txn_rollback(self, &decision_request,
+                                                &decision_result, error)
+                           : self->txn_commit(self, &decision_request,
+                                              &decision_result, error);
+        lc_txn_decision_res_cleanup(&decision_result);
+      }
       if (rc != LC_OK) {
         return rc;
       }
