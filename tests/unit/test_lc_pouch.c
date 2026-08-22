@@ -3831,6 +3831,7 @@ static void test_write_binary_txn_record_v2(
 
 static void test_write_binary_lease_record(lc_pouch *pouch, const char *key,
                                            lc_i64 fencing_token,
+                                           int current_layout,
                                            lc_error *error) {
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
@@ -3850,6 +3851,13 @@ static void test_write_binary_lease_record(lc_pouch *pouch, const char *key,
   test_binary_buffer_string(&buffer, "");
   test_binary_buffer_i64(&buffer, fencing_token);
   test_binary_buffer_i64(&buffer, 0L);
+  if (current_layout) {
+    unsigned char txn_explicit;
+
+    txn_explicit = 0U;
+    test_binary_buffer_u64(&buffer, 0U);
+    test_binary_buffer_append(&buffer, &txn_explicit, sizeof(txn_explicit));
+  }
   options.content_type = "application/x-lockdc-pouch-lease";
   options.has_metadata = 1;
   options.metadata = buffer.bytes;
@@ -23267,7 +23275,7 @@ static void test_pouch_fencing_tokens_do_not_wrap_or_narrow(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  test_write_binary_lease_record(pouch, key, (lc_i64)LONG_MAX, &error);
+  test_write_binary_lease_record(pouch, key, (lc_i64)LONG_MAX, 1, &error);
   lc_pouch_close(pouch);
   pouch = NULL;
 
@@ -23288,7 +23296,7 @@ static void test_pouch_fencing_tokens_do_not_wrap_or_narrow(void **state) {
     lc_error_init(&error);
     rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
     assert_int_equal(rc, LC_OK);
-    test_write_binary_lease_record(pouch, key, LC_I64_MAX, &error);
+    test_write_binary_lease_record(pouch, key, LC_I64_MAX, 1, &error);
     lc_pouch_close(pouch);
     pouch = NULL;
 
@@ -23302,6 +23310,48 @@ static void test_pouch_fencing_tokens_do_not_wrap_or_narrow(void **state) {
     client = NULL;
   }
 
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_rejects_previous_lease_record_layout(void **state) {
+  lc_pouch *pouch;
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire_req;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  client = NULL;
+  lease = NULL;
+  lc_acquire_req_init(&acquire_req);
+  lc_error_init(&error);
+  make_root("previous-lease-layout", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/previous-lease-layout/%ld",
+           (long)getpid());
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  /* This is the former, shorter LPL1 layout. Pouch v0 deliberately does not
+   * migrate or infer its transaction semantics. */
+  test_write_binary_lease_record(pouch, key, 1L, 0, &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "previous-lease-layout-owner";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(lease);
+
+  lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -31354,6 +31404,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_acquire_rolls_back_unrepresentable_generation_claim),
       cmocka_unit_test(test_pouch_fencing_tokens_do_not_wrap_or_narrow),
+      cmocka_unit_test(test_pouch_rejects_previous_lease_record_layout),
       cmocka_unit_test(test_acquire_honors_block_seconds),
       cmocka_unit_test(
           test_minted_xid_single_lease_releases_without_xa_barrier),
