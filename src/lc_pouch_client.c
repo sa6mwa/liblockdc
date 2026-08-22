@@ -17933,6 +17933,38 @@ static const char *lc_pouch_lease_state_storage_key(lc_lease_handle *lease) {
                          : NULL;
 }
 
+static int lc_pouch_lease_read_private_state_metadata(
+    lc_lease_handle *lease, lc_pouch_state_read_result *out, lc_error *error) {
+  const char *state_key;
+  char *staged_key;
+  int rc;
+
+  if (lease == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch private lease state requires context", NULL,
+                        NULL, NULL);
+  }
+  memset(out, 0, sizeof(*out));
+  state_key = lc_pouch_lease_state_storage_key(lease);
+  staged_key = NULL;
+  if (lc_pouch_txn_id_present(lease->txn_id)) {
+    staged_key = lc_pouch_staged_storage_key(state_key, lease->txn_id, error);
+    if (staged_key == NULL) {
+      return error != NULL ? error->code : LC_ERR_NOMEM;
+    }
+    rc = lc_pouch_state_read_metadata(
+        lease->client->pouch, lease->namespace_name, staged_key, out, error);
+    lc_free_with_allocator(NULL, staged_key);
+    if (rc != LC_OK || out->found) {
+      return rc;
+    }
+    lc_pouch_state_read_result_cleanup(&lease->client->allocator, out);
+    memset(out, 0, sizeof(*out));
+  }
+  return lc_pouch_state_read_metadata(
+      lease->client->pouch, lease->namespace_name, state_key, out, error);
+}
+
 static int lc_pouch_lease_read_private_state(lc_lease_handle *lease,
                                              lc_pouch_state_read_result *out,
                                              lc_error *error) {
@@ -17969,7 +18001,6 @@ static int lc_pouch_lease_read_private_state(lc_lease_handle *lease,
 int lc_pouch_lease_describe_method(lc_lease *self, lc_error *error) {
   lc_lease_handle *lease;
   lc_pouch_state_read_result read_result;
-  const char *state_key;
   int rc;
 
   if (self == NULL) {
@@ -17981,10 +18012,8 @@ int lc_pouch_lease_describe_method(lc_lease *self, lc_error *error) {
   if (rc != LC_OK) {
     return rc;
   }
-  state_key = lc_pouch_lease_state_storage_key(lease);
   memset(&read_result, 0, sizeof(read_result));
-  rc = lc_pouch_state_read_metadata(lease->client->pouch, lease->namespace_name,
-                                    state_key, &read_result, error);
+  rc = lc_pouch_lease_read_private_state_metadata(lease, &read_result, error);
   if (rc == LC_OK) {
     lc_version version;
 

@@ -22517,6 +22517,74 @@ static void test_lease_bound_state_update_get_and_release(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_lease_describe_preserves_staged_state_metadata(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_update_res seeded;
+  lc_release_req release_req;
+  lc_error error;
+  char root[512];
+  char key[96];
+  char staged_etag[128];
+  lc_version staged_version;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&seeded, 0, sizeof(seeded));
+  lc_release_req_init(&release_req);
+  lc_error_init(&error);
+  make_root("lease-describe-staged-state", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/lease-describe-staged/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, key, "{\"value\":1}", NULL, 0L, 0, &seeded,
+                     &error);
+  pouch_acquire_test_lease(client, NULL, key, NULL, &lease, &error);
+  assert_int_equal(lease->version, seeded.new_version);
+  assert_string_equal(lease->state_etag, seeded.new_state_etag);
+
+  rc = lc_source_from_memory("{\"value\":2}", strlen("{\"value\":2}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  staged_version = lease->version;
+  assert_true(staged_version > seeded.new_version);
+  assert_true(
+      snprintf(staged_etag, sizeof(staged_etag), "%s", lease->state_etag) > 0);
+
+  rc = lease->describe(lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, staged_version);
+  assert_string_equal(lease->state_etag, staged_etag);
+
+  rc = lc_source_from_memory("{\"value\":3}", strlen("{\"value\":3}"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_true(lease->version > staged_version);
+  assert_sha256_text_etag(lease->state_etag, "{\"value\":3}");
+
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  lc_update_res_cleanup(&seeded);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_lease_private_reads_reject_stale_handle(void **state) {
   lc_client *client;
   lc_lease *stale_lease;
@@ -31483,6 +31551,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_shared_process_transaction_stages_and_commits),
       cmocka_unit_test(test_shared_process_maintenance_serializes_writer),
       cmocka_unit_test(test_lease_bound_state_update_get_and_release),
+      cmocka_unit_test(test_lease_describe_preserves_staged_state_metadata),
       cmocka_unit_test(test_lease_private_reads_reject_stale_handle),
       cmocka_unit_test(test_pouch_lease_claim_and_credentials_are_durable),
       cmocka_unit_test(test_lease_mutate_and_local_mutate_refresh_state),
