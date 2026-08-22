@@ -26,6 +26,7 @@
 typedef struct lc_xid_generator {
   pthread_mutex_t mutex;
   unsigned char machine_id[LC_XID_MACHINE_ID_LENGTH];
+  uint32_t process_pid;
   uint32_t pid;
   uint32_t counter;
   int initialized;
@@ -34,7 +35,7 @@ typedef struct lc_xid_generator {
 
 static pthread_once_t lc_xid_once = PTHREAD_ONCE_INIT;
 static lc_xid_generator lc_xid_global = {
-    PTHREAD_MUTEX_INITIALIZER, {0U, 0U, 0U}, 0U, 0U, 0, LC_OK};
+    PTHREAD_MUTEX_INITIALIZER, {0U, 0U, 0U}, 0U, 0U, 0U, 0, LC_OK};
 
 static int lc_xid_read_file(const char *path, unsigned char *out,
                             size_t capacity, size_t *out_length) {
@@ -117,10 +118,58 @@ static int lc_xid_machine_id_from_host(unsigned char *machine_id) {
   return RAND_bytes(machine_id, LC_XID_MACHINE_ID_LENGTH) == 1;
 }
 
-static void lc_xid_initialize(void) {
-  unsigned char random_counter[LC_XID_MACHINE_ID_LENGTH];
+static uint32_t lc_xid_process_identifier(uint32_t process_pid) {
   unsigned char cpuset[4096];
   size_t cpuset_length;
+  uint32_t identifier;
+
+  identifier = process_pid;
+  cpuset_length = 0U;
+#if defined(__linux__)
+  if (lc_xid_read_file("/proc/self/cpuset", cpuset, sizeof(cpuset),
+                       &cpuset_length) &&
+      cpuset_length > 1U) {
+    identifier ^= (uint32_t)crc32(0L, cpuset, (uInt)cpuset_length);
+  }
+#endif
+  return identifier;
+}
+
+static int lc_xid_refresh_after_fork_locked(void) {
+  unsigned char random_counter[LC_XID_MACHINE_ID_LENGTH];
+  uint32_t process_pid;
+
+  process_pid = (uint32_t)getpid();
+  if (lc_xid_global.process_pid == process_pid) {
+    return LC_OK;
+  }
+  if (RAND_bytes(random_counter, sizeof(random_counter)) != 1) {
+    return LC_ERR_TRANSPORT;
+  }
+  lc_xid_global.counter = ((uint32_t)random_counter[0] << 16) |
+                          ((uint32_t)random_counter[1] << 8) |
+                          (uint32_t)random_counter[2];
+  lc_xid_global.process_pid = process_pid;
+  lc_xid_global.pid = lc_xid_process_identifier(process_pid);
+  return LC_OK;
+}
+
+static void lc_xid_atfork_prepare(void) {
+  (void)pthread_mutex_lock(&lc_xid_global.mutex);
+}
+
+static void lc_xid_atfork_parent(void) {
+  (void)pthread_mutex_unlock(&lc_xid_global.mutex);
+}
+
+static void lc_xid_atfork_child(void) {
+  /* Reset the inherited state before making the mutex usable in the child. */
+  lc_xid_global.process_pid = 0U;
+  (void)pthread_mutex_unlock(&lc_xid_global.mutex);
+}
+
+static void lc_xid_initialize(void) {
+  unsigned char random_counter[LC_XID_MACHINE_ID_LENGTH];
 
   if (!lc_xid_machine_id_from_host(lc_xid_global.machine_id) ||
       RAND_bytes(random_counter, sizeof(random_counter)) != 1) {
@@ -130,15 +179,10 @@ static void lc_xid_initialize(void) {
   lc_xid_global.counter = ((uint32_t)random_counter[0] << 16) |
                           ((uint32_t)random_counter[1] << 8) |
                           (uint32_t)random_counter[2];
-  lc_xid_global.pid = (uint32_t)getpid();
-  cpuset_length = 0U;
-#if defined(__linux__)
-  if (lc_xid_read_file("/proc/self/cpuset", cpuset, sizeof(cpuset),
-                       &cpuset_length) &&
-      cpuset_length > 1U) {
-    lc_xid_global.pid ^= (uint32_t)crc32(0L, cpuset, (uInt)cpuset_length);
-  }
-#endif
+  lc_xid_global.process_pid = (uint32_t)getpid();
+  lc_xid_global.pid = lc_xid_process_identifier(lc_xid_global.process_pid);
+  (void)pthread_atfork(lc_xid_atfork_prepare, lc_xid_atfork_parent,
+                       lc_xid_atfork_child);
   lc_xid_global.initialized = 1;
 }
 
@@ -173,6 +217,8 @@ int lc_xid_new(char out[LC_XID_STRING_SIZE], lc_error *error) {
   time_t now;
   unsigned char raw[LC_XID_RAW_LENGTH];
   uint32_t counter;
+  uint32_t pid;
+  int rc;
 
   if (out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -190,16 +236,25 @@ int lc_xid_new(char out[LC_XID_STRING_SIZE], lc_error *error) {
                         "failed to read time for XID", NULL, NULL, NULL);
   }
   pthread_mutex_lock(&lc_xid_global.mutex);
-  lc_xid_global.counter = (lc_xid_global.counter + 1U) & LC_XID_COUNTER_MASK;
-  counter = lc_xid_global.counter;
+  rc = lc_xid_refresh_after_fork_locked();
+  if (rc == LC_OK) {
+    lc_xid_global.counter = (lc_xid_global.counter + 1U) & LC_XID_COUNTER_MASK;
+    counter = lc_xid_global.counter;
+    pid = lc_xid_global.pid;
+  }
   pthread_mutex_unlock(&lc_xid_global.mutex);
+  if (rc != LC_OK) {
+    return lc_error_set(error, rc, 0L,
+                        "failed to refresh XID generator after fork", NULL,
+                        NULL, NULL);
+  }
   raw[0] = (unsigned char)((uint32_t)now >> 24);
   raw[1] = (unsigned char)((uint32_t)now >> 16);
   raw[2] = (unsigned char)((uint32_t)now >> 8);
   raw[3] = (unsigned char)now;
   memcpy(raw + 4U, lc_xid_global.machine_id, LC_XID_MACHINE_ID_LENGTH);
-  raw[7] = (unsigned char)(lc_xid_global.pid >> 8);
-  raw[8] = (unsigned char)lc_xid_global.pid;
+  raw[7] = (unsigned char)(pid >> 8);
+  raw[8] = (unsigned char)pid;
   raw[9] = (unsigned char)(counter >> 16);
   raw[10] = (unsigned char)(counter >> 8);
   raw[11] = (unsigned char)counter;
