@@ -198,9 +198,15 @@ typedef struct lc_pouch_state_write_options {
   void *precondition_context;
   lc_pouch_generation expected_version;
   int has_expected_version;
+  /* Transaction staging can carry a durable logical version independently of
+   * the staging object's physical revision. */
+  lc_pouch_generation logical_version;
+  int has_logical_version;
   int create_if_absent;
   int has_query_hidden;
   int query_hidden;
+  /* A private staged record is not a public query-index mutation. */
+  int suppress_query_index;
   int disable_compression;
   /* Stores an internal object (attachments, queues, control records) rather
    * than public document state. Object records are excluded from query-index
@@ -218,7 +224,7 @@ typedef struct lc_pouch_state_write_options {
   /* Internal pointer populated by the validated lease precondition. A
    * positive expiration lets the idle indexer retire an abandoned guard after
    * its owning lease is no longer valid. */
-  const lc_pouch_unix_seconds *query_index_operation_expires_at_unix;
+  lc_pouch_unix_seconds *query_index_operation_expires_at_unix;
   /* Internal only: marks a staged transactional delete in durable metadata.
    * Public content types remain ordinary content types unless this field is
    * set by the delete path. */
@@ -275,6 +281,9 @@ typedef struct lc_pouch_state_visit_entry {
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  /* Non-zero when this record owns a readable state payload (including an
+   * empty payload). Metadata-only lease and tombstone records are not bodies. */
+  int has_payload;
   /* Non-zero for internal object records, which are not public query state. */
   int object_record;
 } lc_pouch_state_visit_entry;

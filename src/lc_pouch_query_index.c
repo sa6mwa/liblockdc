@@ -343,6 +343,9 @@ struct lc_pouch_query_index_pending_entry {
   int incomplete;
   lc_pouch_query_index_summary summary;
   lc_pouch_query_index_key_hex_set deletes;
+  /* Distinct keys whose bodies must be replayed. This preserves the normal
+   * threshold policy even when the foreground path cannot retain a source. */
+  lc_pouch_query_index_key_hex_set incomplete_keys;
   lc_pouch_query_index_memtable *memtable;
   struct lc_pouch_query_index_pending_entry *next;
 };
@@ -2162,7 +2165,8 @@ lc_pouch_query_index_summary_visit(const lc_pouch_state_visit_entry *entry,
   int rc;
 
   summary = (lc_pouch_query_index_summary *)context;
-  if (entry == NULL || entry->key == NULL || entry->object_record) {
+  if (entry == NULL || entry->key == NULL || !entry->has_payload ||
+      entry->object_record) {
     return LC_OK;
   }
   if (strncmp(entry->key, ".staging/", sizeof(".staging/") - 1U) == 0 ||
@@ -2792,6 +2796,9 @@ static int lc_pouch_query_index_incremental_apply_changes(
     current.updated_at_unix = change->updated_at_unix;
     current.has_query_hidden = change->has_query_hidden;
     current.query_hidden = change->query_hidden;
+    /* Change visits expose the current visible projection only; a found
+     * change therefore carries the body that the incremental extractor reads. */
+    current.has_payload = change->found;
     prior_count = incremental->summary->count;
     rc = lc_pouch_query_index_summary_visit(&current, incremental->summary,
                                             error);
@@ -6501,6 +6508,7 @@ static void lc_pouch_query_index_pending_entry_cleanup(
   lc_free_with_allocator(allocator, entry->memtable);
   lc_pouch_query_index_summary_cleanup(&entry->summary);
   lc_pouch_query_index_key_hex_set_cleanup(allocator, &entry->deletes);
+  lc_pouch_query_index_key_hex_set_cleanup(allocator, &entry->incomplete_keys);
   memset(entry, 0, sizeof(*entry));
 }
 
@@ -6596,6 +6604,26 @@ static void lc_pouch_query_index_pending_invalidate_locked(
   if (index_seq > pending->last_index_seq) {
     pending->last_index_seq = index_seq;
   }
+}
+
+static void lc_pouch_query_index_pending_add_incomplete_key_locked(
+    lc_pouch *pouch, lc_pouch_query_index_pending_entry *pending,
+    const char *key) {
+  char *key_hex;
+  lc_error ignored;
+
+  if (pouch == NULL || pending == NULL || key == NULL || key[0] == '\0') {
+    return;
+  }
+  key_hex = lc_pouch_query_index_hex_encode(&pouch->allocator, key);
+  if (key_hex == NULL) {
+    return;
+  }
+  lc_error_init(&ignored);
+  (void)lc_pouch_query_index_key_hex_set_add(
+      &pouch->allocator, &pending->incomplete_keys, key_hex, &ignored);
+  lc_error_cleanup(&ignored);
+  lc_free_with_allocator(&pouch->allocator, key_hex);
 }
 
 static lc_pouch_unix_seconds lc_pouch_query_index_now_unix(void) {
@@ -6770,6 +6798,25 @@ static int lc_pouch_query_index_pending_has_active_operations_locked(
   return 0;
 }
 
+/* A threshold publication must not fall back to a live-state rebuild while a
+ * lease or transaction is still staging a logical value.  Pending batches are
+ * an optimization and may legitimately be absent for private staging writes,
+ * so the publication boundary is the operation guard itself. */
+static int lc_pouch_query_index_namespace_has_active_operations(
+    lc_pouch *pouch, const char *namespace_name) {
+  int active;
+
+  if (pouch == NULL || namespace_name == NULL ||
+      !pouch->indexer_mutex_initialized) {
+    return 0;
+  }
+  pthread_mutex_lock(&pouch->indexer_mutex);
+  active = lc_pouch_query_index_pending_has_active_operations_locked(
+      pouch, namespace_name);
+  pthread_mutex_unlock(&pouch->indexer_mutex);
+  return active;
+}
+
 static void lc_pouch_query_index_pending_mark_incomplete(
     lc_pouch *pouch, const char *namespace_name, lc_pouch_generation index_seq,
     const char *key, int operation_active) {
@@ -6783,7 +6830,6 @@ static void lc_pouch_query_index_pending_mark_incomplete(
       namespace_name == NULL) {
     return;
   }
-  (void)key;
   (void)operation_active;
   base_index_seq = 0UL;
   lc_error_init(&error);
@@ -6802,6 +6848,8 @@ static void lc_pouch_query_index_pending_mark_incomplete(
   }
   if (pending != NULL) {
     lc_pouch_query_index_pending_invalidate_locked(pouch, pending, index_seq);
+    lc_pouch_query_index_pending_add_incomplete_key_locked(pouch, pending,
+                                                            key);
   }
   pthread_mutex_unlock(&pouch->indexer_mutex);
 }
@@ -6977,6 +7025,7 @@ static int lc_pouch_query_index_pending_prepare_write(
   entry.updated_at_unix = result->updated_at_unix;
   entry.has_query_hidden = result->has_query_hidden;
   entry.query_hidden = result->query_hidden;
+  entry.has_payload = 1;
   rc = lc_pouch_query_index_summary_visit(&entry, summary, error);
   if (rc != LC_OK || summary->count != 1U) {
     return rc != LC_OK
@@ -7031,6 +7080,8 @@ static void lc_pouch_query_index_pending_note_write(
       pending->last_index_seq = result->index_seq;
     }
     pthread_mutex_unlock(&pouch->indexer_mutex);
+    lc_pouch_query_index_pending_mark_incomplete(
+        pouch, namespace_name, result->index_seq, key, operation_active);
     return;
   }
   pthread_mutex_unlock(&pouch->indexer_mutex);
@@ -7187,6 +7238,8 @@ static void lc_pouch_query_index_pending_note_delete(
       pending->last_index_seq = result->index_seq;
     }
     pthread_mutex_unlock(&pouch->indexer_mutex);
+    lc_pouch_query_index_pending_mark_incomplete(
+        pouch, namespace_name, result->index_seq, key, operation_active);
     lc_free_with_allocator(&pouch->allocator, key_hex);
     lc_error_cleanup(&error);
     return;
@@ -7344,12 +7397,14 @@ int lc_pouch_query_index_pending_document_limit_reached_locked(
     return 0;
   }
   pending = lc_pouch_query_index_pending_find(pouch, namespace_name, NULL);
-  return pending != NULL && !pending->incomplete &&
+  return pending != NULL &&
          !lc_pouch_query_index_pending_has_active_operations_locked(
              pouch, namespace_name) &&
-         ((uint64_t)pending->summary.count >= document_limit ||
+         ((uint64_t)pending->summary.count +
+              (uint64_t)pending->incomplete_keys.count >= document_limit ||
           (uint64_t)pending->deletes.count >=
-              document_limit - (uint64_t)pending->summary.count);
+              document_limit - ((uint64_t)pending->summary.count +
+                                (uint64_t)pending->incomplete_keys.count));
 }
 
 static int lc_pouch_query_index_pending_apply_tail_deletes(
@@ -12808,6 +12863,14 @@ static int lc_pouch_query_index_flush_segmented(
       validate_existing_segments || (full_rebuild && manifest.present);
   if (manifest_current) {
     out->index_seq = state_index_seq;
+    goto cleanup;
+  }
+  if (require_completed_operations &&
+      lc_pouch_query_index_namespace_has_active_operations(pouch,
+                                                           namespace_name)) {
+    /* Do not substitute a live-state rebuild for a deferred foreground
+     * projection: it could publish a namespace while another key remains
+     * provisional. */
     goto cleanup;
   }
   pending_taken = lc_pouch_query_index_pending_take(
