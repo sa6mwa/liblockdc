@@ -76,10 +76,12 @@ are closed locally; they are not released one by one.
 
 ### Workflow adapter rules
 
-- A normal `begin()` creates an unbound workflow transaction. Its first
-  participant acquire omits `txn_id`, captures the backend-issued id from the
-  returned lease, and every later participant acquire joins that id. The
-  transaction is invalid if the first lease does not return a non-empty id.
+- A normal `begin()` creates an unbound workflow transaction. On remote lockd,
+  its first participant acquire omits `txn_id`, captures the backend-issued id
+  from the returned lease, and every later participant acquire joins that id.
+  On Pouch, the adapter creates its private non-empty/no-slash transaction id
+  before the first participant acquire and supplies it to every participant.
+  Neither backend detail is exposed as a caller-assembled identifier.
 - An advanced join may supply a compatible existing transaction id solely to
   transfer a lease already acquired under that id into the workflow. The
   workflow validates it, then owns its eventual terminal decision; it never
@@ -251,14 +253,16 @@ worker thread starts.
 
 The normal application path is `begin()` followed by `txn->acquire()`; the
 application never assembles a transaction id or decides a participant itself.
-Without `join_txn_id`, the first `txn->acquire()` omits `txn_id` and captures
-the non-empty id returned on its lease. Every later acquire carries that exact
-id. This is the implicit XA start path used by remote lockd and Pouch. The
-begin request's optional `join_txn_id` is for the exceptional case where a raw
-liblockdc lease was acquired first. If present, it must be a canonical lockd
-xid (the current contract is the compact 20-character lowercase base32 form)
-and becomes the workflow transaction id. `adopt_lease()` then accepts only a
-lease carrying exactly that id.
+Without `join_txn_id`, the remote adapter's first `txn->acquire()` omits
+`txn_id` and captures the non-empty id returned on its lease; every later
+remote acquire carries that exact id. The Pouch adapter instead generates and
+supplies its private transaction id before its first acquire, because a Pouch
+acquire does not mint one. The begin request's optional `join_txn_id` is for
+the exceptional case where a raw liblockdc lease was acquired first. It must
+meet the selected backend's identifier rules (the remote lockd contract is a
+compact 20-character lowercase base32 xid) and becomes the workflow
+transaction id. `adopt_lease()` then accepts only a lease carrying exactly that
+id.
 
 Once a lease is acquired through, or transferred to, the transaction, terminal
 ownership belongs to the workflow. Application code receives only its
@@ -634,11 +638,12 @@ recovery source of truth.
 Implementation is not complete until the following behavior is proven for both
 Pouch and the repository's compose-backed remote lockd E2E environment.
 
-1. A normal begin starts implicit XA by acquiring its first key without a
-   transaction id, captures the backend-issued id, and uses that exact id for
-   at least one additional key. The compose-backed remote lockd endpoint and
-   Pouch both return a usable non-empty id. An invalid or mismatched
-   `join_txn_id` is rejected before ownership transfer.
+1. A normal begin starts implicit XA on remote lockd by acquiring its first key
+   without a transaction id, captures the backend-issued id, and uses that
+   exact id for at least one additional key. On Pouch, it creates a private
+   valid transaction id before the first acquire and uses it for at least two
+   keys. Neither requires a caller-assembled identifier. An invalid or
+   mismatched `join_txn_id` is rejected before ownership transfer.
 2. One workflow participant ledger containing domain mutation, inbox/outbox
    key, and payload attachment commits atomically; rollback exposes none of
    them. The remote case finalizes by releasing every enrolled lease with the
