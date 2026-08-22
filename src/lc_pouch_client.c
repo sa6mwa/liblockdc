@@ -8631,6 +8631,18 @@ static int lc_pouch_client_validate_owner(const char *owner, lc_error *error) {
   return LC_OK;
 }
 
+/* Queue deliveries acquire a normal lease before their transaction participant
+ * is staged. Keep the identifier contract aligned with that lease and the
+ * terminal transaction APIs so a delivery can always be finalized. */
+static int lc_pouch_client_validate_optional_txn_id(const char *txn_id,
+                                                    lc_error *error) {
+  if (txn_id != NULL && txn_id[0] != '\0' && !lc_xid_is_valid(txn_id)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch txn_id must be a valid xid", NULL, NULL, NULL);
+  }
+  return LC_OK;
+}
+
 static int lc_pouch_queue_lease_acquire_prepare_metadata(
     const lc_pouch_state_metadata_view *state_view, void *context,
     lc_pouch_state_write_options *options, int *apply, lc_error *error) {
@@ -8728,6 +8740,10 @@ static int lc_pouch_queue_acquire_message_lease(
                         NULL, NULL, "pouch");
   }
   rc = lc_pouch_client_validate_owner(req->owner, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_client_validate_optional_txn_id(req->txn_id, error);
   if (rc != LC_OK) {
     return rc;
   }

@@ -23713,6 +23713,94 @@ static void test_pouch_transaction_ids_match_lockd_xid_contract(void **state) {
 }
 
 static void
+test_pouch_queue_dequeue_rejects_invalid_xid_without_leasing(void **state) {
+  lc_client *client;
+  lc_source *source;
+  lc_message *message;
+  lc_enqueue_req enqueue_req;
+  lc_enqueue_res enqueue_res;
+  lc_dequeue_req dequeue_req;
+  lc_dequeue_batch_res batch;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  source = NULL;
+  message = NULL;
+  lc_enqueue_req_init(&enqueue_req);
+  memset(&enqueue_res, 0, sizeof(enqueue_res));
+  lc_dequeue_req_init(&dequeue_req);
+  memset(&batch, 0, sizeof(batch));
+  lc_error_init(&error);
+  make_root("pouch-queue-invalid-xid", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  enqueue_req.queue = "invalid-xid";
+  rc = lc_source_from_memory("single", strlen("single"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  dequeue_req.queue = enqueue_req.queue;
+  dequeue_req.owner = "invalid-xid-worker";
+  dequeue_req.txn_id = "not-an-xid";
+  dequeue_req.visibility_timeout_seconds = 30L;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(message);
+  assert_string_equal(error.message, "pouch txn_id must be a valid xid");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  dequeue_req.txn_id = NULL;
+  rc = client->dequeue(client, &dequeue_req, &message, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(message);
+  assert_int_equal(message->attempts, 1);
+  rc = message->ack(message, &error);
+  assert_int_equal(rc, LC_OK);
+  message = NULL;
+
+  rc = lc_source_from_memory("batch", strlen("batch"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_enqueue_res_cleanup(&enqueue_res);
+
+  dequeue_req.txn_id = "not-an-xid";
+  dequeue_req.page_size = 2;
+  rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(batch.messages);
+  assert_int_equal(batch.count, 0U);
+  assert_string_equal(error.message, "pouch txn_id must be a valid xid");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  dequeue_req.txn_id = NULL;
+  rc = client->dequeue_batch(client, &dequeue_req, &batch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(batch.count, 1U);
+  assert_non_null(batch.messages[0]);
+  assert_int_equal(batch.messages[0]->attempts, 1);
+  rc = batch.messages[0]->ack(batch.messages[0], &error);
+  assert_int_equal(rc, LC_OK);
+  lc_dequeue_batch_cleanup(&batch);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_minted_xid_reconstructed_release_validates_lifecycle(void **state) {
   lc_client *client;
   lc_lease *lease;
@@ -31930,6 +32018,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_minted_xid_single_lease_releases_without_xa_barrier),
       cmocka_unit_test(test_pouch_transaction_ids_match_lockd_xid_contract),
+      cmocka_unit_test(
+          test_pouch_queue_dequeue_rejects_invalid_xid_without_leasing),
       cmocka_unit_test(
           test_minted_xid_reconstructed_release_validates_lifecycle),
       cmocka_unit_test(
