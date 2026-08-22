@@ -3748,6 +3748,8 @@ static void test_binary_buffer_string(test_binary_buffer *buffer,
   }
 }
 
+static const char *test_xid_for_label(const char *label);
+
 static void test_write_binary_txn_record(
     lc_pouch *pouch, const char *key, const char *state,
     lc_pouch_unix_seconds expires_at_unix, lc_tc_term tc_term,
@@ -3775,6 +3777,7 @@ static void test_write_binary_txn_record(
     test_binary_buffer_string(&buffer, participants[i].key);
     test_binary_buffer_string(&buffer, participants[i].backend_hash);
   }
+  key = test_xid_for_label(key);
   options.content_type = "application/x-lockdc-pouch-txn";
   options.object_record = 1;
   rc = lc_source_from_memory(buffer.bytes, buffer.length, &source, error);
@@ -3817,6 +3820,7 @@ static void test_write_binary_txn_record_v2(
     test_binary_buffer_string(&buffer, participants[i].backend_hash);
     test_binary_buffer_append(&buffer, &vote, sizeof(vote));
   }
+  key = test_xid_for_label(key);
   options.content_type = "application/x-lockdc-pouch-txn";
   options.object_record = 1;
   rc = lc_source_from_memory(buffer.bytes, buffer.length, &source, error);
@@ -7873,6 +7877,7 @@ static int pouch_shared_process_stage_write(const char *root, const char *key,
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
   lc_error_init(&error);
+  txn_id = test_xid_for_label(txn_id);
   rc = read(start_fd, &start, 1U) == 1 ? LC_OK : LC_ERR_TRANSPORT;
   (void)close(start_fd);
   options.single_writer_set = 1;
@@ -7912,6 +7917,7 @@ static int pouch_shared_process_commit_transaction(const char *root,
   lc_txn_decision_req_init(&request);
   memset(&result, 0, sizeof(result));
   lc_error_init(&error);
+  txn_id = test_xid_for_label(txn_id);
   participants[0].namespace_name = "default";
   participants[0].key = "state/process-txn-first";
   participants[1].namespace_name = "default";
@@ -8744,6 +8750,42 @@ static void seed_pouch_state(lc_client *client, const char *key,
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 }
 
+static const char *test_xid_for_label(const char *label) {
+  static char labels[256][96];
+  static char values[256][LC_XID_STRING_SIZE];
+  static size_t count;
+  static const char encoding[] = "0123456789abcdefghijklmnopqrstuv";
+  uint64_t hash;
+  size_t i;
+
+  assert_non_null(label);
+  if (lc_xid_is_valid(label)) {
+    return label;
+  }
+  for (i = 0U; i < count; ++i) {
+    if (strcmp(labels[i], label) == 0) {
+      return values[i];
+    }
+  }
+  assert_true(count < sizeof(labels) / sizeof(labels[0]));
+  assert_true(strlen(label) < sizeof(labels[0]));
+  memcpy(labels[count], label, strlen(label) + 1U);
+  hash = UINT64_C(1469598103934665603);
+  for (i = 0U; label[i] != '\0'; ++i) {
+    hash ^= (unsigned char)label[i];
+    hash *= UINT64_C(1099511628211);
+  }
+  for (i = 0U; i < LC_XID_STRING_LENGTH - 1U; ++i) {
+    hash ^= hash >> 12;
+    hash ^= hash << 25;
+    hash ^= hash >> 27;
+    values[count][i] = encoding[hash & 0x1fU];
+  }
+  values[count][LC_XID_STRING_LENGTH - 1U] = '0';
+  values[count][LC_XID_STRING_LENGTH] = '\0';
+  return values[count++];
+}
+
 static void pouch_acquire_test_lease(lc_client *client,
                                      const char *namespace_name,
                                      const char *key, const char *txn_id,
@@ -8760,7 +8802,7 @@ static void pouch_acquire_test_lease(lc_client *client,
   request.key = key;
   request.owner = "pouch-test-lease";
   request.ttl_seconds = 30L;
-  request.txn_id = txn_id;
+  request.txn_id = txn_id != NULL ? test_xid_for_label(txn_id) : NULL;
   rc = client->acquire(client, &request, out, error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(*out);
@@ -9661,7 +9703,7 @@ static void test_exclusive_indexer_publishes_transaction_decision_at_threshold(
   acquire_req.key = "doc/transaction";
   acquire_req.owner = "pouch-indexer-transaction";
   acquire_req.ttl_seconds = 30L;
-  acquire_req.txn_id = "pouch-indexer-transaction";
+  acquire_req.txn_id = test_xid_for_label("pouch-indexer-transaction");
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(lease);
@@ -9750,7 +9792,7 @@ test_exclusive_indexer_clears_guards_after_failed_transaction_decision(
   acquire_req.key = "doc/failed-transaction";
   acquire_req.owner = "pouch-indexer-failed-transaction";
   acquire_req.ttl_seconds = 30L;
-  acquire_req.txn_id = "pouch-indexer-failed-transaction";
+  acquire_req.txn_id = test_xid_for_label("pouch-indexer-failed-transaction");
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(lease);
@@ -9853,7 +9895,7 @@ test_transaction_metadata_stays_staged_until_rollback(void **state) {
   acquire_req.key = "doc/transaction-metadata";
   acquire_req.owner = "pouch-transaction-metadata";
   acquire_req.ttl_seconds = 30L;
-  acquire_req.txn_id = "pouch-transaction-metadata";
+  acquire_req.txn_id = test_xid_for_label("pouch-transaction-metadata");
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(lease);
@@ -9900,7 +9942,7 @@ test_transaction_metadata_stays_staged_until_rollback(void **state) {
   acquire_req.key = "doc/transaction-metadata";
   acquire_req.owner = "pouch-transaction-metadata";
   acquire_req.ttl_seconds = 30L;
-  acquire_req.txn_id = "pouch-transaction-metadata-commit";
+  acquire_req.txn_id = test_xid_for_label("pouch-transaction-metadata-commit");
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(lease);
@@ -9979,7 +10021,7 @@ static void test_transaction_metadata_rejects_staged_delete(void **state) {
   acquire_req.key = "doc/transaction-metadata-delete";
   acquire_req.owner = "pouch-transaction-metadata-delete";
   acquire_req.ttl_seconds = 30L;
-  acquire_req.txn_id = "pouch-transaction-metadata-delete";
+  acquire_req.txn_id = test_xid_for_label("pouch-transaction-metadata-delete");
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(lease);
@@ -10210,8 +10252,7 @@ static void test_query_index_sequence_ignores_lease_metadata(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void
-test_incremental_query_index_ignores_lease_only_key(void **state) {
+static void test_incremental_query_index_ignores_lease_only_key(void **state) {
   lc_client *client;
   lc_lease *lease;
   lc_acquire_req acquire_req;
@@ -10249,8 +10290,8 @@ test_incremental_query_index_ignores_lease_only_key(void **state) {
                        root) > 0);
 
   open_pouch_client_endpoint(endpoint, &client, &error);
-  write_client_state(client, "doc/indexed", "{\"kind\":\"indexed\"}", NULL,
-                     0L, 0, &indexed_update, &error);
+  write_client_state(client, "doc/indexed", "{\"kind\":\"indexed\"}", NULL, 0L,
+                     0, &indexed_update, &error);
   lc_update_res_cleanup(&indexed_update);
 
   flush_req.mode = "sync";
@@ -10270,8 +10311,8 @@ test_incremental_query_index_ignores_lease_only_key(void **state) {
   assert_int_equal(rc, LC_OK);
   lease = NULL;
 
-  write_client_state(client, "doc/trigger", "{\"kind\":\"trigger\"}", NULL,
-                     0L, 0, &trigger_update, &error);
+  write_client_state(client, "doc/trigger", "{\"kind\":\"trigger\"}", NULL, 0L,
+                     0, &trigger_update, &error);
   lc_update_res_cleanup(&trigger_update);
 
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
@@ -10463,7 +10504,7 @@ static void test_query_index_ignores_internal_objects(void **state) {
   lc_dequeue_req_init(&dequeue_req);
   dequeue_req.queue = "internal-objects-transaction";
   dequeue_req.owner = "pouch-index-object-transaction";
-  dequeue_req.txn_id = "pouch-index-object-transaction";
+  dequeue_req.txn_id = test_xid_for_label("pouch-index-object-transaction");
   dequeue_req.visibility_timeout_seconds = 30L;
   dequeue_req.wait_seconds = 0L;
   rc = client->dequeue(client, &dequeue_req, &transaction_message, &error);
@@ -11017,7 +11058,7 @@ static void test_public_core_contract_roundtrips_all_transforms(void **state) {
     acquire_req.key = "doc/txn";
     acquire_req.owner = "matrix-txn-owner";
     acquire_req.ttl_seconds = 30L;
-    acquire_req.txn_id = "matrix-txn";
+    acquire_req.txn_id = test_xid_for_label("matrix-txn");
     rc = client->acquire(client, &acquire_req, &lease, &error);
     assert_int_equal(rc, LC_OK);
     rc = lc_source_from_memory(txn_json, strlen(txn_json), &source, &error);
@@ -11028,7 +11069,7 @@ static void test_public_core_contract_roundtrips_all_transforms(void **state) {
     source = NULL;
     participant.namespace_name = "default";
     participant.key = "doc/txn";
-    decision_req.txn_id = "matrix-txn";
+    decision_req.txn_id = test_xid_for_label("matrix-txn");
     decision_req.participants = &participant;
     decision_req.participant_count = 1U;
     rc = client->txn_commit(client, &decision_req, &decision_res, &error);
@@ -11170,8 +11211,6 @@ test_shared_pouch_minted_lease_release_does_not_deadlock(void **state) {
   (void)state;
   client = NULL;
   sink = NULL;
-  bytes = NULL;
-  length = 0U;
   memset(&update_res, 0, sizeof(update_res));
   memset(&get_res, 0, sizeof(get_res));
   lc_error_init(&error);
@@ -18430,7 +18469,7 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
 
   txn_update_req.lease.namespace_name = "default";
   txn_update_req.lease.key = "crypto/txn-state";
-  txn_update_req.lease.txn_id = "crypto-txn";
+  txn_update_req.lease.txn_id = test_xid_for_label("crypto-txn");
   pouch_acquire_test_lease(client, "default", "crypto/txn-state", "crypto-txn",
                            &txn_lease, &error);
   pouch_copy_lease_ref(&txn_update_req.lease, txn_lease);
@@ -18447,7 +18486,7 @@ test_pouch_crypto_encrypts_public_api_payloads_at_rest(void **state) {
   participant.namespace_name = "default";
   participant.key = "crypto/txn-state";
   participant.backend_hash = NULL;
-  decision_req.txn_id = "crypto-txn";
+  decision_req.txn_id = test_xid_for_label("crypto-txn");
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
@@ -19538,12 +19577,12 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
 
   dequeue_req.queue = "txn-jobs";
   dequeue_req.owner = "worker-txn";
-  dequeue_req.txn_id = "txn-queue-commit";
+  dequeue_req.txn_id = test_xid_for_label("txn-queue-commit");
   dequeue_req.visibility_timeout_seconds = 120L;
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(message);
-  assert_string_equal(message->txn_id, "txn-queue-commit");
+  assert_string_equal(message->txn_id, test_xid_for_label("txn-queue-commit"));
 
   ack_op.message.namespace_name = message->namespace_name;
   ack_op.message.queue = message->queue;
@@ -19568,7 +19607,7 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   assert_int_equal(stats_res.pending_candidates, 1);
   lc_queue_stats_res_cleanup(&stats_res);
 
-  decision_req.txn_id = "txn-queue-commit";
+  decision_req.txn_id = test_xid_for_label("txn-queue-commit");
   pouch_queue_message_participant_key(message, participant_key,
                                       sizeof(participant_key));
   snprintf(participant_namespace, sizeof(participant_namespace), "%s",
@@ -19612,11 +19651,12 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_enqueue_res_cleanup(&enqueue_res);
 
-  dequeue_req.txn_id = "txn-queue-rollback";
+  dequeue_req.txn_id = test_xid_for_label("txn-queue-rollback");
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(message);
-  assert_string_equal(message->txn_id, "txn-queue-rollback");
+  assert_string_equal(message->txn_id,
+                      test_xid_for_label("txn-queue-rollback"));
 
   memset(&ack_op, 0, sizeof(ack_op));
   memset(&ack_res, 0, sizeof(ack_res));
@@ -19632,7 +19672,7 @@ static void test_txn_decisions_apply_queue_side_effects(void **state) {
   assert_int_equal(ack_res.acked, 1);
   lc_ack_res_cleanup(&ack_res);
 
-  decision_req.txn_id = "txn-queue-rollback";
+  decision_req.txn_id = test_xid_for_label("txn-queue-rollback");
   pouch_queue_message_participant_key(message, participant_key,
                                       sizeof(participant_key));
   participant.namespace_name = message->namespace_name;
@@ -19730,7 +19770,7 @@ static void test_txn_queue_decision_rejects_newer_delivery_lease(void **state) {
 
   dequeue_req.queue = "txn-stale";
   dequeue_req.owner = "first-worker";
-  dequeue_req.txn_id = "txn-first";
+  dequeue_req.txn_id = test_xid_for_label("txn-first");
   /* The first lease must remain valid through the staged acknowledgement,
    * including under the Valgrind gate, before the test expires it below. */
   dequeue_req.visibility_timeout_seconds = 5L;
@@ -19759,7 +19799,7 @@ static void test_txn_queue_decision_rejects_newer_delivery_lease(void **state) {
 
   sleep(6U);
   dequeue_req.owner = "second-worker";
-  dequeue_req.txn_id = "txn-second";
+  dequeue_req.txn_id = test_xid_for_label("txn-second");
   dequeue_req.visibility_timeout_seconds = 30L;
   rc = client->dequeue(client, &dequeue_req, &second_message, &error);
   assert_int_equal(rc, LC_OK);
@@ -19770,7 +19810,7 @@ static void test_txn_queue_decision_rejects_newer_delivery_lease(void **state) {
   participant.namespace_name = participant_namespace;
   participant.key = participant_key;
   participant.backend_hash = NULL;
-  decision_req.txn_id = "txn-first";
+  decision_req.txn_id = test_xid_for_label("txn-first");
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
@@ -19833,7 +19873,8 @@ static void test_txn_update_preserves_delete_marker_content_type(void **state) {
   open_pouch_client(root, &client, &error);
   update_req.lease.namespace_name = "default";
   update_req.lease.key = "state/content-type";
-  update_req.lease.txn_id = "txn-delete-marker-content-type";
+  update_req.lease.txn_id =
+      test_xid_for_label("txn-delete-marker-content-type");
   pouch_acquire_test_lease(client, "default", "state/content-type",
                            update_req.lease.txn_id, &lease, &error);
   pouch_copy_lease_ref(&update_req.lease, lease);
@@ -19951,7 +19992,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   open_pouch_client(root, &client, &error);
   update_req.lease.namespace_name = "docs/txn-index";
   update_req.lease.key = "doc/txn";
-  update_req.lease.txn_id = "txn-state-index";
+  update_req.lease.txn_id = test_xid_for_label("txn-state-index");
   pouch_acquire_test_lease(client, "docs/txn-index", "doc/txn",
                            update_req.lease.txn_id, &state_lease, &error);
   pouch_copy_lease_ref(&update_req.lease, state_lease);
@@ -19970,7 +20011,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   mutations[1] = "/status=\"mutated\"";
   mutate_op.lease.namespace_name = "docs/txn-index";
   mutate_op.lease.key = "doc/txn";
-  mutate_op.lease.txn_id = "txn-state-index";
+  mutate_op.lease.txn_id = test_xid_for_label("txn-state-index");
   pouch_copy_lease_ref(&mutate_op.lease, state_lease);
   mutate_op.mutations = mutations;
   mutate_op.mutation_count = 2U;
@@ -19995,12 +20036,12 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   dequeue_req.namespace_name = "docs/txn-index";
   dequeue_req.queue = "txn-mixed";
   dequeue_req.owner = "worker-mixed";
-  dequeue_req.txn_id = "txn-state-index";
+  dequeue_req.txn_id = test_xid_for_label("txn-state-index");
   dequeue_req.visibility_timeout_seconds = 120L;
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(message);
-  assert_string_equal(message->txn_id, "txn-state-index");
+  assert_string_equal(message->txn_id, test_xid_for_label("txn-state-index"));
   ack_op.message.namespace_name = message->namespace_name;
   ack_op.message.queue = message->queue;
   ack_op.message.message_id = message->message_id;
@@ -20041,7 +20082,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   participants[1].namespace_name = message->namespace_name;
   participants[1].key = queue_participant_key;
   participants[1].backend_hash = NULL;
-  decision_req.txn_id = "txn-state-index";
+  decision_req.txn_id = test_xid_for_label("txn-state-index");
   decision_req.participants = participants;
   decision_req.participant_count = 2U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
@@ -20087,7 +20128,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   lc_update_req_init(&update_req);
   update_req.lease.namespace_name = "docs/txn-index";
   update_req.lease.key = "doc/rollback";
-  update_req.lease.txn_id = "txn-state-rollback";
+  update_req.lease.txn_id = test_xid_for_label("txn-state-rollback");
   pouch_acquire_test_lease(client, "docs/txn-index", "doc/rollback",
                            update_req.lease.txn_id, &rollback_lease, &error);
   pouch_copy_lease_ref(&update_req.lease, rollback_lease);
@@ -20105,7 +20146,7 @@ test_txn_decisions_stage_state_update_mutate_and_index_refresh(void **state) {
   participants[0].namespace_name = "docs/txn-index";
   participants[0].key = "doc/rollback";
   participants[0].backend_hash = NULL;
-  decision_req.txn_id = "txn-state-rollback";
+  decision_req.txn_id = test_xid_for_label("txn-state-rollback");
   decision_req.participants = participants;
   decision_req.participant_count = 1U;
   rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
@@ -20188,7 +20229,7 @@ static void test_txn_recovery_applies_queue_side_effects(void **state) {
 
   dequeue_req.queue = "txn-recover";
   dequeue_req.owner = "worker-recover";
-  dequeue_req.txn_id = "txn-queue-recover";
+  dequeue_req.txn_id = test_xid_for_label("txn-queue-recover");
   dequeue_req.visibility_timeout_seconds = 120L;
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
@@ -20236,8 +20277,9 @@ static void test_txn_recovery_applies_queue_side_effects(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, ".txns", "txn-queue-recover", &read_result,
-                           &error);
+  rc = lc_pouch_state_read(pouch, ".txns",
+                           test_xid_for_label("txn-queue-recover"),
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
@@ -20871,7 +20913,7 @@ test_client_queue_state_lease_transaction_update_uses_distinct_lease_key(
 
   dequeue_req.queue = "jobs";
   dequeue_req.owner = "worker-state-txn";
-  dequeue_req.txn_id = "txn-queue-state";
+  dequeue_req.txn_id = test_xid_for_label("txn-queue-state");
   dequeue_req.visibility_timeout_seconds = 30L;
   rc = client->dequeue_with_state(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
@@ -21747,6 +21789,7 @@ static int pouch_watch_commit_txn_ack_with_client(lc_client *client,
   char participant_key[256];
   int rc;
 
+  txn_id = test_xid_for_label(txn_id);
   lc_dequeue_req_init(&dequeue_req);
   memset(&ack_op, 0, sizeof(ack_op));
   memset(&ack_res, 0, sizeof(ack_res));
@@ -23400,8 +23443,7 @@ static void test_pouch_rejects_previous_lease_record_layout(void **state) {
   lc_error_init(&error);
   make_root("previous-lease-layout", root, sizeof(root));
   cleanup_root(root);
-  snprintf(key, sizeof(key), "state/previous-lease-layout/%ld",
-           (long)getpid());
+  snprintf(key, sizeof(key), "state/previous-lease-layout/%ld", (long)getpid());
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
@@ -23595,6 +23637,61 @@ test_minted_xid_single_lease_releases_without_xa_barrier(void **state) {
   sink->close(sink);
   sink = NULL;
 
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_transaction_ids_match_lockd_xid_contract(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire_req;
+  lc_txn_replay_req replay_req;
+  lc_txn_replay_res replay_res;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  lc_acquire_req_init(&acquire_req);
+  lc_txn_replay_req_init(&replay_req);
+  memset(&replay_res, 0, sizeof(replay_res));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  lc_error_init(&error);
+  make_root("pouch-xid-contract", root, sizeof(root));
+  cleanup_root(root);
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = "state/invalid-xid";
+  acquire_req.owner = "pouch-xid-contract";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = "not-an-xid";
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(lease);
+  assert_string_equal(error.message, "pouch txn_id must be a valid xid");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  replay_req.txn_id = "not-an-xid";
+  rc = client->txn_replay(client, &replay_req, &replay_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "pouch txn_id must be a valid xid");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  decision_req.txn_id = "not-an-xid";
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "pouch txn_id must be a valid xid");
+
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_txn_replay_res_cleanup(&replay_res);
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -23914,7 +24011,7 @@ static void test_expired_explicit_xa_release_discards_only_expired_participant(
   acquire_first.key = first_key;
   acquire_first.owner = "expired-explicit-xa-owner";
   acquire_first.ttl_seconds = 1L;
-  acquire_first.txn_id = "expired-explicit-xa";
+  acquire_first.txn_id = test_xid_for_label("expired-explicit-xa");
   rc = client->acquire(client, &acquire_first, &first, &error);
   assert_int_equal(rc, LC_OK);
   acquire_second.key = second_key;
@@ -24030,7 +24127,7 @@ test_explicit_xa_live_terminal_release_commits_expired_peer(void **state) {
   acquire_first.key = first_key;
   acquire_first.owner = "explicit-xa-expired-peer-owner";
   acquire_first.ttl_seconds = 1L;
-  acquire_first.txn_id = "explicit-xa-expired-peer";
+  acquire_first.txn_id = test_xid_for_label("explicit-xa-expired-peer");
   rc = client->acquire(client, &acquire_first, &first, &error);
   assert_int_equal(rc, LC_OK);
   acquire_second.key = second_key;
@@ -24055,7 +24152,7 @@ test_explicit_xa_live_terminal_release_commits_expired_peer(void **state) {
 
   sleep(2U);
   /* An active terminal participant decides the transaction. Its expired peer
-   * remains enrolled and is committed, matching lockd's transaction record. */
+   * remains enrolled and is committed, matching the remote lockd backend. */
   rc = second->release(second, NULL, &error);
   assert_int_equal(rc, LC_OK);
   second = NULL;
@@ -24193,7 +24290,7 @@ static void test_explicit_xa_release_survives_pouch_reopen(void **state) {
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(length, strlen("reopen-a"));
-  assert_memory_equal(bytes, "reopen-a", strlen("reopen-a"));
+  assert_memory_equal(bytes, "reopen-a", length);
   lc_get_res_cleanup(&get_res);
   sink->close(sink);
   sink = NULL;
@@ -24233,7 +24330,7 @@ static void test_transaction_bound_lease_requires_transaction_id(void **state) {
   acquire_req.key = key;
   acquire_req.owner = "txn-owner";
   acquire_req.ttl_seconds = 30L;
-  acquire_req.txn_id = "txn-bound-lease";
+  acquire_req.txn_id = test_xid_for_label("txn-bound-lease");
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -24320,7 +24417,7 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   acquire_req.key = key;
   acquire_req.owner = "txn-owner";
   acquire_req.ttl_seconds = 30L;
-  acquire_req.txn_id = "txn-lease-visible";
+  acquire_req.txn_id = test_xid_for_label("txn-lease-visible");
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(lease->has_query_hidden);
@@ -24425,7 +24522,7 @@ test_transaction_bound_lease_rollback_clears_matching_lease(void **state) {
   acquire_req.key = key;
   acquire_req.owner = "txn-owner";
   acquire_req.ttl_seconds = 30L;
-  acquire_req.txn_id = "txn-lease-rollback";
+  acquire_req.txn_id = test_xid_for_label("txn-lease-rollback");
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("rolled-back", strlen("rolled-back"), &source,
@@ -24513,7 +24610,7 @@ static void test_transaction_bound_remove_stages_until_decision(void **state) {
   acquire_req.key = key;
   acquire_req.owner = "txn-remove-owner";
   acquire_req.ttl_seconds = 30L;
-  acquire_req.txn_id = "txn-state-remove-rollback";
+  acquire_req.txn_id = test_xid_for_label("txn-state-remove-rollback");
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
   rc = lease->remove(lease, NULL, &error);
@@ -24555,7 +24652,7 @@ static void test_transaction_bound_remove_stages_until_decision(void **state) {
   sink->close(sink);
   sink = NULL;
 
-  acquire_req.txn_id = "txn-state-remove-commit";
+  acquire_req.txn_id = test_xid_for_label("txn-state-remove-commit");
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
   rc = lease->remove(lease, NULL, &error);
@@ -24630,7 +24727,7 @@ static void test_transaction_bound_remove_then_mutate_recreates_logical_value(
   acquire_req.key = key;
   acquire_req.owner = "txn-remove-mutate-owner";
   acquire_req.ttl_seconds = 30L;
-  acquire_req.txn_id = "txn-remove-mutate";
+  acquire_req.txn_id = test_xid_for_label("txn-remove-mutate");
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -24726,7 +24823,7 @@ static void test_txn_decision_skips_newer_state_lease(void **state) {
   acquire_req.key = key;
   acquire_req.owner = "old-owner";
   acquire_req.ttl_seconds = 1L;
-  acquire_req.txn_id = "txn-old";
+  acquire_req.txn_id = test_xid_for_label("txn-old");
   rc = client->acquire(client, &acquire_req, &old_lease, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("old", strlen("old"), &source, &error);
@@ -24741,14 +24838,14 @@ static void test_txn_decision_skips_newer_state_lease(void **state) {
 
   acquire_req.owner = "new-owner";
   acquire_req.ttl_seconds = 30L;
-  acquire_req.txn_id = "txn-new";
+  acquire_req.txn_id = test_xid_for_label("txn-new");
   rc = client->acquire(client, &acquire_req, &new_lease, &error);
   assert_int_equal(rc, LC_OK);
 
   participant.namespace_name = "default";
   participant.key = key;
   participant.backend_hash = NULL;
-  decision_req.txn_id = "txn-old";
+  decision_req.txn_id = test_xid_for_label("txn-old");
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
@@ -24759,7 +24856,7 @@ static void test_txn_decision_skips_newer_state_lease(void **state) {
   rc = client->describe(client, &describe_req, &describe_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(describe_res.owner, "new-owner");
-  assert_string_equal(describe_res.txn_id, "txn-new");
+  assert_string_equal(describe_res.txn_id, test_xid_for_label("txn-new"));
   lc_describe_res_cleanup(&describe_res);
   rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch, "default", key,
                            &read_result, &error);
@@ -29430,7 +29527,7 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   participants[1].namespace_name = "orders/us";
   participants[1].key = "state/order-2";
   participants[1].backend_hash = "backend-b";
-  decision_req.txn_id = "txn-pouch-records";
+  decision_req.txn_id = test_xid_for_label("txn-pouch-records");
   decision_req.participants = participants;
   decision_req.participant_count = 2U;
   decision_req.expires_at_unix = 2147483647L;
@@ -29446,7 +29543,8 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   decision_req.target_backend_hash = backend_hash;
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(decision_res.txn_id, "txn-pouch-records");
+  assert_string_equal(decision_res.txn_id,
+                      test_xid_for_label("txn-pouch-records"));
   assert_string_equal(decision_res.state, "prepare");
   assert_string_equal(decision_res.correlation_id,
                       "pouch-txn-00000000000000000001");
@@ -29460,8 +29558,8 @@ static void test_txn_decisions_persist_participant_records(void **state) {
                              &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "orders/eu", "state/order-1",
-                                  "txn-pouch-records", source, NULL,
-                                  &write_result, &error);
+                                  test_xid_for_label("txn-pouch-records"),
+                                  source, NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -29471,8 +29569,8 @@ static void test_txn_decisions_persist_participant_records(void **state) {
                              &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "orders/us", "state/order-2",
-                                  "txn-pouch-records", source, NULL,
-                                  &write_result, &error);
+                                  test_xid_for_label("txn-pouch-records"),
+                                  source, NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -29482,8 +29580,8 @@ static void test_txn_decisions_persist_participant_records(void **state) {
                              &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "orders/eu", "state/order-1",
-                                  "txn-pouch-rollback", source, NULL,
-                                  &write_result, &error);
+                                  test_xid_for_label("txn-pouch-rollback"),
+                                  source, NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -29492,10 +29590,11 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   pouch = NULL;
 
   open_pouch_client(root, &reader, &error);
-  replay_req.txn_id = "txn-pouch-records";
+  replay_req.txn_id = test_xid_for_label("txn-pouch-records");
   rc = reader->txn_replay(reader, &replay_req, &replay_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(replay_res.txn_id, "txn-pouch-records");
+  assert_string_equal(replay_res.txn_id,
+                      test_xid_for_label("txn-pouch-records"));
   assert_string_equal(replay_res.state, "prepare");
   assert_string_equal(replay_res.correlation_id,
                       "pouch-txn-00000000000000000001");
@@ -29537,19 +29636,21 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   pouch = NULL;
 
-  decision_req.txn_id = "txn-pouch-rollback";
+  decision_req.txn_id = test_xid_for_label("txn-pouch-rollback");
   rc = reader->txn_rollback(reader, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(decision_res.txn_id, "txn-pouch-rollback");
+  assert_string_equal(decision_res.txn_id,
+                      test_xid_for_label("txn-pouch-rollback"));
   assert_string_equal(decision_res.state, "rollback");
   assert_string_equal(decision_res.correlation_id,
                       "pouch-txn-00000000000000000003");
   lc_txn_decision_res_cleanup(&decision_res);
 
-  replay_req.txn_id = "txn-pouch-rollback";
+  replay_req.txn_id = test_xid_for_label("txn-pouch-rollback");
   rc = reader->txn_replay(reader, &replay_req, &replay_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_string_equal(replay_res.txn_id, "txn-pouch-rollback");
+  assert_string_equal(replay_res.txn_id,
+                      test_xid_for_label("txn-pouch-rollback"));
   assert_string_equal(replay_res.state, "rollback");
   assert_string_equal(replay_res.correlation_id,
                       "pouch-txn-00000000000000000003");
@@ -29567,8 +29668,9 @@ static void test_txn_decisions_persist_participant_records(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, ".txns", "txn-pouch-records", &read_result,
-                           &error);
+  rc = lc_pouch_state_read(pouch, ".txns",
+                           test_xid_for_label("txn-pouch-records"),
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   assert_string_equal(read_result.content_type,
@@ -29594,8 +29696,9 @@ static void test_txn_decisions_persist_participant_records(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, ".txns", "txn-pouch-records", &read_result,
-                           &error);
+  rc = lc_pouch_state_read(pouch, ".txns",
+                           test_xid_for_label("txn-pouch-records"),
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
@@ -29641,8 +29744,9 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   rc = lc_source_from_memory("committed", strlen("committed"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, participant.namespace_name,
-                                  participant.key, "txn-replay-commit", source,
-                                  NULL, &write_result, &error);
+                                  participant.key,
+                                  test_xid_for_label("txn-replay-commit"),
+                                  source, NULL, &write_result, &error);
   source->close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -29652,7 +29756,7 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   test_write_binary_txn_record_v2(pouch, "txn-replay-commit", "commit", 0L, 1UL,
                                   NULL, &participant, 1U, &error);
 
-  replay_req.txn_id = "txn-replay-commit";
+  replay_req.txn_id = test_xid_for_label("txn-replay-commit");
   rc = client->txn_replay(client, &replay_req, &replay_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(replay_res.state, "commit");
@@ -29675,8 +29779,9 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   rc = lc_source_from_memory("discarded", strlen("discarded"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, participant.namespace_name,
-                                  participant.key, "txn-replay-expired", source,
-                                  NULL, &write_result, &error);
+                                  participant.key,
+                                  test_xid_for_label("txn-replay-expired"),
+                                  source, NULL, &write_result, &error);
   source->close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -29684,7 +29789,7 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   test_write_binary_txn_record(pouch, "txn-replay-expired", "prepare", 1L, 1UL,
                                NULL, &participant, 1U, &error);
 
-  replay_req.txn_id = "txn-replay-expired";
+  replay_req.txn_id = test_xid_for_label("txn-replay-expired");
   rc = client->txn_replay(client, &replay_req, &replay_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(replay_res.state, "rollback");
@@ -29745,24 +29850,24 @@ static void test_txn_decision_merges_durable_participants(void **state) {
   participants[1].backend_hash = NULL;
   rc = lc_source_from_memory("first", strlen("first"), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_stage_write(pouch, participants[0].namespace_name,
-                                  participants[0].key, "txn-merge", source,
-                                  NULL, &write_result, &error);
+  rc = lc_pouch_state_stage_write(
+      pouch, participants[0].namespace_name, participants[0].key,
+      test_xid_for_label("txn-merge"), source, NULL, &write_result, &error);
   source->close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   rc = lc_source_from_memory("second", strlen("second"), &source, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_stage_write(pouch, participants[1].namespace_name,
-                                  participants[1].key, "txn-merge", source,
-                                  NULL, &write_result, &error);
+  rc = lc_pouch_state_stage_write(
+      pouch, participants[1].namespace_name, participants[1].key,
+      test_xid_for_label("txn-merge"), source, NULL, &write_result, &error);
   source->close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 
-  prepare_req.txn_id = "txn-merge";
+  prepare_req.txn_id = test_xid_for_label("txn-merge");
   prepare_req.participants = &participants[0];
   prepare_req.participant_count = 1U;
   prepare_req.expires_at_unix = 100L;
@@ -29773,7 +29878,7 @@ static void test_txn_decision_merges_durable_participants(void **state) {
   assert_string_equal(decision_res.state, "prepare");
   lc_txn_decision_res_cleanup(&decision_res);
 
-  commit_req.txn_id = "txn-merge";
+  commit_req.txn_id = test_xid_for_label("txn-merge");
   commit_req.participants = &participants[1];
   commit_req.participant_count = 1U;
   commit_req.expires_at_unix = 10L;
@@ -29817,6 +29922,7 @@ static void test_txn_decision_skips_foreign_backend_participant(void **state) {
   char root[512];
   char backend_hash[LC_POUCH_BACKEND_HASH_HEX_BYTES + 1U];
   char body[64];
+  char staged_key[128];
   int rc;
 
   (void)state;
@@ -29846,7 +29952,8 @@ static void test_txn_decision_skips_foreign_backend_participant(void **state) {
   rc = lc_source_from_memory("local", strlen("local"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, participants[0].namespace_name,
-                                  participants[0].key, "txn-backend-routing",
+                                  participants[0].key,
+                                  test_xid_for_label("txn-backend-routing"),
                                   source, NULL, &write_result, &error);
   source->close(source);
   source = NULL;
@@ -29856,14 +29963,15 @@ static void test_txn_decision_skips_foreign_backend_participant(void **state) {
   rc = lc_source_from_memory("foreign", strlen("foreign"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, participants[1].namespace_name,
-                                  participants[1].key, "txn-backend-routing",
+                                  participants[1].key,
+                                  test_xid_for_label("txn-backend-routing"),
                                   source, NULL, &write_result, &error);
   source->close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
 
-  decision_req.txn_id = "txn-backend-routing";
+  decision_req.txn_id = test_xid_for_label("txn-backend-routing");
   decision_req.participants = participants;
   decision_req.participant_count = 2U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
@@ -29878,8 +29986,10 @@ static void test_txn_decision_skips_foreign_backend_participant(void **state) {
   assert_string_equal(body, "local");
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   memset(&read_result, 0, sizeof(read_result));
-  rc = lc_pouch_state_read(pouch, participants[0].namespace_name,
-                           "state/local/.staging/txn-backend-routing",
+  assert_true(snprintf(staged_key, sizeof(staged_key), "%s/.staging/%s",
+                       participants[0].key,
+                       test_xid_for_label("txn-backend-routing")) > 0);
+  rc = lc_pouch_state_read(pouch, participants[0].namespace_name, staged_key,
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
@@ -29892,8 +30002,10 @@ static void test_txn_decision_skips_foreign_backend_participant(void **state) {
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   memset(&read_result, 0, sizeof(read_result));
-  rc = lc_pouch_state_read(pouch, participants[1].namespace_name,
-                           "state/foreign/.staging/txn-backend-routing",
+  assert_true(snprintf(staged_key, sizeof(staged_key), "%s/.staging/%s",
+                       participants[1].key,
+                       test_xid_for_label("txn-backend-routing")) > 0);
+  rc = lc_pouch_state_read(pouch, participants[1].namespace_name, staged_key,
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
@@ -29941,14 +30053,14 @@ static void test_txn_decision_validates_target_backend(void **state) {
   assert_true(snprintf(padded_backend_hash, sizeof(padded_backend_hash), " %s ",
                        backend_hash) > 0);
 
-  decision_req.txn_id = "txn-target-local";
+  decision_req.txn_id = test_xid_for_label("txn-target-local");
   decision_req.target_backend_hash = padded_backend_hash;
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(decision_res.state, "prepare");
   lc_txn_decision_res_cleanup(&decision_res);
 
-  decision_req.txn_id = "txn-target-foreign";
+  decision_req.txn_id = test_xid_for_label("txn-target-foreign");
   decision_req.target_backend_hash = "foreign-backend";
   rc = client->txn_prepare(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
@@ -29957,8 +30069,9 @@ static void test_txn_decision_validates_target_backend(void **state) {
                       "match root");
   lc_error_cleanup(&error);
   lc_error_init(&error);
-  rc = lc_pouch_state_read(pouch, ".txns", "txn-target-foreign", &read_result,
-                           &error);
+  rc = lc_pouch_state_read(pouch, ".txns",
+                           test_xid_for_label("txn-target-foreign"),
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
@@ -29967,7 +30080,7 @@ static void test_txn_decision_validates_target_backend(void **state) {
   participant.namespace_name = "default";
   participant.key = "state/blank-backend";
   participant.backend_hash = " \t ";
-  decision_req.txn_id = "txn-target-blank-participant";
+  decision_req.txn_id = test_xid_for_label("txn-target-blank-participant");
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
   decision_req.target_backend_hash = NULL;
@@ -29978,7 +30091,8 @@ static void test_txn_decision_validates_target_backend(void **state) {
                       "invalid");
   lc_error_cleanup(&error);
   lc_error_init(&error);
-  rc = lc_pouch_state_read(pouch, ".txns", "txn-target-blank-participant",
+  rc = lc_pouch_state_read(pouch, ".txns",
+                           test_xid_for_label("txn-target-blank-participant"),
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
@@ -29987,7 +30101,7 @@ static void test_txn_decision_validates_target_backend(void **state) {
 
   test_write_binary_txn_record(pouch, "txn-target-replay", "commit", 0L, 1UL,
                                "foreign-backend", NULL, 0U, &error);
-  replay_req.txn_id = "txn-target-replay";
+  replay_req.txn_id = test_xid_for_label("txn-target-replay");
   rc = client->txn_replay(client, &replay_req, &replay_res, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(error.message,
@@ -30002,8 +30116,9 @@ static void test_txn_decision_validates_target_backend(void **state) {
                       "match root");
   lc_error_cleanup(&error);
   lc_error_init(&error);
-  rc = lc_pouch_state_read(pouch, ".txns", "txn-target-replay", &read_result,
-                           &error);
+  rc = lc_pouch_state_read(pouch, ".txns",
+                           test_xid_for_label("txn-target-replay"),
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
@@ -30062,7 +30177,7 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   open_pouch_client(root, &client, &error);
   attach_op.lease.namespace_name = "objects/txn";
   attach_op.lease.key = "state/object-1";
-  attach_op.lease.txn_id = "txn-attachment-commit";
+  attach_op.lease.txn_id = test_xid_for_label("txn-attachment-commit");
   pouch_acquire_test_lease(client, "objects/txn", "state/object-1",
                            attach_op.lease.txn_id, &commit_lease, &error);
   pouch_copy_lease_ref(&attach_op.lease, commit_lease);
@@ -30094,7 +30209,7 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   participant.namespace_name = "objects/txn";
   participant.key = "state/object-1";
   participant.backend_hash = NULL;
-  decision_req.txn_id = "txn-attachment-commit";
+  decision_req.txn_id = test_xid_for_label("txn-attachment-commit");
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
@@ -30130,7 +30245,7 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   sink = NULL;
   lc_attachment_get_res_cleanup(&get_res);
 
-  attach_op.lease.txn_id = "txn-attachment-rollback";
+  attach_op.lease.txn_id = test_xid_for_label("txn-attachment-rollback");
   pouch_acquire_test_lease(client, "objects/txn", "state/object-1",
                            attach_op.lease.txn_id, &rollback_lease, &error);
   pouch_copy_lease_ref(&attach_op.lease, rollback_lease);
@@ -30157,7 +30272,7 @@ static void test_txn_decisions_apply_attachment_side_effects(void **state) {
   assert_int_equal(rc, LC_OK);
   lc_attach_res_cleanup(&attach_res);
 
-  decision_req.txn_id = "txn-attachment-rollback";
+  decision_req.txn_id = test_xid_for_label("txn-attachment-rollback");
   rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(decision_res.state, "rollback");
@@ -30215,7 +30330,7 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
   open_pouch_client(root, &client, &error);
   attach_op.lease.namespace_name = "objects/recover";
   attach_op.lease.key = "state/object-2";
-  attach_op.lease.txn_id = "txn-attachment-recover";
+  attach_op.lease.txn_id = test_xid_for_label("txn-attachment-recover");
   pouch_acquire_test_lease(client, "objects/recover", "state/object-2",
                            attach_op.lease.txn_id, &lease, &error);
   pouch_copy_lease_ref(&attach_op.lease, lease);
@@ -30263,7 +30378,8 @@ static void test_txn_recovery_applies_attachment_side_effects(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_read(pouch, ".txns", "txn-attachment-recover",
+  rc = lc_pouch_state_read(pouch, ".txns",
+                           test_xid_for_label("txn-attachment-recover"),
                            &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
@@ -30375,7 +30491,7 @@ test_private_attachment_reads_validate_lease_and_overlay_transaction(
   acquire_req.key = "state/attachment-txn";
   acquire_req.owner = "attachment-txn-owner";
   acquire_req.ttl_seconds = 30L;
-  acquire_req.txn_id = "txn-attachment-read";
+  acquire_req.txn_id = test_xid_for_label("txn-attachment-read");
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -30513,7 +30629,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_enqueue_res_cleanup(&enqueue_res);
-  dequeue_req.txn_id = "txn-mixed-commit";
+  dequeue_req.txn_id = test_xid_for_label("txn-mixed-commit");
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(message);
@@ -30532,7 +30648,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(stats_res.pending_candidates, 1);
   lc_queue_stats_res_cleanup(&stats_res);
-  decision_req.txn_id = "txn-mixed-commit";
+  decision_req.txn_id = test_xid_for_label("txn-mixed-commit");
   pouch_queue_message_participant_key(message, queue_participant_key,
                                       sizeof(queue_participant_key));
   participants[1].namespace_name = message->namespace_name;
@@ -30563,7 +30679,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_enqueue_res_cleanup(&enqueue_res);
-  dequeue_req.txn_id = "txn-mixed-rollback";
+  dequeue_req.txn_id = test_xid_for_label("txn-mixed-rollback");
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(message);
@@ -30580,7 +30696,7 @@ test_txn_decisions_apply_mixed_object_queue_side_effects(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(ack_res.acked, 1);
   lc_ack_res_cleanup(&ack_res);
-  decision_req.txn_id = "txn-mixed-rollback";
+  decision_req.txn_id = test_xid_for_label("txn-mixed-rollback");
   pouch_queue_message_participant_key(message, queue_participant_key,
                                       sizeof(queue_participant_key));
   participants[1].namespace_name = message->namespace_name;
@@ -30672,7 +30788,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   list_req.public_read = 1;
   delete_op.lease.namespace_name = "objects/delete";
   delete_op.lease.key = "state/object-3";
-  delete_op.lease.txn_id = "txn-delete-commit";
+  delete_op.lease.txn_id = test_xid_for_label("txn-delete-commit");
   pouch_acquire_test_lease(client, "objects/delete", "state/object-3",
                            delete_op.lease.txn_id, &lease, &error);
   pouch_copy_lease_ref(&delete_op.lease, lease);
@@ -30690,7 +30806,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   participant.namespace_name = "objects/delete";
   participant.key = "state/object-3";
   participant.backend_hash = NULL;
-  decision_req.txn_id = "txn-delete-commit";
+  decision_req.txn_id = test_xid_for_label("txn-delete-commit");
   decision_req.participants = &participant;
   decision_req.participant_count = 1U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
@@ -30706,7 +30822,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   assert_true(pouch_attachment_list_has_name(&list, "rollback-delete.txt"));
   lc_attachment_list_cleanup(&list);
 
-  delete_op.lease.txn_id = "txn-delete-rollback";
+  delete_op.lease.txn_id = test_xid_for_label("txn-delete-rollback");
   pouch_acquire_test_lease(client, "objects/delete", "state/object-3",
                            delete_op.lease.txn_id, &lease, &error);
   pouch_copy_lease_ref(&delete_op.lease, lease);
@@ -30715,7 +30831,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   rc = client->delete_attachment(client, &delete_op, &deleted, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(deleted, 1);
-  decision_req.txn_id = "txn-delete-rollback";
+  decision_req.txn_id = test_xid_for_label("txn-delete-rollback");
   rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
@@ -30736,7 +30852,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
                                &error);
   delete_all_op.lease.namespace_name = "objects/delete";
   delete_all_op.lease.key = "state/object-3";
-  delete_all_op.lease.txn_id = "txn-clear-commit";
+  delete_all_op.lease.txn_id = test_xid_for_label("txn-clear-commit");
   pouch_copy_lease_ref(&delete_all_op.lease, lease);
   deleted_count = 0;
   rc = client->delete_all_attachments(client, &delete_all_op, &deleted_count,
@@ -30747,7 +30863,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(list.count >= 4U);
   lc_attachment_list_cleanup(&list);
-  decision_req.txn_id = "txn-clear-commit";
+  decision_req.txn_id = test_xid_for_label("txn-clear-commit");
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
@@ -30760,7 +30876,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
 
   pouch_attach_text(client, "objects/delete", "state/object-3", NULL,
                     "rollback-clear.txt", "rollback-clear", &error);
-  delete_all_op.lease.txn_id = "txn-clear-rollback";
+  delete_all_op.lease.txn_id = test_xid_for_label("txn-clear-rollback");
   pouch_acquire_test_lease(client, "objects/delete", "state/object-3",
                            delete_all_op.lease.txn_id, &lease, &error);
   pouch_copy_lease_ref(&delete_all_op.lease, lease);
@@ -30769,7 +30885,7 @@ static void test_txn_decisions_apply_attachment_delete_and_clear(void **state) {
                                       &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(deleted_count, 1);
-  decision_req.txn_id = "txn-clear-rollback";
+  decision_req.txn_id = test_xid_for_label("txn-clear-rollback");
   rc = client->txn_rollback(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
   lc_txn_decision_res_cleanup(&decision_res);
@@ -30828,7 +30944,8 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
                              &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "orders/recover",
-                                  "state/recover-commit", "txn-recover-commit",
+                                  "state/recover-commit",
+                                  test_xid_for_label("txn-recover-commit"),
                                   source, NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
@@ -30847,9 +30964,10 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   rc = lc_source_from_memory("expired-stage", strlen("expired-stage"), &source,
                              &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_stage_write(
-      pouch, "orders/recover", "state/recover-expired", "txn-recover-expired",
-      source, NULL, &write_result, &error);
+  rc = lc_pouch_state_stage_write(pouch, "orders/recover",
+                                  "state/recover-expired",
+                                  test_xid_for_label("txn-recover-expired"),
+                                  source, NULL, &write_result, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -30912,13 +31030,15 @@ static void test_txn_recovery_applies_decisions_on_client_open(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  rc = lc_pouch_state_read(pouch, ".txns", "txn-recover-commit", &read_result,
-                           &error);
+  rc = lc_pouch_state_read(pouch, ".txns",
+                           test_xid_for_label("txn-recover-commit"),
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
-  rc = lc_pouch_state_read(pouch, ".txns", "txn-recover-expired", &read_result,
-                           &error);
+  rc = lc_pouch_state_read(pouch, ".txns",
+                           test_xid_for_label("txn-recover-expired"),
+                           &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
@@ -31695,6 +31815,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_acquire_honors_block_seconds),
       cmocka_unit_test(
           test_minted_xid_single_lease_releases_without_xa_barrier),
+      cmocka_unit_test(test_pouch_transaction_ids_match_lockd_xid_contract),
       cmocka_unit_test(
           test_minted_xid_reconstructed_release_validates_lifecycle),
       cmocka_unit_test(

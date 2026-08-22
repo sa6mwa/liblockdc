@@ -6253,15 +6253,12 @@ lc_pouch_state_append_binary_records(lc_pouch *pouch,
   return rc;
 }
 
-static int
-lc_pouch_state_append_binary_record(lc_pouch *pouch, const char *namespace_name,
-                                    lc_pouch_namespace_manifest *manifest,
-                                    unsigned char record_type, const void *key,
-                                    size_t key_len, unsigned char *meta,
-                                    size_t meta_len,
-                                    lc_pouch_generation query_index_seq,
-                                    int query_index_from_index,
-                                    lc_error *error) {
+static int lc_pouch_state_append_binary_record(
+    lc_pouch *pouch, const char *namespace_name,
+    lc_pouch_namespace_manifest *manifest, unsigned char record_type,
+    const void *key, size_t key_len, unsigned char *meta, size_t meta_len,
+    lc_pouch_generation query_index_seq, int query_index_from_index,
+    lc_error *error) {
   lc_pouch_state_binary_append_item item;
 
   memset(&item, 0, sizeof(item));
@@ -6462,8 +6459,8 @@ static int lc_pouch_state_meta_set_index_sequences(
     return rc;
   }
   if (has_query_index_seq) {
-    rc = lc_pouch_state_meta_set_index_seq(*meta_io, *meta_length_io,
-                                           index_seq, error);
+    rc = lc_pouch_state_meta_set_index_seq(*meta_io, *meta_length_io, index_seq,
+                                           error);
     if (rc == LC_OK) {
       lc_pouch_state_put64(*meta_io + trailer_offset + 16U,
                            (uint64_t)query_index_seq);
@@ -10960,8 +10957,7 @@ static int lc_pouch_state_append_tombstone(
     lc_pouch_namespace_manifest *manifest, const char *key, const char *etag,
     lc_pouch_generation version, lc_pouch_unix_seconds updated_at_unix,
     unsigned char record_type, int query_index_from_index,
-    lc_pouch_generation *index_seq_out,
-    lc_error *error) {
+    lc_pouch_generation *index_seq_out, lc_error *error) {
   unsigned char *meta;
   size_t meta_len;
   lc_pouch_generation index_seq;
@@ -10982,16 +10978,15 @@ static int lc_pouch_state_append_tombstone(
                                          updated_at_unix, etag, &meta,
                                          &meta_len, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_state_meta_set_index_sequences(
-        &pouch->allocator, &meta, &meta_len, 0UL, 0UL, error);
+    rc = lc_pouch_state_meta_set_index_sequences(&pouch->allocator, &meta,
+                                                 &meta_len, 0UL, 0UL, error);
   }
   if (rc != LC_OK) {
     return rc;
   }
-  rc = lc_pouch_state_append_binary_record(pouch, namespace_name, manifest,
-                                           delete_record_type, key, strlen(key),
-                                           meta, meta_len, 0UL,
-                                           query_index_from_index, error);
+  rc = lc_pouch_state_append_binary_record(
+      pouch, namespace_name, manifest, delete_record_type, key, strlen(key),
+      meta, meta_len, 0UL, query_index_from_index, error);
   if (rc == LC_OK) {
     rc = lc_pouch_state_meta_index_seq(meta, meta_len, &index_seq, error);
   }
@@ -11045,10 +11040,9 @@ static int lc_pouch_state_append_record(
         &pouch->allocator, &meta, &meta_len, 0UL, query_index_seq, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_state_append_binary_record(pouch, namespace_name, manifest,
-                                             record_type, key, strlen(key),
-                                             meta, meta_len, query_index_seq,
-                                             0, error);
+    rc = lc_pouch_state_append_binary_record(
+        pouch, namespace_name, manifest, record_type, key, strlen(key), meta,
+        meta_len, query_index_seq, 0, error);
   }
   lc_free_with_allocator(&pouch->allocator, meta);
   return rc;
@@ -11147,8 +11141,7 @@ static int lc_pouch_state_append_staged_commit_batch(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_state_meta_set_index_sequences(
-        &pouch->allocator, &decision_meta, &decision_meta_len, 0UL, 0UL,
-        error);
+        &pouch->allocator, &decision_meta, &decision_meta_len, 0UL, 0UL, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_state_meta_set_index_sequences(
@@ -11253,8 +11246,7 @@ static int lc_pouch_state_append_staged_delete_commit_batch(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_state_meta_set_index_sequences(
-        &pouch->allocator, &decision_meta, &decision_meta_len, 0UL, 0UL,
-        error);
+        &pouch->allocator, &decision_meta, &decision_meta_len, 0UL, 0UL, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_state_meta_set_index_sequences(
@@ -11348,8 +11340,7 @@ static int lc_pouch_state_commit_staged_delete_locked(
     cache_manifest.state_max_version = committed_index_seq;
     (void)lc_pouch_state_cache_apply_write(
         pouch, namespace_name, &cache_manifest, key, NULL, etag, NULL, NULL,
-        NULL, 0U,
-        version, 0UL, 0UL, NULL, updated_at_unix, 0, 0, 0, 0,
+        NULL, 0U, version, 0UL, 0UL, NULL, updated_at_unix, 0, 0, 0, 0,
         object_record ? LC_POUCH_STATE_RECORD_OBJECT_DELETE
                       : LC_POUCH_STATE_RECORD_STATE_DELETE);
   }
@@ -11402,8 +11393,7 @@ static int lc_pouch_state_append_staged_discard_batch(
   }
   if (rc == LC_OK) {
     rc = lc_pouch_state_meta_set_index_sequences(
-        &pouch->allocator, &decision_meta, &decision_meta_len, 0UL, 0UL,
-        error);
+        &pouch->allocator, &decision_meta, &decision_meta_len, 0UL, 0UL, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_state_meta_set_index_sequences(
@@ -11804,8 +11794,8 @@ static int lc_pouch_state_write_resolved_locked(
     metadata = options->metadata;
     metadata_length = options->metadata_length;
   }
-  if (options != NULL && (options->suppress_query_index ||
-                          options->object_record)) {
+  if (options != NULL &&
+      (options->suppress_query_index || options->object_record)) {
     query_index_seq = current.query_index_seq;
   }
   payload_context = lc_pouch_state_crypto_context(
@@ -12126,8 +12116,8 @@ static int lc_pouch_state_write_resolved_locked(
     if (rc == LC_OK) {
       rc = lc_pouch_state_meta_set_index_sequences(
           &pouch->allocator, &final_meta, &final_meta_len, index_seq,
-          options != NULL && (options->suppress_query_index ||
-                              options->object_record)
+          options != NULL &&
+                  (options->suppress_query_index || options->object_record)
               ? query_index_seq
               : index_seq,
           error);
@@ -12279,8 +12269,8 @@ static int lc_pouch_state_write_resolved_locked(
     if (rc == LC_OK) {
       rc = lc_pouch_state_meta_set_index_sequences(
           &pouch->allocator, &final_meta, &final_meta_len, index_seq,
-          options != NULL && (options->suppress_query_index ||
-                              options->object_record)
+          options != NULL &&
+                  (options->suppress_query_index || options->object_record)
               ? query_index_seq
               : index_seq,
           error);
@@ -13927,13 +13917,12 @@ static int lc_pouch_state_delete_locked(
       return rc;
     }
   }
-  rc = lc_pouch_state_append_tombstone(pouch, namespace_name, &manifest, key,
-                                       etag, version, updated_at_unix,
-                                       options != NULL && options->object_record
-                                           ? LC_POUCH_STATE_RECORD_OBJECT_DELETE
-                                           : current.record_type,
-                                       options == NULL || !options->object_record,
-                                       &index_seq, error);
+  rc = lc_pouch_state_append_tombstone(
+      pouch, namespace_name, &manifest, key, etag, version, updated_at_unix,
+      options != NULL && options->object_record
+          ? LC_POUCH_STATE_RECORD_OBJECT_DELETE
+          : current.record_type,
+      options == NULL || !options->object_record, &index_seq, error);
   if (rc == LC_OK) {
     (void)lc_pouch_state_cache_apply_write(
         pouch, namespace_name, &manifest, key, NULL, etag, NULL, NULL, NULL, 0U,
@@ -14194,8 +14183,8 @@ static int lc_pouch_state_stage_write_prepared_locked(void *context,
       staged_write_options.suppress_query_index = 1;
       rc = lc_pouch_state_write_resolved_locked(
           stage->pouch, stage->namespace_name, staged_key, body,
-          &staged_write_options,
-          &staged_entry, &manifest, manifest.borrowed, stage->out, error);
+          &staged_write_options, &staged_entry, &manifest, manifest.borrowed,
+          stage->out, error);
     }
     if (rc == LC_OK) {
       stage->out->query_index_operation_guard_started =
@@ -14657,11 +14646,10 @@ static int lc_pouch_state_promote_staged_locked(
   cache_manifest.state_max_version = committed_index_seq;
   (void)lc_pouch_state_cache_apply_write(
       pouch, namespace_name, &cache_manifest, key, staged.content_type,
-      staged.etag,
-      &staged.payload_span, staged.payload_context, promoted_metadata,
-      promoted_metadata_length, version, staged.bytes, staged.cipher_bytes,
-      committed_descriptor, updated_at_unix, staged.has_query_hidden,
-      staged.query_hidden, 0, 1,
+      staged.etag, &staged.payload_span, staged.payload_context,
+      promoted_metadata, promoted_metadata_length, version, staged.bytes,
+      staged.cipher_bytes, committed_descriptor, updated_at_unix,
+      staged.has_query_hidden, staged.query_hidden, 0, 1,
       committed_record_type == LC_POUCH_STATE_RECORD_STATE_META
           ? LC_POUCH_STATE_RECORD_STATE_META
       : lc_pouch_state_record_type_is_object(staged.record_type)
@@ -14884,11 +14872,10 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   cache_manifest.state_max_version = committed_index_seq;
   (void)lc_pouch_state_cache_apply_write(
       pouch, namespace_name, &cache_manifest, key, staged.content_type,
-      staged.etag,
-      &staged.payload_span, staged.payload_context, promoted_metadata,
-      promoted_metadata_length, version, staged.bytes, staged.cipher_bytes,
-      committed_descriptor, updated_at_unix, staged.has_query_hidden,
-      staged.query_hidden, 0, 1,
+      staged.etag, &staged.payload_span, staged.payload_context,
+      promoted_metadata, promoted_metadata_length, version, staged.bytes,
+      staged.cipher_bytes, committed_descriptor, updated_at_unix,
+      staged.has_query_hidden, staged.query_hidden, 0, 1,
       committed_record_type == LC_POUCH_STATE_RECORD_STATE_META
           ? LC_POUCH_STATE_RECORD_STATE_META
       : lc_pouch_state_record_type_is_object(staged.record_type)

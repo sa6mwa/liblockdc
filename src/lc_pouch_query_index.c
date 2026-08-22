@@ -6848,8 +6848,7 @@ static void lc_pouch_query_index_pending_mark_incomplete(
   }
   if (pending != NULL) {
     lc_pouch_query_index_pending_invalidate_locked(pouch, pending, index_seq);
-    lc_pouch_query_index_pending_add_incomplete_key_locked(pouch, pending,
-                                                            key);
+    lc_pouch_query_index_pending_add_incomplete_key_locked(pouch, pending, key);
   }
   pthread_mutex_unlock(&pouch->indexer_mutex);
 }
@@ -7401,7 +7400,8 @@ int lc_pouch_query_index_pending_document_limit_reached_locked(
          !lc_pouch_query_index_pending_has_active_operations_locked(
              pouch, namespace_name) &&
          ((uint64_t)pending->summary.count +
-              (uint64_t)pending->incomplete_keys.count >= document_limit ||
+                  (uint64_t)pending->incomplete_keys.count >=
+              document_limit ||
           (uint64_t)pending->deletes.count >=
               document_limit - ((uint64_t)pending->summary.count +
                                 (uint64_t)pending->incomplete_keys.count));

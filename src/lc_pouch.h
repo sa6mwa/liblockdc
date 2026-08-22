@@ -282,7 +282,8 @@ typedef struct lc_pouch_state_visit_entry {
   int has_query_hidden;
   int query_hidden;
   /* Non-zero when this record owns a readable state payload (including an
-   * empty payload). Metadata-only lease and tombstone records are not bodies. */
+   * empty payload). Metadata-only lease and tombstone records are not bodies.
+   */
   int has_payload;
   /* Non-zero for internal object records, which are not public query state. */
   int object_record;

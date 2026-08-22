@@ -607,4 +607,6 @@ int lc_consumer_service_stop_method(lc_consumer_service *self);
 int lc_consumer_service_wait_method(lc_consumer_service *self, lc_error *error);
 void lc_consumer_service_close_method(lc_consumer_service *self);
 
+int lc_xid_is_valid(const char *value);
+
 #endif

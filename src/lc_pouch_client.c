@@ -7863,8 +7863,8 @@ static int lc_pouch_lease_record_parse(lc_client_handle *client,
   memset(&cursor, 0, sizeof(cursor));
   cursor.bytes = bytes;
   cursor.length = length;
-  rc = lc_pouch_binary_cursor_magic(&cursor, LC_POUCH_LEASE_RECORD_MAGIC,
-                                    error);
+  rc =
+      lc_pouch_binary_cursor_magic(&cursor, LC_POUCH_LEASE_RECORD_MAGIC, error);
   if (rc == LC_OK) {
     rc = lc_pouch_binary_cursor_string(&cursor, &record->namespace_name, error);
   }
@@ -8252,16 +8252,15 @@ static int lc_pouch_replace_lease_prepare_metadata(
                                              state_view, &lease_record, error);
   lease_id = ctx->clear_lease ? "" : lease_record.lease_id;
   txn_id = ctx->clear_lease ? "" : lease_record.txn_id;
-  expires_at_unix = ctx->clear_lease
-                        ? 0L
-                        : ctx->preserve_expiration
-                              ? lease_record.expires_at_unix
-                              : ctx->expires_at_unix;
+  expires_at_unix = ctx->clear_lease           ? 0L
+                    : ctx->preserve_expiration ? lease_record.expires_at_unix
+                                               : ctx->expires_at_unix;
   if (rc == LC_OK) {
     rc = lc_pouch_lease_record_build(
         &ctx->lease_metadata, ctx->namespace_name, ctx->key, lease_record.owner,
         lease_id, txn_id, lease_record.fencing_token, expires_at_unix,
-        ctx->has_state_version ? ctx->state_version : lease_record.state_version,
+        ctx->has_state_version ? ctx->state_version
+                               : lease_record.state_version,
         ctx->clear_lease ? 0 : lease_record.txn_explicit, error);
   }
   if (rc == LC_OK) {
@@ -8297,8 +8296,8 @@ static int lc_pouch_replace_lease_record(
     const char *namespace_name, const char *key,
     lc_pouch_unix_seconds expires_at_unix, int clear_lease,
     int preserve_expiration, int has_state_version,
-    lc_pouch_generation state_version,
-    lc_pouch_state_write_result *out, lc_error *error) {
+    lc_pouch_generation state_version, lc_pouch_state_write_result *out,
+    lc_error *error) {
   lc_pouch_lease_replace_context replace_context;
   int rc;
 
@@ -8510,8 +8509,8 @@ static int lc_pouch_client_stage_transaction_write(
       lc_pouch_client_prepare_txn_stage_write, &context, NULL, out, error);
   if (rc == LC_OK) {
     out->version = context.projected_version;
-    if (context.projected_version != 0UL && lease != NULL && lease->key != NULL &&
-        strcmp(key, lease->key) == 0) {
+    if (context.projected_version != 0UL && lease != NULL &&
+        lease->key != NULL && strcmp(key, lease->key) == 0) {
       lc_pouch_state_write_result lease_write_result;
 
       memset(&lease_write_result, 0, sizeof(lease_write_result));
@@ -8667,11 +8666,11 @@ static int lc_pouch_queue_lease_acquire_prepare_metadata(
   }
   if (rc == LC_OK && *apply) {
     txn_id = ctx->req->txn_id != NULL ? ctx->req->txn_id : "";
-    rc = lc_pouch_lease_record_build(
-        &ctx->lease_metadata, ctx->namespace_name, ctx->lease_key,
-        ctx->req->owner, ctx->lease_id, txn_id, ctx->fencing_token,
-        ctx->lease_expires_at_unix, 0UL, lc_pouch_txn_id_present(txn_id),
-        error);
+    rc = lc_pouch_lease_record_build(&ctx->lease_metadata, ctx->namespace_name,
+                                     ctx->lease_key, ctx->req->owner,
+                                     ctx->lease_id, txn_id, ctx->fencing_token,
+                                     ctx->lease_expires_at_unix, 0UL,
+                                     lc_pouch_txn_id_present(txn_id), error);
     if (rc == LC_OK) {
       options->content_type = LC_POUCH_LEASE_CONTENT_TYPE;
       options->has_expected_version = lease_record.version > 0UL;
@@ -11843,6 +11842,9 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
       return rc;
     }
     effective_request.txn_id = minted_txn_id;
+  } else if (!lc_xid_is_valid(effective_request.txn_id)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch txn_id must be a valid xid", NULL, NULL, NULL);
   }
   rc = lc_pouch_client_validate_acquire_key(req->key, error);
   if (rc != LC_OK) {
@@ -12828,8 +12830,8 @@ int lc_pouch_client_keepalive_method(lc_client *self,
                                         &out->version, error);
   }
   if (rc == LC_OK && lc_pouch_txn_id_present(req->lease.txn_id)) {
-    staged_key = lc_pouch_staged_storage_key(req->lease.key, req->lease.txn_id,
-                                              error);
+    staged_key =
+        lc_pouch_staged_storage_key(req->lease.key, req->lease.txn_id, error);
     if (staged_key == NULL) {
       rc = error != NULL ? error->code : LC_ERR_NOMEM;
     }
@@ -12946,10 +12948,10 @@ static int lc_pouch_release_prepare_metadata(
       ctx->client, &ctx->req->lease, ctx->namespace_name, ctx->req->lease.key,
       state_view, &lease_record, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_lease_record_build(
-        &ctx->lease_metadata, ctx->namespace_name, ctx->req->lease.key,
-        lease_record.owner, "", "", lease_record.fencing_token, 0L,
-        lease_record.state_version, 0, error);
+    rc = lc_pouch_lease_record_build(&ctx->lease_metadata, ctx->namespace_name,
+                                     ctx->req->lease.key, lease_record.owner,
+                                     "", "", lease_record.fencing_token, 0L,
+                                     lease_record.state_version, 0, error);
   }
   if (rc == LC_OK) {
     options->content_type = LC_POUCH_LEASE_CONTENT_TYPE;
@@ -12984,6 +12986,7 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
   lc_client_handle *client;
   lc_pouch_release_context release_context;
   lc_pouch_lease_record lease_record;
+  lc_txn_participant participant;
   lc_txn_decision_req decision_request;
   lc_txn_decision_res decision_result;
   const char *namespace_name = NULL;
@@ -13008,6 +13011,7 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
   }
   memset(&release_context, 0, sizeof(release_context));
   memset(&lease_record, 0, sizeof(lease_record));
+  memset(&participant, 0, sizeof(participant));
   lc_txn_decision_req_init(&decision_request);
   memset(&decision_result, 0, sizeof(decision_result));
   now_seconds = 0L;
@@ -13030,6 +13034,11 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
         strcmp(lease_record.txn_id, req->lease.txn_id) == 0) {
       txn_explicit = lease_record.txn_explicit;
       if (txn_explicit) {
+        participant.namespace_name = namespace_name;
+        participant.key = req->lease.key;
+        decision_request.participants = &participant;
+        decision_request.participant_count = 1U;
+        decision_request.expires_at_unix = lease_record.expires_at_unix;
         rc = lc_pouch_now_unix(&now_seconds, error);
         if (rc == LC_OK && lease_record.expires_at_unix <= now_seconds) {
           txn_expired = 1;
@@ -13520,9 +13529,9 @@ static int lc_pouch_attachment_delete_all_locked(void *context,
       char *attachment_key;
       char *staged_attachment_key;
 
-      attachment_key = lc_pouch_attachment_key(
-          ctx->namespace_name, ctx->req->lease.key, builder.items[i].name,
-          error);
+      attachment_key =
+          lc_pouch_attachment_key(ctx->namespace_name, ctx->req->lease.key,
+                                  builder.items[i].name, error);
       staged_attachment_key = NULL;
       if (attachment_key == NULL) {
         rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -15980,6 +15989,10 @@ int lc_pouch_client_txn_replay_method(lc_client *self,
                         "pouch txn_replay requires self, req, and out", NULL,
                         NULL, NULL);
   }
+  if (!lc_xid_is_valid(req->txn_id)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch txn_id must be a valid xid", NULL, NULL, NULL);
+  }
   memset(out, 0, sizeof(*out));
   client = (lc_client_handle *)self;
   memset(&read_result, 0, sizeof(read_result));
@@ -16106,6 +16119,10 @@ static int lc_pouch_client_txn_decision(lc_client *self,
   client = (lc_client_handle *)self;
   memset(&context, 0, sizeof(context));
   lc_txn_decision_req_init(&decision_req);
+  if (!lc_xid_is_valid(req->txn_id)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch txn_id must be a valid xid", NULL, NULL, NULL);
+  }
   rc = lc_pouch_txn_validate_participants(req, error);
   if (rc != LC_OK) {
     return rc;

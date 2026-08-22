@@ -213,6 +213,23 @@ static void lc_xid_encode(const unsigned char raw[LC_XID_RAW_LENGTH],
   out[LC_XID_STRING_LENGTH] = '\0';
 }
 
+int lc_xid_is_valid(const char *value) {
+  size_t i;
+
+  if (value == NULL || strlen(value) != LC_XID_STRING_LENGTH) {
+    return 0;
+  }
+  for (i = 0U; i < LC_XID_STRING_LENGTH; ++i) {
+    if (!((value[i] >= '0' && value[i] <= '9') ||
+          (value[i] >= 'a' && value[i] <= 'v'))) {
+      return 0;
+    }
+  }
+  /* rs/xid rejects non-canonical base32 encodings of the final byte. */
+  return value[LC_XID_STRING_LENGTH - 1U] == '0' ||
+         value[LC_XID_STRING_LENGTH - 1U] == 'g';
+}
+
 int lc_xid_new(char out[LC_XID_STRING_SIZE], lc_error *error) {
   time_t now;
   unsigned char raw[LC_XID_RAW_LENGTH];
