@@ -93,10 +93,6 @@ are closed locally; they are not released one by one.
   emitted. The transaction remains recoverable according to the selected
   backend's existing transaction recovery rules.
 
-The E2E remote lockd artifact must implement this implicit-XA contract. The
-repository's compose fixture is an environment dependency, not proof that an
-arbitrary pinned image provides this contract.
-
 ## Scope and Non-goals
 
 The component covers:
@@ -627,13 +623,12 @@ recovery source of truth.
 ## Required Verification
 
 Implementation is not complete until the following behavior is proven for both
-Pouch and a remote lockd endpoint. The remote suite must run a lockd artifact
-that supports implicit multi-key XA; the suite must not silently substitute a
-legacy release implementation.
+Pouch and the repository's compose-backed remote lockd E2E environment.
 
-1. A normal begin generates a canonical xid accepted by a current remote lockd
-   endpoint and usable across at least two keys; Pouch accepts the same id. An
-   invalid or mismatched `join_txn_id` is rejected before ownership transfer.
+1. A normal begin generates a canonical xid accepted by the compose-backed
+   remote lockd endpoint and usable across at least two keys; Pouch accepts the
+   same id. An invalid or mismatched `join_txn_id` is rejected before ownership
+   transfer.
 2. One workflow participant ledger containing domain mutation, inbox/outbox
    key, and payload attachment commits atomically; rollback exposes none of
    them. The remote case finalizes through one normal lease release; the Pouch
