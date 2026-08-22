@@ -39,10 +39,9 @@ foreign system is the required idempotency mechanism for that boundary.
 
 ## Verified Transaction Contract
 
-The workflow layer uses one client-visible implicit-XA contract. Remote lockd
-and Pouch differ only in where the first transaction identifier is minted;
-they must otherwise have the same lease, vote, visibility, and recovery
-semantics.
+Remote lockd and Pouch distinguish a normal server-minted one-participant
+lease from an explicit XA transaction. They must have the same terminal,
+visibility, and recovery semantics for each mode.
 
 ### Remote lockd
 
@@ -52,54 +51,41 @@ must therefore use the xid grammar accepted by lockd. Every state, metadata,
 and attachment operation through the resulting `lc_lease` carries that
 transaction id and stages its change.
 
-Remote lockd XA is implicit at the client boundary: acquire the first
-participant without `txn_id`, take its server-issued xid, and supply that xid
-when acquiring every additional participant. Stage through the corresponding
-leases. The workflow then releases every enrolled lease as a vote:
-`rollback=0` on every participant commits, while a rollback vote makes the
-outcome rollback. No state becomes publicly visible merely because one
-participant has released; the final decision occurs only after the complete
-participant set has voted. Lockd records the durable decision and applies the
-staged participant set; it is not a per-key publish loop. The workflow must
-not call `lc_txn_prepare()`, `lc_txn_commit()`, `lc_txn_rollback()`, or the TC
-decision surface for this path: those are coordinator/resource-manager control
-operations, not the ordinary application-client finalizer.
+An acquire without `txn_id` is a normal one-participant transaction: release
+commits or rolls it back directly. XA begins only when two or more participants
+are acquired with the same explicit xid. The workflow mints that xid with
+`lc_xid_new()` and supplies it on every participant acquire. A terminal
+release records the durable commit or rollback decision and applies the
+enrolled participant set; it is not a release-vote barrier.
 
 ### Local Pouch
 
-Pouch mints an rs/xid-compatible identifier when its first acquire omits
-`txn_id`, returns it on the lease, and durably registers every later acquire
-that joins it. Each lease-bound state, metadata, and attachment mutation is
-staged. Each `release()` is a durable participant vote: all commit votes make
-the transaction visible, while a rollback vote decides rollback. The durable
-Pouch transaction record carries participant membership and votes, so a reopen
-can apply a final decision or roll an expired undecided transaction back.
+Pouch mints an rs/xid-compatible identifier when an acquire omits `txn_id`.
+That normal lease is staged and finalized directly on release. An explicitly
+supplied xid creates the durable XA participant record; its release records
+the terminal decision and applies all enrolled participants. Recovery replays
+a recorded decision or rolls an expired undecided XA transaction back.
 
 `lc_xid_new()` exposes the same rs/xid-compatible generator used by the local
-endpoint. It is useful only for explicit advanced interoperation; normal
-application and workflow callers leave first-acquire `txn_id` unset and let
-their selected endpoint mint it.
+endpoint. The workflow uses it internally when it needs an explicit XA
+transaction; single-key callers leave `txn_id` unset.
 
 ### Workflow adapter rules
 
-- A normal `begin()` creates an unbound workflow transaction. Its first
-  participant acquire omits `txn_id`, captures the endpoint-minted id from the
-  returned lease, and every later participant acquire joins that id. Neither
-  backend detail is exposed as a caller-assembled identifier.
+- A single-participant `begin()` omits `txn_id` and lets the endpoint mint it.
+  A multi-participant workflow mints one xid internally before acquiring any
+  participant and supplies it for every acquire.
 - An advanced join may supply a compatible existing transaction id solely to
   transfer a lease already acquired under that id into the workflow. The
   workflow validates it, then owns its eventual terminal decision; it never
   invents or silently rewrites an id supplied for this purpose.
 - Every domain, inbox, and outbox lease obtained or adopted by the workflow is
   recorded exactly once as a `(namespace, key)` participant.
-- `commit()`/`rollback()` release every enrolled lease with the corresponding
-  vote on both endpoints.
-- The workflow retains every enrolled lease until the terminal outcome and
-  releases every lease in deterministic participant order on both endpoints.
+- `commit()`/`rollback()` releases the single normal lease directly. For XA it
+  records one terminal decision and applies the enrolled participant set.
 - A successful terminal decision consumes every enrolled lease. Calling
   `release()` on an enrolled lease independently is impossible through the
-  workflow participant surface. A remote workflow tracks per-participant vote
-  progress so a retry or recovery release never omits an outstanding vote.
+  workflow participant surface.
 - If staging or the terminal decision fails, no post-commit notification is
   emitted. The transaction remains recoverable according to the selected
   backend's existing transaction recovery rules.
@@ -240,9 +226,9 @@ boundaries are fixed:
 - Inbox acceptance reports `accepted` or `duplicate` as successful structured
   outcomes. It does not force callers to inspect an error string to distinguish
   a normal duplicate from a conflict.
-- Transaction commit is the single success boundary. It invokes the existing
-  endpoint release-vote protocol; there is no separate `signal()` call for the
-  application to forget.
+- Transaction commit is the single success boundary. It invokes the endpoint's
+  direct single-lease release or explicit XA decision; there is no separate
+  `signal()` call for the application to forget.
 - Dispatcher jobs expose immutable envelope metadata, streaming payload access,
   and only the terminal/renewal operations valid for their owned claim.
 
@@ -255,9 +241,9 @@ worker thread starts.
 
 The normal application path is `begin()` followed by `txn->acquire()`; the
 application never assembles a transaction id or decides a participant itself.
-Without `join_txn_id`, the first `txn->acquire()` omits `txn_id` and captures
-the non-empty id returned on its lease; every later acquire carries that exact
-id. The begin request's optional `join_txn_id` is for
+A one-participant workflow omits `txn_id`; a multi-participant workflow mints
+one xid internally and supplies it on every acquire. The begin request's
+optional `join_txn_id` is for
 the exceptional case where a raw liblockdc lease was acquired first. It must
 meet the selected backend's identifier rules (the remote lockd contract is a
 compact 20-character lowercase base32 xid) and becomes the workflow
@@ -635,15 +621,14 @@ recovery source of truth.
 Implementation is not complete until the following behavior is proven for both
 Pouch and the repository's compose-backed remote lockd E2E environment.
 
-1. A normal begin starts implicit XA on either endpoint by acquiring its first
-   key without a transaction id, captures the endpoint-minted rs/xid value,
-   and uses that exact id for at least one additional key. Neither requires a
-   caller-assembled identifier. An invalid or mismatched `join_txn_id` is
-   rejected before ownership transfer.
+1. A one-participant workflow acquires without a transaction id and receives
+   an endpoint-minted rs/xid. A multi-participant workflow internally mints
+   one rs/xid and supplies it to every participant acquire. An invalid or
+   mismatched `join_txn_id` is rejected before ownership transfer.
 2. One workflow participant ledger containing domain mutation, inbox/outbox
    key, and payload attachment commits atomically; rollback exposes none of
-   them. The remote case finalizes by releasing every enrolled lease with the
-   same commit or rollback vote on both endpoints.
+   them. Both endpoints finalize the explicit XA transaction with one durable
+   terminal decision.
 3. Repeated outbox append with the same operation/effect identity creates one
    intent; a conflicting immutable repeat fails.
 4. Inbox redelivery is idempotent and a payload-digest conflict is rejected.

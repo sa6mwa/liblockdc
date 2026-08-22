@@ -10992,6 +10992,53 @@ static void test_pouch_root_path_aliases_share_store_identity(void **state) {
   lc_error_cleanup(&error);
 }
 
+/* A transaction-minted normal lease must release while a shared-root namespace
+ * mutation lock is active; the release path must not re-enter that lock. */
+static void
+test_shared_pouch_minted_lease_release_does_not_deadlock(void **state) {
+  lc_client *client;
+  lc_update_res update_res;
+  lc_get_res get_res;
+  lc_sink *sink;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  make_root("shared-minted-release", root, sizeof(root));
+  cleanup_root(root);
+  open_pouch_client_shared(root, &client, &error);
+
+  write_client_state(client, "state/shared-minted-release", "{\"value\":1}",
+                     NULL, 0L, 0, &update_res, &error);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, "state/shared-minted-release", NULL, sink, &get_res,
+                   &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("{\"value\":1}"));
+  assert_memory_equal(bytes, "{\"value\":1}", length);
+
+  sink->close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_update_res_cleanup(&update_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_state_etag_is_plaintext_sha256_content_hash(void **state) {
   lc_client *plain_client;
   lc_client *crypto_client;
@@ -23148,7 +23195,7 @@ static void test_acquire_honors_block_seconds(void **state) {
 }
 
 static void
-test_implicit_xa_leases_mint_xid_and_publish_after_all_votes(void **state) {
+test_minted_xid_single_lease_releases_without_xa_barrier(void **state) {
   lc_client *client;
   lc_lease *first;
   lc_lease *second;
@@ -23178,7 +23225,7 @@ test_implicit_xa_leases_mint_xid_and_publish_after_all_votes(void **state) {
   lc_acquire_req_init(&acquire_second);
   memset(&get_res, 0, sizeof(get_res));
   lc_error_init(&error);
-  make_root("implicit-xa-votes", root, sizeof(root));
+  make_root("minted-xid-release", root, sizeof(root));
   cleanup_root(root);
   snprintf(first_key, sizeof(first_key), "state/implicit-xa/first/%ld",
            (long)getpid());
@@ -23237,7 +23284,7 @@ test_implicit_xa_leases_mint_xid_and_publish_after_all_votes(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = client->get(client, first_key, NULL, sink, &get_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(get_res.no_content);
+  assert_false(get_res.no_content);
   lc_get_res_cleanup(&get_res);
   sink->close(sink);
   sink = NULL;
@@ -30692,6 +30739,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_pouch_tc_surface_persists_local_single_node_state),
       cmocka_unit_test(test_public_core_contract_roundtrips_all_transforms),
       cmocka_unit_test(test_state_etag_is_plaintext_sha256_content_hash),
+      cmocka_unit_test(
+          test_shared_pouch_minted_lease_release_does_not_deadlock),
       cmocka_unit_test(test_state_write_read_replays_segment_after_reopen),
       cmocka_unit_test(
           test_state_legacy_metadata_does_not_mimic_snapshot_query_trailer),
@@ -30951,7 +31000,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_pouch_fencing_tokens_do_not_wrap_or_narrow),
       cmocka_unit_test(test_acquire_honors_block_seconds),
       cmocka_unit_test(
-          test_implicit_xa_leases_mint_xid_and_publish_after_all_votes),
+          test_minted_xid_single_lease_releases_without_xa_barrier),
       cmocka_unit_test(
           test_implicit_xa_release_rollback_discards_all_participants),
       cmocka_unit_test(test_implicit_xa_vote_survives_pouch_reopen),

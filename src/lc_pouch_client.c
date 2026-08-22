@@ -109,6 +109,9 @@ static int lc_pouch_txn_buffer_append_string(lc_pouch_txn_buffer *buffer,
                                              const char *value,
                                              lc_error *error);
 static int lc_pouch_txn_id_present(const char *txn_id);
+static int lc_pouch_txn_apply_state_participant(
+    lc_client_handle *client, const char *namespace_name, const char *key,
+    const char *txn_id, const char *state, lc_error *error);
 static int lc_pouch_txn_validate_participants(const lc_txn_decision_req *req,
                                               lc_error *error);
 static void lc_pouch_txn_trim_bounds(const char *value, const char **start,
@@ -11822,6 +11825,7 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   lc_pouch_unix_seconds now_seconds = 0;
   lc_lease *lease;
   char minted_txn_id[LC_XID_STRING_SIZE];
+  int txn_explicit;
   int rc;
 
   if (self == NULL || req == NULL || out == NULL) {
@@ -11832,6 +11836,8 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   *out = NULL;
   client = (lc_client_handle *)self;
   effective_request = *req;
+  txn_explicit =
+      effective_request.txn_id != NULL && effective_request.txn_id[0] != '\0';
   minted_txn_id[0] = '\0';
   if (effective_request.txn_id == NULL || effective_request.txn_id[0] == '\0') {
     rc = lc_xid_new(minted_txn_id, error);
@@ -11930,25 +11936,27 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
     lc_pouch_acquire_context_cleanup(&acquire_context);
     return rollback_rc != LC_OK ? rollback_rc : rc;
   }
-  memset(&participant, 0, sizeof(participant));
-  lc_txn_decision_req_init(&transaction_request);
-  memset(&transaction_result, 0, sizeof(transaction_result));
-  participant.namespace_name = namespace_name;
-  participant.key = effective_request.key;
-  transaction_request.txn_id = effective_request.txn_id;
-  transaction_request.participants = &participant;
-  transaction_request.participant_count = 1U;
-  transaction_request.expires_at_unix = acquire_context.lease_expires_at_unix;
-  rc =
-      self->txn_prepare(self, &transaction_request, &transaction_result, error);
-  lc_txn_decision_res_cleanup(&transaction_result);
-  if (rc != LC_OK) {
-    int rollback_rc;
+  if (txn_explicit) {
+    memset(&participant, 0, sizeof(participant));
+    lc_txn_decision_req_init(&transaction_request);
+    memset(&transaction_result, 0, sizeof(transaction_result));
+    participant.namespace_name = namespace_name;
+    participant.key = effective_request.key;
+    transaction_request.txn_id = effective_request.txn_id;
+    transaction_request.participants = &participant;
+    transaction_request.participant_count = 1U;
+    transaction_request.expires_at_unix = acquire_context.lease_expires_at_unix;
+    rc = self->txn_prepare(self, &transaction_request, &transaction_result,
+                           error);
+    lc_txn_decision_res_cleanup(&transaction_result);
+    if (rc != LC_OK) {
+      int rollback_rc;
 
-    rollback_rc =
-        lc_pouch_rollback_acquire_claim_after_failure(&acquire_context, error);
-    lc_pouch_acquire_context_cleanup(&acquire_context);
-    return rollback_rc != LC_OK ? rollback_rc : rc;
+      rollback_rc = lc_pouch_rollback_acquire_claim_after_failure(
+          &acquire_context, error);
+      lc_pouch_acquire_context_cleanup(&acquire_context);
+      return rollback_rc != LC_OK ? rollback_rc : rc;
+    }
   }
 #ifdef LOCKDC_TEST_BUILD
   if (lc_pouch_test_after_acquire_claim_hook != NULL) {
@@ -11977,6 +11985,7 @@ int lc_pouch_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   }
   lc_pouch_lease_refresh_expiration((lc_lease_handle *)lease,
                                     acquire_context.lease_expires_at_unix);
+  ((lc_lease_handle *)lease)->pouch_txn_explicit = txn_explicit;
   lc_pouch_lease_refresh_query_metadata((lc_lease_handle *)lease,
                                         acquire_context.has_query_hidden,
                                         acquire_context.query_hidden);
@@ -12947,8 +12956,8 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
                                    lc_release_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_pouch_release_context release_context;
-  lc_txn_replay_req replay_request;
-  lc_txn_replay_res replay_result;
+  lc_txn_decision_req decision_request;
+  lc_txn_decision_res decision_result;
   const char *namespace_name = NULL;
   int rc;
 
@@ -12967,12 +12976,26 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
                         "pouch release requires lease_id", NULL, NULL, NULL);
   }
   memset(&release_context, 0, sizeof(release_context));
-  lc_txn_replay_req_init(&replay_request);
-  memset(&replay_result, 0, sizeof(replay_result));
+  lc_txn_decision_req_init(&decision_request);
+  memset(&decision_result, 0, sizeof(decision_result));
   rc = lc_pouch_client_public_namespace(client, req->lease.namespace_name,
                                         &namespace_name, error);
   if (rc != LC_OK) {
     return rc;
+  }
+  if (lc_pouch_txn_id_present(req->lease.txn_id)) {
+    decision_request.txn_id = req->lease.txn_id;
+    rc = req->rollback ? self->txn_rollback(self, &decision_request,
+                                            &decision_result, error)
+                       : self->txn_commit(self, &decision_request,
+                                          &decision_result, error);
+    lc_txn_decision_res_cleanup(&decision_result);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    memset(out, 0, sizeof(*out));
+    out->released = 1;
+    return LC_OK;
   }
   release_context.client = client;
   release_context.req = req;
@@ -12985,14 +13008,6 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
                                       &release_context.write_result);
   if (rc != LC_OK) {
     return rc;
-  }
-  if (release_context.txn_decision_ready) {
-    replay_request.txn_id = req->lease.txn_id;
-    rc = self->txn_replay(self, &replay_request, &replay_result, error);
-    lc_txn_replay_res_cleanup(&replay_result);
-    if (rc != LC_OK) {
-      return rc;
-    }
   }
   lc_pouch_indexer_note_operation_complete(
       client->pouch, namespace_name, req->lease.key,
@@ -18906,6 +18921,19 @@ int lc_pouch_lease_release_method(lc_lease *self, const lc_release_req *req,
                         "pouch lease release requires self", NULL, NULL, NULL);
   }
   lease = (lc_lease_handle *)self;
+  if (lease->pouch_state_key == NULL && !lease->pouch_txn_explicit &&
+      lc_pouch_txn_id_present(lease->txn_id)) {
+    rc = lc_pouch_txn_apply_state_participant(
+        lease->client, lease->namespace_name, lease->key, lease->txn_id,
+        req != NULL && req->rollback ? "rollback" : "commit", error);
+    if (rc == LC_OK) {
+      lc_pouch_indexer_note_operation_complete(lease->client->pouch,
+                                               lease->namespace_name,
+                                               lease->key, lease->txn_id);
+      self->close(self);
+    }
+    return rc;
+  }
   if (lease->pouch_state_key != NULL) {
     memset(&write_result, 0, sizeof(write_result));
     lc_lease_ref_init(&ref);
