@@ -14626,11 +14626,10 @@ static int lc_pouch_state_promote_staged_locked(
   committed_record_type = staged.record_type == LC_POUCH_STATE_RECORD_STATE_META
                               ? LC_POUCH_STATE_RECORD_STATE_META
                               : LC_POUCH_STATE_RECORD_STATE_LINK;
-  version = committed_record_type == LC_POUCH_STATE_RECORD_STATE_META
-                ? (committed.found && committed.payload_span.present
-                       ? committed.version
-                       : 0UL)
-                : staged.version;
+  /* A staged metadata record may overlay a staged payload. Its version is
+   * therefore the transaction's logical version, not the previously
+   * committed document version. */
+  version = staged.version;
   updated_at_unix = lc_pouch_maintenance_now_seconds();
   decision_version = staged.version + 1UL;
   discard_version = decision_version + 1UL;
@@ -14852,11 +14851,10 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   committed_record_type = staged.record_type == LC_POUCH_STATE_RECORD_STATE_META
                               ? LC_POUCH_STATE_RECORD_STATE_META
                               : LC_POUCH_STATE_RECORD_STATE_LINK;
-  version = committed_record_type == LC_POUCH_STATE_RECORD_STATE_META
-                ? (committed.found && committed.payload_span.present
-                       ? committed.version
-                       : 0UL)
-                : staged.version;
+  /* A staged metadata record may overlay a staged payload. Its version is
+   * therefore the transaction's logical version, not the previously
+   * committed document version. */
+  version = staged.version;
   updated_at_unix = lc_pouch_maintenance_now_seconds();
   decision_version = staged.version + 1UL;
   discard_version = decision_version + 1UL;

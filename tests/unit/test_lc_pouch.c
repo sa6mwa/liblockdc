@@ -9858,6 +9858,8 @@ test_transaction_metadata_stays_staged_until_rollback(void **state) {
   lc_client *client;
   lc_client_handle *handle;
   lc_lease *lease;
+  lc_source *source;
+  lc_update_req update_req;
   lc_update_res update_res;
   lc_metadata_op metadata_op;
   lc_metadata_res metadata_res;
@@ -9873,6 +9875,8 @@ test_transaction_metadata_stays_staged_until_rollback(void **state) {
   (void)state;
   client = NULL;
   lease = NULL;
+  source = NULL;
+  lc_update_req_init(&update_req);
   memset(&update_res, 0, sizeof(update_res));
   lc_metadata_op_init(&metadata_op);
   memset(&metadata_res, 0, sizeof(metadata_res));
@@ -9890,6 +9894,7 @@ test_transaction_metadata_stays_staged_until_rollback(void **state) {
   write_client_state(client, "doc/transaction-metadata",
                      "{\"kind\":\"visible\"}", NULL, 0L, 0, &update_res,
                      &error);
+  assert_int_equal(update_res.new_version, 1L);
   lc_update_res_cleanup(&update_res);
 
   acquire_req.key = "doc/transaction-metadata";
@@ -9946,6 +9951,16 @@ test_transaction_metadata_stays_staged_until_rollback(void **state) {
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(lease);
+  pouch_copy_lease_ref(&update_req.lease, lease);
+  rc = lc_source_from_memory("{\"kind\":\"updated\"}",
+                             strlen("{\"kind\":\"updated\"}"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(update_res.new_version, 2L);
+  lc_update_res_cleanup(&update_res);
   lc_metadata_op_init(&metadata_op);
   pouch_copy_lease_ref(&metadata_op.lease, lease);
   metadata_op.has_query_hidden = 1;
@@ -9967,7 +9982,7 @@ test_transaction_metadata_stays_staged_until_rollback(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.has_query_hidden);
   assert_true(read_result.query_hidden);
-  assert_int_equal(read_result.version, 1UL);
+  assert_int_equal(read_result.version, 2UL);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
 
   lc_lease_close(lease);
@@ -24996,6 +25011,105 @@ static void test_lease_metadata_persists_query_hidden(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_minted_lease_metadata_finalization_preserves_staged_version(void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_lease *retry_lease;
+  lc_source *source;
+  lc_acquire_req acquire_req;
+  lc_metadata_req metadata_req;
+  lc_describe_req describe_req;
+  lc_describe_res describe_res;
+  lc_update_req update_req;
+  lc_update_res update_res;
+  lc_release_req release_req;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  retry_lease = NULL;
+  source = NULL;
+  lc_acquire_req_init(&acquire_req);
+  lc_metadata_req_init(&metadata_req);
+  lc_describe_req_init(&describe_req);
+  memset(&describe_res, 0, sizeof(describe_res));
+  lc_update_req_init(&update_req);
+  memset(&update_res, 0, sizeof(update_res));
+  lc_release_req_init(&release_req);
+  lc_error_init(&error);
+  make_root("minted-metadata-staged-version", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/minted-metadata-version/%ld",
+           (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  acquire_req.key = key;
+  acquire_req.owner = "pouch-minted-metadata-version";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
+  rc = lc_source_from_memory("{\"value\":31}", strlen("{\"value\":31}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 1;
+  rc = lease->metadata(lease, &metadata_req, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 1L);
+  rc = lease->release(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  describe_req.key = key;
+  rc = client->describe(client, &describe_req, &describe_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(describe_res.version, 1L);
+  assert_sha256_text_etag(describe_res.state_etag, "{\"value\":31}");
+  assert_true(describe_res.has_query_hidden);
+  assert_true(describe_res.query_hidden);
+  lc_describe_res_cleanup(&describe_res);
+
+  lc_acquire_req_init(&acquire_req);
+  acquire_req.key = key;
+  acquire_req.owner = "pouch-minted-metadata-version-retry";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &retry_lease, &error);
+  assert_int_equal(rc, LC_OK);
+  pouch_copy_lease_ref(&update_req.lease, retry_lease);
+  update_req.has_if_version = 1;
+  update_req.if_version = 0L;
+  rc = lc_source_from_memory("{\"value\":32}", strlen("{\"value\":32}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->update(client, &update_req, source, &update_res, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_update_res_cleanup(&update_res);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  release_req.rollback = 1;
+  rc = retry_lease->release(retry_lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  retry_lease = NULL;
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_client_metadata_enforces_version_precondition(void **state) {
   lc_client *client;
   lc_lease *lease;
@@ -31835,6 +31949,8 @@ int main(int argc, char **argv) {
           test_transaction_bound_remove_then_mutate_recreates_logical_value),
       cmocka_unit_test(test_txn_decision_skips_newer_state_lease),
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
+      cmocka_unit_test(
+          test_minted_lease_metadata_finalization_preserves_staged_version),
       cmocka_unit_test(test_client_metadata_enforces_version_precondition),
       cmocka_unit_test(test_query_keys_scan_uses_liblql_and_query_hidden),
       cmocka_unit_test(test_query_keys_callback_can_reenter_pouch_public_api),

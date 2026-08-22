@@ -936,6 +936,71 @@ static void test_disk_server_explicit_xa_enlists_on_acquire(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_disk_server_metadata_finalization_preserves_staged_version(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_lease *lease;
+  lc_acquire_req acquire_req;
+  lc_metadata_req metadata_req;
+  lc_get_opts get_opts;
+  lc_get_res get_res;
+  lc_sink *sink;
+  lc_error error;
+  char key[96];
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+
+  client = NULL;
+  lease = NULL;
+  sink = NULL;
+  lc_acquire_req_init(&acquire_req);
+  lc_metadata_req_init(&metadata_req);
+  lc_get_opts_init(&get_opts);
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  make_unique_name("disk-metadata-staged-version", key, sizeof(key));
+  acquire_req.key = key;
+  acquire_req.owner = "lc-e2e-metadata-staged-version";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease);
+  save_json_text_or_die(lease, "{\"value\":31}", &error);
+  assert_int_equal(lease->version, 1L);
+
+  metadata_req.has_query_hidden = 1;
+  metadata_req.query_hidden = 1;
+  rc = lease->metadata(lease, &metadata_req, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(lease->version, 1L);
+  rc = lease->release(lease, NULL, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  get_opts.public_read = 1;
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = client->get(client, key, &get_opts, sink, &get_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_false(get_res.no_content);
+  assert_int_equal(get_res.version, 1L);
+  lc_sink_close(sink);
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
 static void test_disk_acquire_for_update_roundtrip(void **state) {
   const char *endpoint;
   const char *bundle_path;
@@ -4509,6 +4574,8 @@ int main(void) {
       cmocka_unit_test(test_disk_lease_state_roundtrip),
       cmocka_unit_test(test_disk_server_minted_multikey_xa_transaction),
       cmocka_unit_test(test_disk_server_explicit_xa_enlists_on_acquire),
+      cmocka_unit_test(
+          test_disk_server_metadata_finalization_preserves_staged_version),
       cmocka_unit_test(test_disk_acquire_for_update_roundtrip),
       cmocka_unit_test(test_disk_acquire_for_update_handler_error_rolls_back),
       cmocka_unit_test(test_disk_acquire_if_not_exists_conflict),
