@@ -75,7 +75,6 @@ struct lc_lease_handle {
   char *state_etag;
   char *queue_state_etag;
   char *pouch_state_key;
-  int pouch_txn_explicit;
   int pouch_stage_active;
   int pouch_stage_dirty;
   char *pouch_stage_etag;
