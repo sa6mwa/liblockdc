@@ -271,6 +271,27 @@ memory queue.
 The outbox record must be committed before notification. A process failure
 between those actions is safe because recovery discovers the durable key later.
 
+### Thread-isolation and shutdown constraints
+
+The dispatcher thread is a liblockdc coordination thread only. It must not
+invoke caller-owned C callbacks, Lua, Kore, or any other host-runtime code.
+The only handoff to host execution is an owned job returned from `next()`;
+there is no callback registration API. This keeps thread affinity, runtime
+lifetime, and host scheduling under the application's control.
+
+The dispatcher owns its client/session and its thread lifecycle. Callers must
+not rely on a dispatcher-owned client, lease, payload reader, or thread being
+usable from another process or as a host-runtime execution context. A job
+returned from `next()` is the explicit owned boundary for a host worker.
+
+`stop()` prevents new claims, stops accepting direct notifications as work, and
+wakes blocked `next()` callers. It does not manufacture completion, retry, or
+dead-letter transitions for jobs already handed to host workers. `wait()` joins
+the dispatcher within its timeout; it does not run or forcibly terminate host
+work. The application gives its workers a bounded shutdown grace period. A job
+that remains unfinished is left claimed until its lease expires and is then
+recovered by the normal durable recovery path.
+
 ### Claim and terminal transitions
 
 ```text
@@ -405,6 +426,12 @@ Pouch and a remote lockd endpoint.
     payload size does not change discovery cost.
 12. Stop/wait behavior leaves incomplete claims for later expiry recovery and
     never manufactures completion.
+13. The dispatcher never invokes host callbacks or host-runtime code on its
+    thread; a host worker receives work only through `next()` and owns its
+    execution context.
+14. Shutdown stops new claims, wakes blocked `next()` callers, joins the
+    dispatcher within the configured deadline, and permits an active host job
+    to recover through lease expiry after its grace period.
 
 ## Proof Obligations and Open Decisions
 
