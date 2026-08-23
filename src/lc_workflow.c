@@ -14,6 +14,14 @@ struct lc_workflow_handle {
   char *namespace_name;
   char *owner;
   long transaction_ttl_seconds;
+  pthread_mutex_t notification_mutex;
+  pthread_cond_t notification_cond;
+  char **notifications;
+  size_t notification_count;
+  size_t notification_capacity;
+  int notification_mutex_initialized;
+  int notification_cond_initialized;
+  int closed;
 };
 
 struct lc_workflow_transaction_handle {
@@ -30,6 +38,21 @@ struct lc_workflow_participant_handle {
   lc_workflow_transaction_handle *transaction;
   lc_lease *lease;
 };
+
+static void lc_workflow_notify(lc_workflow_handle *workflow, const char *key) {
+  char *copy;
+  if (workflow == NULL || key == NULL || strncmp(key, "__lockdc_io/v1/outbox/", sizeof("__lockdc_io/v1/outbox/") - 1U) != 0) return;
+  copy = lc_client_strdup(workflow->client, key);
+  if (copy == NULL) return;
+  pthread_mutex_lock(&workflow->notification_mutex);
+  if (!workflow->closed && workflow->notification_count < workflow->notification_capacity) {
+    workflow->notifications[workflow->notification_count++] = copy;
+    pthread_cond_signal(&workflow->notification_cond);
+    copy = NULL;
+  }
+  pthread_mutex_unlock(&workflow->notification_mutex);
+  lc_client_free(workflow->client, copy);
+}
 
 static int lc_workflow_transaction_add_lease(
     lc_workflow_transaction_handle *transaction, lc_lease *lease,
@@ -367,9 +390,15 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
   if (transaction == NULL || transaction->terminal) return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow transaction is closed", NULL, NULL, NULL);
   lc_release_req_init(&request); request.rollback = rollback;
   for (i = 0U; i < transaction->lease_count; ++i) {
+    char *notification_key;
     if (transaction->leases[i] == NULL) continue;
+    notification_key = NULL;
+    if (!rollback) notification_key = lc_client_strdup(transaction->workflow->client,
+                                                        transaction->leases[i]->key);
     rc = lc_lease_release(transaction->leases[i], &request, error);
-    if (rc != LC_OK) return rc;
+    if (rc != LC_OK) { lc_client_free(transaction->workflow->client, notification_key); return rc; }
+    lc_workflow_notify(transaction->workflow, notification_key);
+    lc_client_free(transaction->workflow->client, notification_key);
     transaction->leases[i] = NULL;
   }
   transaction->terminal = 1;
@@ -444,8 +473,19 @@ static int lc_workflow_next_method(lc_workflow *self, long timeout_ms, lc_outbox
 static void lc_workflow_close_method(lc_workflow *self) {
   lc_workflow_handle *workflow = (lc_workflow_handle *)self;
   lc_client_handle *client;
+  size_t i;
   if (workflow == NULL) return;
   client = workflow->client;
+  if (workflow->notification_mutex_initialized) {
+    pthread_mutex_lock(&workflow->notification_mutex);
+    workflow->closed = 1;
+    if (workflow->notification_cond_initialized) pthread_cond_broadcast(&workflow->notification_cond);
+    pthread_mutex_unlock(&workflow->notification_mutex);
+  }
+  for (i = 0U; i < workflow->notification_count; ++i) lc_client_free(client, workflow->notifications[i]);
+  lc_client_free(client, workflow->notifications);
+  if (workflow->notification_cond_initialized) pthread_cond_destroy(&workflow->notification_cond);
+  if (workflow->notification_mutex_initialized) pthread_mutex_destroy(&workflow->notification_mutex);
   lc_client_free(client, workflow->namespace_name);
   lc_client_free(client, workflow->owner);
   lc_client_free(client, workflow);
@@ -472,6 +512,12 @@ int lc_client_new_workflow_method(lc_client *self,
   if (workflow->namespace_name == NULL || workflow->owner == NULL) { lc_workflow_close_method(&workflow->pub); return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to copy workflow configuration", NULL, NULL, NULL); }
   workflow->transaction_ttl_seconds = config->transaction_ttl_seconds == 0L ? 30L : config->transaction_ttl_seconds;
   if (workflow->transaction_ttl_seconds < 1L) { lc_workflow_close_method(&workflow->pub); return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow transaction ttl must be positive", NULL, NULL, NULL); }
+  workflow->notification_capacity = config->notification_capacity == 0U ? 1024U : config->notification_capacity;
+  workflow->notifications = (char **)lc_client_calloc(client, workflow->notification_capacity, sizeof(*workflow->notifications));
+  if (workflow->notifications == NULL || pthread_mutex_init(&workflow->notification_mutex, NULL) != 0) { lc_workflow_close_method(&workflow->pub); return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to initialize workflow dispatcher state", NULL, NULL, NULL); }
+  workflow->notification_mutex_initialized = 1;
+  if (pthread_cond_init(&workflow->notification_cond, NULL) != 0) { lc_workflow_close_method(&workflow->pub); return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to initialize workflow dispatcher state", NULL, NULL, NULL); }
+  workflow->notification_cond_initialized = 1;
   workflow->pub.append_outbox = lc_workflow_append_outbox_method;
   workflow->pub.accept_inbox = lc_workflow_accept_inbox_method;
   workflow->pub.next = lc_workflow_next_method;
