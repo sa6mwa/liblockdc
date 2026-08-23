@@ -443,13 +443,15 @@ digest must match the stored digest. A mismatch is a conflict.
 
 ## Dispatcher
 
-The dispatcher is private to `lc_workflow`: it owns its backend client/session
-and coordination thread, but never runs user code. The host calls the parent
-receiver's `workflow->next(timeout_ms, &job, error)`, receives an owned claimed
-job, performs the foreign effect, and calls the job's `complete()`, `retry()`,
-or `dead_letter()` operation. Dispatcher configuration belongs to the workflow
-configuration; there is no public dispatcher handle, start, stop, or signal
-surface.
+The dispatcher is private to `lc_workflow`: it owns a remote client clone or a
+retained Pouch-session reference and its coordination thread, but never runs
+user code. A Pouch workflow deliberately shares its one local session with the
+parent workflow so default exclusive-root ownership remains valid. The host
+calls the parent receiver's `workflow->next(timeout_ms, &job, error)`, receives
+an owned claimed job, performs the foreign effect, and calls the job's
+`complete()`, `retry()`, or `dead_letter()` operation. Dispatcher
+configuration belongs to the workflow configuration; there is no public
+dispatcher handle, start, stop, or signal surface.
 
 ### Direct-key fast path
 
@@ -457,10 +459,12 @@ After an outbox transaction commits, liblockdc internally passes the exact
 outbox key to its dispatcher. The dispatcher attempts to acquire that key
 directly and does not perform a namespace query.
 
-The in-memory notification path is bounded. It may coalesce duplicate keys. If
-it cannot retain another notification, it records a recovery-needed condition
-and wakes the dispatcher; it never makes durable work depend on an unbounded
-memory queue.
+The in-memory notification path and preclaimed-job handoff are bounded by
+`notification_capacity`. The dispatcher stops claiming when the host handoff
+is full and resumes when `next()` consumes a job. It may coalesce duplicate
+keys. If it cannot retain another notification, it records a recovery-needed
+condition and wakes the dispatcher; it never makes durable work depend on an
+unbounded memory queue.
 
 The outbox record must be committed before notification. A process failure
 between those actions is safe because recovery discovers the durable key later.
@@ -474,18 +478,22 @@ The only handoff to host execution is an owned job returned from
 affinity, runtime lifetime, and host scheduling under the application's
 control.
 
-The dispatcher owns its client/session and its thread lifecycle. Callers must
-not rely on its client, lease, payload-transfer handle, or thread being usable from
-another process or as a host-runtime execution context. A job returned from
-`workflow->next()` is the explicit owned boundary for a host worker.
+The dispatcher owns its remote client clone or retained Pouch-session reference
+and its thread lifecycle. Callers must not rely on its client, lease,
+payload-transfer handle, or thread being usable from another process or as a
+host-runtime execution context. A job returned from `workflow->next()` is the
+explicit owned boundary for a host worker.
 
 `workflow->close()` prevents new claims and notifications, wakes blocked
-`next()` callers, and joins the private dispatcher within the configured
-shutdown bound. It does not manufacture completion, retry, or dead-letter
-transitions for jobs already handed to host workers, run host work, or forcibly
-terminate it. The application gives its workers a bounded shutdown grace
-period. A job that remains unfinished is left claimed until its lease expires
-and is then recovered by the normal durable recovery path.
+`next()` callers, cancels a remote dispatcher request, and joins the private
+dispatcher. `shutdown_timeout_ms` bounds each remote dispatcher request; zero
+inherits an explicit root-client timeout or defaults to 30 seconds. Close never
+abandons a live thread. It does not
+manufacture completion, retry, or dead-letter transitions for jobs already
+handed to host workers, run host work, or forcibly terminate it. The
+application gives its workers a bounded shutdown grace period. A job that
+remains unfinished is left claimed until its lease expires and is then
+recovered by the normal durable recovery path.
 
 ### Claim and terminal transitions
 
@@ -578,7 +586,7 @@ Configuration must bound:
 
 - operation, effect, source, consumer, kind, destination, and header sizes;
 - attachment size when the application requests a maximum;
-- dispatcher notification capacity and host-job capacity;
+- dispatcher notification and preclaimed-job capacity;
 - claim TTL, renewal cadence, retry delay, and maximum attempts; and
 - retained diagnostics and dead-letter retention.
 
@@ -595,6 +603,7 @@ retry_multiplier          2
 retry_max_delay           15 minutes
 retry_jitter              full jitter
 host_retry_delay_max      1 hour
+shutdown_timeout_ms       30 seconds per dispatcher request
 ```
 
 The calculated retry delay is exponentially increased to the cap and sampled

@@ -101,6 +101,7 @@ LONEJSON_MAP_DEFINE(lc_workflow_inbox_record_map, lc_workflow_inbox_record,
 struct lc_workflow_handle {
   lc_workflow pub;
   lc_client_handle *client;
+  lc_client_handle *dispatcher_client;
   char *namespace_name;
   char *owner;
   long transaction_ttl_seconds;
@@ -109,6 +110,7 @@ struct lc_workflow_handle {
   long retry_initial_delay_seconds;
   long retry_max_delay_seconds;
   long host_retry_delay_max_seconds;
+  long shutdown_timeout_ms;
   int max_attempts;
   pthread_mutex_t notification_mutex;
   pthread_cond_t notification_cond;
@@ -131,6 +133,16 @@ struct lc_workflow_handle {
   int close_requested;
   size_t ref_count;
 };
+
+static int lc_workflow_dispatcher_cancel_check(void *context) {
+  lc_workflow_handle *workflow = (lc_workflow_handle *)context;
+  int closed;
+
+  pthread_mutex_lock(&workflow->notification_mutex);
+  closed = workflow->closed;
+  pthread_mutex_unlock(&workflow->notification_mutex);
+  return closed;
+}
 
 struct lc_workflow_transaction_handle {
   lc_workflow_transaction pub;
@@ -754,9 +766,21 @@ static int lc_outbox_job_dead_letter_method(lc_outbox_job *self,
   return lc_outbox_job_terminal(self, "dead_letter", 0L, diagnostic, error);
 }
 
+/* A successful release consumes the lease. If the endpoint cannot accept the
+ * rollback, this internal path still owns the local handle and must close it. */
+static void lc_workflow_rollback_lease(lc_lease *lease) {
+  lc_release_req release;
+
+  if (lease == NULL) return;
+  lc_release_req_init(&release);
+  release.rollback = 1;
+  if (lc_lease_release(lease, &release, NULL) != LC_OK) lease->close(lease);
+}
+
 static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
                                     const char *key, lc_outbox_job **out,
                                     lc_error *error) {
+  lc_client_handle *client = workflow->dispatcher_client;
   lc_acquire_req acquire;
   lc_lease *lease;
   lc_workflow_outbox_record record;
@@ -773,7 +797,7 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   acquire.owner = workflow->owner;
   acquire.ttl_seconds = workflow->claim_ttl_seconds;
   lease = NULL;
-  rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error);
+  rc = lc_acquire(&client->pub, &acquire, &lease, error);
   if (rc != LC_OK) return rc;
   memset(&record, 0, sizeof(record));
   memset(&result, 0, sizeof(result));
@@ -804,7 +828,7 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
     if (rc == LC_OK) record.attempt_count = claimed.attempt_count;
   }
   if (rc == LC_OK) {
-    job = (lc_outbox_job_handle *)lc_client_calloc(workflow->client, 1U,
+    job = (lc_outbox_job_handle *)lc_client_calloc(client, 1U,
                                                     sizeof(*job));
     if (job == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -813,34 +837,28 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   } else {
     job = NULL;
   }
-  if (rc == LC_OK) rc = lc_workflow_outbox_record_copy(workflow->client,
+  if (rc == LC_OK) rc = lc_workflow_outbox_record_copy(client,
                                                          &job->record, &record,
                                                          error);
   runtime->cleanup(runtime, &lc_workflow_outbox_record_map, &record);
   lc_get_res_cleanup(&result);
   if (rc != LC_OK) {
-    lc_release_req release;
-    lc_release_req_init(&release);
-    release.rollback = 1;
-    (void)lc_lease_release(lease, &release, NULL);
-    if (job != NULL) lc_client_free(workflow->client, job);
+    lc_workflow_rollback_lease(lease);
+    if (job != NULL) lc_client_free(client, job);
     return rc;
   }
-  lc_client_handle_retain(workflow->client);
-  job->client = workflow->client;
+  lc_client_handle_retain(client);
+  job->client = client;
   job->workflow = workflow;
   lc_workflow_retain(workflow);
   job->lease = lease;
-  job->outbox_key = lc_client_strdup(workflow->client, lease->key);
+  job->outbox_key = lc_client_strdup(client, lease->key);
   if (job->outbox_key == NULL) {
-    lc_release_req release;
-    lc_release_req_init(&release);
-    release.rollback = 1;
-    (void)lc_lease_release(lease, &release, NULL);
+    lc_workflow_rollback_lease(lease);
     lc_workflow_release(workflow);
-    lc_workflow_outbox_record_clear(workflow->client, &job->record);
-    lc_client_free(workflow->client, job);
-    lc_client_close(&workflow->client->pub);
+    lc_workflow_outbox_record_clear(client, &job->record);
+    lc_client_free(client, job);
+    lc_client_close(&client->pub);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to copy outbox job key", NULL, NULL, NULL);
   }
@@ -923,7 +941,7 @@ static int lc_workflow_reconcile(lc_workflow_handle *workflow,
   if (workflow->recovery_cursor == NULL) {
     flush_request.namespace_name = workflow->namespace_name;
     flush_request.mode = "wait";
-    rc = lc_flush_index(&workflow->client->pub, &flush_request, &flush_result,
+    rc = lc_flush_index(&workflow->dispatcher_client->pub, &flush_request, &flush_result,
                         error);
     lc_index_flush_res_cleanup(&flush_result);
     if (rc != LC_OK) return rc;
@@ -934,7 +952,7 @@ static int lc_workflow_reconcile(lc_workflow_handle *workflow,
   request.cursor = workflow->recovery_cursor;
   request.engine = "index";
   request.refresh = "wait_for";
-  rc = lc_query_keys(&workflow->client->pub, &request, &handler, &capture,
+  rc = lc_query_keys(&workflow->dispatcher_client->pub, &request, &handler, &capture,
                      &result, error);
   if (rc != LC_OK) {
     lc_query_res_cleanup(&result);
@@ -1385,9 +1403,9 @@ static int lc_workflow_append_outbox_method(lc_workflow *self, const lc_outbox_e
   lease = NULL; rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error);
   if (rc != LC_OK) { if (error != NULL) { lc_error_cleanup(error); lc_error_init(error); } rc = lc_workflow_existing_outbox(workflow, key, entry, receipt, error); free(key); return rc; }
   rc = lc_workflow_stage_outbox(lease, entry, payload, error);
-  if (rc != LC_OK) { lc_release_req rollback; lc_release_req_init(&rollback); rollback.rollback = 1; (void)lc_lease_release(lease, &rollback, NULL); free(key); return rc; }
+  if (rc != LC_OK) { lc_workflow_rollback_lease(lease); free(key); return rc; }
   transaction = lc_workflow_transaction_new(workflow, lease, error);
-  if (transaction == NULL) { lc_lease_close(lease); free(key); return error != NULL ? error->code : LC_ERR_NOMEM; }
+  if (transaction == NULL) { lc_workflow_rollback_lease(lease); free(key); return error != NULL ? error->code : LC_ERR_NOMEM; }
   receipt->outbox_key = key; receipt->effect_key = lc_strdup_local(entry->effect_key);
   if (receipt->effect_key == NULL) { transaction->close(transaction); lc_outbox_receipt_cleanup(receipt); return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to allocate outbox receipt", NULL, NULL, NULL); }
   *out_txn = transaction; return LC_OK;
@@ -1408,9 +1426,9 @@ static int lc_workflow_accept_inbox_method(lc_workflow *self, const lc_inbox_mes
   if (rc != LC_OK) { if (error != NULL) { lc_error_cleanup(error); lc_error_init(error); } rc = lc_workflow_existing_inbox(workflow, key, message, result, error); free(key); return rc; }
   free(key);
   rc = lc_workflow_stage_inbox(lease, message, error);
-  if (rc != LC_OK) { lc_release_req rollback; lc_release_req_init(&rollback); rollback.rollback = 1; (void)lc_lease_release(lease, &rollback, NULL); return rc; }
+  if (rc != LC_OK) { lc_workflow_rollback_lease(lease); return rc; }
   transaction = lc_workflow_transaction_new(workflow, lease, error);
-  if (transaction == NULL) { lc_lease_close(lease); return error != NULL ? error->code : LC_ERR_NOMEM; }
+  if (transaction == NULL) { lc_workflow_rollback_lease(lease); return error != NULL ? error->code : LC_ERR_NOMEM; }
   result->accepted = 1; *out_txn = transaction; return LC_OK;
 }
 static int lc_workflow_next_method(lc_workflow *self, long timeout_ms, lc_outbox_job **out, lc_error *error) {
@@ -1437,6 +1455,9 @@ static void lc_workflow_destroy(lc_workflow_handle *workflow) {
   if (workflow->notification_mutex_initialized) pthread_mutex_destroy(&workflow->notification_mutex);
   lc_client_free(client, workflow->namespace_name);
   lc_client_free(client, workflow->owner);
+  if (workflow->dispatcher_client != NULL) {
+    lc_client_close(&workflow->dispatcher_client->pub);
+  }
   lc_client_free(client, workflow);
   lc_client_close(&client->pub);
 }
@@ -1494,6 +1515,7 @@ int lc_client_new_workflow_method(lc_client *self,
                                   lc_workflow **out, lc_error *error) {
   lc_client_handle *client;
   lc_workflow_handle *workflow;
+  int rc;
   if (self == NULL || config == NULL || out == NULL ||
       config->namespace_name == NULL || config->namespace_name[0] == '\0')
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -1521,12 +1543,17 @@ int lc_client_new_workflow_method(lc_client *self,
       config->host_retry_delay_max_seconds == 0L
           ? 3600L
           : config->host_retry_delay_max_seconds;
+  workflow->shutdown_timeout_ms =
+      config->shutdown_timeout_ms == 0L
+          ? (client->timeout_ms > 0L ? client->timeout_ms : 30000L)
+          : config->shutdown_timeout_ms;
   workflow->recovery_interval_seconds = config->recovery_interval_seconds;
   if (workflow->recovery_interval_seconds == 0L && !client->is_pouch) workflow->recovery_interval_seconds = 300L;
   if (workflow->claim_ttl_seconds < 1L || workflow->max_attempts < 1 ||
       workflow->retry_initial_delay_seconds < 1L ||
       workflow->retry_max_delay_seconds < workflow->retry_initial_delay_seconds ||
       workflow->host_retry_delay_max_seconds < 1L ||
+      workflow->shutdown_timeout_ms < 1L ||
       workflow->recovery_interval_seconds < 0L) { lc_workflow_close_method(&workflow->pub); return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow claim, retry, and recovery configuration is invalid", NULL, NULL, NULL); }
   workflow->notification_capacity = config->notification_capacity == 0U ? 1024U : config->notification_capacity;
   workflow->notifications = (char **)lc_client_calloc(client, workflow->notification_capacity, sizeof(*workflow->notifications));
@@ -1538,6 +1565,22 @@ int lc_client_new_workflow_method(lc_client *self,
   workflow->ref_count = 1U;
   if (pthread_cond_init(&workflow->notification_cond, NULL) != 0) { lc_workflow_close_method(&workflow->pub); return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to initialize workflow dispatcher state", NULL, NULL, NULL); }
   workflow->notification_cond_initialized = 1;
+  if (client->is_pouch) {
+    lc_client_handle_retain(client);
+    workflow->dispatcher_client = client;
+  } else {
+    lc_client *dispatcher_client = NULL;
+    rc = lc_client_clone_remote(client, workflow->shutdown_timeout_ms,
+                                &dispatcher_client, error);
+    if (rc != LC_OK) {
+      lc_workflow_close_method(&workflow->pub);
+      return rc;
+    }
+    workflow->dispatcher_client = (lc_client_handle *)dispatcher_client;
+    lc_engine_client_set_cancel_check(workflow->dispatcher_client->engine,
+                                      lc_workflow_dispatcher_cancel_check,
+                                      workflow);
+  }
   workflow->recovery_needed = 1;
   if (workflow->recovery_interval_seconds > 0L) {
     workflow->next_recovery_unix = (lc_unix_seconds)time(NULL) +

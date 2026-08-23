@@ -98,6 +98,21 @@ static size_t lc_engine_json_http_write_callback(char *contents, size_t size,
 static int lc_engine_json_http_init_parser(lc_engine_json_http_state *state);
 static void lc_engine_json_http_state_cleanup(lc_engine_json_http_state *state);
 
+static int lc_engine_transport_cancel_requested(lc_engine_client *client) {
+  return client != NULL && client->cancel_check != NULL &&
+         client->cancel_check(client->cancel_context);
+}
+
+static int lc_engine_transport_progress(void *client_ptr, curl_off_t dltotal,
+                                        curl_off_t dlnow, curl_off_t ultotal,
+                                        curl_off_t ulnow) {
+  (void)dltotal;
+  (void)dlnow;
+  (void)ultotal;
+  (void)ulnow;
+  return lc_engine_transport_cancel_requested((lc_engine_client *)client_ptr);
+}
+
 const char *lc_engine_version_string(void) { return LC_ENGINE_VERSION_STRING; }
 
 void lc_engine_client_config_init(lc_engine_client_config *config) {
@@ -890,6 +905,10 @@ int lc_engine_http_json_request(
                      client->prefer_http_2 ? CURL_HTTP_VERSION_2TLS
                                            : CURL_HTTP_VERSION_1_1);
     curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(easy, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(easy, CURLOPT_XFERINFOFUNCTION,
+                     lc_engine_transport_progress);
+    curl_easy_setopt(easy, CURLOPT_XFERINFODATA, client);
     curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,
                      client->timeout_ms > 0L ? client->timeout_ms : 30000L);
     if (client->unix_socket_path != NULL &&
@@ -960,7 +979,12 @@ int lc_engine_http_json_request(
       error_fields[4] = lc_log_u64_field("total", client->endpoint_count);
       error_fields[5] = lc_log_str_field("error", error_text);
       lc_log_trace(client->logger, "http.error", error_fields, 6U);
-      if (state.limit_exceeded) {
+      if (curl_code == CURLE_ABORTED_BY_CALLBACK &&
+          lc_engine_transport_cancel_requested(client)) {
+        lc_engine_set_transport_error(error, "request cancelled");
+        return_code = error != NULL ? error->code : LC_ENGINE_ERROR_TRANSPORT;
+        should_retry = 0;
+      } else if (state.limit_exceeded) {
         return_code = error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
         should_retry = 0;
       } else if (state.parser_initialized != 0 &&
@@ -1207,6 +1231,10 @@ int lc_engine_http_json_request_stream(
                      client->prefer_http_2 ? CURL_HTTP_VERSION_2TLS
                                            : CURL_HTTP_VERSION_1_1);
     curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
+    curl_easy_setopt(easy, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(easy, CURLOPT_XFERINFOFUNCTION,
+                     lc_engine_transport_progress);
+    curl_easy_setopt(easy, CURLOPT_XFERINFODATA, client);
     curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS,
                      client->timeout_ms > 0L ? client->timeout_ms : 30000L);
     if (client->unix_socket_path != NULL &&
@@ -1304,7 +1332,12 @@ int lc_engine_http_json_request_stream(
       error_fields[4] = lc_log_u64_field("total", client->endpoint_count);
       error_fields[5] = lc_log_str_field("error", error_text);
       lc_log_trace(client->logger, "http.error", error_fields, 6U);
-      if (state.limit_exceeded) {
+      if (curl_code == CURLE_ABORTED_BY_CALLBACK &&
+          lc_engine_transport_cancel_requested(client)) {
+        lc_engine_set_transport_error(error, "request cancelled");
+        return_code = error != NULL ? error->code : LC_ENGINE_ERROR_TRANSPORT;
+        should_retry = 0;
+      } else if (state.limit_exceeded) {
         return_code = error != NULL ? error->code : LC_ENGINE_ERROR_PROTOCOL;
         should_retry = 0;
       } else if (state.parser_initialized != 0 &&

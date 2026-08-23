@@ -4857,6 +4857,88 @@ static void test_disk_workflow_startup_recovery(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_disk_workflow_competing_dispatchers_deliver_once(void **state) {
+  static const char state_json[] =
+      "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"competing-op\","
+      "\"effect_id\":\"competing-effect\",\"effect_key\":\"competing-key\","
+      "\"kind\":\"test\",\"destination\":\"competing://target\","
+      "\"content_type\":\"text/plain\",\"dispatch_state\":\"pending\","
+      "\"attempt_count\":0,\"not_before_unix\":0}";
+  const char *endpoint, *bundle_path;
+  lc_client *seed, *first_client, *second_client;
+  lc_workflow *first, *second;
+  lc_workflow_config config;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_source *state_source;
+  lc_outbox_job *first_job, *second_job;
+  lc_error error;
+  char suffix[64], key[128];
+  int rc, first_got, second_got;
+
+  (void)state;
+  endpoint = env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+  make_unique_name("workflow-competing", suffix, sizeof(suffix));
+  assert_true(snprintf(key, sizeof(key), "__lockdc_io/v1/outbox/-%s", suffix) > 0);
+  seed = NULL; first_client = NULL; second_client = NULL; first = NULL;
+  second = NULL; lease = NULL; state_source = NULL; first_job = NULL;
+  second_job = NULL; first_got = 0; second_got = 0;
+  lc_error_init(&error);
+  open_tcp_client(endpoint, bundle_path, &seed, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = "default";
+  acquire.key = key;
+  acquire.owner = "workflow-competing-seed";
+  acquire.ttl_seconds = 30L;
+  rc = lc_acquire(seed, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_source_from_memory(state_json, sizeof(state_json) - 1U, &state_source, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_lease_update(lease, state_source, NULL, &error);
+  assert_lc_ok(rc, &error);
+  lc_source_close(state_source);
+  rc = lc_lease_release(lease, NULL, &error);
+  assert_lc_ok(rc, &error);
+  lc_client_close(seed);
+
+  open_tcp_client(endpoint, bundle_path, &first_client, &error);
+  open_tcp_client(endpoint, bundle_path, &second_client, &error);
+  lc_workflow_config_init(&config);
+  config.namespace_name = "default";
+  config.owner = "workflow-competing-first";
+  config.notification_capacity = 1U;
+  rc = lc_client_new_workflow(first_client, &config, &first, &error);
+  assert_lc_ok(rc, &error);
+  config.owner = "workflow-competing-second";
+  rc = lc_client_new_workflow(second_client, &config, &second, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_workflow_next(first, 5000L, &first_job, &error);
+  assert_lc_ok(rc, &error);
+  if (first_job != NULL) {
+    first_got = 1;
+    assert_string_equal(first_job->effect_key, "competing-key");
+    assert_lc_ok(lc_outbox_job_complete(first_job, &error), &error);
+    lc_outbox_job_close(first_job);
+  }
+  rc = lc_workflow_next(second, 5000L, &second_job, &error);
+  assert_lc_ok(rc, &error);
+  if (second_job != NULL) {
+    second_got = 1;
+    assert_string_equal(second_job->effect_key, "competing-key");
+    assert_lc_ok(lc_outbox_job_complete(second_job, &error), &error);
+    lc_outbox_job_close(second_job);
+  }
+  assert_int_equal(first_got + second_got, 1);
+  lc_workflow_close(second);
+  lc_workflow_close(first);
+  lc_client_close(second_client);
+  lc_client_close(first_client);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_disk_lease_state_roundtrip),
@@ -4864,6 +4946,7 @@ int main(void) {
       cmocka_unit_test(test_disk_workflow_implicit_xa_roundtrip),
       cmocka_unit_test(test_disk_workflow_retry_redelivery),
       cmocka_unit_test(test_disk_workflow_startup_recovery),
+      cmocka_unit_test(test_disk_workflow_competing_dispatchers_deliver_once),
       cmocka_unit_test(test_disk_server_explicit_xa_enlists_on_acquire),
       cmocka_unit_test(
           test_disk_server_metadata_finalization_preserves_staged_version),

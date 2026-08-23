@@ -148,8 +148,15 @@ typedef struct https_testserver {
   const https_expectation *expectations;
   size_t expectation_count;
   size_t handled_count;
+  long response_delay_ms;
+  int allow_response_write_failure;
   char failure_message[1024];
 } https_testserver;
+
+typedef struct delayed_cancel_check {
+  pthread_mutex_t mutex;
+  int requested;
+} delayed_cancel_check;
 
 typedef struct subscribe_capture {
   int begin_calls;
@@ -1309,7 +1316,15 @@ static void *https_testserver_main(void *context) {
       break;
     }
     verify_expectation(server, index, expectation, &capture, ssl);
-    if (!write_http_response(ssl, expectation)) {
+    if (server->response_delay_ms > 0L) {
+      struct timespec delay;
+
+      delay.tv_sec = server->response_delay_ms / 1000L;
+      delay.tv_nsec = (server->response_delay_ms % 1000L) * 1000000L;
+      (void)nanosleep(&delay, NULL);
+    }
+    if (!write_http_response(ssl, expectation) &&
+        !server->allow_response_write_failure) {
       set_failure(server, "failed to write HTTP response");
     }
     buffer_cleanup(&capture);
@@ -1757,6 +1772,81 @@ static int test_cancel_check(void *context) {
 
   capture = (canceling_subscribe_capture *)context;
   return capture != NULL && capture->cancel_requested;
+}
+
+static int test_delayed_cancel_check(void *context) {
+  delayed_cancel_check *cancel = (delayed_cancel_check *)context;
+  int requested;
+
+  pthread_mutex_lock(&cancel->mutex);
+  requested = cancel->requested;
+  pthread_mutex_unlock(&cancel->mutex);
+  return requested;
+}
+
+static void *test_request_cancel_after_delay(void *context) {
+  delayed_cancel_check *cancel = (delayed_cancel_check *)context;
+  struct timespec delay;
+
+  delay.tv_sec = 0;
+  delay.tv_nsec = 100000000L;
+  (void)nanosleep(&delay, NULL);
+  pthread_mutex_lock(&cancel->mutex);
+  cancel->requested = 1;
+  pthread_mutex_unlock(&cancel->mutex);
+  return NULL;
+}
+
+static void test_state_transport_honors_client_cancel(void **state) {
+  static const char *const headers[] = {"Content-Type: application/json"};
+  static const char *const body[] = {"\"namespace\":\"cancel-test\"",
+                                     "\"key\":\"key\"", "\"owner\":\"owner\""};
+  static const https_expectation expectations[] = {
+      {"POST", "/v1/acquire", headers, 1U, body, 3U, 0, 200, NULL, 0U, "{}",
+       "liblockdc test client"}};
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_acquire_request request;
+  lc_engine_acquire_response response;
+  lc_engine_error error;
+  https_tls_material material;
+  https_testserver server;
+  delayed_cancel_check cancel;
+  pthread_t cancel_thread;
+  int rc;
+
+  (void)state;
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(https_testserver_start(&server, &material, expectations, 1U));
+  server.response_delay_ms = 2000L;
+  server.allow_response_write_failure = 1;
+  init_client_config(&config, server.port, material.client_bundle_path);
+  client = NULL;
+  lc_engine_error_init(&error);
+  memset(&request, 0, sizeof(request));
+  memset(&response, 0, sizeof(response));
+  memset(&cancel, 0, sizeof(cancel));
+  assert_int_equal(pthread_mutex_init(&cancel.mutex, NULL), 0);
+  assert_int_equal(lc_engine_client_open(&config, &client, &error),
+                   LC_ENGINE_OK);
+  lc_engine_client_set_cancel_check(client, test_delayed_cancel_check, &cancel);
+  request.namespace_name = "cancel-test";
+  request.key = "key";
+  request.owner = "owner";
+  request.ttl_seconds = 30L;
+  assert_int_equal(pthread_create(&cancel_thread, NULL,
+                                  test_request_cancel_after_delay, &cancel),
+                   0);
+  rc = lc_engine_client_acquire(client, &request, &response, &error);
+  assert_int_equal(rc, LC_ENGINE_ERROR_TRANSPORT);
+  assert_string_equal(error.message, "request cancelled");
+  assert_int_equal(pthread_join(cancel_thread, NULL), 0);
+  lc_engine_acquire_response_cleanup(&response);
+  lc_engine_client_close(client);
+  https_testserver_stop(&server);
+  pthread_mutex_destroy(&cancel.mutex);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
 }
 
 static int cancel_after_delivery_chunk(void *context, const void *bytes,
@@ -7562,6 +7652,9 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #elif defined(LC_HTTPS_CASE_STATE_PATHS_USE_MTLS)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_state_transport_paths_use_mtls)
+#elif defined(LC_HTTPS_CASE_STATE_TRANSPORT_HONORS_CLIENT_CANCEL)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_state_transport_honors_client_cancel)
 #elif defined(LC_HTTPS_CASE_STATE_PARSES_BUFFERED_TYPED_JSON_RESPONSE)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_state_transport_parses_buffered_typed_json_response)
@@ -7823,6 +7916,7 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
       cmocka_unit_test(                                                           \
           test_public_client_open_accepts_chunked_callback_bundle_source),        \
       cmocka_unit_test(test_state_transport_paths_use_mtls),                      \
+      cmocka_unit_test(test_state_transport_honors_client_cancel),                \
       cmocka_unit_test(                                                           \
           test_state_transport_parses_buffered_typed_json_response),              \
       cmocka_unit_test(                                                           \

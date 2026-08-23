@@ -2768,6 +2768,8 @@ static int lcdc_client_new_workflow(lua_State *L) {
                          &config.host_retry_delay_max_seconds);
   lcdc_opt_integer_field(L, 2, "recovery_interval_seconds",
                          &config.recovery_interval_seconds);
+  lcdc_opt_integer_field(L, 2, "shutdown_timeout_ms",
+                         &config.shutdown_timeout_ms);
   {
     long notification_capacity = 0L;
     if (lcdc_opt_integer_field(L, 2, "notification_capacity",

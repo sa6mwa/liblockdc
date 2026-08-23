@@ -1567,6 +1567,12 @@ typedef struct lc_workflow_config {
    * Pouch dispatch.
    */
   long recovery_interval_seconds;
+  /**
+   * Maximum duration of one remote dispatcher request; zero inherits an
+   * explicit root-client timeout or defaults to 30 seconds. Pouch dispatch
+   * uses its retained local session.
+   */
+  long shutdown_timeout_ms;
 } lc_workflow_config;
 
 /** Immutable envelope and routing data for one durable outbox effect. */

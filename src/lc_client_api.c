@@ -2814,6 +2814,44 @@ int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
   return LC_OK;
 }
 
+int lc_client_clone_remote(lc_client_handle *source, long timeout_ms,
+                           lc_client **out, lc_error *error) {
+  lc_client_config config;
+  int rc;
+
+  if (source == NULL || out == NULL || source->is_pouch) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "remote client clone requires a remote source and output",
+                        NULL, NULL, NULL);
+  }
+  *out = NULL;
+  lc_client_config_init(&config);
+  config.endpoints = (const char *const *)source->endpoints;
+  config.endpoint_count = source->endpoint_count;
+  config.unix_socket_path = source->unix_socket_path;
+  if (source->client_bundle_bytes != NULL) {
+    rc = lc_source_from_memory(source->client_bundle_bytes,
+                               source->client_bundle_length,
+                               &config.client_bundle_source, error);
+    if (rc != LC_OK) return rc;
+  } else {
+    config.client_bundle_path = source->client_bundle_path;
+  }
+  config.default_namespace = source->default_namespace;
+  config.timeout_ms = timeout_ms;
+  config.disable_mtls = source->disable_mtls;
+  config.insecure_skip_verify = source->insecure_skip_verify;
+  config.prefer_http_2 = source->prefer_http_2;
+  config.http_json_response_limit_bytes =
+      source->http_json_response_limit_bytes;
+  config.disable_logger_sys_field = source->disable_logger_sys_field;
+  config.logger = source->base_logger;
+  config.allocator = source->allocator;
+  rc = lc_client_open(&config, out, error);
+  lc_source_close(config.client_bundle_source);
+  return rc;
+}
+
 void lc_client_handle_retain(lc_client_handle *client) {
   if (client == NULL || !client->lifecycle_mutex_initialized) {
     return;

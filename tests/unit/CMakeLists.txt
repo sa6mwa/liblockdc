@@ -227,6 +227,10 @@ lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_state_paths_use_mtls
   LC_HTTPS_CASE_STATE_PATHS_USE_MTLS
 )
+lc_add_https_unit_test_case(
+  lc_unit_transport_https_state_transport_honors_client_cancel
+  LC_HTTPS_CASE_STATE_TRANSPORT_HONORS_CLIENT_CANCEL
+)
 lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_state_parses_buffered_typed_json_response
   LC_HTTPS_CASE_STATE_PARSES_BUFFERED_TYPED_JSON_RESPONSE

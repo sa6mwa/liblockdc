@@ -9,7 +9,9 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 #define WORKFLOW_TMP_PREFIX "/tmp/liblockdc-unit-workflow-"
 #define WORKFLOW_RECONCILIATION_RECORDS 256U
@@ -55,6 +57,63 @@ static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
   lc_attach_res_cleanup(&attach_result);
   lc_source_close(payload_source);
   assert_int_equal(lc_lease_release(lease, NULL, error), LC_OK);
+}
+
+typedef struct workflow_process_result {
+  int rc;
+  int got_job;
+} workflow_process_result;
+
+static workflow_process_result workflow_shared_process_claim(
+    const char *root, const char *namespace_name, int start_fd) {
+  workflow_process_result result;
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  lc_error error;
+  char start;
+
+  memset(&result, 0, sizeof(result));
+  result.rc = LC_ERR_TRANSPORT;
+  if (read(start_fd, &start, 1U) != 1) {
+    (void)close(start_fd);
+    return result;
+  }
+  (void)close(start_fd);
+  if (snprintf(endpoint, sizeof(endpoint),
+               "pouch://%s?pouch_single_writer=false", root) < 0) return result;
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  job = NULL;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  result.rc = lc_client_open(&client_config, &client, &error);
+  if (result.rc == LC_OK) {
+    lc_workflow_config_init(&workflow_config);
+    workflow_config.namespace_name = namespace_name;
+    workflow_config.owner = "workflow-shared-child";
+    workflow_config.recovery_interval_seconds = 1L;
+    result.rc = lc_client_new_workflow(client, &workflow_config, &workflow,
+                                       &error);
+  }
+  if (result.rc == LC_OK)
+    result.rc = lc_workflow_next(workflow, 5000L, &job, &error);
+  if (result.rc == LC_OK && job != NULL) {
+    result.got_job = 1;
+    result.rc = lc_outbox_job_complete(job, &error);
+  }
+  if (job != NULL) lc_outbox_job_close(job);
+  if (workflow != NULL) lc_workflow_close(workflow);
+  if (client != NULL) lc_client_close(client);
+  lc_error_cleanup(&error);
+  return result;
 }
 
 static void test_pouch_outbox_transaction_and_duplicate(void **state) {
@@ -478,12 +537,149 @@ static void test_pouch_recovery_prefetch_is_bounded(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void test_pouch_shared_process_dispatches_once(void **state) {
+  char root[256], template_path[256], endpoint[320], start;
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  workflow_process_result child_result;
+  lc_error error;
+  int start_pipe[2], result_pipe[2], status, parent_got_job;
+  pid_t child;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "shared-process-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?pouch_single_writer=false", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  seed_recovery_outbox(client, "workflow-shared-process",
+                       "__lockdc_io/v1/outbox/shared-process", &error);
+  lc_client_close(client);
+  assert_int_equal(pipe(start_pipe), 0);
+  assert_int_equal(pipe(result_pipe), 0);
+  child = fork();
+  assert_true(child >= 0);
+  if (child == 0) {
+    workflow_process_result result;
+    (void)close(start_pipe[1]);
+    (void)close(result_pipe[0]);
+    result = workflow_shared_process_claim(root, "workflow-shared-process",
+                                           start_pipe[0]);
+    (void)write(result_pipe[1], &result, sizeof(result));
+    (void)close(result_pipe[1]);
+    _exit(result.rc == LC_OK ? 0 : 1);
+  }
+  (void)close(start_pipe[0]);
+  (void)close(result_pipe[1]);
+  client = NULL;
+  workflow = NULL;
+  job = NULL;
+  parent_got_job = 0;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-shared-process";
+  workflow_config.owner = "workflow-shared-parent";
+  workflow_config.recovery_interval_seconds = 1L;
+  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
+                                          &error), LC_OK);
+  start = 's';
+  assert_int_equal(write(start_pipe[1], &start, 1U), 1);
+  (void)close(start_pipe[1]);
+  assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
+  if (job != NULL) {
+    parent_got_job = 1;
+    assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+    lc_outbox_job_close(job);
+  }
+  assert_int_equal(read(result_pipe[0], &child_result, sizeof(child_result)),
+                   (ssize_t)sizeof(child_result));
+  (void)close(result_pipe[0]);
+  assert_int_equal(waitpid(child, &status, 0), child);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+  assert_int_equal(child_result.rc, LC_OK);
+  assert_true((parent_got_job != 0) != (child_result.got_job != 0));
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_expired_claim_rejects_stale_terminal(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config config;
+  lc_client *client;
+  lc_workflow *first, *second;
+  lc_outbox_job *stale, *replacement;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "stale-terminal-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  seed_recovery_outbox(client, "workflow-stale-terminal",
+                       "__lockdc_io/v1/outbox/stale-terminal", &error);
+  lc_workflow_config_init(&config);
+  config.namespace_name = "workflow-stale-terminal";
+  config.owner = "workflow-stale-first";
+  config.claim_ttl_seconds = 1L;
+  first = NULL;
+  assert_int_equal(lc_client_new_workflow(client, &config, &first, &error), LC_OK);
+  stale = NULL;
+  assert_int_equal(lc_workflow_next(first, 5000L, &stale, &error), LC_OK);
+  assert_non_null(stale);
+  lc_workflow_close(first);
+  sleep(2U);
+  config.owner = "workflow-stale-second";
+  second = NULL;
+  assert_int_equal(lc_client_new_workflow(client, &config, &second, &error), LC_OK);
+  replacement = NULL;
+  assert_int_equal(lc_workflow_next(second, 5000L, &replacement, &error), LC_OK);
+  assert_non_null(replacement);
+  assert_string_equal(replacement->effect_key, stale->effect_key);
+  assert_true(lc_outbox_job_complete(stale, &error) != LC_OK);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_outbox_job_complete(replacement, &error), LC_OK);
+  lc_outbox_job_close(replacement);
+  lc_outbox_job_close(stale);
+  lc_workflow_close(second);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
       cmocka_unit_test(test_pouch_startup_recovery_claims_seeded_outbox),
       cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
       cmocka_unit_test(test_pouch_recovery_prefetch_is_bounded),
+      cmocka_unit_test(test_pouch_shared_process_dispatches_once),
+      cmocka_unit_test(test_pouch_expired_claim_rejects_stale_terminal),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

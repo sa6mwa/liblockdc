@@ -661,6 +661,7 @@ local function test_workflow_facade_lifecycle()
     namespace = 'workflow-ns',
     owner = 'lua-worker',
     recovery_interval_seconds = 7,
+    shutdown_timeout_ms = 1234,
   }))
   local txn, receipt = assert(workflow:append_outbox({
     operation_id = 'op-1',
@@ -672,6 +673,8 @@ local function test_workflow_facade_lifecycle()
   }, 'payload'))
 
   assert_eq(captured.workflow_config.namespace, 'workflow-ns', 'new_workflow should pass config through')
+  assert_eq(captured.workflow_config.shutdown_timeout_ms, 1234,
+      'workflow shutdown timeout should pass through')
   assert_eq(captured.first_entry.headers_json, 'header-json', 'workflow should encode headers into headers_json')
   assert_eq(captured.first_entry.headers, nil, 'workflow should not pass façade-only headers')
   assert_eq(captured.first_payload, 'payload', 'workflow should preserve arbitrary payload source')
