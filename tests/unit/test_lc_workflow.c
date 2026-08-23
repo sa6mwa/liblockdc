@@ -13,6 +13,7 @@
 
 #define WORKFLOW_TMP_PREFIX "/tmp/liblockdc-unit-workflow-"
 #define WORKFLOW_RECONCILIATION_RECORDS 256U
+#define WORKFLOW_PREFETCH_RECORDS 3U
 
 static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
                                  const char *key, lc_error *error) {
@@ -384,11 +385,105 @@ static void test_pouch_reconciliation_pages_large_outbox(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void test_pouch_recovery_prefetch_is_bounded(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_error error;
+  struct timespec deadline;
+  struct timespec now;
+  size_t index;
+  int found_unclaimed;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "prefetch-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  for (index = 0U; index < WORKFLOW_PREFETCH_RECORDS; ++index) {
+    char key[128];
+
+    assert_true(snprintf(key, sizeof(key),
+                         "__lockdc_io/v1/outbox/prefetch-%03lu",
+                         (unsigned long)index) > 0);
+    seed_recovery_outbox(client, "workflow-prefetch", key, &error);
+  }
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-prefetch";
+  workflow_config.owner = "workflow-prefetch-test";
+  workflow_config.notification_capacity = 2U;
+  workflow = NULL;
+  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
+                                          &error), LC_OK);
+  assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &deadline), 0);
+  deadline.tv_sec += 3L;
+  found_unclaimed = 0;
+  do {
+    size_t locked = 0U;
+    size_t available = 0U;
+
+    for (index = 0U; index < WORKFLOW_PREFETCH_RECORDS; ++index) {
+      char key[128];
+      lc_acquire_req acquire;
+      lc_lease *lease;
+      int rc;
+
+      assert_true(snprintf(key, sizeof(key),
+                           "__lockdc_io/v1/outbox/prefetch-%03lu",
+                           (unsigned long)index) > 0);
+      lc_acquire_req_init(&acquire);
+      acquire.namespace_name = "workflow-prefetch";
+      acquire.key = key;
+      acquire.owner = "workflow-prefetch-probe";
+      acquire.ttl_seconds = 30L;
+      lease = NULL;
+      rc = lc_acquire(client, &acquire, &lease, &error);
+      if (rc == LC_OK) {
+        ++available;
+        assert_int_equal(lc_lease_release(lease, NULL, &error), LC_OK);
+      } else {
+        ++locked;
+        lc_error_cleanup(&error);
+        lc_error_init(&error);
+      }
+    }
+    if (locked >= 2U && available > 0U) found_unclaimed = 1;
+    if (!found_unclaimed) {
+      struct timespec delay;
+      delay.tv_sec = 0;
+      delay.tv_nsec = 10000000L;
+      (void)nanosleep(&delay, NULL);
+      assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &now), 0);
+    }
+  } while (!found_unclaimed &&
+           (now.tv_sec < deadline.tv_sec ||
+            (now.tv_sec == deadline.tv_sec && now.tv_nsec < deadline.tv_nsec)));
+  assert_true(found_unclaimed);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
       cmocka_unit_test(test_pouch_startup_recovery_claims_seeded_outbox),
       cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
+      cmocka_unit_test(test_pouch_recovery_prefetch_is_bounded),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

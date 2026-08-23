@@ -46,7 +46,11 @@ local function wrap_workflow(core_workflow)
 end
 
 local function wrap_workflow_transaction(core_transaction)
-  return setmetatable({ _core = core_transaction, _closed = false }, WorkflowTransaction)
+  return setmetatable({
+    _core = core_transaction,
+    _closed = false,
+    _terminal = false,
+  }, WorkflowTransaction)
 end
 
 local function wrap_workflow_participant(core_participant)
@@ -54,7 +58,11 @@ local function wrap_workflow_participant(core_participant)
 end
 
 local function wrap_outbox_job(core_job)
-  return setmetatable({ _core = core_job, _closed = false }, OutboxJob)
+  return setmetatable({
+    _core = core_job,
+    _closed = false,
+    _terminal = false,
+  }, OutboxJob)
 end
 
 local function normalize_result(a, b)
@@ -648,7 +656,7 @@ function WorkflowTransaction:commit()
   local ok, err = normalize_result(self._core:commit())
 
   if ok ~= nil then
-    self._closed = true
+    self._terminal = true
   end
   return ok, err
 end
@@ -657,7 +665,7 @@ function WorkflowTransaction:rollback()
   local ok, err = normalize_result(self._core:rollback())
 
   if ok ~= nil then
-    self._closed = true
+    self._terminal = true
   end
   return ok, err
 end
@@ -777,7 +785,7 @@ function OutboxJob:complete()
   local ok, err = normalize_result(self._core:complete())
 
   if ok ~= nil then
-    self._closed = true
+    self._terminal = true
   end
   return ok, err
 end
@@ -786,7 +794,7 @@ function OutboxJob:retry(req)
   local ok, err = normalize_result(self._core:retry(req))
 
   if ok ~= nil then
-    self._closed = true
+    self._terminal = true
   end
   return ok, err
 end
@@ -795,7 +803,7 @@ function OutboxJob:dead_letter(diagnostic)
   local ok, err = normalize_result(self._core:dead_letter(diagnostic))
 
   if ok ~= nil then
-    self._closed = true
+    self._terminal = true
   end
   return ok, err
 end

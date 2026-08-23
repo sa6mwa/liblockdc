@@ -696,6 +696,9 @@ local function test_workflow_facade_lifecycle()
   participant:close()
   assert_truthy(txn:commit(), 'transaction commit should delegate')
   assert_truthy(transaction_core.committed, 'transaction core should observe commit')
+  txn:close()
+  assert_truthy(transaction_core.closed,
+      'transaction close must release the native transaction after commit')
 
   local duplicate_txn, duplicate = workflow:accept_inbox({
     consumer_id = 'billing',
@@ -714,6 +717,9 @@ local function test_workflow_facade_lifecycle()
   assert_eq(captured.renew_ttl, 90, 'job renewal should preserve TTL')
   assert_truthy(job:complete(), 'job completion should delegate')
   assert_truthy(job_core.completed, 'job core should observe completion')
+  job:close()
+  assert_truthy(job_core.closed,
+      'job close must release the native job after completion')
 
   workflow:close()
   assert_truthy(workflow_core.closed, 'workflow close should close the core receiver')

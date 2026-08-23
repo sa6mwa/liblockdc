@@ -126,6 +126,7 @@ struct lc_workflow_handle {
   int dispatcher_started;
   lc_outbox_job_handle *ready_head;
   lc_outbox_job_handle *ready_tail;
+  size_t ready_count;
   int closed;
   int close_requested;
   size_t ref_count;
@@ -962,10 +963,17 @@ static void *lc_workflow_dispatcher_main(void *context) {
     key = NULL;
     reconcile = 0;
     pthread_mutex_lock(&workflow->notification_mutex);
-    while (!workflow->closed && workflow->notification_count == 0U &&
-           !workflow->recovery_needed) {
+    while (!workflow->closed &&
+           (workflow->ready_count >= workflow->notification_capacity ||
+            (workflow->notification_count == 0U &&
+             !workflow->recovery_needed))) {
       lc_unix_seconds now = (lc_unix_seconds)time(NULL);
       lc_unix_seconds due;
+      if (workflow->ready_count >= workflow->notification_capacity) {
+        pthread_cond_wait(&workflow->notification_cond,
+                          &workflow->notification_mutex);
+        continue;
+      }
       if (now > 0) lc_workflow_promote_due_retries_locked(workflow, now);
       if (workflow->notification_count > 0U || workflow->recovery_needed) {
         break;
@@ -1037,6 +1045,7 @@ static void *lc_workflow_dispatcher_main(void *context) {
         if (workflow->ready_tail != NULL) workflow->ready_tail->next = handle;
         else workflow->ready_head = handle;
         workflow->ready_tail = handle;
+        ++workflow->ready_count;
         pthread_cond_broadcast(&workflow->notification_cond);
         job = NULL;
       }
@@ -1097,6 +1106,8 @@ static int lc_workflow_wait_for_ready(lc_workflow_handle *workflow,
     workflow->ready_head = job->next;
     if (workflow->ready_head == NULL) workflow->ready_tail = NULL;
     job->next = NULL;
+    --workflow->ready_count;
+    pthread_cond_broadcast(&workflow->notification_cond);
     *out = &job->pub;
   }
   pthread_mutex_unlock(&workflow->notification_mutex);
@@ -1472,6 +1483,7 @@ static void lc_workflow_close_method(lc_workflow *self) {
     lc_outbox_job_handle *job = workflow->ready_head;
     workflow->ready_head = job->next;
     job->next = NULL;
+    --workflow->ready_count;
     job->pub.close(&job->pub);
   }
   lc_workflow_release(workflow);
