@@ -12394,6 +12394,26 @@ int lc_pouch_client_load_method(lc_client *self, const char *key,
                                         error);
 }
 
+int lc_pouch_client_load_in_namespace(lc_client *self,
+                                      const char *namespace_name,
+                                      const char *key,
+                                      const lonejson_map *map, void *dst,
+                                      const lc_get_opts *opts,
+                                      lc_get_res *out, lc_error *error) {
+  lc_client_handle *client;
+
+  if (self == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
+      key == NULL || map == NULL || dst == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch namespaced load requires namespace, key, map, "
+                        "destination, and out",
+                        NULL, NULL, NULL);
+  }
+  client = (lc_client_handle *)self;
+  return lc_pouch_client_load_namespace(client, namespace_name, key, map, dst,
+                                        opts, out, error);
+}
+
 int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
                                   lc_source *src, lc_update_res *out,
                                   lc_error *error) {

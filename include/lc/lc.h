@@ -1591,6 +1591,14 @@ typedef struct lc_inbox_accept_result {
   int duplicate;
 } lc_inbox_accept_result;
 
+/** Durable outcome requested for a claimed outbox job. */
+typedef struct lc_outbox_retry {
+  /** Delay before the next eligible delivery, in seconds. Zero uses policy. */
+  long delay_seconds;
+  /** Optional bounded failure diagnostic retained with the record. */
+  const char *diagnostic;
+} lc_outbox_retry;
+
 /** Domain-lease acquisition request within a workflow transaction. */
 typedef struct lc_workflow_participant_request {
   lc_acquire_req acquire;
@@ -2088,6 +2096,43 @@ struct lc_workflow_participant {
   void *impl;
 };
 
+/**
+ * One claimed outbox effect, owned by the host after `workflow->next()`.
+ *
+ * The methods never invoke host callbacks. `write_payload()` streams the
+ * immutable payload attachment into the caller's sink without materializing it
+ * in liblockdc. A terminal method consumes the job on success.
+ */
+struct lc_outbox_job {
+  int (*write_payload)(lc_outbox_job *self, lc_sink *dst, size_t *written,
+                       lc_error *error);
+  int (*renew)(lc_outbox_job *self, long ttl_seconds, lc_error *error);
+  int (*complete)(lc_outbox_job *self, lc_error *error);
+  int (*retry)(lc_outbox_job *self, const lc_outbox_retry *request,
+               lc_error *error);
+  int (*dead_letter)(lc_outbox_job *self, const char *diagnostic,
+                     lc_error *error);
+  /** Abandons the local job handle without a terminal transition. */
+  void (*close)(lc_outbox_job *self);
+  /** Opaque durable record key; useful for logs and diagnostics. */
+  const char *outbox_key;
+  const char *operation_id;
+  const char *effect_id;
+  const char *effect_key;
+  const char *kind;
+  const char *destination;
+  const char *content_type;
+  const char *headers_json;
+  const char *trace_context;
+  /** Delivery number, starting at one. */
+  int attempt;
+  /** Maximum permitted attempts including the first. */
+  int max_attempts;
+  /** Current claim expiry; refreshed by `renew()`. */
+  lc_unix_seconds lease_expires_at_unix;
+  void *impl;
+};
+
 /** A parent workflow owns private dispatch coordination and exposes jobs here. */
 struct lc_workflow {
   int (*append_outbox)(lc_workflow *self, const lc_outbox_entry *entry,
@@ -2482,6 +2527,8 @@ void lc_workflow_config_init(lc_workflow_config *config);
 void lc_outbox_entry_init(lc_outbox_entry *entry);
 /** Initializes an inbox identity request to all-zero/empty values. */
 void lc_inbox_message_init(lc_inbox_message *message);
+/** Clears a retry request so policy chooses its delay and no diagnostic. */
+void lc_outbox_retry_init(lc_outbox_retry *request);
 /** Initializes a workflow participant request to all-zero/empty values. */
 void lc_workflow_participant_request_init(lc_workflow_participant_request *request);
 /** Initializes an outbox receipt to all-zero/empty values. */
@@ -2745,6 +2792,17 @@ int lc_get(lc_client *client, const char *key, const lc_get_opts *opts,
 int lc_load(lc_client *client, const char *key, const lonejson_map *map,
             void *dst, const lc_get_opts *opts, lc_get_res *out,
             lc_error *error);
+/**
+ * Parses state from an explicit namespace into `dst` through a lonejson map.
+ *
+ * This is the namespace-aware counterpart to `lc_load()`. It is useful for
+ * component records that deliberately live outside the client's default
+ * namespace.
+ */
+int lc_load_in_namespace(lc_client *client, const char *namespace_name,
+                         const char *key, const lonejson_map *map, void *dst,
+                         const lc_get_opts *opts, lc_get_res *out,
+                         lc_error *error);
 /** Updates an existing, credentialed lease reference from a streamed source. */
 int lc_update(lc_client *client, const lc_update_req *req, lc_source *src,
               lc_update_res *out, lc_error *error);
@@ -3013,6 +3071,16 @@ int lc_workflow_accept_inbox(lc_workflow *workflow,
 int lc_workflow_next(lc_workflow *workflow, long timeout_ms,
                      lc_outbox_job **out, lc_error *error);
 void lc_workflow_close(lc_workflow *workflow);
+int lc_outbox_job_write_payload(lc_outbox_job *job, lc_sink *dst,
+                                size_t *written, lc_error *error);
+int lc_outbox_job_renew(lc_outbox_job *job, long ttl_seconds,
+                        lc_error *error);
+int lc_outbox_job_complete(lc_outbox_job *job, lc_error *error);
+int lc_outbox_job_retry(lc_outbox_job *job, const lc_outbox_retry *request,
+                        lc_error *error);
+int lc_outbox_job_dead_letter(lc_outbox_job *job, const char *diagnostic,
+                               lc_error *error);
+void lc_outbox_job_close(lc_outbox_job *job);
 int lc_workflow_transaction_acquire(
     lc_workflow_transaction *transaction,
     const lc_workflow_participant_request *request,

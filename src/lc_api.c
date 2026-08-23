@@ -28,6 +28,26 @@ int lc_load(lc_client *client, const char *key, const lonejson_map *map,
   return client->load(client, key, map, dst, opts, out, error);
 }
 
+int lc_load_in_namespace(lc_client *client, const char *namespace_name,
+                         const char *key, const lonejson_map *map, void *dst,
+                         const lc_get_opts *opts, lc_get_res *out,
+                         lc_error *error) {
+  lc_client_handle *handle;
+
+  if (client == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "namespaced load requires client and namespace", NULL,
+                        NULL, NULL);
+  }
+  handle = (lc_client_handle *)client;
+  if (handle->is_pouch) {
+    return lc_pouch_client_load_in_namespace(client, namespace_name, key, map,
+                                             dst, opts, out, error);
+  }
+  return lc_client_load_in_namespace_method(client, namespace_name, key, map,
+                                            dst, opts, out, error);
+}
+
 int lc_update(lc_client *client, const lc_update_req *req, lc_source *src,
               lc_update_res *out, lc_error *error) {
   return client->update(client, req, src, out, error);
@@ -261,6 +281,28 @@ int lc_workflow_next(lc_workflow *workflow, long timeout_ms,
   return workflow->next(workflow, timeout_ms, out, error);
 }
 void lc_workflow_close(lc_workflow *workflow) { if (workflow != NULL) workflow->close(workflow); }
+int lc_outbox_job_write_payload(lc_outbox_job *job, lc_sink *dst,
+                                size_t *written, lc_error *error) {
+  return job->write_payload(job, dst, written, error);
+}
+int lc_outbox_job_renew(lc_outbox_job *job, long ttl_seconds,
+                        lc_error *error) {
+  return job->renew(job, ttl_seconds, error);
+}
+int lc_outbox_job_complete(lc_outbox_job *job, lc_error *error) {
+  return job->complete(job, error);
+}
+int lc_outbox_job_retry(lc_outbox_job *job, const lc_outbox_retry *request,
+                        lc_error *error) {
+  return job->retry(job, request, error);
+}
+int lc_outbox_job_dead_letter(lc_outbox_job *job, const char *diagnostic,
+                               lc_error *error) {
+  return job->dead_letter(job, diagnostic, error);
+}
+void lc_outbox_job_close(lc_outbox_job *job) {
+  if (job != NULL) job->close(job);
+}
 int lc_workflow_transaction_acquire(lc_workflow_transaction *transaction,
                                     const lc_workflow_participant_request *request,
                                     lc_workflow_participant **out,

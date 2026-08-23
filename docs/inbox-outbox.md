@@ -270,7 +270,7 @@ end
 
 local job = workflow:next(1000)
 if job then
-  local payload = job:open_payload()
+  job:write_payload(foreign_request_body)
   -- host-owned Lua code performs the foreign effect here.
   job:complete()
 end
@@ -353,10 +353,11 @@ last_error_message
 completed_at
 ```
 
-The attachment name is fixed by the component, for example `payload`. It is
-written transactionally with the record. `lc_outbox_job_open_payload()` returns
-an `lc_source` over that attachment; it must preserve real bounded-buffer
-streaming for both backends.
+The attachment name is fixed by the component, `payload`. It is written
+transactionally with the record. `lc_outbox_job_write_payload()` streams that
+attachment directly into a caller-owned `lc_sink`; it must preserve real
+bounded-buffer streaming for both backends and must not materialize the full
+payload behind a source-looking facade.
 
 ### Inbox key
 
@@ -474,7 +475,7 @@ affinity, runtime lifetime, and host scheduling under the application's
 control.
 
 The dispatcher owns its client/session and its thread lifecycle. Callers must
-not rely on its client, lease, payload reader, or thread being usable from
+not rely on its client, lease, payload-transfer handle, or thread being usable from
 another process or as a host-runtime execution context. A job returned from
 `workflow->next()` is the explicit owned boundary for a host worker.
 

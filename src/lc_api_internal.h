@@ -227,6 +227,12 @@ int lc_pouch_client_load_method(lc_client *self, const char *key,
                                 const lonejson_map *map, void *dst,
                                 const lc_get_opts *opts, lc_get_res *out,
                                 lc_error *error);
+int lc_pouch_client_load_in_namespace(lc_client *self,
+                                      const char *namespace_name,
+                                      const char *key,
+                                      const lonejson_map *map, void *dst,
+                                      const lc_get_opts *opts,
+                                      lc_get_res *out, lc_error *error);
 int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
                                   lc_source *src, lc_update_res *out,
                                   lc_error *error);
@@ -407,6 +413,12 @@ int lc_client_load_method(lc_client *self, const char *key,
                           const lonejson_map *map, void *dst,
                           const lc_get_opts *opts, lc_get_res *out,
                           lc_error *error);
+int lc_client_load_in_namespace_method(lc_client *self,
+                                       const char *namespace_name,
+                                       const char *key,
+                                       const lonejson_map *map, void *dst,
+                                       const lc_get_opts *opts,
+                                       lc_get_res *out, lc_error *error);
 int lc_client_update_method(lc_client *self, const lc_update_req *req,
                             lc_source *src, lc_update_res *out,
                             lc_error *error);

@@ -1716,6 +1716,7 @@ LC_INIT_STRUCT_FUNC(lc_consumer_service_config, lc_consumer_service_config_init)
 LC_INIT_STRUCT_FUNC(lc_workflow_config, lc_workflow_config_init)
 LC_INIT_STRUCT_FUNC(lc_outbox_entry, lc_outbox_entry_init)
 LC_INIT_STRUCT_FUNC(lc_inbox_message, lc_inbox_message_init)
+LC_INIT_STRUCT_FUNC(lc_outbox_retry, lc_outbox_retry_init)
 LC_INIT_STRUCT_FUNC(lc_workflow_participant_request,
                     lc_workflow_participant_request_init)
 LC_INIT_STRUCT_FUNC(lc_outbox_receipt, lc_outbox_receipt_init)

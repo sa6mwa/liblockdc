@@ -4580,8 +4580,13 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   lc_workflow_transaction *transaction;
   lc_workflow_participant_request participant_request;
   lc_workflow_participant *participant;
+  lc_outbox_job *job;
   lc_source *payload;
   lc_source *domain_state;
+  lc_sink *payload_sink;
+  const void *payload_bytes;
+  size_t payload_length;
+  size_t payload_written;
   lc_error error;
   char domain_key[128];
   int rc;
@@ -4594,7 +4599,8 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   require_file_or_skip(bundle_path);
   make_unique_name("workflow-domain", domain_key, sizeof(domain_key));
   client = NULL; workflow = NULL; transaction = NULL; participant = NULL;
-  payload = NULL; domain_state = NULL;
+  job = NULL; payload = NULL; domain_state = NULL; payload_sink = NULL;
+  payload_bytes = NULL; payload_length = 0U; payload_written = 0U;
   lc_error_init(&error);
   open_tcp_client(endpoint, bundle_path, &client, &error);
   lc_workflow_config_init(&config);
@@ -4637,8 +4643,31 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   rc = lc_workflow_transaction_commit(transaction, &error);
   assert_lc_ok(rc, &error);
   lc_workflow_transaction_close(transaction);
+  rc = lc_workflow_next(workflow, 2000L, &job, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, domain_key);
+  rc = lc_sink_to_memory(&payload_sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_outbox_job_write_payload(job, payload_sink, &payload_written,
+                                   &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_sink_memory_bytes(payload_sink, &payload_bytes, &payload_length,
+                            &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(payload_written, 16U);
+  assert_int_equal(payload_length, 16U);
+  assert_memory_equal(payload_bytes, "workflow-payload", 16U);
+  lc_sink_close(payload_sink);
+  payload_sink = NULL;
+  rc = lc_outbox_job_complete(job, &error);
+  assert_lc_ok(rc, &error);
+  lc_outbox_job_close(job);
+  job = NULL;
   lc_source_close(payload);
   lc_outbox_receipt_cleanup(&receipt);
+  if (payload_sink != NULL) lc_sink_close(payload_sink);
+  if (job != NULL) lc_outbox_job_close(job);
   lc_workflow_close(workflow);
   lc_client_close(client);
   lc_error_cleanup(&error);

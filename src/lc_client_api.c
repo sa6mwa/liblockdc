@@ -571,10 +571,12 @@ int lc_client_get_method(lc_client *self, const char *key,
   return LC_OK;
 }
 
-int lc_client_load_method(lc_client *self, const char *key,
-                          const lonejson_map *map, void *dst,
-                          const lc_get_opts *opts, lc_get_res *out,
-                          lc_error *error) {
+int lc_client_load_in_namespace_method(lc_client *self,
+                                       const char *namespace_name,
+                                       const char *key,
+                                       const lonejson_map *map, void *dst,
+                                       const lc_get_opts *opts,
+                                       lc_get_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_engine_get_request engine_req;
   lc_engine_get_stream_response engine_res;
@@ -619,6 +621,7 @@ int lc_client_load_method(lc_client *self, const char *key,
         error, rc, &load_state.parse.error,
         "failed to initialize mapped load parser");
   }
+  engine_req.namespace_name = namespace_name;
   engine_req.key = key;
   engine_req.public_read = opts != NULL ? opts->public_read : 0;
   rc = lc_engine_client_get_into(client->engine, &engine_req,
@@ -694,6 +697,14 @@ int lc_client_load_method(lc_client *self, const char *key,
   lc_engine_get_stream_response_cleanup(&engine_res);
   lc_engine_error_cleanup(&engine_error);
   return LC_OK;
+}
+
+int lc_client_load_method(lc_client *self, const char *key,
+                          const lonejson_map *map, void *dst,
+                          const lc_get_opts *opts, lc_get_res *out,
+                          lc_error *error) {
+  return lc_client_load_in_namespace_method(self, NULL, key, map, dst, opts,
+                                            out, error);
 }
 
 int lc_client_update_method(lc_client *self, const lc_update_req *req,
