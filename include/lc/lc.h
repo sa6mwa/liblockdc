@@ -48,6 +48,14 @@ typedef struct lc_lease lc_lease;
 typedef struct lc_message lc_message;
 /** Opaque managed queue consumer service. */
 typedef struct lc_consumer_service lc_consumer_service;
+/** Opaque inbox/outbox workflow handle. */
+typedef struct lc_workflow lc_workflow;
+/** Opaque workflow transaction handle. */
+typedef struct lc_workflow_transaction lc_workflow_transaction;
+/** Restricted non-terminal lease view owned by a workflow transaction. */
+typedef struct lc_workflow_participant lc_workflow_participant;
+/** Owned, claimed outbox delivery returned from a workflow. */
+typedef struct lc_outbox_job lc_outbox_job;
 /** Opaque byte source used for uploads and streamed request bodies. */
 typedef struct lc_source lc_source;
 /** Opaque byte sink used for downloads and streamed response bodies. */
@@ -1532,6 +1540,62 @@ typedef struct lc_consumer_service_config {
   size_t consumer_count;
 } lc_consumer_service_config;
 
+/** Settings for one inbox/outbox workflow namespace. */
+typedef struct lc_workflow_config {
+  /** Required namespace that contains both inbox and outbox records. */
+  const char *namespace_name;
+  /** Lease owner used for component-owned record and claim leases. */
+  const char *owner;
+  /** TTL for workflow transaction participants; zero defaults to 30 seconds. */
+  long transaction_ttl_seconds;
+  /** TTL for an outbox claim; zero defaults to five minutes. */
+  long claim_ttl_seconds;
+  /** Maximum delivery attempts including the first; zero defaults to 100. */
+  int max_attempts;
+  /** Bounded direct-key notification capacity; zero defaults to 1024. */
+  size_t notification_capacity;
+} lc_workflow_config;
+
+/** Immutable envelope and routing data for one durable outbox effect. */
+typedef struct lc_outbox_entry {
+  const char *operation_id;
+  const char *effect_id;
+  const char *effect_key;
+  const char *kind;
+  const char *destination;
+  const char *content_type;
+  const char *headers_json;
+  const char *trace_context;
+} lc_outbox_entry;
+
+/** Immutable identity for one received source message. */
+typedef struct lc_inbox_message {
+  const char *consumer_id;
+  const char *source_kind;
+  const char *source_id;
+  const char *message_id;
+  const char *payload_digest;
+  const char *operation_id;
+} lc_inbox_message;
+
+/** Result of a durable outbox append. Strings are owned by this result. */
+typedef struct lc_outbox_receipt {
+  char *outbox_key;
+  char *effect_key;
+  int duplicate;
+} lc_outbox_receipt;
+
+/** Result of durable inbox acceptance. */
+typedef struct lc_inbox_accept_result {
+  int accepted;
+  int duplicate;
+} lc_inbox_accept_result;
+
+/** Domain-lease acquisition request within a workflow transaction. */
+typedef struct lc_workflow_participant_request {
+  lc_acquire_req acquire;
+} lc_workflow_participant_request;
+
 /** Attachment selector by id or name. */
 typedef struct lc_attachment_selector {
   /** Attachment content/hash identifier. Mutually exclusive with `name`. */
@@ -1979,6 +2043,66 @@ struct lc_consumer_service {
 };
 
 /**
+ * One owned workflow transaction. The first inbox or outbox operation obtains
+ * its xid from the endpoint; later participant acquires automatically carry
+ * that xid. Only this receiver can make the terminal decision.
+ */
+struct lc_workflow_transaction {
+  int (*acquire)(lc_workflow_transaction *self,
+                 const lc_workflow_participant_request *request,
+                 lc_workflow_participant **out, lc_error *error);
+  int (*append_outbox)(lc_workflow_transaction *self,
+                       const lc_outbox_entry *entry, lc_source *payload,
+                       lc_outbox_receipt *out, lc_error *error);
+  int (*commit)(lc_workflow_transaction *self, lc_error *error);
+  int (*rollback)(lc_workflow_transaction *self, lc_error *error);
+  void (*close)(lc_workflow_transaction *self);
+  void *impl;
+};
+
+/** Restricted non-terminal view over a workflow-owned lease. */
+struct lc_workflow_participant {
+  int (*describe)(lc_workflow_participant *self, lc_error *error);
+  int (*get)(lc_workflow_participant *self, lc_sink *dst,
+             const lc_get_opts *opts, lc_get_res *out, lc_error *error);
+  int (*update)(lc_workflow_participant *self, lc_source *src,
+                const lc_update_opts *opts, lc_error *error);
+  int (*metadata)(lc_workflow_participant *self,
+                  const lc_metadata_req *req, lc_error *error);
+  int (*remove)(lc_workflow_participant *self, const lc_remove_req *req,
+                lc_error *error);
+  int (*keepalive)(lc_workflow_participant *self,
+                   const lc_keepalive_req *req, lc_error *error);
+  int (*attach)(lc_workflow_participant *self, const lc_attach_req *req,
+                lc_source *src, lc_attach_res *out, lc_error *error);
+  int (*get_attachment)(lc_workflow_participant *self,
+                        const lc_attachment_get_req *req, lc_sink *dst,
+                        lc_attachment_get_res *out, lc_error *error);
+  void (*close)(lc_workflow_participant *self);
+  const char *namespace_name;
+  const char *key;
+  const char *txn_id;
+  long fencing_token;
+  lc_version version;
+  const char *state_etag;
+  void *impl;
+};
+
+/** A parent workflow owns private dispatch coordination and exposes jobs here. */
+struct lc_workflow {
+  int (*append_outbox)(lc_workflow *self, const lc_outbox_entry *entry,
+                       lc_source *payload, lc_workflow_transaction **out_txn,
+                       lc_outbox_receipt *receipt, lc_error *error);
+  int (*accept_inbox)(lc_workflow *self, const lc_inbox_message *message,
+                      lc_workflow_transaction **out_txn,
+                      lc_inbox_accept_result *result, lc_error *error);
+  int (*next)(lc_workflow *self, long timeout_ms, lc_outbox_job **out,
+              lc_error *error);
+  void (*close)(lc_workflow *self);
+  void *impl;
+};
+
+/**
  * Root client handle.
  *
  * This is the root object for the SDK. Open it once with `lc_client_open()`,
@@ -2168,6 +2292,9 @@ struct lc_client {
   int (*new_consumer_service)(lc_client *self,
                               const lc_consumer_service_config *config,
                               lc_consumer_service **out, lc_error *error);
+  /** Creates an inbox/outbox workflow owned by this client. */
+  int (*new_workflow)(lc_client *self, const lc_workflow_config *config,
+                      lc_workflow **out, lc_error *error);
   /** Watches queue depth changes with a streaming watch callback. */
   int (*watch_queue)(lc_client *self, const lc_watch_queue_req *req,
                      const lc_watch_handler *handler, lc_error *error);
@@ -2349,6 +2476,18 @@ void lc_consumer_restart_policy_init(lc_consumer_restart_policy *policy);
 void lc_consumer_config_init(lc_consumer_config *config);
 /** Initializes a consumer service config to all-zero/empty values. */
 void lc_consumer_service_config_init(lc_consumer_service_config *config);
+/** Initializes an inbox/outbox workflow config to all-zero/empty values. */
+void lc_workflow_config_init(lc_workflow_config *config);
+/** Initializes an outbox envelope request to all-zero/empty values. */
+void lc_outbox_entry_init(lc_outbox_entry *entry);
+/** Initializes an inbox identity request to all-zero/empty values. */
+void lc_inbox_message_init(lc_inbox_message *message);
+/** Initializes a workflow participant request to all-zero/empty values. */
+void lc_workflow_participant_request_init(lc_workflow_participant_request *request);
+/** Initializes an outbox receipt to all-zero/empty values. */
+void lc_outbox_receipt_init(lc_outbox_receipt *receipt);
+/** Releases strings owned by an outbox receipt. */
+void lc_outbox_receipt_cleanup(lc_outbox_receipt *receipt);
 /** Initializes an attachment selector to all-zero/empty values. */
 void lc_attachment_selector_init(lc_attachment_selector *selector);
 /** Initializes an attachment upload request to all-zero/empty values. */
@@ -2759,6 +2898,9 @@ int lc_subscribe_with_state(lc_client *client, const lc_dequeue_req *req,
 int lc_client_new_consumer_service(lc_client *client,
                                    const lc_consumer_service_config *config,
                                    lc_consumer_service **out, lc_error *error);
+/** Creates an inbox/outbox workflow owned by this client. */
+int lc_client_new_workflow(lc_client *client, const lc_workflow_config *config,
+                           lc_workflow **out, lc_error *error);
 /** Watches queue depth changes with a streaming watch callback. */
 int lc_watch_queue(lc_client *client, const lc_watch_queue_req *req,
                    const lc_watch_handler *handler, lc_error *error);
@@ -2859,5 +3001,30 @@ int lc_consumer_service_stop(lc_consumer_service *service);
 int lc_consumer_service_wait(lc_consumer_service *service, lc_error *error);
 /** Closes and frees a managed consumer service. */
 void lc_consumer_service_close(lc_consumer_service *service);
+
+int lc_workflow_append_outbox(lc_workflow *workflow, const lc_outbox_entry *entry,
+                              lc_source *payload,
+                              lc_workflow_transaction **out_txn,
+                              lc_outbox_receipt *receipt, lc_error *error);
+int lc_workflow_accept_inbox(lc_workflow *workflow,
+                             const lc_inbox_message *message,
+                             lc_workflow_transaction **out_txn,
+                             lc_inbox_accept_result *result, lc_error *error);
+int lc_workflow_next(lc_workflow *workflow, long timeout_ms,
+                     lc_outbox_job **out, lc_error *error);
+void lc_workflow_close(lc_workflow *workflow);
+int lc_workflow_transaction_acquire(
+    lc_workflow_transaction *transaction,
+    const lc_workflow_participant_request *request,
+    lc_workflow_participant **out, lc_error *error);
+int lc_workflow_transaction_append_outbox(
+    lc_workflow_transaction *transaction, const lc_outbox_entry *entry,
+    lc_source *payload, lc_outbox_receipt *out, lc_error *error);
+int lc_workflow_transaction_commit(lc_workflow_transaction *transaction,
+                                   lc_error *error);
+int lc_workflow_transaction_rollback(lc_workflow_transaction *transaction,
+                                     lc_error *error);
+void lc_workflow_transaction_close(lc_workflow_transaction *transaction);
+void lc_workflow_participant_close(lc_workflow_participant *participant);
 
 #endif

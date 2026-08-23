@@ -1713,6 +1713,12 @@ LC_INIT_STRUCT_FUNC(lc_watch_queue_req, lc_watch_queue_req_init)
 LC_INIT_STRUCT_FUNC(lc_watch_handler, lc_watch_handler_init)
 LC_INIT_STRUCT_FUNC(lc_consumer, lc_consumer_init)
 LC_INIT_STRUCT_FUNC(lc_consumer_service_config, lc_consumer_service_config_init)
+LC_INIT_STRUCT_FUNC(lc_workflow_config, lc_workflow_config_init)
+LC_INIT_STRUCT_FUNC(lc_outbox_entry, lc_outbox_entry_init)
+LC_INIT_STRUCT_FUNC(lc_inbox_message, lc_inbox_message_init)
+LC_INIT_STRUCT_FUNC(lc_workflow_participant_request,
+                    lc_workflow_participant_request_init)
+LC_INIT_STRUCT_FUNC(lc_outbox_receipt, lc_outbox_receipt_init)
 LC_INIT_STRUCT_FUNC(lc_attachment_selector, lc_attachment_selector_init)
 LC_INIT_STRUCT_FUNC(lc_attach_req, lc_attach_req_init)
 LC_INIT_STRUCT_FUNC(lc_attach_op, lc_attach_op_init)
@@ -1724,6 +1730,15 @@ LC_INIT_STRUCT_FUNC(lc_attachment_delete_all_op,
                     lc_attachment_delete_all_op_init)
 
 #undef LC_INIT_STRUCT_FUNC
+
+void lc_outbox_receipt_cleanup(lc_outbox_receipt *receipt) {
+  if (receipt == NULL) {
+    return;
+  }
+  free(receipt->outbox_key);
+  free(receipt->effect_key);
+  memset(receipt, 0, sizeof(*receipt));
+}
 
 const char *lc_nack_intent_to_string(lc_nack_intent intent) {
   switch (intent) {
@@ -2119,6 +2134,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->pub.subscribe = lc_client_subscribe_method;
   client->pub.subscribe_with_state = lc_client_subscribe_with_state_method;
   client->pub.new_consumer_service = lc_client_new_consumer_service_method;
+  client->pub.new_workflow = lc_client_new_workflow_method;
   client->pub.watch_queue = lc_client_watch_queue_method;
   client->pub.close = lc_client_close_method;
   if (client->is_pouch) {

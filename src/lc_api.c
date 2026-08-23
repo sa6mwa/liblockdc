@@ -238,6 +238,43 @@ int lc_client_new_consumer_service(lc_client *client,
   return client->new_consumer_service(client, config, out, error);
 }
 
+int lc_client_new_workflow(lc_client *client, const lc_workflow_config *config,
+                           lc_workflow **out, lc_error *error) {
+  return client->new_workflow(client, config, out, error);
+}
+
+int lc_workflow_append_outbox(lc_workflow *workflow,
+                              const lc_outbox_entry *entry, lc_source *payload,
+                              lc_workflow_transaction **out_txn,
+                              lc_outbox_receipt *receipt, lc_error *error) {
+  return workflow->append_outbox(workflow, entry, payload, out_txn, receipt,
+                                  error);
+}
+int lc_workflow_accept_inbox(lc_workflow *workflow,
+                             const lc_inbox_message *message,
+                             lc_workflow_transaction **out_txn,
+                             lc_inbox_accept_result *result, lc_error *error) {
+  return workflow->accept_inbox(workflow, message, out_txn, result, error);
+}
+int lc_workflow_next(lc_workflow *workflow, long timeout_ms,
+                     lc_outbox_job **out, lc_error *error) {
+  return workflow->next(workflow, timeout_ms, out, error);
+}
+void lc_workflow_close(lc_workflow *workflow) { if (workflow != NULL) workflow->close(workflow); }
+int lc_workflow_transaction_acquire(lc_workflow_transaction *transaction,
+                                    const lc_workflow_participant_request *request,
+                                    lc_workflow_participant **out,
+                                    lc_error *error) { return transaction->acquire(transaction, request, out, error); }
+int lc_workflow_transaction_append_outbox(lc_workflow_transaction *transaction,
+                                          const lc_outbox_entry *entry,
+                                          lc_source *payload,
+                                          lc_outbox_receipt *out,
+                                          lc_error *error) { return transaction->append_outbox(transaction, entry, payload, out, error); }
+int lc_workflow_transaction_commit(lc_workflow_transaction *transaction, lc_error *error) { return transaction->commit(transaction, error); }
+int lc_workflow_transaction_rollback(lc_workflow_transaction *transaction, lc_error *error) { return transaction->rollback(transaction, error); }
+void lc_workflow_transaction_close(lc_workflow_transaction *transaction) { if (transaction != NULL) transaction->close(transaction); }
+void lc_workflow_participant_close(lc_workflow_participant *participant) { if (participant != NULL) participant->close(participant); }
+
 int lc_watch_queue(lc_client *client, const lc_watch_queue_req *req,
                    const lc_watch_handler *handler, lc_error *error) {
   return client->watch_queue(client, req, handler, error);

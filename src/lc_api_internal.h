@@ -519,6 +519,9 @@ int lc_client_subscribe_with_state_method(lc_client *self,
 int lc_client_new_consumer_service_method(
     lc_client *self, const lc_consumer_service_config *config,
     lc_consumer_service **out, lc_error *error);
+int lc_client_new_workflow_method(lc_client *self,
+                                  const lc_workflow_config *config,
+                                  lc_workflow **out, lc_error *error);
 int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
                                  const lc_watch_handler *handler,
                                  lc_error *error);

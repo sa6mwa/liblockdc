@@ -388,6 +388,7 @@ set(lc_sources
     src/lc_pouch_state.c
     src/lc_queue_api.c
     src/lc_queue_stream_api.c
+    src/lc_workflow.c
     src/lc_log.c
     src/lc_state_api.c
     src/lc_streaming.c
