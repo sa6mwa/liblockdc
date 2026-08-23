@@ -177,6 +177,45 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
   lc_outbox_job_close(job);
   lc_source_close(payload);
+  payload = NULL;
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_outbox_receipt_init(&receipt);
+  entry.effect_id = "effect-retry";
+  entry.effect_key = "foreign-idempotency-retry";
+  assert_int_equal(lc_source_from_memory("retry-payload", 13U, &payload,
+                                         &error), LC_OK);
+  transaction = NULL;
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                              &transaction, &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  job = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 2000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  {
+    lc_outbox_retry retry;
+    lc_outbox_retry_init(&retry);
+    retry.delay_seconds = 3601L;
+    assert_int_equal(lc_outbox_job_retry(job, &retry, &error), LC_ERR_INVALID);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+    retry.delay_seconds = 1L;
+    assert_int_equal(lc_outbox_job_retry(job, &retry, &error), LC_OK);
+  }
+  lc_outbox_job_close(job);
+  job = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 3000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, "foreign-idempotency-retry");
+  assert_int_equal(job->attempt, 2);
+  assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+  lc_outbox_job_close(job);
+  lc_source_close(payload);
+  payload = NULL;
+  entry.effect_id = "effect-1";
+  entry.effect_key = "foreign-idempotency-\"1\\stable";
   lc_outbox_receipt_cleanup(&duplicate_receipt);
   lc_inbox_message_init(&inbox);
   inbox.consumer_id = long_consumer_id;
@@ -247,6 +286,25 @@ static void test_pouch_startup_recovery_claims_seeded_outbox(void **state) {
   assert_non_null(job);
   assert_string_equal(job->effect_key, "recovery-key");
   assert_int_equal(job->attempt, 1);
+  /* A handed-off job remains terminally usable after dispatcher shutdown. Its
+   * retry is recovered durably by the replacement workflow, not lost with the
+   * private in-memory scheduler. */
+  lc_workflow_close(workflow);
+  workflow = NULL;
+  {
+    lc_outbox_retry retry;
+    lc_outbox_retry_init(&retry);
+    retry.delay_seconds = 1L;
+    assert_int_equal(lc_outbox_job_retry(job, &retry, &error), LC_OK);
+  }
+  lc_outbox_job_close(job);
+  job = NULL;
+  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
+                                          &error), LC_OK);
+  assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, "recovery-key");
+  assert_int_equal(job->attempt, 2);
   assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
   lc_outbox_job_close(job);
   lc_workflow_close(workflow);

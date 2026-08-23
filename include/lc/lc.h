@@ -1554,6 +1554,12 @@ typedef struct lc_workflow_config {
   int max_attempts;
   /** Bounded direct-key notification capacity; zero defaults to 1024. */
   size_t notification_capacity;
+  /** Initial automatic retry cap; zero defaults to one second. */
+  long retry_initial_delay_seconds;
+  /** Maximum automatic retry cap; zero defaults to fifteen minutes. */
+  long retry_max_delay_seconds;
+  /** Maximum host-requested retry delay; zero defaults to one hour. */
+  long host_retry_delay_max_seconds;
   /**
    * Infrequent durable-recovery cadence. Zero defaults to five minutes for a
    * remote endpoint and disables routine scans for local Pouch; startup and

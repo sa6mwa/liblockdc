@@ -602,8 +602,12 @@ with full jitter. A host may provide a retry delay, for example from a foreign
 system's backoff instruction, but liblockdc rejects values above
 `host_retry_delay_max`. After the final failed attempt the record is
 dead-lettered; it is never discarded automatically. These defaults and limits
-are workflow configuration, and a host renewing a claim for a longer foreign
-effect must do so before the five-minute claim expiry.
+are exposed through `lc_workflow_config`; zero selects the defaults. A retry
+scheduled by a live workflow is held as a bounded delayed direct-key signal,
+not a queue entry or a namespace scan. Scheduler overflow and work owned after
+workflow shutdown remain recoverable through the durable reconciliation path.
+A host renewing a claim for a longer foreign effect must do so before the
+five-minute claim expiry.
 
 The component exposes read-only statistics and last-error state, including:
 
