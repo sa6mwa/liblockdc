@@ -12,6 +12,48 @@
 
 #define WORKFLOW_TMP_PREFIX "/tmp/liblockdc-unit-workflow-"
 
+static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
+                                 const char *key, lc_error *error) {
+  static const char state[] =
+      "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"recovery-op\","
+      "\"effect_id\":\"recovery-effect\",\"effect_key\":\"recovery-key\","
+      "\"kind\":\"test\",\"destination\":\"recovery://target\","
+      "\"content_type\":\"text/plain\",\"dispatch_state\":\"pending\","
+      "\"attempt_count\":0,\"not_before_unix\":0}";
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_source *state_source;
+  lc_source *payload_source;
+  lc_attach_req attach;
+  lc_attach_res attach_result;
+
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = namespace_name;
+  acquire.key = key;
+  acquire.owner = "workflow-recovery-seed";
+  acquire.ttl_seconds = 30L;
+  lease = NULL;
+  assert_int_equal(lc_acquire(client, &acquire, &lease, error), LC_OK);
+  state_source = NULL;
+  assert_int_equal(lc_source_from_memory(state, sizeof(state) - 1U,
+                                         &state_source, error), LC_OK);
+  assert_int_equal(lc_lease_update(lease, state_source, NULL, error), LC_OK);
+  lc_source_close(state_source);
+  payload_source = NULL;
+  assert_int_equal(lc_source_from_memory("recovery-payload", 16U,
+                                         &payload_source, error), LC_OK);
+  lc_attach_req_init(&attach);
+  attach.name = "payload";
+  attach.content_type = "text/plain";
+  attach.prevent_overwrite = 1;
+  memset(&attach_result, 0, sizeof(attach_result));
+  assert_int_equal(lc_lease_attach(lease, &attach, payload_source,
+                                   &attach_result, error), LC_OK);
+  lc_attach_res_cleanup(&attach_result);
+  lc_source_close(payload_source);
+  assert_int_equal(lc_lease_release(lease, NULL, error), LC_OK);
+}
+
 static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   char root[256];
   char template_path[256];
@@ -167,9 +209,56 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void test_pouch_startup_recovery_claims_seeded_outbox(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "recovery-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  seed_recovery_outbox(client, "workflow-recovery",
+                       "__lockdc_io/v1/outbox/recovery", &error);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-recovery";
+  workflow_config.owner = "workflow-recovery-test";
+  workflow = NULL;
+  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
+                                          &error), LC_OK);
+  job = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, "recovery-key");
+  assert_int_equal(job->attempt, 1);
+  assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+  lc_outbox_job_close(job);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
+      cmocka_unit_test(test_pouch_startup_recovery_claims_seeded_outbox),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

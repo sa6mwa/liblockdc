@@ -4693,11 +4693,99 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_disk_workflow_startup_recovery(void **state) {
+  static const char state_json[] =
+      "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"recovery-op\","
+      "\"effect_id\":\"recovery-effect\",\"effect_key\":\"recovery-key\","
+      "\"kind\":\"test\",\"destination\":\"recovery://target\","
+      "\"content_type\":\"text/plain\",\"dispatch_state\":\"pending\","
+      "\"attempt_count\":0,\"not_before_unix\":0}";
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_config config;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_source *state_source;
+  lc_source *payload_source;
+  lc_attach_req attach;
+  lc_attach_res attach_result;
+  lc_outbox_job *job;
+  lc_error error;
+  char suffix[64];
+  char key[128];
+  int rc;
+
+  (void)state;
+  endpoint = env_or_default("LOCKDC_E2E_DISK_ENDPOINT",
+                            "https://localhost:19441");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+  make_unique_name("workflow-recovery", suffix, sizeof(suffix));
+  /* This fixture sorts before digest-shaped production keys so a bounded
+   * recovery page proves discovery without claiming unrelated durable work in
+   * the shared compose-test namespace. */
+  assert_true(snprintf(key, sizeof(key), "__lockdc_io/v1/outbox/-%s", suffix) > 0);
+  client = NULL; workflow = NULL; lease = NULL; state_source = NULL;
+  payload_source = NULL; job = NULL;
+  lc_error_init(&error);
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = "default";
+  acquire.key = key;
+  acquire.owner = "workflow-recovery-e2e";
+  acquire.ttl_seconds = 30L;
+  rc = lc_acquire(client, &acquire, &lease, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_source_from_memory(state_json, sizeof(state_json) - 1U,
+                             &state_source, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_lease_update(lease, state_source, NULL, &error);
+  assert_lc_ok(rc, &error);
+  lc_source_close(state_source);
+  state_source = NULL;
+  rc = lc_source_from_memory("recovery-payload", 16U, &payload_source,
+                             &error);
+  assert_lc_ok(rc, &error);
+  lc_attach_req_init(&attach);
+  attach.name = "payload";
+  attach.content_type = "text/plain";
+  attach.prevent_overwrite = 1;
+  memset(&attach_result, 0, sizeof(attach_result));
+  rc = lc_lease_attach(lease, &attach, payload_source, &attach_result, &error);
+  assert_lc_ok(rc, &error);
+  lc_attach_res_cleanup(&attach_result);
+  lc_source_close(payload_source);
+  payload_source = NULL;
+  rc = lc_lease_release(lease, NULL, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+  lc_workflow_config_init(&config);
+  config.namespace_name = "default";
+  config.owner = "workflow-recovery-e2e";
+  config.notification_capacity = 1U;
+  rc = lc_client_new_workflow(client, &config, &workflow, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_workflow_next(workflow, 5000L, &job, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, "recovery-key");
+  rc = lc_outbox_job_complete(job, &error);
+  assert_lc_ok(rc, &error);
+  lc_outbox_job_close(job);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_disk_lease_state_roundtrip),
       cmocka_unit_test(test_disk_server_minted_multikey_xa_transaction),
       cmocka_unit_test(test_disk_workflow_implicit_xa_roundtrip),
+      cmocka_unit_test(test_disk_workflow_startup_recovery),
       cmocka_unit_test(test_disk_server_explicit_xa_enlists_on_acquire),
       cmocka_unit_test(
           test_disk_server_metadata_finalization_preserves_staged_version),

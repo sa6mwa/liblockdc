@@ -95,12 +95,16 @@ struct lc_workflow_handle {
   char *owner;
   long transaction_ttl_seconds;
   long claim_ttl_seconds;
+  long recovery_interval_seconds;
   int max_attempts;
   pthread_mutex_t notification_mutex;
   pthread_cond_t notification_cond;
   char **notifications;
   size_t notification_count;
   size_t notification_capacity;
+  char *recovery_cursor;
+  int recovery_needed;
+  lc_unix_seconds next_recovery_unix;
   int notification_mutex_initialized;
   int notification_cond_initialized;
   pthread_t dispatcher_thread;
@@ -144,6 +148,9 @@ static void lc_workflow_notify(lc_workflow_handle *workflow, const char *key) {
     workflow->notifications[workflow->notification_count++] = copy;
     pthread_cond_signal(&workflow->notification_cond);
     copy = NULL;
+  } else if (!workflow->closed) {
+    workflow->recovery_needed = 1;
+    pthread_cond_signal(&workflow->notification_cond);
   }
   pthread_mutex_unlock(&workflow->notification_mutex);
   lc_client_free(workflow->client, copy);
@@ -693,6 +700,101 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   return LC_OK;
 }
 
+typedef struct lc_workflow_recovery_capture {
+  lc_workflow_handle *workflow;
+  char key[129];
+  size_t length;
+} lc_workflow_recovery_capture;
+
+static int lc_workflow_recovery_key_begin(void *context, lc_error *error) {
+  lc_workflow_recovery_capture *capture =
+      (lc_workflow_recovery_capture *)context;
+  (void)error;
+  capture->length = 0U;
+  return 1;
+}
+
+static int lc_workflow_recovery_key_chunk(void *context, const char *bytes,
+                                          size_t length, lc_error *error) {
+  lc_workflow_recovery_capture *capture =
+      (lc_workflow_recovery_capture *)context;
+  if (length > sizeof(capture->key) - 1U - capture->length) {
+    lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                 "workflow recovery received an oversized key", NULL, NULL,
+                 NULL);
+    return 0;
+  }
+  memcpy(capture->key + capture->length, bytes, length);
+  capture->length += length;
+  return 1;
+}
+
+static int lc_workflow_recovery_key_end(void *context, lc_error *error) {
+  lc_workflow_recovery_capture *capture =
+      (lc_workflow_recovery_capture *)context;
+  (void)error;
+  capture->key[capture->length] = '\0';
+  lc_workflow_notify(capture->workflow, capture->key);
+  return 1;
+}
+
+static int lc_workflow_reconcile(lc_workflow_handle *workflow,
+                                 lc_error *error) {
+  static const char selector[] =
+      "{\"in\":{\"field\":\"/dispatch_state\",\"any\":[\"pending\",\"retry_wait\"]}}";
+  lc_query_req request;
+  lc_query_key_handler handler;
+  lc_query_res result;
+  lc_index_flush_req flush_request;
+  lc_index_flush_res flush_result;
+  lc_workflow_recovery_capture capture;
+  char *cursor;
+  int rc;
+
+  lc_query_req_init(&request);
+  lc_index_flush_req_init(&flush_request);
+  memset(&handler, 0, sizeof(handler));
+  memset(&result, 0, sizeof(result));
+  memset(&flush_result, 0, sizeof(flush_result));
+  memset(&capture, 0, sizeof(capture));
+  handler.begin = lc_workflow_recovery_key_begin;
+  handler.chunk = lc_workflow_recovery_key_chunk;
+  handler.end = lc_workflow_recovery_key_end;
+  capture.workflow = workflow;
+  /* A recovery sweep starts from a durable index boundary. Later pages keep
+   * that boundary: flushing every page would turn one large sweep into N
+   * global flushes and needlessly amplify reconciliation cost. */
+  if (workflow->recovery_cursor == NULL) {
+    flush_request.namespace_name = workflow->namespace_name;
+    flush_request.mode = "wait";
+    rc = lc_flush_index(&workflow->client->pub, &flush_request, &flush_result,
+                        error);
+    lc_index_flush_res_cleanup(&flush_result);
+    if (rc != LC_OK) return rc;
+  }
+  request.namespace_name = workflow->namespace_name;
+  request.selector_json = selector;
+  request.limit = (long)workflow->notification_capacity;
+  request.cursor = workflow->recovery_cursor;
+  request.engine = "index";
+  request.refresh = "wait_for";
+  rc = lc_query_keys(&workflow->client->pub, &request, &handler, &capture,
+                     &result, error);
+  if (rc != LC_OK) {
+    lc_query_res_cleanup(&result);
+    return rc;
+  }
+  cursor = result.cursor;
+  result.cursor = NULL;
+  lc_query_res_cleanup(&result);
+  lc_client_free(workflow->client, workflow->recovery_cursor);
+  workflow->recovery_cursor = cursor;
+  pthread_mutex_lock(&workflow->notification_mutex);
+  workflow->recovery_needed = workflow->recovery_cursor != NULL;
+  pthread_mutex_unlock(&workflow->notification_mutex);
+  return LC_OK;
+}
+
 static void *lc_workflow_dispatcher_main(void *context) {
   lc_workflow_handle *workflow = (lc_workflow_handle *)context;
 
@@ -700,25 +802,62 @@ static void *lc_workflow_dispatcher_main(void *context) {
     char *key;
     lc_outbox_job *job;
     lc_error error;
+    int reconcile;
 
     key = NULL;
+    reconcile = 0;
     pthread_mutex_lock(&workflow->notification_mutex);
-    while (!workflow->closed && workflow->notification_count == 0U) {
-      pthread_cond_wait(&workflow->notification_cond,
-                        &workflow->notification_mutex);
+    while (!workflow->closed && workflow->notification_count == 0U &&
+           !workflow->recovery_needed) {
+      if (workflow->next_recovery_unix > 0) {
+        struct timespec deadline;
+        deadline.tv_sec = workflow->next_recovery_unix;
+        deadline.tv_nsec = 0L;
+        if (pthread_cond_timedwait(&workflow->notification_cond,
+                                   &workflow->notification_mutex,
+                                   &deadline) == ETIMEDOUT) {
+          workflow->recovery_needed = 1;
+        }
+      } else {
+        pthread_cond_wait(&workflow->notification_cond,
+                          &workflow->notification_mutex);
+      }
     }
     if (workflow->closed) {
       pthread_mutex_unlock(&workflow->notification_mutex);
       break;
     }
-    key = workflow->notifications[0];
-    if (workflow->notification_count > 1U) {
-      memmove(workflow->notifications, workflow->notifications + 1U,
-              (workflow->notification_count - 1U) *
-                  sizeof(*workflow->notifications));
+    if (workflow->notification_count == 0U) {
+      reconcile = 1;
+    } else {
+      key = workflow->notifications[0];
+      if (workflow->notification_count > 1U) {
+        memmove(workflow->notifications, workflow->notifications + 1U,
+                (workflow->notification_count - 1U) *
+                    sizeof(*workflow->notifications));
+      }
+      --workflow->notification_count;
     }
-    --workflow->notification_count;
     pthread_mutex_unlock(&workflow->notification_mutex);
+
+    if (reconcile) {
+      int recovery_rc;
+      lc_error_init(&error);
+      recovery_rc = lc_workflow_reconcile(workflow, &error);
+      lc_error_cleanup(&error);
+      pthread_mutex_lock(&workflow->notification_mutex);
+      if (recovery_rc != LC_OK) {
+        workflow->recovery_needed = 0;
+        workflow->next_recovery_unix = (lc_unix_seconds)time(NULL) + 1L;
+      } else if (workflow->recovery_interval_seconds > 0L) {
+        workflow->next_recovery_unix =
+            (lc_unix_seconds)time(NULL) + workflow->recovery_interval_seconds;
+      } else {
+        workflow->next_recovery_unix = 0;
+      }
+      pthread_mutex_unlock(&workflow->notification_mutex);
+      continue;
+    }
 
     job = NULL;
     lc_error_init(&error);
@@ -1058,6 +1197,7 @@ static void lc_workflow_close_method(lc_workflow *self) {
   }
   for (i = 0U; i < workflow->notification_count; ++i) lc_client_free(client, workflow->notifications[i]);
   lc_client_free(client, workflow->notifications);
+  lc_client_free(client, workflow->recovery_cursor);
   if (workflow->notification_cond_initialized) pthread_cond_destroy(&workflow->notification_cond);
   if (workflow->notification_mutex_initialized) pthread_mutex_destroy(&workflow->notification_mutex);
   lc_client_free(client, workflow->namespace_name);
@@ -1088,13 +1228,20 @@ int lc_client_new_workflow_method(lc_client *self,
   if (workflow->transaction_ttl_seconds < 1L) { lc_workflow_close_method(&workflow->pub); return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow transaction ttl must be positive", NULL, NULL, NULL); }
   workflow->claim_ttl_seconds = config->claim_ttl_seconds == 0L ? 300L : config->claim_ttl_seconds;
   workflow->max_attempts = config->max_attempts == 0 ? 100 : config->max_attempts;
-  if (workflow->claim_ttl_seconds < 1L || workflow->max_attempts < 1) { lc_workflow_close_method(&workflow->pub); return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow claim ttl and maximum attempts must be positive", NULL, NULL, NULL); }
+  workflow->recovery_interval_seconds = config->recovery_interval_seconds;
+  if (workflow->recovery_interval_seconds == 0L && !client->is_pouch) workflow->recovery_interval_seconds = 300L;
+  if (workflow->claim_ttl_seconds < 1L || workflow->max_attempts < 1 || workflow->recovery_interval_seconds < 0L) { lc_workflow_close_method(&workflow->pub); return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow claim ttl, maximum attempts, and recovery interval are invalid", NULL, NULL, NULL); }
   workflow->notification_capacity = config->notification_capacity == 0U ? 1024U : config->notification_capacity;
   workflow->notifications = (char **)lc_client_calloc(client, workflow->notification_capacity, sizeof(*workflow->notifications));
   if (workflow->notifications == NULL || pthread_mutex_init(&workflow->notification_mutex, NULL) != 0) { lc_workflow_close_method(&workflow->pub); return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to initialize workflow dispatcher state", NULL, NULL, NULL); }
   workflow->notification_mutex_initialized = 1;
   if (pthread_cond_init(&workflow->notification_cond, NULL) != 0) { lc_workflow_close_method(&workflow->pub); return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to initialize workflow dispatcher state", NULL, NULL, NULL); }
   workflow->notification_cond_initialized = 1;
+  workflow->recovery_needed = 1;
+  if (workflow->recovery_interval_seconds > 0L) {
+    workflow->next_recovery_unix = (lc_unix_seconds)time(NULL) +
+                                    workflow->recovery_interval_seconds;
+  }
   workflow->pub.append_outbox = lc_workflow_append_outbox_method;
   workflow->pub.accept_inbox = lc_workflow_accept_inbox_method;
   workflow->pub.next = lc_workflow_next_method;

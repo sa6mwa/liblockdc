@@ -529,14 +529,17 @@ to repair conditions that a local notification cannot cover:
 - an optional infrequent reconciliation cadence.
 
 The dispatcher uses `lc_query_keys()` against the workflow namespace with the
-indexed query engine and a bounded page size. It selects envelope fields such
-as `record_type`, `dispatch_state`, `not_before`, and claim expiry, then receives
-keys only. It does not load payload attachments during discovery.
+indexed query engine and a bounded page size. Its portable indexed predicate
+selects dispatchable `pending` and `retry_wait` states; direct-key claim then
+rereads and validates the full envelope, `record_type`, timing, and active
+lease authority before it can hand work to a host. It receives keys only and
+does not load payload attachments during discovery.
 
-The recovery query must use an explicit freshness policy appropriate to the
-backend, including `refresh=wait_for` where that is required to make the Pouch
-index observe committed state after restart. Its performance and freshness are
-an implementation acceptance gate, not an assumption.
+Every new sweep establishes one explicit durable index boundary, then paginates
+that same sweep without flushing per page. It uses the backend's indexed-query
+freshness policy, including `refresh=wait_for`, so a restart can observe
+committed state. Its performance and freshness are an implementation acceptance
+gate, not an assumption.
 
 In a one-process local Pouch deployment where every writer uses this component,
 startup recovery and direct key notification can avoid a routine reconciliation

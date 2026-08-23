@@ -1554,6 +1554,13 @@ typedef struct lc_workflow_config {
   int max_attempts;
   /** Bounded direct-key notification capacity; zero defaults to 1024. */
   size_t notification_capacity;
+  /**
+   * Infrequent durable-recovery cadence. Zero defaults to five minutes for a
+   * remote endpoint and disables routine scans for local Pouch; startup and
+   * overflow reconciliation always run. Set a positive value for shared-root
+   * Pouch dispatch.
+   */
+  long recovery_interval_seconds;
 } lc_workflow_config;
 
 /** Immutable envelope and routing data for one durable outbox effect. */
