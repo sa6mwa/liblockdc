@@ -4577,11 +4577,14 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   lc_workflow_config config;
   lc_outbox_entry entry;
   lc_outbox_receipt receipt;
+  lc_outbox_receipt duplicate_receipt;
   lc_workflow_transaction *transaction;
+  lc_workflow_transaction *duplicate_transaction;
   lc_workflow_participant_request participant_request;
   lc_workflow_participant *participant;
   lc_outbox_job *job;
   lc_source *payload;
+  lc_source *duplicate_payload;
   lc_source *domain_state;
   lc_sink *payload_sink;
   const void *payload_bytes;
@@ -4599,7 +4602,8 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   require_file_or_skip(bundle_path);
   make_unique_name("workflow-domain", domain_key, sizeof(domain_key));
   client = NULL; workflow = NULL; transaction = NULL; participant = NULL;
-  job = NULL; payload = NULL; domain_state = NULL; payload_sink = NULL;
+  job = NULL; payload = NULL; duplicate_payload = NULL; domain_state = NULL;
+  duplicate_transaction = NULL; payload_sink = NULL;
   payload_bytes = NULL; payload_length = 0U; payload_written = 0U;
   lc_error_init(&error);
   open_tcp_client(endpoint, bundle_path, &client, &error);
@@ -4647,6 +4651,21 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   assert_non_null(job);
   assert_string_equal(job->effect_key, domain_key);
+  rc = lc_source_from_memory("workflow-payload", 16U, &duplicate_payload,
+                             &error);
+  assert_lc_ok(rc, &error);
+  lc_outbox_receipt_init(&duplicate_receipt);
+  duplicate_transaction = (lc_workflow_transaction *)1;
+  rc = lc_workflow_append_outbox(workflow, &entry, duplicate_payload,
+                                 &duplicate_transaction, &duplicate_receipt,
+                                 &error);
+  assert_lc_ok(rc, &error);
+  assert_null(duplicate_transaction);
+  assert_true(duplicate_receipt.duplicate);
+  assert_string_equal(duplicate_receipt.outbox_key, receipt.outbox_key);
+  lc_outbox_receipt_cleanup(&duplicate_receipt);
+  lc_source_close(duplicate_payload);
+  duplicate_payload = NULL;
   rc = lc_sink_to_memory(&payload_sink, &error);
   assert_lc_ok(rc, &error);
   rc = lc_outbox_job_write_payload(job, payload_sink, &payload_written,
@@ -4666,6 +4685,7 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   job = NULL;
   lc_source_close(payload);
   lc_outbox_receipt_cleanup(&receipt);
+  if (duplicate_payload != NULL) lc_source_close(duplicate_payload);
   if (payload_sink != NULL) lc_sink_close(payload_sink);
   if (job != NULL) lc_outbox_job_close(job);
   lc_workflow_close(workflow);
