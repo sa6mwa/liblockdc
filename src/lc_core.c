@@ -1990,6 +1990,14 @@ LC_INIT_STRUCT_FUNC(lc_watch_handler, lc_watch_handler_init)
 LC_INIT_STRUCT_FUNC(lc_consumer, lc_consumer_init)
 LC_INIT_STRUCT_FUNC(lc_consumer_service_config, lc_consumer_service_config_init)
 LC_INIT_STRUCT_FUNC(lc_workflow_config, lc_workflow_config_init)
+void lc_dead_letter_export_opts_init(lc_dead_letter_export_opts *options) {
+  if (options == NULL)
+    return;
+  memset(options, 0, sizeof(*options));
+  options->format = LC_DEAD_LETTER_EXPORT_JSON;
+}
+LC_INIT_STRUCT_FUNC(lc_dead_letter_export_res, lc_dead_letter_export_res_init)
+LC_INIT_STRUCT_FUNC(lc_workflow_stats, lc_workflow_stats_init)
 LC_INIT_STRUCT_FUNC(lc_outbox_entry, lc_outbox_entry_init)
 LC_INIT_STRUCT_FUNC(lc_inbox_message, lc_inbox_message_init)
 LC_INIT_STRUCT_FUNC(lc_outbox_retry, lc_outbox_retry_init)
@@ -2015,6 +2023,14 @@ void lc_outbox_receipt_cleanup(lc_outbox_receipt *receipt) {
   free(receipt->outbox_key);
   free(receipt->effect_key);
   memset(receipt, 0, sizeof(*receipt));
+}
+
+void lc_workflow_stats_cleanup(lc_workflow_stats *stats) {
+  if (stats == NULL) {
+    return;
+  }
+  free(stats->last_error);
+  memset(stats, 0, sizeof(*stats));
 }
 
 const char *lc_nack_intent_to_string(lc_nack_intent intent) {

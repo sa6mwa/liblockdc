@@ -212,7 +212,7 @@ local function test_subscribe_ack_and_error_paths()
   end
 
   local function open_client_for_messages(messages)
-    local client_core = {
+local client_core = {
       close = function() end,
     }
 
@@ -642,6 +642,26 @@ local function test_workflow_facade_lifecycle()
       captured.next_timeout = timeout
       return job_core
     end,
+    stats = function()
+      return { running = true, recovery_queries = 3 }
+    end,
+    reconcile = function(self)
+      self.reconciled = true
+      return true
+    end,
+    replay_dead_letter = function(self, key)
+      self.replayed_key = key
+      return true
+    end,
+    delete_dead_letter = function(self, key)
+      self.deleted_key = key
+      return true
+    end,
+    export_dead_letters = function(_, options, dest)
+      captured.export_options = options
+      captured.export_dest = dest
+      return '[{"dispatch_state":"dead_letter"}]', { exported = 1 }
+    end,
     close = function(self) self.closed = true end,
   }
   local client_core = {
@@ -662,6 +682,7 @@ local function test_workflow_facade_lifecycle()
     owner = 'lua-worker',
     recovery_interval_seconds = 7,
     shutdown_timeout_ms = 1234,
+    replay_dead_letters_on_startup = true,
   }))
   local txn, receipt = assert(workflow:append_outbox({
     operation_id = 'op-1',
@@ -675,6 +696,8 @@ local function test_workflow_facade_lifecycle()
   assert_eq(captured.workflow_config.namespace, 'workflow-ns', 'new_workflow should pass config through')
   assert_eq(captured.workflow_config.shutdown_timeout_ms, 1234,
       'workflow shutdown timeout should pass through')
+  assert_eq(captured.workflow_config.replay_dead_letters_on_startup, true,
+      'workflow startup replay option should pass through')
   assert_eq(captured.first_entry.headers_json, 'header-json', 'workflow should encode headers into headers_json')
   assert_eq(captured.first_entry.headers, nil, 'workflow should not pass façade-only headers')
   assert_eq(captured.first_payload, 'payload', 'workflow should preserve arbitrary payload source')
@@ -723,6 +746,33 @@ local function test_workflow_facade_lifecycle()
   job:close()
   assert_truthy(job_core.closed,
       'job close must release the native job after completion')
+
+  local stats = assert(workflow:stats())
+  assert_eq(stats.recovery_queries, 3, 'workflow stats should delegate')
+  assert_truthy(workflow:reconcile(), 'workflow reconciliation should delegate')
+  assert_truthy(workflow_core.reconciled, 'workflow core should reconcile')
+  assert_truthy(workflow:replay_dead_letter('dead-key'),
+      'dead-letter replay should delegate')
+  assert_eq(workflow_core.replayed_key, 'dead-key',
+      'dead-letter replay key should pass through')
+  assert_truthy(workflow:delete_dead_letter('dead-key'),
+      'dead-letter delete should delegate')
+  assert_eq(workflow_core.deleted_key, 'dead-key',
+      'dead-letter delete key should pass through')
+  local exported, export_result = assert(workflow:export_dead_letters(
+      { format = 'jsonl', limit = 10 }, { path = '/tmp/dead-letter.jsonl' }))
+  assert_eq(export_result.exported, 1, 'dead-letter export result should delegate')
+  assert_eq(captured.export_options.format, 'jsonl',
+      'dead-letter export options should pass through')
+  assert_eq(captured.export_dest.path, '/tmp/dead-letter.jsonl',
+      'dead-letter export destination should pass through')
+  assert_truthy(exported:find('dead_letter', 1, true),
+      'dead-letter export should return the core output')
+  assert(workflow:export_dead_letters('/tmp/dead-letter.json'))
+  assert_eq(captured.export_options, nil,
+      'dead-letter export should allow a destination without options')
+  assert_eq(captured.export_dest, '/tmp/dead-letter.json',
+      'dead-letter export destination shorthand should pass through')
 
   workflow:close()
   assert_truthy(workflow_core.closed, 'workflow close should close the core receiver')

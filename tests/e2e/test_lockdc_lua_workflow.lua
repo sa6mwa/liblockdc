@@ -191,8 +191,36 @@ if job:info().attempt ~= 2 then
   client:close()
   error("Lua workflow retry did not increment the attempt")
 end
+local dead_letter_key = job:info().outbox_key
 assert_ok(job:dead_letter("permanent"), nil, "Lua workflow dead letter")
 job:close()
+
+local stats = assert_ok(workflow:stats(), nil, "Lua workflow stats")
+if not stats.running then
+  workflow:close()
+  client:close()
+  error("Lua workflow stats did not report a running dispatcher")
+end
+local exported, export_result = workflow:export_dead_letters({ format = "jsonl" })
+if exported == nil or export_result == nil or export_result.exported ~= 1 or
+    not exported:find("dead_letter", 1, true) or
+    exported:find("retry-payload", 1, true) then
+  workflow:close()
+  client:close()
+  error("Lua workflow dead-letter export did not return a metadata-only envelope")
+end
+assert_ok(workflow:replay_dead_letter(dead_letter_key), nil,
+          "Lua workflow dead-letter replay")
+job = assert_ok(workflow:next(3000), nil, "Lua workflow replayed job")
+if job:info().effect_key ~= "lua-effect:retry" or job:info().attempt ~= 1 then
+  job:close()
+  workflow:close()
+  client:close()
+  error("Lua workflow dead-letter replay did not reset the delivery attempt")
+end
+assert_ok(job:complete(), nil, "Lua workflow replayed completion")
+job:close()
+assert_ok(workflow:reconcile(), nil, "Lua workflow reconciliation signal")
 
 workflow:close()
 client:close()

@@ -1581,7 +1581,57 @@ typedef struct lc_workflow_config {
    * uses its retained local session.
    */
   long shutdown_timeout_ms;
+  /** When non-zero, replay durable dead letters through startup reconciliation.
+   */
+  int replay_dead_letters_on_startup;
 } lc_workflow_config;
+
+/** Streaming representation requested from `export_dead_letters()`. */
+enum {
+  /** Write one JSON array containing every exported dead-letter envelope. */
+  LC_DEAD_LETTER_EXPORT_JSON = 1,
+  /** Write one complete JSON envelope followed by a newline per record. */
+  LC_DEAD_LETTER_EXPORT_JSONL = 2
+};
+
+/** Bounded export settings for workflow dead-letter envelopes. */
+typedef struct lc_dead_letter_export_opts {
+  /** `LC_DEAD_LETTER_EXPORT_JSON` or `LC_DEAD_LETTER_EXPORT_JSONL`. */
+  int format;
+  /** Maximum records to export; zero uses the workflow notification capacity.
+   */
+  size_t limit;
+} lc_dead_letter_export_opts;
+
+/** Result of a streamed dead-letter export. */
+typedef struct lc_dead_letter_export_res {
+  /** Number of complete envelope documents written to the caller's sink. */
+  size_t exported;
+} lc_dead_letter_export_res;
+
+/** Cheap process-local workflow observability snapshot. */
+typedef struct lc_workflow_stats {
+  /** Non-zero while the private dispatcher may claim new work. */
+  int running;
+  /** Current direct-notification backlog. */
+  size_t pending_notifications;
+  /** Current preclaimed host-job backlog. */
+  size_t ready_jobs;
+  /** Monotonic successful key notifications in this workflow process. */
+  uint64_t direct_notifications;
+  /** Monotonic notification overflows repaired through reconciliation. */
+  uint64_t notification_overflows;
+  /** Monotonic indexed reconciliation sweeps started by this process. */
+  uint64_t recovery_queries;
+  /** Monotonic outbox keys rediscovered by reconciliation. */
+  uint64_t recovered_claims;
+  /** Monotonic claims that could not become a host job. */
+  uint64_t claim_losses;
+  /** Monotonic payload streaming failures observed from claimed jobs. */
+  uint64_t payload_open_failures;
+  /** Owned latest private-dispatcher error text, or `NULL`. */
+  char *last_error;
+} lc_workflow_stats;
 
 /** Immutable envelope and routing data for one durable outbox effect. */
 typedef struct lc_outbox_entry {
@@ -2106,12 +2156,12 @@ struct lc_workflow_participant {
                 lc_error *error);
   int (*mutate_local)(lc_workflow_participant *self,
                       const lc_mutate_local_req *req, lc_error *error);
-  int (*metadata)(lc_workflow_participant *self,
-                  const lc_metadata_req *req, lc_error *error);
+  int (*metadata)(lc_workflow_participant *self, const lc_metadata_req *req,
+                  lc_error *error);
   int (*remove)(lc_workflow_participant *self, const lc_remove_req *req,
                 lc_error *error);
-  int (*keepalive)(lc_workflow_participant *self,
-                   const lc_keepalive_req *req, lc_error *error);
+  int (*keepalive)(lc_workflow_participant *self, const lc_keepalive_req *req,
+                   lc_error *error);
   int (*attach)(lc_workflow_participant *self, const lc_attach_req *req,
                 lc_source *src, lc_attach_res *out, lc_error *error);
   int (*list_attachments)(lc_workflow_participant *self,
@@ -2120,8 +2170,8 @@ struct lc_workflow_participant {
                         const lc_attachment_get_req *req, lc_sink *dst,
                         lc_attachment_get_res *out, lc_error *error);
   int (*delete_attachment)(lc_workflow_participant *self,
-                           const lc_attachment_selector *selector,
-                           int *deleted, lc_error *error);
+                           const lc_attachment_selector *selector, int *deleted,
+                           lc_error *error);
   int (*delete_all_attachments)(lc_workflow_participant *self,
                                 int *deleted_count, lc_error *error);
   void (*close)(lc_workflow_participant *self);
@@ -2171,7 +2221,8 @@ struct lc_outbox_job {
   void *impl;
 };
 
-/** A parent workflow owns private dispatch coordination and exposes jobs here. */
+/** A parent workflow owns private dispatch coordination and exposes jobs here.
+ */
 struct lc_workflow {
   int (*append_outbox)(lc_workflow *self, const lc_outbox_entry *entry,
                        lc_source *payload, lc_workflow_transaction **out_txn,
@@ -2181,6 +2232,16 @@ struct lc_workflow {
                       lc_inbox_accept_result *result, lc_error *error);
   int (*next)(lc_workflow *self, long timeout_ms, lc_outbox_job **out,
               lc_error *error);
+  int (*get_stats)(lc_workflow *self, lc_workflow_stats *out, lc_error *error);
+  int (*reconcile)(lc_workflow *self, lc_error *error);
+  int (*replay_dead_letter)(lc_workflow *self, const char *outbox_key,
+                            lc_error *error);
+  int (*delete_dead_letter)(lc_workflow *self, const char *outbox_key,
+                            lc_error *error);
+  int (*export_dead_letters)(lc_workflow *self,
+                             const lc_dead_letter_export_opts *options,
+                             lc_sink *dst, lc_dead_letter_export_res *out,
+                             lc_error *error);
   void (*close)(lc_workflow *self);
   void *impl;
 };
@@ -2561,6 +2622,14 @@ void lc_consumer_config_init(lc_consumer_config *config);
 void lc_consumer_service_config_init(lc_consumer_service_config *config);
 /** Initializes an inbox/outbox workflow config to all-zero/empty values. */
 void lc_workflow_config_init(lc_workflow_config *config);
+/** Initializes a dead-letter export request to JSON with the default bound. */
+void lc_dead_letter_export_opts_init(lc_dead_letter_export_opts *options);
+/** Clears a dead-letter export result to zero records. */
+void lc_dead_letter_export_res_init(lc_dead_letter_export_res *result);
+/** Clears a workflow observability snapshot to zero/empty values. */
+void lc_workflow_stats_init(lc_workflow_stats *stats);
+/** Releases strings owned by a workflow observability snapshot. */
+void lc_workflow_stats_cleanup(lc_workflow_stats *stats);
 /** Initializes an outbox envelope request to all-zero/empty values. */
 void lc_outbox_entry_init(lc_outbox_entry *entry);
 /** Initializes an inbox identity request to all-zero/empty values. */
@@ -2568,7 +2637,8 @@ void lc_inbox_message_init(lc_inbox_message *message);
 /** Clears a retry request so policy chooses its delay and no diagnostic. */
 void lc_outbox_retry_init(lc_outbox_retry *request);
 /** Initializes a workflow participant request to all-zero/empty values. */
-void lc_workflow_participant_request_init(lc_workflow_participant_request *request);
+void lc_workflow_participant_request_init(
+    lc_workflow_participant_request *request);
 /** Initializes an outbox receipt to all-zero/empty values. */
 void lc_outbox_receipt_init(lc_outbox_receipt *receipt);
 /** Releases strings owned by an outbox receipt. */
@@ -3128,8 +3198,8 @@ int lc_consumer_service_wait(lc_consumer_service *service, lc_error *error);
 /** Closes and frees a managed consumer service. */
 void lc_consumer_service_close(lc_consumer_service *service);
 
-int lc_workflow_append_outbox(lc_workflow *workflow, const lc_outbox_entry *entry,
-                              lc_source *payload,
+int lc_workflow_append_outbox(lc_workflow *workflow,
+                              const lc_outbox_entry *entry, lc_source *payload,
                               lc_workflow_transaction **out_txn,
                               lc_outbox_receipt *receipt, lc_error *error);
 int lc_workflow_accept_inbox(lc_workflow *workflow,
@@ -3138,24 +3208,37 @@ int lc_workflow_accept_inbox(lc_workflow *workflow,
                              lc_inbox_accept_result *result, lc_error *error);
 int lc_workflow_next(lc_workflow *workflow, long timeout_ms,
                      lc_outbox_job **out, lc_error *error);
+int lc_workflow_get_stats(lc_workflow *workflow, lc_workflow_stats *out,
+                          lc_error *error);
+int lc_workflow_reconcile(lc_workflow *workflow, lc_error *error);
+int lc_workflow_replay_dead_letter(lc_workflow *workflow,
+                                   const char *outbox_key, lc_error *error);
+int lc_workflow_delete_dead_letter(lc_workflow *workflow,
+                                   const char *outbox_key, lc_error *error);
+int lc_workflow_export_dead_letters(lc_workflow *workflow,
+                                    const lc_dead_letter_export_opts *options,
+                                    lc_sink *dst,
+                                    lc_dead_letter_export_res *out,
+                                    lc_error *error);
 void lc_workflow_close(lc_workflow *workflow);
 int lc_outbox_job_write_payload(lc_outbox_job *job, lc_sink *dst,
                                 size_t *written, lc_error *error);
-int lc_outbox_job_renew(lc_outbox_job *job, long ttl_seconds,
-                        lc_error *error);
+int lc_outbox_job_renew(lc_outbox_job *job, long ttl_seconds, lc_error *error);
 int lc_outbox_job_complete(lc_outbox_job *job, lc_error *error);
 int lc_outbox_job_retry(lc_outbox_job *job, const lc_outbox_retry *request,
                         lc_error *error);
 int lc_outbox_job_dead_letter(lc_outbox_job *job, const char *diagnostic,
-                               lc_error *error);
+                              lc_error *error);
 void lc_outbox_job_close(lc_outbox_job *job);
 int lc_workflow_transaction_acquire(
     lc_workflow_transaction *transaction,
     const lc_workflow_participant_request *request,
     lc_workflow_participant **out, lc_error *error);
-int lc_workflow_transaction_append_outbox(
-    lc_workflow_transaction *transaction, const lc_outbox_entry *entry,
-    lc_source *payload, lc_outbox_receipt *out, lc_error *error);
+int lc_workflow_transaction_append_outbox(lc_workflow_transaction *transaction,
+                                          const lc_outbox_entry *entry,
+                                          lc_source *payload,
+                                          lc_outbox_receipt *out,
+                                          lc_error *error);
 int lc_workflow_transaction_commit(lc_workflow_transaction *transaction,
                                    lc_error *error);
 int lc_workflow_transaction_rollback(lc_workflow_transaction *transaction,

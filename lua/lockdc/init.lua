@@ -632,6 +632,31 @@ function Workflow:next(timeout_ms)
   return wrap_outbox_job(job)
 end
 
+function Workflow:stats()
+  return self._core:stats()
+end
+
+function Workflow:reconcile()
+  return self._core:reconcile()
+end
+
+function Workflow:replay_dead_letter(outbox_key)
+  return self._core:replay_dead_letter(outbox_key)
+end
+
+function Workflow:delete_dead_letter(outbox_key)
+  return self._core:delete_dead_letter(outbox_key)
+end
+
+function Workflow:export_dead_letters(options, dest)
+  if dest == nil and (type(options) == "string" or type(options) == "number" or
+      (type(options) == "table" and
+       (options.path ~= nil or options.fd ~= nil))) then
+    return self._core:export_dead_letters(nil, options)
+  end
+  return self._core:export_dead_letters(options, dest)
+end
+
 function WorkflowTransaction:close()
   if self._core ~= nil and not self._closed then
     self._core:close()

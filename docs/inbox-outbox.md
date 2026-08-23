@@ -1,6 +1,7 @@
 # liblockdc Inbox/Outbox Design Specification
 
-Status: proposed; transaction contract reviewed against liblockdc and lockd
+Status: implemented v0 design; operational recovery and dead-letter controls
+are part of the public workflow surface
 
 ## Purpose
 
@@ -166,6 +167,17 @@ struct lc_workflow {
                       lc_inbox_accept_result *result, lc_error *error);
   int (*next)(lc_workflow *self, long timeout_ms, lc_outbox_job **out,
               lc_error *error);
+  int (*get_stats)(lc_workflow *self, lc_workflow_stats *out,
+                   lc_error *error);
+  int (*reconcile)(lc_workflow *self, lc_error *error);
+  int (*replay_dead_letter)(lc_workflow *self, const char *outbox_key,
+                            lc_error *error);
+  int (*delete_dead_letter)(lc_workflow *self, const char *outbox_key,
+                            lc_error *error);
+  int (*export_dead_letters)(lc_workflow *self,
+                             const lc_dead_letter_export_opts *options,
+                             lc_sink *dst, lc_dead_letter_export_res *out,
+                             lc_error *error);
   void (*close)(lc_workflow *self);
 };
 
@@ -282,6 +294,13 @@ calling Lua context; the private native dispatcher never enters a Lua VM or
 invokes a Lua callback. This keeps the facility usable by any Lua host without
 assuming its scheduler, mailbox, or runtime-lifetime rules.
 
+The Lua façade supplies the matching parent operations as `workflow:stats()`,
+`workflow:reconcile()`, `workflow:replay_dead_letter(outbox_key)`,
+`workflow:delete_dead_letter(outbox_key)`, and
+`workflow:export_dead_letters(options, destination)`. `options.format` is
+`"json"` or `"jsonl"`; an omitted destination returns the bounded export as a
+Lua string, while the usual Lua file/fd destination forms stream directly.
+
 ### Cross-language parity
 
 The C and Lua surfaces must have parity for workflow creation, first-operation
@@ -351,6 +370,10 @@ claim_expires_at
 last_error_code
 last_error_message
 completed_at
+dead_lettered_at_unix
+replay_count
+replayed_at_unix
+prior_dead_letter_error
 ```
 
 The attachment name is fixed by the component, `payload`. It is written
@@ -525,6 +548,27 @@ sets `not_before`. Exhausting the configured retry budget transitions to
 `dead_letter`; it never silently removes the record. Dead-letter replay retains
 the original `effect_key`.
 
+### Dead-letter operations
+
+Dead letters are terminal durable envelopes until an application takes one
+explicit management action. `replay_dead_letter(outbox_key)` is valid only for
+a current dead-letter envelope. It atomically restores `pending`, resets the
+delivery attempt count to zero, retains the immutable `effect_key`, increments
+`replay_count`, writes `replayed_at_unix`, and preserves the previous terminal
+diagnostic in `prior_dead_letter_error`. The normal dispatcher then receives
+the exact key as an internal notification.
+
+`delete_dead_letter(outbox_key)` is also restricted to a current dead letter.
+It deletes the envelope and its fixed `payload` attachment under one workflow
+lease/transaction, so no orphaned payload survives a successful delete. There
+is no automatic retention/deletion scheduler in v0.
+
+`export_dead_letters()` emits envelope state only: it never reads or writes
+payload attachment bytes. JSON output is one array; JSONL output is one JSON
+envelope per line. Export is deliberately bounded by `options.limit` (or the
+workflow notification capacity when zero), so a caller can write a stable,
+bounded audit/replay sink without materializing the result in liblockdc.
+
 ## Recovery and Indexed Reconciliation
 
 Direct notification is the normal dispatch path. Index querying exists solely
@@ -535,6 +579,15 @@ to repair conditions that a local notification cannot cover:
 - claims that expired after process or worker loss;
 - retry deadlines not retained by a stopped dispatcher; and
 - an optional infrequent reconciliation cadence.
+
+`workflow->reconcile()` is an explicit, asynchronous request for this same
+private recovery sweep; it does not expose dispatcher coordination or execute
+host work in the caller. `replay_dead_letters_on_startup` is opt-in. When set,
+the initial reconciliation first scans bounded pages of durable dead letters,
+applies the reset-with-provenance replay transition, and signals the same
+dispatcher before returning to normal pending/retry reconciliation. The option
+is appropriate for an operator-controlled restart, not a substitute for a
+foreign system's idempotency contract.
 
 The dispatcher uses `lc_query_keys()` against the workflow namespace with the
 indexed query engine and a bounded page size. Its portable indexed predicate
@@ -618,21 +671,24 @@ workflow shutdown remain recoverable through the durable reconciliation path.
 A host renewing a claim for a longer foreign effect must do so before the
 five-minute claim expiry.
 
-The component exposes read-only statistics and last-error state, including:
+The component exposes an MVP read-only, process-local snapshot through
+`lc_workflow_get_stats()` / `workflow:stats()`, including:
 
 ```text
-direct_notifications
+direct_notifications (all accepted internal key notifications)
 notification_overflows
 recovery_queries
-recovered_claims
-ready | claimed | retry_wait | completed | dead_letter counts
+recovered_claims (outbox keys rediscovered by reconciliation)
 claim_losses
 payload_open_failures
 dispatcher lifecycle state
+latest dispatcher error text
 ```
 
-These counters and logs are observability. Durable state keys remain the sole
-recovery source of truth.
+The snapshot also reports the current bounded notification and ready-job
+backlogs. It does not query or aggregate durable namespace counts, and it is
+reset on workflow recreation. These counters are observability only; durable
+state keys remain the sole recovery source of truth.
 
 ## Required Verification
 
@@ -693,6 +749,11 @@ Pouch and the repository's compose-backed remote lockd E2E environment.
     participant; and a consumed participant cannot be reused.
 18. A matching committed outbox duplicate returns its existing receipt with no
     transaction and cannot stage a second domain mutation or outbox intent.
+19. Dead-letter export contains envelope JSON but no payload bytes; explicit
+    replay keeps `effect_key`, resets the attempt, records replay provenance,
+    and deletion removes both envelope and attachment atomically. The same
+    outcomes are covered through the C and Lua surfaces, including opt-in
+    startup replay.
 
 ## Proof Obligations and Open Decisions
 

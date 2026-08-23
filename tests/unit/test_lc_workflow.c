@@ -17,6 +17,23 @@
 #define WORKFLOW_RECONCILIATION_RECORDS 256U
 #define WORKFLOW_PREFETCH_RECORDS 3U
 
+static int workflow_bytes_contains(const void *bytes, size_t length,
+                                   const char *needle) {
+  size_t needle_length;
+  size_t index;
+
+  if (bytes == NULL || needle == NULL)
+    return 0;
+  needle_length = strlen(needle);
+  if (needle_length == 0U || needle_length > length)
+    return 0;
+  for (index = 0U; index <= length - needle_length; ++index) {
+    if (memcmp((const char *)bytes + index, needle, needle_length) == 0)
+      return 1;
+  }
+  return 0;
+}
+
 static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
                                  const char *key, lc_error *error) {
   static const char state[] =
@@ -40,20 +57,23 @@ static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
   lease = NULL;
   assert_int_equal(lc_acquire(client, &acquire, &lease, error), LC_OK);
   state_source = NULL;
-  assert_int_equal(lc_source_from_memory(state, sizeof(state) - 1U,
-                                         &state_source, error), LC_OK);
+  assert_int_equal(
+      lc_source_from_memory(state, sizeof(state) - 1U, &state_source, error),
+      LC_OK);
   assert_int_equal(lc_lease_update(lease, state_source, NULL, error), LC_OK);
   lc_source_close(state_source);
   payload_source = NULL;
-  assert_int_equal(lc_source_from_memory("recovery-payload", 16U,
-                                         &payload_source, error), LC_OK);
+  assert_int_equal(
+      lc_source_from_memory("recovery-payload", 16U, &payload_source, error),
+      LC_OK);
   lc_attach_req_init(&attach);
   attach.name = "payload";
   attach.content_type = "text/plain";
   attach.prevent_overwrite = 1;
   memset(&attach_result, 0, sizeof(attach_result));
-  assert_int_equal(lc_lease_attach(lease, &attach, payload_source,
-                                   &attach_result, error), LC_OK);
+  assert_int_equal(
+      lc_lease_attach(lease, &attach, payload_source, &attach_result, error),
+      LC_OK);
   lc_attach_res_cleanup(&attach_result);
   lc_source_close(payload_source);
   assert_int_equal(lc_lease_release(lease, NULL, error), LC_OK);
@@ -64,8 +84,9 @@ typedef struct workflow_process_result {
   int got_job;
 } workflow_process_result;
 
-static workflow_process_result workflow_shared_process_claim(
-    const char *root, const char *namespace_name, int start_fd) {
+static workflow_process_result
+workflow_shared_process_claim(const char *root, const char *namespace_name,
+                              int start_fd) {
   workflow_process_result result;
   char endpoint[320];
   const char *endpoints[1];
@@ -85,7 +106,8 @@ static workflow_process_result workflow_shared_process_claim(
   }
   (void)close(start_fd);
   if (snprintf(endpoint, sizeof(endpoint),
-               "pouch://%s?pouch_single_writer=false", root) < 0) return result;
+               "pouch://%s?pouch_single_writer=false", root) < 0)
+    return result;
   endpoints[0] = endpoint;
   client = NULL;
   workflow = NULL;
@@ -100,8 +122,8 @@ static workflow_process_result workflow_shared_process_claim(
     workflow_config.namespace_name = namespace_name;
     workflow_config.owner = "workflow-shared-child";
     workflow_config.recovery_interval_seconds = 1L;
-    result.rc = lc_client_new_workflow(client, &workflow_config, &workflow,
-                                       &error);
+    result.rc =
+        lc_client_new_workflow(client, &workflow_config, &workflow, &error);
   }
   if (result.rc == LC_OK)
     result.rc = lc_workflow_next(workflow, 5000L, &job, &error);
@@ -109,9 +131,12 @@ static workflow_process_result workflow_shared_process_claim(
     result.got_job = 1;
     result.rc = lc_outbox_job_complete(job, &error);
   }
-  if (job != NULL) lc_outbox_job_close(job);
-  if (workflow != NULL) lc_workflow_close(workflow);
-  if (client != NULL) lc_client_close(client);
+  if (job != NULL)
+    lc_outbox_job_close(job);
+  if (workflow != NULL)
+    lc_workflow_close(workflow);
+  if (client != NULL)
+    lc_client_close(client);
   lc_error_cleanup(&error);
   return result;
 }
@@ -164,8 +189,9 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   workflow_config.namespace_name = "workflow";
   workflow_config.owner = "workflow-test";
   workflow = NULL;
-  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
-                                          &error), LC_OK);
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
   lc_outbox_entry_init(&entry);
   entry.operation_id = "operation-1";
   entry.effect_id = "effect-1";
@@ -180,7 +206,7 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_outbox_receipt_init(&receipt);
   transaction = NULL;
   assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
-                                              &transaction, &receipt, &error),
+                                             &transaction, &receipt, &error),
                    LC_OK);
   assert_non_null(transaction);
   assert_non_null(receipt.outbox_key);
@@ -190,14 +216,15 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   participant_request.acquire.owner = "orders";
   participant_request.acquire.ttl_seconds = 30L;
   participant = NULL;
-  assert_int_equal(lc_workflow_transaction_acquire(transaction,
-                                                    &participant_request,
-                                                    &participant, &error), LC_OK);
+  assert_int_equal(lc_workflow_transaction_acquire(
+                       transaction, &participant_request, &participant, &error),
+                   LC_OK);
   assert_non_null(participant);
   assert_non_null(participant->txn_id);
   state_source = NULL;
   assert_int_equal(lc_source_from_memory("{\"status\":\"paid\"}", 17U,
-                                         &state_source, &error), LC_OK);
+                                         &state_source, &error),
+                   LC_OK);
   assert_int_equal(participant->update(participant, state_source, NULL, &error),
                    LC_OK);
   lc_source_close(state_source);
@@ -217,8 +244,9 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_outbox_receipt_init(&duplicate_receipt);
   duplicate_transaction = (lc_workflow_transaction *)1;
   assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
-                                              &duplicate_transaction,
-                                              &duplicate_receipt, &error), LC_OK);
+                                             &duplicate_transaction,
+                                             &duplicate_receipt, &error),
+                   LC_OK);
   assert_null(duplicate_transaction);
   assert_true(duplicate_receipt.duplicate);
   assert_string_equal(receipt.outbox_key, duplicate_receipt.outbox_key);
@@ -227,11 +255,12 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   payload_length = 0U;
   payload_written = 0U;
   assert_int_equal(lc_sink_to_memory(&payload_sink, &error), LC_OK);
-  assert_int_equal(lc_outbox_job_write_payload(job, payload_sink,
-                                                &payload_written, &error),
-                   LC_OK);
+  assert_int_equal(
+      lc_outbox_job_write_payload(job, payload_sink, &payload_written, &error),
+      LC_OK);
   assert_int_equal(lc_sink_memory_bytes(payload_sink, &payload_bytes,
-                                        &payload_length, &error), LC_OK);
+                                        &payload_length, &error),
+                   LC_OK);
   assert_int_equal(payload_written, 7U);
   assert_int_equal(payload_length, 7U);
   assert_memory_equal(payload_bytes, "payload", 7U);
@@ -244,11 +273,11 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_outbox_receipt_init(&receipt);
   entry.effect_id = "effect-retry";
   entry.effect_key = "foreign-idempotency-retry";
-  assert_int_equal(lc_source_from_memory("retry-payload", 13U, &payload,
-                                         &error), LC_OK);
+  assert_int_equal(
+      lc_source_from_memory("retry-payload", 13U, &payload, &error), LC_OK);
   transaction = NULL;
   assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
-                                              &transaction, &receipt, &error),
+                                             &transaction, &receipt, &error),
                    LC_OK);
   assert_non_null(transaction);
   assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
@@ -289,8 +318,9 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   inbox_transaction = NULL;
   memset(&inbox_result, 0, sizeof(inbox_result));
   assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox,
-                                             &inbox_transaction, &inbox_result,
-                                             &error), LC_OK);
+                                            &inbox_transaction, &inbox_result,
+                                            &error),
+                   LC_OK);
   assert_true(inbox_result.accepted);
   assert_non_null(inbox_transaction);
   assert_int_equal(lc_workflow_transaction_commit(inbox_transaction, &error),
@@ -299,10 +329,192 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   inbox_transaction = (lc_workflow_transaction *)1;
   memset(&inbox_result, 0, sizeof(inbox_result));
   assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox,
-                                             &inbox_transaction, &inbox_result,
-                                             &error), LC_OK);
+                                            &inbox_transaction, &inbox_result,
+                                            &error),
+                   LC_OK);
   assert_null(inbox_transaction);
   assert_true(inbox_result.duplicate);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_dead_letter_operations(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_outbox_receipt receipt;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_sink *sink;
+  lc_dead_letter_export_opts export_options;
+  lc_dead_letter_export_res export_result;
+  lc_workflow_stats workflow_stats;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_attachment_list attachments;
+  const void *bytes;
+  size_t length;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "dead-letter-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  job = NULL;
+  payload = NULL;
+  sink = NULL;
+  lease = NULL;
+  memset(&attachments, 0, sizeof(attachments));
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-dead-letter";
+  workflow_config.owner = "workflow-dead-letter-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "dead-letter-operation";
+  entry.effect_id = "dead-letter-effect";
+  entry.effect_key = "foreign-dead-letter-idempotency-key";
+  entry.kind = "http";
+  entry.destination = "https://example.invalid/dead-letter";
+  entry.content_type = "text/plain";
+  assert_int_equal(lc_source_from_memory("payload-body", 12U, &payload, &error),
+                   LC_OK);
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  lc_source_close(payload);
+  payload = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 3000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_int_equal(lc_outbox_job_dead_letter(job, "permanent failure", &error),
+                   LC_OK);
+  lc_outbox_job_close(job);
+  job = NULL;
+
+  lc_dead_letter_export_res_init(&export_result);
+  assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+  assert_int_equal(lc_workflow_export_dead_letters(workflow, NULL, sink,
+                                                   &export_result, &error),
+                   LC_OK);
+  assert_int_equal(export_result.exported, 1U);
+  bytes = NULL;
+  length = 0U;
+  assert_int_equal(lc_sink_memory_bytes(sink, &bytes, &length, &error), LC_OK);
+  assert_true(length > 2U);
+  assert_true(workflow_bytes_contains(bytes, length, "dead_letter"));
+  assert_true(workflow_bytes_contains(bytes, length, entry.effect_key));
+  assert_false(workflow_bytes_contains(bytes, length, "payload-body"));
+  lc_sink_close(sink);
+  sink = NULL;
+
+  lc_workflow_stats_init(&workflow_stats);
+  assert_int_equal(lc_workflow_get_stats(workflow, &workflow_stats, &error),
+                   LC_OK);
+  assert_true(workflow_stats.running);
+  assert_true(workflow_stats.direct_notifications > 0U);
+  lc_workflow_stats_cleanup(&workflow_stats);
+  assert_int_equal(
+      lc_workflow_replay_dead_letter(workflow, receipt.outbox_key, &error),
+      LC_OK);
+  assert_int_equal(lc_workflow_next(workflow, 3000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, entry.effect_key);
+  assert_int_equal(job->attempt, 1);
+  assert_int_equal(lc_outbox_job_dead_letter(job, "second failure", &error),
+                   LC_OK);
+  lc_outbox_job_close(job);
+  job = NULL;
+
+  lc_dead_letter_export_opts_init(&export_options);
+  export_options.format = LC_DEAD_LETTER_EXPORT_JSONL;
+  lc_dead_letter_export_res_init(&export_result);
+  assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+  assert_int_equal(lc_workflow_export_dead_letters(
+                       workflow, &export_options, sink, &export_result, &error),
+                   LC_OK);
+  assert_int_equal(export_result.exported, 1U);
+  assert_int_equal(lc_sink_memory_bytes(sink, &bytes, &length, &error), LC_OK);
+  assert_true(length > 0U && ((const char *)bytes)[length - 1U] == '\n');
+  assert_true(
+      workflow_bytes_contains(bytes, length, "prior_dead_letter_error"));
+  assert_true(workflow_bytes_contains(bytes, length, "second failure"));
+  lc_sink_close(sink);
+  sink = NULL;
+
+  assert_int_equal(
+      lc_workflow_delete_dead_letter(workflow, receipt.outbox_key, &error),
+      LC_OK);
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = workflow_config.namespace_name;
+  acquire.key = receipt.outbox_key;
+  acquire.owner = "workflow-dead-letter-inspect";
+  acquire.ttl_seconds = 30L;
+  assert_int_equal(lc_acquire(client, &acquire, &lease, &error), LC_OK);
+  assert_int_equal(lc_lease_list_attachments(lease, &attachments, &error),
+                   LC_OK);
+  assert_int_equal(attachments.count, 0U);
+  lc_attachment_list_cleanup(&attachments);
+  assert_int_equal(lc_lease_release(lease, NULL, &error), LC_OK);
+  lease = NULL;
+
+  entry.effect_id = "startup-replay-effect";
+  entry.effect_key = "startup-replay-idempotency-key";
+  assert_int_equal(
+      lc_source_from_memory("startup-payload", 15U, &payload, &error), LC_OK);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  lc_source_close(payload);
+  payload = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 3000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_int_equal(lc_outbox_job_dead_letter(job, "startup replay", &error),
+                   LC_OK);
+  lc_outbox_job_close(job);
+  job = NULL;
+  lc_workflow_close(workflow);
+  workflow = NULL;
+  workflow_config.replay_dead_letters_on_startup = 1;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, entry.effect_key);
+  assert_int_equal(job->attempt, 1);
+  assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+  lc_outbox_job_close(job);
   lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
   lc_client_close(client);
@@ -341,8 +553,9 @@ static void test_pouch_startup_recovery_claims_seeded_outbox(void **state) {
   workflow_config.namespace_name = "workflow-recovery";
   workflow_config.owner = "workflow-recovery-test";
   workflow = NULL;
-  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
-                                          &error), LC_OK);
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
   job = NULL;
   assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
   assert_non_null(job);
@@ -361,8 +574,9 @@ static void test_pouch_startup_recovery_claims_seeded_outbox(void **state) {
   }
   lc_outbox_job_close(job);
   job = NULL;
-  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
-                                          &error), LC_OK);
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
   assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
   assert_non_null(job);
   assert_string_equal(job->effect_key, "recovery-key");
@@ -424,8 +638,9 @@ static void test_pouch_reconciliation_pages_large_outbox(void **state) {
   workflow_config.notification_capacity = 16U;
   workflow = NULL;
   assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &started), 0);
-  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
-                                          &error), LC_OK);
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
   for (index = 0U; index < WORKFLOW_RECONCILIATION_RECORDS; ++index) {
     job = NULL;
     assert_int_equal(lc_workflow_next(workflow, 30000L, &job, &error), LC_OK);
@@ -485,8 +700,9 @@ static void test_pouch_recovery_prefetch_is_bounded(void **state) {
   workflow_config.owner = "workflow-prefetch-test";
   workflow_config.notification_capacity = 2U;
   workflow = NULL;
-  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
-                                          &error), LC_OK);
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
   assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &deadline), 0);
   deadline.tv_sec += 3L;
   found_unclaimed = 0;
@@ -519,7 +735,8 @@ static void test_pouch_recovery_prefetch_is_bounded(void **state) {
         lc_error_init(&error);
       }
     }
-    if (locked >= 2U && available > 0U) found_unclaimed = 1;
+    if (locked >= 2U && available > 0U)
+      found_unclaimed = 1;
     if (!found_unclaimed) {
       struct timespec delay;
       delay.tv_sec = 0;
@@ -592,8 +809,9 @@ static void test_pouch_shared_process_dispatches_once(void **state) {
   workflow_config.namespace_name = "workflow-shared-process";
   workflow_config.owner = "workflow-shared-parent";
   workflow_config.recovery_interval_seconds = 1L;
-  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
-                                          &error), LC_OK);
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
   start = 's';
   assert_int_equal(write(start_pipe[1], &start, 1U), 1);
   (void)close(start_pipe[1]);
@@ -647,7 +865,8 @@ static void test_pouch_expired_claim_rejects_stale_terminal(void **state) {
   config.owner = "workflow-stale-first";
   config.claim_ttl_seconds = 1L;
   first = NULL;
-  assert_int_equal(lc_client_new_workflow(client, &config, &first, &error), LC_OK);
+  assert_int_equal(lc_client_new_workflow(client, &config, &first, &error),
+                   LC_OK);
   stale = NULL;
   assert_int_equal(lc_workflow_next(first, 5000L, &stale, &error), LC_OK);
   assert_non_null(stale);
@@ -655,9 +874,11 @@ static void test_pouch_expired_claim_rejects_stale_terminal(void **state) {
   sleep(2U);
   config.owner = "workflow-stale-second";
   second = NULL;
-  assert_int_equal(lc_client_new_workflow(client, &config, &second, &error), LC_OK);
+  assert_int_equal(lc_client_new_workflow(client, &config, &second, &error),
+                   LC_OK);
   replacement = NULL;
-  assert_int_equal(lc_workflow_next(second, 5000L, &replacement, &error), LC_OK);
+  assert_int_equal(lc_workflow_next(second, 5000L, &replacement, &error),
+                   LC_OK);
   assert_non_null(replacement);
   assert_string_equal(replacement->effect_key, stale->effect_key);
   assert_true(lc_outbox_job_complete(stale, &error) != LC_OK);
@@ -675,6 +896,7 @@ static void test_pouch_expired_claim_rejects_stale_terminal(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
+      cmocka_unit_test(test_pouch_dead_letter_operations),
       cmocka_unit_test(test_pouch_startup_recovery_claims_seeded_outbox),
       cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
       cmocka_unit_test(test_pouch_recovery_prefetch_is_bounded),
