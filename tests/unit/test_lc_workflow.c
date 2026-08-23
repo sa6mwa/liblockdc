@@ -79,6 +79,36 @@ static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
   assert_int_equal(lc_lease_release(lease, NULL, error), LC_OK);
 }
 
+static void seed_foreign_workflow_state(lc_client *client,
+                                        const char *namespace_name,
+                                        const char *key,
+                                        const char *dispatch_state,
+                                        lc_error *error) {
+  char state[160];
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_source *state_source;
+
+  assert_true(snprintf(state, sizeof(state),
+                       "{\"record_type\":\"foreign.v1\","
+                       "\"dispatch_state\":\"%s\"}",
+                       dispatch_state) > 0);
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = namespace_name;
+  acquire.key = key;
+  acquire.owner = "workflow-foreign-seed";
+  acquire.ttl_seconds = 30L;
+  lease = NULL;
+  assert_int_equal(lc_acquire(client, &acquire, &lease, error), LC_OK);
+  state_source = NULL;
+  assert_int_equal(
+      lc_source_from_memory(state, strlen(state), &state_source, error),
+      LC_OK);
+  assert_int_equal(lc_lease_update(lease, state_source, NULL, error), LC_OK);
+  lc_source_close(state_source);
+  assert_int_equal(lc_lease_release(lease, NULL, error), LC_OK);
+}
+
 typedef struct workflow_process_result {
   int rc;
   int got_job;
@@ -416,6 +446,8 @@ static void test_pouch_dead_letter_operations(void **state) {
                    LC_OK);
   lc_outbox_job_close(job);
   job = NULL;
+  seed_foreign_workflow_state(client, workflow_config.namespace_name,
+                              "foreign-dead-letter", "dead_letter", &error);
 
   lc_dead_letter_export_res_init(&export_result);
   assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);

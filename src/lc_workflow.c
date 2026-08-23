@@ -427,6 +427,12 @@ static int lc_workflow_outbox_key(lc_workflow_handle *workflow,
   return LC_OK;
 }
 
+static int lc_workflow_is_outbox_key(const char *key) {
+  static const char prefix[] = "__lockdc_io/v1/outbox/";
+
+  return key != NULL && strncmp(key, prefix, sizeof(prefix) - 1U) == 0;
+}
+
 static int lc_workflow_inbox_key(lc_workflow_handle *workflow,
                                  const lc_inbox_message *message, char **out,
                                  lc_error *error) {
@@ -1056,6 +1062,8 @@ static int lc_workflow_recovery_key_end(void *context, lc_error *error) {
       (lc_workflow_recovery_capture *)context;
   (void)error;
   capture->key[capture->length] = '\0';
+  if (!lc_workflow_is_outbox_key(capture->key))
+    return 1;
   lc_workflow_notify(capture->workflow, capture->key);
   pthread_mutex_lock(&capture->workflow->notification_mutex);
   ++capture->workflow->recovered_claims;
@@ -1654,8 +1662,11 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
   }
   transaction->terminal = 1;
   for (i = 0U; i < transaction->lease_count; ++i) {
-    lc_workflow_notify(transaction->workflow,
-                       notification_keys == NULL ? NULL : notification_keys[i]);
+    if (lc_workflow_is_outbox_key(notification_keys == NULL
+                                      ? NULL
+                                      : notification_keys[i])) {
+      lc_workflow_notify(transaction->workflow, notification_keys[i]);
+    }
     lc_client_free(transaction->workflow->client,
                    notification_keys == NULL ? NULL : notification_keys[i]);
   }
@@ -2034,6 +2045,8 @@ static int lc_workflow_dead_letter_replay_end(void *context, lc_error *error) {
       (lc_workflow_dead_letter_replay_capture *)context;
 
   capture->key[capture->length] = '\0';
+  if (!lc_workflow_is_outbox_key(capture->key))
+    return 1;
   if (capture->count == capture->key_capacity ||
       (capture->keys[capture->count] =
            lc_client_strdup(capture->workflow->client, capture->key)) == NULL) {
@@ -2174,8 +2187,18 @@ static int lc_workflow_export_dead_letter_key(
   lease = NULL;
   rc = lc_workflow_open_dead_letter(capture->workflow, capture->key, &lease,
                                     &record, error);
-  if (rc != LC_OK)
+  if (rc != LC_OK) {
+    /* Index selection and the direct read are separate operations. A record
+     * replayed or deleted between them is no longer exportable, not an export
+     * failure. Other validation and transport errors remain observable. */
+    if (rc == LC_ERR_INVALID && error != NULL && error->message != NULL &&
+        strcmp(error->message, "outbox record is not a dead letter") == 0) {
+      lc_error_cleanup(error);
+      lc_error_init(error);
+      return LC_OK;
+    }
     return rc;
+  }
   memset(&get_result, 0, sizeof(get_result));
   if (capture->format == LC_DEAD_LETTER_EXPORT_JSON && !capture->first) {
     if (!capture->dst->write(capture->dst, ",", 1U, error))
@@ -2229,6 +2252,8 @@ static int lc_workflow_dead_letter_export_end(void *context, lc_error *error) {
   lc_workflow_dead_letter_export_capture *capture =
       (lc_workflow_dead_letter_export_capture *)context;
   capture->key[capture->length] = '\0';
+  if (!lc_workflow_is_outbox_key(capture->key))
+    return 1;
   return lc_workflow_export_dead_letter_key(capture, error) == LC_OK ? 1 : 0;
 }
 
@@ -2239,6 +2264,8 @@ static int lc_workflow_export_dead_letters_method(
       "{\"eq\":{\"field\":\"/dispatch_state\",\"value\":\"dead_letter\"}}";
   lc_workflow_handle *workflow = (lc_workflow_handle *)self;
   lc_dead_letter_export_opts defaults;
+  lc_index_flush_req flush_request;
+  lc_index_flush_res flush_result;
   lc_query_req request;
   lc_query_key_handler handler;
   lc_query_res query_result;
@@ -2270,8 +2297,20 @@ static int lc_workflow_export_dead_letters_method(
       !dst->write(dst, "[", 1U, error))
     return LC_ERR_TRANSPORT;
   lc_query_req_init(&request);
+  lc_index_flush_req_init(&flush_request);
   memset(&handler, 0, sizeof(handler));
   memset(&query_result, 0, sizeof(query_result));
+  memset(&flush_result, 0, sizeof(flush_result));
+  /* Export starts from a durable index boundary. A concurrent replay or
+   * deletion can still change a selected record before it is read; that
+   * benign stale-key race is ignored by the key visitor above. */
+  flush_request.namespace_name = workflow->namespace_name;
+  flush_request.mode = "wait";
+  rc = lc_flush_index(&workflow->dispatcher_client->pub, &flush_request,
+                      &flush_result, error);
+  lc_index_flush_res_cleanup(&flush_result);
+  if (rc != LC_OK)
+    return rc;
   request.namespace_name = workflow->namespace_name;
   request.selector_json = selector;
   request.limit = (long)(options->limit == 0U ? workflow->notification_capacity

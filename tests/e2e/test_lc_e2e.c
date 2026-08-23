@@ -3018,7 +3018,8 @@ static void wait_for_consumer_handled(e2e_consumer_context *consumer_context,
   retries = 0;
   for (;;) {
     pthread_mutex_lock(&consumer_context->mutex);
-    if (consumer_context->handled >= minimum_count) {
+    if (consumer_context->handled >= minimum_count &&
+        (!consumer_context->expect_state || consumer_context->saw_state)) {
       pthread_mutex_unlock(&consumer_context->mutex);
       return;
     }
@@ -4803,6 +4804,15 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   rc = lc_outbox_job_complete(job, &error);
   assert_lc_ok(rc, &error);
   lc_outbox_job_close(job);
+  lc_dead_letter_export_res_init(&export_result);
+  rc = lc_sink_to_memory(&export_sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_workflow_export_dead_letters(workflow, &export_options, export_sink,
+                                        &export_result, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(export_result.exported, 0U);
+  lc_sink_close(export_sink);
+  export_sink = NULL;
   lc_outbox_receipt_cleanup(&receipt);
   lc_source_close(payload);
   lc_workflow_close(workflow);
