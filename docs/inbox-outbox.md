@@ -303,7 +303,9 @@ __lockdc_io/v1/inbox/<encoded-consumer>/<inbox-identity-digest>
 __lockdc_io/v1/outbox/<operation-id-digest>/<effect-id-digest>
 ```
 
-Key components are deterministic, bounded encodings or digests. liblockdc
+Key components are deterministic, bounded encodings or digests. SHA-256
+components use unpadded base64url (43 characters), not hexadecimal, so the
+complete reserved key remains below lockd's 128-character key limit. liblockdc
 never creates a key by directly concatenating unescaped source-supplied
 identifiers. The original identifiers remain in the state body and are checked
 when an existing key is reused. A mismatch is a conflict, not a duplicate.

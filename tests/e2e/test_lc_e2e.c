@@ -4569,10 +4569,86 @@ static void test_pouch_direct_consumer_service_with_state(void **state) {
 }
 
 #if defined(LC_E2E_GROUP_DISK_DIRECT)
+static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_config config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_workflow_transaction *transaction;
+  lc_workflow_participant_request participant_request;
+  lc_workflow_participant *participant;
+  lc_source *payload;
+  lc_source *domain_state;
+  lc_error error;
+  char domain_key[128];
+  int rc;
+
+  (void)state;
+  endpoint = env_or_default("LOCKDC_E2E_DISK_ENDPOINT",
+                            "https://localhost:19441");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+  make_unique_name("workflow-domain", domain_key, sizeof(domain_key));
+  client = NULL; workflow = NULL; transaction = NULL; participant = NULL;
+  payload = NULL; domain_state = NULL;
+  lc_error_init(&error);
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  lc_workflow_config_init(&config);
+  config.namespace_name = "default";
+  config.owner = "workflow-e2e";
+  rc = lc_client_new_workflow(client, &config, &workflow, &error);
+  assert_lc_ok(rc, &error);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = domain_key;
+  entry.effect_id = "notify";
+  entry.effect_key = domain_key;
+  entry.kind = "test";
+  entry.destination = "https://example.invalid/workflow";
+  entry.content_type = "text/plain";
+  rc = lc_source_from_memory("workflow-payload", 16U, &payload, &error);
+  assert_lc_ok(rc, &error);
+  lc_outbox_receipt_init(&receipt);
+  rc = lc_workflow_append_outbox(workflow, &entry, payload, &transaction,
+                                  &receipt, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(transaction);
+  lc_workflow_participant_request_init(&participant_request);
+  participant_request.acquire.namespace_name = "default";
+  participant_request.acquire.key = domain_key;
+  participant_request.acquire.owner = "workflow-e2e";
+  participant_request.acquire.ttl_seconds = 30L;
+  rc = lc_workflow_transaction_acquire(transaction, &participant_request,
+                                        &participant, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(participant->txn_id);
+  rc = lc_source_from_memory("{\"workflow\":true}", 17U, &domain_state,
+                             &error);
+  assert_lc_ok(rc, &error);
+  rc = participant->update(participant, domain_state, NULL, &error);
+  assert_lc_ok(rc, &error);
+  lc_source_close(domain_state);
+  domain_state = NULL;
+  lc_workflow_participant_close(participant);
+  participant = NULL;
+  rc = lc_workflow_transaction_commit(transaction, &error);
+  assert_lc_ok(rc, &error);
+  lc_workflow_transaction_close(transaction);
+  lc_source_close(payload);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_disk_lease_state_roundtrip),
       cmocka_unit_test(test_disk_server_minted_multikey_xa_transaction),
+      cmocka_unit_test(test_disk_workflow_implicit_xa_roundtrip),
       cmocka_unit_test(test_disk_server_explicit_xa_enlists_on_acquire),
       cmocka_unit_test(
           test_disk_server_metadata_finalization_preserves_staged_version),

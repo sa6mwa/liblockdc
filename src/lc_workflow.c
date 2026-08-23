@@ -55,11 +55,12 @@ static int lc_workflow_transaction_add_lease(
   return LC_OK;
 }
 
-static int lc_workflow_digest(const char *value, char out[65], lc_error *error) {
+static int lc_workflow_digest(const char *value, char out[44], lc_error *error) {
   EVP_MD_CTX *ctx;
   unsigned char digest[EVP_MAX_MD_SIZE];
   unsigned int length;
-  static const char hex[] = "0123456789abcdef";
+  static const char base64url[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
   size_t i;
 
   if (value == NULL || value[0] == '\0') {
@@ -78,19 +79,24 @@ static int lc_workflow_digest(const char *value, char out[65], lc_error *error) 
                         NULL);
   }
   EVP_MD_CTX_free(ctx);
-  for (i = 0U; i < 32U; ++i) {
-    out[i * 2U] = hex[(digest[i] >> 4U) & 0x0fU];
-    out[i * 2U + 1U] = hex[digest[i] & 0x0fU];
+  for (i = 0U; i < 30U; i += 3U) {
+    out[(i / 3U) * 4U] = base64url[digest[i] >> 2U];
+    out[(i / 3U) * 4U + 1U] = base64url[((digest[i] & 0x03U) << 4U) | (digest[i + 1U] >> 4U)];
+    out[(i / 3U) * 4U + 2U] = base64url[((digest[i + 1U] & 0x0fU) << 2U) | (digest[i + 2U] >> 6U)];
+    out[(i / 3U) * 4U + 3U] = base64url[digest[i + 2U] & 0x3fU];
   }
-  out[64] = '\0';
+  out[40] = base64url[digest[30] >> 2U];
+  out[41] = base64url[((digest[30] & 0x03U) << 4U) | (digest[31] >> 4U)];
+  out[42] = base64url[(digest[31] & 0x0fU) << 2U];
+  out[43] = '\0';
   return LC_OK;
 }
 
 static int lc_workflow_outbox_key(lc_workflow_handle *workflow,
                                   const lc_outbox_entry *entry, char **out,
                                   lc_error *error) {
-  char operation[65];
-  char effect[65];
+  char operation[44];
+  char effect[44];
   size_t length;
   char *key;
   int rc;
@@ -115,7 +121,7 @@ static int lc_workflow_outbox_key(lc_workflow_handle *workflow,
   if (rc != LC_OK) {
     return rc;
   }
-  length = sizeof("__lockdc_io/v1/outbox//") - 1U + 64U + 64U + 1U;
+  length = sizeof("__lockdc_io/v1/outbox//") - 1U + 43U + 43U + 1U;
   key = (char *)malloc(length);
   if (key == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
