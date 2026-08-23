@@ -12101,6 +12101,179 @@ test_pouch_endpoint_opens_new_backend_without_http_engine(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_pouch_endpoint_build_and_option_presence(void **state) {
+  static const lc_pouch_endpoint_option encoded_options[] = {
+      {"pouch_crypto_key", "a+b&c"},
+      {"bare", NULL},
+      {"empty", ""},
+      {"plus+name", "v=1"},
+  };
+  static const lc_pouch_endpoint_option open_options[] = {
+      {"single_writer", "false"},
+  };
+  lc_client_config config;
+  lc_client *client;
+  lc_error error;
+  const char *endpoints[1];
+  char *endpoint;
+  char root[512];
+  int present;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  endpoint = NULL;
+  lc_error_init(&error);
+
+  rc = lc_pouch_endpoint_build(
+      "/tmp/pouch root?#", encoded_options,
+      sizeof(encoded_options) / sizeof(encoded_options[0]), &endpoint, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(endpoint, "pouch:///tmp/pouch%20root%3F%23?"
+                                "pouch_crypto_key=a%2Bb%26c&bare&empty=&"
+                                "plus%2Bname=v%3D1");
+  lc_pouch_endpoint_free(endpoint);
+  endpoint = NULL;
+
+  rc = lc_pouch_endpoint_has_option(
+      "pouch:///tmp/root?pouch%5Fcrypto%5fkey=value&"
+      "pouch_crypto_key#pouch_crypto_key=fragment",
+      "pouch_crypto_key", &present, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(present, 1);
+
+  rc = lc_pouch_endpoint_has_option(
+      "pouch:///tmp/root?single_writer=pouch_crypto_key&"
+      "pouch_crypto_key_file=pouch_crypto_key&"
+      "pouch_crypto_key_extra=value#pouch_crypto_key=value",
+      "pouch_crypto_key", &present, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(present, 0);
+
+  rc = lc_pouch_endpoint_has_option("pouch:///tmp/root?pouch_crypto+key=x",
+                                    "pouch_crypto_key", &present, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(present, 0);
+  rc = lc_pouch_endpoint_has_option("pouch:///tmp/root?pouch_crypto+key=x",
+                                    "pouch_crypto+key", &present, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(present, 1);
+
+  rc =
+      lc_pouch_endpoint_has_option("pouch:///tmp/root?pouch_crypto%ZZkey=value",
+                                   "pouch_crypto_key", &present, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "invalid percent escape in pouch endpoint");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_endpoint_has_option("https://lockd.example", "pouch_crypto_key",
+                                    &present, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "pouch endpoint is required");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  make_root("endpoint-build", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_endpoint_build(root, open_options,
+                               sizeof(open_options) / sizeof(open_options[0]),
+                               &endpoint, &error);
+  assert_int_equal(rc, LC_OK);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_client_close(client);
+  lc_pouch_endpoint_free(endpoint);
+  lc_error_cleanup(&error);
+  cleanup_root(root);
+}
+
+static void
+test_pouch_endpoint_option_presence_selects_crypto_default(void **state) {
+  lc_client_config config;
+  lc_client *client;
+  lc_error error;
+  lc_pouch_endpoint_option option;
+  const char *endpoints[1];
+  char *crypto_key;
+  char *endpoint;
+  char encoded_endpoint[1024];
+  char root[512];
+  int present;
+  int rc;
+  int written;
+
+  (void)state;
+  client = NULL;
+  crypto_key = NULL;
+  endpoint = NULL;
+  lc_error_init(&error);
+  make_root("endpoint-crypto-option-presence", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  option.name = "pouch_crypto_key";
+  option.value = crypto_key;
+  rc = lc_pouch_endpoint_build(root, &option, 1U, &endpoint, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_endpoint_has_option(endpoint, "pouch_crypto_key", &present,
+                                    &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(present, 1);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_client_close(client);
+  client = NULL;
+  lc_pouch_endpoint_free(endpoint);
+  endpoint = NULL;
+
+  written = snprintf(encoded_endpoint, sizeof(encoded_endpoint),
+                     "pouch://%s?pouch%%5Fcrypto%%5Fkey=%s#"
+                     "pouch_crypto_key=fragment",
+                     root, crypto_key);
+  assert_true(written > 0 && (size_t)written < sizeof(encoded_endpoint));
+  endpoints[0] = encoded_endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_client_close(client);
+  client = NULL;
+
+  option.name = "pouch_crypto_key_file";
+  option.value = "/tmp/lookalike-pouch_crypto_key";
+  rc = lc_pouch_endpoint_build(root, &option, 1U, &endpoint, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_endpoint_has_option(endpoint, "pouch_crypto_key", &present,
+                                    &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(present, 0);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_crypto_key = crypto_key;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_client_close(client);
+
+  lc_pouch_endpoint_free(endpoint);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  lc_error_cleanup(&error);
+  cleanup_root(root);
+}
+
 static void test_pouch_endpoint_rejects_unix_socket_mix(void **state) {
   lc_client_config config;
   lc_client *client;
@@ -31743,6 +31916,9 @@ int main(int argc, char **argv) {
           test_namespace_segment_leaf_parser_rejects_retired_layout),
       cmocka_unit_test(
           test_pouch_endpoint_opens_new_backend_without_http_engine),
+      cmocka_unit_test(test_pouch_endpoint_build_and_option_presence),
+      cmocka_unit_test(
+          test_pouch_endpoint_option_presence_selects_crypto_default),
       cmocka_unit_test(test_pouch_endpoint_rejects_unix_socket_mix),
       cmocka_unit_test(
           test_pouch_endpoint_query_engine_routes_implicit_queries),

@@ -1812,6 +1812,24 @@ selection, drift validation, live-link protection, and obsolete cleanup timing.
 Validation drift must abandon the snapshot without installing it. Cleanup must
 be retryable and idempotent.
 
+## Pouch Endpoint Construction
+
+Applications must not assemble `pouch://` strings by concatenating a root and
+query text. `lc_pouch_endpoint_build()` takes an absolute, decoded root plus an
+array of decoded `lc_pouch_endpoint_option` values and returns an owned,
+percent-encoded endpoint. It preserves `/` in the root, encodes query names and
+values, and represents a `NULL` option value as a bare option. Release the
+result with `lc_pouch_endpoint_free()`.
+
+`lc_pouch_endpoint_has_option()` is the complementary inspection API for
+configuration layering. It compares decoded query names only, never returns
+values, and treats duplicate or bare options as present. It uses the same
+percent-decoding as Pouch open; query processing ends before a URL fragment,
+and `+` remains a literal plus rather than being form-decoded. Consumers can
+therefore decide whether to apply a local default such as
+`pouch_crypto_key_file` without reimplementing Pouch URL parsing or accidentally
+overriding an encoded explicit option.
+
 ## Public API Coverage
 
 Every Pouch behavior is exercised through the public Pouch API or public

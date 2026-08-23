@@ -190,6 +190,14 @@ typedef struct lc_allocator {
   void *context;
 } lc_allocator;
 
+/** One query option used to construct a Pouch endpoint. */
+typedef struct lc_pouch_endpoint_option {
+  /** Decoded option name. It must be non-empty. */
+  const char *name;
+  /** Decoded option value, or `NULL` to emit a bare `?name` option. */
+  const char *value;
+} lc_pouch_endpoint_option;
+
 /**
  * Client construction settings.
  *
@@ -2674,6 +2682,36 @@ int lc_sink_memory_bytes(lc_sink *sink, const void **bytes, size_t *length,
  * it receives the total bytes copied.
  */
 int lc_copy(lc_source *src, lc_sink *dst, size_t *written, lc_error *error);
+
+/**
+ * Constructs a canonical `pouch://` endpoint from an absolute root and query
+ * options.
+ *
+ * The root, names, and values are decoded filesystem/query strings. The
+ * library percent-encodes every reserved byte, preserving `/` in the absolute
+ * root; callers must not compose or escape endpoint syntax themselves. A
+ * `NULL` option value emits a bare option, while an empty string emits
+ * `name=`. The returned endpoint is owned by the caller and must be released
+ * with `lc_pouch_endpoint_free()`.
+ */
+int lc_pouch_endpoint_build(const char *root_path,
+                            const lc_pouch_endpoint_option *options,
+                            size_t option_count, char **out, lc_error *error);
+
+/**
+ * Reports whether a decoded query option name is present in a Pouch endpoint.
+ *
+ * The inspection follows the same percent-decoding and fragment handling as
+ * Pouch endpoint opening. It never exposes option values. On success `present`
+ * is zero or one; duplicate and bare options count as present.
+ */
+int lc_pouch_endpoint_has_option(const char *endpoint, const char *name,
+                                 int *present, lc_error *error);
+
+/** Releases an endpoint returned by `lc_pouch_endpoint_build()`. Accepts
+ * `NULL`.
+ */
+void lc_pouch_endpoint_free(char *endpoint);
 
 /** Generates a new `lc-pouch-key-v1:<base64url>` root key string.
  *
