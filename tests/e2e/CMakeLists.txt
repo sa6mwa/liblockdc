@@ -235,4 +235,11 @@ lc_add_lua_e2e_test(
   PACKAGE_ONLY
   POUCH_ROOT "${CMAKE_BINARY_DIR}/lua-pouch-e2e/lc_e2e_lua_pouch_config"
 )
+
+lc_add_lua_e2e_test(
+  lc_e2e_lua_workflow
+  "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_workflow.lua"
+  PACKAGE_ONLY
+  POUCH_ROOT "${CMAKE_BINARY_DIR}/lua-pouch-e2e/lc_e2e_lua_workflow"
+)
 lc_apply_default_test_timeouts()

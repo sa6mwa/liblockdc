@@ -94,6 +94,10 @@ Primary handle types:
 - `Client`
 - `Lease`
 - `Message`
+- `Workflow`
+- `WorkflowTransaction`
+- `WorkflowParticipant`
+- `OutboxJob`
 - `Service`
 
 ## Client API
@@ -185,6 +189,7 @@ Common client methods:
 - `client:get_namespace_config(req)`
 - `client:update_namespace_config(req)`
 - `client:flush_index(req)`
+- `client:new_workflow(config)`
 - `client:subscribe(req, handler)`
 - `client:subscribe_with_state(req, handler)`
 - `client:watch_queue(req, handler)`
@@ -192,6 +197,69 @@ Common client methods:
 - `client:start_consumer(...)`
 
 The Lua binding intentionally excludes the TC/XA administrative APIs.
+
+## Inbox/outbox workflows
+
+`client:new_workflow(config)` creates the inbox/outbox parent receiver. Its
+`namespace` (or `namespace_name`) contains both durable inbox and outbox keys;
+the private dispatcher signals committed keys locally and performs recovery
+internally. Lua code never supplies an xid, manages the dispatcher, or receives
+a callback from its thread.
+
+```lua
+local workflow = assert(client:new_workflow({
+  namespace = "orders-workflow",
+  owner = "orders-api",
+  max_attempts = 100,
+}))
+
+local txn, receipt = assert(workflow:append_outbox({
+  operation_id = order_id,
+  effect_id = "charge-card",
+  effect_key = "charge:" .. order_id,
+  kind = "http",
+  destination = "https://payments.example/charges",
+  headers = { ["idempotency-key"] = "charge:" .. order_id },
+}, payload_source))
+
+local order = assert(txn:acquire({ namespace_name = "orders", key = order_id }))
+assert(order:update_json({ status = "payment_pending" }))
+order:close()
+assert(txn:commit())
+txn:close()
+
+local job = assert(workflow:next(1000))
+-- Stream arbitrary bytes to a host-owned request-body sink; no dispatcher
+-- thread enters the Lua VM.
+assert(job:write_payload(foreign_request_body_sink))
+assert(job:complete())
+job:close()
+```
+
+`headers` is the façade convenience form and is JSON-encoded into the durable
+`headers_json` envelope. Pass `headers_json` directly when it is already
+serialized; supplying both is an error. `workflow:accept_inbox(message)`
+returns `nil, result` on an accepted duplicate, where `result.duplicate` is
+true. Otherwise it returns a `WorkflowTransaction` and `result.accepted` is
+true.
+
+Workflow receivers are explicit and owned:
+
+- `workflow:append_outbox(entry, payload)`
+- `workflow:accept_inbox(message)`
+- `workflow:next(timeout_ms)`
+- `workflow:close()`
+- `txn:acquire(req)`, `txn:append_outbox(entry, payload)`, `txn:commit()`,
+  `txn:rollback()`, `txn:close()`
+- participant `describe`, `get_raw`, `get_json`, `update_raw`, `update_json`,
+  metadata, remove, keepalive, and attachment methods
+- job `info`, `write_payload` (also `payload`), `payload_json`, `renew`,
+  `complete`, `retry`, `dead_letter`, and `close`
+
+Participants deliberately have no release or terminal-decision method. A
+workflow job is the only handoff to host effect execution; keep its claim
+alive with `job:renew()` for longer foreign operations, then select exactly one
+terminal operation.
 
 `client:acquire_for_update(req, handler)` wraps the common acquire, snapshot,
 update, release workflow. The handler receives a context table with:

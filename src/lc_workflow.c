@@ -1132,11 +1132,72 @@ static int lc_workflow_participant_update(lc_workflow_participant *self, lc_sour
   if (p == NULL || p->lease == NULL) return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow participant is closed", NULL, NULL, NULL);
   rc = lc_lease_update(p->lease, src, opts, error); lc_workflow_participant_refresh(p); return rc;
 }
+static int lc_workflow_participant_mutate(lc_workflow_participant *self,
+                                          const lc_mutate_req *req,
+                                          lc_error *error) {
+  lc_workflow_participant_handle *p =
+      (lc_workflow_participant_handle *)self;
+  int rc;
+
+  if (p == NULL || p->lease == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow participant is closed", NULL, NULL, NULL);
+  }
+  rc = lc_lease_mutate(p->lease, req, error);
+  lc_workflow_participant_refresh(p);
+  return rc;
+}
+static int lc_workflow_participant_mutate_local(
+    lc_workflow_participant *self, const lc_mutate_local_req *req,
+    lc_error *error) {
+  lc_workflow_participant_handle *p =
+      (lc_workflow_participant_handle *)self;
+  int rc;
+
+  if (p == NULL || p->lease == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow participant is closed", NULL, NULL, NULL);
+  }
+  rc = lc_lease_mutate_local(p->lease, req, error);
+  lc_workflow_participant_refresh(p);
+  return rc;
+}
 static int lc_workflow_participant_metadata(lc_workflow_participant *self, const lc_metadata_req *req, lc_error *error) { lc_workflow_participant_handle *p = (lc_workflow_participant_handle *)self; int rc; if (p == NULL || p->lease == NULL) return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow participant is closed", NULL, NULL, NULL); rc = lc_lease_metadata(p->lease, req, error); lc_workflow_participant_refresh(p); return rc; }
 static int lc_workflow_participant_remove(lc_workflow_participant *self, const lc_remove_req *req, lc_error *error) { lc_workflow_participant_handle *p = (lc_workflow_participant_handle *)self; int rc; if (p == NULL || p->lease == NULL) return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow participant is closed", NULL, NULL, NULL); rc = lc_lease_remove(p->lease, req, error); lc_workflow_participant_refresh(p); return rc; }
 static int lc_workflow_participant_keepalive(lc_workflow_participant *self, const lc_keepalive_req *req, lc_error *error) { lc_workflow_participant_handle *p = (lc_workflow_participant_handle *)self; int rc; if (p == NULL || p->lease == NULL) return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow participant is closed", NULL, NULL, NULL); rc = lc_lease_keepalive(p->lease, req, error); lc_workflow_participant_refresh(p); return rc; }
 static int lc_workflow_participant_attach(lc_workflow_participant *self, const lc_attach_req *req, lc_source *src, lc_attach_res *out, lc_error *error) { lc_workflow_participant_handle *p = (lc_workflow_participant_handle *)self; if (p == NULL || p->lease == NULL) return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow participant is closed", NULL, NULL, NULL); return lc_lease_attach(p->lease, req, src, out, error); }
+static int lc_workflow_participant_list_attachments(
+    lc_workflow_participant *self, lc_attachment_list *out, lc_error *error) {
+  lc_workflow_participant_handle *p =
+      (lc_workflow_participant_handle *)self;
+  if (p == NULL || p->lease == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow participant is closed", NULL, NULL, NULL);
+  }
+  return lc_lease_list_attachments(p->lease, out, error);
+}
 static int lc_workflow_participant_get_attachment(lc_workflow_participant *self, const lc_attachment_get_req *req, lc_sink *dst, lc_attachment_get_res *out, lc_error *error) { lc_workflow_participant_handle *p = (lc_workflow_participant_handle *)self; if (p == NULL || p->lease == NULL) return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow participant is closed", NULL, NULL, NULL); return lc_lease_get_attachment(p->lease, req, dst, out, error); }
+static int lc_workflow_participant_delete_attachment(
+    lc_workflow_participant *self, const lc_attachment_selector *selector,
+    int *deleted, lc_error *error) {
+  lc_workflow_participant_handle *p =
+      (lc_workflow_participant_handle *)self;
+  if (p == NULL || p->lease == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow participant is closed", NULL, NULL, NULL);
+  }
+  return lc_lease_delete_attachment(p->lease, selector, deleted, error);
+}
+static int lc_workflow_participant_delete_all_attachments(
+    lc_workflow_participant *self, int *deleted_count, lc_error *error) {
+  lc_workflow_participant_handle *p =
+      (lc_workflow_participant_handle *)self;
+  if (p == NULL || p->lease == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow participant is closed", NULL, NULL, NULL);
+  }
+  return lc_lease_delete_all_attachments(p->lease, deleted_count, error);
+}
 static void lc_workflow_participant_close_method(lc_workflow_participant *self) { lc_workflow_participant_handle *p = (lc_workflow_participant_handle *)self; if (p != NULL) { lc_client_free(p->transaction->workflow->client, p); } }
 
 static int lc_workflow_transaction_acquire_method(
@@ -1173,11 +1234,18 @@ static int lc_workflow_transaction_acquire_method(
   participant->pub.describe = lc_workflow_participant_describe;
   participant->pub.get = lc_workflow_participant_get;
   participant->pub.update = lc_workflow_participant_update;
+  participant->pub.mutate = lc_workflow_participant_mutate;
+  participant->pub.mutate_local = lc_workflow_participant_mutate_local;
   participant->pub.metadata = lc_workflow_participant_metadata;
   participant->pub.remove = lc_workflow_participant_remove;
   participant->pub.keepalive = lc_workflow_participant_keepalive;
   participant->pub.attach = lc_workflow_participant_attach;
+  participant->pub.list_attachments = lc_workflow_participant_list_attachments;
   participant->pub.get_attachment = lc_workflow_participant_get_attachment;
+  participant->pub.delete_attachment =
+      lc_workflow_participant_delete_attachment;
+  participant->pub.delete_all_attachments =
+      lc_workflow_participant_delete_all_attachments;
   participant->pub.close = lc_workflow_participant_close_method;
   lc_workflow_participant_refresh(participant);
   *out = &participant->pub;

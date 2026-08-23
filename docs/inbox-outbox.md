@@ -258,7 +258,7 @@ local txn, receipt = workflow:append_outbox(entry, payload_source)
 
 local order = txn:acquire({ namespace = "orders", key = order_id,
                             owner = "orders-api", ttl_seconds = 30 })
-order:update(order_update_source)
+order:update_raw(order_update_source)
 txn:append_outbox(entry, payload_source)
 local result = txn:commit()
 
@@ -270,7 +270,7 @@ end
 
 local job = workflow:next(1000)
 if job then
-  job:write_payload(foreign_request_body)
+  job:write_payload(foreign_request_body_sink)
   -- host-owned Lua code performs the foreign effect here.
   job:complete()
 end

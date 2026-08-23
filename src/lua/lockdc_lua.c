@@ -12,6 +12,10 @@
 #define LCDC_CLIENT_MT "lockdc.client"
 #define LCDC_LEASE_MT "lockdc.lease"
 #define LCDC_MESSAGE_MT "lockdc.message"
+#define LCDC_WORKFLOW_MT "lockdc.workflow"
+#define LCDC_WORKFLOW_TXN_MT "lockdc.workflow_transaction"
+#define LCDC_WORKFLOW_PARTICIPANT_MT "lockdc.workflow_participant"
+#define LCDC_OUTBOX_JOB_MT "lockdc.outbox_job"
 
 typedef struct lcdc_client_ud {
   lc_client *client;
@@ -25,6 +29,26 @@ typedef struct lcdc_lease_ud {
 typedef struct lcdc_message_ud {
   lc_message *message;
 } lcdc_message_ud;
+
+typedef struct lcdc_workflow_ud {
+  lc_workflow *workflow;
+  int owner_ref;
+} lcdc_workflow_ud;
+
+typedef struct lcdc_workflow_txn_ud {
+  lc_workflow_transaction *transaction;
+  int owner_ref;
+} lcdc_workflow_txn_ud;
+
+typedef struct lcdc_workflow_participant_ud {
+  lc_workflow_participant *participant;
+  int owner_ref;
+} lcdc_workflow_participant_ud;
+
+typedef struct lcdc_outbox_job_ud {
+  lc_outbox_job *job;
+  int owner_ref;
+} lcdc_outbox_job_ud;
 
 typedef struct lcdc_output {
   lc_sink *sink;
@@ -107,6 +131,41 @@ static lcdc_message_ud *lcdc_check_message(lua_State *L, int index) {
   ud = (lcdc_message_ud *)luaL_checkudata(L, index, LCDC_MESSAGE_MT);
   luaL_argcheck(L, ud != NULL && ud->message != NULL, index,
                 "lockdc message is closed");
+  return ud;
+}
+
+static lcdc_workflow_ud *lcdc_check_workflow(lua_State *L, int index) {
+  lcdc_workflow_ud *ud =
+      (lcdc_workflow_ud *)luaL_checkudata(L, index, LCDC_WORKFLOW_MT);
+  luaL_argcheck(L, ud != NULL && ud->workflow != NULL, index,
+                "lockdc workflow is closed");
+  return ud;
+}
+
+static lcdc_workflow_txn_ud *lcdc_check_workflow_txn(lua_State *L,
+                                                      int index) {
+  lcdc_workflow_txn_ud *ud = (lcdc_workflow_txn_ud *)luaL_checkudata(
+      L, index, LCDC_WORKFLOW_TXN_MT);
+  luaL_argcheck(L, ud != NULL && ud->transaction != NULL, index,
+                "lockdc workflow transaction is closed");
+  return ud;
+}
+
+static lcdc_workflow_participant_ud *
+lcdc_check_workflow_participant(lua_State *L, int index) {
+  lcdc_workflow_participant_ud *ud =
+      (lcdc_workflow_participant_ud *)luaL_checkudata(
+          L, index, LCDC_WORKFLOW_PARTICIPANT_MT);
+  luaL_argcheck(L, ud != NULL && ud->participant != NULL, index,
+                "lockdc workflow participant is closed");
+  return ud;
+}
+
+static lcdc_outbox_job_ud *lcdc_check_outbox_job(lua_State *L, int index) {
+  lcdc_outbox_job_ud *ud =
+      (lcdc_outbox_job_ud *)luaL_checkudata(L, index, LCDC_OUTBOX_JOB_MT);
+  luaL_argcheck(L, ud != NULL && ud->job != NULL, index,
+                "lockdc outbox job is closed");
   return ud;
 }
 
@@ -573,6 +632,68 @@ static int lcdc_push_message(lua_State *L, lc_message *message) {
   return 1;
 }
 
+static int lcdc_push_workflow(lua_State *L, lc_workflow *workflow,
+                              int owner_index) {
+  lcdc_workflow_ud *ud =
+      (lcdc_workflow_ud *)lua_newuserdata(L, sizeof(*ud));
+  ud->workflow = workflow;
+  ud->owner_ref = LUA_NOREF;
+  if (owner_index != 0) {
+    lua_pushvalue(L, owner_index);
+    ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  }
+  luaL_getmetatable(L, LCDC_WORKFLOW_MT);
+  lua_setmetatable(L, -2);
+  return 1;
+}
+
+static int lcdc_push_workflow_txn(lua_State *L,
+                                  lc_workflow_transaction *transaction,
+                                  int owner_index) {
+  lcdc_workflow_txn_ud *ud =
+      (lcdc_workflow_txn_ud *)lua_newuserdata(L, sizeof(*ud));
+  ud->transaction = transaction;
+  ud->owner_ref = LUA_NOREF;
+  if (owner_index != 0) {
+    lua_pushvalue(L, owner_index);
+    ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  }
+  luaL_getmetatable(L, LCDC_WORKFLOW_TXN_MT);
+  lua_setmetatable(L, -2);
+  return 1;
+}
+
+static int lcdc_push_workflow_participant(lua_State *L,
+                                          lc_workflow_participant *participant,
+                                          int owner_index) {
+  lcdc_workflow_participant_ud *ud =
+      (lcdc_workflow_participant_ud *)lua_newuserdata(L, sizeof(*ud));
+  ud->participant = participant;
+  ud->owner_ref = LUA_NOREF;
+  if (owner_index != 0) {
+    lua_pushvalue(L, owner_index);
+    ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  }
+  luaL_getmetatable(L, LCDC_WORKFLOW_PARTICIPANT_MT);
+  lua_setmetatable(L, -2);
+  return 1;
+}
+
+static int lcdc_push_outbox_job(lua_State *L, lc_outbox_job *job,
+                                int owner_index) {
+  lcdc_outbox_job_ud *ud =
+      (lcdc_outbox_job_ud *)lua_newuserdata(L, sizeof(*ud));
+  ud->job = job;
+  ud->owner_ref = LUA_NOREF;
+  if (owner_index != 0) {
+    lua_pushvalue(L, owner_index);
+    ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  }
+  luaL_getmetatable(L, LCDC_OUTBOX_JOB_MT);
+  lua_setmetatable(L, -2);
+  return 1;
+}
+
 static int lcdc_push_cloned_lease(lua_State *L, const lc_lease *lease) {
   const lc_lease_handle *lease_handle;
   lc_lease *lease_copy;
@@ -701,6 +822,63 @@ static int lcdc_message_gc(lua_State *L) {
   if (ud->message != NULL) {
     lc_message_close(ud->message);
     ud->message = NULL;
+  }
+  return 0;
+}
+
+static int lcdc_workflow_gc(lua_State *L) {
+  lcdc_workflow_ud *ud =
+      (lcdc_workflow_ud *)luaL_checkudata(L, 1, LCDC_WORKFLOW_MT);
+  if (ud->workflow != NULL) {
+    lc_workflow_close(ud->workflow);
+    ud->workflow = NULL;
+  }
+  if (ud->owner_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
+    ud->owner_ref = LUA_NOREF;
+  }
+  return 0;
+}
+
+static int lcdc_workflow_txn_gc(lua_State *L) {
+  lcdc_workflow_txn_ud *ud = (lcdc_workflow_txn_ud *)luaL_checkudata(
+      L, 1, LCDC_WORKFLOW_TXN_MT);
+  if (ud->transaction != NULL) {
+    lc_workflow_transaction_close(ud->transaction);
+    ud->transaction = NULL;
+  }
+  if (ud->owner_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
+    ud->owner_ref = LUA_NOREF;
+  }
+  return 0;
+}
+
+static int lcdc_workflow_participant_gc(lua_State *L) {
+  lcdc_workflow_participant_ud *ud =
+      (lcdc_workflow_participant_ud *)luaL_checkudata(
+          L, 1, LCDC_WORKFLOW_PARTICIPANT_MT);
+  if (ud->participant != NULL) {
+    lc_workflow_participant_close(ud->participant);
+    ud->participant = NULL;
+  }
+  if (ud->owner_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
+    ud->owner_ref = LUA_NOREF;
+  }
+  return 0;
+}
+
+static int lcdc_outbox_job_gc(lua_State *L) {
+  lcdc_outbox_job_ud *ud =
+      (lcdc_outbox_job_ud *)luaL_checkudata(L, 1, LCDC_OUTBOX_JOB_MT);
+  if (ud->job != NULL) {
+    lc_outbox_job_close(ud->job);
+    ud->job = NULL;
+  }
+  if (ud->owner_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
+    ud->owner_ref = LUA_NOREF;
   }
   return 0;
 }
@@ -2501,9 +2679,783 @@ static int lcdc_message_payload(lua_State *L) {
   return 2;
 }
 
+static void lcdc_parse_outbox_entry(lua_State *L, int index,
+                                    lc_outbox_entry *entry) {
+  lc_outbox_entry_init(entry);
+  luaL_checktype(L, index, LUA_TTABLE);
+  lcdc_require_string_field(L, index, "operation_id", &entry->operation_id);
+  lcdc_require_string_field(L, index, "effect_id", &entry->effect_id);
+  lcdc_require_string_field(L, index, "effect_key", &entry->effect_key);
+  lcdc_require_string_field(L, index, "kind", &entry->kind);
+  lcdc_require_string_field(L, index, "destination", &entry->destination);
+  entry->content_type = lcdc_opt_string_field(L, index, "content_type");
+  entry->headers_json = lcdc_opt_string_field(L, index, "headers_json");
+  entry->trace_context = lcdc_opt_string_field(L, index, "trace_context");
+}
+
+static void lcdc_push_outbox_receipt(lua_State *L,
+                                     const lc_outbox_receipt *receipt) {
+  lua_newtable(L);
+  lcdc_set_string_field(L, "outbox_key", receipt->outbox_key);
+  lcdc_set_string_field(L, "effect_key", receipt->effect_key);
+  lcdc_set_bool_field(L, "duplicate", receipt->duplicate);
+}
+
+static void lcdc_push_inbox_result(lua_State *L,
+                                   const lc_inbox_accept_result *result) {
+  lua_newtable(L);
+  lcdc_set_bool_field(L, "accepted", result->accepted);
+  lcdc_set_bool_field(L, "duplicate", result->duplicate);
+}
+
+static void lcdc_push_workflow_participant_info(
+    lua_State *L, const lc_workflow_participant *participant) {
+  lua_newtable(L);
+  lcdc_set_string_field(L, "namespace_name", participant->namespace_name);
+  lcdc_set_string_field(L, "key", participant->key);
+  lcdc_set_string_field(L, "txn_id", participant->txn_id);
+  lcdc_set_integer_field(L, "fencing_token", participant->fencing_token);
+  lcdc_set_integer_field(L, "version", participant->version);
+  lcdc_set_string_field(L, "state_etag", participant->state_etag);
+}
+
+static void lcdc_push_outbox_job_info(lua_State *L, const lc_outbox_job *job) {
+  lua_newtable(L);
+  lcdc_set_string_field(L, "outbox_key", job->outbox_key);
+  lcdc_set_string_field(L, "operation_id", job->operation_id);
+  lcdc_set_string_field(L, "effect_id", job->effect_id);
+  lcdc_set_string_field(L, "effect_key", job->effect_key);
+  lcdc_set_string_field(L, "kind", job->kind);
+  lcdc_set_string_field(L, "destination", job->destination);
+  lcdc_set_string_field(L, "content_type", job->content_type);
+  lcdc_set_string_field(L, "headers_json", job->headers_json);
+  lcdc_set_string_field(L, "trace_context", job->trace_context);
+  lcdc_set_integer_field(L, "attempt", job->attempt);
+  lcdc_set_integer_field(L, "max_attempts", job->max_attempts);
+  lcdc_set_integer_field(L, "lease_expires_at_unix",
+                         job->lease_expires_at_unix);
+}
+
+static int lcdc_client_new_workflow(lua_State *L) {
+  lcdc_client_ud *client_ud = lcdc_check_client(L, 1);
+  lc_workflow_config config;
+  lc_workflow *workflow = NULL;
+  lc_error error;
+  int rc;
+
+  lc_workflow_config_init(&config);
+  lc_error_init(&error);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  config.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  if (config.namespace_name == NULL) {
+    config.namespace_name = lcdc_opt_string_field(L, 2, "namespace");
+  }
+  config.owner = lcdc_opt_string_field(L, 2, "owner");
+  lcdc_opt_integer_field(L, 2, "transaction_ttl_seconds",
+                         &config.transaction_ttl_seconds);
+  lcdc_opt_integer_field(L, 2, "claim_ttl_seconds", &config.claim_ttl_seconds);
+  {
+    long max_attempts = 0L;
+    if (lcdc_opt_integer_field(L, 2, "max_attempts", &max_attempts)) {
+      config.max_attempts = (int)max_attempts;
+    }
+  }
+  lcdc_opt_integer_field(L, 2, "retry_initial_delay_seconds",
+                         &config.retry_initial_delay_seconds);
+  lcdc_opt_integer_field(L, 2, "retry_max_delay_seconds",
+                         &config.retry_max_delay_seconds);
+  lcdc_opt_integer_field(L, 2, "host_retry_delay_max_seconds",
+                         &config.host_retry_delay_max_seconds);
+  lcdc_opt_integer_field(L, 2, "recovery_interval_seconds",
+                         &config.recovery_interval_seconds);
+  {
+    long notification_capacity = 0L;
+    if (lcdc_opt_integer_field(L, 2, "notification_capacity",
+                               &notification_capacity)) {
+      config.notification_capacity = (size_t)notification_capacity;
+    }
+  }
+  rc = lc_client_new_workflow(client_ud->client, &config, &workflow, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lc_error_cleanup(&error);
+  return lcdc_push_workflow(L, workflow, 1);
+}
+
+static int lcdc_workflow_close(lua_State *L) { return lcdc_workflow_gc(L); }
+
+static int lcdc_workflow_append_outbox(lua_State *L) {
+  lcdc_workflow_ud *ud = lcdc_check_workflow(L, 1);
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_workflow_transaction *transaction = NULL;
+  lc_source *payload = NULL;
+  lc_error error;
+  int rc;
+
+  lcdc_parse_outbox_entry(L, 2, &entry);
+  lc_outbox_receipt_init(&receipt);
+  lc_error_init(&error);
+  rc = lcdc_source_from_value(L, 3, &payload, &error);
+  if (rc == LC_OK) {
+    rc = lc_workflow_append_outbox(ud->workflow, &entry, payload, &transaction,
+                                   &receipt, &error);
+  }
+  lc_source_close(payload);
+  if (rc != LC_OK) {
+    lc_outbox_receipt_cleanup(&receipt);
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  if (transaction != NULL) {
+    lcdc_push_workflow_txn(L, transaction, 1);
+  } else {
+    lua_pushnil(L);
+  }
+  lcdc_push_outbox_receipt(L, &receipt);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_error_cleanup(&error);
+  return 2;
+}
+
+static int lcdc_workflow_accept_inbox(lua_State *L) {
+  lcdc_workflow_ud *ud = lcdc_check_workflow(L, 1);
+  lc_inbox_message message;
+  lc_inbox_accept_result result;
+  lc_workflow_transaction *transaction = NULL;
+  lc_error error;
+  int rc;
+
+  lc_inbox_message_init(&message);
+  memset(&result, 0, sizeof(result));
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_require_string_field(L, 2, "consumer_id", &message.consumer_id);
+  lcdc_require_string_field(L, 2, "source_kind", &message.source_kind);
+  lcdc_require_string_field(L, 2, "source_id", &message.source_id);
+  lcdc_require_string_field(L, 2, "message_id", &message.message_id);
+  message.payload_digest = lcdc_opt_string_field(L, 2, "payload_digest");
+  message.operation_id = lcdc_opt_string_field(L, 2, "operation_id");
+  lc_error_init(&error);
+  rc = lc_workflow_accept_inbox(ud->workflow, &message, &transaction, &result,
+                                &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  if (transaction != NULL) {
+    lcdc_push_workflow_txn(L, transaction, 1);
+  } else {
+    lua_pushnil(L);
+  }
+  lcdc_push_inbox_result(L, &result);
+  lc_error_cleanup(&error);
+  return 2;
+}
+
+static int lcdc_workflow_next(lua_State *L) {
+  lcdc_workflow_ud *ud = lcdc_check_workflow(L, 1);
+  lc_outbox_job *job = NULL;
+  lc_error error;
+  long timeout_ms = -1L;
+  int rc;
+
+  if (!lua_isnoneornil(L, 2)) timeout_ms = (long)luaL_checkinteger(L, 2);
+  lc_error_init(&error);
+  rc = lc_workflow_next(ud->workflow, timeout_ms, &job, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lc_error_cleanup(&error);
+  if (job == NULL) {
+    lua_pushnil(L);
+    return 1;
+  }
+  return lcdc_push_outbox_job(L, job, 1);
+}
+
+static int lcdc_workflow_txn_close(lua_State *L) {
+  return lcdc_workflow_txn_gc(L);
+}
+
+static int lcdc_workflow_txn_acquire(lua_State *L) {
+  lcdc_workflow_txn_ud *ud = lcdc_check_workflow_txn(L, 1);
+  lc_workflow_participant_request request;
+  lc_workflow_participant *participant = NULL;
+  lc_error error;
+  int rc;
+
+  lc_workflow_participant_request_init(&request);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  request.acquire.namespace_name =
+      lcdc_opt_string_field(L, 2, "namespace_name");
+  lcdc_require_string_field(L, 2, "key", &request.acquire.key);
+  request.acquire.owner = lcdc_opt_string_field(L, 2, "owner");
+  lcdc_opt_integer_field(L, 2, "ttl_seconds", &request.acquire.ttl_seconds);
+  lcdc_opt_integer_field(L, 2, "block_seconds",
+                         &request.acquire.block_seconds);
+  lcdc_opt_boolean_field(L, 2, "if_not_exists",
+                         &request.acquire.if_not_exists);
+  lc_error_init(&error);
+  rc = lc_workflow_transaction_acquire(ud->transaction, &request, &participant,
+                                       &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lc_error_cleanup(&error);
+  return lcdc_push_workflow_participant(L, participant, 1);
+}
+
+static int lcdc_workflow_txn_append_outbox(lua_State *L) {
+  lcdc_workflow_txn_ud *ud = lcdc_check_workflow_txn(L, 1);
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_source *payload = NULL;
+  lc_error error;
+  int rc;
+
+  lcdc_parse_outbox_entry(L, 2, &entry);
+  lc_outbox_receipt_init(&receipt);
+  lc_error_init(&error);
+  rc = lcdc_source_from_value(L, 3, &payload, &error);
+  if (rc == LC_OK) {
+    rc = lc_workflow_transaction_append_outbox(ud->transaction, &entry,
+                                               payload, &receipt, &error);
+  }
+  lc_source_close(payload);
+  if (rc != LC_OK) {
+    lc_outbox_receipt_cleanup(&receipt);
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_outbox_receipt(L, &receipt);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_txn_terminal(lua_State *L, int rollback) {
+  lcdc_workflow_txn_ud *ud = lcdc_check_workflow_txn(L, 1);
+  lc_error error;
+  int rc;
+
+  lc_error_init(&error);
+  rc = rollback ? lc_workflow_transaction_rollback(ud->transaction, &error)
+                : lc_workflow_transaction_commit(ud->transaction, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushboolean(L, 1);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_txn_commit(lua_State *L) {
+  return lcdc_workflow_txn_terminal(L, 0);
+}
+
+static int lcdc_workflow_txn_rollback(lua_State *L) {
+  return lcdc_workflow_txn_terminal(L, 1);
+}
+
+static int lcdc_workflow_participant_close(lua_State *L) {
+  return lcdc_workflow_participant_gc(L);
+}
+
+static int lcdc_workflow_participant_info(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lcdc_push_workflow_participant_info(L, ud->participant);
+  return 1;
+}
+
+static int lcdc_workflow_participant_describe(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lc_error error;
+  int rc;
+
+  lc_error_init(&error);
+  rc = ud->participant->describe(ud->participant, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_workflow_participant_info(L, ud->participant);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_participant_get(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lcdc_output output;
+  lc_get_opts opts;
+  lc_get_res result;
+  lc_error error;
+  int rc;
+
+  lc_get_opts_init(&opts);
+  memset(&result, 0, sizeof(result));
+  lc_error_init(&error);
+  if (!lua_isnoneornil(L, 2)) {
+    luaL_checktype(L, 2, LUA_TTABLE);
+    lcdc_opt_boolean_field(L, 2, "public_read", &opts.public_read);
+  }
+  rc = lcdc_init_output(L, 3, &output, &error);
+  if (rc == LC_OK) {
+    rc = ud->participant->get(ud->participant, output.sink, &opts, &result,
+                              &error);
+  }
+  if (rc != LC_OK) {
+    if (output.sink != NULL) lc_sink_close(output.sink);
+    lcdc_push_status_error(L, rc, &error);
+    lc_get_res_cleanup(&result);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_output(L, &output);
+  lua_newtable(L);
+  lcdc_set_bool_field(L, "no_content", result.no_content);
+  lcdc_set_string_field(L, "content_type", result.content_type);
+  lcdc_set_string_field(L, "etag", result.etag);
+  lcdc_set_integer_field(L, "version", result.version);
+  lcdc_set_integer_field(L, "fencing_token", result.fencing_token);
+  lcdc_set_string_field(L, "correlation_id", result.correlation_id);
+  lc_get_res_cleanup(&result);
+  lc_error_cleanup(&error);
+  return 2;
+}
+
+static int lcdc_workflow_participant_update(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lc_update_opts opts;
+  lc_source *source = NULL;
+  lc_error error;
+  int rc;
+
+  lc_update_opts_init(&opts);
+  lc_error_init(&error);
+  if (!lua_isnoneornil(L, 3)) {
+    luaL_checktype(L, 3, LUA_TTABLE);
+    opts.if_state_etag = lcdc_opt_string_field(L, 3, "if_state_etag");
+    if (lcdc_opt_integer_field(L, 3, "if_version", &opts.if_version)) {
+      opts.has_if_version = 1;
+    }
+    opts.content_type = lcdc_opt_string_field(L, 3, "content_type");
+  }
+  rc = lcdc_source_from_value(L, 2, &source, &error);
+  if (rc == LC_OK) {
+    rc = ud->participant->update(ud->participant, source, &opts, &error);
+  }
+  lc_source_close(source);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_workflow_participant_info(L, ud->participant);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_participant_mutate(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lc_mutate_req request;
+  lc_error error;
+  const char **mutations = NULL;
+  size_t mutation_count = 0U;
+  int rc;
+
+  lc_mutate_req_init(&request);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_parse_string_array(L, 2, "mutations", &mutations, &mutation_count);
+  request.mutations = mutations;
+  request.mutation_count = mutation_count;
+  request.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
+  if (lcdc_opt_integer_field(L, 2, "if_version", &request.if_version)) {
+    request.has_if_version = 1;
+  }
+  lc_error_init(&error);
+  rc = ud->participant->mutate(ud->participant, &request, &error);
+  lcdc_free_string_array(&mutations);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_workflow_participant_info(L, ud->participant);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_participant_mutate_local(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lc_mutate_local_req request;
+  lc_error error;
+  const char **mutations = NULL;
+  size_t mutation_count = 0U;
+  int rc;
+
+  lc_mutate_local_req_init(&request);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_parse_string_array(L, 2, "mutations", &mutations, &mutation_count);
+  request.mutations = mutations;
+  request.mutation_count = mutation_count;
+  lcdc_opt_boolean_field(L, 2, "disable_fetched_cas",
+                         &request.disable_fetched_cas);
+  request.file_value_base_dir =
+      lcdc_opt_string_field(L, 2, "file_value_base_dir");
+  request.update.if_state_etag =
+      lcdc_opt_string_field(L, 2, "if_state_etag");
+  if (lcdc_opt_integer_field(L, 2, "if_version",
+                             &request.update.if_version)) {
+    request.update.has_if_version = 1;
+  }
+  request.update.content_type = lcdc_opt_string_field(L, 2, "content_type");
+  lc_error_init(&error);
+  rc = ud->participant->mutate_local(ud->participant, &request, &error);
+  lcdc_free_string_array(&mutations);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_workflow_participant_info(L, ud->participant);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_participant_metadata(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lc_metadata_req request;
+  lc_error error;
+  int rc;
+
+  lc_metadata_req_init(&request);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  if (lcdc_opt_boolean_field(L, 2, "query_hidden", &request.query_hidden)) {
+    request.has_query_hidden = 1;
+  }
+  if (lcdc_opt_integer_field(L, 2, "if_version", &request.if_version)) {
+    request.has_if_version = 1;
+  }
+  lc_error_init(&error);
+  rc = ud->participant->metadata(ud->participant, &request, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_workflow_participant_info(L, ud->participant);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_participant_remove(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lc_remove_req request;
+  lc_error error;
+  int rc;
+
+  lc_remove_req_init(&request);
+  if (!lua_isnoneornil(L, 2)) {
+    luaL_checktype(L, 2, LUA_TTABLE);
+    request.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
+    if (lcdc_opt_integer_field(L, 2, "if_version", &request.if_version)) {
+      request.has_if_version = 1;
+    }
+  }
+  lc_error_init(&error);
+  rc = ud->participant->remove(ud->participant, &request, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_workflow_participant_info(L, ud->participant);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_participant_keepalive(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lc_keepalive_req request;
+  lc_error error;
+  int rc;
+
+  lc_keepalive_req_init(&request);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_opt_integer_field(L, 2, "ttl_seconds", &request.ttl_seconds);
+  lc_error_init(&error);
+  rc = ud->participant->keepalive(ud->participant, &request, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_workflow_participant_info(L, ud->participant);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_participant_attach(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lc_attach_req request;
+  lc_attach_res result;
+  lc_source *source = NULL;
+  lc_error error;
+  int rc;
+
+  lc_attach_req_init(&request);
+  memset(&result, 0, sizeof(result));
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_require_string_field(L, 2, "name", &request.name);
+  request.content_type = lcdc_opt_string_field(L, 2, "content_type");
+  if (lcdc_opt_integer_field(L, 2, "max_bytes", &request.max_bytes)) {
+    request.has_max_bytes = 1;
+  }
+  lcdc_opt_boolean_field(L, 2, "prevent_overwrite",
+                         &request.prevent_overwrite);
+  lc_error_init(&error);
+  rc = lcdc_source_from_value(L, 3, &source, &error);
+  if (rc == LC_OK) {
+    rc = ud->participant->attach(ud->participant, &request, source, &result,
+                                 &error);
+  }
+  lc_source_close(source);
+  if (rc != LC_OK) {
+    lc_attach_res_cleanup(&result);
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_newtable(L);
+  lcdc_push_attachment_info(L, &result.attachment);
+  lua_setfield(L, -2, "attachment");
+  lcdc_set_bool_field(L, "noop", result.noop);
+  lcdc_set_integer_field(L, "version", result.version);
+  lcdc_set_string_field(L, "correlation_id", result.correlation_id);
+  lc_attach_res_cleanup(&result);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_participant_get_attachment(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lc_attachment_get_req request;
+  lc_attachment_get_res result;
+  lcdc_output output;
+  lc_error error;
+  int rc;
+
+  lc_attachment_get_req_init(&request);
+  memset(&result, 0, sizeof(result));
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lua_getfield(L, 2, "selector");
+  lcdc_parse_attachment_selector(L, -1, &request.selector);
+  lua_pop(L, 1);
+  lcdc_opt_boolean_field(L, 2, "public_read", &request.public_read);
+  lc_error_init(&error);
+  rc = lcdc_init_output(L, 3, &output, &error);
+  if (rc == LC_OK) {
+    rc = ud->participant->get_attachment(ud->participant, &request,
+                                         output.sink, &result, &error);
+  }
+  if (rc != LC_OK) {
+    if (output.sink != NULL) lc_sink_close(output.sink);
+    lc_attachment_get_res_cleanup(&result);
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_output(L, &output);
+  lua_newtable(L);
+  lcdc_push_attachment_info(L, &result.attachment);
+  lua_setfield(L, -2, "attachment");
+  lcdc_set_string_field(L, "correlation_id", result.correlation_id);
+  lc_attachment_get_res_cleanup(&result);
+  lc_error_cleanup(&error);
+  return 2;
+}
+
+static int lcdc_workflow_participant_list_attachments(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lc_attachment_list result;
+  lc_error error;
+  size_t index;
+  int rc;
+
+  memset(&result, 0, sizeof(result));
+  lc_error_init(&error);
+  rc = ud->participant->list_attachments(ud->participant, &result, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_newtable(L);
+  lcdc_set_string_field(L, "correlation_id", result.correlation_id);
+  lua_createtable(L, (int)result.count, 0);
+  for (index = 0U; index < result.count; ++index) {
+    lcdc_push_attachment_info(L, &result.items[index]);
+    lua_rawseti(L, -2, (lua_Integer)(index + 1U));
+  }
+  lua_setfield(L, -2, "items");
+  lc_attachment_list_cleanup(&result);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_participant_delete_attachment(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lc_attachment_selector selector;
+  lc_error error;
+  int deleted = 0;
+  int rc;
+
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_parse_attachment_selector(L, 2, &selector);
+  lc_error_init(&error);
+  rc = ud->participant->delete_attachment(ud->participant, &selector,
+                                           &deleted, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushboolean(L, deleted);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_participant_delete_all_attachments(lua_State *L) {
+  lcdc_workflow_participant_ud *ud = lcdc_check_workflow_participant(L, 1);
+  lc_error error;
+  int deleted_count = 0;
+  int rc;
+
+  lc_error_init(&error);
+  rc = ud->participant->delete_all_attachments(ud->participant,
+                                                &deleted_count, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushinteger(L, (lua_Integer)deleted_count);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_outbox_job_close(lua_State *L) { return lcdc_outbox_job_gc(L); }
+
+static int lcdc_outbox_job_info(lua_State *L) {
+  lcdc_outbox_job_ud *ud = lcdc_check_outbox_job(L, 1);
+  lcdc_push_outbox_job_info(L, ud->job);
+  return 1;
+}
+
+static int lcdc_outbox_job_write_payload(lua_State *L) {
+  lcdc_outbox_job_ud *ud = lcdc_check_outbox_job(L, 1);
+  lcdc_output output;
+  lc_error error;
+  int rc;
+
+  lc_error_init(&error);
+  rc = lcdc_init_output(L, 2, &output, &error);
+  if (rc == LC_OK) {
+    rc = lc_outbox_job_write_payload(ud->job, output.sink, &output.written,
+                                     &error);
+  }
+  if (rc != LC_OK) {
+    if (output.sink != NULL) lc_sink_close(output.sink);
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_output(L, &output);
+  lua_pushinteger(L, (lua_Integer)output.written);
+  lc_error_cleanup(&error);
+  return 2;
+}
+
+static int lcdc_outbox_job_renew(lua_State *L) {
+  lcdc_outbox_job_ud *ud = lcdc_check_outbox_job(L, 1);
+  lc_error error;
+  long ttl_seconds = (long)luaL_checkinteger(L, 2);
+  int rc;
+
+  lc_error_init(&error);
+  rc = lc_outbox_job_renew(ud->job, ttl_seconds, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_outbox_job_info(L, ud->job);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_outbox_job_terminal(lua_State *L, int operation) {
+  lcdc_outbox_job_ud *ud = lcdc_check_outbox_job(L, 1);
+  lc_error error;
+  int rc;
+
+  lc_error_init(&error);
+  if (operation == 0) {
+    rc = lc_outbox_job_complete(ud->job, &error);
+  } else if (operation == 1) {
+    lc_outbox_retry retry;
+    lc_outbox_retry_init(&retry);
+    if (!lua_isnoneornil(L, 2)) {
+      luaL_checktype(L, 2, LUA_TTABLE);
+      lcdc_opt_integer_field(L, 2, "delay_seconds", &retry.delay_seconds);
+      retry.diagnostic = lcdc_opt_string_field(L, 2, "diagnostic");
+    }
+    rc = lc_outbox_job_retry(ud->job, &retry, &error);
+  } else {
+    const char *diagnostic = lua_isnoneornil(L, 2)
+                                 ? NULL
+                                 : luaL_checkstring(L, 2);
+    rc = lc_outbox_job_dead_letter(ud->job, diagnostic, &error);
+  }
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushboolean(L, 1);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_outbox_job_complete(lua_State *L) {
+  return lcdc_outbox_job_terminal(L, 0);
+}
+
+static int lcdc_outbox_job_retry(lua_State *L) {
+  return lcdc_outbox_job_terminal(L, 1);
+}
+
+static int lcdc_outbox_job_dead_letter(lua_State *L) {
+  return lcdc_outbox_job_terminal(L, 2);
+}
+
 static const luaL_Reg lcdc_client_methods[] = {
     {"info", lcdc_client_info},
     {"close", lcdc_client_close},
+    {"new_workflow", lcdc_client_new_workflow},
     {"acquire", lcdc_client_acquire},
     {"acquire_for_update", lcdc_client_acquire_for_update},
     {"describe", lcdc_client_describe},
@@ -2563,6 +3515,49 @@ static const luaL_Reg lcdc_message_methods[] = {
     {"payload", lcdc_message_payload},
     {NULL, NULL}};
 
+static const luaL_Reg lcdc_workflow_methods[] = {
+    {"close", lcdc_workflow_close},
+    {"append_outbox", lcdc_workflow_append_outbox},
+    {"accept_inbox", lcdc_workflow_accept_inbox},
+    {"next", lcdc_workflow_next},
+    {NULL, NULL}};
+
+static const luaL_Reg lcdc_workflow_txn_methods[] = {
+    {"close", lcdc_workflow_txn_close},
+    {"acquire", lcdc_workflow_txn_acquire},
+    {"append_outbox", lcdc_workflow_txn_append_outbox},
+    {"commit", lcdc_workflow_txn_commit},
+    {"rollback", lcdc_workflow_txn_rollback},
+    {NULL, NULL}};
+
+static const luaL_Reg lcdc_workflow_participant_methods[] = {
+    {"close", lcdc_workflow_participant_close},
+    {"info", lcdc_workflow_participant_info},
+    {"describe", lcdc_workflow_participant_describe},
+    {"get", lcdc_workflow_participant_get},
+    {"update", lcdc_workflow_participant_update},
+    {"mutate", lcdc_workflow_participant_mutate},
+    {"mutate_local", lcdc_workflow_participant_mutate_local},
+    {"metadata", lcdc_workflow_participant_metadata},
+    {"remove", lcdc_workflow_participant_remove},
+    {"keepalive", lcdc_workflow_participant_keepalive},
+    {"attach", lcdc_workflow_participant_attach},
+    {"list_attachments", lcdc_workflow_participant_list_attachments},
+    {"get_attachment", lcdc_workflow_participant_get_attachment},
+    {"delete_attachment", lcdc_workflow_participant_delete_attachment},
+    {"delete_all_attachments", lcdc_workflow_participant_delete_all_attachments},
+    {NULL, NULL}};
+
+static const luaL_Reg lcdc_outbox_job_methods[] = {
+    {"close", lcdc_outbox_job_close},
+    {"info", lcdc_outbox_job_info},
+    {"write_payload", lcdc_outbox_job_write_payload},
+    {"renew", lcdc_outbox_job_renew},
+    {"complete", lcdc_outbox_job_complete},
+    {"retry", lcdc_outbox_job_retry},
+    {"dead_letter", lcdc_outbox_job_dead_letter},
+    {NULL, NULL}};
+
 static void lcdc_create_metatable(lua_State *L, const char *name,
                                   const luaL_Reg *methods, lua_CFunction gc) {
   luaL_newmetatable(L, name);
@@ -2584,6 +3579,15 @@ int luaopen_lockdc_core(lua_State *L) {
   lcdc_create_metatable(L, LCDC_LEASE_MT, lcdc_lease_methods, lcdc_lease_gc);
   lcdc_create_metatable(L, LCDC_MESSAGE_MT, lcdc_message_methods,
                         lcdc_message_gc);
+  lcdc_create_metatable(L, LCDC_WORKFLOW_MT, lcdc_workflow_methods,
+                        lcdc_workflow_gc);
+  lcdc_create_metatable(L, LCDC_WORKFLOW_TXN_MT, lcdc_workflow_txn_methods,
+                        lcdc_workflow_txn_gc);
+  lcdc_create_metatable(L, LCDC_WORKFLOW_PARTICIPANT_MT,
+                        lcdc_workflow_participant_methods,
+                        lcdc_workflow_participant_gc);
+  lcdc_create_metatable(L, LCDC_OUTBOX_JOB_MT, lcdc_outbox_job_methods,
+                        lcdc_outbox_job_gc);
   lua_newtable(L);
   luaL_setfuncs(L, module_functions, 0);
   lua_pushinteger(L, LC_OK);

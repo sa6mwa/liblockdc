@@ -2088,6 +2088,10 @@ struct lc_workflow_participant {
              const lc_get_opts *opts, lc_get_res *out, lc_error *error);
   int (*update)(lc_workflow_participant *self, lc_source *src,
                 const lc_update_opts *opts, lc_error *error);
+  int (*mutate)(lc_workflow_participant *self, const lc_mutate_req *req,
+                lc_error *error);
+  int (*mutate_local)(lc_workflow_participant *self,
+                      const lc_mutate_local_req *req, lc_error *error);
   int (*metadata)(lc_workflow_participant *self,
                   const lc_metadata_req *req, lc_error *error);
   int (*remove)(lc_workflow_participant *self, const lc_remove_req *req,
@@ -2096,9 +2100,16 @@ struct lc_workflow_participant {
                    const lc_keepalive_req *req, lc_error *error);
   int (*attach)(lc_workflow_participant *self, const lc_attach_req *req,
                 lc_source *src, lc_attach_res *out, lc_error *error);
+  int (*list_attachments)(lc_workflow_participant *self,
+                          lc_attachment_list *out, lc_error *error);
   int (*get_attachment)(lc_workflow_participant *self,
                         const lc_attachment_get_req *req, lc_sink *dst,
                         lc_attachment_get_res *out, lc_error *error);
+  int (*delete_attachment)(lc_workflow_participant *self,
+                           const lc_attachment_selector *selector,
+                           int *deleted, lc_error *error);
+  int (*delete_all_attachments)(lc_workflow_participant *self,
+                                int *deleted_count, lc_error *error);
   void (*close)(lc_workflow_participant *self);
   const char *namespace_name;
   const char *key;
