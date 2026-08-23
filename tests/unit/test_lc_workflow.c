@@ -105,6 +105,7 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   assert_non_null(job);
   assert_string_equal(job->effect_key, entry.effect_key);
   assert_string_equal(job->destination, entry.destination);
+  assert_int_equal(job->attempt, 1);
   lc_source_close(payload);
   payload = NULL;
   assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),

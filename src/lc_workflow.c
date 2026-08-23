@@ -601,7 +601,6 @@ static int lc_outbox_job_retry_method(lc_outbox_job *self,
     return lc_outbox_job_terminal(self, "dead_letter", 0L,
                                   request->diagnostic, error);
   }
-  ++job->record.attempt_count;
   return lc_outbox_job_terminal(self, "retry_wait", (long)(now + delay),
                                 request->diagnostic, error);
 }
