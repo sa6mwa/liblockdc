@@ -4693,6 +4693,83 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_disk_workflow_retry_redelivery(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_config config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_workflow_transaction *transaction;
+  lc_outbox_job *job;
+  lc_outbox_retry retry;
+  lc_source *payload;
+  lc_error error;
+  char effect_key[128];
+  int rc;
+
+  (void)state;
+  endpoint = env_or_default("LOCKDC_E2E_DISK_ENDPOINT",
+                            "https://localhost:19441");
+  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                               "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+  make_unique_name("workflow-retry", effect_key, sizeof(effect_key));
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  job = NULL;
+  payload = NULL;
+  lc_error_init(&error);
+  open_tcp_client(endpoint, bundle_path, &client, &error);
+  lc_workflow_config_init(&config);
+  config.namespace_name = "default";
+  config.owner = "workflow-retry-e2e";
+  rc = lc_client_new_workflow(client, &config, &workflow, &error);
+  assert_lc_ok(rc, &error);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = effect_key;
+  entry.effect_id = "retry";
+  entry.effect_key = effect_key;
+  entry.kind = "test";
+  entry.destination = "retry://target";
+  rc = lc_source_from_memory("retry-payload", 13U, &payload, &error);
+  assert_lc_ok(rc, &error);
+  lc_outbox_receipt_init(&receipt);
+  rc = lc_workflow_append_outbox(workflow, &entry, payload, &transaction,
+                                  &receipt, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(transaction);
+  rc = lc_workflow_transaction_commit(transaction, &error);
+  assert_lc_ok(rc, &error);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  rc = lc_workflow_next(workflow, 3000L, &job, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(job);
+  lc_outbox_retry_init(&retry);
+  retry.delay_seconds = 1L;
+  retry.diagnostic = "temporary";
+  rc = lc_outbox_job_retry(job, &retry, &error);
+  assert_lc_ok(rc, &error);
+  lc_outbox_job_close(job);
+  job = NULL;
+  rc = lc_workflow_next(workflow, 5000L, &job, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, effect_key);
+  assert_int_equal(job->attempt, 2);
+  rc = lc_outbox_job_complete(job, &error);
+  assert_lc_ok(rc, &error);
+  lc_outbox_job_close(job);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
 static void test_disk_workflow_startup_recovery(void **state) {
   static const char state_json[] =
       "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"recovery-op\","
@@ -4785,6 +4862,7 @@ int main(void) {
       cmocka_unit_test(test_disk_lease_state_roundtrip),
       cmocka_unit_test(test_disk_server_minted_multikey_xa_transaction),
       cmocka_unit_test(test_disk_workflow_implicit_xa_roundtrip),
+      cmocka_unit_test(test_disk_workflow_retry_redelivery),
       cmocka_unit_test(test_disk_workflow_startup_recovery),
       cmocka_unit_test(test_disk_server_explicit_xa_enlists_on_acquire),
       cmocka_unit_test(

@@ -659,10 +659,13 @@ Pouch and the repository's compose-backed remote lockd E2E environment.
     active lease-authorized claim and recover abandoned claims. Tests must not
     assert identical public visibility of a live `claimed` envelope across the
     two backends.
-12. Indexed recovery has measured latency and bounded I/O with a large retained
-    terminal population, continuous state-transition churn, and an
-    un-compacted Pouch log. The test records index freshness and verifies that
-    payload size does not change discovery cost.
+12. The regression baseline seeds 256 pending records with a 16-key
+    notification bound, proves paged indexed reconciliation delivers every
+    record, and records wall-clock latency under a deliberately broad 30-second
+    failure bound. A separate load benchmark before v1 release must extend this
+    profile with retained terminal population, continuous state-transition
+    churn, and an un-compacted Pouch log; payload size must not change
+    discovery cost.
 13. Parent close behavior leaves incomplete claims for later expiry recovery
     and never manufactures completion.
 14. The dispatcher never invokes host callbacks or host-runtime code on its

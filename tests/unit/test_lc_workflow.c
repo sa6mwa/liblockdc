@@ -9,8 +9,10 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define WORKFLOW_TMP_PREFIX "/tmp/liblockdc-unit-workflow-"
+#define WORKFLOW_RECONCILIATION_RECORDS 256U
 
 static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
                                  const char *key, lc_error *error) {
@@ -313,10 +315,80 @@ static void test_pouch_startup_recovery_claims_seeded_outbox(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static long workflow_elapsed_milliseconds(const struct timespec *started,
+                                          const struct timespec *finished) {
+  long seconds = (long)(finished->tv_sec - started->tv_sec);
+  long nanoseconds = (long)(finished->tv_nsec - started->tv_nsec);
+
+  return seconds * 1000L + nanoseconds / 1000000L;
+}
+
+static void test_pouch_reconciliation_pages_large_outbox(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  lc_error error;
+  struct timespec started;
+  struct timespec finished;
+  size_t index;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "reconcile-large-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  for (index = 0U; index < WORKFLOW_RECONCILIATION_RECORDS; ++index) {
+    char key[128];
+
+    assert_true(snprintf(key, sizeof(key), "__lockdc_io/v1/outbox/load-%03lu",
+                         (unsigned long)index) > 0);
+    seed_recovery_outbox(client, "workflow-reconcile-large", key, &error);
+  }
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-reconcile-large";
+  workflow_config.owner = "workflow-reconcile-large-test";
+  workflow_config.notification_capacity = 16U;
+  workflow = NULL;
+  assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &started), 0);
+  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
+                                          &error), LC_OK);
+  for (index = 0U; index < WORKFLOW_RECONCILIATION_RECORDS; ++index) {
+    job = NULL;
+    assert_int_equal(lc_workflow_next(workflow, 30000L, &job, &error), LC_OK);
+    assert_non_null(job);
+    assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+    lc_outbox_job_close(job);
+  }
+  assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &finished), 0);
+  assert_true(workflow_elapsed_milliseconds(&started, &finished) < 30000L);
+  fprintf(stderr, "workflow reconciliation: %lu records in %ld ms\n",
+          (unsigned long)WORKFLOW_RECONCILIATION_RECORDS,
+          workflow_elapsed_milliseconds(&started, &finished));
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
       cmocka_unit_test(test_pouch_startup_recovery_claims_seeded_outbox),
+      cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }
