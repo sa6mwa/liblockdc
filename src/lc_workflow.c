@@ -8,6 +8,77 @@ typedef struct lc_workflow_handle lc_workflow_handle;
 typedef struct lc_workflow_transaction_handle lc_workflow_transaction_handle;
 typedef struct lc_workflow_participant_handle lc_workflow_participant_handle;
 
+typedef struct lc_workflow_outbox_record {
+  char *record_type;
+  char *operation_id;
+  char *effect_id;
+  char *effect_key;
+  char *kind;
+  char *destination;
+  char *content_type;
+  char *headers_json;
+  char *trace_context;
+  char *dispatch_state;
+  lonejson_int64 attempt_count;
+} lc_workflow_outbox_record;
+
+typedef struct lc_workflow_inbox_record {
+  char *record_type;
+  char *consumer_id;
+  char *source_kind;
+  char *source_id;
+  char *message_id;
+  char *payload_digest;
+  char *operation_id;
+  char *processing_state;
+} lc_workflow_inbox_record;
+
+static const lonejson_field lc_workflow_outbox_record_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, record_type,
+                                    "record_type"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, operation_id,
+                                    "operation_id"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, effect_id,
+                                    "effect_id"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, effect_key,
+                                    "effect_key"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, kind, "kind"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, destination,
+                                    "destination"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, content_type,
+                                    "content_type"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_outbox_record, headers_json,
+                                "headers_json"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_outbox_record, trace_context,
+                                "trace_context"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, dispatch_state,
+                                    "dispatch_state"),
+    LONEJSON_FIELD_I64(lc_workflow_outbox_record, attempt_count,
+                       "attempt_count")};
+
+static const lonejson_field lc_workflow_inbox_record_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_inbox_record, record_type,
+                                    "record_type"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_inbox_record, consumer_id,
+                                    "consumer_id"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_inbox_record, source_kind,
+                                    "source_kind"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_inbox_record, source_id,
+                                    "source_id"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_inbox_record, message_id,
+                                    "message_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_inbox_record, payload_digest,
+                                "payload_digest"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_inbox_record, operation_id,
+                                "operation_id"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_inbox_record,
+                                    processing_state, "processing_state")};
+
+LONEJSON_MAP_DEFINE(lc_workflow_outbox_record_map, lc_workflow_outbox_record,
+                    lc_workflow_outbox_record_fields);
+LONEJSON_MAP_DEFINE(lc_workflow_inbox_record_map, lc_workflow_inbox_record,
+                    lc_workflow_inbox_record_fields);
+
 struct lc_workflow_handle {
   lc_workflow pub;
   lc_client_handle *client;
@@ -158,11 +229,12 @@ static int lc_workflow_outbox_key(lc_workflow_handle *workflow,
 static int lc_workflow_inbox_key(lc_workflow_handle *workflow,
                                  const lc_inbox_message *message, char **out,
                                  lc_error *error) {
-  char identity[65];
+  char identity[44];
   EVP_MD_CTX *ctx;
   unsigned char digest[EVP_MAX_MD_SIZE];
   unsigned int length;
-  static const char hex[] = "0123456789abcdef";
+  static const char base64url[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
   char *key;
   size_t i;
   size_t key_length;
@@ -170,29 +242,38 @@ static int lc_workflow_inbox_key(lc_workflow_handle *workflow,
   ctx = EVP_MD_CTX_new(); length = 0U;
   if (ctx == NULL || EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1 || EVP_DigestUpdate(ctx, message->consumer_id, strlen(message->consumer_id)) != 1 || EVP_DigestUpdate(ctx, "\n", 1U) != 1 || EVP_DigestUpdate(ctx, message->source_kind, strlen(message->source_kind)) != 1 || EVP_DigestUpdate(ctx, "\n", 1U) != 1 || EVP_DigestUpdate(ctx, message->source_id, strlen(message->source_id)) != 1 || EVP_DigestUpdate(ctx, "\n", 1U) != 1 || EVP_DigestUpdate(ctx, message->message_id, strlen(message->message_id)) != 1 || EVP_DigestFinal_ex(ctx, digest, &length) != 1 || length != 32U) { EVP_MD_CTX_free(ctx); return lc_error_set(error, LC_ERR_PROTOCOL, 0L, "failed to digest inbox identity", NULL, NULL, NULL); }
   EVP_MD_CTX_free(ctx);
-  for (i = 0U; i < 32U; ++i) { identity[i * 2U] = hex[(digest[i] >> 4U) & 0x0fU]; identity[i * 2U + 1U] = hex[digest[i] & 0x0fU]; }
-  identity[64] = '\0'; key_length = sizeof("__lockdc_io/v1/inbox/") - 1U + strlen(message->consumer_id) + 1U + 64U + 1U;
+  for (i = 0U; i < 30U; i += 3U) {
+    identity[(i / 3U) * 4U] = base64url[digest[i] >> 2U];
+    identity[(i / 3U) * 4U + 1U] = base64url[((digest[i] & 0x03U) << 4U) |
+                                               (digest[i + 1U] >> 4U)];
+    identity[(i / 3U) * 4U + 2U] = base64url[((digest[i + 1U] & 0x0fU) << 2U) |
+                                               (digest[i + 2U] >> 6U)];
+    identity[(i / 3U) * 4U + 3U] = base64url[digest[i + 2U] & 0x3fU];
+  }
+  identity[40] = base64url[digest[30] >> 2U];
+  identity[41] = base64url[((digest[30] & 0x03U) << 4U) |
+                             (digest[31] >> 4U)];
+  identity[42] = base64url[(digest[31] & 0x0fU) << 2U];
+  identity[43] = '\0';
+  key_length = sizeof("__lockdc_io/v1/inbox/") - 1U + 43U + 1U;
   key = (char *)malloc(key_length); if (key == NULL) return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to allocate inbox key", NULL, NULL, NULL);
-  snprintf(key, key_length, "__lockdc_io/v1/inbox/%s/%s", message->consumer_id, identity);
+  snprintf(key, key_length, "__lockdc_io/v1/inbox/%s", identity);
   (void)workflow; *out = key; return LC_OK;
 }
 
 static int lc_workflow_stage_inbox(lc_lease *lease, const lc_inbox_message *message, lc_error *error) {
-  char *json; size_t length; lc_source *source; int rc;
-  length = strlen(message->consumer_id) + strlen(message->source_kind) + strlen(message->source_id) + strlen(message->message_id) + (message->payload_digest != NULL ? strlen(message->payload_digest) : 0U) + (message->operation_id != NULL ? strlen(message->operation_id) : 0U) + 160U;
-  json = (char *)malloc(length); if (json == NULL) return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to allocate inbox receipt", NULL, NULL, NULL);
-  snprintf(json, length, "{\"record_type\":\"lockdc.inbox.v1\",\"consumer_id\":\"%s\",\"source_kind\":\"%s\",\"source_id\":\"%s\",\"message_id\":\"%s\",\"payload_digest\":\"%s\",\"operation_id\":\"%s\",\"processing_state\":\"accepted\"}", message->consumer_id, message->source_kind, message->source_id, message->message_id, message->payload_digest != NULL ? message->payload_digest : "", message->operation_id != NULL ? message->operation_id : "");
-  source = NULL; rc = lc_source_from_memory(json, strlen(json), &source, error); if (rc == LC_OK) rc = lc_lease_update(lease, source, NULL, error); lc_source_close(source); free(json); return rc;
-}
+  lc_workflow_inbox_record record;
 
-static int lc_workflow_lease_json(lc_lease *lease, char **out, lc_error *error) {
-  lc_sink *sink; const void *bytes; size_t length; char *json; lc_get_res result; int rc;
-  sink = NULL; bytes = NULL; length = 0U; *out = NULL;
-  memset(&result, 0, sizeof(result)); rc = lc_sink_to_memory(&sink, error); if (rc != LC_OK) return rc;
-  rc = lc_lease_get(lease, sink, NULL, &result, error);
-  if (rc == LC_OK) rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
-  if (rc == LC_OK) { json = (char *)malloc(length + 1U); if (json == NULL) rc = lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to copy workflow record", NULL, NULL, NULL); else { if (length > 0U) memcpy(json, bytes, length); json[length] = '\0'; *out = json; } }
-  lc_get_res_cleanup(&result); lc_sink_close(sink); return rc;
+  memset(&record, 0, sizeof(record));
+  record.record_type = "lockdc.inbox.v1";
+  record.consumer_id = (char *)message->consumer_id;
+  record.source_kind = (char *)message->source_kind;
+  record.source_id = (char *)message->source_id;
+  record.message_id = (char *)message->message_id;
+  record.payload_digest = (char *)message->payload_digest;
+  record.operation_id = (char *)message->operation_id;
+  record.processing_state = "accepted";
+  return lc_lease_save(lease, &lc_workflow_inbox_record_map, &record, error);
 }
 
 static int lc_workflow_existing_outbox(lc_workflow_handle *workflow,
@@ -200,12 +281,34 @@ static int lc_workflow_existing_outbox(lc_workflow_handle *workflow,
                                        const lc_outbox_entry *entry,
                                        lc_outbox_receipt *receipt,
                                        lc_error *error) {
-  lc_acquire_req acquire; lc_lease *lease; char *json; char *needle; size_t length; int rc;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_workflow_outbox_record record;
+  lc_get_res result;
+  lonejson *runtime;
+  int rc;
+
   lc_acquire_req_init(&acquire); acquire.namespace_name = workflow->namespace_name; acquire.key = key; acquire.owner = workflow->owner; acquire.ttl_seconds = workflow->transaction_ttl_seconds;
   lease = NULL; rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error); if (rc != LC_OK) return rc;
-  json = NULL; rc = lc_workflow_lease_json(lease, &json, error);
-  if (rc == LC_OK) { length = strlen(entry->operation_id) + strlen(entry->effect_id) + strlen(entry->effect_key) + strlen(entry->kind) + strlen(entry->destination) + 100U; needle = (char *)malloc(length); if (needle == NULL) rc = lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to validate outbox duplicate", NULL, NULL, NULL); else { snprintf(needle, length, "\"operation_id\":\"%s\"", entry->operation_id); if (strstr(json, needle) == NULL) rc = lc_error_set(error, LC_ERR_SERVER, 0L, "outbox identity conflicts with an existing record", NULL, NULL, NULL); snprintf(needle, length, "\"effect_id\":\"%s\"", entry->effect_id); if (rc == LC_OK && strstr(json, needle) == NULL) rc = lc_error_set(error, LC_ERR_SERVER, 0L, "outbox identity conflicts with an existing record", NULL, NULL, NULL); snprintf(needle, length, "\"effect_key\":\"%s\"", entry->effect_key); if (rc == LC_OK && strstr(json, needle) == NULL) rc = lc_error_set(error, LC_ERR_SERVER, 0L, "outbox immutable fields conflict with an existing record", NULL, NULL, NULL); free(needle); } }
-  free(json); { lc_release_req rollback; lc_release_req_init(&rollback); rollback.rollback = 1; if (lc_lease_release(lease, &rollback, error) != LC_OK && rc == LC_OK) rc = error != NULL ? error->code : LC_ERR_SERVER; }
+  memset(&record, 0, sizeof(record));
+  memset(&result, 0, sizeof(result));
+  runtime = lc_thread_lonejson_runtime();
+  rc = lc_lease_load(lease, &lc_workflow_outbox_record_map, &record, NULL,
+                     &result, error);
+  if (rc == LC_OK &&
+      (strcmp(record.record_type, "lockdc.outbox.v1") != 0 ||
+       strcmp(record.operation_id, entry->operation_id) != 0 ||
+       strcmp(record.effect_id, entry->effect_id) != 0 ||
+       strcmp(record.effect_key, entry->effect_key) != 0 ||
+       strcmp(record.kind, entry->kind) != 0 ||
+       strcmp(record.destination, entry->destination) != 0)) {
+    rc = lc_error_set(error, LC_ERR_SERVER, 0L,
+                      "outbox immutable fields conflict with an existing record",
+                      NULL, NULL, NULL);
+  }
+  runtime->cleanup(runtime, &lc_workflow_outbox_record_map, &record);
+  lc_get_res_cleanup(&result);
+  { lc_release_req rollback; lc_release_req_init(&rollback); rollback.rollback = 1; if (lc_lease_release(lease, &rollback, error) != LC_OK && rc == LC_OK) rc = error != NULL ? error->code : LC_ERR_SERVER; }
   if (rc == LC_OK) { receipt->outbox_key = lc_strdup_local(key); receipt->effect_key = lc_strdup_local(entry->effect_key); if (receipt->outbox_key == NULL || receipt->effect_key == NULL) { lc_outbox_receipt_cleanup(receipt); return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to allocate duplicate outbox receipt", NULL, NULL, NULL); } receipt->duplicate = 1; }
   return rc;
 }
@@ -215,12 +318,36 @@ static int lc_workflow_existing_inbox(lc_workflow_handle *workflow,
                                       const lc_inbox_message *message,
                                       lc_inbox_accept_result *result,
                                       lc_error *error) {
-  lc_acquire_req acquire; lc_lease *lease; char *json; char *needle; size_t length; int rc;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_workflow_inbox_record record;
+  lc_get_res load_result;
+  lonejson *runtime;
+  int rc;
+
   lc_acquire_req_init(&acquire); acquire.namespace_name = workflow->namespace_name; acquire.key = key; acquire.owner = workflow->owner; acquire.ttl_seconds = workflow->transaction_ttl_seconds;
   lease = NULL; rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error); if (rc != LC_OK) return rc;
-  json = NULL; rc = lc_workflow_lease_json(lease, &json, error);
-  if (rc == LC_OK) { length = strlen(message->consumer_id) + strlen(message->source_kind) + strlen(message->source_id) + strlen(message->message_id) + (message->payload_digest != NULL ? strlen(message->payload_digest) : 0U) + 64U; needle = (char *)malloc(length); if (needle == NULL) rc = lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to validate inbox duplicate", NULL, NULL, NULL); else { snprintf(needle, length, "\"consumer_id\":\"%s\"", message->consumer_id); if (strstr(json, needle) == NULL) rc = lc_error_set(error, LC_ERR_SERVER, 0L, "inbox identity conflicts with an existing record", NULL, NULL, NULL); snprintf(needle, length, "\"source_kind\":\"%s\"", message->source_kind); if (rc == LC_OK && strstr(json, needle) == NULL) rc = lc_error_set(error, LC_ERR_SERVER, 0L, "inbox identity conflicts with an existing record", NULL, NULL, NULL); snprintf(needle, length, "\"source_id\":\"%s\"", message->source_id); if (rc == LC_OK && strstr(json, needle) == NULL) rc = lc_error_set(error, LC_ERR_SERVER, 0L, "inbox identity conflicts with an existing record", NULL, NULL, NULL); snprintf(needle, length, "\"message_id\":\"%s\"", message->message_id); if (rc == LC_OK && strstr(json, needle) == NULL) rc = lc_error_set(error, LC_ERR_SERVER, 0L, "inbox identity conflicts with an existing record", NULL, NULL, NULL); if (rc == LC_OK && message->payload_digest != NULL) { snprintf(needle, length, "\"payload_digest\":\"%s\"", message->payload_digest); if (strstr(json, needle) == NULL) rc = lc_error_set(error, LC_ERR_SERVER, 0L, "inbox payload digest conflicts with an existing record", NULL, NULL, NULL); } free(needle); } }
-  free(json); { lc_release_req rollback; lc_release_req_init(&rollback); rollback.rollback = 1; if (lc_lease_release(lease, &rollback, error) != LC_OK && rc == LC_OK) rc = error != NULL ? error->code : LC_ERR_SERVER; }
+  memset(&record, 0, sizeof(record));
+  memset(&load_result, 0, sizeof(load_result));
+  runtime = lc_thread_lonejson_runtime();
+  rc = lc_lease_load(lease, &lc_workflow_inbox_record_map, &record, NULL,
+                     &load_result, error);
+  if (rc == LC_OK &&
+      (strcmp(record.record_type, "lockdc.inbox.v1") != 0 ||
+       strcmp(record.consumer_id, message->consumer_id) != 0 ||
+       strcmp(record.source_kind, message->source_kind) != 0 ||
+       strcmp(record.source_id, message->source_id) != 0 ||
+       strcmp(record.message_id, message->message_id) != 0 ||
+       ((record.payload_digest == NULL) != (message->payload_digest == NULL)) ||
+       (record.payload_digest != NULL &&
+        strcmp(record.payload_digest, message->payload_digest) != 0))) {
+    rc = lc_error_set(error, LC_ERR_SERVER, 0L,
+                      "inbox immutable fields conflict with an existing record",
+                      NULL, NULL, NULL);
+  }
+  runtime->cleanup(runtime, &lc_workflow_inbox_record_map, &record);
+  lc_get_res_cleanup(&load_result);
+  { lc_release_req rollback; lc_release_req_init(&rollback); rollback.rollback = 1; if (lc_lease_release(lease, &rollback, error) != LC_OK && rc == LC_OK) rc = error != NULL ? error->code : LC_ERR_SERVER; }
   if (rc == LC_OK) result->duplicate = 1;
   return rc;
 }
@@ -228,9 +355,7 @@ static int lc_workflow_existing_inbox(lc_workflow_handle *workflow,
 static int lc_workflow_stage_outbox(lc_lease *lease,
                                     const lc_outbox_entry *entry,
                                     lc_source *payload, lc_error *error) {
-  char *json;
-  size_t length;
-  lc_source *state;
+  lc_workflow_outbox_record record;
   lc_attach_req attach;
   lc_attach_res attach_result;
   int rc;
@@ -240,26 +365,21 @@ static int lc_workflow_stage_outbox(lc_lease *lease,
                         "outbox payload source is required", NULL, NULL,
                         NULL);
   }
-  length = strlen(entry->operation_id) + strlen(entry->effect_id) +
-           strlen(entry->effect_key) + strlen(entry->kind) +
-           strlen(entry->destination) + 160U;
-  json = (char *)malloc(length);
-  if (json == NULL) {
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to allocate outbox envelope", NULL, NULL,
-                        NULL);
-  }
-  snprintf(json, length,
-           "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"%s\",\"effect_id\":\"%s\",\"effect_key\":\"%s\",\"kind\":\"%s\",\"destination\":\"%s\",\"dispatch_state\":\"pending\",\"attempt_count\":0}",
-           entry->operation_id, entry->effect_id, entry->effect_key,
-           entry->kind, entry->destination);
-  state = NULL;
-  rc = lc_source_from_memory(json, strlen(json), &state, error);
-  if (rc == LC_OK) {
-    rc = lc_lease_update(lease, state, NULL, error);
-  }
-  lc_source_close(state);
-  free(json);
+  memset(&record, 0, sizeof(record));
+  record.record_type = "lockdc.outbox.v1";
+  record.operation_id = (char *)entry->operation_id;
+  record.effect_id = (char *)entry->effect_id;
+  record.effect_key = (char *)entry->effect_key;
+  record.kind = (char *)entry->kind;
+  record.destination = (char *)entry->destination;
+  record.content_type = (char *)(entry->content_type != NULL
+                                     ? entry->content_type
+                                     : "application/octet-stream");
+  record.headers_json = (char *)entry->headers_json;
+  record.trace_context = (char *)entry->trace_context;
+  record.dispatch_state = "pending";
+  record.attempt_count = 0;
+  rc = lc_lease_save(lease, &lc_workflow_outbox_record_map, &record, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -385,23 +505,63 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
                                             int rollback, lc_error *error) {
   lc_workflow_transaction_handle *transaction = (lc_workflow_transaction_handle *)self;
   lc_release_req request;
+  char **notification_keys;
   size_t i;
   int rc;
   if (transaction == NULL || transaction->terminal) return lc_error_set(error, LC_ERR_INVALID, 0L, "workflow transaction is closed", NULL, NULL, NULL);
-  lc_release_req_init(&request); request.rollback = rollback;
+  notification_keys = NULL;
+  if (!rollback) {
+    notification_keys = (char **)lc_client_calloc(
+        transaction->workflow->client, transaction->lease_count,
+        sizeof(*notification_keys));
+    if (notification_keys == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to prepare workflow dispatch signals", NULL,
+                          NULL, NULL);
+    }
+    for (i = 0U; i < transaction->lease_count; ++i) {
+      if (transaction->leases[i] != NULL) {
+        notification_keys[i] = lc_client_strdup(
+            transaction->workflow->client, transaction->leases[i]->key);
+        if (notification_keys[i] == NULL) {
+          while (i > 0U) {
+            --i;
+            lc_client_free(transaction->workflow->client,
+                           notification_keys[i]);
+          }
+          lc_client_free(transaction->workflow->client, notification_keys);
+          return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                              "failed to prepare workflow dispatch signals",
+                              NULL, NULL, NULL);
+        }
+      }
+    }
+  }
+  lc_release_req_init(&request);
+  request.rollback = rollback;
   for (i = 0U; i < transaction->lease_count; ++i) {
-    char *notification_key;
     if (transaction->leases[i] == NULL) continue;
-    notification_key = NULL;
-    if (!rollback) notification_key = lc_client_strdup(transaction->workflow->client,
-                                                        transaction->leases[i]->key);
     rc = lc_lease_release(transaction->leases[i], &request, error);
-    if (rc != LC_OK) { lc_client_free(transaction->workflow->client, notification_key); return rc; }
-    lc_workflow_notify(transaction->workflow, notification_key);
-    lc_client_free(transaction->workflow->client, notification_key);
+    if (rc != LC_OK) {
+      size_t j;
+      for (j = 0U; j < transaction->lease_count; ++j) {
+        lc_client_free(transaction->workflow->client, notification_keys == NULL
+                                                       ? NULL
+                                                       : notification_keys[j]);
+      }
+      lc_client_free(transaction->workflow->client, notification_keys);
+      return rc;
+    }
     transaction->leases[i] = NULL;
   }
   transaction->terminal = 1;
+  for (i = 0U; i < transaction->lease_count; ++i) {
+    lc_workflow_notify(transaction->workflow,
+                       notification_keys == NULL ? NULL : notification_keys[i]);
+    lc_client_free(transaction->workflow->client,
+                   notification_keys == NULL ? NULL : notification_keys[i]);
+  }
+  lc_client_free(transaction->workflow->client, notification_keys);
   return LC_OK;
 }
 static int lc_workflow_transaction_commit_method(lc_workflow_transaction *self, lc_error *error) { return lc_workflow_transaction_terminal(self, 0, error); }

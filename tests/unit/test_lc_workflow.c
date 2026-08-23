@@ -34,6 +34,7 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_source *payload;
   lc_source *state_source;
   lc_error error;
+  char long_consumer_id[256];
 
   (void)state;
   assert_true(snprintf(template_path, sizeof(template_path),
@@ -43,6 +44,8 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
   endpoints[0] = endpoint;
   lc_error_init(&error);
+  memset(long_consumer_id, 'c', sizeof(long_consumer_id) - 1U);
+  long_consumer_id[sizeof(long_consumer_id) - 1U] = '\0';
   lc_client_config_init(&client_config);
   client_config.endpoints = endpoints;
   client_config.endpoint_count = 1U;
@@ -57,10 +60,11 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_outbox_entry_init(&entry);
   entry.operation_id = "operation-1";
   entry.effect_id = "effect-1";
-  entry.effect_key = "foreign-idempotency-1";
+  entry.effect_key = "foreign-idempotency-\"1\\stable";
   entry.kind = "http";
-  entry.destination = "https://example.invalid/effect";
+  entry.destination = "https://example.invalid/effect?target=\"primary\"";
   entry.content_type = "text/plain";
+  entry.trace_context = "trace-\"quoted\"";
   payload = NULL;
   assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
                    LC_OK);
@@ -106,7 +110,7 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_source_close(payload);
   lc_outbox_receipt_cleanup(&duplicate_receipt);
   lc_inbox_message_init(&inbox);
-  inbox.consumer_id = "orders";
+  inbox.consumer_id = long_consumer_id;
   inbox.source_kind = "http";
   inbox.source_id = "gateway";
   inbox.message_id = "message-1";
