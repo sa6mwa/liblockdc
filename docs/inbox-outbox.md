@@ -211,7 +211,10 @@ boundaries are fixed:
   exposes no `release()` or transaction-decision operation. Later outbox
   entries use the same endpoint-minted xid through `txn->append_outbox()`.
 - An outbox receipt contains the stable outbox identity and `effect_key` needed
-  for logs and foreign-system calls without revealing storage layout.
+  for logs and foreign-system calls without revealing storage layout. A
+  matching committed outbox append returns that existing receipt as a successful
+  `duplicate` result and returns no transaction; a caller therefore cannot
+  accidentally repeat the associated domain mutation.
 - Inbox acceptance reports `accepted` or `duplicate` as successful structured
   outcomes. It does not force callers to inspect an error string to distinguish
   a normal duplicate from a conflict.
@@ -414,7 +417,9 @@ never treated as a fresh duplicate.
 
 Submitting the same `(operation_id, effect_id)` again is idempotent only when
 all immutable fields, including `effect_key`, match. A conflicting repeat
-fails visibly.
+fails visibly. A matching committed repeat returns the existing outbox receipt
+with `duplicate` set and no transaction; it does not create or stage any new
+domain or outbox participant.
 
 ### Inbox acceptance
 
@@ -570,6 +575,29 @@ Configuration must bound:
 - claim TTL, renewal cadence, retry delay, and maximum attempts; and
 - retained diagnostics and dead-letter retention.
 
+### Default delivery policy
+
+The defaults are deliberately generous while preserving a bounded, observable
+terminal outcome:
+
+```text
+claim_ttl                 5 minutes
+max_attempts              100, including the first delivery attempt
+retry_initial_delay       1 second
+retry_multiplier          2
+retry_max_delay           15 minutes
+retry_jitter              full jitter
+host_retry_delay_max      1 hour
+```
+
+The calculated retry delay is exponentially increased to the cap and sampled
+with full jitter. A host may provide a retry delay, for example from a foreign
+system's backoff instruction, but liblockdc rejects values above
+`host_retry_delay_max`. After the final failed attempt the record is
+dead-lettered; it is never discarded automatically. These defaults and limits
+are workflow configuration, and a host renewing a claim for a longer foreign
+effect must do so before the five-minute claim expiry.
+
 The component exposes read-only statistics and last-error state, including:
 
 ```text
@@ -610,7 +638,9 @@ Pouch and the repository's compose-backed remote lockd E2E environment.
 8. Stale completion, retry, and dead-letter operations cannot alter a later
    claim.
 9. Retry scheduling, retry-budget exhaustion, dead-lettering, and replay are
-   durable and observable.
+   durable and observable. Default policy tests prove 100 attempts including
+   the first, full-jitter exponential delay from one second capped at fifteen
+   minutes, a one-hour host-delay limit, and dead-lettering without deletion.
 10. Payload reads remain streaming under fragmented reads, large attachments,
    cancellation, and backend failover/reopen; tests prove no full-payload
    materialization.
@@ -638,6 +668,8 @@ Pouch and the repository's compose-backed remote lockd E2E environment.
     release/decision method; the transaction begins only from its deterministic
     first record lease; the Pouch terminal decision contains every enrolled
     participant; and a consumed participant cannot be reused.
+18. A matching committed outbox duplicate returns its existing receipt with no
+    transaction and cannot stage a second domain mutation or outbox intent.
 
 ## Proof Obligations and Open Decisions
 
