@@ -743,6 +743,55 @@ Pouch and the repository's compose-backed remote lockd E2E environment.
     idempotent append/accept, explicit duplicate results, parent `next()`
     streamed-payload handoff, and terminal job transitions without dispatcher
     thread callbacks.
+
+## Reconciliation Performance Benchmark
+
+`lockdc_bench workflow-reconcile` is the load benchmark for the recovery path.
+It seeds public outbox envelopes through the normal client API, then starts a
+new workflow so that delivery can occur only through its private indexed
+reconciliation path. The workload contains:
+
+- `pending_rows` dispatchable records, each with an optional payload
+  attachment;
+- `terminal_rows` retained completed records in the same namespace; and
+- `churn_updates` complete state rewrites of every terminal record, leaving
+  Pouch intentionally un-compacted before recovery starts.
+
+The benchmark validates that every pending record is delivered exactly once to
+the benchmark’s own key prefix and that recovery performs at least
+`ceil(pending_rows / page_capacity)` bounded indexed pages. It emits
+machine-readable first-delivery latency, drain latency, throughput,
+recovery-query count, recovered-candidate count, and candidate surplus.
+Candidate surplus is expected to expose stale index entries: candidate keys are
+always directly reread and validated before a dispatcher hands work to the
+host, so it is an efficiency signal rather than a duplicate-delivery count.
+Attachment bytes are deliberately excluded from discovery; compare a
+zero-payload run with a large-payload run to confirm that discovery cost is
+governed by indexed state, not payload size.
+
+The reproducible entry points are:
+
+```sh
+make benchmark-workflow-pouch
+make benchmark-workflow-remote
+```
+
+The Pouch command creates and removes an isolated local root. The remote
+command resets then starts the repository devenv and uses its disk endpoint and generated
+mTLS bundle, supplying both disk nodes so the client follows the active leader.
+It uses the shared `default` namespace permitted by the development client but
+allocates a unique outbox-key prefix, leaving those records available for
+post-run inspection. Both commands default to the
+256-pending/1,024-terminal/four-churn/16-page baseline. Set
+`WORKFLOW_BENCH_ROWS`, `WORKFLOW_BENCH_TERMINAL_ROWS`,
+`WORKFLOW_BENCH_CHURN_UPDATES`, `WORKFLOW_BENCH_PAYLOAD_BYTES`, and
+`WORKFLOW_BENCH_PAGE_CAPACITY` to characterize a deployment-sized profile.
+
+Timing is reported rather than enforced as a universal pass/fail threshold:
+storage media, remote TLS, and lockd deployment topology materially affect the
+absolute number. Before v1, record representative Pouch and remote baselines
+on the supported deployment hardware and promote agreed budgets into an
+explicit performance gate.
 17. Transaction ownership is enforced: a workflow participant exposes no
     release/decision method; the transaction begins only from its deterministic
     first record lease; the Pouch terminal decision contains every enrolled

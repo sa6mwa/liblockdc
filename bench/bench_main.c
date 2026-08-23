@@ -33,6 +33,14 @@ typedef struct bench_pouch_perf_fixture {
   char root[512];
 } bench_pouch_perf_fixture;
 
+typedef struct bench_workflow_fixture {
+  lc_client *client;
+  char root[512];
+  char namespace_name[128];
+  char key_prefix[96];
+  int is_pouch;
+} bench_workflow_fixture;
+
 static double bench_now_seconds(void) {
   struct timespec ts;
 
@@ -147,6 +155,23 @@ static int bench_env_enabled(const char *name) {
          strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0;
 }
 
+static long bench_env_long(const char *name, long fallback, long minimum) {
+  const char *value;
+  char *end;
+  long parsed;
+
+  value = getenv(name);
+  if (value == NULL || value[0] == '\0') {
+    return fallback;
+  }
+  end = NULL;
+  parsed = strtol(value, &end, 10);
+  if (end == value || *end != '\0' || parsed < minimum) {
+    return fallback;
+  }
+  return parsed;
+}
+
 static int bench_pouch_client_open_crypto(const char *root,
                                           const char *crypto_key,
                                           lc_client **out, lc_error *error) {
@@ -196,6 +221,433 @@ static void bench_pouch_perf_fixture_close(bench_pouch_perf_fixture *fixture) {
   lc_pouch_crypto_key_string_free(fixture->crypto_key);
   bench_pouch_cleanup_root(fixture->root);
   memset(fixture, 0, sizeof(*fixture));
+}
+
+static int bench_workflow_remote_client_open(const char *endpoint,
+                                             const char *failover_endpoint,
+                                             const char *bundle_path,
+                                             const char *namespace_name,
+                                             lc_client **out, lc_error *error) {
+  const char *endpoints[2];
+  lc_client_config config;
+  lc_source *bundle_source;
+  int rc;
+
+  bundle_source = NULL;
+  rc = lc_source_from_file(bundle_path, &bundle_source, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  endpoints[0] = endpoint;
+  endpoints[1] = failover_endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = failover_endpoint == NULL ? 1U : 2U;
+  config.default_namespace = namespace_name;
+  config.timeout_ms = 30000L;
+  config.client_bundle_source = bundle_source;
+  config.insecure_skip_verify = 1;
+  rc = lc_client_open(&config, out, error);
+  lc_source_close(bundle_source);
+  return rc;
+}
+
+static int bench_workflow_remote_probe(lc_client *client,
+                                       const char *namespace_name,
+                                       lc_error *error) {
+  lc_index_flush_req request;
+  lc_index_flush_res result;
+  int rc;
+
+  lc_index_flush_req_init(&request);
+  memset(&result, 0, sizeof(result));
+  request.namespace_name = namespace_name;
+  request.mode = "wait";
+  rc = lc_flush_index(client, &request, &result, error);
+  lc_index_flush_res_cleanup(&result);
+  return rc;
+}
+
+static int bench_workflow_fixture_open(bench_workflow_fixture *fixture,
+                                       lc_error *error) {
+  const char *endpoint;
+  const char *failover_endpoint;
+  const char *bundle_path;
+  const char *namespace_name;
+  const char *endpoints[1];
+  char root_path[sizeof(fixture->root)];
+  lc_client_config config;
+  struct timespec now;
+  const char *selected_endpoint;
+  const char *selected_failover_endpoint;
+  int attempt;
+  int rc;
+
+  if (fixture == NULL) {
+    return 1;
+  }
+  memset(fixture, 0, sizeof(*fixture));
+  endpoints[0] = NULL;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+    return 1;
+  }
+  if (snprintf(fixture->key_prefix, sizeof(fixture->key_prefix),
+               "__lockdc_io/v1/outbox/bench-%ld-%ld", (long)getpid(),
+               (long)now.tv_nsec) < 0) {
+    return 1;
+  }
+  endpoint = getenv("LOCKDC_WORKFLOW_BENCH_ENDPOINT");
+  failover_endpoint = getenv("LOCKDC_WORKFLOW_BENCH_FAILOVER_ENDPOINT");
+  namespace_name = getenv("LOCKDC_WORKFLOW_BENCH_NAMESPACE");
+  lc_client_config_init(&config);
+  config.timeout_ms = 30000L;
+  if (endpoint == NULL || endpoint[0] == '\0') {
+    if (snprintf(fixture->namespace_name, sizeof(fixture->namespace_name),
+                 "workflow-bench-%ld-%ld", (long)getpid(),
+                 (long)now.tv_nsec) < 0) {
+      return 1;
+    }
+    if (bench_pouch_root_path(fixture->root, sizeof(fixture->root),
+                              "workflow") != 0) {
+      return 1;
+    }
+    memcpy(root_path, fixture->root, sizeof(root_path));
+    if (snprintf(fixture->root, sizeof(fixture->root), "pouch://%s",
+                 root_path) < 0) {
+      return 1;
+    }
+    endpoints[0] = fixture->root;
+    fixture->is_pouch = 1;
+  } else {
+    if (namespace_name == NULL || namespace_name[0] == '\0') {
+      namespace_name = "default";
+    }
+    if (snprintf(fixture->namespace_name, sizeof(fixture->namespace_name), "%s",
+                 namespace_name) < 0) {
+      return 1;
+    }
+    bundle_path = getenv("LOCKDC_WORKFLOW_BENCH_CLIENT_BUNDLE");
+    if (bundle_path == NULL || bundle_path[0] == '\0') {
+      bundle_path = "./devenv/volumes/lockd-disk-a-config/client.pem";
+    }
+    selected_endpoint = NULL;
+    selected_failover_endpoint = NULL;
+    for (attempt = 0; attempt < 30; ++attempt) {
+      rc = bench_workflow_remote_client_open(endpoint, NULL, bundle_path,
+                                             fixture->namespace_name,
+                                             &fixture->client, error);
+      if (rc == LC_OK) {
+        rc = bench_workflow_remote_probe(fixture->client,
+                                         fixture->namespace_name, error);
+        if (rc == LC_OK) {
+          selected_endpoint = endpoint;
+          selected_failover_endpoint = failover_endpoint;
+          fixture->client->close(fixture->client);
+          fixture->client = NULL;
+          break;
+        }
+        fixture->client->close(fixture->client);
+        fixture->client = NULL;
+      }
+      if (failover_endpoint != NULL && failover_endpoint[0] != '\0') {
+        lc_error_cleanup(error);
+        lc_error_init(error);
+        rc = bench_workflow_remote_client_open(
+            failover_endpoint, NULL, bundle_path, fixture->namespace_name,
+            &fixture->client, error);
+        if (rc == LC_OK) {
+          rc = bench_workflow_remote_probe(fixture->client,
+                                           fixture->namespace_name, error);
+          if (rc == LC_OK) {
+            selected_endpoint = failover_endpoint;
+            selected_failover_endpoint = endpoint;
+            fixture->client->close(fixture->client);
+            fixture->client = NULL;
+            break;
+          }
+          fixture->client->close(fixture->client);
+          fixture->client = NULL;
+        }
+      }
+      if (attempt + 1 < 30) {
+        lc_error_cleanup(error);
+        lc_error_init(error);
+        sleep(1U);
+      }
+    }
+    if (selected_endpoint == NULL) {
+      return rc;
+    }
+    return bench_workflow_remote_client_open(
+        selected_endpoint, selected_failover_endpoint, bundle_path,
+        fixture->namespace_name, &fixture->client, error);
+  }
+  config.default_namespace = fixture->namespace_name;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  return lc_client_open(&config, &fixture->client, error);
+}
+
+static void bench_workflow_fixture_close(bench_workflow_fixture *fixture) {
+  if (fixture == NULL) {
+    return;
+  }
+  if (fixture->client != NULL) {
+    fixture->client->close(fixture->client);
+  }
+  if (fixture->is_pouch) {
+    const char *root = fixture->root + strlen("pouch://");
+
+    bench_pouch_cleanup_root(root);
+  }
+  memset(fixture, 0, sizeof(*fixture));
+}
+
+static int bench_workflow_seed_record(lc_client *client,
+                                      const char *namespace_name,
+                                      const char *key,
+                                      const char *dispatch_state,
+                                      long generation, const char *payload,
+                                      size_t payload_length, lc_error *error) {
+  char state[512];
+  lc_acquire_req acquire;
+  lc_attach_req attach;
+  lc_attach_res attach_result;
+  lc_lease *lease;
+  lc_source *state_source;
+  lc_source *payload_source;
+  int rc;
+
+  if (snprintf(state, sizeof(state),
+               "{\"record_type\":\"lockdc.outbox.v1\","
+               "\"operation_id\":\"workflow-bench-%s-%ld\","
+               "\"effect_id\":\"workflow-bench-effect-%s-%ld\","
+               "\"effect_key\":\"workflow-bench-key-%s-%ld\","
+               "\"kind\":\"benchmark\","
+               "\"destination\":\"benchmark://reconcile\","
+               "\"content_type\":\"application/octet-stream\","
+               "\"dispatch_state\":\"%s\",\"attempt_count\":0,"
+               "\"not_before_unix\":0,\"benchmark_generation\":%ld}",
+               dispatch_state, generation, dispatch_state, generation,
+               dispatch_state, generation, dispatch_state, generation) < 0) {
+    return 1;
+  }
+  lease = NULL;
+  state_source = NULL;
+  payload_source = NULL;
+  memset(&attach_result, 0, sizeof(attach_result));
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = namespace_name;
+  acquire.key = key;
+  acquire.owner = "workflow-benchmark-seed";
+  acquire.ttl_seconds = 60L;
+  rc = client->acquire(client, &acquire, &lease, error);
+  if (rc == LC_OK) {
+    rc = lc_source_from_memory(state, strlen(state), &state_source, error);
+  }
+  if (rc == LC_OK) {
+    rc = lease->update(lease, state_source, NULL, error);
+  }
+  if (rc == LC_OK && payload != NULL && payload_length > 0U) {
+    rc = lc_source_from_memory(payload, payload_length, &payload_source, error);
+  }
+  if (rc == LC_OK && payload_source != NULL) {
+    lc_attach_req_init(&attach);
+    attach.name = "payload";
+    attach.content_type = "application/octet-stream";
+    attach.prevent_overwrite = 1;
+    rc = lease->attach(lease, &attach, payload_source, &attach_result, error);
+  }
+  if (rc == LC_OK) {
+    rc = lease->release(lease, NULL, error);
+    if (rc == LC_OK) {
+      lease = NULL;
+    }
+  }
+  lc_attach_res_cleanup(&attach_result);
+  if (payload_source != NULL) {
+    lc_source_close(payload_source);
+  }
+  if (state_source != NULL) {
+    lc_source_close(state_source);
+  }
+  if (lease != NULL) {
+    lease->close(lease);
+  }
+  return rc;
+}
+
+static int bench_workflow_reconcile(long iterations) {
+  bench_workflow_fixture fixture;
+  lc_workflow_config config;
+  lc_workflow *workflow;
+  lc_workflow_stats stats;
+  lc_outbox_job *job;
+  lc_error error;
+  struct timespec started;
+  double first_delivery_seconds;
+  double drain_seconds;
+  long rows;
+  long terminal_rows;
+  long churn_updates;
+  long payload_bytes;
+  long page_capacity;
+  uint64_t expected_recovery_queries;
+  char *payload;
+  size_t index;
+  int rc;
+
+  rows = iterations > 0L ? iterations : 256L;
+  terminal_rows =
+      bench_env_long("LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS", rows * 4L, 0L);
+  churn_updates = bench_env_long("LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES", 4L, 0L);
+  payload_bytes =
+      bench_env_long("LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES", 4096L, 0L);
+  page_capacity =
+      bench_env_long("LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY", 16L, 1L);
+  expected_recovery_queries =
+      ((uint64_t)rows + (uint64_t)page_capacity - 1U) / (uint64_t)page_capacity;
+  payload = NULL;
+  workflow = NULL;
+  memset(&fixture, 0, sizeof(fixture));
+  memset(&stats, 0, sizeof(stats));
+  lc_error_init(&error);
+  rc = bench_workflow_fixture_open(&fixture, &error);
+  if (rc != LC_OK) {
+    goto done;
+  }
+  if (payload_bytes > 0L) {
+    payload = (char *)malloc((size_t)payload_bytes);
+    if (payload == NULL) {
+      rc = 1;
+      goto done;
+    }
+    memset(payload, 'p', (size_t)payload_bytes);
+  }
+  for (index = 0U; rc == LC_OK && index < (size_t)terminal_rows; ++index) {
+    char key[128];
+
+    if (snprintf(key, sizeof(key), "%s/terminal-%08lu", fixture.key_prefix,
+                 (unsigned long)index) < 0) {
+      rc = 1;
+      break;
+    }
+    rc = bench_workflow_seed_record(fixture.client, fixture.namespace_name, key,
+                                    "completed", 0L, NULL, 0U, &error);
+  }
+  for (index = 0U; rc == LC_OK && index < (size_t)churn_updates; ++index) {
+    size_t terminal_index;
+
+    for (terminal_index = 0U; terminal_index < (size_t)terminal_rows;
+         ++terminal_index) {
+      char key[128];
+
+      if (snprintf(key, sizeof(key), "%s/terminal-%08lu", fixture.key_prefix,
+                   (unsigned long)terminal_index) < 0) {
+        rc = 1;
+        break;
+      }
+      rc = bench_workflow_seed_record(fixture.client, fixture.namespace_name,
+                                      key, "completed", (long)index + 1L, NULL,
+                                      0U, &error);
+      if (rc != LC_OK) {
+        break;
+      }
+    }
+  }
+  for (index = 0U; rc == LC_OK && index < (size_t)rows; ++index) {
+    char key[128];
+
+    if (snprintf(key, sizeof(key), "%s/pending-%08lu", fixture.key_prefix,
+                 (unsigned long)index) < 0) {
+      rc = 1;
+      break;
+    }
+    rc = bench_workflow_seed_record(fixture.client, fixture.namespace_name, key,
+                                    "pending", 0L, payload,
+                                    (size_t)payload_bytes, &error);
+  }
+  if (rc != LC_OK) {
+    goto done;
+  }
+  lc_workflow_config_init(&config);
+  config.namespace_name = fixture.namespace_name;
+  config.owner = "workflow-benchmark-dispatcher";
+  config.notification_capacity = (size_t)page_capacity;
+  config.recovery_interval_seconds = 0L;
+  if (clock_gettime(CLOCK_MONOTONIC, &started) != 0) {
+    rc = 1;
+    goto done;
+  }
+  rc = lc_client_new_workflow(fixture.client, &config, &workflow, &error);
+  first_delivery_seconds = 0.0;
+  for (index = 0U; rc == LC_OK && index < (size_t)rows; ++index) {
+    job = NULL;
+    rc = workflow->next(workflow, 30000L, &job, &error);
+    if (rc != LC_OK || job == NULL) {
+      if (rc == LC_OK) {
+        rc = 1;
+      }
+      break;
+    }
+    if (job->outbox_key == NULL || strncmp(job->outbox_key, fixture.key_prefix,
+                                           strlen(fixture.key_prefix)) != 0) {
+      job->close(job);
+      rc = 1;
+      break;
+    }
+    if (index == 0U) {
+      first_delivery_seconds =
+          bench_now_seconds() -
+          ((double)started.tv_sec + (double)started.tv_nsec / 1000000000.0);
+    }
+    rc = job->complete(job, &error);
+    job->close(job);
+  }
+  drain_seconds =
+      bench_now_seconds() -
+      ((double)started.tv_sec + (double)started.tv_nsec / 1000000000.0);
+  if (rc == LC_OK) {
+    rc = workflow->get_stats(workflow, &stats, &error);
+  }
+  if (rc == LC_OK && (stats.recovered_claims < (uint64_t)rows ||
+                      stats.recovery_queries < expected_recovery_queries)) {
+    rc = 1;
+  }
+  printf("metric=workflow-reconcile backend=%s pending_rows=%ld "
+         "terminal_rows=%ld churn_updates=%ld payload_bytes=%ld "
+         "page_capacity=%ld first_delivery_ms=%.3f drain_ms=%.3f "
+         "throughput_rows_per_second=%.3f recovery_queries=%.0f "
+         "minimum_recovery_queries=%.0f recovered_claims=%.0f "
+         "candidate_surplus=%.0f rc=%d\n",
+         fixture.is_pouch ? "pouch" : "remote", rows, terminal_rows,
+         churn_updates, payload_bytes, page_capacity,
+         first_delivery_seconds * 1000.0, drain_seconds * 1000.0,
+         drain_seconds > 0.0 ? (double)rows / drain_seconds : 0.0,
+         (double)stats.recovery_queries, (double)expected_recovery_queries,
+         (double)stats.recovered_claims,
+         stats.recovered_claims > (uint64_t)rows
+             ? (double)(stats.recovered_claims - (uint64_t)rows)
+             : 0.0,
+         rc);
+
+done:
+  if (workflow != NULL) {
+    workflow->close(workflow);
+  }
+  lc_workflow_stats_cleanup(&stats);
+  free(payload);
+  bench_workflow_fixture_close(&fixture);
+  if (rc != LC_OK && error.message != NULL) {
+    fprintf(stderr,
+            "workflow-reconcile failed: code=%d http=%ld message=%s"
+            " detail=%s server_code=%s\n",
+            error.code, error.http_status, error.message,
+            error.detail == NULL ? "" : error.detail,
+            error.server_code == NULL ? "" : error.server_code);
+  }
+  lc_error_cleanup(&error);
+  return rc == LC_OK ? 0 : 1;
 }
 
 static char *bench_pouch_perf_document(long row, long generation,
@@ -988,6 +1440,7 @@ static const bench_case *bench_cases(void) {
       {"pouch-perf-flush-intermediate", 128L,
        bench_pouch_perf_flush_intermediate},
       {"pouch-perf-flush-reopen", 128L, bench_pouch_perf_flush_reopen},
+      {"workflow-reconcile", 256L, bench_workflow_reconcile},
       {"pouch-query-eq-sparse-index-keys", 1024L,
        bench_pouch_query_eq_sparse_index_keys},
       {"pouch-query-eq-sparse-scan-keys", 1024L,

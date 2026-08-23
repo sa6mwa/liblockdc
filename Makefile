@@ -120,6 +120,15 @@ POUCH_PERF_CRYPTO ?= 0
 POUCH_PERF_TIMEOUT ?= 60s
 POUCH_PERF_ROUTINE_ROWS ?= 12
 POUCH_PERF_ROUTINE_PAYLOAD_BYTES ?= 131072
+WORKFLOW_BENCH_ROWS ?= 256
+WORKFLOW_BENCH_TERMINAL_ROWS ?= 1024
+WORKFLOW_BENCH_CHURN_UPDATES ?= 4
+WORKFLOW_BENCH_PAYLOAD_BYTES ?= 4096
+WORKFLOW_BENCH_PAGE_CAPACITY ?= 16
+WORKFLOW_BENCH_TIMEOUT ?= 10m
+WORKFLOW_BENCH_REMOTE_ENDPOINT ?= https://localhost:19441
+WORKFLOW_BENCH_REMOTE_FAILOVER_ENDPOINT ?= https://localhost:19442
+WORKFLOW_BENCH_REMOTE_BUNDLE ?= $(ROOT)/devenv/volumes/lockd-disk-a-config/client.pem
 FUZZ_TIME ?= 30
 FUZZ_LONG_TIME ?= 300
 POUCH_GO_BENCH_CFLAGS := \
@@ -155,7 +164,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__build-debug __build-host __build-x86_64-linux-gnu-release __build-release __build-e2e __build-coverage __build-fuzz \
 	__test-debug __test-host __test-cross __test-e2e __test-install-tree __example-smoke-local __test-all __test-coverage \
 	__format \
-	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate __benchmark-pouch-go-core-soak __pouch-core-hardening \
+	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-workflow-prepare __benchmark-workflow-pouch __benchmark-workflow-remote __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate __benchmark-pouch-go-core-soak __pouch-core-hardening \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __verify-release-privacy __clean-dist \
 	__lua-rock __lua-test __lua-env __release-lua-artifacts \
 	__dev-up __dev-down __dev-reset __dev-ps __dev-logs __cross-build __cross-preset-test __cross-test \
@@ -164,7 +173,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	build build-debug build-host build-release build-e2e build-coverage build-fuzz \
 	test test-debug test-host test-cross test-e2e test-install-tree example-smoke-local test-all test-coverage \
 	format \
-	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate benchmark-pouch-go-core-soak \
+	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-workflow-pouch benchmark-workflow-remote benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate benchmark-pouch-go-core-soak \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives verify-release-privacy clean-dist \
 	lua-rock lua-test lua-env release-lua-artifacts \
 	dev-up dev-down dev-reset dev-ps dev-logs cross-build cross-preset-test cross-test \
@@ -210,6 +219,8 @@ help:
 		'make benchmarks-go      Run Go parity benchmarks through the standard lifecycle name.' \
 		'make perf-gate          Enforce Pouch-vs-disk core-operation parity for default and strict-durable I/O.' \
 		'make benchmark-pouch-perf Prepare native artifacts, then run one sub-minute pouch perf case (POUCH_PERF_CASE=$(POUCH_PERF_CASE), POUCH_PERF_ROWS=$(POUCH_PERF_ROWS), POUCH_PERF_CRYPTO=$(POUCH_PERF_CRYPTO)).' \
+		'make benchmark-workflow-pouch Run the large-outbox indexed-reconciliation benchmark against a fresh, un-compacted Pouch root.' \
+		'make benchmark-workflow-remote Start the compose devenv, then run the same workflow reconciliation workload through the disk lockd endpoint.' \
 		'make benchmark-pouch-routine Prepare benchmark artifacts, then run all bounded native phase probes plus production and shared-root concurrency comparison in at most $(POUCH_GO_ROUTINE_TIMEOUT).' \
 		'make benchmark-pouch-perf-index-docs Run the isolated public-API indexed narrative document query perf case.' \
 		'make benchmark-pouch-perf-full-text-keys Run the isolated public-API full-text key query perf case.' \
@@ -494,6 +505,39 @@ __benchmark-pouch-perf:
 	  LOCKDC_POUCH_PERF_CRYPTO='$(POUCH_PERF_CRYPTO)' \
 	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
 	    $(POUCH_PERF_ROWS) $(POUCH_PERF_CASE)
+
+benchmark-workflow-pouch: __benchmark-workflow-prepare
+	$(TIMED) benchmark-workflow-pouch timeout --kill-after=5s \
+	  '$(WORKFLOW_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-workflow-pouch
+
+__benchmark-workflow-prepare:
+	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)
+	$(CMAKE) --build --preset $(X86_64_GNU_RELEASE_PRESET) --target lockdc_bench
+
+__benchmark-workflow-pouch:
+	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
+	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile
+
+benchmark-workflow-remote: __benchmark-workflow-prepare
+	$(MAKE_RECURSE) __dev-reset
+	$(MAKE_RECURSE) __dev-up
+	$(TIMED) benchmark-workflow-remote timeout --kill-after=5s \
+	  '$(WORKFLOW_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-workflow-remote
+
+__benchmark-workflow-remote:
+	LOCKDC_WORKFLOW_BENCH_ENDPOINT='$(WORKFLOW_BENCH_REMOTE_ENDPOINT)' \
+	  LOCKDC_WORKFLOW_BENCH_FAILOVER_ENDPOINT='$(WORKFLOW_BENCH_REMOTE_FAILOVER_ENDPOINT)' \
+	  LOCKDC_WORKFLOW_BENCH_CLIENT_BUNDLE='$(WORKFLOW_BENCH_REMOTE_BUNDLE)' \
+	  LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
+	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile
 
 benchmark-pouch-perf-index-docs:
 	$(MAKE_RECURSE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-index-docs
