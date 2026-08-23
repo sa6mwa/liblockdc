@@ -16,6 +16,8 @@
 #define WORKFLOW_TMP_PREFIX "/tmp/liblockdc-unit-workflow-"
 #define WORKFLOW_RECONCILIATION_RECORDS 256U
 #define WORKFLOW_PREFETCH_RECORDS 3U
+#define WORKFLOW_SHARED_PROCESS_RECORDS 64U
+#define WORKFLOW_SHARED_PROCESS_IDLE_LIMIT 40U
 
 static int workflow_bytes_contains(const void *bytes, size_t length,
                                    const char *needle) {
@@ -112,6 +114,8 @@ static void seed_foreign_workflow_state(lc_client *client,
 typedef struct workflow_process_result {
   int rc;
   int got_job;
+  unsigned long delivered;
+  char error_message[256];
 } workflow_process_result;
 
 static workflow_process_result
@@ -160,6 +164,8 @@ workflow_shared_process_claim(const char *root, const char *namespace_name,
   if (result.rc == LC_OK && job != NULL) {
     result.got_job = 1;
     result.rc = lc_outbox_job_complete(job, &error);
+    if (result.rc == LC_OK)
+      result.delivered = 1UL;
   }
   if (job != NULL)
     lc_outbox_job_close(job);
@@ -167,8 +173,112 @@ workflow_shared_process_claim(const char *root, const char *namespace_name,
     lc_workflow_close(workflow);
   if (client != NULL)
     lc_client_close(client);
+  if (error.message != NULL)
+    (void)snprintf(result.error_message, sizeof(result.error_message), "%s",
+                   error.message);
   lc_error_cleanup(&error);
   return result;
+}
+
+static workflow_process_result
+workflow_shared_process_drain(const char *root, const char *namespace_name,
+                              const char *owner, int start_fd) {
+  workflow_process_result result;
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_error error;
+  char start;
+  unsigned long idle_count;
+
+  memset(&result, 0, sizeof(result));
+  result.rc = LC_ERR_TRANSPORT;
+  if (read(start_fd, &start, 1U) != 1) {
+    (void)close(start_fd);
+    return result;
+  }
+  (void)close(start_fd);
+  if (start != 's' ||
+      snprintf(endpoint, sizeof(endpoint),
+               "pouch://%s?pouch_single_writer=false&segment_target_bytes=65536",
+               root) < 0) {
+    result.rc = LC_ERR_INVALID;
+    return result;
+  }
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  idle_count = 0U;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  result.rc = lc_client_open(&client_config, &client, &error);
+  if (result.rc == LC_OK) {
+    lc_workflow_config_init(&workflow_config);
+    workflow_config.namespace_name = namespace_name;
+    workflow_config.owner = owner;
+    workflow_config.notification_capacity = 16U;
+    workflow_config.recovery_interval_seconds = 1L;
+    result.rc =
+        lc_client_new_workflow(client, &workflow_config, &workflow, &error);
+  }
+  while (result.rc == LC_OK &&
+         idle_count < WORKFLOW_SHARED_PROCESS_IDLE_LIMIT) {
+    lc_outbox_job *job;
+
+    job = NULL;
+    result.rc = lc_workflow_next(workflow, 250L, &job, &error);
+    if (result.rc != LC_OK)
+      break;
+    if (job == NULL) {
+      ++idle_count;
+      continue;
+    }
+    idle_count = 0U;
+    result.got_job = 1;
+    result.rc = lc_outbox_job_complete(job, &error);
+    lc_outbox_job_close(job);
+    if (result.rc == LC_OK)
+      ++result.delivered;
+  }
+  if (workflow != NULL)
+    lc_workflow_close(workflow);
+  if (client != NULL)
+    lc_client_close(client);
+  if (error.message != NULL)
+    (void)snprintf(result.error_message, sizeof(result.error_message), "%s",
+                   error.message);
+  lc_error_cleanup(&error);
+  return result;
+}
+
+static void workflow_assert_outbox_completed(lc_client *client,
+                                             const char *key,
+                                             lc_error *error) {
+  lc_get_opts options;
+  lc_get_res result;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length;
+
+  lc_get_opts_init(&options);
+  options.public_read = 1;
+  memset(&result, 0, sizeof(result));
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  assert_int_equal(lc_sink_to_memory(&sink, error), LC_OK);
+  assert_int_equal(lc_get(client, key, &options, sink, &result, error), LC_OK);
+  assert_false(result.no_content);
+  assert_int_equal(lc_sink_memory_bytes(sink, &bytes, &length, error), LC_OK);
+  assert_true(workflow_bytes_contains(bytes, length,
+                                      "\"dispatch_state\":\"completed\""));
+  lc_get_res_cleanup(&result);
+  lc_sink_close(sink);
 }
 
 static void test_pouch_outbox_transaction_and_duplicate(void **state) {
@@ -867,6 +977,119 @@ static void test_pouch_shared_process_dispatches_once(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void test_pouch_shared_process_reconciles_each_outbox_once(void **state) {
+  char root[256], template_path[256], endpoint[384];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  workflow_process_result results[2];
+  lc_client *client;
+  lc_error error;
+  int start_pipes[2][2];
+  int result_pipes[2][2];
+  int status;
+  pid_t children[2];
+  size_t index;
+  unsigned long delivered;
+
+  (void)state;
+  memset(start_pipes, -1, sizeof(start_pipes));
+  memset(result_pipes, -1, sizeof(result_pipes));
+  memset(children, 0, sizeof(children));
+  memset(results, 0, sizeof(results));
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "shared-reconcile-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?pouch_single_writer=false&segment_target_bytes=65536",
+                       root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client_config.default_namespace = "workflow-shared-reconcile";
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  for (index = 0U; index < WORKFLOW_SHARED_PROCESS_RECORDS; ++index) {
+    char key[160];
+
+    assert_true(snprintf(key, sizeof(key),
+                         "__lockdc_io/v1/outbox/shared-reconcile-%03lu",
+                         (unsigned long)index) > 0);
+    seed_recovery_outbox(client, client_config.default_namespace, key, &error);
+  }
+  lc_client_close(client);
+  client = NULL;
+
+  for (index = 0U; index < 2U; ++index) {
+    char owner[64];
+
+    assert_int_equal(pipe(start_pipes[index]), 0);
+    assert_int_equal(pipe(result_pipes[index]), 0);
+    children[index] = fork();
+    assert_true(children[index] >= 0);
+    if (children[index] == 0) {
+      workflow_process_result child_result;
+
+      (void)close(start_pipes[index][1]);
+      (void)close(result_pipes[index][0]);
+      assert_true(snprintf(owner, sizeof(owner), "workflow-shared-drain-%lu",
+                           (unsigned long)index) > 0);
+      child_result = workflow_shared_process_drain(
+          root, client_config.default_namespace, owner, start_pipes[index][0]);
+      (void)write(result_pipes[index][1], &child_result, sizeof(child_result));
+      (void)close(result_pipes[index][1]);
+      _exit(child_result.rc == LC_OK ? 0 : 1);
+    }
+    (void)close(start_pipes[index][0]);
+    start_pipes[index][0] = -1;
+    (void)close(result_pipes[index][1]);
+    result_pipes[index][1] = -1;
+  }
+  for (index = 0U; index < 2U; ++index) {
+    char start;
+
+    start = 's';
+    assert_int_equal(write(start_pipes[index][1], &start, 1U), 1);
+    (void)close(start_pipes[index][1]);
+    start_pipes[index][1] = -1;
+  }
+  delivered = 0UL;
+  for (index = 0U; index < 2U; ++index) {
+    assert_int_equal(read(result_pipes[index][0], &results[index],
+                          sizeof(results[index])),
+                     (ssize_t)sizeof(results[index]));
+    (void)close(result_pipes[index][0]);
+    result_pipes[index][0] = -1;
+    assert_int_equal(waitpid(children[index], &status, 0), children[index]);
+    assert_true(WIFEXITED(status));
+    if (results[index].rc != LC_OK) {
+      (void)fprintf(stderr,
+                    "shared workflow drain %lu failed: rc=%d message=%s\n",
+                    (unsigned long)index, results[index].rc,
+                    results[index].error_message);
+    }
+    assert_int_equal(results[index].rc, LC_OK);
+    assert_int_equal(WEXITSTATUS(status), 0);
+    delivered += results[index].delivered;
+  }
+  assert_int_equal(delivered, WORKFLOW_SHARED_PROCESS_RECORDS);
+
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  for (index = 0U; index < WORKFLOW_SHARED_PROCESS_RECORDS; ++index) {
+    char key[160];
+
+    assert_true(snprintf(key, sizeof(key),
+                         "__lockdc_io/v1/outbox/shared-reconcile-%03lu",
+                         (unsigned long)index) > 0);
+    workflow_assert_outbox_completed(client, key, &error);
+  }
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void test_pouch_expired_claim_rejects_stale_terminal(void **state) {
   char root[256], template_path[256], endpoint[320];
   const char *endpoints[1];
@@ -933,6 +1156,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
       cmocka_unit_test(test_pouch_recovery_prefetch_is_bounded),
       cmocka_unit_test(test_pouch_shared_process_dispatches_once),
+      cmocka_unit_test(test_pouch_shared_process_reconciles_each_outbox_once),
       cmocka_unit_test(test_pouch_expired_claim_rejects_stale_terminal),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);

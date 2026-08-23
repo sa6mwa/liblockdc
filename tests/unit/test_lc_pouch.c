@@ -40,6 +40,8 @@
 #define POUCH_TEST_CHILD_COMMAND_MAX 20U
 #define POUCH_TEST_CROSS_EMULATOR_MAX_ARGS 8U
 #define POUCH_TEST_CROSS_EMULATOR_SPEC_MAX 4096U
+#define POUCH_SHARED_ROTATION_WRITERS 12U
+#define POUCH_SHARED_ACTIVE_TAIL_WRITES 64U
 
 static const char *pouch_test_executable;
 #ifdef LOCKDC_TEST_CROSS_EMULATOR_SPEC
@@ -7542,6 +7544,9 @@ static void test_shared_clients_dequeue_one_message_once(void **state) {
 static int pouch_shared_process_write_with_segment_target(
     const char *root, const char *key, const char *value, int start_fd,
     uint64_t segment_target_bytes);
+static int pouch_shared_process_write_many_with_segment_target(
+    const char *root, const char *prefix, int ready_fd, int start_fd,
+    uint64_t segment_target_bytes, uint64_t count);
 
 static int pouch_shared_process_write_with_segment_target(
     const char *root, const char *key, const char *value, int start_fd,
@@ -7578,6 +7583,111 @@ static int pouch_shared_process_write_with_segment_target(
     lc_source_close(source);
   }
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  if (pouch != NULL) {
+    lc_pouch_close(pouch);
+  }
+  lc_error_cleanup(&error);
+  return rc;
+}
+
+/* Keep both independent Pouch projections warm while they append to the same
+ * active segment. A shared reader must tail only completed peer records; a
+ * transient append must never surface as record corruption. */
+static int pouch_shared_process_write_many_with_segment_target(
+    const char *root, const char *prefix, int ready_fd, int start_fd,
+    uint64_t segment_target_bytes, uint64_t count) {
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_error error;
+  char start;
+  char seed_key[128];
+  uint64_t index;
+  int rc;
+
+  pouch = NULL;
+  memset(&options, 0, sizeof(options));
+  lc_error_init(&error);
+  if (count == 0U || count > POUCH_SHARED_ACTIVE_TAIL_WRITES) {
+    rc = LC_ERR_INVALID;
+  } else {
+    rc = LC_OK;
+  }
+  options.single_writer_set = 1;
+  options.single_writer = 0;
+  options.segment_target_bytes = segment_target_bytes;
+  if (rc == LC_OK) {
+    rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  }
+  if (rc == LC_OK) {
+    lc_pouch_state_write_result write_result;
+    lc_source *source;
+    int written;
+
+    memset(&write_result, 0, sizeof(write_result));
+    source = NULL;
+    written = snprintf(seed_key, sizeof(seed_key),
+                       "state/process-active-tail/%s/seed", prefix);
+    if (written < 0 || (size_t)written >= sizeof(seed_key)) {
+      rc = LC_ERR_INVALID;
+    }
+    if (rc == LC_OK) {
+      rc = lc_source_from_memory(prefix, strlen(prefix), &source, &error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_write(pouch, "default", seed_key, source, NULL,
+                                &write_result, &error);
+    }
+    if (source != NULL) {
+      lc_source_close(source);
+    }
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  }
+  if (rc == LC_OK && write(ready_fd, "1", 1U) != 1) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  if (rc == LC_OK && read(start_fd, &start, 1U) != 1) {
+    rc = LC_ERR_TRANSPORT;
+  }
+  (void)close(ready_fd);
+  (void)close(start_fd);
+  for (index = 0U; rc == LC_OK && index < count; ++index) {
+    lc_pouch_state_write_result write_result;
+    lc_source *source;
+    char key[128];
+    char label[64];
+    char value[768];
+    int written;
+
+    memset(&write_result, 0, sizeof(write_result));
+    source = NULL;
+    written = snprintf(key, sizeof(key), "state/process-active-tail/%s/%03lu",
+                       prefix, (unsigned long)index);
+    if (written < 0 || (size_t)written >= sizeof(key)) {
+      rc = LC_ERR_INVALID;
+    }
+    if (rc == LC_OK) {
+      memset(value, (int)prefix[0], sizeof(value) - 1U);
+      value[sizeof(value) - 1U] = '\0';
+      written = snprintf(label, sizeof(label), "%s-%03lu", prefix,
+                         (unsigned long)index);
+      if (written < 0 || (size_t)written >= sizeof(label)) {
+        rc = LC_ERR_INVALID;
+      } else {
+        memcpy(value, label, (size_t)written);
+      }
+    }
+    if (rc == LC_OK) {
+      rc = lc_source_from_memory(value, sizeof(value) - 1U, &source, &error);
+    }
+    if (rc == LC_OK) {
+      rc = lc_pouch_state_write(pouch, "default", key, source, NULL,
+                                &write_result, &error);
+    }
+    if (source != NULL) {
+      lc_source_close(source);
+    }
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  }
   if (pouch != NULL) {
     lc_pouch_close(pouch);
   }
@@ -8005,6 +8115,30 @@ static pid_t pouch_test_spawn_shared_write(const char *root, const char *key,
                                 sizeof(arguments) / sizeof(arguments[0]));
 }
 
+static pid_t pouch_test_spawn_shared_write_many(
+    const char *root, const char *prefix, int ready_fd, int start_fd,
+    uint64_t segment_target_bytes, uint64_t count) {
+  char ready_fd_arg[32];
+  char start_fd_arg[32];
+  char segment_target_arg[32];
+  char count_arg[32];
+  const char *arguments[6];
+
+  pouch_test_child_fd_arg(ready_fd_arg, sizeof(ready_fd_arg), ready_fd);
+  pouch_test_child_fd_arg(start_fd_arg, sizeof(start_fd_arg), start_fd);
+  pouch_test_child_u64_arg(segment_target_arg, sizeof(segment_target_arg),
+                           segment_target_bytes);
+  pouch_test_child_u64_arg(count_arg, sizeof(count_arg), count);
+  arguments[0] = root;
+  arguments[1] = prefix;
+  arguments[2] = ready_fd_arg;
+  arguments[3] = start_fd_arg;
+  arguments[4] = segment_target_arg;
+  arguments[5] = count_arg;
+  return pouch_test_spawn_child("shared-write-many", arguments,
+                                sizeof(arguments) / sizeof(arguments[0]));
+}
+
 static pid_t pouch_test_spawn_shared_hold(const char *root, int ready_fd,
                                           int release_fd) {
   char ready_fd_arg[32];
@@ -8257,50 +8391,148 @@ static void test_process_writer_modes_and_shared_writes(void **state) {
 static void test_shared_process_writers_rotate_segments(void **state) {
   lc_pouch *reader;
   char root[512];
-  char first_value[768];
-  char second_value[768];
-  int first_start[2];
-  int second_start[2];
-  pid_t first_pid;
-  pid_t second_pid;
+  char value[POUCH_SHARED_ROTATION_WRITERS][768];
+  char key[POUCH_SHARED_ROTATION_WRITERS][64];
+  char body[768];
+  int start[POUCH_SHARED_ROTATION_WRITERS][2];
+  pid_t writer[POUCH_SHARED_ROTATION_WRITERS];
   lc_error error;
   int status;
   int rc;
+  size_t index;
 
   (void)state;
   reader = NULL;
-  first_pid = -1;
-  second_pid = -1;
-  memset(first_value, 'a', sizeof(first_value) - 1U);
-  first_value[sizeof(first_value) - 1U] = '\0';
-  memset(second_value, 'b', sizeof(second_value) - 1U);
-  second_value[sizeof(second_value) - 1U] = '\0';
+  for (index = 0U; index < POUCH_SHARED_ROTATION_WRITERS; ++index) {
+    memset(value[index], (int)('a' + (int)index), sizeof(value[index]) - 1U);
+    value[index][sizeof(value[index]) - 1U] = '\0';
+    writer[index] = -1;
+  }
   lc_error_init(&error);
   make_root("process-shared-rotation", root, sizeof(root));
   cleanup_root(root);
 
+  for (index = 0U; index < POUCH_SHARED_ROTATION_WRITERS; ++index) {
+    assert_true(snprintf(key[index], sizeof(key[index]),
+                         "state/process-rotation-%02lu",
+                         (unsigned long)index) > 0);
+    assert_int_equal(pipe(start[index]), 0);
+    writer[index] = pouch_test_spawn_shared_write(
+        root, key[index], value[index], start[index][0], 512U);
+    (void)close(start[index][0]);
+  }
+  for (index = 0U; index < POUCH_SHARED_ROTATION_WRITERS; ++index) {
+    assert_int_equal(write(start[index][1], "1", 1U), 1);
+    (void)close(start[index][1]);
+  }
+  for (index = 0U; index < POUCH_SHARED_ROTATION_WRITERS; ++index) {
+    assert_int_equal(waitpid(writer[index], &status, 0), writer[index]);
+    assert_true(WIFEXITED(status));
+    assert_int_equal(WEXITSTATUS(status), 0);
+  }
+  rc = lc_pouch_open(root, NULL, NULL, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(pouch_state_segment_count(root, "default") >=
+              POUCH_SHARED_ROTATION_WRITERS);
+  for (index = 0U; index < POUCH_SHARED_ROTATION_WRITERS; ++index) {
+    lc_pouch_state_read_result read_result;
+
+    memset(&read_result, 0, sizeof(read_result));
+    rc = lc_pouch_state_read(reader, "default", key[index], &read_result,
+                             &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(read_result.found);
+    read_source_to_string(read_result.body, body, sizeof(body));
+    assert_string_equal(body, value[index]);
+    lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  }
+  lc_pouch_close(reader);
+
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_shared_process_writers_tail_active_segment(void **state) {
+  lc_pouch *reader;
+  char root[512];
+  char key[128];
+  char body[768];
+  char signal;
+  int first_ready[2];
+  int second_ready[2];
+  int first_start[2];
+  int second_start[2];
+  pid_t first_writer;
+  pid_t second_writer;
+  lc_error error;
+  int status;
+  int rc;
+  size_t index;
+
+  (void)state;
+  reader = NULL;
+  first_writer = -1;
+  second_writer = -1;
+  lc_error_init(&error);
+  make_root("process-shared-active-tail", root, sizeof(root));
+  cleanup_root(root);
+
+  assert_int_equal(pipe(first_ready), 0);
   assert_int_equal(pipe(first_start), 0);
-  first_pid = pouch_test_spawn_shared_write(
-      root, "state/process-rotation-first", first_value, first_start[0], 512U);
-  assert_int_equal(pipe(second_start), 0);
-  second_pid =
-      pouch_test_spawn_shared_write(root, "state/process-rotation-second",
-                                    second_value, second_start[0], 512U);
+  first_writer = pouch_test_spawn_shared_write_many(
+      root, "first", first_ready[1], first_start[0], 512U * 1024U,
+      POUCH_SHARED_ACTIVE_TAIL_WRITES);
+  (void)close(first_ready[1]);
   (void)close(first_start[0]);
+  assert_int_equal(pipe(second_ready), 0);
+  assert_int_equal(pipe(second_start), 0);
+  second_writer = pouch_test_spawn_shared_write_many(
+      root, "second", second_ready[1], second_start[0], 512U * 1024U,
+      POUCH_SHARED_ACTIVE_TAIL_WRITES);
+  (void)close(second_ready[1]);
   (void)close(second_start[0]);
+  assert_int_equal(read(first_ready[0], &signal, 1U), 1);
+  assert_int_equal(read(second_ready[0], &signal, 1U), 1);
+  (void)close(first_ready[0]);
+  (void)close(second_ready[0]);
   assert_int_equal(write(first_start[1], "1", 1U), 1);
   assert_int_equal(write(second_start[1], "1", 1U), 1);
   (void)close(first_start[1]);
   (void)close(second_start[1]);
-  assert_int_equal(waitpid(first_pid, &status, 0), first_pid);
+  assert_int_equal(waitpid(first_writer, &status, 0), first_writer);
   assert_true(WIFEXITED(status));
   assert_int_equal(WEXITSTATUS(status), 0);
-  assert_int_equal(waitpid(second_pid, &status, 0), second_pid);
+  assert_int_equal(waitpid(second_writer, &status, 0), second_writer);
   assert_true(WIFEXITED(status));
   assert_int_equal(WEXITSTATUS(status), 0);
+
   rc = lc_pouch_open(root, NULL, NULL, &reader, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(pouch_state_segment_count(root, "default") >= 2UL);
+  for (index = 0U; index < POUCH_SHARED_ACTIVE_TAIL_WRITES; ++index) {
+    lc_pouch_state_read_result first_read;
+    lc_pouch_state_read_result second_read;
+
+    memset(&first_read, 0, sizeof(first_read));
+    memset(&second_read, 0, sizeof(second_read));
+    assert_true(snprintf(key, sizeof(key),
+                         "state/process-active-tail/first/%03lu",
+                         (unsigned long)index) > 0);
+    rc = lc_pouch_state_read(reader, "default", key, &first_read, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(first_read.found);
+    read_source_to_string(first_read.body, body, sizeof(body));
+    assert_true(strncmp(body, "first-", strlen("first-")) == 0);
+    lc_pouch_state_read_result_cleanup(NULL, &first_read);
+    assert_true(snprintf(key, sizeof(key),
+                         "state/process-active-tail/second/%03lu",
+                         (unsigned long)index) > 0);
+    rc = lc_pouch_state_read(reader, "default", key, &second_read, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_true(second_read.found);
+    read_source_to_string(second_read.body, body, sizeof(body));
+    assert_true(strncmp(body, "second-", strlen("second-")) == 0);
+    lc_pouch_state_read_result_cleanup(NULL, &second_read);
+  }
   lc_pouch_close(reader);
 
   cleanup_root(root);
@@ -31810,6 +32042,7 @@ static int pouch_test_child_parse_u64(const char *text, uint64_t *out) {
 static int pouch_test_child_main(int argc, char **argv) {
   const char *operation;
   uint64_t segment_target_bytes;
+  uint64_t count;
   int first_fd;
   int second_fd;
   int third_fd;
@@ -31823,12 +32056,20 @@ static int pouch_test_child_main(int argc, char **argv) {
   second_fd = -1;
   third_fd = -1;
   segment_target_bytes = 0U;
+  count = 0U;
   rc = LC_ERR_INVALID;
   if (strcmp(operation, "shared-write") == 0 && argc == 8 &&
       pouch_test_child_parse_fd(argv[6], &first_fd) &&
       pouch_test_child_parse_u64(argv[7], &segment_target_bytes)) {
     rc = pouch_shared_process_write_with_segment_target(
         argv[3], argv[4], argv[5], first_fd, segment_target_bytes);
+  } else if (strcmp(operation, "shared-write-many") == 0 && argc == 9 &&
+             pouch_test_child_parse_fd(argv[5], &first_fd) &&
+             pouch_test_child_parse_fd(argv[6], &second_fd) &&
+             pouch_test_child_parse_u64(argv[7], &segment_target_bytes) &&
+             pouch_test_child_parse_u64(argv[8], &count)) {
+    rc = pouch_shared_process_write_many_with_segment_target(
+        argv[3], argv[4], first_fd, second_fd, segment_target_bytes, count);
   } else if (strcmp(operation, "shared-hold") == 0 && argc == 6 &&
              pouch_test_child_parse_fd(argv[4], &first_fd) &&
              pouch_test_child_parse_fd(argv[5], &second_fd)) {
@@ -32170,6 +32411,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_shared_clients_dequeue_one_message_once),
       cmocka_unit_test(test_process_writer_modes_and_shared_writes),
       cmocka_unit_test(test_shared_process_writers_rotate_segments),
+      cmocka_unit_test(test_shared_process_writers_tail_active_segment),
       cmocka_unit_test(test_shared_process_lease_conflict_and_handoff),
       cmocka_unit_test(test_shared_process_queue_delivers_once),
       cmocka_unit_test(test_shared_process_transaction_stages_and_commits),
