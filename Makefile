@@ -199,7 +199,7 @@ help:
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
 		'make test-install-tree  Validate CMake and pkg-config consumers against the installed native SDK.' \
 		'make example-smoke-local Run local-service example smoke tests.' \
-		'make test-all           Run debug, host and QEMU cross tests, Valgrind, fuzz smoke, local e2e, and Pouch-vs-disk performance gates.' \
+		'make test-all           Run debug, host and QEMU cross tests, Valgrind, fuzz smoke, and local e2e.' \
 		'make test-coverage      Run the coverage preset test suite and build the coverage report.' \
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
@@ -386,7 +386,10 @@ __example-smoke-local:
 test-all:
 	$(TIMED) test-all $(MAKE_RECURSE) __test-all
 
-__test-all: __test-pouch-workflow-preflight __test-debug __test-host __test-cross __valgrind __fuzz-smoke __test-e2e __bench-gate
+# Performance work is deliberately excluded: benchmark processes may consume
+# all available CPU and their results are not a functional test invariant.
+# Run `make bench-gate` explicitly, or use the intentional prerelease gate.
+__test-all: __test-pouch-workflow-preflight __test-debug __test-host __test-cross __valgrind __fuzz-smoke __test-e2e
 
 dev-up:
 	$(TIMED) dev-up $(MAKE_RECURSE) __dev-up
