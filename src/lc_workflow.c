@@ -21,6 +21,12 @@ typedef struct lc_workflow_delayed_notification {
 static void lc_workflow_release(lc_workflow_handle *workflow);
 static void lc_workflow_retain(lc_workflow_handle *workflow);
 
+#ifdef LOCKDC_TEST_BUILD
+lc_workflow_test_after_reconcile_query_hook_fn
+    lc_workflow_test_after_reconcile_query_hook = NULL;
+void *lc_workflow_test_after_reconcile_query_context = NULL;
+#endif
+
 typedef struct lc_workflow_outbox_record {
   char *record_type;
   char *operation_id;
@@ -1131,10 +1137,20 @@ static int lc_workflow_reconcile_pending(lc_workflow_handle *workflow,
   cursor = result.cursor;
   result.cursor = NULL;
   lc_query_res_cleanup(&result);
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_after_reconcile_query_hook != NULL) {
+    lc_workflow_test_after_reconcile_query_hook(
+        lc_workflow_test_after_reconcile_query_context);
+  }
+#endif
   lc_client_free(workflow->client, workflow->recovery_cursor);
   workflow->recovery_cursor = cursor;
   pthread_mutex_lock(&workflow->notification_mutex);
-  workflow->recovery_needed = workflow->recovery_cursor != NULL;
+  /* The dispatcher clears the request before starting this sweep. Keep an
+   * overflow signal raised while the query was in flight, otherwise the final
+   * page could strand a newly committed durable key until a restart. */
+  workflow->recovery_needed =
+      workflow->recovery_needed || workflow->recovery_cursor != NULL;
   pthread_mutex_unlock(&workflow->notification_mutex);
   return LC_OK;
 }
@@ -1195,6 +1211,9 @@ static void *lc_workflow_dispatcher_main(void *context) {
     }
     if (workflow->notification_count == 0U) {
       reconcile = 1;
+      /* A new overflow while reconciliation runs must be distinguishable from
+       * the request that selected this sweep. */
+      workflow->recovery_needed = 0;
     } else {
       key = workflow->notifications[0];
       if (workflow->notification_count > 1U) {
@@ -1616,6 +1635,7 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
   if (transaction == NULL || transaction->terminal)
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "workflow transaction is closed", NULL, NULL, NULL);
+  rc = LC_OK;
   notification_keys = NULL;
   if (!rollback) {
     notification_keys = (char **)lc_client_calloc(transaction->workflow->client,
@@ -1736,6 +1756,7 @@ static int lc_workflow_append_outbox_method(lc_workflow *self,
   lc_acquire_req acquire;
   lc_lease *lease;
   lc_workflow_transaction *transaction;
+  char txn_id[LC_XID_STRING_SIZE];
   char *key;
   int rc;
   if (workflow == NULL || out_txn == NULL || receipt == NULL)
@@ -1755,6 +1776,12 @@ static int lc_workflow_append_outbox_method(lc_workflow *self,
   acquire.owner = workflow->owner;
   acquire.ttl_seconds = workflow->transaction_ttl_seconds;
   acquire.if_not_exists = 1;
+  rc = lc_xid_new(txn_id, error);
+  if (rc != LC_OK) {
+    free(key);
+    return rc;
+  }
+  acquire.txn_id = txn_id;
   lease = NULL;
   rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error);
   if (rc != LC_OK) {
@@ -1799,6 +1826,7 @@ static int lc_workflow_accept_inbox_method(lc_workflow *self,
   lc_acquire_req acquire;
   lc_lease *lease;
   lc_workflow_transaction *transaction;
+  char txn_id[LC_XID_STRING_SIZE];
   char *key;
   int rc;
   if (workflow == NULL || out_txn == NULL || result == NULL)
@@ -1818,6 +1846,12 @@ static int lc_workflow_accept_inbox_method(lc_workflow *self,
   acquire.owner = workflow->owner;
   acquire.ttl_seconds = workflow->transaction_ttl_seconds;
   acquire.if_not_exists = 1;
+  rc = lc_xid_new(txn_id, error);
+  if (rc != LC_OK) {
+    free(key);
+    return rc;
+  }
+  acquire.txn_id = txn_id;
   lease = NULL;
   rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error);
   if (rc != LC_OK) {

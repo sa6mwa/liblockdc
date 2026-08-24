@@ -72,6 +72,8 @@ lc_pouch_test_before_queue_message_build_hook_fn
 void *lc_pouch_test_before_queue_message_build_context = NULL;
 lc_pouch_test_hook lc_pouch_test_after_queue_batch_message_build_hook = NULL;
 void *lc_pouch_test_after_queue_batch_message_build_context = NULL;
+lc_pouch_test_hook lc_pouch_test_before_txn_decision_hook = NULL;
+void *lc_pouch_test_before_txn_decision_context = NULL;
 #endif
 
 typedef struct lc_pouch_acquire_for_update_file {
@@ -16168,6 +16170,15 @@ static int lc_pouch_client_txn_decision(lc_client *self,
   if (rc != LC_OK) {
     return rc;
   }
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_pouch_test_before_txn_decision_hook != NULL) {
+    rc = lc_pouch_test_before_txn_decision_hook(
+        lc_pouch_test_before_txn_decision_context, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+#endif
   key = lc_pouch_txn_key(req->txn_id, error);
   if (key == NULL) {
     return error != NULL ? error->code : LC_ERR_NOMEM;

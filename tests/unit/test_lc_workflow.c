@@ -6,6 +6,8 @@
 
 #include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
+#include "lc_api_internal.h"
+#include "lc_pouch_internal.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -45,6 +47,12 @@ static long workflow_elapsed_milliseconds(const struct timespec *started,
 typedef struct workflow_query_count {
   unsigned long count;
 } workflow_query_count;
+
+typedef struct workflow_reconcile_overflow_hook {
+  lc_workflow *workflow;
+  int calls;
+  int rc;
+} workflow_reconcile_overflow_hook;
 
 static int workflow_query_count_begin(void *context, lc_error *error) {
   (void)context;
@@ -314,6 +322,74 @@ static void workflow_assert_outbox_completed(lc_client *client,
   lc_sink_close(sink);
 }
 
+static void workflow_assert_public_state_absent(lc_client *client,
+                                                const char *key,
+                                                lc_error *error) {
+  lc_get_opts options;
+  lc_get_res result;
+  lc_sink *sink;
+
+  lc_get_opts_init(&options);
+  options.public_read = 1;
+  memset(&result, 0, sizeof(result));
+  sink = NULL;
+  assert_int_equal(lc_sink_to_memory(&sink, error), LC_OK);
+  assert_int_equal(lc_get(client, key, &options, sink, &result, error), LC_OK);
+  assert_true(result.no_content);
+  lc_get_res_cleanup(&result);
+  lc_sink_close(sink);
+}
+
+static int workflow_force_pouch_txn_decision_failure(void *context,
+                                                      lc_error *error) {
+  int *calls = (int *)context;
+
+  ++*calls;
+  return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "forced workflow terminal decision failure", NULL, NULL,
+                      "pouch");
+}
+
+static void workflow_reconcile_overflow_commit_hook(void *context) {
+  workflow_reconcile_overflow_hook *hook =
+      (workflow_reconcile_overflow_hook *)context;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_workflow_transaction *transaction;
+  lc_source *payload;
+  lc_error error;
+
+  if (hook == NULL || hook->workflow == NULL || hook->calls != 0)
+    return;
+  ++hook->calls;
+  hook->rc = LC_ERR_INVALID;
+  lc_error_init(&error);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "reconcile-overflow-operation";
+  entry.effect_id = "reconcile-overflow-effect";
+  entry.effect_key = "reconcile-overflow-effect-key";
+  entry.kind = "test";
+  entry.destination = "reconcile://overflow";
+  entry.content_type = "text/plain";
+  lc_outbox_receipt_init(&receipt);
+  transaction = NULL;
+  payload = NULL;
+  hook->rc = lc_source_from_memory("overflow", 8U, &payload, &error);
+  if (hook->rc == LC_OK) {
+    hook->rc = lc_workflow_append_outbox(hook->workflow, &entry, payload,
+                                         &transaction, &receipt, &error);
+  }
+  if (hook->rc == LC_OK) {
+    hook->rc = lc_workflow_transaction_commit(transaction, &error);
+  }
+  if (transaction != NULL)
+    lc_workflow_transaction_close(transaction);
+  if (payload != NULL)
+    lc_source_close(payload);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_error_cleanup(&error);
+}
+
 static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   char root[256];
   char template_path[256];
@@ -508,6 +584,206 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   assert_null(inbox_transaction);
   assert_true(inbox_result.duplicate);
   lc_outbox_receipt_cleanup(&receipt);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_multikey_terminal_failure_publishes_nothing(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_workflow_participant_request participant_request;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_workflow_participant *participant;
+  lc_source *payload;
+  lc_source *domain_state;
+  lc_error error;
+  int decision_calls;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "atomic-terminal-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  participant = NULL;
+  payload = NULL;
+  domain_state = NULL;
+  decision_calls = 0;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client_config.default_namespace = "workflow-atomic";
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-atomic";
+  workflow_config.owner = "workflow-atomic-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "atomic-operation";
+  entry.effect_id = "atomic-effect";
+  entry.effect_key = "atomic-effect-key";
+  entry.kind = "test";
+  entry.destination = "atomic://effect";
+  entry.content_type = "text/plain";
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_source_from_memory("atomic", 6U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  lc_workflow_participant_request_init(&participant_request);
+  participant_request.acquire.namespace_name = "workflow-atomic";
+  participant_request.acquire.key = "domain-atomic";
+  participant_request.acquire.owner = "workflow-atomic-test";
+  participant_request.acquire.ttl_seconds = 30L;
+  assert_int_equal(lc_workflow_transaction_acquire(
+                       transaction, &participant_request, &participant, &error),
+                   LC_OK);
+  assert_int_equal(lc_source_from_memory("{\"committed\":true}", 18U,
+                                         &domain_state, &error),
+                   LC_OK);
+  assert_int_equal(participant->update(participant, domain_state, NULL, &error),
+                   LC_OK);
+  lc_source_close(domain_state);
+  domain_state = NULL;
+  lc_workflow_participant_close(participant);
+  participant = NULL;
+
+  /* A failed terminal decision must leave both the outbox intent and the
+   * domain mutation private. Before the regression fix, the first implicit
+   * outbox lease was committed before this second-participant decision. */
+  lc_pouch_test_before_txn_decision_context = &decision_calls;
+  lc_pouch_test_before_txn_decision_hook =
+      workflow_force_pouch_txn_decision_failure;
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error),
+                   LC_ERR_TRANSPORT);
+  assert_int_equal(decision_calls, 1);
+  lc_pouch_test_before_txn_decision_hook = NULL;
+  lc_pouch_test_before_txn_decision_context = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  workflow_assert_public_state_absent(client, receipt.outbox_key, &error);
+  workflow_assert_public_state_absent(client, "domain-atomic", &error);
+
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_reconciliation_retains_overflow_request(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  workflow_reconcile_overflow_hook hook;
+  lc_workflow_stats stats;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  lc_error error;
+  int delivered_recovered;
+  int delivered_overflow;
+  size_t attempt;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "reconcile-overflow-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  job = NULL;
+  delivered_recovered = 0;
+  delivered_overflow = 0;
+  memset(&hook, 0, sizeof(hook));
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client_config.default_namespace = "workflow-reconcile-overflow";
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-reconcile-overflow";
+  workflow_config.owner = "workflow-reconcile-overflow-test";
+  workflow_config.notification_capacity = 1U;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+
+  /* Do not install the race hook until the mandatory empty startup sweep has
+   * completed. The following explicit sweep is therefore the only one that
+   * can add the second record while its notification queue is full. */
+  memset(&stats, 0, sizeof(stats));
+  for (attempt = 0U; attempt < 100U; ++attempt) {
+    assert_int_equal(lc_workflow_get_stats(workflow, &stats, &error), LC_OK);
+    if (stats.recovery_queries != 0U)
+      break;
+    lc_workflow_stats_cleanup(&stats);
+    memset(&stats, 0, sizeof(stats));
+    {
+      struct timespec delay;
+      delay.tv_sec = 0;
+      delay.tv_nsec = 10000000L;
+      (void)nanosleep(&delay, NULL);
+    }
+  }
+  assert_true(stats.recovery_queries != 0U);
+  lc_workflow_stats_cleanup(&stats);
+
+  seed_recovery_outbox(client, "workflow-reconcile-overflow",
+                       "__lockdc_io/v1/outbox/recovered", &error);
+  hook.workflow = workflow;
+  lc_workflow_test_after_reconcile_query_context = &hook;
+  lc_workflow_test_after_reconcile_query_hook =
+      workflow_reconcile_overflow_commit_hook;
+  assert_int_equal(lc_workflow_reconcile(workflow, &error), LC_OK);
+  for (attempt = 0U; attempt < 2U; ++attempt) {
+    job = NULL;
+    assert_int_equal(lc_workflow_next(workflow, 3000L, &job, &error), LC_OK);
+    assert_non_null(job);
+    if (strcmp(job->effect_key, "reconcile-overflow-effect-key") == 0)
+      delivered_overflow = 1;
+    else if (strcmp(job->effect_key, "recovery-key") == 0)
+      delivered_recovered = 1;
+    else
+      fail_msg("unexpected reconciled outbox job");
+    assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+    lc_outbox_job_close(job);
+  }
+  lc_workflow_test_after_reconcile_query_hook = NULL;
+  lc_workflow_test_after_reconcile_query_context = NULL;
+  assert_int_equal(hook.calls, 1);
+  assert_int_equal(hook.rc, LC_OK);
+  assert_true(delivered_recovered);
+  assert_true(delivered_overflow);
+
   lc_workflow_close(workflow);
   lc_client_close(client);
   lc_error_cleanup(&error);
@@ -1301,6 +1577,8 @@ static void test_pouch_expired_claim_rejects_stale_terminal(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
+      cmocka_unit_test(test_pouch_multikey_terminal_failure_publishes_nothing),
+      cmocka_unit_test(test_pouch_reconciliation_retains_overflow_request),
       cmocka_unit_test(test_pouch_dead_letter_operations),
       cmocka_unit_test(test_pouch_startup_recovery_claims_seeded_outbox),
       cmocka_unit_test(test_pouch_clean_reopen_reconciles_durable_index),

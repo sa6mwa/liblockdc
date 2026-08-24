@@ -4588,6 +4588,8 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   lc_source *duplicate_payload;
   lc_source *domain_state;
   lc_sink *payload_sink;
+  lc_get_opts get_options;
+  lc_get_res get_result;
   const void *payload_bytes;
   size_t payload_length;
   size_t payload_written;
@@ -4607,6 +4609,8 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   duplicate_transaction = NULL; payload_sink = NULL;
   payload_bytes = NULL; payload_length = 0U; payload_written = 0U;
   lc_error_init(&error);
+  lc_get_opts_init(&get_options);
+  memset(&get_result, 0, sizeof(get_result));
   open_tcp_client(endpoint, bundle_path, &client, &error);
   lc_workflow_config_init(&config);
   config.namespace_name = "default";
@@ -4648,6 +4652,20 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   rc = lc_workflow_transaction_commit(transaction, &error);
   assert_lc_ok(rc, &error);
   lc_workflow_transaction_close(transaction);
+  get_options.public_read = 1;
+  rc = lc_sink_to_memory(&payload_sink, &error);
+  assert_lc_ok(rc, &error);
+  rc = client->get(client, domain_key, &get_options, payload_sink, &get_result,
+                   &error);
+  assert_lc_ok(rc, &error);
+  assert_false(get_result.no_content);
+  rc = lc_sink_memory_bytes(payload_sink, &payload_bytes, &payload_length,
+                            &error);
+  assert_lc_ok(rc, &error);
+  assert_memory_equal(payload_bytes, "{\"workflow\":true}", 17U);
+  lc_get_res_cleanup(&get_result);
+  lc_sink_close(payload_sink);
+  payload_sink = NULL;
   rc = lc_workflow_next(workflow, 2000L, &job, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(job);

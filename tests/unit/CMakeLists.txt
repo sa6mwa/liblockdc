@@ -152,6 +152,7 @@ lc_add_unit_test(lc_unit_public_mock_usage test_lc_public_mock_usage.c mock_lc_p
 lc_add_unit_test(lc_unit_consumer_service test_lc_consumer_service.c)
 lc_add_unit_test(lc_unit_workflow test_lc_workflow.c
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+target_compile_definitions(lc_unit_workflow PRIVATE LOCKDC_TEST_BUILD=1)
 target_link_options(lc_unit_consumer_service PRIVATE
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_client_open>
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_engine_client_subscribe>

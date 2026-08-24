@@ -29,6 +29,13 @@ typedef struct lc_lease_handle lc_lease_handle;
 typedef struct lc_message_handle lc_message_handle;
 typedef struct lc_consumer_service_handle lc_consumer_service_handle;
 
+#ifdef LOCKDC_TEST_BUILD
+typedef void (*lc_workflow_test_after_reconcile_query_hook_fn)(void *context);
+extern lc_workflow_test_after_reconcile_query_hook_fn
+    lc_workflow_test_after_reconcile_query_hook;
+extern void *lc_workflow_test_after_reconcile_query_context;
+#endif
+
 struct lc_client_handle {
   lc_client pub;
   lc_engine_client *engine;

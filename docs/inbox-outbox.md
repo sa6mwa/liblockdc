@@ -25,10 +25,10 @@ foreign system is the required idempotency mechanism for that boundary.
   attachments, not JSON fields.
 - State change, inbox/outbox intent, and payload attachment commit in one
   existing lockd/Pouch transaction.
-- The first durable inbox or outbox record is acquired without `txn_id` and
-  receives the endpoint-minted xid. The workflow propagates that xid to every
-  later participant, owns the participant ledger and terminal decision, and
-  does not implement a new coordinator.
+- The workflow mints an rs/xid-compatible xid internally before acquiring its
+  first durable inbox or outbox record. It supplies that xid to every
+  participant, owns the participant ledger and terminal releases, and does not
+  expose or implement a new coordinator.
 - The normal dispatch path passes the newly committed outbox key to an
   internal dispatcher. The host sees work only through `workflow->next()`;
   it does not query the namespace or manage dispatcher internals.
@@ -48,39 +48,40 @@ visibility, and recovery semantics for each mode.
 
 ### Remote lockd
 
-`lc_acquire_req.txn_id` joins a key to an existing transaction. An acquire
-without one returns a server-issued xid. The first workflow record acquire
-intentionally omits `txn_id`; every later domain, inbox, outbox, metadata, or
-attachment participant carries the returned transaction id and stages its
-change.
+`lc_acquire_req.txn_id` binds a key into an explicit XA transaction. An
+acquire without one still returns a server-issued xid for ordinary lease use,
+but a workflow must supply its library-minted xid to its first record acquire:
+that record can later gain a domain or further outbox participant, and lockd
+cannot retroactively convert a normal lease into an enrolled XA participant.
+Every domain, inbox, outbox, metadata, or attachment participant carries that
+same xid and stages its change.
 
-The initial acquire is a normal one-participant transaction. When another key
-joins with its returned xid, lockd performs its existing implicit XA flow. A
-terminal workflow commit records and applies one durable commit or rollback
-decision for the enrolled participant set; it is not a release-vote barrier.
+Ordinary application credentials do not call the privileged transaction
+coordinator API. Each terminal workflow release invokes lockd's existing
+implicit XA decision path; the server records and applies one durable commit or
+rollback decision for the enrolled participant set.
 
 ### Local Pouch
 
-Pouch mints an rs/xid-compatible identifier when an acquire omits `txn_id`.
-That normal lease is staged and finalized directly on release. When another
-participant joins with the returned xid, Pouch creates the durable XA
-participant record; terminal release records and applies the decision for all
-enrolled participants. Recovery replays a recorded decision or rolls an
-expired undecided XA transaction back.
+Pouch mints an rs/xid-compatible identifier when an ordinary acquire omits
+`txn_id`. A workflow instead supplies its library-minted xid to every
+participant from the first acquire, creating the durable XA participant record
+before any staged work. Terminal lease releases record and apply the decision
+for all enrolled participants. Recovery replays a recorded decision or rolls
+an expired undecided XA transaction back.
 
-`lc_xid_new()` remains available as a general helper, but the workflow never
-mints or accepts a caller-supplied transaction id. It propagates only the xid
-returned by its first endpoint acquire.
+`lc_xid_new()` remains a public general helper. The workflow uses the same
+generator internally and accepts no caller-supplied transaction id.
 
 ### Workflow adapter rules
 
 - `append_outbox()` or `accept_inbox()` is the first workflow operation. It
-  acquires its deterministic record key without `txn_id`, receives the
-  endpoint-minted xid, and creates the transaction receiver.
+  mints an xid internally, acquires its deterministic record key with that xid,
+  and creates the transaction receiver.
 - Every later domain, inbox, and outbox lease uses that xid and is recorded
   exactly once as a `(namespace, key)` participant.
-- `commit()`/`rollback()` releases the single normal lease directly. For XA it
-  records one terminal decision and applies the enrolled participant set.
+- `commit()`/`rollback()` invokes the backend's implicit XA terminal release
+  path. It does not call the privileged transaction-coordinator API.
 - A successful terminal decision consumes every enrolled lease. Calling
   `release()` on an enrolled lease independently is impossible through the
   workflow participant surface.
@@ -211,9 +212,9 @@ boundaries are fixed:
   notification, and lease references. `effect_key` is caller supplied,
   immutable, and retained for every foreign-effect retry.
 - `workflow->append_outbox()` or `workflow->accept_inbox()` is the first
-  workflow operation. It acquires its deterministic record lease without a
-  transaction id, records the endpoint-minted xid, and returns the transaction
-  only after the duplicate barrier succeeds. A duplicate inbox result returns
+  workflow operation. It mints an xid internally, acquires its deterministic
+  record lease with that xid, and returns the transaction only after the
+  duplicate barrier succeeds. A duplicate inbox result returns
   a successful structured result and no transaction.
 - `txn->acquire()` is the normal way to obtain a domain lease inside the
   workflow transaction. It supplies the workflow transaction id and retains
@@ -221,7 +222,7 @@ boundaries are fixed:
   receiver whose non-terminal surface mirrors the normal lease state,
   metadata, keepalive, and streaming attachment operations. It deliberately
   exposes no `release()` or transaction-decision operation. Later outbox
-  entries use the same endpoint-minted xid through `txn->append_outbox()`.
+  entries use the same workflow-owned xid through `txn->append_outbox()`.
 - An outbox receipt contains the stable outbox identity and `effect_key` needed
   for logs and foreign-system calls without revealing storage layout. A
   matching committed outbox append returns that existing receipt as a successful
@@ -244,12 +245,12 @@ worker thread starts.
 ### Transaction creation and ownership
 
 There is no public begin, join, or lease-adoption surface. To start outbound
-work, `workflow->append_outbox()` derives the deterministic key and acquires
-its record without `txn_id`. To start inbound work,
-`workflow->accept_inbox()` does the same for the inbox receipt. The endpoint
-returns a minted xid with that lease; liblockdc installs it in the owned
-workflow transaction and supplies it for every later participant. A duplicate
-inbox result is successful and returns no transaction.
+work, `workflow->append_outbox()` derives the deterministic key, mints an xid
+internally, and acquires its record with that xid. To start inbound work,
+`workflow->accept_inbox()` does the same for the inbox receipt. liblockdc keeps
+the xid inside the owned workflow transaction and supplies it for every later
+participant. A duplicate inbox result is successful and returns no
+transaction.
 
 Once a lease is acquired through the transaction, terminal ownership belongs
 to the workflow. Application code receives only its participant receiver for
@@ -412,12 +413,12 @@ wrapper over existing lockd and Pouch transaction facilities. The receiver
 surface in [Consumer Experience and Public Surface](#consumer-experience-and-public-surface)
 is the intended public boundary.
 
-The transaction has an explicit participant ledger. Its first inbox or outbox
-record lease is acquired by the workflow without `txn_id`; the endpoint-minted
-xid is then propagated to every later participant. The application obtains a
-domain participant through `txn->acquire()`, mutates through that receiver,
-and leaves terminal processing to the workflow. The wrapper stages inbox/outbox
-keys and attachments under that same transaction id.
+The transaction has an explicit participant ledger. Before its first inbox or
+outbox record lease, the workflow mints an xid and supplies it to that acquire
+and every later participant. The application obtains a domain participant
+through `txn->acquire()`, mutates through that receiver, and leaves terminal
+processing to the workflow. The wrapper stages inbox/outbox keys and
+attachments under that same transaction id.
 
 The workflow must choose its duplicate barrier before the application performs
 the associated domain mutation. The first `workflow->append_outbox()` or
@@ -432,8 +433,8 @@ never treated as a fresh duplicate.
 
 1. The caller calls `workflow->append_outbox()` before staging the associated
    domain mutation. It derives the deterministic outbox key, applies the
-   create-only duplicate barrier, acquires it without `txn_id`, and returns a
-   transaction carrying the endpoint-minted xid.
+   create-only duplicate barrier, mints an xid internally, acquires it with
+   that xid, and returns a transaction carrying the workflow-owned xid.
 2. The caller acquires and stages domain mutation leases through that
    transaction. The attachment and envelope metadata stage with the outbox
    participant. Further effects use `txn->append_outbox()` and the same xid.
@@ -451,9 +452,9 @@ domain or outbox participant.
 ### Inbox acceptance
 
 1. The caller calls `workflow->accept_inbox()` for the incoming message. It
-   derives the inbox key, applies the create-only duplicate barrier, acquires
-   it without `txn_id`, and returns a transaction carrying the endpoint-minted
-   xid for an accepted message.
+   derives the inbox key, applies the create-only duplicate barrier, mints an
+   xid internally, acquires it with that xid, and returns a transaction
+   carrying the workflow-owned xid for an accepted message.
 2. The caller acquires domain leases and appends resulting outbox intent(s)
    under that transaction.
 3. The terminal adapter persists the receipt, domain changes, and resulting
@@ -695,10 +696,10 @@ state keys remain the sole recovery source of truth.
 Implementation is not complete until the following behavior is proven for both
 Pouch and the repository's compose-backed remote lockd E2E environment.
 
-1. The first `append_outbox()` or `accept_inbox()` acquire omits `txn_id` and
-   receives an endpoint-minted xid. Every later domain or outbox participant
-   propagates that xid. There is no caller transaction-id construction, join,
-   or lease-adoption surface.
+1. The first `append_outbox()` or `accept_inbox()` acquire supplies a
+   library-minted xid. Every later domain or outbox participant propagates that
+   xid. There is no caller transaction-id construction, join, or lease-adoption
+   surface.
 2. One workflow participant ledger containing domain mutation, inbox/outbox
    key, and payload attachment commits atomically; rollback exposes none of
    them. Both endpoints finalize the explicit XA transaction with one durable

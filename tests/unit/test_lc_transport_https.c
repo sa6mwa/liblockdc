@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -8027,6 +8028,12 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 int main(void) {
   const struct CMUnitTest tests[] = {LC_HTTPS_UNIT_TESTS};
 
+  /* Several negative streaming cases deliberately close the client after it
+   * has detected a malformed response. The in-process TLS server may then
+   * observe EPIPE while finishing its fixture response; model that as a write
+   * failure rather than terminating the test process with SIGPIPE. */
+  if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+    return EXIT_FAILURE;
   return cmocka_run_group_tests(tests, https_tls_material_setup_shared,
                                 https_tls_material_teardown_shared);
 }
