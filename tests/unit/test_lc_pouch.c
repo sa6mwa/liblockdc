@@ -6973,8 +6973,13 @@ static void test_shared_writers_append_one_rolling_segment(void **state) {
   source = NULL;
   assert_true(second_write.index_seq > first_write.index_seq);
   assert_int_equal(second_write.version, 2UL);
-  assert_int_equal(body_append.calls, 2UL);
-  assert_string_equal(body_append.namespace_name, "default");
+  /* Shared Pouch holds root-wide durable authority across each exact-key
+   * mutation. It must append inline: transferring that authority to a local
+   * batching worker would leave the caller waiting while it still owns the
+   * cross-process mutation lock. The durable result below is the observable
+   * contract; this hook guards the lock-handoff regression directly. */
+  assert_int_equal(body_append.calls, 0UL);
+  assert_null(body_append.namespace_name);
 
   assert_int_equal(pouch_state_segment_count(root, "default"), 1UL);
   pouch_state_segment_path(root, "default", 1UL, segment_path,
@@ -7764,7 +7769,7 @@ static int pouch_shared_process_open_client(const char *root, lc_client **out,
   }
   *out = NULL;
   written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_single_writer=false", root);
+                     "pouch://%s?single_writer=false", root);
   if (written <= 0 || (size_t)written >= sizeof(endpoint)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "shared process pouch endpoint is invalid", NULL, NULL,
@@ -8858,7 +8863,7 @@ static void open_pouch_client_shared(const char *root, lc_client **out,
   int written;
 
   written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_single_writer=false", root);
+                     "pouch://%s?single_writer=false", root);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   open_pouch_client_endpoint(endpoint, out, error);
 }
@@ -8884,7 +8889,7 @@ static void open_pouch_client_crypto(const char *root, const char *crypto_key,
   int written;
 
   written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_crypto_key=%s", root, crypto_key);
+                     "pouch://%s?crypto_key=%s", root, crypto_key);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   open_pouch_client_endpoint(endpoint, out, error);
 }
@@ -8895,7 +8900,7 @@ static void open_pouch_client_compressed(const char *root, lc_client **out,
   int written;
 
   written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_compression=zlib", root);
+                     "pouch://%s?compression=zlib", root);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   open_pouch_client_endpoint(endpoint, out, error);
 }
@@ -8908,7 +8913,7 @@ static void open_pouch_client_crypto_compressed(const char *root,
   int written;
 
   written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_crypto_key=%s&pouch_compression=zlib",
+                     "pouch://%s?crypto_key=%s&compression=zlib",
                      root, crypto_key);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   open_pouch_client_endpoint(endpoint, out, error);
@@ -11409,7 +11414,7 @@ static void test_pouch_root_path_aliases_share_store_identity(void **state) {
   written = snprintf(alias_root, sizeof(alias_root), "%s/../%s", root, leaf);
   assert_true(written > 0 && (size_t)written < sizeof(alias_root));
   written = snprintf(alias_endpoint, sizeof(alias_endpoint),
-                     "pouch://%s?pouch_single_writer=false", alias_root);
+                     "pouch://%s?single_writer=false", alias_root);
   assert_true(written > 0 && (size_t)written < sizeof(alias_endpoint));
 
   open_pouch_client_shared(root, &canonical, &error);
@@ -12335,7 +12340,7 @@ test_pouch_endpoint_opens_new_backend_without_http_engine(void **state) {
 
 static void test_pouch_endpoint_build_and_option_presence(void **state) {
   static const lc_pouch_endpoint_option encoded_options[] = {
-      {"pouch_crypto_key", "a+b&c"},
+      {"crypto_key", "a+b&c"},
       {"bare", NULL},
       {"empty", ""},
       {"plus+name", "v=1"},
@@ -12348,6 +12353,7 @@ static void test_pouch_endpoint_build_and_option_presence(void **state) {
   lc_error error;
   const char *endpoints[1];
   char *endpoint;
+  char invalid_endpoint[640];
   char root[512];
   int present;
   int rc;
@@ -12362,45 +12368,45 @@ static void test_pouch_endpoint_build_and_option_presence(void **state) {
       sizeof(encoded_options) / sizeof(encoded_options[0]), &endpoint, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(endpoint, "pouch:///tmp/pouch%20root%3F%23?"
-                                "pouch_crypto_key=a%2Bb%26c&bare&empty=&"
+                                "crypto_key=a%2Bb%26c&bare&empty=&"
                                 "plus%2Bname=v%3D1");
   lc_pouch_endpoint_free(endpoint);
   endpoint = NULL;
 
   rc = lc_pouch_endpoint_has_option(
-      "pouch:///tmp/root?pouch%5Fcrypto%5fkey=value&"
-      "pouch_crypto_key#pouch_crypto_key=fragment",
-      "pouch_crypto_key", &present, &error);
+      "pouch:///tmp/root?crypto%5Fkey=value&"
+      "crypto_key#crypto_key=fragment",
+      "crypto_key", &present, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(present, 1);
 
   rc = lc_pouch_endpoint_has_option(
-      "pouch:///tmp/root?single_writer=pouch_crypto_key&"
-      "pouch_crypto_key_file=pouch_crypto_key&"
-      "pouch_crypto_key_extra=value#pouch_crypto_key=value",
-      "pouch_crypto_key", &present, &error);
+      "pouch:///tmp/root?single_writer=crypto_key&"
+      "crypto_key_file=crypto_key&"
+      "crypto_key_extra=value#crypto_key=value",
+      "crypto_key", &present, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(present, 0);
 
-  rc = lc_pouch_endpoint_has_option("pouch:///tmp/root?pouch_crypto+key=x",
-                                    "pouch_crypto_key", &present, &error);
+  rc = lc_pouch_endpoint_has_option("pouch:///tmp/root?crypto+key=x",
+                                    "crypto_key", &present, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(present, 0);
-  rc = lc_pouch_endpoint_has_option("pouch:///tmp/root?pouch_crypto+key=x",
-                                    "pouch_crypto+key", &present, &error);
+  rc = lc_pouch_endpoint_has_option("pouch:///tmp/root?crypto+key=x",
+                                    "crypto+key", &present, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(present, 1);
 
   rc =
-      lc_pouch_endpoint_has_option("pouch:///tmp/root?pouch_crypto%ZZkey=value",
-                                   "pouch_crypto_key", &present, &error);
+      lc_pouch_endpoint_has_option("pouch:///tmp/root?crypto%ZZkey=value",
+                                   "crypto_key", &present, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(error.message,
                       "invalid percent escape in pouch endpoint");
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
-  rc = lc_pouch_endpoint_has_option("https://lockd.example", "pouch_crypto_key",
+  rc = lc_pouch_endpoint_has_option("https://lockd.example", "crypto_key",
                                     &present, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(error.message, "pouch endpoint is required");
@@ -12420,6 +12426,15 @@ static void test_pouch_endpoint_build_and_option_presence(void **state) {
   rc = lc_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_OK);
   lc_client_close(client);
+  client = NULL;
+  assert_true(snprintf(invalid_endpoint, sizeof(invalid_endpoint),
+                       "pouch://%s?pouch_single_writer=false", root) > 0);
+  endpoints[0] = invalid_endpoint;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "unsupported pouch endpoint query option");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
   lc_pouch_endpoint_free(endpoint);
   lc_error_cleanup(&error);
   cleanup_root(root);
@@ -12450,11 +12465,11 @@ test_pouch_endpoint_option_presence_selects_crypto_default(void **state) {
 
   rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
   assert_int_equal(rc, LC_OK);
-  option.name = "pouch_crypto_key";
+  option.name = "crypto_key";
   option.value = crypto_key;
   rc = lc_pouch_endpoint_build(root, &option, 1U, &endpoint, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_endpoint_has_option(endpoint, "pouch_crypto_key", &present,
+  rc = lc_pouch_endpoint_has_option(endpoint, "crypto_key", &present,
                                     &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(present, 1);
@@ -12470,8 +12485,8 @@ test_pouch_endpoint_option_presence_selects_crypto_default(void **state) {
   endpoint = NULL;
 
   written = snprintf(encoded_endpoint, sizeof(encoded_endpoint),
-                     "pouch://%s?pouch%%5Fcrypto%%5Fkey=%s#"
-                     "pouch_crypto_key=fragment",
+                     "pouch://%s?crypto%%5Fkey=%s#"
+                     "crypto_key=fragment",
                      root, crypto_key);
   assert_true(written > 0 && (size_t)written < sizeof(encoded_endpoint));
   endpoints[0] = encoded_endpoint;
@@ -12483,11 +12498,11 @@ test_pouch_endpoint_option_presence_selects_crypto_default(void **state) {
   lc_client_close(client);
   client = NULL;
 
-  option.name = "pouch_crypto_key_file";
-  option.value = "/tmp/lookalike-pouch_crypto_key";
+  option.name = "crypto_key_file";
+  option.value = "/tmp/lookalike-crypto_key";
   rc = lc_pouch_endpoint_build(root, &option, 1U, &endpoint, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_endpoint_has_option(endpoint, "pouch_crypto_key", &present,
+  rc = lc_pouch_endpoint_has_option(endpoint, "crypto_key", &present,
                                     &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(present, 0);
@@ -13001,8 +13016,8 @@ test_pouch_crypto_endpoint_key_is_not_retained_in_endpoint_copy(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_non_null(wrong_key);
   written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_crypto_key=%s&pouch_crypto_key=%s&"
-                     "pouch_query_engine=scan",
+                     "pouch://%s?crypto_key=%s&crypto_key=%s&"
+                     "query_engine=scan",
                      root, wrong_key, crypto_key);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   endpoints[0] = endpoint;
@@ -13020,8 +13035,8 @@ test_pouch_crypto_endpoint_key_is_not_retained_in_endpoint_copy(void **state) {
   assert_non_null(handle->endpoints[0]);
   assert_null(strstr(handle->endpoints[0], crypto_key));
   assert_null(strstr(handle->endpoints[0], wrong_key));
-  assert_null(strstr(handle->endpoints[0], "pouch_crypto_key"));
-  assert_non_null(strstr(handle->endpoints[0], "pouch_query_engine=scan"));
+  assert_null(strstr(handle->endpoints[0], "crypto_key"));
+  assert_non_null(strstr(handle->endpoints[0], "query_engine=scan"));
 
   lc_client_close(client);
   lc_pouch_crypto_key_string_free(wrong_key);
@@ -15790,6 +15805,15 @@ static void test_maintenance_reports_threshold_skip(void **state) {
   assert_int_equal(rc, LC_OK);
   body->close(body);
 
+  /* A clean close installs the restart acceleration projection. Forced
+   * compaction must still rebuild from the manifest records and publish its
+   * managed snapshot rather than treating that acceleration artifact as a
+   * live compaction dependency. */
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
   maintenance_options.namespace_name = "team/alpha";
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -17067,7 +17091,7 @@ test_state_replay_preserves_all_binary_record_families(void **state) {
 }
 
 static void
-test_staged_decision_recovery_tombstones_interrupted_discard(void **state) {
+test_clean_reopen_recovers_live_staged_decision(void **state) {
   lc_pouch *pouch;
   lc_source *source;
   lc_pouch_state_write_result staged;
@@ -17105,6 +17129,9 @@ test_staged_decision_recovery_tombstones_interrupted_discard(void **state) {
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
+  /* Live staging deliberately suppresses the clean checkpoint, so reopening
+   * must take durable decision recovery rather than treating the log as a
+   * settled single-writer projection. */
   pouch_state_segment_path(root, "team/alpha", 1UL, segment_path,
                            sizeof(segment_path));
   written = snprintf(staged_key, sizeof(staged_key),
@@ -17367,7 +17394,7 @@ static void test_client_update_waits_for_namespace_mutation_lock(void **state) {
    * Both handles use shared mode because this test exercises write.lock. */
   assert_true(snprintf(endpoint, sizeof(endpoint),
                        "pouch://%s?background_compaction=false&"
-                       "pouch_single_writer=false",
+                       "single_writer=false",
                        root) > 0);
   open_pouch_client_endpoint(endpoint, &client, &error);
   write_client_state(client, "state/locked", "{\"value\":1}", NULL, 0L, 0,
@@ -18072,7 +18099,7 @@ test_compaction_preserves_reachable_spans_in_writer_modes(void **state) {
     cleanup_root(root);
     written = snprintf(endpoint, sizeof(endpoint),
                        shared ? "pouch://%s?segment_target_bytes=1&"
-                                "pouch_single_writer=false"
+                                "single_writer=false"
                               : "pouch://%s?segment_target_bytes=1",
                        root);
     assert_true(written > 0 && (size_t)written < sizeof(endpoint));
@@ -19571,8 +19598,8 @@ static void test_pouch_crypto_public_config_false_overrides_endpoint_generation(
   written = snprintf(key_path, sizeof(key_path), "%s/pouch.key", root);
   assert_true(written > 0 && (size_t)written < sizeof(key_path));
   written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_crypto_key_file=%s&"
-                     "pouch_crypto_generate_key_file=true",
+                     "pouch://%s?crypto_key_file=%s&"
+                     "crypto_generate_key_file=true",
                      root, key_path);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   endpoints[0] = endpoint;
@@ -19728,7 +19755,7 @@ static void test_pouch_crypto_rejects_wrong_key(void **state) {
   client = NULL;
 
   written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_crypto_key=%s", root, wrong_key);
+                     "pouch://%s?crypto_key=%s", root, wrong_key);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
@@ -19870,7 +19897,7 @@ static void test_pouch_crypto_rejects_truncated_sealed_payload(void **state) {
   rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
   assert_int_equal(rc, LC_OK);
   written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_crypto_key=%s&segment_target_bytes=1",
+                     "pouch://%s?crypto_key=%s&segment_target_bytes=1",
                      root, crypto_key);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   open_pouch_client_endpoint(endpoint, &client, &error);
@@ -22274,7 +22301,7 @@ static int pouch_watch_commit_txn_ack_child(const char *root, const char *queue,
   client = NULL;
   lc_error_init(&error);
   written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_single_writer=false", root);
+                     "pouch://%s?single_writer=false", root);
   if (written <= 0 || (size_t)written >= sizeof(endpoint)) {
     lc_error_cleanup(&error);
     return LC_ERR_INVALID;
@@ -22568,7 +22595,7 @@ test_client_queue_watch_detects_forked_transaction_ack_commit(void **state) {
 
   assert_true(snprintf(endpoint, sizeof(endpoint),
                        "pouch://%s?background_compaction=false&"
-                       "pouch_single_writer=false",
+                       "single_writer=false",
                        root) > 0);
   open_pouch_client_endpoint(endpoint, &watcher, &error);
   enqueue_req.queue = "watch-fork-txn";
@@ -32230,7 +32257,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_staged_state_writes_durable_decision_records),
       cmocka_unit_test(test_state_replay_preserves_all_binary_record_families),
       cmocka_unit_test(
-          test_staged_decision_recovery_tombstones_interrupted_discard),
+          test_clean_reopen_recovers_live_staged_decision),
       cmocka_unit_test(test_client_update_get_load_roundtrips_state),
       cmocka_unit_test(test_exclusive_indexer_publishes_at_document_threshold),
       cmocka_unit_test(

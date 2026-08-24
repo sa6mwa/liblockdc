@@ -18,6 +18,9 @@
 #define WORKFLOW_PREFETCH_RECORDS 3U
 #define WORKFLOW_SHARED_PROCESS_RECORDS 64U
 #define WORKFLOW_SHARED_PROCESS_IDLE_LIMIT 40U
+#define WORKFLOW_CLEAN_REOPEN_FOREIGN_KEYS 32U
+#define WORKFLOW_CLEAN_REOPEN_FOREIGN_CHURN 16U
+#define WORKFLOW_CLEAN_REOPEN_PENDING_RECORDS 32U
 
 static int workflow_bytes_contains(const void *bytes, size_t length,
                                    const char *needle) {
@@ -34,6 +37,36 @@ static int workflow_bytes_contains(const void *bytes, size_t length,
       return 1;
   }
   return 0;
+}
+
+static long workflow_elapsed_milliseconds(const struct timespec *started,
+                                          const struct timespec *finished);
+
+typedef struct workflow_query_count {
+  unsigned long count;
+} workflow_query_count;
+
+static int workflow_query_count_begin(void *context, lc_error *error) {
+  (void)context;
+  (void)error;
+  return 1;
+}
+
+static int workflow_query_count_chunk(void *context, const char *bytes,
+                                      size_t length, lc_error *error) {
+  (void)context;
+  (void)bytes;
+  (void)length;
+  (void)error;
+  return 1;
+}
+
+static int workflow_query_count_end(void *context, lc_error *error) {
+  workflow_query_count *count = (workflow_query_count *)context;
+
+  (void)error;
+  ++count->count;
+  return 1;
 }
 
 static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
@@ -140,7 +173,7 @@ workflow_shared_process_claim(const char *root, const char *namespace_name,
   }
   (void)close(start_fd);
   if (snprintf(endpoint, sizeof(endpoint),
-               "pouch://%s?pouch_single_writer=false", root) < 0)
+               "pouch://%s?single_writer=false", root) < 0)
     return result;
   endpoints[0] = endpoint;
   client = NULL;
@@ -203,7 +236,7 @@ workflow_shared_process_drain(const char *root, const char *namespace_name,
   (void)close(start_fd);
   if (start != 's' ||
       snprintf(endpoint, sizeof(endpoint),
-               "pouch://%s?pouch_single_writer=false&segment_target_bytes=65536",
+               "pouch://%s?single_writer=false&segment_target_bytes=65536",
                root) < 0) {
     result.rc = LC_ERR_INVALID;
     return result;
@@ -731,6 +764,123 @@ static void test_pouch_startup_recovery_claims_seeded_outbox(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void test_pouch_reopen_reconciles_durable_index_mode(int shared) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_index_flush_req flush_request;
+  lc_index_flush_res flush_result;
+  lc_query_req query_request;
+  lc_query_key_handler query_handler;
+  lc_query_res query_result;
+  workflow_query_count query_count;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  lc_error error;
+  struct timespec started;
+  struct timespec finished;
+  size_t index;
+
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "clean-reopen-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       shared ? "pouch://%s?single_writer=false" : "pouch://%s",
+                       root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  for (index = 0U; index < WORKFLOW_CLEAN_REOPEN_FOREIGN_CHURN; ++index) {
+    size_t key_index;
+
+    for (key_index = 0U; key_index < WORKFLOW_CLEAN_REOPEN_FOREIGN_KEYS;
+         ++key_index) {
+      char key[128];
+
+      assert_true(snprintf(key, sizeof(key), "foreign-%03lu",
+                           (unsigned long)key_index) > 0);
+      seed_foreign_workflow_state(client, "workflow-clean-reopen", key,
+                                  "completed", &error);
+    }
+  }
+  for (index = 0U; index < WORKFLOW_CLEAN_REOPEN_PENDING_RECORDS; ++index) {
+    char key[128];
+
+    assert_true(snprintf(key, sizeof(key),
+                         "__lockdc_io/v1/outbox/clean-reopen-%03lu",
+                         (unsigned long)index) > 0);
+    seed_recovery_outbox(client, "workflow-clean-reopen", key, &error);
+  }
+  lc_index_flush_req_init(&flush_request);
+  memset(&flush_result, 0, sizeof(flush_result));
+  flush_request.namespace_name = "workflow-clean-reopen";
+  flush_request.mode = "sync";
+  assert_int_equal(lc_flush_index(client, &flush_request, &flush_result, &error),
+                   LC_OK);
+  lc_index_flush_res_cleanup(&flush_result);
+  lc_client_close(client);
+  client = NULL;
+
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_query_req_init(&query_request);
+  memset(&query_handler, 0, sizeof(query_handler));
+  memset(&query_result, 0, sizeof(query_result));
+  memset(&query_count, 0, sizeof(query_count));
+  query_request.namespace_name = "workflow-clean-reopen";
+  query_request.selector_json =
+      "{\"in\":{\"field\":\"/dispatch_state\",\"any\":[\"pending\","
+      "\"retry_wait\"]}}";
+  query_request.engine = "index";
+  query_request.refresh = "wait_for";
+  query_handler.begin = workflow_query_count_begin;
+  query_handler.chunk = workflow_query_count_chunk;
+  query_handler.end = workflow_query_count_end;
+  assert_int_equal(lc_query_keys(client, &query_request, &query_handler,
+                                 &query_count, &query_result, &error),
+                   LC_OK);
+  assert_int_equal(query_count.count, WORKFLOW_CLEAN_REOPEN_PENDING_RECORDS);
+  lc_query_res_cleanup(&query_result);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-clean-reopen";
+  workflow_config.owner = "workflow-clean-reopen-test";
+  workflow_config.notification_capacity = 1U;
+  workflow = NULL;
+  assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &started), 0);
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  job = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &finished), 0);
+  assert_true(workflow_elapsed_milliseconds(&started, &finished) < 5000L);
+  assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+  lc_outbox_job_close(job);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_clean_reopen_reconciles_durable_index(void **state) {
+  (void)state;
+  test_pouch_reopen_reconciles_durable_index_mode(0);
+}
+
+static void test_pouch_shared_reopen_reconciles_durable_index(void **state) {
+  (void)state;
+  test_pouch_reopen_reconciles_durable_index_mode(1);
+}
+
 static long workflow_elapsed_milliseconds(const struct timespec *started,
                                           const struct timespec *finished) {
   long seconds = (long)(finished->tv_sec - started->tv_sec);
@@ -915,7 +1065,7 @@ static void test_pouch_shared_process_dispatches_once(void **state) {
   assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
                                   WORKFLOW_TMP_PREFIX));
   assert_true(snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?pouch_single_writer=false", root) > 0);
+                       "pouch://%s?single_writer=false", root) > 0);
   endpoints[0] = endpoint;
   lc_error_init(&error);
   lc_client_config_init(&client_config);
@@ -1001,7 +1151,7 @@ static void test_pouch_shared_process_reconciles_each_outbox_once(void **state) 
   assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
                                   WORKFLOW_TMP_PREFIX));
   assert_true(snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?pouch_single_writer=false&segment_target_bytes=65536",
+                       "pouch://%s?single_writer=false&segment_target_bytes=65536",
                        root) > 0);
   endpoints[0] = endpoint;
   lc_error_init(&error);
@@ -1153,6 +1303,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
       cmocka_unit_test(test_pouch_dead_letter_operations),
       cmocka_unit_test(test_pouch_startup_recovery_claims_seeded_outbox),
+      cmocka_unit_test(test_pouch_clean_reopen_reconciles_durable_index),
+      cmocka_unit_test(test_pouch_shared_reopen_reconciles_durable_index),
       cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
       cmocka_unit_test(test_pouch_recovery_prefetch_is_bounded),
       cmocka_unit_test(test_pouch_shared_process_dispatches_once),

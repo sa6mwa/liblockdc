@@ -3905,7 +3905,7 @@ static void test_pouch_direct_state_attachment_reopen_roundtrip(void **state) {
   make_pouch_root("state-attachment", root, sizeof(root), endpoint,
                   sizeof(endpoint));
   assert_true(snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?pouch_single_writer=false", root) > 0);
+                       "pouch://%s?single_writer=false", root) > 0);
 
   client = NULL;
   reader = NULL;

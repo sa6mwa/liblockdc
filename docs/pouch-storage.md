@@ -816,7 +816,7 @@ the public API or durable format.
   epoch as data authority. This is a supported Pouch extension, not the
   default Go-disk-aligned performance path.
   Direct callers set `single_writer_set=1` and `single_writer=0`; endpoint
-  callers use `?single_writer=false` (or `?pouch_single_writer=false`).
+  callers use `?single_writer=false`.
 
 - Mode transitions are lifecycle transitions. Pouch takes a writer-mode
   transition barrier that stops new append-capable operations and waits for
@@ -886,7 +886,7 @@ the public API or durable format.
   state mutation.
   Deployments that tune Go disk's index writer may set comparable bounds on
   Pouch, for example
-  `pouch://...?pouch_indexer_flush_docs=64&pouch_indexer_flush_interval_seconds=1`.
+  `pouch://...?indexer_flush_docs=64&indexer_flush_interval_seconds=1`.
 
 - Filesystem capability policy and queue wake-up:
   Pouch detects NFS on Linux and BSD-family targets and exposes both detection
@@ -1827,7 +1827,7 @@ values, and treats duplicate or bare options as present. It uses the same
 percent-decoding as Pouch open; query processing ends before a URL fragment,
 and `+` remains a literal plus rather than being form-decoded. Consumers can
 therefore decide whether to apply a local default such as
-`pouch_crypto_key_file` without reimplementing Pouch URL parsing or accidentally
+`crypto_key_file` without reimplementing Pouch URL parsing or accidentally
 overriding an encoded explicit option.
 
 ## Public API Coverage
@@ -1841,7 +1841,7 @@ The installed C header is part of this public contract. Doxygen comments for
 public Pouch-facing configuration and APIs must document the same behavior
 described here: `pouch://` uses one absolute local root, exclusive single-writer
 mode is the default, explicit shared-root writing requires
-`single_writer=false` or `pouch_single_writer=false`, endpoint option values are
+`single_writer=false`, endpoint option values are
 copied at open, public `long` fields are range-checked before narrowing on
 32-bit targets, and state bodies, queue payloads, attachments, scan output,
 query-document output, crypto, and compression remain real streaming paths

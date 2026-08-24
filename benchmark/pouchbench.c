@@ -436,7 +436,7 @@ static int lockdc_bench_open_client(const char *root, const char *crypto_key,
 
   if (segment_target_bytes != 0U) {
     written = snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?pouch_single_writer=true&"
+                       "pouch://%s?single_writer=true&"
                        "durable_sync=%s&"
                        "indexer_flush_docs=64&"
                        "indexer_flush_interval_seconds=1&"
@@ -445,7 +445,7 @@ static int lockdc_bench_open_client(const char *root, const char *crypto_key,
                        segment_target_bytes);
   } else {
     written = snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?pouch_single_writer=true&"
+                       "pouch://%s?single_writer=true&"
                        "durable_sync=%s&"
                        "indexer_flush_docs=64&"
                        "indexer_flush_interval_seconds=1",
@@ -475,7 +475,7 @@ static int lockdc_bench_open_shared_client(const char *root,
   int rc;
 
   written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?pouch_single_writer=false", root);
+                     "pouch://%s?single_writer=false", root);
   if (written <= 0 || (size_t)written >= sizeof(endpoint)) {
     return LC_ERR_INVALID;
   }

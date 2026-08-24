@@ -320,11 +320,11 @@ bench_workflow_fixture_client_open(const bench_workflow_fixture *fixture,
 
       if (pouch_shared_writer && segment_target > 0L) {
         written = snprintf(pouch_endpoint, sizeof(pouch_endpoint),
-                           "%s?pouch_single_writer=false&segment_target_bytes=%ld",
+                           "%s?single_writer=false&segment_target_bytes=%ld",
                            fixture->root, segment_target);
       } else if (pouch_shared_writer) {
         written = snprintf(pouch_endpoint, sizeof(pouch_endpoint),
-                           "%s?pouch_single_writer=false", fixture->root);
+                           "%s?single_writer=false", fixture->root);
       } else {
         written = snprintf(pouch_endpoint, sizeof(pouch_endpoint),
                            "%s?segment_target_bytes=%ld", fixture->root,

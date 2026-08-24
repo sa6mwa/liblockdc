@@ -209,12 +209,11 @@ typedef struct lc_pouch_endpoint_option {
  * `pouch:///var/lib/app/lockd-root`. Local Pouch storage defaults to exclusive
  * single-writer mode. A second default writer for the same root fails at open;
  * callers that intentionally need multiple active local writers must opt in
- * with `?single_writer=false` or `?pouch_single_writer=false`.
+ * with `?single_writer=false`.
  *
  * Endpoint query options are copied at open and use the same C-native Pouch
  * storage engine as direct Pouch callers. Supported options include
- * `compression`/`pouch_compression`, `pouch_crypto_key`,
- * `pouch_crypto_key_file`, `pouch_crypto_generate_key_file`,
+ * `compression`, `crypto_key`, `crypto_key_file`, `crypto_generate_key_file`,
  * `durable_sync`, `fsync_batch_max_ops`, `segment_target_bytes`,
  * `indexer_flush_docs`, `indexer_flush_interval_seconds`,
  * `background_compaction`, `disable_compaction_throttling`,
@@ -274,14 +273,14 @@ typedef struct lc_client_config {
    *
    * Prefer key files for long-lived process config. This string is copied as
    * secret material and wiped before the client releases it. It may also be
-   * supplied as the `pouch_crypto_key` endpoint option.
+   * supplied as the `crypto_key` endpoint option.
    */
   const char *pouch_crypto_key;
   /**
    * Pouch root key file path for encrypted local storage.
    *
    * The file stores an `lc-pouch-key-v1:<base64url>` root key. It may also be
-   * supplied as the `pouch_crypto_key_file` endpoint option.
+   * supplied as the `crypto_key_file` endpoint option.
    */
   const char *pouch_crypto_key_file;
   /**
@@ -299,7 +298,7 @@ typedef struct lc_client_config {
   /** Marks `pouch_crypto_generate_key_file` as explicitly configured.
    *
    * Leave zero for legacy endpoint-option precedence. Set non-zero when an
-   * explicit false value must override `pouch_crypto_generate_key_file=true`
+   * explicit false value must override `crypto_generate_key_file=true`
    * in a Pouch endpoint.
    */
   int pouch_crypto_generate_key_file_set;

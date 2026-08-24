@@ -37,6 +37,7 @@ static pthread_once_t lc_xid_once = PTHREAD_ONCE_INIT;
 static lc_xid_generator lc_xid_global = {
     PTHREAD_MUTEX_INITIALIZER, {0U, 0U, 0U}, 0U, 0U, 0U, 0, LC_OK};
 
+#if defined(__linux__)
 static int lc_xid_read_file(const char *path, unsigned char *out,
                             size_t capacity, size_t *out_length) {
   FILE *file;
@@ -60,6 +61,7 @@ static int lc_xid_read_file(const char *path, unsigned char *out,
   }
   return length > 0U;
 }
+#endif
 
 static int lc_xid_machine_id_from_environment(unsigned char *machine_id) {
   const char *value;
@@ -119,13 +121,15 @@ static int lc_xid_machine_id_from_host(unsigned char *machine_id) {
 }
 
 static uint32_t lc_xid_process_identifier(uint32_t process_pid) {
+#if defined(__linux__)
   unsigned char cpuset[4096];
   size_t cpuset_length;
+#endif
   uint32_t identifier;
 
   identifier = process_pid;
-  cpuset_length = 0U;
 #if defined(__linux__)
+  cpuset_length = 0U;
   if (lc_xid_read_file("/proc/self/cpuset", cpuset, sizeof(cpuset),
                        &cpuset_length) &&
       cpuset_length > 1U) {

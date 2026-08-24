@@ -162,7 +162,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	help \
 	__deps-debug __deps-release __deps-cross \
 	__build-debug __build-host __build-x86_64-linux-gnu-release __build-release __build-e2e __build-coverage __build-fuzz \
-	__test-debug __test-host __test-cross __test-e2e __test-install-tree __example-smoke-local __test-all __test-coverage \
+	__test-debug __test-pouch-workflow-preflight __test-host __test-cross __test-e2e __test-install-tree __example-smoke-local __test-all __test-coverage \
 	__format \
 	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-workflow-prepare __benchmark-workflow-pouch __benchmark-workflow-remote __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate __benchmark-pouch-go-core-soak __pouch-core-hardening \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __verify-release-privacy __clean-dist \
@@ -171,7 +171,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__prerelease __prerelease-ordinary __prerelease-live __prerelease-hardening __lifecycle-version-contract __release __release-pipeline __release-matrix __clean \
 	deps-debug deps-release deps-cross \
 	build build-debug build-host build-release build-e2e build-coverage build-fuzz \
-	test test-debug test-host test-cross test-e2e test-install-tree example-smoke-local test-all test-coverage \
+	test test-debug test-pouch-workflow-preflight test-host test-cross test-e2e test-install-tree example-smoke-local test-all test-coverage \
 	format \
 	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-workflow-pouch benchmark-workflow-remote benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate benchmark-pouch-go-core-soak \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives verify-release-privacy clean-dist \
@@ -192,6 +192,7 @@ help:
 		'make deps-release       Provision the shipped x86_64 GNU/musl release dependency trees.' \
 		'make deps-cross         Provision all non-host cross release dependency trees.' \
 		'make test-debug         Run the ASan/UBSan debug preset test suite.' \
+		'make test-pouch-workflow-preflight Run fast clean-restart and shared-dispatcher Pouch regressions.' \
 		'make test               Run the pinned Bootlin host-executable GNU and musl release suites.' \
 		'make test-host          Run the pinned Bootlin host-executable GNU and musl release suites.' \
 		'make test-cross         Run the non-host cross release suites.' \
@@ -341,6 +342,14 @@ test-debug:
 __test-debug: __build-debug
 	$(CTEST) --preset $(DEBUG_PRESET)
 
+test-pouch-workflow-preflight:
+	$(TIMED) test-pouch-workflow-preflight $(MAKE_RECURSE) __test-pouch-workflow-preflight
+
+__test-pouch-workflow-preflight: __build-debug
+	CMOCKA_TEST_FILTER=test_pouch_clean_reopen_reconciles_durable_index $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_shared_reopen_reconciles_durable_index $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_shared_process_reconciles_each_outbox_once $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+
 test-host:
 	$(TIMED) test-host $(MAKE_RECURSE) __test-host
 
@@ -375,7 +384,7 @@ __example-smoke-local:
 test-all:
 	$(TIMED) test-all $(MAKE_RECURSE) __test-all
 
-__test-all: __test-debug __test-host __test-cross __valgrind __fuzz-smoke __test-e2e __bench-gate
+__test-all: __test-pouch-workflow-preflight __test-debug __test-host __test-cross __valgrind __fuzz-smoke __test-e2e __bench-gate
 
 dev-up:
 	$(TIMED) dev-up $(MAKE_RECURSE) __dev-up

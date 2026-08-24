@@ -20,8 +20,8 @@ end
 
 local disabled_generation_client, disabled_generation_err = lockdc.open({
   endpoints = {
-    endpoint .. "?pouch_crypto_key_file=" .. explicit_false_key_file
-      .. "&pouch_crypto_generate_key_file=true",
+    endpoint .. "?crypto_key_file=" .. explicit_false_key_file
+      .. "&crypto_generate_key_file=true",
   },
   pouch_crypto_generate_key_file = false,
 })

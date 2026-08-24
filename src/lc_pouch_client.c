@@ -2821,7 +2821,7 @@ lc_pouch_query_index_summary_visit(const lc_pouch_query_index_row_view *row,
   stop = 0;
   rc = lc_pouch_query_page_accept_match(context, &emit, &stop, error);
   if (rc != LC_OK || !emit) {
-    return LC_OK;
+    return rc == LC_OK && stop ? LC_POUCH_STATE_READ_MANY_STOP : rc;
   }
   rc = lc_pouch_query_emit_key(context->handler, context->handler_context,
                                row->key, error);
@@ -4332,7 +4332,7 @@ lc_pouch_query_index_process_exact_key(lc_pouch_query_scan_context *context,
   stop = 0;
   rc = lc_pouch_query_page_accept_match(context, &emit, &stop, error);
   if (rc != LC_OK || !emit) {
-    return rc;
+    return rc == LC_OK && stop ? LC_POUCH_STATE_READ_MANY_STOP : rc;
   }
   rc = lc_pouch_query_emit_key(context->handler, context->handler_context,
                                key->key, error);

@@ -1345,9 +1345,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
   if (decoded_key == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "single_writer") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_single_writer")) {
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "single_writer")) {
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
                                               "single_writer", error);
     if (copy == NULL) {
@@ -1370,9 +1368,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "queue_watch") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_queue_watch")) {
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "queue_watch")) {
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
                                               "queue_watch", error);
     if (copy == NULL) {
@@ -1395,9 +1391,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return LC_OK;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "fsync_batch_max_ops") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_fsync_batch_max_ops")) {
+                          "fsync_batch_max_ops")) {
     lc_u64 parsed;
 
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
@@ -1418,9 +1412,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "durable_sync") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_durable_sync")) {
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "durable_sync")) {
     rc = lc_pouch_endpoint_parse_boolean(allocator, value, value_len,
                                          "durable_sync", &options->durable_sync,
                                          error);
@@ -1428,9 +1420,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "segment_target_bytes") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_segment_target_bytes")) {
+                          "segment_target_bytes")) {
     rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
                                      "segment_target_bytes",
                                      &options->segment_target_bytes, error);
@@ -1438,9 +1428,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "indexer_flush_docs") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_indexer_flush_docs")) {
+                          "indexer_flush_docs")) {
     rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
                                      "indexer_flush_docs",
                                      &options->indexer_flush_docs, error);
@@ -1448,9 +1436,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "indexer_flush_interval_seconds") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_indexer_flush_interval_seconds")) {
+                          "indexer_flush_interval_seconds")) {
     rc = lc_pouch_endpoint_parse_u64(
         allocator, value, value_len, "indexer_flush_interval_seconds",
         &options->indexer_flush_interval_seconds, error);
@@ -1458,9 +1444,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "background_compaction") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_background_compaction")) {
+                          "background_compaction")) {
     rc = lc_pouch_endpoint_parse_boolean(
         allocator, value, value_len, "background_compaction",
         &options->background_compaction_enabled, error);
@@ -1471,9 +1455,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "disable_compaction_throttling") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_disable_compaction_throttling")) {
+                          "disable_compaction_throttling")) {
     rc = lc_pouch_endpoint_parse_boolean(
         allocator, value, value_len, "disable_compaction_throttling",
         &options->compaction_throttling_disabled, error);
@@ -1481,9 +1463,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "retention_seconds") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_retention_seconds")) {
+                          "retention_seconds")) {
     rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
                                      "retention_seconds",
                                      &options->retention_seconds, error);
@@ -1491,9 +1471,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "janitor_interval_seconds") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_janitor_interval_seconds")) {
+                          "janitor_interval_seconds")) {
     rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
                                      "janitor_interval_seconds",
                                      &options->janitor_interval_seconds, error);
@@ -1502,11 +1480,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key), "query_engine") ||
       lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_query_engine") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "query_fallback_engine") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_query_fallback_engine")) {
+                          "query_fallback_engine")) {
     int fallback;
 
     fallback = strstr(decoded_key, "fallback") != NULL ? 1 : 0;
@@ -1537,10 +1511,9 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_crypto_key")) {
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "crypto_key")) {
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
-                                              "pouch_crypto_key", error);
+                                              "crypto_key", error);
     if (copy == NULL) {
       lc_free_with_allocator(allocator, decoded_key);
       return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -1551,9 +1524,9 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return LC_OK;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_crypto_key_file")) {
+                          "crypto_key_file")) {
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
-                                              "pouch_crypto_key_file", error);
+                                              "crypto_key_file", error);
     if (copy == NULL) {
       lc_free_with_allocator(allocator, decoded_key);
       return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -1564,9 +1537,9 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return LC_OK;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_crypto_generate_key_file")) {
+                          "crypto_generate_key_file")) {
     copy = lc_pouch_endpoint_decode_component(
-        allocator, value, value_len, "pouch_crypto_generate_key_file", error);
+        allocator, value, value_len, "crypto_generate_key_file", error);
     if (copy == NULL) {
       lc_free_with_allocator(allocator, decoded_key);
       return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -1587,11 +1560,9 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "compression") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_compression")) {
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "compression")) {
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
-                                              "pouch_compression", error);
+                                              "compression", error);
     if (copy == NULL) {
       lc_free_with_allocator(allocator, decoded_key);
       return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -1747,7 +1718,7 @@ static int lc_pouch_endpoint_redacted_copy(const lc_allocator *allocator,
       lc_free_with_allocator(allocator, copy);
       return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     }
-    is_secret = strcmp(decoded_key, "pouch_crypto_key") == 0 ? 1 : 0;
+    is_secret = strcmp(decoded_key, "crypto_key") == 0 ? 1 : 0;
     lc_free_with_allocator(allocator, decoded_key);
     if (!is_secret) {
       copy[dst] = dst == prefix_len ? '?' : '&';

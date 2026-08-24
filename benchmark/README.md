@@ -46,7 +46,7 @@ production workload for six
 explicit variants by default: `ProductionPouchPT`, `ProductionPouchCrypto`,
 `ProductionPouchCompression`, `ProductionPouchCryptoCompression`, and
 `ProductionLockdDiskNoCrypto`, plus `ProductionLockdDiskCrypto`. Pouch crypto
-is enabled through the public `pouch_crypto_key` endpoint option; the Go disk
+is enabled through the public `crypto_key` endpoint option; the Go disk
 variants run with storage encryption disabled and enabled respectively. The
 parity gate compares plaintext and crypto runs only to their matching Go disk
 configuration. Go disk has no matching compression mode, so compression runs
@@ -125,7 +125,7 @@ resident query path.
 `make benchmark-pouch-go-concurrency` is the bounded lock and shared-root
 comparison matrix. It runs Pouch and Go lockd disk with crypto disabled and
 enabled, over a contended single key and independent keys. Pouch opens the
-requested number of distinct liblockdc clients with `pouch_single_writer=false`
+requested number of distinct liblockdc clients with `single_writer=false`
 against one root. The same-key case uses public acquire/update/release calls and
 asserts the final version equals every completed write; the independent-key case
 reads back every key at version one. This confirms both key-lock serialization
@@ -152,7 +152,7 @@ default Go failover numbers.
 
 Crypto mode measures the operational overhead of each engine's enabled
 at-rest-encryption configuration, not a byte-for-byte cryptographic-format
-comparison: Pouch uses one generated `pouch_crypto_key` across its clients, and
+comparison: Pouch uses one generated `crypto_key` across its clients, and
 the bootstrapped Go lockd disk server enables its storage encryption.
 
 `make benchmark-pouch-go-medium` mirrors the Go lockd disk comparison shape over

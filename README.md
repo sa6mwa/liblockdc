@@ -47,16 +47,16 @@ acquire, update, release, queue, attachment, and query operations use the
 resident logstore fast path. Opening a second default writer for the same root
 fails instead of silently downgrading. Explicit shared-root writing remains
 available for callers that need multiple active local writers by adding
-`?single_writer=false` or `?pouch_single_writer=false`; that mode preserves
+`?single_writer=false`; that mode preserves
 correctness and process fencing but is not the primary performance target.
 
 Pouch endpoint options mirror the public C config and direct Pouch storage
 options. Common options are:
 
-- `compression=zlib` or `pouch_compression=zlib` for streaming at-rest zlib
+- `compression=zlib` for streaming at-rest zlib
   compression
-- `pouch_crypto_key_file=/path/to/pouch.key` with
-  `pouch_crypto_generate_key_file=true` for encrypted local roots
+- `crypto_key_file=/path/to/pouch.key` with
+  `crypto_generate_key_file=true` for encrypted local roots
 - `durable_sync=true` and `fsync_batch_max_ops=<u64>` for root-scoped durable
   group commit
 - `segment_target_bytes=<u64>` for rolling segment sizing
