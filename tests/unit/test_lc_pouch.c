@@ -3768,7 +3768,7 @@ static void test_write_binary_txn_record(
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
   source = NULL;
-  test_binary_buffer_append(&buffer, "LPT1", 4U);
+  test_binary_buffer_append(&buffer, "LPT3", 4U);
   test_binary_buffer_string(&buffer, state);
   test_binary_buffer_i64(&buffer, expires_at_unix);
   test_binary_buffer_u64(&buffer, tc_term);
@@ -3778,6 +3778,11 @@ static void test_write_binary_txn_record(
     test_binary_buffer_string(&buffer, participants[i].namespace_name);
     test_binary_buffer_string(&buffer, participants[i].key);
     test_binary_buffer_string(&buffer, participants[i].backend_hash);
+    {
+      const unsigned char vote = 0U;
+
+      test_binary_buffer_append(&buffer, &vote, sizeof(vote));
+    }
   }
   key = test_xid_for_label(key);
   options.content_type = "application/x-lockdc-pouch-txn";
@@ -3792,7 +3797,7 @@ static void test_write_binary_txn_record(
   test_binary_buffer_cleanup(&buffer);
 }
 
-static void test_write_binary_txn_record_v2(
+static void test_write_binary_txn_record_voting(
     lc_pouch *pouch, const char *key, const char *state,
     lc_pouch_unix_seconds expires_at_unix, lc_tc_term tc_term,
     const char *target_backend_hash, const lc_txn_participant *participants,
@@ -3810,7 +3815,7 @@ static void test_write_binary_txn_record_v2(
   memset(&write_result, 0, sizeof(write_result));
   source = NULL;
   vote = 0U;
-  test_binary_buffer_append(&buffer, "LPT2", 4U);
+  test_binary_buffer_append(&buffer, "LPT3", 4U);
   test_binary_buffer_string(&buffer, state);
   test_binary_buffer_i64(&buffer, expires_at_unix);
   test_binary_buffer_u64(&buffer, tc_term);
@@ -3849,7 +3854,7 @@ static void test_write_binary_lease_record(lc_pouch *pouch, const char *key,
   memset(&options, 0, sizeof(options));
   memset(&write_result, 0, sizeof(write_result));
   source = NULL;
-  test_binary_buffer_append(&buffer, "LPL1", 4U);
+  test_binary_buffer_append(&buffer, current_layout ? "LPL2" : "LPL1", 4U);
   test_binary_buffer_string(&buffer, "default");
   test_binary_buffer_string(&buffer, key);
   test_binary_buffer_string(&buffer, "prior-owner");
@@ -17450,6 +17455,8 @@ static void test_client_mutate_applies_plan_and_preconditions(void **state) {
   client = NULL;
   lease = NULL;
   sink = NULL;
+  bytes = NULL;
+  length = 0U;
   memset(&update_res, 0, sizeof(update_res));
   lc_mutate_op_init(&mutate_op);
   memset(&mutate_res, 0, sizeof(mutate_res));
@@ -17533,8 +17540,6 @@ static void test_client_mutate_serializes_concurrent_transforms(void **state) {
   client = NULL;
   lease = NULL;
   sink = NULL;
-  bytes = NULL;
-  length = 0U;
   memset(&update_res, 0, sizeof(update_res));
   memset(&get_res, 0, sizeof(get_res));
   memset(mutations, 0, sizeof(mutations));
@@ -24089,6 +24094,115 @@ test_minted_xid_single_lease_releases_without_xa_barrier(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_minted_xid_enrolls_cross_namespace_participant_before_publish(void **state) {
+  lc_client *client;
+  lc_lease *first;
+  lc_lease *second;
+  lc_source *source;
+  lc_acquire_req acquire_first;
+  lc_acquire_req acquire_second;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char body[16];
+  char root[512];
+  char first_key[96];
+  char second_key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  first = NULL;
+  second = NULL;
+  source = NULL;
+  lc_acquire_req_init(&acquire_first);
+  lc_acquire_req_init(&acquire_second);
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("minted-xid-implicit-enrollment", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(first_key, sizeof(first_key), "state/implicit-enrollment/a/%ld",
+           (long)getpid());
+  snprintf(second_key, sizeof(second_key), "state/implicit-enrollment/b/%ld",
+           (long)getpid());
+
+  /* Shared mode covers the former recursive state-lock deadlock as well as
+   * the cross-namespace implicit-XA enrollment boundary. */
+  open_pouch_client_shared(root, &client, &error);
+  acquire_first.namespace_name = "implicit-first";
+  acquire_first.key = first_key;
+  acquire_first.owner = "implicit-enrollment-owner";
+  acquire_first.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_first, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(first->txn_id);
+
+  acquire_second.namespace_name = "implicit-second";
+  acquire_second.key = second_key;
+  acquire_second.owner = "implicit-enrollment-owner";
+  acquire_second.ttl_seconds = 30L;
+  acquire_second.txn_id = first->txn_id;
+  rc = client->acquire(client, &acquire_second, &second, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(second->txn_id, first->txn_id);
+
+  rc = lc_source_from_memory("first", strlen("first"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = first->update(first, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("second", strlen("second"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = second->update(second, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  rc = first->release(first, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  first = NULL;
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch,
+                           "implicit-first", first_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch,
+                           "implicit-second", second_key, &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+
+  rc = second->release(second, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  second = NULL;
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch,
+                           "implicit-first", first_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_int_equal(read_source_to_bytes(read_result.body, body, sizeof(body)),
+                   strlen("first"));
+  assert_memory_equal(body, "first", strlen("first"));
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch,
+                           "implicit-second", second_key, &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_int_equal(read_source_to_bytes(read_result.body, body, sizeof(body)),
+                   strlen("second"));
+  assert_memory_equal(body, "second", strlen("second"));
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_pouch_transaction_ids_match_lockd_xid_contract(void **state) {
   lc_client *client;
   lc_lease *lease;
@@ -24505,7 +24619,7 @@ test_explicit_xa_release_rollback_discards_all_participants(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_expired_explicit_xa_release_discards_only_expired_participant(
+static void test_expired_explicit_xa_release_rolls_back_all_participants(
     void **state) {
   lc_client *client;
   lc_lease *first;
@@ -24516,8 +24630,6 @@ static void test_expired_explicit_xa_release_discards_only_expired_participant(
   lc_acquire_req acquire_second;
   lc_get_res get_res;
   lc_error error;
-  const void *bytes;
-  size_t length;
   char root[512];
   char first_key[96];
   char second_key[96];
@@ -24529,8 +24641,6 @@ static void test_expired_explicit_xa_release_discards_only_expired_participant(
   second = NULL;
   source = NULL;
   sink = NULL;
-  bytes = NULL;
-  length = 0U;
   lc_acquire_req_init(&acquire_first);
   lc_acquire_req_init(&acquire_second);
   memset(&get_res, 0, sizeof(get_res));
@@ -24570,8 +24680,7 @@ static void test_expired_explicit_xa_release_discards_only_expired_participant(
   source = NULL;
 
   sleep(2U);
-  /* Match lockd: expiry discards only this participant and leaves the
-   * transaction pending for the still-live participant. */
+  /* An expired participant is a rollback vote for the whole XA unit. */
   rc = first->release(first, NULL, &error);
   assert_int_equal(rc, LC_OK);
   first = NULL;
@@ -24608,11 +24717,7 @@ static void test_expired_explicit_xa_release_discards_only_expired_participant(
   assert_int_equal(rc, LC_OK);
   rc = client->get(client, second_key, NULL, sink, &get_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_false(get_res.no_content);
-  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(length, strlen("expired-b"));
-  assert_memory_equal(bytes, "expired-b", length);
+  assert_true(get_res.no_content);
   lc_get_res_cleanup(&get_res);
   sink->close(sink);
 
@@ -24621,8 +24726,7 @@ static void test_expired_explicit_xa_release_discards_only_expired_participant(
   lc_error_cleanup(&error);
 }
 
-static void
-test_explicit_xa_live_terminal_release_commits_expired_peer(void **state) {
+static void test_explicit_xa_live_release_rolls_back_expired_peer(void **state) {
   lc_client *client;
   lc_lease *first;
   lc_lease *second;
@@ -24632,8 +24736,6 @@ test_explicit_xa_live_terminal_release_commits_expired_peer(void **state) {
   lc_acquire_req acquire_second;
   lc_get_res get_res;
   lc_error error;
-  const void *bytes;
-  size_t length;
   char root[512];
   char first_key[96];
   char second_key[96];
@@ -24645,8 +24747,6 @@ test_explicit_xa_live_terminal_release_commits_expired_peer(void **state) {
   second = NULL;
   source = NULL;
   sink = NULL;
-  bytes = NULL;
-  length = 0U;
   lc_acquire_req_init(&acquire_first);
   lc_acquire_req_init(&acquire_second);
   memset(&get_res, 0, sizeof(get_res));
@@ -24686,8 +24786,7 @@ test_explicit_xa_live_terminal_release_commits_expired_peer(void **state) {
   source = NULL;
 
   sleep(2U);
-  /* An active terminal participant decides the transaction. Its expired peer
-   * remains enrolled and is committed, matching the remote lockd backend. */
+  /* The earliest participant expiry rolls the complete XA unit back. */
   rc = second->release(second, NULL, &error);
   assert_int_equal(rc, LC_OK);
   second = NULL;
@@ -24698,11 +24797,7 @@ test_explicit_xa_live_terminal_release_commits_expired_peer(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = client->get(client, first_key, NULL, sink, &get_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_false(get_res.no_content);
-  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(length, strlen("peer-a"));
-  assert_memory_equal(bytes, "peer-a", length);
+  assert_true(get_res.no_content);
   lc_get_res_cleanup(&get_res);
   sink->close(sink);
   sink = NULL;
@@ -24710,11 +24805,7 @@ test_explicit_xa_live_terminal_release_commits_expired_peer(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = client->get(client, second_key, NULL, sink, &get_res, &error);
   assert_int_equal(rc, LC_OK);
-  assert_false(get_res.no_content);
-  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(length, strlen("peer-b"));
-  assert_memory_equal(bytes, "peer-b", length);
+  assert_true(get_res.no_content);
   lc_get_res_cleanup(&get_res);
   sink->close(sink);
 
@@ -24731,6 +24822,7 @@ static void test_explicit_xa_release_survives_pouch_reopen(void **state) {
   lc_sink *sink;
   lc_acquire_req acquire_first;
   lc_acquire_req acquire_second;
+  lc_release_op release_first;
   lc_release_op release_second;
   lc_release_res release_result;
   lc_get_res get_res;
@@ -24741,7 +24833,9 @@ static void test_explicit_xa_release_survives_pouch_reopen(void **state) {
   char first_key[96];
   char second_key[96];
   char transaction_id[LC_XID_STRING_SIZE];
+  char first_lease_id[128];
   char second_lease_id[128];
+  long first_fencing_token;
   long second_fencing_token;
   int rc;
 
@@ -24754,10 +24848,13 @@ static void test_explicit_xa_release_survives_pouch_reopen(void **state) {
   bytes = NULL;
   length = 0U;
   transaction_id[0] = '\0';
+  first_lease_id[0] = '\0';
   second_lease_id[0] = '\0';
+  first_fencing_token = 0L;
   second_fencing_token = 0L;
   lc_acquire_req_init(&acquire_first);
   lc_acquire_req_init(&acquire_second);
+  lc_release_op_init(&release_first);
   lc_release_op_init(&release_second);
   memset(&release_result, 0, sizeof(release_result));
   memset(&get_res, 0, sizeof(get_res));
@@ -24785,6 +24882,9 @@ static void test_explicit_xa_release_survives_pouch_reopen(void **state) {
   rc = client->acquire(client, &acquire_second, &second, &error);
   assert_int_equal(rc, LC_OK);
   assert_string_equal(first->txn_id, transaction_id);
+  assert_true(snprintf(first_lease_id, sizeof(first_lease_id), "%s",
+                       first->lease_id) > 0);
+  first_fencing_token = first->fencing_token;
   assert_true(snprintf(second_lease_id, sizeof(second_lease_id), "%s",
                        second->lease_id) > 0);
   second_fencing_token = second->fencing_token;
@@ -24817,6 +24917,24 @@ static void test_explicit_xa_release_survives_pouch_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(release_result.released);
   lc_release_res_cleanup(&release_result);
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, first_key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+  sink = NULL;
+
+  release_first.lease.key = first_key;
+  release_first.lease.lease_id = first_lease_id;
+  release_first.lease.txn_id = transaction_id;
+  release_first.lease.fencing_token = first_fencing_token;
+  rc = client->release(client, &release_first, &release_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(release_result.released);
+  lc_release_res_cleanup(&release_result);
+
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->get(client, first_key, NULL, sink, &get_res, &error);
@@ -30312,7 +30430,7 @@ static void test_txn_decisions_persist_participant_records(void **state) {
   txn_record_length =
       read_source_to_bytes(read_result.body, txn_record, sizeof(txn_record));
   assert_true(txn_record_length > 4U);
-  assert_memory_equal(txn_record, "LPT1", 4U);
+  assert_memory_equal(txn_record, "LPT3", 4U);
   assert_true(bytes_contain_text(txn_record, txn_record_length, "commit"));
   assert_true(bytes_contain_text(txn_record, txn_record_length, backend_hash));
   assert_true(bytes_contain_text(txn_record, txn_record_length, "orders/eu"));
@@ -30385,10 +30503,9 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
-  /* Records written by the short-lived LPT2 voting implementation remain
-   * readable after returning Pouch to lockd's decision-only XA contract. */
-  test_write_binary_txn_record_v2(pouch, "txn-replay-commit", "commit", 0L, 1UL,
-                                  NULL, &participant, 1U, &error);
+  test_write_binary_txn_record_voting(
+      pouch, "txn-replay-commit", "commit", 0L, 1UL, NULL, &participant,
+      1U, &error);
 
   replay_req.txn_id = test_xid_for_label("txn-replay-commit");
   rc = client->txn_replay(client, &replay_req, &replay_res, &error);
@@ -32462,6 +32579,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_acquire_honors_block_seconds),
       cmocka_unit_test(
           test_minted_xid_single_lease_releases_without_xa_barrier),
+      cmocka_unit_test(
+          test_minted_xid_enrolls_cross_namespace_participant_before_publish),
       cmocka_unit_test(test_pouch_transaction_ids_match_lockd_xid_contract),
       cmocka_unit_test(
           test_pouch_queue_dequeue_rejects_invalid_xid_without_leasing),
@@ -32470,9 +32589,9 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_explicit_xa_release_rollback_discards_all_participants),
       cmocka_unit_test(
-          test_expired_explicit_xa_release_discards_only_expired_participant),
+          test_expired_explicit_xa_release_rolls_back_all_participants),
       cmocka_unit_test(
-          test_explicit_xa_live_terminal_release_commits_expired_peer),
+          test_explicit_xa_live_release_rolls_back_expired_peer),
       cmocka_unit_test(test_explicit_xa_release_survives_pouch_reopen),
       cmocka_unit_test(test_transaction_bound_lease_requires_transaction_id),
       cmocka_unit_test(

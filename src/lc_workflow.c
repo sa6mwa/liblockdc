@@ -1756,7 +1756,6 @@ static int lc_workflow_append_outbox_method(lc_workflow *self,
   lc_acquire_req acquire;
   lc_lease *lease;
   lc_workflow_transaction *transaction;
-  char txn_id[LC_XID_STRING_SIZE];
   char *key;
   int rc;
   if (workflow == NULL || out_txn == NULL || receipt == NULL)
@@ -1776,12 +1775,6 @@ static int lc_workflow_append_outbox_method(lc_workflow *self,
   acquire.owner = workflow->owner;
   acquire.ttl_seconds = workflow->transaction_ttl_seconds;
   acquire.if_not_exists = 1;
-  rc = lc_xid_new(txn_id, error);
-  if (rc != LC_OK) {
-    free(key);
-    return rc;
-  }
-  acquire.txn_id = txn_id;
   lease = NULL;
   rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error);
   if (rc != LC_OK) {
@@ -1826,7 +1819,6 @@ static int lc_workflow_accept_inbox_method(lc_workflow *self,
   lc_acquire_req acquire;
   lc_lease *lease;
   lc_workflow_transaction *transaction;
-  char txn_id[LC_XID_STRING_SIZE];
   char *key;
   int rc;
   if (workflow == NULL || out_txn == NULL || result == NULL)
@@ -1846,12 +1838,6 @@ static int lc_workflow_accept_inbox_method(lc_workflow *self,
   acquire.owner = workflow->owner;
   acquire.ttl_seconds = workflow->transaction_ttl_seconds;
   acquire.if_not_exists = 1;
-  rc = lc_xid_new(txn_id, error);
-  if (rc != LC_OK) {
-    free(key);
-    return rc;
-  }
-  acquire.txn_id = txn_id;
   lease = NULL;
   rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error);
   if (rc != LC_OK) {
