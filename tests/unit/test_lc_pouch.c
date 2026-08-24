@@ -24814,6 +24814,123 @@ static void test_explicit_xa_live_release_rolls_back_expired_peer(void **state) 
   lc_error_cleanup(&error);
 }
 
+/* An explicit XA acquire prepares the durable participant set.  A later
+ * coordinator decision must retain that terminal request rather than allow a
+ * prepare helper to turn it back into a pending transaction. */
+static void test_explicit_xa_coordinator_commit_after_acquire_prepare(
+    void **state) {
+  lc_client *client;
+  lc_lease *first;
+  lc_lease *second;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire_first;
+  lc_acquire_req acquire_second;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_get_res get_res;
+  lc_error error;
+  const void *bytes;
+  size_t length;
+  char root[512];
+  char first_key[96];
+  char second_key[96];
+  char transaction_id[LC_XID_STRING_SIZE];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  first = NULL;
+  second = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  transaction_id[0] = '\0';
+  lc_acquire_req_init(&acquire_first);
+  lc_acquire_req_init(&acquire_second);
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  make_root("explicit-xa-coordinator", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(first_key, sizeof(first_key), "state/explicit-xa-coordinator/a/%ld",
+           (long)getpid());
+  snprintf(second_key, sizeof(second_key),
+           "state/explicit-xa-coordinator/b/%ld", (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  rc = lc_xid_new(transaction_id, &error);
+  assert_int_equal(rc, LC_OK);
+  acquire_first.key = first_key;
+  acquire_first.owner = "explicit-xa-coordinator";
+  acquire_first.ttl_seconds = 30L;
+  acquire_first.txn_id = transaction_id;
+  rc = client->acquire(client, &acquire_first, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  acquire_second.key = second_key;
+  acquire_second.owner = "explicit-xa-coordinator";
+  acquire_second.ttl_seconds = 30L;
+  acquire_second.txn_id = transaction_id;
+  rc = client->acquire(client, &acquire_second, &second, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("first", strlen("first"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = first->update(first, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("second", strlen("second"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = second->update(second, source, NULL, &error);
+  source->close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  /* The durable prepare record already owns both participants. */
+  decision_req.txn_id = transaction_id;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_string_equal(decision_res.state, "commit");
+  lc_txn_decision_res_cleanup(&decision_res);
+  first->close(first);
+  first = NULL;
+  second->close(second);
+  second = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, first_key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("first"));
+  assert_memory_equal(bytes, "first", length);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+  sink = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, second_key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, strlen("second"));
+  assert_memory_equal(bytes, "second", length);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+  sink = NULL;
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_explicit_xa_release_survives_pouch_reopen(void **state) {
   lc_client *client;
   lc_lease *first;
@@ -32592,6 +32709,8 @@ int main(int argc, char **argv) {
           test_expired_explicit_xa_release_rolls_back_all_participants),
       cmocka_unit_test(
           test_explicit_xa_live_release_rolls_back_expired_peer),
+      cmocka_unit_test(
+          test_explicit_xa_coordinator_commit_after_acquire_prepare),
       cmocka_unit_test(test_explicit_xa_release_survives_pouch_reopen),
       cmocka_unit_test(test_transaction_bound_lease_requires_transaction_id),
       cmocka_unit_test(
