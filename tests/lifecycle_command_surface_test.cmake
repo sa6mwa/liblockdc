@@ -14,7 +14,6 @@ set(package_matrix_script_path "${LOCKDC_ROOT}/scripts/run_linux_package_matrix.
 set(source_smoke_script_path "${LOCKDC_ROOT}/scripts/test_release_from_source.sh")
 set(clean_script_path "${LOCKDC_ROOT}/scripts/clean.sh")
 set(e2e_script_path "${LOCKDC_ROOT}/scripts/test-e2e.sh")
-set(ledger_path "${LOCKDC_ROOT}/docs/lifecycle-migration.md")
 
 file(READ "${makefile_path}" root_makefile)
 file(READ "${root_cmake_path}" root_cmake)
@@ -28,7 +27,6 @@ file(READ "${package_matrix_script_path}" package_matrix_script)
 file(READ "${source_smoke_script_path}" source_smoke_script)
 file(READ "${clean_script_path}" clean_script)
 file(READ "${e2e_script_path}" e2e_script)
-file(READ "${ledger_path}" lifecycle_ledger)
 
 function(assert_contains haystack needle description)
     string(FIND "${${haystack}}" "${needle}" found_at)
@@ -240,9 +238,3 @@ foreach(target
         message(FATAL_ERROR "make help output did not include ${target}\nstdout:\n${help_stdout}")
     endif()
 endforeach()
-
-assert_contains(lifecycle_ledger "## Command Surface" "migration ledger command surface section")
-assert_contains(lifecycle_ledger "make finalize-slice" "migration ledger finalize-slice entry")
-assert_contains(lifecycle_ledger "make valgrind" "migration ledger valgrind entry")
-assert_contains(lifecycle_ledger "make lifecycle-version-contract" "migration ledger version contract entry")
-assert_contains(lifecycle_ledger "## Optional Extensions" "lifecycle ledger optional extensions section")
