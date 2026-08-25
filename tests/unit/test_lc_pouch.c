@@ -8125,9 +8125,11 @@ static pid_t pouch_test_spawn_shared_write(const char *root, const char *key,
                                 sizeof(arguments) / sizeof(arguments[0]));
 }
 
-static pid_t pouch_test_spawn_shared_write_many(
-    const char *root, const char *prefix, int ready_fd, int start_fd,
-    uint64_t segment_target_bytes, uint64_t count) {
+static pid_t pouch_test_spawn_shared_write_many(const char *root,
+                                                const char *prefix,
+                                                int ready_fd, int start_fd,
+                                                uint64_t segment_target_bytes,
+                                                uint64_t count) {
   char ready_fd_arg[32];
   char start_fd_arg[32];
   char segment_target_arg[32];
@@ -8893,8 +8895,8 @@ static void open_pouch_client_crypto(const char *root, const char *crypto_key,
   char endpoint[1024];
   int written;
 
-  written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?crypto_key=%s", root, crypto_key);
+  written = snprintf(endpoint, sizeof(endpoint), "pouch://%s?crypto_key=%s",
+                     root, crypto_key);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   open_pouch_client_endpoint(endpoint, out, error);
 }
@@ -8904,8 +8906,8 @@ static void open_pouch_client_compressed(const char *root, lc_client **out,
   char endpoint[1024];
   int written;
 
-  written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?compression=zlib", root);
+  written =
+      snprintf(endpoint, sizeof(endpoint), "pouch://%s?compression=zlib", root);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   open_pouch_client_endpoint(endpoint, out, error);
 }
@@ -8917,9 +8919,9 @@ static void open_pouch_client_crypto_compressed(const char *root,
   char endpoint[1536];
   int written;
 
-  written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?crypto_key=%s&compression=zlib",
-                     root, crypto_key);
+  written =
+      snprintf(endpoint, sizeof(endpoint),
+               "pouch://%s?crypto_key=%s&compression=zlib", root, crypto_key);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   open_pouch_client_endpoint(endpoint, out, error);
 }
@@ -11565,17 +11567,12 @@ static void test_state_etag_is_plaintext_sha256_content_hash(void **state) {
   lc_error_cleanup(&error);
 }
 
-static int pouch_test_lock_namespace_write_file(const char *root,
-                                                const char *namespace_name) {
-  char *namespace_path;
+static int pouch_test_lock_shared_mutation_file(const char *root) {
   char *lock_path;
   struct flock fl;
   int fd;
 
-  namespace_path = lc_pouch_namespace_path(NULL, root, namespace_name);
-  assert_non_null(namespace_path);
-  lock_path = lc_pouch_path_join(NULL, namespace_path, "write.lock");
-  lc_free_with_allocator(NULL, namespace_path);
+  lock_path = lc_pouch_path_join(NULL, root, "pouch.mutation.lock");
   assert_non_null(lock_path);
   fd = open(lock_path, O_CREAT | O_RDWR, 0666);
   lc_free_with_allocator(NULL, lock_path);
@@ -11587,7 +11584,7 @@ static int pouch_test_lock_namespace_write_file(const char *root,
   return fd;
 }
 
-static void pouch_test_unlock_namespace_write_file(int fd) {
+static void pouch_test_unlock_shared_mutation_file(int fd) {
   struct flock fl;
 
   memset(&fl, 0, sizeof(fl));
@@ -12378,18 +12375,17 @@ static void test_pouch_endpoint_build_and_option_presence(void **state) {
   lc_pouch_endpoint_free(endpoint);
   endpoint = NULL;
 
-  rc = lc_pouch_endpoint_has_option(
-      "pouch:///tmp/root?crypto%5Fkey=value&"
-      "crypto_key#crypto_key=fragment",
-      "crypto_key", &present, &error);
+  rc = lc_pouch_endpoint_has_option("pouch:///tmp/root?crypto%5Fkey=value&"
+                                    "crypto_key#crypto_key=fragment",
+                                    "crypto_key", &present, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(present, 1);
 
-  rc = lc_pouch_endpoint_has_option(
-      "pouch:///tmp/root?single_writer=crypto_key&"
-      "crypto_key_file=crypto_key&"
-      "crypto_key_extra=value#crypto_key=value",
-      "crypto_key", &present, &error);
+  rc =
+      lc_pouch_endpoint_has_option("pouch:///tmp/root?single_writer=crypto_key&"
+                                   "crypto_key_file=crypto_key&"
+                                   "crypto_key_extra=value#crypto_key=value",
+                                   "crypto_key", &present, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(present, 0);
 
@@ -12402,9 +12398,8 @@ static void test_pouch_endpoint_build_and_option_presence(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(present, 1);
 
-  rc =
-      lc_pouch_endpoint_has_option("pouch:///tmp/root?crypto%ZZkey=value",
-                                   "crypto_key", &present, &error);
+  rc = lc_pouch_endpoint_has_option("pouch:///tmp/root?crypto%ZZkey=value",
+                                    "crypto_key", &present, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
   assert_string_equal(error.message,
                       "invalid percent escape in pouch endpoint");
@@ -12474,8 +12469,7 @@ test_pouch_endpoint_option_presence_selects_crypto_default(void **state) {
   option.value = crypto_key;
   rc = lc_pouch_endpoint_build(root, &option, 1U, &endpoint, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_endpoint_has_option(endpoint, "crypto_key", &present,
-                                    &error);
+  rc = lc_pouch_endpoint_has_option(endpoint, "crypto_key", &present, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(present, 1);
   endpoints[0] = endpoint;
@@ -12507,8 +12501,7 @@ test_pouch_endpoint_option_presence_selects_crypto_default(void **state) {
   option.value = "/tmp/lookalike-crypto_key";
   rc = lc_pouch_endpoint_build(root, &option, 1U, &endpoint, &error);
   assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_endpoint_has_option(endpoint, "crypto_key", &present,
-                                    &error);
+  rc = lc_pouch_endpoint_has_option(endpoint, "crypto_key", &present, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(present, 0);
   endpoints[0] = endpoint;
@@ -17095,8 +17088,7 @@ test_state_replay_preserves_all_binary_record_families(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void
-test_clean_reopen_recovers_live_staged_decision(void **state) {
+static void test_clean_reopen_recovers_live_staged_decision(void **state) {
   lc_pouch *pouch;
   lc_source *source;
   lc_pouch_state_write_result staged;
@@ -17396,7 +17388,7 @@ static void test_client_update_waits_for_namespace_mutation_lock(void **state) {
   cleanup_root(root);
 
   /* The child opens Pouch after fork, so keep the parent single-threaded.
-   * Both handles use shared mode because this test exercises write.lock. */
+   * Both handles use shared mode and must wait on its root mutation guard. */
   assert_true(snprintf(endpoint, sizeof(endpoint),
                        "pouch://%s?background_compaction=false&"
                        "single_writer=false",
@@ -17405,14 +17397,14 @@ static void test_client_update_waits_for_namespace_mutation_lock(void **state) {
   write_client_state(client, "state/locked", "{\"value\":1}", NULL, 0L, 0,
                      &update_res, &error);
   lc_update_res_cleanup(&update_res);
-  lock_fd = pouch_test_lock_namespace_write_file(root, "default");
+  lock_fd = pouch_test_lock_shared_mutation_file(root);
 
   pid = pouch_test_spawn_public_update(root, "state/locked", "{\"value\":2}");
 
   usleep(100000);
   rc = waitpid(pid, &status, WNOHANG);
   assert_int_equal(rc, 0);
-  pouch_test_unlock_namespace_write_file(lock_fd);
+  pouch_test_unlock_shared_mutation_file(lock_fd);
   assert_int_equal(waitpid(pid, &status, 0), pid);
   assert_true(WIFEXITED(status));
   assert_int_equal(WEXITSTATUS(status), 0);
@@ -19759,8 +19751,8 @@ static void test_pouch_crypto_rejects_wrong_key(void **state) {
   lc_client_close(client);
   client = NULL;
 
-  written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?crypto_key=%s", root, wrong_key);
+  written = snprintf(endpoint, sizeof(endpoint), "pouch://%s?crypto_key=%s",
+                     root, wrong_key);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
@@ -19902,8 +19894,8 @@ static void test_pouch_crypto_rejects_truncated_sealed_payload(void **state) {
   rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
   assert_int_equal(rc, LC_OK);
   written = snprintf(endpoint, sizeof(endpoint),
-                     "pouch://%s?crypto_key=%s&segment_target_bytes=1",
-                     root, crypto_key);
+                     "pouch://%s?crypto_key=%s&segment_target_bytes=1", root,
+                     crypto_key);
   assert_true(written > 0 && (size_t)written < sizeof(endpoint));
   open_pouch_client_endpoint(endpoint, &client, &error);
   write_client_state(client, "crypto/truncated-sealed",
@@ -24094,8 +24086,8 @@ test_minted_xid_single_lease_releases_without_xa_barrier(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void
-test_minted_xid_enrolls_cross_namespace_participant_before_publish(void **state) {
+static void test_minted_xid_enrolls_cross_namespace_participant_before_publish(
+    void **state) {
   lc_client *client;
   lc_lease *first;
   lc_lease *second;
@@ -24169,8 +24161,7 @@ test_minted_xid_enrolls_cross_namespace_participant_before_publish(void **state)
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   memset(&read_result, 0, sizeof(read_result));
   rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch,
-                           "implicit-second", second_key, &read_result,
-                           &error);
+                           "implicit-second", second_key, &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(read_result.found);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
@@ -24189,8 +24180,7 @@ test_minted_xid_enrolls_cross_namespace_participant_before_publish(void **state)
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
   memset(&read_result, 0, sizeof(read_result));
   rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch,
-                           "implicit-second", second_key, &read_result,
-                           &error);
+                           "implicit-second", second_key, &read_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_true(read_result.found);
   assert_int_equal(read_source_to_bytes(read_result.body, body, sizeof(body)),
@@ -24619,8 +24609,8 @@ test_explicit_xa_release_rollback_discards_all_participants(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_expired_explicit_xa_release_rolls_back_all_participants(
-    void **state) {
+static void
+test_expired_explicit_xa_release_rolls_back_all_participants(void **state) {
   lc_client *client;
   lc_lease *first;
   lc_lease *second;
@@ -24726,7 +24716,8 @@ static void test_expired_explicit_xa_release_rolls_back_all_participants(
   lc_error_cleanup(&error);
 }
 
-static void test_explicit_xa_live_release_rolls_back_expired_peer(void **state) {
+static void
+test_explicit_xa_live_release_rolls_back_expired_peer(void **state) {
   lc_client *client;
   lc_lease *first;
   lc_lease *second;
@@ -24817,8 +24808,8 @@ static void test_explicit_xa_live_release_rolls_back_expired_peer(void **state) 
 /* An explicit XA acquire prepares the durable participant set.  A later
  * coordinator decision must retain that terminal request rather than allow a
  * prepare helper to turn it back into a pending transaction. */
-static void test_explicit_xa_coordinator_commit_after_acquire_prepare(
-    void **state) {
+static void
+test_explicit_xa_coordinator_commit_after_acquire_prepare(void **state) {
   lc_client *client;
   lc_lease *first;
   lc_lease *second;
@@ -30620,9 +30611,8 @@ static void test_txn_replay_applies_durable_decision(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
-  test_write_binary_txn_record_voting(
-      pouch, "txn-replay-commit", "commit", 0L, 1UL, NULL, &participant,
-      1U, &error);
+  test_write_binary_txn_record_voting(pouch, "txn-replay-commit", "commit", 0L,
+                                      1UL, NULL, &participant, 1U, &error);
 
   replay_req.txn_id = test_xid_for_label("txn-replay-commit");
   rc = client->txn_replay(client, &replay_req, &replay_res, &error);
@@ -32490,8 +32480,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_namespace_manifest_repairs_from_existing_segments),
       cmocka_unit_test(test_staged_state_writes_durable_decision_records),
       cmocka_unit_test(test_state_replay_preserves_all_binary_record_families),
-      cmocka_unit_test(
-          test_clean_reopen_recovers_live_staged_decision),
+      cmocka_unit_test(test_clean_reopen_recovers_live_staged_decision),
       cmocka_unit_test(test_client_update_get_load_roundtrips_state),
       cmocka_unit_test(test_exclusive_indexer_publishes_at_document_threshold),
       cmocka_unit_test(
@@ -32707,8 +32696,7 @@ int main(int argc, char **argv) {
           test_explicit_xa_release_rollback_discards_all_participants),
       cmocka_unit_test(
           test_expired_explicit_xa_release_rolls_back_all_participants),
-      cmocka_unit_test(
-          test_explicit_xa_live_release_rolls_back_expired_peer),
+      cmocka_unit_test(test_explicit_xa_live_release_rolls_back_expired_peer),
       cmocka_unit_test(
           test_explicit_xa_coordinator_commit_after_acquire_prepare),
       cmocka_unit_test(test_explicit_xa_release_survives_pouch_reopen),

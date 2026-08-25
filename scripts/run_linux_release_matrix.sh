@@ -13,7 +13,7 @@ unset LD_LIBRARY_PATH
 for preset in x86_64-linux-gnu-release x86_64-linux-musl-release; do
   "$script_dir/run_timed.sh" "release-matrix test $preset" \
     ctest --preset "$preset" --output-on-failure --progress --stop-on-failure \
-      --timeout "${LOCKDC_CTEST_TIMEOUT:-300}" -LE lifecycle-host
+      --timeout "${LOCKDC_CTEST_TIMEOUT:-300}" --parallel "${LOCKDC_CTEST_PARALLEL_LEVEL:-4}" -LE lifecycle-host
 done
 
 "$script_dir/run_timed.sh" "release-matrix cross tests" \

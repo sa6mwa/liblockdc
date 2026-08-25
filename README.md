@@ -146,10 +146,13 @@ make test-all
 ```
 
 `make test-all` runs the sanitizer-instrumented debug suite, both
-host-executable Bootlin release suites, QEMU cross suites, Valgrind, fuzz
-smoke, and deterministic local e2e. It deliberately excludes performance
-workloads, which belong to the explicit `make bench-gate` command and may use
-the machine's available CPU. The complete artifact rehearsal remains `make
+host-executable Bootlin release suites, QEMU cross suites, Valgrind, and
+deterministic local e2e. Its CTest suites use a bounded four-job default
+(`LOCKDC_CTEST_PARALLEL_LEVEL` overrides it), while tests marked serial remain
+serial. Fuzz smoke stays explicit (`make fuzz-smoke`) and in `make prerelease`:
+its cold AFL++ compiler bootstrap is hardening work, not an everyday
+functional invariant. Performance workloads likewise belong to the explicit
+`make bench-gate` command. The complete artifact rehearsal remains `make
 release-matrix`.
 
 `make prerelease-hardening` is the longer pre-release layer. It keeps the

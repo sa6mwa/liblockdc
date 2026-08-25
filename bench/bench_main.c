@@ -518,8 +518,8 @@ static int bench_workflow_fixture_open(bench_workflow_fixture *fixture,
         fixture->namespace_name, &fixture->client, error);
   }
   if (fixture->is_pouch) {
-    return bench_workflow_fixture_client_open(
-        fixture, pouch_shared_writer, &fixture->client, error);
+    return bench_workflow_fixture_client_open(fixture, pouch_shared_writer,
+                                              &fixture->client, error);
   }
   config.default_namespace = fixture->namespace_name;
   config.endpoints = endpoints;
@@ -662,8 +662,7 @@ static int bench_workflow_reconcile_case(long iterations, int index_mode) {
       bench_env_long("LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY", 16L, 1L);
   pouch_segment_target_bytes = bench_env_long(
       "LOCKDC_WORKFLOW_BENCH_SEGMENT_TARGET_BYTES",
-      index_mode == 3 ? BENCH_WORKFLOW_COMPACT_SEGMENT_TARGET_BYTES : 0L,
-      0L);
+      index_mode == 3 ? BENCH_WORKFLOW_COMPACT_SEGMENT_TARGET_BYTES : 0L, 0L);
   expected_recovery_queries =
       ((uint64_t)rows + (uint64_t)page_capacity - 1U) / (uint64_t)page_capacity;
   payload = NULL;
@@ -1013,10 +1012,9 @@ static int bench_workflow_reconcile_multi_case(long iterations,
   if ((unsigned long)dispatcher_count > BENCH_WORKFLOW_MAX_DISPATCHERS) {
     dispatcher_count = (long)BENCH_WORKFLOW_MAX_DISPATCHERS;
   }
-  pouch_segment_target_bytes = bench_env_long(
-      "LOCKDC_WORKFLOW_BENCH_SEGMENT_TARGET_BYTES",
-      BENCH_WORKFLOW_COMPACT_SEGMENT_TARGET_BYTES,
-      0L);
+  pouch_segment_target_bytes =
+      bench_env_long("LOCKDC_WORKFLOW_BENCH_SEGMENT_TARGET_BYTES",
+                     BENCH_WORKFLOW_COMPACT_SEGMENT_TARGET_BYTES, 0L);
   memset(&fixture, 0, sizeof(fixture));
   memset(&maintenance, 0, sizeof(maintenance));
   memset(maintenance_bytes, 0, sizeof(maintenance_bytes));
@@ -1240,7 +1238,8 @@ static int bench_workflow_reconcile_multi_case(long iterations,
     rc = LC_ERR_INVALID;
   }
   printf(
-      "metric=workflow-reconcile-multi backend=%s index_mode=%s dispatchers=%ld "
+      "metric=workflow-reconcile-multi backend=%s index_mode=%s "
+      "dispatchers=%ld "
       "pending_rows=%ld terminal_rows=%ld churn_updates=%ld delivered_rows=%lu "
       "first_delivery_ms=%.3f drain_ms=%.3f throughput_rows_per_second=%.3f "
       "maintenance_ms=%.3f maintenance_segments=%lu maintenance_bytes=%s "
@@ -1257,8 +1256,7 @@ static int bench_workflow_reconcile_multi_case(long iterations,
           ? (double)rows / (last_delivery_seconds - started)
           : 0.0,
       maintenance.seconds * 1000.0, maintenance.candidate_segments,
-      maintenance_bytes, maintenance.compacted,
-      rc);
+      maintenance_bytes, maintenance.compacted, rc);
 
   for (index = 0U; index < BENCH_WORKFLOW_MAX_DISPATCHERS; ++index) {
     if (start_pipes[index][0] >= 0) {

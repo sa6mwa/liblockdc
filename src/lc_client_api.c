@@ -573,9 +573,8 @@ int lc_client_get_method(lc_client *self, const char *key,
 
 int lc_client_load_in_namespace_method(lc_client *self,
                                        const char *namespace_name,
-                                       const char *key,
-                                       const lonejson_map *map, void *dst,
-                                       const lc_get_opts *opts,
+                                       const char *key, const lonejson_map *map,
+                                       void *dst, const lc_get_opts *opts,
                                        lc_get_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_engine_get_request engine_req;
@@ -2820,9 +2819,10 @@ int lc_client_clone_remote(lc_client_handle *source, long timeout_ms,
   int rc;
 
   if (source == NULL || out == NULL || source->is_pouch) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "remote client clone requires a remote source and output",
-                        NULL, NULL, NULL);
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "remote client clone requires a remote source and output", NULL, NULL,
+        NULL);
   }
   *out = NULL;
   lc_client_config_init(&config);
@@ -2833,7 +2833,8 @@ int lc_client_clone_remote(lc_client_handle *source, long timeout_ms,
     rc = lc_source_from_memory(source->client_bundle_bytes,
                                source->client_bundle_length,
                                &config.client_bundle_source, error);
-    if (rc != LC_OK) return rc;
+    if (rc != LC_OK)
+      return rc;
   } else {
     config.client_bundle_path = source->client_bundle_path;
   }

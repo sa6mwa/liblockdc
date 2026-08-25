@@ -519,6 +519,12 @@ static int lc_workflow_stage_inbox(lc_lease *lease,
   return lc_lease_save(lease, &lc_workflow_inbox_record_map, &record, error);
 }
 
+static int lc_workflow_nullable_string_equal(const char *left,
+                                             const char *right) {
+  return left == right ||
+         (left != NULL && right != NULL && strcmp(left, right) == 0);
+}
+
 static int lc_workflow_existing_outbox(lc_workflow_handle *workflow,
                                        const char *key,
                                        const lc_outbox_entry *entry,
@@ -528,26 +534,35 @@ static int lc_workflow_existing_outbox(lc_workflow_handle *workflow,
   lc_get_res result;
   lc_get_opts options;
   lonejson *runtime;
+  const char *content_type;
   int rc;
 
   memset(&record, 0, sizeof(record));
   memset(&result, 0, sizeof(result));
   lc_get_opts_init(&options);
   options.public_read = 1;
+  content_type = entry->content_type != NULL ? entry->content_type
+                                             : "application/octet-stream";
   runtime = lc_thread_lonejson_runtime();
   rc = lc_load_in_namespace(&workflow->client->pub, workflow->namespace_name,
                             key, &lc_workflow_outbox_record_map, &record,
                             &options, &result, error);
-  if (rc == LC_OK && (result.no_content || record.record_type == NULL ||
-                      record.operation_id == NULL || record.effect_id == NULL ||
-                      record.effect_key == NULL || record.kind == NULL ||
-                      record.destination == NULL ||
-                      strcmp(record.record_type, "lockdc.outbox.v1") != 0 ||
-                      strcmp(record.operation_id, entry->operation_id) != 0 ||
-                      strcmp(record.effect_id, entry->effect_id) != 0 ||
-                      strcmp(record.effect_key, entry->effect_key) != 0 ||
-                      strcmp(record.kind, entry->kind) != 0 ||
-                      strcmp(record.destination, entry->destination) != 0)) {
+  if (rc == LC_OK &&
+      (result.no_content || record.record_type == NULL ||
+       record.operation_id == NULL || record.effect_id == NULL ||
+       record.effect_key == NULL || record.kind == NULL ||
+       record.destination == NULL || record.content_type == NULL ||
+       strcmp(record.record_type, "lockdc.outbox.v1") != 0 ||
+       strcmp(record.operation_id, entry->operation_id) != 0 ||
+       strcmp(record.effect_id, entry->effect_id) != 0 ||
+       strcmp(record.effect_key, entry->effect_key) != 0 ||
+       strcmp(record.kind, entry->kind) != 0 ||
+       strcmp(record.destination, entry->destination) != 0 ||
+       strcmp(record.content_type, content_type) != 0 ||
+       !lc_workflow_nullable_string_equal(record.headers_json,
+                                          entry->headers_json) ||
+       !lc_workflow_nullable_string_equal(record.trace_context,
+                                          entry->trace_context))) {
     rc =
         lc_error_set(error, LC_ERR_SERVER, 0L,
                      "outbox immutable fields conflict with an existing record",
@@ -1682,9 +1697,8 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
   }
   transaction->terminal = 1;
   for (i = 0U; i < transaction->lease_count; ++i) {
-    if (lc_workflow_is_outbox_key(notification_keys == NULL
-                                      ? NULL
-                                      : notification_keys[i])) {
+    if (lc_workflow_is_outbox_key(
+            notification_keys == NULL ? NULL : notification_keys[i])) {
       lc_workflow_notify(transaction->workflow, notification_keys[i]);
     }
     lc_client_free(transaction->workflow->client,

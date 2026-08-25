@@ -18,6 +18,7 @@ cross_preset_package_regex='dist_dir_configure_test|package_archives_test|packag
 unset LD_LIBRARY_PATH
 
 ctest_timeout=${LOCKDC_CTEST_TIMEOUT:-300}
+ctest_parallel_level=${LOCKDC_CTEST_PARALLEL_LEVEL:-4}
 
 require_release_build_tree() {
   local preset="$1"
@@ -65,7 +66,7 @@ require_release_runner() {
 run_cross_preset_package_isolation() {
   "$timed_bin" "cross-preset build debug" "$script_dir/build.sh" debug
   "$timed_bin" "cross-preset package-isolation" \
-    ctest --preset debug --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout" -R "$cross_preset_package_regex"
+    ctest --preset debug --output-on-failure --progress --stop-on-failure --timeout "$ctest_timeout" --parallel "$ctest_parallel_level" -R "$cross_preset_package_regex"
 }
 
 run_cross_release_matrix() {
@@ -76,7 +77,7 @@ run_cross_release_matrix() {
     require_release_runner "$preset"
     "$timed_bin" "release-matrix test $preset" env LOCKDC_SLOW_TEST_RUNTIME=1 \
       ctest --preset "$preset" --output-on-failure --progress --stop-on-failure \
-        --timeout "$ctest_timeout" -L cross-runtime
+        --timeout "$ctest_timeout" --parallel "$ctest_parallel_level" -L cross-runtime
   done
 }
 

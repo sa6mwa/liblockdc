@@ -2746,8 +2746,7 @@ static void lcdc_push_workflow_stats(lua_State *L,
   lcdc_set_integer_field(L, "notification_overflows",
                          (long)stats->notification_overflows);
   lcdc_set_integer_field(L, "recovery_queries", (long)stats->recovery_queries);
-  lcdc_set_integer_field(L, "recovered_claims",
-                         (long)stats->recovered_claims);
+  lcdc_set_integer_field(L, "recovered_claims", (long)stats->recovered_claims);
   lcdc_set_integer_field(L, "claim_losses", (long)stats->claim_losses);
   lcdc_set_integer_field(L, "payload_open_failures",
                          (long)stats->payload_open_failures);

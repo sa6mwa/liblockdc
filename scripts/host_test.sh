@@ -28,6 +28,7 @@ deps_presets=(
 unset LD_LIBRARY_PATH
 
 ctest_timeout=${LOCKDC_CTEST_TIMEOUT:-300}
+ctest_parallel_level=${LOCKDC_CTEST_PARALLEL_LEVEL:-4}
 
 cd "$repo_root"
 
@@ -49,6 +50,6 @@ for preset in "${presets[@]}"; do
   "$script_dir/build.sh" "$preset"
   if [ "$mode" = "test" ]; then
     ctest --preset "$preset" --output-on-failure --progress --stop-on-failure \
-      --timeout "$ctest_timeout" -LE lifecycle-host
+      --timeout "$ctest_timeout" --parallel "$ctest_parallel_level" -LE lifecycle-host
   fi
 done

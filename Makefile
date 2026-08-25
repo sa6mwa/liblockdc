@@ -9,6 +9,8 @@ CTEST := ctest
 CLANG_FORMAT := clang-format
 GO := go
 TIMED := bash ./scripts/run_timed.sh
+LOCKDC_CTEST_PARALLEL_LEVEL ?= 4
+export LOCKDC_CTEST_PARALLEL_LEVEL
 # Keep recursive calls print-only under `make -n`. GNU Make executes recipe
 # lines that directly reference $(MAKE), even in dry-run mode.
 MAKE_RECURSE := $(MAKE)
@@ -199,7 +201,7 @@ help:
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
 		'make test-install-tree  Validate CMake and pkg-config consumers against the installed native SDK.' \
 		'make example-smoke-local Run local-service example smoke tests.' \
-		'make test-all           Run debug, host and QEMU cross tests, Valgrind, fuzz smoke, and local e2e.' \
+		'make test-all           Run the parallel debug, host and QEMU cross functional matrix plus local e2e.' \
 		'make test-coverage      Run the coverage preset test suite and build the coverage report.' \
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
@@ -340,7 +342,7 @@ test-debug:
 	$(TIMED) test-debug $(MAKE_RECURSE) __test-debug
 
 __test-debug: __build-debug
-	$(CTEST) --preset $(DEBUG_PRESET)
+	$(CTEST) --preset $(DEBUG_PRESET) --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL)
 
 test-pouch-workflow-preflight:
 	$(TIMED) test-pouch-workflow-preflight $(MAKE_RECURSE) __test-pouch-workflow-preflight
@@ -375,7 +377,7 @@ test-install-tree:
 
 __test-install-tree: __build-x86_64-linux-gnu-release
 	$(CTEST) --preset $(X86_64_GNU_RELEASE_PRESET) --output-on-failure \
-		--progress --stop-on-failure -R '^install_tree_sdk_test$$'
+		--progress --stop-on-failure --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL) -R '^install_tree_sdk_test$$'
 
 example-smoke-local:
 	$(TIMED) example-smoke-local $(MAKE_RECURSE) __example-smoke-local
@@ -386,10 +388,11 @@ __example-smoke-local:
 test-all:
 	$(TIMED) test-all $(MAKE_RECURSE) __test-all
 
-# Performance work is deliberately excluded: benchmark processes may consume
-# all available CPU and their results are not a functional test invariant.
-# Run `make bench-gate` explicitly, or use the intentional prerelease gate.
-__test-all: __test-pouch-workflow-preflight __test-debug __test-host __test-cross __valgrind __fuzz-smoke __test-e2e
+# Fuzzing provisions an external compiler toolchain and is a hardening gate,
+# not a fast functional invariant. Keep it in `make prerelease` and invoke it
+# explicitly with `make fuzz-smoke`; do not make everyday confidence depend on
+# a cold bootstrap. Benchmark work is likewise deliberate and explicit.
+__test-all: __test-pouch-workflow-preflight __test-debug __test-host __test-cross __valgrind __test-e2e
 
 dev-up:
 	$(TIMED) dev-up $(MAKE_RECURSE) __dev-up
@@ -444,7 +447,7 @@ test-coverage:
 	$(TIMED) test-coverage $(MAKE_RECURSE) __test-coverage
 
 __test-coverage: __build-coverage
-	$(CTEST) --preset $(COVERAGE_PRESET)
+	$(CTEST) --preset $(COVERAGE_PRESET) --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL)
 	$(CMAKE) --build --preset coverage-report
 
 coverage:
@@ -841,7 +844,7 @@ lua-test:
 	$(TIMED) lua-test $(MAKE_RECURSE) __lua-test
 
 __lua-test: __build-debug
-	$(CTEST) --preset debug-lua
+	$(CTEST) --preset debug-lua --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL)
 
 lua-env:
 	$(TIMED) lua-env $(MAKE_RECURSE) __lua-env

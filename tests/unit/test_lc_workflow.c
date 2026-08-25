@@ -18,7 +18,7 @@
 #define WORKFLOW_TMP_PREFIX "/tmp/liblockdc-unit-workflow-"
 #define WORKFLOW_RECONCILIATION_RECORDS 256U
 #define WORKFLOW_PREFETCH_RECORDS 3U
-#define WORKFLOW_SHARED_PROCESS_RECORDS 64U
+#define WORKFLOW_SHARED_PROCESS_RECORDS 256U
 #define WORKFLOW_SHARED_PROCESS_IDLE_LIMIT 40U
 #define WORKFLOW_CLEAN_REOPEN_FOREIGN_KEYS 32U
 #define WORKFLOW_CLEAN_REOPEN_FOREIGN_CHURN 16U
@@ -145,8 +145,7 @@ static void seed_foreign_workflow_state(lc_client *client,
   assert_int_equal(lc_acquire(client, &acquire, &lease, error), LC_OK);
   state_source = NULL;
   assert_int_equal(
-      lc_source_from_memory(state, strlen(state), &state_source, error),
-      LC_OK);
+      lc_source_from_memory(state, strlen(state), &state_source, error), LC_OK);
   assert_int_equal(lc_lease_update(lease, state_source, NULL, error), LC_OK);
   lc_source_close(state_source);
   assert_int_equal(lc_lease_release(lease, NULL, error), LC_OK);
@@ -157,6 +156,7 @@ typedef struct workflow_process_result {
   int got_job;
   unsigned long delivered;
   char error_message[256];
+  char error_detail[256];
 } workflow_process_result;
 
 static workflow_process_result
@@ -180,8 +180,8 @@ workflow_shared_process_claim(const char *root, const char *namespace_name,
     return result;
   }
   (void)close(start_fd);
-  if (snprintf(endpoint, sizeof(endpoint),
-               "pouch://%s?single_writer=false", root) < 0)
+  if (snprintf(endpoint, sizeof(endpoint), "pouch://%s?single_writer=false",
+               root) < 0)
     return result;
   endpoints[0] = endpoint;
   client = NULL;
@@ -217,6 +217,9 @@ workflow_shared_process_claim(const char *root, const char *namespace_name,
   if (error.message != NULL)
     (void)snprintf(result.error_message, sizeof(result.error_message), "%s",
                    error.message);
+  if (error.detail != NULL)
+    (void)snprintf(result.error_detail, sizeof(result.error_detail), "%s",
+                   error.detail);
   lc_error_cleanup(&error);
   return result;
 }
@@ -293,12 +296,14 @@ workflow_shared_process_drain(const char *root, const char *namespace_name,
   if (error.message != NULL)
     (void)snprintf(result.error_message, sizeof(result.error_message), "%s",
                    error.message);
+  if (error.detail != NULL)
+    (void)snprintf(result.error_detail, sizeof(result.error_detail), "%s",
+                   error.detail);
   lc_error_cleanup(&error);
   return result;
 }
 
-static void workflow_assert_outbox_completed(lc_client *client,
-                                             const char *key,
+static void workflow_assert_outbox_completed(lc_client *client, const char *key,
                                              lc_error *error) {
   lc_get_opts options;
   lc_get_res result;
@@ -341,7 +346,7 @@ static void workflow_assert_public_state_absent(lc_client *client,
 }
 
 static int workflow_force_pouch_txn_decision_failure(void *context,
-                                                      lc_error *error) {
+                                                     lc_error *error) {
   int *calls = (int *)context;
 
   ++*calls;
@@ -388,6 +393,102 @@ static void workflow_reconcile_overflow_commit_hook(void *context) {
     lc_source_close(payload);
   lc_outbox_receipt_cleanup(&receipt);
   lc_error_cleanup(&error);
+}
+
+static void
+test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_outbox_receipt receipt;
+  lc_source *payload;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "immutable-envelope-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow";
+  workflow_config.owner = "workflow-immutable-envelope";
+  workflow = NULL;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "immutable-envelope-operation";
+  entry.effect_id = "immutable-envelope-effect";
+  entry.effect_key = "immutable-envelope-effect-key";
+  entry.kind = "http";
+  entry.destination = "https://example.invalid/immutable-envelope";
+  entry.content_type = "text/plain";
+  entry.headers_json = "{\"x-request-id\":\"first\"}";
+  entry.trace_context = "trace-first";
+  payload = NULL;
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+  lc_outbox_receipt_init(&receipt);
+  transaction = NULL;
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+
+  entry.content_type = "application/json";
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_ERR_SERVER);
+  assert_null(transaction);
+  assert_null(receipt.outbox_key);
+  assert_false(receipt.duplicate);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  entry.content_type = "text/plain";
+
+  entry.headers_json = "{\"x-request-id\":\"second\"}";
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_ERR_SERVER);
+  assert_null(transaction);
+  assert_null(receipt.outbox_key);
+  assert_false(receipt.duplicate);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  entry.headers_json = "{\"x-request-id\":\"first\"}";
+
+  entry.trace_context = "trace-second";
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_ERR_SERVER);
+  assert_null(transaction);
+  assert_null(receipt.outbox_key);
+  assert_false(receipt.duplicate);
+
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
 static void test_pouch_outbox_transaction_and_duplicate(void **state) {
@@ -590,7 +691,8 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
-static void test_pouch_multikey_terminal_failure_publishes_nothing(void **state) {
+static void
+test_pouch_multikey_terminal_failure_publishes_nothing(void **state) {
   char root[256];
   char template_path[256];
   char endpoint[320];
@@ -657,9 +759,9 @@ static void test_pouch_multikey_terminal_failure_publishes_nothing(void **state)
   assert_int_equal(lc_workflow_transaction_acquire(
                        transaction, &participant_request, &participant, &error),
                    LC_OK);
-  assert_int_equal(lc_source_from_memory("{\"committed\":true}", 18U,
-                                         &domain_state, &error),
-                   LC_OK);
+  assert_int_equal(
+      lc_source_from_memory("{\"committed\":true}", 18U, &domain_state, &error),
+      LC_OK);
   assert_int_equal(participant->update(participant, domain_state, NULL, &error),
                    LC_OK);
   lc_source_close(domain_state);
@@ -1100,8 +1202,8 @@ static void test_pouch_reopen_reconciles_durable_index_mode(int shared) {
   memset(&flush_result, 0, sizeof(flush_result));
   flush_request.namespace_name = "workflow-clean-reopen";
   flush_request.mode = "sync";
-  assert_int_equal(lc_flush_index(client, &flush_request, &flush_result, &error),
-                   LC_OK);
+  assert_int_equal(
+      lc_flush_index(client, &flush_request, &flush_result, &error), LC_OK);
   lc_index_flush_res_cleanup(&flush_result);
   lc_client_close(client);
   client = NULL;
@@ -1403,7 +1505,8 @@ static void test_pouch_shared_process_dispatches_once(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
-static void test_pouch_shared_process_reconciles_each_outbox_once(void **state) {
+static void
+test_pouch_shared_process_reconciles_each_outbox_once(void **state) {
   char root[256], template_path[256], endpoint[384];
   const char *endpoints[1];
   lc_client_config client_config;
@@ -1426,9 +1529,10 @@ static void test_pouch_shared_process_reconciles_each_outbox_once(void **state) 
                        WORKFLOW_TMP_PREFIX "shared-reconcile-XXXXXX") > 0);
   assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
                                   WORKFLOW_TMP_PREFIX));
-  assert_true(snprintf(endpoint, sizeof(endpoint),
-                       "pouch://%s?single_writer=false&segment_target_bytes=65536",
-                       root) > 0);
+  assert_true(
+      snprintf(endpoint, sizeof(endpoint),
+               "pouch://%s?single_writer=false&segment_target_bytes=65536",
+               root) > 0);
   endpoints[0] = endpoint;
   lc_error_init(&error);
   lc_client_config_init(&client_config);
@@ -1483,18 +1587,19 @@ static void test_pouch_shared_process_reconciles_each_outbox_once(void **state) 
   }
   delivered = 0UL;
   for (index = 0U; index < 2U; ++index) {
-    assert_int_equal(read(result_pipes[index][0], &results[index],
-                          sizeof(results[index])),
-                     (ssize_t)sizeof(results[index]));
+    assert_int_equal(
+        read(result_pipes[index][0], &results[index], sizeof(results[index])),
+        (ssize_t)sizeof(results[index]));
     (void)close(result_pipes[index][0]);
     result_pipes[index][0] = -1;
     assert_int_equal(waitpid(children[index], &status, 0), children[index]);
     assert_true(WIFEXITED(status));
     if (results[index].rc != LC_OK) {
       (void)fprintf(stderr,
-                    "shared workflow drain %lu failed: rc=%d message=%s\n",
+                    "shared workflow drain %lu failed: rc=%d message=%s "
+                    "detail=%s\n",
                     (unsigned long)index, results[index].rc,
-                    results[index].error_message);
+                    results[index].error_message, results[index].error_detail);
     }
     assert_int_equal(results[index].rc, LC_OK);
     assert_int_equal(WEXITSTATUS(status), 0);
@@ -1576,6 +1681,8 @@ static void test_pouch_expired_claim_rejects_stale_terminal(void **state) {
 
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(
+          test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts),
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
       cmocka_unit_test(test_pouch_multikey_terminal_failure_publishes_nothing),
       cmocka_unit_test(test_pouch_reconciliation_retains_overflow_request),

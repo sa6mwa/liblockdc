@@ -4598,16 +4598,26 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   int rc;
 
   (void)state;
-  endpoint = env_or_default("LOCKDC_E2E_DISK_ENDPOINT",
-                            "https://localhost:19441");
-  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                               "./devenv/volumes/lockd-disk-a-config/client.pem");
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
   require_file_or_skip(bundle_path);
   make_unique_name("workflow-domain", domain_key, sizeof(domain_key));
-  client = NULL; workflow = NULL; transaction = NULL; participant = NULL;
-  job = NULL; payload = NULL; duplicate_payload = NULL; domain_state = NULL;
-  duplicate_transaction = NULL; payload_sink = NULL;
-  payload_bytes = NULL; payload_length = 0U; payload_written = 0U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  participant = NULL;
+  job = NULL;
+  payload = NULL;
+  duplicate_payload = NULL;
+  domain_state = NULL;
+  duplicate_transaction = NULL;
+  payload_sink = NULL;
+  payload_bytes = NULL;
+  payload_length = 0U;
+  payload_written = 0U;
   lc_error_init(&error);
   lc_get_opts_init(&get_options);
   memset(&get_result, 0, sizeof(get_result));
@@ -4628,7 +4638,7 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   lc_outbox_receipt_init(&receipt);
   rc = lc_workflow_append_outbox(workflow, &entry, payload, &transaction,
-                                  &receipt, &error);
+                                 &receipt, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(transaction);
   lc_workflow_participant_request_init(&participant_request);
@@ -4637,11 +4647,10 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   participant_request.acquire.owner = "workflow-e2e";
   participant_request.acquire.ttl_seconds = 30L;
   rc = lc_workflow_transaction_acquire(transaction, &participant_request,
-                                        &participant, &error);
+                                       &participant, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(participant->txn_id);
-  rc = lc_source_from_memory("{\"workflow\":true}", 17U, &domain_state,
-                             &error);
+  rc = lc_source_from_memory("{\"workflow\":true}", 17U, &domain_state, &error);
   assert_lc_ok(rc, &error);
   rc = participant->update(participant, domain_state, NULL, &error);
   assert_lc_ok(rc, &error);
@@ -4687,8 +4696,7 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   duplicate_payload = NULL;
   rc = lc_sink_to_memory(&payload_sink, &error);
   assert_lc_ok(rc, &error);
-  rc = lc_outbox_job_write_payload(job, payload_sink, &payload_written,
-                                   &error);
+  rc = lc_outbox_job_write_payload(job, payload_sink, &payload_written, &error);
   assert_lc_ok(rc, &error);
   rc = lc_sink_memory_bytes(payload_sink, &payload_bytes, &payload_length,
                             &error);
@@ -4704,9 +4712,12 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   job = NULL;
   lc_source_close(payload);
   lc_outbox_receipt_cleanup(&receipt);
-  if (duplicate_payload != NULL) lc_source_close(duplicate_payload);
-  if (payload_sink != NULL) lc_sink_close(payload_sink);
-  if (job != NULL) lc_outbox_job_close(job);
+  if (duplicate_payload != NULL)
+    lc_source_close(duplicate_payload);
+  if (payload_sink != NULL)
+    lc_sink_close(payload_sink);
+  if (job != NULL)
+    lc_outbox_job_close(job);
   lc_workflow_close(workflow);
   lc_client_close(client);
   lc_error_cleanup(&error);
@@ -4735,10 +4746,11 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   int rc;
 
   (void)state;
-  endpoint = env_or_default("LOCKDC_E2E_DISK_ENDPOINT",
-                            "https://localhost:19441");
-  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                               "./devenv/volumes/lockd-disk-a-config/client.pem");
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
   require_file_or_skip(bundle_path);
   make_unique_name("workflow-retry", effect_key, sizeof(effect_key));
   client = NULL;
@@ -4764,7 +4776,7 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   assert_lc_ok(rc, &error);
   lc_outbox_receipt_init(&receipt);
   rc = lc_workflow_append_outbox(workflow, &entry, payload, &transaction,
-                                  &receipt, &error);
+                                 &receipt, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(transaction);
   rc = lc_workflow_transaction_commit(transaction, &error);
@@ -4801,7 +4813,7 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   rc = lc_sink_to_memory(&export_sink, &error);
   assert_lc_ok(rc, &error);
   rc = lc_workflow_export_dead_letters(workflow, &export_options, export_sink,
-                                        &export_result, &error);
+                                       &export_result, &error);
   assert_lc_ok(rc, &error);
   assert_int_equal(export_result.exported, 1U);
   exported_bytes = NULL;
@@ -4826,7 +4838,7 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   rc = lc_sink_to_memory(&export_sink, &error);
   assert_lc_ok(rc, &error);
   rc = lc_workflow_export_dead_letters(workflow, &export_options, export_sink,
-                                        &export_result, &error);
+                                       &export_result, &error);
   assert_lc_ok(rc, &error);
   assert_int_equal(export_result.exported, 0U);
   lc_sink_close(export_sink);
@@ -4863,18 +4875,24 @@ static void test_disk_workflow_startup_recovery(void **state) {
   int rc;
 
   (void)state;
-  endpoint = env_or_default("LOCKDC_E2E_DISK_ENDPOINT",
-                            "https://localhost:19441");
-  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                               "./devenv/volumes/lockd-disk-a-config/client.pem");
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
   require_file_or_skip(bundle_path);
   make_unique_name("workflow-recovery", suffix, sizeof(suffix));
   /* This fixture sorts before digest-shaped production keys so a bounded
    * recovery page proves discovery without claiming unrelated durable work in
    * the shared compose-test namespace. */
-  assert_true(snprintf(key, sizeof(key), "__lockdc_io/v1/outbox/-%s", suffix) > 0);
-  client = NULL; workflow = NULL; lease = NULL; state_source = NULL;
-  payload_source = NULL; job = NULL;
+  assert_true(snprintf(key, sizeof(key), "__lockdc_io/v1/outbox/-%s", suffix) >
+              0);
+  client = NULL;
+  workflow = NULL;
+  lease = NULL;
+  state_source = NULL;
+  payload_source = NULL;
+  job = NULL;
   lc_error_init(&error);
   open_tcp_client(endpoint, bundle_path, &client, &error);
   lc_acquire_req_init(&acquire);
@@ -4884,15 +4902,14 @@ static void test_disk_workflow_startup_recovery(void **state) {
   acquire.ttl_seconds = 30L;
   rc = lc_acquire(client, &acquire, &lease, &error);
   assert_lc_ok(rc, &error);
-  rc = lc_source_from_memory(state_json, sizeof(state_json) - 1U,
-                             &state_source, &error);
+  rc = lc_source_from_memory(state_json, sizeof(state_json) - 1U, &state_source,
+                             &error);
   assert_lc_ok(rc, &error);
   rc = lc_lease_update(lease, state_source, NULL, &error);
   assert_lc_ok(rc, &error);
   lc_source_close(state_source);
   state_source = NULL;
-  rc = lc_source_from_memory("recovery-payload", 16U, &payload_source,
-                             &error);
+  rc = lc_source_from_memory("recovery-payload", 16U, &payload_source, &error);
   assert_lc_ok(rc, &error);
   lc_attach_req_init(&attach);
   attach.name = "payload";
@@ -4925,7 +4942,8 @@ static void test_disk_workflow_startup_recovery(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_disk_workflow_competing_dispatchers_deliver_once(void **state) {
+static void
+test_disk_workflow_competing_dispatchers_deliver_once(void **state) {
   static const char state_json[] =
       "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"competing-op\","
       "\"effect_id\":\"competing-effect\",\"effect_key\":\"competing-key\","
@@ -4945,15 +4963,26 @@ static void test_disk_workflow_competing_dispatchers_deliver_once(void **state) 
   int rc, first_got, second_got;
 
   (void)state;
-  endpoint = env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
-  bundle_path = env_or_default("LOCKDC_E2E_DISK_BUNDLE",
-                               "./devenv/volumes/lockd-disk-a-config/client.pem");
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
   require_file_or_skip(bundle_path);
   make_unique_name("workflow-competing", suffix, sizeof(suffix));
-  assert_true(snprintf(key, sizeof(key), "__lockdc_io/v1/outbox/-%s", suffix) > 0);
-  seed = NULL; first_client = NULL; second_client = NULL; first = NULL;
-  second = NULL; lease = NULL; state_source = NULL; first_job = NULL;
-  second_job = NULL; first_got = 0; second_got = 0;
+  assert_true(snprintf(key, sizeof(key), "__lockdc_io/v1/outbox/-%s", suffix) >
+              0);
+  seed = NULL;
+  first_client = NULL;
+  second_client = NULL;
+  first = NULL;
+  second = NULL;
+  lease = NULL;
+  state_source = NULL;
+  first_job = NULL;
+  second_job = NULL;
+  first_got = 0;
+  second_got = 0;
   lc_error_init(&error);
   open_tcp_client(endpoint, bundle_path, &seed, &error);
   lc_acquire_req_init(&acquire);
@@ -4963,7 +4992,8 @@ static void test_disk_workflow_competing_dispatchers_deliver_once(void **state) 
   acquire.ttl_seconds = 30L;
   rc = lc_acquire(seed, &acquire, &lease, &error);
   assert_lc_ok(rc, &error);
-  rc = lc_source_from_memory(state_json, sizeof(state_json) - 1U, &state_source, &error);
+  rc = lc_source_from_memory(state_json, sizeof(state_json) - 1U, &state_source,
+                             &error);
   assert_lc_ok(rc, &error);
   rc = lc_lease_update(lease, state_source, NULL, &error);
   assert_lc_ok(rc, &error);

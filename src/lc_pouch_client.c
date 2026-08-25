@@ -379,6 +379,7 @@ typedef struct lc_pouch_txn_guard {
   int fd;
   pthread_mutex_t *mutex;
   int mutex_locked;
+  lc_pouch_state_shared_mutation_guard *shared_mutation;
 } lc_pouch_txn_guard;
 
 typedef struct lc_pouch_implicit_txn_leader {
@@ -10425,10 +10426,9 @@ static char *lc_pouch_txn_key(const char *txn_id, lc_error *error) {
 }
 
 /* The endpoint-minted XID is also the implicit transaction admission key.
- * A root-local file lock coordinates processes and its in-process companion
- * mutex coordinates threads: fcntl record locks alone are process-scoped.
- * The guard gives joins and terminal releases one linearization point without
- * nesting Pouch state locks (which is unsafe for shared roots). */
+ * In shared mode the root durable-mutation guard is acquired first, then this
+ * root-local transaction lock coordinates joins and terminal releases. The
+ * ordering prevents a transaction guard/root cycle across processes. */
 static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
                                       const char *txn_id,
                                       lc_pouch_txn_guard *guard,
@@ -10440,6 +10440,7 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
   size_t stripe;
   const unsigned char *cursor;
   int pthread_rc;
+  int rc;
 
   if (client == NULL || client->pouch == NULL || txn_id == NULL ||
       txn_id[0] == '\0' || guard == NULL) {
@@ -10451,15 +10452,22 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
   guard->fd = -1;
   guard->mutex = NULL;
   guard->mutex_locked = 0;
+  guard->shared_mutation = NULL;
+  rc = lc_pouch_state_shared_mutation_enter(client->pouch,
+                                            &guard->shared_mutation, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   hash = ((uint64_t)0xcbf29ce4UL << 32U) | (uint64_t)0x84222325UL;
   for (cursor = (const unsigned char *)txn_id; *cursor != '\0'; ++cursor) {
     hash ^= (uint64_t)*cursor;
     hash *= ((uint64_t)0x00000100UL << 32U) | (uint64_t)0x000001b3UL;
   }
   stripe = (size_t)(hash % LC_POUCH_TXN_GUARD_STRIPES);
-  pthread_rc = pthread_once(&lc_pouch_txn_guard_once,
-                            lc_pouch_txn_guard_mutexes_init);
+  pthread_rc =
+      pthread_once(&lc_pouch_txn_guard_once, lc_pouch_txn_guard_mutexes_init);
   if (pthread_rc != 0) {
+    lc_pouch_state_shared_mutation_leave(&guard->shared_mutation);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to initialize pouch transaction guard",
                         strerror(pthread_rc), NULL, "pouch");
@@ -10468,6 +10476,7 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
   pthread_rc = pthread_mutex_lock(guard->mutex);
   if (pthread_rc != 0) {
     guard->mutex = NULL;
+    lc_pouch_state_shared_mutation_leave(&guard->shared_mutation);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to lock pouch transaction guard",
                         strerror(pthread_rc), NULL, "pouch");
@@ -10478,9 +10487,10 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
     (void)pthread_mutex_unlock(guard->mutex);
     guard->mutex = NULL;
     guard->mutex_locked = 0;
+    lc_pouch_state_shared_mutation_leave(&guard->shared_mutation);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "failed to format pouch transaction guard", NULL,
-                        NULL, "pouch");
+                        "failed to format pouch transaction guard", NULL, NULL,
+                        "pouch");
   }
   path = lc_pouch_path_join(&client->pouch->allocator, client->pouch->root_path,
                             leaf);
@@ -10488,6 +10498,7 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
     (void)pthread_mutex_unlock(guard->mutex);
     guard->mutex = NULL;
     guard->mutex_locked = 0;
+    lc_pouch_state_shared_mutation_leave(&guard->shared_mutation);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch transaction guard path", NULL,
                         NULL, "pouch");
@@ -10498,6 +10509,7 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
     (void)pthread_mutex_unlock(guard->mutex);
     guard->mutex = NULL;
     guard->mutex_locked = 0;
+    lc_pouch_state_shared_mutation_leave(&guard->shared_mutation);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to open pouch transaction guard",
                         strerror(errno), NULL, "pouch");
@@ -10514,6 +10526,7 @@ static int lc_pouch_txn_guard_acquire(lc_client_handle *client,
     (void)pthread_mutex_unlock(guard->mutex);
     guard->mutex = NULL;
     guard->mutex_locked = 0;
+    lc_pouch_state_shared_mutation_leave(&guard->shared_mutation);
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to lock pouch transaction guard",
                         strerror(errno), NULL, "pouch");
@@ -10540,6 +10553,7 @@ static void lc_pouch_txn_guard_release(lc_pouch_txn_guard *guard) {
   }
   guard->mutex = NULL;
   guard->mutex_locked = 0;
+  lc_pouch_state_shared_mutation_leave(&guard->shared_mutation);
 }
 
 static int lc_pouch_txn_record_exists(lc_client_handle *client,
@@ -10571,8 +10585,8 @@ static int lc_pouch_txn_record_exists(lc_client_handle *client,
   return rc;
 }
 
-static void lc_pouch_implicit_txn_leader_cleanup(
-    lc_pouch_implicit_txn_leader *leader) {
+static void
+lc_pouch_implicit_txn_leader_cleanup(lc_pouch_implicit_txn_leader *leader) {
   if (leader == NULL) {
     return;
   }
@@ -10582,8 +10596,9 @@ static void lc_pouch_implicit_txn_leader_cleanup(
   memset(leader, 0, sizeof(*leader));
 }
 
-static int lc_pouch_implicit_txn_leader_visit(
-    const lc_pouch_state_visit_entry *entry, void *context, lc_error *error) {
+static int
+lc_pouch_implicit_txn_leader_visit(const lc_pouch_state_visit_entry *entry,
+                                   void *context, lc_error *error) {
   lc_pouch_implicit_txn_leader *leader;
   lc_pouch_lease_record record;
   int rc;
@@ -10625,9 +10640,10 @@ static int lc_pouch_implicit_txn_leader_visit(
   return rc;
 }
 
-static int lc_pouch_find_implicit_txn_leader(
-    lc_client_handle *client, const char *txn_id,
-    lc_pouch_implicit_txn_leader *leader, lc_error *error) {
+static int
+lc_pouch_find_implicit_txn_leader(lc_client_handle *client, const char *txn_id,
+                                  lc_pouch_implicit_txn_leader *leader,
+                                  lc_error *error) {
   char *namespaces_path;
   DIR *dir;
   struct dirent *entry;
@@ -10656,11 +10672,10 @@ static int lc_pouch_find_implicit_txn_leader(
   dir = opendir(namespaces_path);
   lc_free_with_allocator(&client->pouch->allocator, namespaces_path);
   if (dir == NULL) {
-    return errno == ENOENT
-               ? LC_OK
-               : lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                              "failed to scan pouch namespaces", strerror(errno),
-                              NULL, "pouch");
+    return errno == ENOENT ? LC_OK
+                           : lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                                          "failed to scan pouch namespaces",
+                                          strerror(errno), NULL, "pouch");
   }
   rc = LC_OK;
   while (rc == LC_OK) {
@@ -10684,15 +10699,15 @@ static int lc_pouch_find_implicit_txn_leader(
     if (namespace_name == NULL) {
       continue;
     }
-    rc = lc_pouch_state_visit(client->pouch, namespace_name,
-                              lc_pouch_implicit_txn_leader_visit, leader,
-                              error);
+    rc =
+        lc_pouch_state_visit(client->pouch, namespace_name,
+                             lc_pouch_implicit_txn_leader_visit, leader, error);
     lc_free_with_allocator(&client->pouch->allocator, namespace_name);
   }
   if (closedir(dir) != 0 && rc == LC_OK) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                      "failed to close pouch namespaces", strerror(errno),
-                      NULL, "pouch");
+                      "failed to close pouch namespaces", strerror(errno), NULL,
+                      "pouch");
   }
   if (rc != LC_OK) {
     lc_pouch_implicit_txn_leader_cleanup(leader);
@@ -10712,10 +10727,11 @@ static int lc_pouch_validate_implicit_txn_leader(
   int rc;
 
   if (client == NULL || leader == NULL || leader->namespace_name == NULL ||
-      leader->key == NULL || leader->lease_id == NULL || leader->txn_id == NULL) {
+      leader->key == NULL || leader->lease_id == NULL ||
+      leader->txn_id == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch implicit transaction leader is incomplete",
-                        NULL, NULL, "pouch");
+                        "pouch implicit transaction leader is incomplete", NULL,
+                        NULL, "pouch");
   }
   memset(&record, 0, sizeof(record));
   now = 0L;
@@ -10724,12 +10740,12 @@ static int lc_pouch_validate_implicit_txn_leader(
   if (rc == LC_OK) {
     rc = lc_pouch_now_unix(&now, error);
   }
-  if (rc == LC_OK &&
-      (!record.found || record.txn_explicit || record.lease_id == NULL ||
-       record.txn_id == NULL || strcmp(record.lease_id, leader->lease_id) != 0 ||
-       strcmp(record.txn_id, leader->txn_id) != 0 ||
-       record.fencing_token != leader->fencing_token ||
-       record.expires_at_unix <= now)) {
+  if (rc == LC_OK && (!record.found || record.txn_explicit ||
+                      record.lease_id == NULL || record.txn_id == NULL ||
+                      strcmp(record.lease_id, leader->lease_id) != 0 ||
+                      strcmp(record.txn_id, leader->txn_id) != 0 ||
+                      record.fencing_token != leader->fencing_token ||
+                      record.expires_at_unix <= now)) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch implicit transaction leader is no longer active",
                       NULL, NULL, "pouch");
@@ -12832,9 +12848,8 @@ int lc_pouch_client_load_method(lc_client *self, const char *key,
 
 int lc_pouch_client_load_in_namespace(lc_client *self,
                                       const char *namespace_name,
-                                      const char *key,
-                                      const lonejson_map *map, void *dst,
-                                      const lc_get_opts *opts,
+                                      const char *key, const lonejson_map *map,
+                                      void *dst, const lc_get_opts *opts,
                                       lc_get_res *out, lc_error *error) {
   lc_client_handle *client;
 
@@ -13522,10 +13537,9 @@ int lc_pouch_client_release_method(lc_client *self, const lc_release_op *req,
     }
     lc_pouch_lease_record_cleanup(&lease_record);
     if (rc == LC_OK && txn_record_exists && lease_matches) {
-      rc = lc_pouch_txn_record_vote(client, req->lease.txn_id, namespace_name,
-                                    req->lease.key,
-                                    req->rollback || txn_expired,
-                                    &decision_ready, error);
+      rc = lc_pouch_txn_record_vote(
+          client, req->lease.txn_id, namespace_name, req->lease.key,
+          req->rollback || txn_expired, &decision_ready, error);
     }
     if (rc == LC_OK && txn_record_exists && decision_ready) {
       replay_request.txn_id = req->lease.txn_id;

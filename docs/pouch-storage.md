@@ -791,24 +791,21 @@ the public API or durable format.
 - Shared-root capability is an explicit post-cutover contract:
   callers that intentionally place two or more active Pouch instances on one
   root will select shared-writer mode. Each process retains its local
-  projection and serializes normal mutations through a short cross-process
-  append authority. At each acquired authority window it tails only the
-  committed delta after its cursor, appends and publishes the record family,
-  performs the requested durability work, advances its cursor, and releases
-  authority. A healthy writer does not
+  projection, but every cache refresh and durable mutation acquires one
+  root-scoped mutation guard before recovery, delta tail, append, publication,
+  and requested durability. It covers every participating namespace, including
+  `.txns`. A healthy writer does not
   reread or revalidate bytes at or before that verified cursor on each normal
   mutation; recovery, manifest lifecycle invalidation, or a new projection
-  performs that historical validation. Exact-key locking, namespace sequence
-  allocation, the local mode epoch, and maintenance fencing remain required. The
-  current implementation coalesces independent metadata-only mutations and
-  bounded SDK-memory body mutations from one local shared writer into append
-  batches while every request retains its exact key lock and commit group. The
-  body worker holds one physical append authority window for its batch, then
-  invokes the normal finalized-record path for each request; it neither copies
-  nor materializes a source. Callback, file, fd, and oversized-memory bodies
-  keep one authority window per operation. Compound staged decisions already
-  encode their 3-record promotion or 2-record discard group through one binary
-  append batch; they are never mixed with unrelated mutations. A shared handle
+  performs that historical validation. Shared mode deliberately combines no
+  independent namespace, key, or append file locks beneath the root guard:
+  that removes cross-process lock-order cycles. It is a correctness-first
+  serialization mode; default exclusive mode keeps its concurrent hot path.
+  Namespace sequence allocation, the local mode epoch, and maintenance fencing
+  remain required. Compound staged decisions retain their atomic 3-record
+  promotion or 2-record discard group while holding the same guard. Transaction
+  coordination acquires that guard before its per-XID linearization guard. A
+  shared handle
   retains a root-wide process read lock for its lifetime; exclusive mode
   requires the conflicting write lock. A live shared writer therefore cannot
   be overtaken, and a crashed writer loses its kernel lock before
@@ -1090,8 +1087,8 @@ root/
         seg-<20-digit-u64-id>.log          # rolling active or sealed
       snapshots/
         snapshot-<20-digit-u64-id>.log
-      sequence                              # shared-root advisory allocator
-      sequence.lock                         # shared-root allocator fence
+      sequence                              # durable advisory allocator
+      sequence.lock                         # exclusive cold allocator fence
       write.lock
       locks/
       index/
@@ -1276,7 +1273,8 @@ Required behavior:
   headers are written. Default exclusive mode reserves from its resident
   projection high-water mark and does not read, write, or lock the advisory
   `sequence` file on healthy mutations. Explicit shared-root mode reserves
-  under `sequence.lock` so independent processes cannot reuse a sequence. A
+  under the root durable-mutation guard, so independent processes cannot reuse
+  a sequence. A
   normal exclusive close writes a durable per-namespace clean checkpoint after
   pending append syncs. A later cold index read may use that checkpoint instead
   of replaying the namespace. The first subsequent mutation atomically marks
@@ -1292,18 +1290,17 @@ Required behavior:
   headers, keys, and metadata total at most 256 KiB may use one bounded
   contiguous append buffer; it never contains document, queue-payload, or
   attachment bytes. Larger metadata batches retain the vectored append path;
-- in explicit shared-root mode, acquire physical append authority once for a
-  bounded batch, replay only the committed delta after the writer cursor, then
-  append/publish the batch and release authority. Discovery of the first
-  physical file for the already-selected active leaf is a cursor-preserving
-  transition, not a historic replay. A changed writer epoch, active segment,
-  manifest lifecycle state, invalid cursor, or any other segment topology
-  change triggers bounded refresh or recovery rather than a stale append;
-- shared bounded-memory body writes retain the caller's exact-key lock and
-  commit group while a namespace worker owns one physical append-authority
-  window for the bounded queue. The worker calls the normal complete-record
-  path for every request, so finalization, index reservation, cache
-  publication, and source consumption remain the direct-write behavior;
+- in explicit shared-root mode, take one root-scoped durable-mutation guard
+  before reading a projection or mutating any namespace. That guard serializes
+  the complete recovery/read-or-write/append/publication window across
+  processes, including `.txns`; shared mode must not combine independent
+  namespace, key, or append file locks with that root guard because they have
+  no global acquisition order. This is deliberately a correctness-first
+  deployment mode, while the default single-writer mode retains per-key and
+  append concurrency;
+- shared bounded-memory body writes retain the caller's commit group under the
+  root guard and use the normal complete-record path for finalization, index
+  reservation, cache publication, and source consumption;
 - staged promotion and discard encode their complete decision group into one
   binary append batch. They retain one authority window and are not coalesced
   with unrelated body or metadata requests, preserving transaction order;
@@ -1367,7 +1364,8 @@ Required behavior:
 - treat an active pending or incomplete tail, including a truncated encrypted
   payload frame, as an unpublished crash tail: readers stop before it and a
   later appender repairs only the unseen suffix after its verified cursor while
-  holding the physical append gate. Sealed segments and snapshots do not
+  holding the shared root mutation guard (or the exclusive append gate). Sealed
+  segments and snapshots do not
   receive this recovery treatment and reject truncation or authentication
   failure;
 - make refs visible in projections after finalized-record publication and, when
@@ -1452,8 +1450,8 @@ use the normal validated packed-artifact decoder. No cache retains source JSON
 or full document bodies.
 
 Exclusive roots serialize derived artifact publication with a root-local flush
-mutex. Shared roots instead hold the namespace's durable cross-process write
-authority from the high-water sequence sample through artifact and manifest
+mutex. Shared roots instead hold the root durable-mutation guard from the
+high-water sequence sample through artifact and manifest
 publication. This serializes competing Pouch handles and processes, so their
 read-modify-write manifest updates and derived artifact writes cannot race.
 The indexer's queue is local scheduling state only and never participates in
@@ -1522,10 +1520,10 @@ Required behavior:
   before an ordinary exclusive operation;
 - exclusive mode reuses its projection and verified active append offset until
   rotation, maintenance, handoff, close/abort, or I/O failure;
-- shared-root mode validates its writer epoch/cursor under append authority and
-  replays only bytes beyond its verified committed tail offset. The initial
-  directory discovery of that known active leaf is treated as such a tail
-  transition; it does not revalidate the pre-cursor history;
+- shared-root mode validates and refreshes its projection under the root
+  durable-mutation guard. It replays only bytes beyond its verified committed
+  tail offset; the initial directory discovery of that known active leaf is a
+  cursor-preserving tail transition rather than a historic replay;
 - order installed snapshot first, then live non-obsolete segments;
 - apply state/object records by public generation so stale payload writes
   cannot resurrect older state; use the durable namespace index sequence as
@@ -1536,7 +1534,8 @@ Required behavior:
   staged-link, delete, and decision record;
 - stop at an incomplete, pending, or truncated tail in the manifest's active
   rolling segment, then repair it once during writer acquisition/recovery
-  while holding append authority; reject the same condition in a sealed
+  while holding the root mutation guard in shared mode or append authority in
+  exclusive mode; reject the same condition in a sealed
   non-active segment or installed snapshot as corruption;
 - never apply a partial record or bad-CRC payload;
 - validate link targets against manifested segment/snapshot state before

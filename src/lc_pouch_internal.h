@@ -314,6 +314,18 @@ char *lc_pouch_state_test_crypto_context(const lc_allocator *allocator,
 #endif
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);
+typedef struct lc_pouch_state_shared_mutation_guard
+    lc_pouch_state_shared_mutation_guard;
+/**
+ * Enters the shared-root durable mutation authority. Transaction coordinators
+ * use this before their own per-transaction guard so nested state operations
+ * retain one global lock order. It is a no-op in exclusive mode.
+ */
+int lc_pouch_state_shared_mutation_enter(
+    lc_pouch *pouch, lc_pouch_state_shared_mutation_guard **out,
+    lc_error *error);
+void lc_pouch_state_shared_mutation_leave(
+    lc_pouch_state_shared_mutation_guard **guard);
 /** Writes best-effort exclusive-root clean checkpoints after all append fsyncs.
  * Missing or invalid checkpoints only require a cold replay; they never alter
  * durable record ordering. */
