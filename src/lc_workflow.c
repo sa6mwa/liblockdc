@@ -1668,7 +1668,9 @@ static int lc_workflow_reconcile_pending(lc_workflow_handle *workflow,
         lc_workflow_test_after_reconcile_query_context);
   }
 #endif
-  lc_client_free(workflow->client, workflow->recovery_cursor);
+  /* Query cursors are public-result fields allocated in the libc domain; keep
+   * their ownership consistent with lc_query_res_cleanup(). */
+  free(workflow->recovery_cursor);
   workflow->recovery_cursor = cursor;
   pthread_mutex_lock(&workflow->notification_mutex);
   /* The dispatcher clears the request before starting this sweep. Keep an
@@ -3345,7 +3347,7 @@ static void lc_workflow_destroy(lc_workflow_handle *workflow) {
     lc_client_free(client, workflow->delayed_notifications[i].key);
   }
   lc_client_free(client, workflow->delayed_notifications);
-  lc_client_free(client, workflow->recovery_cursor);
+  free(workflow->recovery_cursor);
   lc_client_free(client, workflow->last_error);
   if (workflow->notification_cond_initialized)
     pthread_cond_destroy(&workflow->notification_cond);

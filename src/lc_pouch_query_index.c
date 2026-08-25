@@ -6325,8 +6325,8 @@ lc_pouch_query_index_key_hex_set_remove(const lc_allocator *allocator,
 
 static int lc_pouch_query_index_encode_delete_keys(
     lc_pouch_query_index_incremental_change *changes, size_t change_count,
-    lc_pouch_query_index_text *out, unsigned long *delete_count,
-    unsigned long *delete_hash, lc_error *error) {
+    lc_pouch_query_index_text *out, const lc_allocator *allocator,
+    unsigned long *delete_count, unsigned long *delete_hash, lc_error *error) {
   size_t index;
   int rc;
 
@@ -6338,6 +6338,7 @@ static int lc_pouch_query_index_encode_delete_keys(
   *delete_count = 0UL;
   *delete_hash = lc_pouch_query_index_hash_init();
   memset(out, 0, sizeof(*out));
+  out->allocator = allocator;
   rc = LC_OK;
   for (index = 0U; rc == LC_OK && index < change_count; ++index) {
     if (changes[index].found || changes[index].key_hex == NULL) {
@@ -6360,7 +6361,8 @@ static int lc_pouch_query_index_encode_delete_keys(
 
 static int lc_pouch_query_index_encode_delete_set(
     const lc_pouch_query_index_key_hex_set *set, lc_pouch_query_index_text *out,
-    unsigned long *delete_count, unsigned long *delete_hash, lc_error *error) {
+    const lc_allocator *allocator, unsigned long *delete_count,
+    unsigned long *delete_hash, lc_error *error) {
   size_t index;
   int rc;
 
@@ -6372,6 +6374,7 @@ static int lc_pouch_query_index_encode_delete_set(
   *delete_count = 0UL;
   *delete_hash = lc_pouch_query_index_hash_init();
   memset(out, 0, sizeof(*out));
+  out->allocator = allocator;
   rc = LC_OK;
   for (index = 0U; rc == LC_OK && set != NULL && index < set->count; ++index) {
     rc = lc_pouch_query_index_text_append_cstr(out, set->items[index], NULL,
@@ -12996,11 +12999,12 @@ extracted:
   }
   if (rc == LC_OK && pending_taken) {
     rc = lc_pouch_query_index_encode_delete_set(
-        &pending_deletes, &deletes, &delete_count, &delete_hash, error);
+        &pending_deletes, &deletes, &pouch->allocator, &delete_count,
+        &delete_hash, error);
   } else if (rc == LC_OK) {
     rc = lc_pouch_query_index_encode_delete_keys(
-        incremental.changes, incremental.change_count, &deletes, &delete_count,
-        &delete_hash, error);
+        incremental.changes, incremental.change_count, &deletes,
+        &pouch->allocator, &delete_count, &delete_hash, error);
   }
   if (rc != LC_OK) {
     goto cleanup;

@@ -9,7 +9,9 @@
 #include "lc_api_internal.h"
 #include "lc_pouch_internal.h"
 
+#include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -64,6 +66,118 @@ static long workflow_elapsed_milliseconds(const struct timespec *started,
 typedef struct workflow_query_count {
   unsigned long count;
 } workflow_query_count;
+
+typedef struct workflow_tracked_allocation {
+  void *pointer;
+  struct workflow_tracked_allocation *next;
+} workflow_tracked_allocation;
+
+typedef struct workflow_tracking_allocator {
+  pthread_mutex_t mutex;
+  workflow_tracked_allocation *allocations;
+  size_t foreign_free_calls;
+  size_t foreign_realloc_calls;
+} workflow_tracking_allocator;
+
+static void
+workflow_tracking_allocator_init(workflow_tracking_allocator *allocator) {
+  memset(allocator, 0, sizeof(*allocator));
+  assert_int_equal(pthread_mutex_init(&allocator->mutex, NULL), 0);
+}
+
+static void
+workflow_tracking_allocator_destroy(workflow_tracking_allocator *allocator) {
+  workflow_tracked_allocation *allocation;
+
+  assert_int_equal(pthread_mutex_lock(&allocator->mutex), 0);
+  allocation = allocator->allocations;
+  allocator->allocations = NULL;
+  assert_int_equal(pthread_mutex_unlock(&allocator->mutex), 0);
+  assert_null(allocation);
+  assert_int_equal(allocator->foreign_free_calls, 0U);
+  assert_int_equal(allocator->foreign_realloc_calls, 0U);
+  pthread_mutex_destroy(&allocator->mutex);
+}
+
+static void *workflow_tracking_malloc(void *context, size_t size) {
+  workflow_tracking_allocator *allocator =
+      (workflow_tracking_allocator *)context;
+  workflow_tracked_allocation *allocation;
+  void *pointer;
+
+  pointer = malloc(size == 0U ? 1U : size);
+  if (pointer == NULL)
+    return NULL;
+  allocation = (workflow_tracked_allocation *)malloc(sizeof(*allocation));
+  if (allocation == NULL) {
+    free(pointer);
+    return NULL;
+  }
+  allocation->pointer = pointer;
+  assert_int_equal(pthread_mutex_lock(&allocator->mutex), 0);
+  allocation->next = allocator->allocations;
+  allocator->allocations = allocation;
+  assert_int_equal(pthread_mutex_unlock(&allocator->mutex), 0);
+  return pointer;
+}
+
+static void *workflow_tracking_realloc(void *context, void *pointer,
+                                       size_t size) {
+  workflow_tracking_allocator *allocator =
+      (workflow_tracking_allocator *)context;
+  workflow_tracked_allocation **cursor;
+  workflow_tracked_allocation *allocation;
+  void *resized;
+
+  if (pointer == NULL)
+    return workflow_tracking_malloc(context, size);
+  assert_int_equal(pthread_mutex_lock(&allocator->mutex), 0);
+  cursor = &allocator->allocations;
+  while (*cursor != NULL && (*cursor)->pointer != pointer)
+    cursor = &(*cursor)->next;
+  if (*cursor == NULL) {
+    ++allocator->foreign_realloc_calls;
+    assert_int_equal(pthread_mutex_unlock(&allocator->mutex), 0);
+    return NULL;
+  }
+  allocation = *cursor;
+  if (size == 0U) {
+    *cursor = allocation->next;
+    assert_int_equal(pthread_mutex_unlock(&allocator->mutex), 0);
+    free(allocation);
+    free(pointer);
+    return NULL;
+  }
+  resized = realloc(pointer, size);
+  if (resized != NULL)
+    allocation->pointer = resized;
+  assert_int_equal(pthread_mutex_unlock(&allocator->mutex), 0);
+  return resized;
+}
+
+static void workflow_tracking_free(void *context, void *pointer) {
+  workflow_tracking_allocator *allocator =
+      (workflow_tracking_allocator *)context;
+  workflow_tracked_allocation **cursor;
+  workflow_tracked_allocation *allocation;
+
+  if (pointer == NULL)
+    return;
+  assert_int_equal(pthread_mutex_lock(&allocator->mutex), 0);
+  cursor = &allocator->allocations;
+  while (*cursor != NULL && (*cursor)->pointer != pointer)
+    cursor = &(*cursor)->next;
+  if (*cursor == NULL) {
+    ++allocator->foreign_free_calls;
+    assert_int_equal(pthread_mutex_unlock(&allocator->mutex), 0);
+    return;
+  }
+  allocation = *cursor;
+  *cursor = allocation->next;
+  assert_int_equal(pthread_mutex_unlock(&allocator->mutex), 0);
+  free(allocation);
+  free(pointer);
+}
 
 typedef struct workflow_reconcile_overflow_hook {
   lc_workflow *workflow;
@@ -2080,6 +2194,71 @@ static void test_pouch_reconciliation_pages_large_outbox(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void
+test_pouch_reconciliation_preserves_allocator_domains(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  workflow_tracking_allocator allocator;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  lc_error error;
+  size_t index;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "reconcile-cursor-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  for (index = 0U; index < 3U; ++index) {
+    char key[128];
+
+    assert_true(snprintf(key, sizeof(key), "__lockdc_io/v1/outbox/cursor-%03lu",
+                         (unsigned long)index) > 0);
+    seed_recovery_outbox(client, "workflow-reconcile-cursor", key, &error);
+  }
+  lc_client_close(client);
+  workflow_tracking_allocator_init(&allocator);
+  client_config.allocator.malloc_fn = workflow_tracking_malloc;
+  client_config.allocator.realloc_fn = workflow_tracking_realloc;
+  client_config.allocator.free_fn = workflow_tracking_free;
+  client_config.allocator.context = &allocator;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-reconcile-cursor";
+  workflow_config.owner = "workflow-reconcile-cursor-test";
+  workflow_config.notification_capacity = 1U;
+  workflow = NULL;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  for (index = 0U; index < 3U; ++index) {
+    job = NULL;
+    assert_int_equal(lc_workflow_next(workflow, 30000L, &job, &error), LC_OK);
+    assert_non_null(job);
+    assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+    lc_outbox_job_close(job);
+  }
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  workflow_tracking_allocator_destroy(&allocator);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void test_pouch_recovery_prefetch_is_bounded(void **state) {
   char root[256];
   char template_path[256];
@@ -2452,6 +2631,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_clean_reopen_reconciles_durable_index),
       cmocka_unit_test(test_pouch_shared_reopen_reconciles_durable_index),
       cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
+      cmocka_unit_test(test_pouch_reconciliation_preserves_allocator_domains),
       cmocka_unit_test(test_pouch_recovery_prefetch_is_bounded),
       cmocka_unit_test(test_pouch_shared_process_dispatches_once),
       cmocka_unit_test(test_pouch_shared_process_reconciles_each_outbox_once),
