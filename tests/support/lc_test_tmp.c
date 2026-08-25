@@ -162,7 +162,14 @@ static int lc_test_tmp_has_live_owner(const char *path) {
   }
   scanned = fscanf(fp, "%ld", &pid);
   (void)fclose(fp);
-  if (scanned != 1 || pid <= 0L) {
+  /* A sibling process can observe the marker between creation and its first
+   * completed write. Preserve an unreadable or partial marker rather than
+   * deleting a live root during parallel CTest startup. A complete nonpositive
+   * owner remains an explicit stale marker. */
+  if (scanned != 1) {
+    return 1;
+  }
+  if (pid <= 0L) {
     return 0;
   }
   if (pid == (long)getpid()) {

@@ -137,6 +137,15 @@ set_tests_properties(lc_unit_tmp_cleanup_orphan_owner_marker PROPERTIES
   LABELS "unit;local"
   TIMEOUT 15
 )
+add_test(NAME lc_unit_tmp_cleanup_partial_owner_marker
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "LOCKDC_TMP_CLEANUP_MODE=partial-owner-marker"
+    ${lc_unit_tmp_cleanup_probe_command}
+)
+set_tests_properties(lc_unit_tmp_cleanup_partial_owner_marker PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 15
+)
 add_test(NAME lc_unit_tmp_cleanup_unmarked_global_prefix
   COMMAND "${CMAKE_COMMAND}" -E env
     "LOCKDC_TMP_CLEANUP_MODE=unmarked-global-prefix"

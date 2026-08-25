@@ -204,6 +204,40 @@ static int run_orphan_owner_marker_cleanup_probe(void) {
   return 0;
 }
 
+static int run_partial_owner_marker_preserved_probe(void) {
+  char root[] = TMP_AUTO_CLEANUP_PREFIX "partial-owner";
+  char marker[512];
+  FILE *fp;
+  int written;
+
+  lc_test_tmp_cleanup_path(root, TMP_AUTO_CLEANUP_PREFIX);
+  if (mkdir(root, 0700) != 0) {
+    return 60;
+  }
+  written =
+      snprintf(marker, sizeof(marker), "%s/.liblockdc-test-tmp-owner", root);
+  if (written < 0 || (size_t)written >= sizeof(marker)) {
+    lc_test_tmp_cleanup_path(root, TMP_AUTO_CLEANUP_PREFIX);
+    return 61;
+  }
+  fp = fopen(marker, "w");
+  if (fp == NULL) {
+    lc_test_tmp_cleanup_path(root, TMP_AUTO_CLEANUP_PREFIX);
+    return 62;
+  }
+  if (fclose(fp) != 0) {
+    lc_test_tmp_cleanup_path(root, TMP_AUTO_CLEANUP_PREFIX);
+    return 63;
+  }
+  lc_test_tmp_cleanup_stale("/tmp", "liblockdc-unit-tmp-autocleanup-",
+                            TMP_AUTO_CLEANUP_PREFIX);
+  if (!path_exists(root)) {
+    return 64;
+  }
+  lc_test_tmp_cleanup_path(root, TMP_AUTO_CLEANUP_PREFIX);
+  return 0;
+}
+
 static int run_unmarked_global_prefix_preserved_probe(void) {
   char unmarked_root[] = "/tmp/liblockdc-unowned-cleanup-probe";
   char unmarked_child[] = "/tmp/liblockdc-unowned-cleanup-probe/child";
@@ -250,6 +284,9 @@ int main(void) {
   }
   if (mode != NULL && strcmp(mode, "orphan-owner-marker") == 0) {
     return run_orphan_owner_marker_cleanup_probe();
+  }
+  if (mode != NULL && strcmp(mode, "partial-owner-marker") == 0) {
+    return run_partial_owner_marker_preserved_probe();
   }
   if (mode != NULL && strcmp(mode, "unmarked-global-prefix") == 0) {
     return run_unmarked_global_prefix_preserved_probe();
