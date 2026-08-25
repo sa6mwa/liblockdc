@@ -2729,6 +2729,94 @@ static void test_pouch_expired_claim_rejects_stale_terminal(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void
+test_pouch_expired_claim_recovers_and_preserves_attempt_budget(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *first, *second, *unexpected;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_sink *sink;
+  lc_get_res get_result;
+  const void *bytes;
+  size_t length;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "expired-budget-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  seed_recovery_outbox(client, "workflow-expired-budget",
+                       "__lockdc_io/v1/outbox/expired-budget", &error);
+  lc_workflow_config_init(&config);
+  config.namespace_name = "workflow-expired-budget";
+  config.owner = "workflow-expired-budget";
+  config.claim_ttl_seconds = 1L;
+  config.max_attempts = 2;
+  workflow = NULL;
+  assert_int_equal(lc_client_new_workflow(client, &config, &workflow, &error),
+                   LC_OK);
+
+  first = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 5000L, &first, &error), LC_OK);
+  assert_non_null(first);
+  assert_int_equal(first->attempt, 1);
+  /* Closing an unfinished job must wake the local dispatcher at lease expiry;
+   * it is not dependent on a restart or an opt-in recovery poll. */
+  lc_outbox_job_close(first);
+
+  second = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 5000L, &second, &error), LC_OK);
+  assert_non_null(second);
+  assert_int_equal(second->attempt, 2);
+  lc_outbox_job_close(second);
+
+  /* A second abandoned claim consumes the final durable attempt. Expiry must
+   * dead-letter it rather than reset the counter and hand out attempt three. */
+  unexpected = (lc_outbox_job *)1;
+  assert_int_equal(lc_workflow_next(workflow, 5000L, &unexpected, &error),
+                   LC_OK);
+  assert_null(unexpected);
+
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = config.namespace_name;
+  acquire.key = "__lockdc_io/v1/outbox/expired-budget";
+  acquire.owner = "workflow-expired-budget-inspect";
+  acquire.ttl_seconds = 30L;
+  lease = NULL;
+  assert_int_equal(lc_acquire(client, &acquire, &lease, &error), LC_OK);
+  sink = NULL;
+  memset(&get_result, 0, sizeof(get_result));
+  assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+  assert_int_equal(lc_lease_get(lease, sink, NULL, &get_result, &error), LC_OK);
+  bytes = NULL;
+  length = 0U;
+  assert_int_equal(lc_sink_memory_bytes(sink, &bytes, &length, &error), LC_OK);
+  assert_true(workflow_bytes_contains(bytes, length,
+                                      "\"dispatch_state\":\"dead_letter\""));
+  assert_true(workflow_bytes_contains(bytes, length, "\"attempt_count\":2"));
+  lc_get_res_cleanup(&get_result);
+  lc_sink_close(sink);
+  assert_int_equal(lc_lease_release(lease, NULL, &error), LC_OK);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(
@@ -2757,6 +2845,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_shared_process_dispatches_once),
       cmocka_unit_test(test_pouch_shared_process_reconciles_each_outbox_once),
       cmocka_unit_test(test_pouch_expired_claim_rejects_stale_terminal),
+      cmocka_unit_test(
+          test_pouch_expired_claim_recovers_and_preserves_attempt_budget),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

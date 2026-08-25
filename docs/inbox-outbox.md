@@ -606,6 +606,7 @@ It has mutable delivery fields:
 ```text
 dispatch_state       pending | claimed | retry_wait | completed | dead_letter
 attempt_count
+claim_expires_at_unix
 not_before_unix
 last_error
 delivery_reference
@@ -910,12 +911,22 @@ reread and validates state, timing, and claim generation before handing the
 job out. Completion, retry, and dead-letter transitions require that same
 lease. A stale claim cannot change a later claimant's record.
 
-The active outbox-key lease is not copied into the durable envelope. Pouch
-keeps transaction-bound changes invisible to public reads until every enrolled
-participant has committed. On host loss, recovery rolls an expired undecided
-transaction back, after which a later lease holder can reclaim and recheck the
-durable envelope. Remote lockd is expected to provide the same boundary after
-its implicit-XA enrollment defect is fixed.
+Claim admission is a short, single-key durable transition: it stores
+`claimed`, increments `attempt_count`, and records `claim_expires_at_unix`
+before the job is handed to the host. The component then obtains the active
+outbox-key lease that fences the host's terminal action. The deadline is a
+recovery schedule marker, not a lease credential or fencing token. A live
+worker renews its active lease and moves its local recovery signal forward;
+recovery always reacquires and validates the real lease before changing the
+durable record.
+
+If a worker disappears, expiry recovery turns the durable claim back to
+`pending`; if the durable attempt budget was consumed, it instead transitions
+the record to `dead_letter`. This retains attempts across process loss and
+prevents repeated crashes from bypassing `max_attempts`. The active lease ID,
+owner, and fencing token are never copied into the envelope. Remote lockd is
+expected to provide the same single-key lease boundary after its implicit-XA
+enrollment defect is fixed.
 
 The outbox envelope is also the external-delivery receipt for its one
 `effect_key`; a separate generic external-delivery table is unnecessary.

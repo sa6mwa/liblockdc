@@ -1,4 +1,5 @@
 #include "lc_api_internal.h"
+#include "lc_pouch_internal.h"
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
@@ -54,6 +55,7 @@ typedef struct lc_workflow_outbox_record {
   char *trace_context;
   char *dispatch_state;
   lonejson_int64 attempt_count;
+  lonejson_int64 claim_expires_at_unix;
   lonejson_int64 not_before_unix;
   lonejson_int64 replay_count;
   lonejson_int64 dead_lettered_at_unix;
@@ -124,6 +126,8 @@ static const lonejson_field lc_workflow_outbox_record_fields[] = {
                                     "dispatch_state"),
     LONEJSON_FIELD_I64(lc_workflow_outbox_record, attempt_count,
                        "attempt_count"),
+    LONEJSON_FIELD_I64(lc_workflow_outbox_record, claim_expires_at_unix,
+                       "claim_expires_at_unix"),
     LONEJSON_FIELD_I64(lc_workflow_outbox_record, not_before_unix,
                        "not_before_unix"),
     LONEJSON_FIELD_I64(lc_workflow_outbox_record, replay_count, "replay_count"),
@@ -226,6 +230,8 @@ struct lc_workflow_handle {
   size_t delayed_notification_count;
   char *recovery_cursor;
   int recovery_needed;
+  int recovery_claims_pending;
+  int recovery_scanning_claims;
   lc_unix_seconds next_recovery_unix;
   int notification_mutex_initialized;
   int notification_cond_initialized;
@@ -379,6 +385,78 @@ static void lc_workflow_schedule_retry(lc_workflow_handle *workflow,
   }
   pthread_mutex_unlock(&workflow->notification_mutex);
   lc_client_free(workflow->client, copy);
+}
+
+/* A claimed envelope remains durable if its worker disappears. Unlike a retry
+ * deadline, a successful keepalive must be able to move this deadline later. */
+static void
+lc_workflow_schedule_claim_recovery(lc_workflow_handle *workflow,
+                                    const char *key,
+                                    lc_unix_seconds claim_expires_at_unix) {
+  char *copy;
+  size_t index;
+
+  if (workflow == NULL || key == NULL || claim_expires_at_unix <= 0)
+    return;
+  copy = lc_client_strdup(workflow->client, key);
+  if (copy == NULL)
+    return;
+  pthread_mutex_lock(&workflow->notification_mutex);
+  if (!workflow->closed) {
+    for (index = 0U; index < workflow->delayed_notification_count; ++index) {
+      lc_workflow_delayed_notification *delayed =
+          &workflow->delayed_notifications[index];
+      if (strcmp(delayed->key, key) == 0) {
+        delayed->eligible_at_unix = claim_expires_at_unix;
+        break;
+      }
+    }
+    if (index == workflow->delayed_notification_count) {
+      if (workflow->delayed_notification_count <
+          workflow->notification_capacity) {
+        lc_workflow_delayed_notification *delayed =
+            &workflow->delayed_notifications
+                 [workflow->delayed_notification_count++];
+        delayed->key = copy;
+        delayed->eligible_at_unix = claim_expires_at_unix;
+        copy = NULL;
+      } else {
+        workflow->recovery_needed = 1;
+        workflow->recovery_claims_pending = 1;
+        if (workflow->next_recovery_unix == 0 ||
+            claim_expires_at_unix < workflow->next_recovery_unix) {
+          workflow->next_recovery_unix = claim_expires_at_unix;
+        }
+      }
+    }
+    pthread_cond_signal(&workflow->notification_cond);
+  }
+  pthread_mutex_unlock(&workflow->notification_mutex);
+  lc_client_free(workflow->client, copy);
+}
+
+static void
+lc_workflow_cancel_delayed_notification(lc_workflow_handle *workflow,
+                                        const char *key) {
+  size_t index;
+
+  if (workflow == NULL || key == NULL)
+    return;
+  pthread_mutex_lock(&workflow->notification_mutex);
+  for (index = 0U; index < workflow->delayed_notification_count; ++index) {
+    if (strcmp(workflow->delayed_notifications[index].key, key) == 0) {
+      lc_client_free(workflow->client,
+                     workflow->delayed_notifications[index].key);
+      --workflow->delayed_notification_count;
+      if (index != workflow->delayed_notification_count) {
+        workflow->delayed_notifications[index] =
+            workflow
+                ->delayed_notifications[workflow->delayed_notification_count];
+      }
+      break;
+    }
+  }
+  pthread_mutex_unlock(&workflow->notification_mutex);
 }
 
 static void lc_workflow_promote_due_retries_locked(lc_workflow_handle *workflow,
@@ -1226,6 +1304,7 @@ static int lc_workflow_outbox_record_copy(lc_client_handle *client,
                         "failed to copy outbox envelope", NULL, NULL, NULL);
   }
   dst->attempt_count = src->attempt_count;
+  dst->claim_expires_at_unix = src->claim_expires_at_unix;
   dst->not_before_unix = src->not_before_unix;
   dst->replay_count = src->replay_count;
   dst->dead_lettered_at_unix = src->dead_lettered_at_unix;
@@ -1261,8 +1340,15 @@ static void lc_outbox_job_close_method(lc_outbox_job *self) {
     return;
   client = job->client;
   workflow = job->workflow;
-  if (job->lease != NULL)
+  if (job->lease != NULL) {
+    /* The committed claim record is intentionally left for expiry recovery.
+     * Keep the local dispatcher awake at that boundary even when its ordinary
+     * Pouch recovery interval is disabled. */
+    lc_workflow_schedule_claim_recovery(
+        workflow, job->outbox_key,
+        (lc_unix_seconds)job->lease->lease_expires_at_unix);
     job->lease->close(job->lease);
+  }
   lc_workflow_outbox_record_clear(client, &job->record);
   lc_client_free(client, job->outbox_key);
   lc_client_free(client, job);
@@ -1314,8 +1400,12 @@ static int lc_outbox_job_renew_method(lc_outbox_job *self, long ttl_seconds,
   lc_keepalive_req_init(&request);
   request.ttl_seconds = ttl_seconds;
   rc = lc_lease_keepalive(job->lease, &request, error);
-  if (rc == LC_OK)
+  if (rc == LC_OK) {
     lc_outbox_job_refresh(job);
+    lc_workflow_schedule_claim_recovery(
+        job->workflow, job->outbox_key,
+        (lc_unix_seconds)job->lease->lease_expires_at_unix);
+  }
   return rc;
 }
 
@@ -1334,6 +1424,7 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
   }
   record = job->record;
   record.dispatch_state = (char *)state;
+  record.claim_expires_at_unix = 0;
   record.not_before_unix = not_before_unix;
   record.last_error = (char *)diagnostic;
   if (strcmp(state, "completed") == 0) {
@@ -1371,6 +1462,7 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
   job->lease = NULL;
   job->terminal = 1;
   lc_outbox_job_refresh(job);
+  lc_workflow_cancel_delayed_notification(job->workflow, job->outbox_key);
   if (strcmp(state, "retry_wait") == 0) {
     lc_workflow_schedule_retry(job->workflow, job->outbox_key,
                                (lc_unix_seconds)not_before_unix);
@@ -1460,6 +1552,84 @@ static void lc_workflow_rollback_lease(lc_lease *lease) {
     lease->close(lease);
 }
 
+/* Shared Pouch dispatchers can see the same recovery key at once. Once a
+ * claim has been committed, read it before taking a lease so an observer does
+ * not transiently acquire and roll back a claim that another dispatcher is
+ * handing to its host. This is a shared-writer contention optimization only;
+ * the lease path below remains the correctness authority. */
+static int lc_workflow_pouch_shared_live_claim(lc_workflow_handle *workflow,
+                                               const char *key) {
+  lc_client_handle *client;
+  lc_workflow_outbox_record record;
+  lc_get_opts options;
+  lc_get_res result;
+  lonejson *runtime;
+  lc_error load_error;
+  time_t now;
+  int rc;
+  int active;
+
+  client = workflow->dispatcher_client;
+  if (!client->is_pouch || lc_pouch_single_writer_enabled(client->pouch))
+    return 0;
+  memset(&record, 0, sizeof(record));
+  memset(&result, 0, sizeof(result));
+  lc_get_opts_init(&options);
+  options.public_read = 1;
+  lc_error_init(&load_error);
+  runtime = lc_thread_lonejson_runtime();
+  rc = lc_load_in_namespace(&client->pub, workflow->namespace_name, key,
+                            &lc_workflow_outbox_record_map, &record, &options,
+                            &result, &load_error);
+  now = time(NULL);
+  active = rc == LC_OK && now != (time_t)-1 && !result.no_content &&
+           record.record_type != NULL &&
+           strcmp(record.record_type, "lockdc.outbox.v1") == 0 &&
+           record.dispatch_state != NULL &&
+           strcmp(record.dispatch_state, "claimed") == 0 &&
+           record.claim_expires_at_unix > (lonejson_int64)now;
+  if (active) {
+    lc_workflow_schedule_claim_recovery(
+        workflow, key, (lc_unix_seconds)record.claim_expires_at_unix);
+  }
+  runtime->cleanup(runtime, &lc_workflow_outbox_record_map, &record);
+  lc_get_res_cleanup(&result);
+  lc_error_cleanup(&load_error);
+  return active;
+}
+
+/* A preflight read eliminates the normal shared-writer hand-off race. Keep a
+ * small bounded backoff for the remaining read/commit race without using the
+ * Pouch acquire API's one-second polling contract. */
+static int lc_workflow_reacquire_durable_claim(lc_workflow_handle *workflow,
+                                               const lc_acquire_req *acquire,
+                                               lc_lease **lease,
+                                               lc_error *error) {
+  enum { LC_WORKFLOW_SHARED_HANDOFF_RETRIES = 20 };
+  lc_client_handle *client = workflow->dispatcher_client;
+  int shared_pouch =
+      client->is_pouch && !lc_pouch_single_writer_enabled(client->pouch);
+  unsigned int attempt;
+  int rc;
+
+  for (attempt = 0U;; ++attempt) {
+    rc = lc_acquire(&client->pub, acquire, lease, error);
+    if (rc == LC_OK || !shared_pouch || rc != LC_ERR_INVALID ||
+        attempt == LC_WORKFLOW_SHARED_HANDOFF_RETRIES) {
+      return rc;
+    }
+    lc_error_cleanup(error);
+    lc_error_init(error);
+    {
+      struct timespec delay;
+
+      delay.tv_sec = 0;
+      delay.tv_nsec = 5L * 1000L * 1000L;
+      (void)nanosleep(&delay, NULL);
+    }
+  }
+}
+
 static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
                                     const char *key, lc_outbox_job **out,
                                     lc_error *error) {
@@ -1467,10 +1637,18 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   lc_acquire_req acquire;
   lc_lease *lease;
   lc_workflow_outbox_record record;
+  lc_workflow_outbox_record verified;
   lc_get_res result;
+  lc_get_res verify_result;
   lonejson *runtime;
   lc_outbox_job_handle *job;
   time_t now;
+  lc_unix_seconds claim_expires_at_unix;
+  char *original_dispatch_state;
+  char *original_last_error;
+  lonejson_int64 original_attempt_count;
+  lonejson_int64 original_claim_expires_at_unix;
+  int recovered_to_pending;
   int rc;
 
   *out = NULL;
@@ -1480,12 +1658,27 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   acquire.owner = workflow->owner;
   acquire.ttl_seconds = workflow->claim_ttl_seconds;
   lease = NULL;
+  if (lc_workflow_pouch_shared_live_claim(workflow, key)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "outbox candidate remains actively claimed", NULL,
+                        NULL, NULL);
+  }
   rc = lc_acquire(&client->pub, &acquire, &lease, error);
-  if (rc != LC_OK)
+  if (rc != LC_OK) {
+    now = time(NULL);
+    if (now != (time_t)-1) {
+      lc_workflow_schedule_claim_recovery(
+          workflow, key, (lc_unix_seconds)now + workflow->claim_ttl_seconds);
+    }
     return rc;
+  }
   memset(&record, 0, sizeof(record));
+  memset(&verified, 0, sizeof(verified));
   memset(&result, 0, sizeof(result));
+  memset(&verify_result, 0, sizeof(verify_result));
   runtime = lc_thread_lonejson_runtime();
+  job = NULL;
+  recovered_to_pending = 0;
   rc = lc_lease_load(lease, &lc_workflow_outbox_record_map, &record, NULL,
                      &result, error);
   if (rc == LC_OK) {
@@ -1493,11 +1686,13 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
     if (now == (time_t)-1 ||
         strcmp(record.record_type, "lockdc.outbox.v1") != 0 ||
         (strcmp(record.dispatch_state, "pending") != 0 &&
-         strcmp(record.dispatch_state, "retry_wait") != 0)) {
+         strcmp(record.dispatch_state, "retry_wait") != 0 &&
+         strcmp(record.dispatch_state, "claimed") != 0)) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "outbox candidate is not currently dispatchable", NULL,
                         NULL, NULL);
-    } else if (record.not_before_unix > (long)now) {
+    } else if (strcmp(record.dispatch_state, "retry_wait") == 0 &&
+               record.not_before_unix > (long)now) {
       lc_workflow_schedule_retry(workflow, key,
                                  (lc_unix_seconds)record.not_before_unix);
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -1505,31 +1700,124 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
                         NULL, NULL);
     }
   }
-  if (rc == LC_OK) {
-    lc_workflow_outbox_record claimed = record;
-    claimed.dispatch_state = "claimed";
-    ++claimed.attempt_count;
-    rc = lc_lease_save(lease, &lc_workflow_outbox_record_map, &claimed, error);
-    if (rc == LC_OK)
-      record.attempt_count = claimed.attempt_count;
+
+  if (rc == LC_OK && strcmp(record.dispatch_state, "claimed") == 0) {
+    if (record.claim_expires_at_unix > (lonejson_int64)now) {
+      lc_workflow_schedule_claim_recovery(
+          workflow, key, (lc_unix_seconds)record.claim_expires_at_unix);
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "outbox candidate remains actively claimed", NULL, NULL,
+                        NULL);
+    } else {
+      original_dispatch_state = record.dispatch_state;
+      original_last_error = record.last_error;
+      original_claim_expires_at_unix = record.claim_expires_at_unix;
+      recovered_to_pending = record.attempt_count < workflow->max_attempts;
+      record.dispatch_state = recovered_to_pending ? "pending" : "dead_letter";
+      record.claim_expires_at_unix = 0;
+      if (recovered_to_pending) {
+        record.last_error = "claim expired before terminal outcome";
+      } else {
+        record.last_error = "delivery attempt budget exhausted by claim expiry";
+        record.dead_lettered_at_unix = (lonejson_int64)now;
+      }
+      rc = lc_lease_save(lease, &lc_workflow_outbox_record_map, &record, error);
+      if (rc == LC_OK) {
+        lc_release_req release;
+        lc_release_req_init(&release);
+        rc = lc_lease_release(lease, &release, error);
+        if (rc == LC_OK)
+          lease = NULL;
+      }
+      record.dispatch_state = original_dispatch_state;
+      record.last_error = original_last_error;
+      record.claim_expires_at_unix = original_claim_expires_at_unix;
+      if (rc == LC_OK && recovered_to_pending)
+        lc_workflow_notify(workflow, key);
+      if (rc == LC_OK) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "outbox claim recovered after expiry", NULL, NULL,
+                          NULL);
+      }
+    }
   }
+
   if (rc == LC_OK) {
+    original_dispatch_state = record.dispatch_state;
+    original_attempt_count = record.attempt_count;
+    original_claim_expires_at_unix = record.claim_expires_at_unix;
+    claim_expires_at_unix = (lc_unix_seconds)now + workflow->claim_ttl_seconds;
+    record.dispatch_state = "claimed";
+    ++record.attempt_count;
+    record.claim_expires_at_unix = (lonejson_int64)claim_expires_at_unix;
     job = (lc_outbox_job_handle *)lc_client_calloc(client, 1U, sizeof(*job));
     if (job == NULL) {
       rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate outbox job", NULL, NULL, NULL);
     }
-  } else {
-    job = NULL;
+    if (rc == LC_OK)
+      rc = lc_workflow_outbox_record_copy(client, &job->record, &record, error);
+    if (rc == LC_OK) {
+      job->outbox_key = lc_client_strdup(client, key);
+      if (job->outbox_key == NULL) {
+        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to copy outbox job key", NULL, NULL, NULL);
+      }
+    }
+    if (rc == LC_OK)
+      rc = lc_lease_save(lease, &lc_workflow_outbox_record_map, &record, error);
+    if (rc == LC_OK) {
+      lc_release_req release;
+      lc_release_req_init(&release);
+      rc = lc_lease_release(lease, &release, error);
+      if (rc == LC_OK)
+        lease = NULL;
+    }
+    record.dispatch_state = original_dispatch_state;
+    record.attempt_count = original_attempt_count;
+    record.claim_expires_at_unix = original_claim_expires_at_unix;
   }
-  if (rc == LC_OK)
-    rc = lc_workflow_outbox_record_copy(client, &job->record, &record, error);
   runtime->cleanup(runtime, &lc_workflow_outbox_record_map, &record);
   lc_get_res_cleanup(&result);
   if (rc != LC_OK) {
     lc_workflow_rollback_lease(lease);
-    if (job != NULL)
+    if (job != NULL) {
+      lc_workflow_outbox_record_clear(client, &job->record);
+      lc_client_free(client, job->outbox_key);
       lc_client_free(client, job);
+    }
+    return rc;
+  }
+
+  /* The durable claim is now visible and has spent its attempt. A fresh lease
+   * fences the host's terminal action; a crash in this hand-off recovers at
+   * the durable claim deadline. */
+  rc = lc_workflow_reacquire_durable_claim(workflow, &acquire, &lease, error);
+  if (rc != LC_OK) {
+    lc_workflow_schedule_claim_recovery(workflow, key, claim_expires_at_unix);
+    lc_workflow_outbox_record_clear(client, &job->record);
+    lc_client_free(client, job->outbox_key);
+    lc_client_free(client, job);
+    return rc;
+  }
+  rc = lc_lease_load(lease, &lc_workflow_outbox_record_map, &verified, NULL,
+                     &verify_result, error);
+  if (rc == LC_OK &&
+      (strcmp(verified.dispatch_state, "claimed") != 0 ||
+       verified.attempt_count != job->record.attempt_count ||
+       verified.claim_expires_at_unix != job->record.claim_expires_at_unix)) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "durable outbox claim changed before hand-off", NULL,
+                      NULL, NULL);
+  }
+  runtime->cleanup(runtime, &lc_workflow_outbox_record_map, &verified);
+  lc_get_res_cleanup(&verify_result);
+  if (rc != LC_OK) {
+    lc_workflow_rollback_lease(lease);
+    lc_workflow_schedule_claim_recovery(workflow, key, claim_expires_at_unix);
+    lc_workflow_outbox_record_clear(client, &job->record);
+    lc_client_free(client, job->outbox_key);
+    lc_client_free(client, job);
     return rc;
   }
   lc_client_handle_retain(client);
@@ -1537,16 +1825,6 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   job->workflow = workflow;
   lc_workflow_retain(workflow);
   job->lease = lease;
-  job->outbox_key = lc_client_strdup(client, lease->key);
-  if (job->outbox_key == NULL) {
-    lc_workflow_rollback_lease(lease);
-    lc_workflow_release(workflow);
-    lc_workflow_outbox_record_clear(client, &job->record);
-    lc_client_free(client, job);
-    lc_client_close(&client->pub);
-    return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                        "failed to copy outbox job key", NULL, NULL, NULL);
-  }
   job->pub.write_payload = lc_outbox_job_write_payload_method;
   job->pub.renew = lc_outbox_job_renew_method;
   job->pub.complete = lc_outbox_job_complete_method;
@@ -1555,6 +1833,8 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   job->pub.close = lc_outbox_job_close_method;
   job->pub.max_attempts = workflow->max_attempts;
   lc_outbox_job_refresh(job);
+  lc_workflow_schedule_claim_recovery(
+      workflow, key, (lc_unix_seconds)lease->lease_expires_at_unix);
   *out = &job->pub;
   return LC_OK;
 }
@@ -1604,9 +1884,11 @@ static int lc_workflow_recovery_key_end(void *context, lc_error *error) {
 
 static int lc_workflow_reconcile_pending(lc_workflow_handle *workflow,
                                          lc_error *error) {
-  static const char selector[] =
+  static const char dispatchable_selector[] =
       "{\"in\":{\"field\":\"/"
       "dispatch_state\",\"any\":[\"pending\",\"retry_wait\"]}}";
+  static const char claimed_selector[] =
+      "{\"eq\":{\"field\":\"/dispatch_state\",\"value\":\"claimed\"}}";
   lc_query_req request;
   lc_query_key_handler handler;
   lc_query_res result;
@@ -1614,6 +1896,7 @@ static int lc_workflow_reconcile_pending(lc_workflow_handle *workflow,
   lc_index_flush_res flush_result;
   lc_workflow_recovery_capture capture;
   char *cursor;
+  int scanning_claims;
   int rc;
 
   if (workflow->startup_dead_letter_replay_pending) {
@@ -1635,6 +1918,14 @@ static int lc_workflow_reconcile_pending(lc_workflow_handle *workflow,
   handler.chunk = lc_workflow_recovery_key_chunk;
   handler.end = lc_workflow_recovery_key_end;
   capture.workflow = workflow;
+  pthread_mutex_lock(&workflow->notification_mutex);
+  if (workflow->recovery_cursor == NULL) {
+    workflow->recovery_scanning_claims = workflow->recovery_claims_pending;
+    /* A signal raised while this query runs belongs to the next sweep. */
+    workflow->recovery_claims_pending = 0;
+  }
+  scanning_claims = workflow->recovery_scanning_claims;
+  pthread_mutex_unlock(&workflow->notification_mutex);
   /* A recovery sweep starts from a durable index boundary. Later pages keep
    * that boundary: flushing every page would turn one large sweep into N
    * global flushes and needlessly amplify reconciliation cost. */
@@ -1648,7 +1939,8 @@ static int lc_workflow_reconcile_pending(lc_workflow_handle *workflow,
       return rc;
   }
   request.namespace_name = workflow->namespace_name;
-  request.selector_json = selector;
+  request.selector_json =
+      scanning_claims ? claimed_selector : dispatchable_selector;
   request.limit = (long)workflow->notification_capacity;
   request.cursor = workflow->recovery_cursor;
   request.engine = "index";
@@ -1676,8 +1968,16 @@ static int lc_workflow_reconcile_pending(lc_workflow_handle *workflow,
   /* The dispatcher clears the request before starting this sweep. Keep an
    * overflow signal raised while the query was in flight, otherwise the final
    * page could strand a newly committed durable key until a restart. */
-  workflow->recovery_needed =
-      workflow->recovery_needed || workflow->recovery_cursor != NULL;
+  if (workflow->recovery_cursor == NULL && scanning_claims) {
+    workflow->recovery_scanning_claims = 0;
+    /* The startup or periodic claim pass is only recovery preparation. Follow
+     * it with the ordinary dispatchable pass without making claims part of
+     * every hot reconciliation sweep. */
+    workflow->recovery_needed = 1;
+  } else {
+    workflow->recovery_needed =
+        workflow->recovery_needed || workflow->recovery_cursor != NULL;
+  }
   pthread_mutex_unlock(&workflow->notification_mutex);
   return LC_OK;
 }
@@ -1725,6 +2025,7 @@ static void *lc_workflow_dispatcher_main(void *context) {
               workflow->next_recovery_unix > 0 &&
               now >= workflow->next_recovery_unix) {
             workflow->recovery_needed = 1;
+            workflow->recovery_claims_pending = 1;
           }
         }
       } else {
@@ -2907,6 +3208,7 @@ static int lc_workflow_reconcile_method(lc_workflow *self, lc_error *error) {
                         NULL, NULL);
   }
   workflow->recovery_needed = 1;
+  workflow->recovery_claims_pending = 1;
   pthread_cond_signal(&workflow->notification_cond);
   pthread_mutex_unlock(&workflow->notification_mutex);
   return LC_OK;
@@ -3538,6 +3840,7 @@ int lc_client_new_workflow_method(lc_client *self,
                                       workflow);
   }
   workflow->recovery_needed = 1;
+  workflow->recovery_claims_pending = 1;
   if (workflow->recovery_interval_seconds > 0L) {
     workflow->next_recovery_unix =
         (lc_unix_seconds)time(NULL) + workflow->recovery_interval_seconds;
