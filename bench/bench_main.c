@@ -784,6 +784,14 @@ static int bench_workflow_reconcile_case(long iterations, int index_mode) {
           ((double)started.tv_sec + (double)started.tv_nsec / 1000000000.0);
     }
     rc = job->complete(job, NULL, &error);
+    if (rc != LC_OK) {
+      (void)fprintf(stderr,
+                    "workflow-reconcile completion failed key=%s code=%d "
+                    "message=%s detail=%s\n",
+                    job->outbox_key == NULL ? "" : job->outbox_key, rc,
+                    error.message == NULL ? "" : error.message,
+                    error.detail == NULL ? "" : error.detail);
+    }
     job->close(job);
   }
   drain_seconds =

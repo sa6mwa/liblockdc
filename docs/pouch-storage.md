@@ -1959,6 +1959,12 @@ shared-root contention. The soak has fixed workload and timeout controls in
 the root Makefile; it is deliberate release hardening, not an unbounded burn-in
 or a normal release prerequisite.
 
+The same lane also runs the bounded workflow reconciliation hardening suite:
+preflushed and persisted indexes, a forced-compaction reopen, and shared-root
+dispatchers before and after compaction. Its cases are serial and use two
+shared-root dispatchers by default, so it exercises recovery correctness
+without turning release hardening into an unbounded host load.
+
 ## Fuzzing And Failure Modes
 
 Fuzzing and failure tests must cover:

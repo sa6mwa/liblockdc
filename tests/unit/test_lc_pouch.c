@@ -10511,6 +10511,93 @@ static void test_query_index_sequence_ignores_lease_metadata(void **state) {
   lc_error_cleanup(&error);
 }
 
+/* A forced snapshot must retain the final cleared lease metadata for every
+ * key. This exercises the dense metadata-only tail produced by a large
+ * outbox: a stale pre-release record after reopen would make the dispatcher
+ * treat a completed record as still leased until its original TTL expires. */
+static void
+test_compaction_reopen_preserves_released_implicit_xa_leases(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_update_res update_result;
+  lc_acquire_req acquire_request;
+  lc_lease *lease;
+  lc_error error;
+  char endpoint[1024];
+  char root[512];
+  char key[96];
+  long document;
+  long rewrite;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&update_result, 0, sizeof(update_result));
+  lc_acquire_req_init(&acquire_request);
+  lc_error_init(&error);
+  make_root("released-implicit-xa-compact", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?segment_target_bytes=65536&"
+                       "indexer_flush_interval_seconds=3600",
+                       root) > 0);
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  for (rewrite = 0L; rewrite < 5L; ++rewrite) {
+    for (document = 0L; document < 64L; ++document) {
+      assert_true(snprintf(key, sizeof(key), "outbox/released-%03ld", document) >
+                  0);
+      write_client_state(client, key,
+                         rewrite == 4L
+                             ? "{\"dispatch_state\":\"pending\"}"
+                             : "{\"dispatch_state\":\"completed\"}",
+                         NULL, 0L, 0, &update_result, &error);
+      lc_update_res_cleanup(&update_result);
+      memset(&update_result, 0, sizeof(update_result));
+    }
+  }
+  maintenance_options.namespace_name = "default";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(handle->pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.compacted);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_client_close(client);
+  client = NULL;
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  for (document = 0L; document < 64L; ++document) {
+    assert_true(snprintf(key, sizeof(key), "outbox/released-%03ld", document) >
+                0);
+    acquire_request.key = key;
+    acquire_request.owner = "pouch-compaction-regression";
+    acquire_request.ttl_seconds = 30L;
+    lease = NULL;
+    rc = client->acquire(client, &acquire_request, &lease, &error);
+    assert_int_equal(rc, LC_OK);
+    assert_non_null(lease);
+    rc = lease->release(lease, NULL, &error);
+    assert_int_equal(rc, LC_OK);
+    lease = NULL;
+  }
+
+  lc_update_res_cleanup(&update_result);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  if (lease != NULL)
+    lease->close(lease);
+  if (client != NULL)
+    lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_incremental_query_index_ignores_lease_only_key(void **state) {
   lc_client *client;
   lc_lease *lease;
@@ -32506,6 +32593,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_exclusive_indexer_defers_lease_metadata_until_release),
       cmocka_unit_test(test_query_index_sequence_ignores_lease_metadata),
+      cmocka_unit_test(
+          test_compaction_reopen_preserves_released_implicit_xa_leases),
       cmocka_unit_test(test_incremental_query_index_ignores_lease_only_key),
       cmocka_unit_test(test_query_index_ignores_internal_objects),
       cmocka_unit_test(test_staged_object_delete_does_not_queue_query_index),

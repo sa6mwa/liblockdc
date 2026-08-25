@@ -254,6 +254,35 @@ static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
   assert_int_equal(lc_lease_release(lease, NULL, error), LC_OK);
 }
 
+static void seed_terminal_workflow_outbox(lc_client *client,
+                                          const char *namespace_name,
+                                          const char *key, lc_error *error) {
+  static const char state[] =
+      "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"terminal-op\","
+      "\"effect_id\":\"terminal-effect\",\"effect_key\":\"terminal-key\","
+      "\"message_id\":\"msg_terminal\","
+      "\"kind\":\"test\",\"destination\":\"recovery://target\","
+      "\"content_type\":\"text/plain\",\"dispatch_state\":\"completed\","
+      "\"attempt_count\":1,\"not_before_unix\":0}";
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_source *source;
+
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = namespace_name;
+  acquire.key = key;
+  acquire.owner = "workflow-terminal-seed";
+  acquire.ttl_seconds = 30L;
+  lease = NULL;
+  source = NULL;
+  assert_int_equal(lc_acquire(client, &acquire, &lease, error), LC_OK);
+  assert_int_equal(
+      lc_source_from_memory(state, sizeof(state) - 1U, &source, error), LC_OK);
+  assert_int_equal(lc_lease_update(lease, source, NULL, error), LC_OK);
+  lc_source_close(source);
+  assert_int_equal(lc_lease_release(lease, NULL, error), LC_OK);
+}
+
 static void seed_foreign_workflow_state(lc_client *client,
                                         const char *namespace_name,
                                         const char *key,
@@ -2124,6 +2153,97 @@ static void test_pouch_shared_reopen_reconciles_durable_index(void **state) {
   test_pouch_reopen_reconciles_durable_index_mode(1);
 }
 
+/* Compaction is allowed to discard historical release records, but never the
+ * final lease clear. Reconciliation must be able to claim every pending outbox
+ * record immediately after a dense implicit-XA history is snapshotted. */
+static void
+test_pouch_compacted_reopen_reconciles_released_outbox(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_client_handle *client_handle;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  lc_error error;
+  size_t index;
+  size_t rewrite;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "compacted-reopen-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?segment_target_bytes=65536", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  for (rewrite = 0U; rewrite < 5U; ++rewrite) {
+    for (index = 0U; index < 64U; ++index) {
+      char key[128];
+
+      assert_true(snprintf(key, sizeof(key),
+                           "__lockdc_io/v1/outbox/compacted-terminal-%03lu",
+                           (unsigned long)index) > 0);
+      seed_terminal_workflow_outbox(client, "workflow-compacted-reopen", key,
+                                    &error);
+    }
+  }
+  for (index = 0U; index < 16U; ++index) {
+    char key[128];
+
+    assert_true(snprintf(key, sizeof(key),
+                         "__lockdc_io/v1/outbox/compacted-pending-%03lu",
+                         (unsigned long)index) > 0);
+    seed_recovery_outbox(client, "workflow-compacted-reopen", key, &error);
+  }
+  client_handle = (lc_client_handle *)client;
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  maintenance_options.namespace_name = "workflow-compacted-reopen";
+  maintenance_options.force = 1;
+  assert_int_equal(lc_pouch_maintenance_run(client_handle->pouch,
+                                             &maintenance_options,
+                                             &maintenance_result, &error),
+                   LC_OK);
+  assert_true(maintenance_result.compacted);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_client_close(client);
+  client = NULL;
+
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-compacted-reopen";
+  workflow_config.owner = "workflow-compacted-reopen-test";
+  workflow_config.notification_capacity = 16U;
+  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
+                                          &error),
+                   LC_OK);
+  for (index = 0U; index < 16U; ++index) {
+    job = NULL;
+    assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
+    assert_non_null(job);
+    assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+    lc_outbox_job_close(job);
+  }
+
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static long workflow_elapsed_milliseconds(const struct timespec *started,
                                           const struct timespec *finished) {
   long seconds = (long)(finished->tv_sec - started->tv_sec);
@@ -2630,6 +2750,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_startup_recovery_claims_seeded_outbox),
       cmocka_unit_test(test_pouch_clean_reopen_reconciles_durable_index),
       cmocka_unit_test(test_pouch_shared_reopen_reconciles_durable_index),
+      cmocka_unit_test(
+          test_pouch_compacted_reopen_reconciles_released_outbox),
       cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
       cmocka_unit_test(test_pouch_reconciliation_preserves_allocator_domains),
       cmocka_unit_test(test_pouch_recovery_prefetch_is_bounded),

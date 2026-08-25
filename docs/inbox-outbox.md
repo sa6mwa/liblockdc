@@ -1202,6 +1202,7 @@ The reproducible entry points are:
 
 ```sh
 make benchmark-workflow-pouch
+make benchmark-workflow-hardening
 make benchmark-workflow-remote
 ```
 
@@ -1215,6 +1216,12 @@ post-run inspection. Both commands default to the
 `WORKFLOW_BENCH_ROWS`, `WORKFLOW_BENCH_TERMINAL_ROWS`,
 `WORKFLOW_BENCH_CHURN_UPDATES`, `WORKFLOW_BENCH_PAYLOAD_BYTES`, and
 `WORKFLOW_BENCH_PAGE_CAPACITY` to characterize a deployment-sized profile.
+
+`benchmark-workflow-hardening` is the local Pouch hardening lane. It runs the
+preflushed-index, persisted-after-reopen, compacted, shared-writer, and
+shared-writer-compacted reconciliation cases serially under the same bounded
+timeout. The shared-writer cases use two dispatchers by default; set
+`WORKFLOW_BENCH_HARDENING_DISPATCHERS` to change that deliberately.
 
 Timing is reported rather than enforced as a universal pass/fail threshold:
 storage media, remote TLS, and lockd deployment topology materially affect the

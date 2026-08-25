@@ -75,6 +75,7 @@ foreach(target
         bench-check
         benchmarks-go
         perf-gate
+        benchmark-workflow-hardening
         dev-ps
         dev-logs
         release-lua-artifacts
@@ -82,6 +83,19 @@ foreach(target
     assert_contains(root_makefile "make ${target}" "make help entry for ${target}")
     assert_contains(root_makefile "${target}:" "make target ${target}")
 endforeach()
+
+assert_contains(root_makefile "__benchmark-workflow-hardening:"
+    "workflow reconciliation hardening target")
+assert_contains(root_makefile "workflow-reconcile-preflushed"
+    "workflow hardening preflushed-index case")
+assert_contains(root_makefile "workflow-reconcile-warm"
+    "workflow hardening persisted-index case")
+assert_contains(root_makefile "workflow-reconcile-compacted"
+    "workflow hardening compacted case")
+assert_contains(root_makefile "workflow-reconcile-multi"
+    "workflow hardening shared-writer case")
+assert_contains(root_makefile "workflow-reconcile-multi-compacted"
+    "workflow hardening shared-writer compacted case")
 
 foreach(script
         scripts/dev-logs.sh
@@ -120,7 +134,7 @@ assert_contains(linux_build_matrix_script "\"$timed_bin\" \"release-matrix build
 assert_contains(cross_test_script "\"$timed_bin\" \"release-matrix test $preset\"" "per-preset release test timing")
 assert_contains(cross_test_script "-L cross-runtime" "curated QEMU runtime test selection")
 assert_contains(package_matrix_script "release-matrix package source-smoke" "per-artifact package timing")
-assert_contains(root_makefile "__prerelease-hardening: __prerelease __pouch-core-hardening __fuzz __release-matrix" "hardening prerelease graph")
+assert_contains(root_makefile "__prerelease-hardening: __prerelease __pouch-core-hardening __benchmark-workflow-hardening __fuzz __release-matrix" "hardening prerelease graph")
 assert_contains(root_makefile "pouch-core-hardening soak" "hardening core soak timing")
 assert_contains(root_makefile "pouch-core-hardening reclaim" "hardening reclaim timing")
 assert_contains(root_makefile "pouch-core-hardening shared-root" "hardening shared-root timing")

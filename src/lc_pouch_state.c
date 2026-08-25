@@ -6413,6 +6413,7 @@ static int lc_pouch_state_append_binary_records_locked(
   int retain_active_append_fd;
   int single_writer;
   lc_pouch_generation first_index;
+  lc_pouch_generation reserved_state_max_version;
   uint64_t record_size;
   uint64_t segment_size;
   uint64_t appended_end;
@@ -6436,6 +6437,7 @@ static int lc_pouch_state_append_binary_records_locked(
   retain_active_append_fd = 0;
   append_started = 0;
   first_index = 0UL;
+  reserved_state_max_version = 0UL;
   record_size = 0U;
   segment_size = 0U;
   appended_end = 0U;
@@ -6515,6 +6517,9 @@ static int lc_pouch_state_append_binary_records_locked(
     rc = lc_pouch_state_reserve_index_records(
         pouch, namespace_name, manifest, (unsigned long)item_count,
         query_index_changed, &first_index, error);
+    if (rc == LC_OK) {
+      reserved_state_max_version = manifest->state_max_version;
+    }
   }
   for (index = 0U; index < item_count; ++index) {
     if (rc == LC_OK) {
@@ -6546,6 +6551,15 @@ static int lc_pouch_state_append_binary_records_locked(
     segment_path = NULL;
     rc = lc_pouch_state_manifest_materialize(pouch, namespace_name, manifest,
                                              &manifest_from_cache, error);
+    /* Reservation advances the active in-memory projection before a segment
+     * rotation persists the manifest. Materializing here reloads the older
+     * durable manifest, so retain the reservation high-water before writing
+     * the new topology. Otherwise the following cache publication can carry
+     * an older sequence than the active lease record and be ignored. */
+    if (rc == LC_OK &&
+        manifest->state_max_version < reserved_state_max_version) {
+      manifest->state_max_version = reserved_state_max_version;
+    }
     if (rc == LC_OK) {
       rc = lc_pouch_namespace_manifest_rotate(
           &pouch->allocator, namespace_name, manifest,
