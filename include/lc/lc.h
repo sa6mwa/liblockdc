@@ -1637,7 +1637,11 @@ typedef struct lc_outbox_entry {
   const char *operation_id;
   const char *effect_id;
   const char *effect_key;
+  /** Optional immediate durable cause (command or source message identity). */
+  const char *causation_id;
   const char *kind;
+  /** Optional application message-schema version. */
+  const char *schema_version;
   const char *destination;
   const char *content_type;
   const char *headers_json;
@@ -1653,6 +1657,69 @@ typedef struct lc_inbox_message {
   const char *payload_digest;
   const char *operation_id;
 } lc_inbox_message;
+
+/** Immutable identity selecting one durable API-command receipt. */
+typedef struct lc_command_identity {
+  const char *scope;
+  const char *command_type;
+  const char *idempotency_key;
+} lc_command_identity;
+
+/** Command identity plus immutable binding data accepted by the workflow. */
+typedef struct lc_command_request {
+  lc_command_identity identity;
+  /** Required opaque semantic request binding; never interpreted by liblockdc.
+   */
+  const char *request_digest;
+  /** Optional durable business-correlation identity. */
+  const char *operation_id;
+} lc_command_request;
+
+enum {
+  LC_COMMAND_PENDING = 1,
+  LC_COMMAND_COMPLETED = 2,
+  LC_COMMAND_FAILED = 3
+};
+
+/** One terminal outcome staged through an owned workflow transaction. */
+typedef struct lc_command_result {
+  /** Required safe application result class for a completed command. */
+  const char *result_code;
+  /** Optional safe resource, workflow, or status reference. */
+  const char *result_reference;
+  /** Required only when `body` is non-NULL. */
+  const char *content_type;
+  /** Optional result bytes, streamed into the durable `result` attachment. */
+  lc_source *body;
+  /** Required safe application failure class for a failed command. */
+  const char *failure_code;
+  /** Optional bounded safe failure message. */
+  const char *failure_message;
+} lc_command_result;
+
+/** Owned durable command status and safe terminal outcome. */
+typedef struct lc_command_receipt {
+  int state;
+  int duplicate;
+  char *command_id;
+  char *scope;
+  char *command_type;
+  char *idempotency_key;
+  char *operation_id;
+  char *result_code;
+  char *result_reference;
+  char *failure_code;
+  char *failure_message;
+  int has_result_body;
+} lc_command_receipt;
+
+/** Optional durable evidence retained when an outbox delivery completes. */
+typedef struct lc_outbox_completion {
+  /** Optional provider or broker delivery reference. */
+  const char *delivery_reference;
+  /** Optional opaque digest of the provider response or acknowledgement. */
+  const char *response_digest;
+} lc_outbox_completion;
 
 /** Result of a durable outbox append. Strings are owned by this result. */
 typedef struct lc_outbox_receipt {
@@ -2132,12 +2199,19 @@ struct lc_consumer_service {
  * that xid. Only this receiver can make the terminal decision.
  */
 struct lc_workflow_transaction {
+  int (*accept_command)(lc_workflow_transaction *self,
+                        const lc_command_request *request,
+                        lc_command_receipt *receipt, lc_error *error);
   int (*acquire)(lc_workflow_transaction *self,
                  const lc_workflow_participant_request *request,
                  lc_workflow_participant **out, lc_error *error);
   int (*append_outbox)(lc_workflow_transaction *self,
                        const lc_outbox_entry *entry, lc_source *payload,
                        lc_outbox_receipt *out, lc_error *error);
+  int (*complete_command)(lc_workflow_transaction *self,
+                          const lc_command_result *result, lc_error *error);
+  int (*fail_command)(lc_workflow_transaction *self,
+                      const lc_command_result *result, lc_error *error);
   int (*commit)(lc_workflow_transaction *self, lc_error *error);
   int (*rollback)(lc_workflow_transaction *self, lc_error *error);
   void (*close)(lc_workflow_transaction *self);
@@ -2194,7 +2268,8 @@ struct lc_outbox_job {
   int (*write_payload)(lc_outbox_job *self, lc_sink *dst, size_t *written,
                        lc_error *error);
   int (*renew)(lc_outbox_job *self, long ttl_seconds, lc_error *error);
-  int (*complete)(lc_outbox_job *self, lc_error *error);
+  int (*complete)(lc_outbox_job *self, const lc_outbox_completion *completion,
+                  lc_error *error);
   int (*retry)(lc_outbox_job *self, const lc_outbox_retry *request,
                lc_error *error);
   int (*dead_letter)(lc_outbox_job *self, const char *diagnostic,
@@ -2206,7 +2281,13 @@ struct lc_outbox_job {
   const char *operation_id;
   const char *effect_id;
   const char *effect_key;
+  /** Component-generated stable transport message identity. */
+  const char *message_id;
+  /** Optional immediate durable command or source-message cause. */
+  const char *causation_id;
   const char *kind;
+  /** Optional caller-defined message schema version. */
+  const char *schema_version;
   const char *destination;
   const char *content_type;
   const char *headers_json;
@@ -2223,6 +2304,18 @@ struct lc_outbox_job {
 /** A parent workflow owns private dispatch coordination and exposes jobs here.
  */
 struct lc_workflow {
+  int (*accept_command)(lc_workflow *self, const lc_command_request *request,
+                        lc_workflow_transaction **out_txn,
+                        lc_command_receipt *receipt, lc_error *error);
+  int (*get_command_receipt)(lc_workflow *self,
+                             const lc_command_identity *identity,
+                             lc_command_receipt *out, lc_error *error);
+  int (*write_command_result)(lc_workflow *self,
+                              const lc_command_identity *identity, lc_sink *dst,
+                              size_t *written, lc_error *error);
+  int (*resume_command)(lc_workflow *self, const lc_command_identity *identity,
+                        lc_workflow_transaction **out_txn,
+                        lc_command_receipt *receipt, lc_error *error);
   int (*append_outbox)(lc_workflow *self, const lc_outbox_entry *entry,
                        lc_source *payload, lc_workflow_transaction **out_txn,
                        lc_outbox_receipt *receipt, lc_error *error);
@@ -2633,6 +2726,18 @@ void lc_workflow_stats_cleanup(lc_workflow_stats *stats);
 void lc_outbox_entry_init(lc_outbox_entry *entry);
 /** Initializes an inbox identity request to all-zero/empty values. */
 void lc_inbox_message_init(lc_inbox_message *message);
+/** Initializes a command identity to all-zero/empty values. */
+void lc_command_identity_init(lc_command_identity *identity);
+/** Initializes a command acceptance request to all-zero/empty values. */
+void lc_command_request_init(lc_command_request *request);
+/** Initializes a terminal command result to all-zero/empty values. */
+void lc_command_result_init(lc_command_result *result);
+/** Initializes an owned command receipt to all-zero/empty values. */
+void lc_command_receipt_init(lc_command_receipt *receipt);
+/** Releases strings owned by a command receipt. */
+void lc_command_receipt_cleanup(lc_command_receipt *receipt);
+/** Initializes optional outbox completion evidence to all-zero/empty values. */
+void lc_outbox_completion_init(lc_outbox_completion *completion);
 /** Clears a retry request so policy chooses its delay and no diagnostic. */
 void lc_outbox_retry_init(lc_outbox_retry *request);
 /** Initializes a workflow participant request to all-zero/empty values. */
@@ -3205,6 +3310,21 @@ int lc_workflow_accept_inbox(lc_workflow *workflow,
                              const lc_inbox_message *message,
                              lc_workflow_transaction **out_txn,
                              lc_inbox_accept_result *result, lc_error *error);
+int lc_workflow_accept_command(lc_workflow *workflow,
+                               const lc_command_request *request,
+                               lc_workflow_transaction **out_txn,
+                               lc_command_receipt *receipt, lc_error *error);
+int lc_workflow_get_command_receipt(lc_workflow *workflow,
+                                    const lc_command_identity *identity,
+                                    lc_command_receipt *out, lc_error *error);
+int lc_workflow_write_command_result(lc_workflow *workflow,
+                                     const lc_command_identity *identity,
+                                     lc_sink *dst, size_t *written,
+                                     lc_error *error);
+int lc_workflow_resume_command(lc_workflow *workflow,
+                               const lc_command_identity *identity,
+                               lc_workflow_transaction **out_txn,
+                               lc_command_receipt *receipt, lc_error *error);
 int lc_workflow_next(lc_workflow *workflow, long timeout_ms,
                      lc_outbox_job **out, lc_error *error);
 int lc_workflow_get_stats(lc_workflow *workflow, lc_workflow_stats *out,
@@ -3223,7 +3343,9 @@ void lc_workflow_close(lc_workflow *workflow);
 int lc_outbox_job_write_payload(lc_outbox_job *job, lc_sink *dst,
                                 size_t *written, lc_error *error);
 int lc_outbox_job_renew(lc_outbox_job *job, long ttl_seconds, lc_error *error);
-int lc_outbox_job_complete(lc_outbox_job *job, lc_error *error);
+int lc_outbox_job_complete(lc_outbox_job *job,
+                           const lc_outbox_completion *completion,
+                           lc_error *error);
 int lc_outbox_job_retry(lc_outbox_job *job, const lc_outbox_retry *request,
                         lc_error *error);
 int lc_outbox_job_dead_letter(lc_outbox_job *job, const char *diagnostic,
@@ -3238,6 +3360,16 @@ int lc_workflow_transaction_append_outbox(lc_workflow_transaction *transaction,
                                           lc_source *payload,
                                           lc_outbox_receipt *out,
                                           lc_error *error);
+int lc_workflow_transaction_accept_command(lc_workflow_transaction *transaction,
+                                           const lc_command_request *request,
+                                           lc_command_receipt *receipt,
+                                           lc_error *error);
+int lc_workflow_transaction_complete_command(
+    lc_workflow_transaction *transaction, const lc_command_result *result,
+    lc_error *error);
+int lc_workflow_transaction_fail_command(lc_workflow_transaction *transaction,
+                                         const lc_command_result *result,
+                                         lc_error *error);
 int lc_workflow_transaction_commit(lc_workflow_transaction *transaction,
                                    lc_error *error);
 int lc_workflow_transaction_rollback(lc_workflow_transaction *transaction,

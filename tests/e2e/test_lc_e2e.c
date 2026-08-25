@@ -4706,7 +4706,7 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   assert_memory_equal(payload_bytes, "workflow-payload", 16U);
   lc_sink_close(payload_sink);
   payload_sink = NULL;
-  rc = lc_outbox_job_complete(job, &error);
+  rc = lc_outbox_job_complete(job, NULL, &error);
   assert_lc_ok(rc, &error);
   lc_outbox_job_close(job);
   job = NULL;
@@ -4831,7 +4831,7 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   assert_non_null(job);
   assert_string_equal(job->effect_key, effect_key);
   assert_int_equal(job->attempt, 1);
-  rc = lc_outbox_job_complete(job, &error);
+  rc = lc_outbox_job_complete(job, NULL, &error);
   assert_lc_ok(rc, &error);
   lc_outbox_job_close(job);
   lc_dead_letter_export_res_init(&export_result);
@@ -4854,6 +4854,7 @@ static void test_disk_workflow_startup_recovery(void **state) {
   static const char state_json[] =
       "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"recovery-op\","
       "\"effect_id\":\"recovery-effect\",\"effect_key\":\"recovery-key\","
+      "\"message_id\":\"msg_recovery\","
       "\"kind\":\"test\",\"destination\":\"recovery://target\","
       "\"content_type\":\"text/plain\",\"dispatch_state\":\"pending\","
       "\"attempt_count\":0,\"not_before_unix\":0}";
@@ -4934,7 +4935,7 @@ static void test_disk_workflow_startup_recovery(void **state) {
   assert_lc_ok(rc, &error);
   assert_non_null(job);
   assert_string_equal(job->effect_key, "recovery-key");
-  rc = lc_outbox_job_complete(job, &error);
+  rc = lc_outbox_job_complete(job, NULL, &error);
   assert_lc_ok(rc, &error);
   lc_outbox_job_close(job);
   lc_workflow_close(workflow);
@@ -4947,6 +4948,7 @@ test_disk_workflow_competing_dispatchers_deliver_once(void **state) {
   static const char state_json[] =
       "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"competing-op\","
       "\"effect_id\":\"competing-effect\",\"effect_key\":\"competing-key\","
+      "\"message_id\":\"msg_competing\","
       "\"kind\":\"test\",\"destination\":\"competing://target\","
       "\"content_type\":\"text/plain\",\"dispatch_state\":\"pending\","
       "\"attempt_count\":0,\"not_before_unix\":0}";
@@ -5018,7 +5020,7 @@ test_disk_workflow_competing_dispatchers_deliver_once(void **state) {
   if (first_job != NULL) {
     first_got = 1;
     assert_string_equal(first_job->effect_key, "competing-key");
-    assert_lc_ok(lc_outbox_job_complete(first_job, &error), &error);
+    assert_lc_ok(lc_outbox_job_complete(first_job, NULL, &error), &error);
     lc_outbox_job_close(first_job);
   }
   rc = lc_workflow_next(second, 5000L, &second_job, &error);
@@ -5026,7 +5028,7 @@ test_disk_workflow_competing_dispatchers_deliver_once(void **state) {
   if (second_job != NULL) {
     second_got = 1;
     assert_string_equal(second_job->effect_key, "competing-key");
-    assert_lc_ok(lc_outbox_job_complete(second_job, &error), &error);
+    assert_lc_ok(lc_outbox_job_complete(second_job, NULL, &error), &error);
     lc_outbox_job_close(second_job);
   }
   assert_int_equal(first_got + second_got, 1);

@@ -575,13 +575,15 @@ static int bench_workflow_seed_record(lc_client *client,
                "\"operation_id\":\"workflow-bench-%s-%ld\","
                "\"effect_id\":\"workflow-bench-effect-%s-%ld\","
                "\"effect_key\":\"workflow-bench-key-%s-%ld\","
+               "\"message_id\":\"workflow-bench-message-%s-%ld\","
                "\"kind\":\"benchmark\","
                "\"destination\":\"benchmark://reconcile\","
                "\"content_type\":\"application/octet-stream\","
                "\"dispatch_state\":\"%s\",\"attempt_count\":0,"
                "\"not_before_unix\":0,\"benchmark_generation\":%ld}",
                dispatch_state, generation, dispatch_state, generation,
-               dispatch_state, generation, dispatch_state, generation) < 0) {
+               dispatch_state, generation, dispatch_state, generation,
+               dispatch_state, generation) < 0) {
     return 1;
   }
   lease = NULL;
@@ -781,7 +783,7 @@ static int bench_workflow_reconcile_case(long iterations, int index_mode) {
           bench_now_seconds() -
           ((double)started.tv_sec + (double)started.tv_nsec / 1000000000.0);
     }
-    rc = job->complete(job, &error);
+    rc = job->complete(job, NULL, &error);
     job->close(job);
   }
   drain_seconds =
@@ -939,7 +941,7 @@ static int bench_workflow_dispatcher_child(
       (void)fprintf(stderr, "workflow dispatcher=%s claimed=%s\n", owner,
                     job->outbox_key == NULL ? "" : job->outbox_key);
     }
-    rc = job->complete(job, &error);
+    rc = job->complete(job, NULL, &error);
     job->close(job);
     if (rc == LC_OK) {
       ++result.delivered;

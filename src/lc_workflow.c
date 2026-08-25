@@ -32,7 +32,10 @@ typedef struct lc_workflow_outbox_record {
   char *operation_id;
   char *effect_id;
   char *effect_key;
+  char *message_id;
+  char *causation_id;
   char *kind;
+  char *schema_version;
   char *destination;
   char *content_type;
   char *headers_json;
@@ -43,6 +46,9 @@ typedef struct lc_workflow_outbox_record {
   lonejson_int64 replay_count;
   lonejson_int64 dead_lettered_at_unix;
   lonejson_int64 replayed_at_unix;
+  char *delivery_reference;
+  char *response_digest;
+  lonejson_int64 completed_at_unix;
   char *last_error;
   char *prior_dead_letter_error;
 } lc_workflow_outbox_record;
@@ -58,6 +64,26 @@ typedef struct lc_workflow_inbox_record {
   char *processing_state;
 } lc_workflow_inbox_record;
 
+typedef struct lc_workflow_command_record {
+  char *record_type;
+  char *command_id;
+  char *scope;
+  char *command_type;
+  char *idempotency_key;
+  char *request_digest;
+  char *operation_id;
+  lonejson_int64 accepted_at_unix;
+  char *state;
+  char *result_code;
+  char *result_reference;
+  char *result_content_type;
+  lonejson_int64 completed_at_unix;
+  char *failure_code;
+  char *failure_message;
+  lonejson_int64 failed_at_unix;
+  lonejson_int64 has_result_body;
+} lc_workflow_command_record;
+
 static const lonejson_field lc_workflow_outbox_record_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, record_type,
                                     "record_type"),
@@ -67,7 +93,13 @@ static const lonejson_field lc_workflow_outbox_record_fields[] = {
                                     "effect_id"),
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, effect_key,
                                     "effect_key"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, message_id,
+                                    "message_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_outbox_record, causation_id,
+                                "causation_id"),
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, kind, "kind"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_outbox_record, schema_version,
+                                "schema_version"),
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, destination,
                                     "destination"),
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, content_type,
@@ -87,6 +119,12 @@ static const lonejson_field lc_workflow_outbox_record_fields[] = {
                        "dead_lettered_at_unix"),
     LONEJSON_FIELD_I64(lc_workflow_outbox_record, replayed_at_unix,
                        "replayed_at_unix"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_outbox_record, delivery_reference,
+                                "delivery_reference"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_outbox_record, response_digest,
+                                "response_digest"),
+    LONEJSON_FIELD_I64(lc_workflow_outbox_record, completed_at_unix,
+                       "completed_at_unix"),
     LONEJSON_FIELD_STRING_ALLOC(lc_workflow_outbox_record, last_error,
                                 "last_error"),
     LONEJSON_FIELD_STRING_ALLOC(lc_workflow_outbox_record,
@@ -111,10 +149,46 @@ static const lonejson_field lc_workflow_inbox_record_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_inbox_record, processing_state,
                                     "processing_state")};
 
+static const lonejson_field lc_workflow_command_record_fields[] = {
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_command_record, record_type,
+                                    "record_type"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_command_record, command_id,
+                                    "command_id"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_command_record, scope, "scope"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_command_record, command_type,
+                                    "command_type"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_command_record, idempotency_key,
+                                    "idempotency_key"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_command_record, request_digest,
+                                    "request_digest"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_command_record, operation_id,
+                                "operation_id"),
+    LONEJSON_FIELD_I64(lc_workflow_command_record, accepted_at_unix,
+                       "accepted_at_unix"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_command_record, state, "state"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_command_record, result_code,
+                                "result_code"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_command_record, result_reference,
+                                "result_reference"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_command_record, result_content_type,
+                                "result_content_type"),
+    LONEJSON_FIELD_I64(lc_workflow_command_record, completed_at_unix,
+                       "completed_at_unix"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_command_record, failure_code,
+                                "failure_code"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_workflow_command_record, failure_message,
+                                "failure_message"),
+    LONEJSON_FIELD_I64(lc_workflow_command_record, failed_at_unix,
+                       "failed_at_unix"),
+    LONEJSON_FIELD_I64(lc_workflow_command_record, has_result_body,
+                       "has_result_body")};
+
 LONEJSON_MAP_DEFINE(lc_workflow_outbox_record_map, lc_workflow_outbox_record,
                     lc_workflow_outbox_record_fields);
 LONEJSON_MAP_DEFINE(lc_workflow_inbox_record_map, lc_workflow_inbox_record,
                     lc_workflow_inbox_record_fields);
+LONEJSON_MAP_DEFINE(lc_workflow_command_record_map, lc_workflow_command_record,
+                    lc_workflow_command_record_fields);
 
 struct lc_workflow_handle {
   lc_workflow pub;
@@ -182,6 +256,9 @@ struct lc_workflow_transaction_handle {
   lc_lease **leases;
   size_t lease_count;
   size_t lease_capacity;
+  lc_lease *command_lease;
+  char *causation_id;
+  int command_terminal;
   int terminal;
 };
 
@@ -502,6 +579,168 @@ static int lc_workflow_inbox_key(lc_workflow_handle *workflow,
   return LC_OK;
 }
 
+static int lc_workflow_command_key(const lc_command_identity *identity,
+                                   char **out, char command_id[48],
+                                   lc_error *error) {
+  EVP_MD_CTX *ctx;
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int digest_length;
+  static const char base64url[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const char *parts[3];
+  size_t index;
+  char identity_digest[44];
+  char *key;
+  size_t key_length;
+
+  if (identity == NULL || identity->scope == NULL ||
+      identity->command_type == NULL || identity->idempotency_key == NULL ||
+      identity->scope[0] == '\0' || identity->command_type[0] == '\0' ||
+      identity->idempotency_key[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "command scope, type, and idempotency key are required",
+                        NULL, NULL, NULL);
+  }
+  parts[0] = identity->scope;
+  parts[1] = identity->command_type;
+  parts[2] = identity->idempotency_key;
+  ctx = EVP_MD_CTX_new();
+  digest_length = 0U;
+  if (ctx == NULL || EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1) {
+    EVP_MD_CTX_free(ctx);
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "failed to digest command identity", NULL, NULL, NULL);
+  }
+  for (index = 0U; index < 3U; ++index) {
+    uint64_t length = (uint64_t)strlen(parts[index]);
+    unsigned char encoded_length[8];
+    size_t byte;
+    for (byte = 0U; byte < sizeof(encoded_length); ++byte) {
+      encoded_length[sizeof(encoded_length) - 1U - byte] =
+          (unsigned char)(length & 0xffU);
+      length >>= 8U;
+    }
+    if (EVP_DigestUpdate(ctx, encoded_length, sizeof(encoded_length)) != 1 ||
+        EVP_DigestUpdate(ctx, parts[index], strlen(parts[index])) != 1) {
+      EVP_MD_CTX_free(ctx);
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "failed to digest command identity", NULL, NULL,
+                          NULL);
+    }
+  }
+  if (EVP_DigestFinal_ex(ctx, digest, &digest_length) != 1 ||
+      digest_length != 32U) {
+    EVP_MD_CTX_free(ctx);
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "failed to digest command identity", NULL, NULL, NULL);
+  }
+  EVP_MD_CTX_free(ctx);
+  for (index = 0U; index < 30U; index += 3U) {
+    identity_digest[(index / 3U) * 4U] = base64url[digest[index] >> 2U];
+    identity_digest[(index / 3U) * 4U + 1U] =
+        base64url[((digest[index] & 0x03U) << 4U) | (digest[index + 1U] >> 4U)];
+    identity_digest[(index / 3U) * 4U + 2U] =
+        base64url[((digest[index + 1U] & 0x0fU) << 2U) |
+                  (digest[index + 2U] >> 6U)];
+    identity_digest[(index / 3U) * 4U + 3U] =
+        base64url[digest[index + 2U] & 0x3fU];
+  }
+  identity_digest[40] = base64url[digest[30] >> 2U];
+  identity_digest[41] =
+      base64url[((digest[30] & 0x03U) << 4U) | (digest[31] >> 4U)];
+  identity_digest[42] = base64url[(digest[31] & 0x0fU) << 2U];
+  identity_digest[43] = '\0';
+  key_length = sizeof("__lockdc_io/v1/command/") - 1U + 43U + 1U;
+  key = (char *)malloc(key_length);
+  if (key == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate command receipt key", NULL, NULL,
+                        NULL);
+  }
+  snprintf(key, key_length, "__lockdc_io/v1/command/%s", identity_digest);
+  snprintf(command_id, 48U, "cmd_%s", identity_digest);
+  *out = key;
+  return LC_OK;
+}
+
+static int lc_workflow_command_receipt_from_record(
+    const lc_workflow_command_record *record, lc_command_receipt *receipt,
+    lc_error *error) {
+  if (record == NULL || receipt == NULL || record->record_type == NULL ||
+      record->command_id == NULL || record->scope == NULL ||
+      record->command_type == NULL || record->idempotency_key == NULL ||
+      record->state == NULL ||
+      strcmp(record->record_type, "lockdc.command.v1") != 0) {
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "command receipt record is malformed", NULL, NULL,
+                        NULL);
+  }
+  lc_command_receipt_cleanup(receipt);
+  if ((receipt->command_id = lc_strdup_local(record->command_id)) == NULL ||
+      (receipt->scope = lc_strdup_local(record->scope)) == NULL ||
+      (receipt->command_type = lc_strdup_local(record->command_type)) == NULL ||
+      (receipt->idempotency_key = lc_strdup_local(record->idempotency_key)) ==
+          NULL ||
+      (record->operation_id != NULL && (receipt->operation_id = lc_strdup_local(
+                                            record->operation_id)) == NULL) ||
+      (record->result_code != NULL &&
+       (receipt->result_code = lc_strdup_local(record->result_code)) == NULL) ||
+      (record->result_reference != NULL &&
+       (receipt->result_reference =
+            lc_strdup_local(record->result_reference)) == NULL) ||
+      (record->failure_code != NULL && (receipt->failure_code = lc_strdup_local(
+                                            record->failure_code)) == NULL) ||
+      (record->failure_message != NULL &&
+       (receipt->failure_message = lc_strdup_local(record->failure_message)) ==
+           NULL)) {
+    lc_command_receipt_cleanup(receipt);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to copy command receipt", NULL, NULL, NULL);
+  }
+  if (strcmp(record->state, "pending") == 0)
+    receipt->state = LC_COMMAND_PENDING;
+  else if (strcmp(record->state, "completed") == 0)
+    receipt->state = LC_COMMAND_COMPLETED;
+  else if (strcmp(record->state, "failed") == 0)
+    receipt->state = LC_COMMAND_FAILED;
+  else {
+    lc_command_receipt_cleanup(receipt);
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "command receipt state is invalid", NULL, NULL, NULL);
+  }
+  receipt->has_result_body = record->has_result_body != 0;
+  return LC_OK;
+}
+
+static int lc_workflow_stage_command(lc_lease *lease,
+                                     const lc_command_request *request,
+                                     const char *command_id, lc_error *error) {
+  lc_workflow_command_record record;
+  time_t now;
+
+  if (request == NULL || request->request_digest == NULL ||
+      request->request_digest[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "command request digest is required", NULL, NULL, NULL);
+  }
+  now = time(NULL);
+  if (now == (time_t)-1)
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "failed to read command receipt clock", NULL, NULL,
+                        NULL);
+  memset(&record, 0, sizeof(record));
+  record.record_type = "lockdc.command.v1";
+  record.command_id = (char *)command_id;
+  record.scope = (char *)request->identity.scope;
+  record.command_type = (char *)request->identity.command_type;
+  record.idempotency_key = (char *)request->identity.idempotency_key;
+  record.request_digest = (char *)request->request_digest;
+  record.operation_id = (char *)request->operation_id;
+  record.accepted_at_unix = (lonejson_int64)now;
+  record.state = "pending";
+  return lc_lease_save(lease, &lc_workflow_command_record_map, &record, error);
+}
+
 static int lc_workflow_stage_inbox(lc_lease *lease,
                                    const lc_inbox_message *message,
                                    lc_error *error) {
@@ -547,22 +786,26 @@ static int lc_workflow_existing_outbox(lc_workflow_handle *workflow,
   rc = lc_load_in_namespace(&workflow->client->pub, workflow->namespace_name,
                             key, &lc_workflow_outbox_record_map, &record,
                             &options, &result, error);
-  if (rc == LC_OK &&
-      (result.no_content || record.record_type == NULL ||
-       record.operation_id == NULL || record.effect_id == NULL ||
-       record.effect_key == NULL || record.kind == NULL ||
-       record.destination == NULL || record.content_type == NULL ||
-       strcmp(record.record_type, "lockdc.outbox.v1") != 0 ||
-       strcmp(record.operation_id, entry->operation_id) != 0 ||
-       strcmp(record.effect_id, entry->effect_id) != 0 ||
-       strcmp(record.effect_key, entry->effect_key) != 0 ||
-       strcmp(record.kind, entry->kind) != 0 ||
-       strcmp(record.destination, entry->destination) != 0 ||
-       strcmp(record.content_type, content_type) != 0 ||
-       !lc_workflow_nullable_string_equal(record.headers_json,
-                                          entry->headers_json) ||
-       !lc_workflow_nullable_string_equal(record.trace_context,
-                                          entry->trace_context))) {
+  if (rc == LC_OK && (result.no_content || record.record_type == NULL ||
+                      record.operation_id == NULL || record.effect_id == NULL ||
+                      record.effect_key == NULL || record.message_id == NULL ||
+                      record.kind == NULL || record.destination == NULL ||
+                      record.content_type == NULL ||
+                      strcmp(record.record_type, "lockdc.outbox.v1") != 0 ||
+                      strcmp(record.operation_id, entry->operation_id) != 0 ||
+                      strcmp(record.effect_id, entry->effect_id) != 0 ||
+                      strcmp(record.effect_key, entry->effect_key) != 0 ||
+                      !lc_workflow_nullable_string_equal(record.causation_id,
+                                                         entry->causation_id) ||
+                      strcmp(record.kind, entry->kind) != 0 ||
+                      !lc_workflow_nullable_string_equal(
+                          record.schema_version, entry->schema_version) ||
+                      strcmp(record.destination, entry->destination) != 0 ||
+                      strcmp(record.content_type, content_type) != 0 ||
+                      !lc_workflow_nullable_string_equal(record.headers_json,
+                                                         entry->headers_json) ||
+                      !lc_workflow_nullable_string_equal(
+                          record.trace_context, entry->trace_context))) {
     rc =
         lc_error_set(error, LC_ERR_SERVER, 0L,
                      "outbox immutable fields conflict with an existing record",
@@ -626,12 +869,173 @@ static int lc_workflow_existing_inbox(lc_workflow_handle *workflow,
   return rc;
 }
 
+static int lc_workflow_existing_command(lc_workflow_handle *workflow,
+                                        const char *key,
+                                        const lc_command_request *request,
+                                        lc_command_receipt *receipt,
+                                        lc_error *error) {
+  lc_workflow_command_record record;
+  lc_get_res load_result;
+  lc_get_opts options;
+  lonejson *runtime;
+  int rc;
+
+  memset(&record, 0, sizeof(record));
+  memset(&load_result, 0, sizeof(load_result));
+  lc_get_opts_init(&options);
+  options.public_read = 1;
+  runtime = lc_thread_lonejson_runtime();
+  rc = lc_load_in_namespace(&workflow->client->pub, workflow->namespace_name,
+                            key, &lc_workflow_command_record_map, &record,
+                            &options, &load_result, error);
+  if (rc == LC_OK &&
+      (load_result.no_content || record.record_type == NULL ||
+       record.scope == NULL || record.command_type == NULL ||
+       record.idempotency_key == NULL || record.request_digest == NULL ||
+       (request != NULL &&
+        (strcmp(record.scope, request->identity.scope) != 0 ||
+         strcmp(record.command_type, request->identity.command_type) != 0 ||
+         strcmp(record.idempotency_key, request->identity.idempotency_key) !=
+             0 ||
+         strcmp(record.request_digest, request->request_digest) != 0 ||
+         !lc_workflow_nullable_string_equal(record.operation_id,
+                                            request->operation_id))))) {
+    rc = lc_error_set(
+        error, LC_ERR_SERVER, 0L,
+        "command immutable fields conflict with an existing receipt", NULL,
+        NULL, NULL);
+  }
+  if (rc == LC_OK)
+    rc = lc_workflow_command_receipt_from_record(&record, receipt, error);
+  runtime->cleanup(runtime, &lc_workflow_command_record_map, &record);
+  lc_get_res_cleanup(&load_result);
+  if (rc == LC_OK && request != NULL)
+    receipt->duplicate = 1;
+  return rc;
+}
+
+static int
+lc_workflow_transaction_set_command(lc_workflow_transaction_handle *transaction,
+                                    lc_lease *lease, const char *command_id,
+                                    lc_error *error) {
+  char *cause;
+
+  if (transaction->command_lease != NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow transaction already owns a command receipt",
+                        NULL, NULL, NULL);
+  }
+  if (transaction->causation_id == NULL) {
+    cause = lc_client_strdup(transaction->workflow->client, command_id);
+    if (cause == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to retain command causation identity", NULL,
+                          NULL, NULL);
+    }
+    transaction->causation_id = cause;
+  }
+  transaction->command_lease = lease;
+  return LC_OK;
+}
+
+static int
+lc_workflow_stage_command_terminal(lc_workflow_transaction_handle *transaction,
+                                   const lc_command_result *result, int failed,
+                                   lc_error *error) {
+  lc_workflow_command_record record;
+  lc_workflow_command_record updated;
+  lc_get_res load_result;
+  lc_attach_req attach;
+  lc_attach_res attach_result;
+  time_t now;
+  int rc;
+
+  if (transaction == NULL || transaction->terminal ||
+      transaction->command_lease == NULL || transaction->command_terminal ||
+      result == NULL) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "an open transaction with a pending command is required", NULL, NULL,
+        NULL);
+  }
+  if ((!failed &&
+       (result->result_code == NULL || result->result_code[0] == '\0' ||
+        result->failure_code != NULL || result->failure_message != NULL ||
+        (result->body != NULL &&
+         (result->content_type == NULL || result->content_type[0] == '\0')))) ||
+      (failed &&
+       (result->failure_code == NULL || result->failure_code[0] == '\0' ||
+        result->result_code != NULL || result->result_reference != NULL ||
+        result->content_type != NULL || result->body != NULL))) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "command terminal result contains contradictory fields",
+                        NULL, NULL, NULL);
+  }
+  memset(&record, 0, sizeof(record));
+  memset(&load_result, 0, sizeof(load_result));
+  rc =
+      lc_lease_load(transaction->command_lease, &lc_workflow_command_record_map,
+                    &record, NULL, &load_result, error);
+  if (rc != LC_OK)
+    return rc;
+  if (record.state == NULL || strcmp(record.state, "pending") != 0) {
+    lc_thread_lonejson_runtime()->cleanup(
+        lc_thread_lonejson_runtime(), &lc_workflow_command_record_map, &record);
+    lc_get_res_cleanup(&load_result);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "command receipt is already terminal", NULL, NULL,
+                        NULL);
+  }
+  now = time(NULL);
+  if (now == (time_t)-1) {
+    lc_thread_lonejson_runtime()->cleanup(
+        lc_thread_lonejson_runtime(), &lc_workflow_command_record_map, &record);
+    lc_get_res_cleanup(&load_result);
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "failed to read command terminal clock", NULL, NULL,
+                        NULL);
+  }
+  updated = record;
+  updated.state = failed ? "failed" : "completed";
+  if (failed) {
+    updated.failure_code = (char *)result->failure_code;
+    updated.failure_message = (char *)result->failure_message;
+    updated.failed_at_unix = (lonejson_int64)now;
+  } else {
+    updated.result_code = (char *)result->result_code;
+    updated.result_reference = (char *)result->result_reference;
+    updated.result_content_type = (char *)result->content_type;
+    updated.completed_at_unix = (lonejson_int64)now;
+    updated.has_result_body = result->body != NULL;
+  }
+  rc = lc_lease_save(transaction->command_lease,
+                     &lc_workflow_command_record_map, &updated, error);
+  if (rc == LC_OK && result->body != NULL) {
+    lc_attach_req_init(&attach);
+    attach.name = "result";
+    attach.content_type = result->content_type;
+    attach.prevent_overwrite = 1;
+    memset(&attach_result, 0, sizeof(attach_result));
+    rc = lc_lease_attach(transaction->command_lease, &attach, result->body,
+                         &attach_result, error);
+    lc_attach_res_cleanup(&attach_result);
+  }
+  lc_thread_lonejson_runtime()->cleanup(
+      lc_thread_lonejson_runtime(), &lc_workflow_command_record_map, &record);
+  lc_get_res_cleanup(&load_result);
+  if (rc == LC_OK)
+    transaction->command_terminal = 1;
+  return rc;
+}
+
 static int lc_workflow_stage_outbox(lc_lease *lease,
                                     const lc_outbox_entry *entry,
                                     lc_source *payload, lc_error *error) {
   lc_workflow_outbox_record record;
   lc_attach_req attach;
   lc_attach_res attach_result;
+  char message_digest[44];
+  char message_id[48];
   int rc;
 
   if (payload == NULL) {
@@ -643,7 +1047,14 @@ static int lc_workflow_stage_outbox(lc_lease *lease,
   record.operation_id = (char *)entry->operation_id;
   record.effect_id = (char *)entry->effect_id;
   record.effect_key = (char *)entry->effect_key;
+  rc = lc_workflow_digest(lease->key, message_digest, error);
+  if (rc != LC_OK)
+    return rc;
+  snprintf(message_id, sizeof(message_id), "msg_%s", message_digest);
+  record.message_id = message_id;
+  record.causation_id = (char *)entry->causation_id;
   record.kind = (char *)entry->kind;
+  record.schema_version = (char *)entry->schema_version;
   record.destination = (char *)entry->destination;
   record.content_type =
       (char *)(entry->content_type != NULL ? entry->content_type
@@ -680,11 +1091,16 @@ static void lc_workflow_outbox_record_clear(lc_client_handle *client,
   lc_client_free(client, record->operation_id);
   lc_client_free(client, record->effect_id);
   lc_client_free(client, record->effect_key);
+  lc_client_free(client, record->message_id);
+  lc_client_free(client, record->causation_id);
   lc_client_free(client, record->kind);
+  lc_client_free(client, record->schema_version);
   lc_client_free(client, record->destination);
   lc_client_free(client, record->content_type);
   lc_client_free(client, record->headers_json);
   lc_client_free(client, record->trace_context);
+  lc_client_free(client, record->delivery_reference);
+  lc_client_free(client, record->response_digest);
   lc_client_free(client, record->dispatch_state);
   lc_client_free(client, record->last_error);
   lc_client_free(client, record->prior_dead_letter_error);
@@ -714,8 +1130,15 @@ static int lc_workflow_outbox_record_copy(lc_client_handle *client,
        (dst->effect_id = lc_client_strdup(client, src->effect_id)) == NULL) ||
       (src->effect_key != NULL &&
        (dst->effect_key = lc_client_strdup(client, src->effect_key)) == NULL) ||
+      (src->message_id != NULL &&
+       (dst->message_id = lc_client_strdup(client, src->message_id)) == NULL) ||
+      (src->causation_id != NULL && (dst->causation_id = lc_client_strdup(
+                                         client, src->causation_id)) == NULL) ||
       (src->kind != NULL &&
        (dst->kind = lc_client_strdup(client, src->kind)) == NULL) ||
+      (src->schema_version != NULL &&
+       (dst->schema_version = lc_client_strdup(client, src->schema_version)) ==
+           NULL) ||
       (src->destination != NULL && (dst->destination = lc_client_strdup(
                                         client, src->destination)) == NULL) ||
       (src->content_type != NULL && (dst->content_type = lc_client_strdup(
@@ -725,6 +1148,12 @@ static int lc_workflow_outbox_record_copy(lc_client_handle *client,
       (src->trace_context != NULL &&
        (dst->trace_context = lc_client_strdup(client, src->trace_context)) ==
            NULL) ||
+      (src->delivery_reference != NULL &&
+       (dst->delivery_reference =
+            lc_client_strdup(client, src->delivery_reference)) == NULL) ||
+      (src->response_digest != NULL &&
+       (dst->response_digest =
+            lc_client_strdup(client, src->response_digest)) == NULL) ||
       (src->dispatch_state != NULL &&
        (dst->dispatch_state = lc_client_strdup(client, src->dispatch_state)) ==
            NULL) ||
@@ -742,6 +1171,7 @@ static int lc_workflow_outbox_record_copy(lc_client_handle *client,
   dst->replay_count = src->replay_count;
   dst->dead_lettered_at_unix = src->dead_lettered_at_unix;
   dst->replayed_at_unix = src->replayed_at_unix;
+  dst->completed_at_unix = src->completed_at_unix;
   return LC_OK;
 }
 
@@ -750,7 +1180,10 @@ static void lc_outbox_job_refresh(lc_outbox_job_handle *job) {
   job->pub.operation_id = job->record.operation_id;
   job->pub.effect_id = job->record.effect_id;
   job->pub.effect_key = job->record.effect_key;
+  job->pub.message_id = job->record.message_id;
+  job->pub.causation_id = job->record.causation_id;
   job->pub.kind = job->record.kind;
+  job->pub.schema_version = job->record.schema_version;
   job->pub.destination = job->record.destination;
   job->pub.content_type = job->record.content_type;
   job->pub.headers_json = job->record.headers_json;
@@ -829,6 +1262,7 @@ static int lc_outbox_job_renew_method(lc_outbox_job *self, long ttl_seconds,
 
 static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
                                   long not_before_unix, const char *diagnostic,
+                                  const lc_outbox_completion *completion,
                                   lc_error *error) {
   lc_outbox_job_handle *job = (lc_outbox_job_handle *)self;
   lc_workflow_outbox_record record;
@@ -843,6 +1277,20 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
   record.dispatch_state = (char *)state;
   record.not_before_unix = not_before_unix;
   record.last_error = (char *)diagnostic;
+  if (strcmp(state, "completed") == 0) {
+    time_t now = time(NULL);
+
+    if (now == (time_t)-1) {
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "failed to read workflow completion clock", NULL,
+                          NULL, NULL);
+    }
+    record.delivery_reference =
+        (char *)(completion == NULL ? NULL : completion->delivery_reference);
+    record.response_digest =
+        (char *)(completion == NULL ? NULL : completion->response_digest);
+    record.completed_at_unix = (lonejson_int64)now;
+  }
   if (strcmp(state, "dead_letter") == 0) {
     time_t now = time(NULL);
 
@@ -871,8 +1319,10 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
   return LC_OK;
 }
 
-static int lc_outbox_job_complete_method(lc_outbox_job *self, lc_error *error) {
-  return lc_outbox_job_terminal(self, "completed", 0L, NULL, error);
+static int lc_outbox_job_complete_method(lc_outbox_job *self,
+                                         const lc_outbox_completion *completion,
+                                         lc_error *error) {
+  return lc_outbox_job_terminal(self, "completed", 0L, NULL, completion, error);
 }
 
 static long lc_outbox_job_auto_retry_delay(const lc_outbox_job_handle *job) {
@@ -924,16 +1374,17 @@ static int lc_outbox_job_retry_method(lc_outbox_job *self,
   }
   if (job->record.attempt_count >= job->pub.max_attempts) {
     return lc_outbox_job_terminal(self, "dead_letter", 0L, request->diagnostic,
-                                  error);
+                                  NULL, error);
   }
   return lc_outbox_job_terminal(self, "retry_wait", (long)(now + delay),
-                                request->diagnostic, error);
+                                request->diagnostic, NULL, error);
 }
 
 static int lc_outbox_job_dead_letter_method(lc_outbox_job *self,
                                             const char *diagnostic,
                                             lc_error *error) {
-  return lc_outbox_job_terminal(self, "dead_letter", 0L, diagnostic, error);
+  return lc_outbox_job_terminal(self, "dead_letter", 0L, diagnostic, NULL,
+                                error);
 }
 
 /* A successful release consumes the lease. If the endpoint cannot accept the
@@ -1579,22 +2030,30 @@ static int lc_workflow_transaction_acquire_method(
   return LC_OK;
 }
 
-static int lc_workflow_transaction_append_outbox_method(
-    lc_workflow_transaction *self, const lc_outbox_entry *entry,
-    lc_source *payload, lc_outbox_receipt *receipt, lc_error *error) {
+static int lc_workflow_transaction_accept_command_method(
+    lc_workflow_transaction *self, const lc_command_request *request,
+    lc_command_receipt *receipt, lc_error *error) {
   lc_workflow_transaction_handle *transaction =
       (lc_workflow_transaction_handle *)self;
   lc_acquire_req acquire;
   lc_lease *lease;
   char *key;
+  char command_id[48];
+  lc_workflow_command_record record;
   int rc;
-  if (transaction == NULL || transaction->terminal || receipt == NULL ||
-      transaction->lease_count == 0U)
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "workflow transaction is closed", NULL, NULL, NULL);
-  lc_outbox_receipt_cleanup(receipt);
+
+  if (transaction == NULL || transaction->terminal || request == NULL ||
+      receipt == NULL || transaction->lease_count == 0U ||
+      transaction->command_lease != NULL || request->request_digest == NULL ||
+      request->request_digest[0] == '\0') {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "open transaction, one command request, and digest are required", NULL,
+        NULL, NULL);
+  }
+  lc_command_receipt_cleanup(receipt);
   key = NULL;
-  rc = lc_workflow_outbox_key(transaction->workflow, entry, &key, error);
+  rc = lc_workflow_command_key(&request->identity, &key, command_id, error);
   if (rc != LC_OK)
     return rc;
   lc_acquire_req_init(&acquire);
@@ -1611,12 +2070,98 @@ static int lc_workflow_transaction_append_outbox_method(
       lc_error_cleanup(error);
       lc_error_init(error);
     }
-    rc = lc_workflow_existing_outbox(transaction->workflow, key, entry, receipt,
-                                     error);
+    rc = lc_workflow_existing_command(transaction->workflow, key, request,
+                                      receipt, error);
     free(key);
     return rc;
   }
-  rc = lc_workflow_stage_outbox(lease, entry, payload, error);
+  rc = lc_workflow_stage_command(lease, request, command_id, error);
+  if (rc == LC_OK)
+    rc = lc_workflow_transaction_add_lease(transaction, lease, error);
+  if (rc == LC_OK)
+    rc = lc_workflow_transaction_set_command(transaction, lease, command_id,
+                                             error);
+  if (rc != LC_OK) {
+    if (transaction->lease_count > 0U &&
+        transaction->leases[transaction->lease_count - 1U] == lease) {
+      transaction->leases[--transaction->lease_count] = NULL;
+    }
+    lc_workflow_rollback_lease(lease);
+    free(key);
+    return rc;
+  }
+  memset(&record, 0, sizeof(record));
+  record.record_type = "lockdc.command.v1";
+  record.command_id = command_id;
+  record.scope = (char *)request->identity.scope;
+  record.command_type = (char *)request->identity.command_type;
+  record.idempotency_key = (char *)request->identity.idempotency_key;
+  record.state = "pending";
+  record.operation_id = (char *)request->operation_id;
+  rc = lc_workflow_command_receipt_from_record(&record, receipt, error);
+  free(key);
+  return rc;
+}
+
+static int
+lc_workflow_transaction_complete_command_method(lc_workflow_transaction *self,
+                                                const lc_command_result *result,
+                                                lc_error *error) {
+  return lc_workflow_stage_command_terminal(
+      (lc_workflow_transaction_handle *)self, result, 0, error);
+}
+
+static int
+lc_workflow_transaction_fail_command_method(lc_workflow_transaction *self,
+                                            const lc_command_result *result,
+                                            lc_error *error) {
+  return lc_workflow_stage_command_terminal(
+      (lc_workflow_transaction_handle *)self, result, 1, error);
+}
+
+static int lc_workflow_transaction_append_outbox_method(
+    lc_workflow_transaction *self, const lc_outbox_entry *entry,
+    lc_source *payload, lc_outbox_receipt *receipt, lc_error *error) {
+  lc_workflow_transaction_handle *transaction =
+      (lc_workflow_transaction_handle *)self;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_outbox_entry effective_entry;
+  char *key;
+  int rc;
+  if (transaction == NULL || transaction->terminal || receipt == NULL ||
+      transaction->lease_count == 0U || entry == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow transaction is closed", NULL, NULL, NULL);
+  lc_outbox_receipt_cleanup(receipt);
+  effective_entry = *entry;
+  if (effective_entry.causation_id == NULL)
+    effective_entry.causation_id = transaction->causation_id;
+  key = NULL;
+  rc = lc_workflow_outbox_key(transaction->workflow, &effective_entry, &key,
+                              error);
+  if (rc != LC_OK)
+    return rc;
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = transaction->workflow->namespace_name;
+  acquire.key = key;
+  acquire.owner = transaction->workflow->owner;
+  acquire.ttl_seconds = transaction->workflow->transaction_ttl_seconds;
+  acquire.if_not_exists = 1;
+  acquire.txn_id = transaction->leases[0]->txn_id;
+  lease = NULL;
+  rc = lc_acquire(&transaction->workflow->client->pub, &acquire, &lease, error);
+  if (rc != LC_OK) {
+    if (error != NULL) {
+      lc_error_cleanup(error);
+      lc_error_init(error);
+    }
+    rc = lc_workflow_existing_outbox(transaction->workflow, key,
+                                     &effective_entry, receipt, error);
+    free(key);
+    return rc;
+  }
+  rc = lc_workflow_stage_outbox(lease, &effective_entry, payload, error);
   if (rc != LC_OK) {
     lc_release_req rollback;
     lc_release_req_init(&rollback);
@@ -1730,6 +2275,7 @@ lc_workflow_transaction_close_method(lc_workflow_transaction *self) {
   for (i = 0U; i < transaction->lease_count; ++i)
     lc_lease_close(transaction->leases[i]);
   lc_client_free(workflow->client, transaction->leases);
+  lc_client_free(workflow->client, transaction->causation_id);
   lc_client_free(workflow->client, transaction);
   lc_workflow_release(workflow);
 }
@@ -1747,8 +2293,13 @@ lc_workflow_transaction_new(lc_workflow_handle *workflow, lc_lease *first,
   }
   transaction->workflow = workflow;
   lc_workflow_retain(workflow);
+  transaction->pub.accept_command =
+      lc_workflow_transaction_accept_command_method;
   transaction->pub.acquire = lc_workflow_transaction_acquire_method;
   transaction->pub.append_outbox = lc_workflow_transaction_append_outbox_method;
+  transaction->pub.complete_command =
+      lc_workflow_transaction_complete_command_method;
+  transaction->pub.fail_command = lc_workflow_transaction_fail_command_method;
   transaction->pub.commit = lc_workflow_transaction_commit_method;
   transaction->pub.rollback = lc_workflow_transaction_rollback_method;
   transaction->pub.close = lc_workflow_transaction_close_method;
@@ -1874,10 +2425,233 @@ static int lc_workflow_accept_inbox_method(lc_workflow *self,
     lc_workflow_rollback_lease(lease);
     return error != NULL ? error->code : LC_ERR_NOMEM;
   }
+  ((lc_workflow_transaction_handle *)transaction)->causation_id =
+      lc_client_strdup(workflow->client, message->message_id);
+  if (((lc_workflow_transaction_handle *)transaction)->causation_id == NULL) {
+    transaction->close(transaction);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to retain inbox causation identity", NULL, NULL,
+                        NULL);
+  }
   result->accepted = 1;
   *out_txn = transaction;
   return LC_OK;
 }
+
+static int lc_workflow_accept_command_method(lc_workflow *self,
+                                             const lc_command_request *request,
+                                             lc_workflow_transaction **out_txn,
+                                             lc_command_receipt *receipt,
+                                             lc_error *error) {
+  lc_workflow_handle *workflow = (lc_workflow_handle *)self;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_workflow_transaction *transaction;
+  lc_workflow_transaction_handle *handle;
+  lc_workflow_command_record record;
+  char *key;
+  char command_id[48];
+  int rc;
+
+  if (workflow == NULL || request == NULL || out_txn == NULL ||
+      receipt == NULL || request->request_digest == NULL ||
+      request->request_digest[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow, command request, digest, transaction "
+                        "output, and receipt are required",
+                        NULL, NULL, NULL);
+  }
+  *out_txn = NULL;
+  lc_command_receipt_cleanup(receipt);
+  key = NULL;
+  rc = lc_workflow_command_key(&request->identity, &key, command_id, error);
+  if (rc != LC_OK)
+    return rc;
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = workflow->namespace_name;
+  acquire.key = key;
+  acquire.owner = workflow->owner;
+  acquire.ttl_seconds = workflow->transaction_ttl_seconds;
+  acquire.if_not_exists = 1;
+  lease = NULL;
+  rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error);
+  if (rc != LC_OK) {
+    if (error != NULL) {
+      lc_error_cleanup(error);
+      lc_error_init(error);
+    }
+    rc = lc_workflow_existing_command(workflow, key, request, receipt, error);
+    free(key);
+    return rc;
+  }
+  rc = lc_workflow_stage_command(lease, request, command_id, error);
+  if (rc != LC_OK) {
+    lc_workflow_rollback_lease(lease);
+    free(key);
+    return rc;
+  }
+  transaction = lc_workflow_transaction_new(workflow, lease, error);
+  if (transaction == NULL) {
+    lc_workflow_rollback_lease(lease);
+    free(key);
+    return error != NULL ? error->code : LC_ERR_NOMEM;
+  }
+  handle = (lc_workflow_transaction_handle *)transaction;
+  rc = lc_workflow_transaction_set_command(handle, lease, command_id, error);
+  if (rc != LC_OK) {
+    transaction->close(transaction);
+    free(key);
+    return rc;
+  }
+  memset(&record, 0, sizeof(record));
+  record.record_type = "lockdc.command.v1";
+  record.command_id = command_id;
+  record.scope = (char *)request->identity.scope;
+  record.command_type = (char *)request->identity.command_type;
+  record.idempotency_key = (char *)request->identity.idempotency_key;
+  record.operation_id = (char *)request->operation_id;
+  record.state = "pending";
+  rc = lc_workflow_command_receipt_from_record(&record, receipt, error);
+  free(key);
+  if (rc != LC_OK) {
+    transaction->close(transaction);
+    return rc;
+  }
+  *out_txn = transaction;
+  return LC_OK;
+}
+
+static int lc_workflow_get_command_receipt_method(
+    lc_workflow *self, const lc_command_identity *identity,
+    lc_command_receipt *receipt, lc_error *error) {
+  lc_workflow_handle *workflow = (lc_workflow_handle *)self;
+  char *key;
+  char command_id[48];
+  int rc;
+
+  if (workflow == NULL || receipt == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow and command receipt output are required",
+                        NULL, NULL, NULL);
+  lc_command_receipt_cleanup(receipt);
+  key = NULL;
+  rc = lc_workflow_command_key(identity, &key, command_id, error);
+  if (rc == LC_OK)
+    rc = lc_workflow_existing_command(workflow, key, NULL, receipt, error);
+  free(key);
+  return rc;
+}
+
+static int lc_workflow_write_command_result_method(
+    lc_workflow *self, const lc_command_identity *identity, lc_sink *dst,
+    size_t *written, lc_error *error) {
+  lc_workflow_handle *workflow = (lc_workflow_handle *)self;
+  lc_attachment_get_op request;
+  lc_attachment_get_res result;
+  char *key;
+  char command_id[48];
+  int rc;
+
+  if (workflow == NULL || dst == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow and command result sink are required", NULL,
+                        NULL, NULL);
+  key = NULL;
+  rc = lc_workflow_command_key(identity, &key, command_id, error);
+  if (rc != LC_OK)
+    return rc;
+  lc_attachment_get_op_init(&request);
+  memset(&result, 0, sizeof(result));
+  request.lease.namespace_name = workflow->namespace_name;
+  request.lease.key = key;
+  request.selector.name = "result";
+  request.public_read = 1;
+  rc = lc_get_attachment(&workflow->client->pub, &request, dst, &result, error);
+  if (rc == LC_OK && written != NULL)
+    *written = (size_t)result.attachment.size;
+  lc_attachment_get_res_cleanup(&result);
+  free(key);
+  return rc;
+}
+
+static int lc_workflow_resume_command_method(
+    lc_workflow *self, const lc_command_identity *identity,
+    lc_workflow_transaction **out_txn, lc_command_receipt *receipt,
+    lc_error *error) {
+  lc_workflow_handle *workflow = (lc_workflow_handle *)self;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_workflow_transaction *transaction;
+  lc_workflow_transaction_handle *handle;
+  lc_workflow_command_record record;
+  lc_get_res load_result;
+  lonejson *runtime;
+  char *key;
+  char command_id[48];
+  int rc;
+
+  if (workflow == NULL || out_txn == NULL || receipt == NULL)
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "workflow, transaction output, and receipt are required", NULL, NULL,
+        NULL);
+  *out_txn = NULL;
+  lc_command_receipt_cleanup(receipt);
+  key = NULL;
+  rc = lc_workflow_command_key(identity, &key, command_id, error);
+  if (rc != LC_OK)
+    return rc;
+  rc = lc_workflow_existing_command(workflow, key, NULL, receipt, error);
+  if (rc != LC_OK || receipt->state != LC_COMMAND_PENDING) {
+    free(key);
+    return rc;
+  }
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = workflow->namespace_name;
+  acquire.key = key;
+  acquire.owner = workflow->owner;
+  acquire.ttl_seconds = workflow->transaction_ttl_seconds;
+  lease = NULL;
+  rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error);
+  if (rc != LC_OK) {
+    free(key);
+    return rc;
+  }
+  memset(&record, 0, sizeof(record));
+  memset(&load_result, 0, sizeof(load_result));
+  runtime = lc_thread_lonejson_runtime();
+  rc = lc_lease_load(lease, &lc_workflow_command_record_map, &record, NULL,
+                     &load_result, error);
+  if (rc == LC_OK &&
+      (record.state == NULL || strcmp(record.state, "pending") != 0)) {
+    rc = lc_workflow_command_receipt_from_record(&record, receipt, error);
+    if (rc == LC_OK)
+      receipt->duplicate = 1;
+  }
+  runtime->cleanup(runtime, &lc_workflow_command_record_map, &record);
+  lc_get_res_cleanup(&load_result);
+  if (rc != LC_OK || receipt->state != LC_COMMAND_PENDING) {
+    lc_workflow_rollback_lease(lease);
+    free(key);
+    return rc;
+  }
+  transaction = lc_workflow_transaction_new(workflow, lease, error);
+  if (transaction == NULL) {
+    lc_workflow_rollback_lease(lease);
+    free(key);
+    return error != NULL ? error->code : LC_ERR_NOMEM;
+  }
+  handle = (lc_workflow_transaction_handle *)transaction;
+  rc = lc_workflow_transaction_set_command(handle, lease, command_id, error);
+  free(key);
+  if (rc != LC_OK) {
+    transaction->close(transaction);
+    return rc;
+  }
+  *out_txn = transaction;
+  return LC_OK;
+}
+
 static int lc_workflow_next_method(lc_workflow *self, long timeout_ms,
                                    lc_outbox_job **out, lc_error *error) {
   lc_workflow_handle *workflow = (lc_workflow_handle *)self;
@@ -2570,6 +3344,10 @@ int lc_client_new_workflow_method(lc_client *self,
     workflow->next_recovery_unix =
         (lc_unix_seconds)time(NULL) + workflow->recovery_interval_seconds;
   }
+  workflow->pub.accept_command = lc_workflow_accept_command_method;
+  workflow->pub.get_command_receipt = lc_workflow_get_command_receipt_method;
+  workflow->pub.write_command_result = lc_workflow_write_command_result_method;
+  workflow->pub.resume_command = lc_workflow_resume_command_method;
   workflow->pub.append_outbox = lc_workflow_append_outbox_method;
   workflow->pub.accept_inbox = lc_workflow_accept_inbox_method;
   workflow->pub.next = lc_workflow_next_method;

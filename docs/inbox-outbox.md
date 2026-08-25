@@ -1,11 +1,11 @@
 # liblockdc Transactional Messaging Design Specification
 
 Status: inbox, outbox, operational recovery, and dead-letter controls are
-implemented for Pouch. This document also specifies the next command-receipt
+implemented for Pouch. This document also specifies the command-receipt
 extension, its explicit message/causation envelope identity, and delivery
-completion evidence; those are not yet public APIs. Remote lockd parity for
-every workflow that adds a second participant is blocked on the upstream
-implicit-XA enrollment defect recorded in its bug tracker.
+completion evidence. The public workflow surface remains endpoint-neutral;
+remote lockd verification is deferred only because its current implicit-XA
+enrollment defect breaks multi-participant atomicity.
 
 ## Purpose
 
@@ -207,39 +207,34 @@ dispatcher notifications themselves.
 
 The primary C entry point is an opaque workflow handle created from an existing
 client. It follows the public library's receiver-function convention and
-zero-initializable configuration/request records. The inbox/outbox methods
-below are current. The command-receipt methods and records marked *proposed*
-are the required next public-surface extension; they are intentionally shown
-here before implementation so C and Lua can make one clean cutover.
+zero-initializable configuration/request records. The command-receipt methods,
+message envelope fields, and completion evidence below are the current public
+surface.
 
 ```c
 typedef struct lc_workflow lc_workflow;
 typedef struct lc_workflow_transaction lc_workflow_transaction;
 typedef struct lc_workflow_participant lc_workflow_participant;
 typedef struct lc_outbox_job lc_outbox_job;
-typedef struct lc_command_identity lc_command_identity;     /* proposed */
-typedef struct lc_command_request lc_command_request;       /* proposed */
-typedef struct lc_command_receipt lc_command_receipt;       /* proposed */
-typedef struct lc_command_result lc_command_result;         /* proposed */
+typedef struct lc_command_identity lc_command_identity;
+typedef struct lc_command_request lc_command_request;
+typedef struct lc_command_receipt lc_command_receipt;
+typedef struct lc_command_result lc_command_result;
 
 int (*new_workflow)(lc_client *self, const lc_workflow_config *config,
                     lc_workflow **out, lc_error *error);
 
 struct lc_workflow {
-  /* Proposed: creates the command receipt as the first transaction record. */
   int (*accept_command)(lc_workflow *self,
                         const lc_command_request *request,
                         lc_workflow_transaction **out,
                         lc_command_receipt *receipt, lc_error *error);
-  /* Proposed: reads a durable status/result snapshot without claiming work. */
   int (*get_command_receipt)(lc_workflow *self,
                              const lc_command_identity *identity,
                              lc_command_receipt *out, lc_error *error);
-  /* Proposed: streams the immutable terminal result attachment, if present. */
   int (*write_command_result)(lc_workflow *self,
                               const lc_command_identity *identity,
                               lc_sink *dst, size_t *written, lc_error *error);
-  /* Proposed: starts a transaction to terminally resolve a pending command. */
   int (*resume_command)(lc_workflow *self,
                         const lc_command_identity *identity,
                         lc_workflow_transaction **out,
@@ -267,8 +262,6 @@ struct lc_workflow {
 };
 
 struct lc_workflow_transaction {
-  /* Proposed: adds a command receipt after an inbox receipt already started
-     this transaction. It returns an existing receipt on a command duplicate. */
   int (*accept_command)(lc_workflow_transaction *self,
                         const lc_command_request *request,
                         lc_command_receipt *receipt, lc_error *error);
@@ -278,8 +271,6 @@ struct lc_workflow_transaction {
   int (*append_outbox)(lc_workflow_transaction *self,
                         const lc_outbox_entry *entry, lc_source *payload,
                         lc_outbox_receipt *out, lc_error *error);
-  /* Proposed: persists one immutable terminal command outcome with this
-     transaction. No terminal result leaves the new receipt pending. */
   int (*complete_command)(lc_workflow_transaction *self,
                           const lc_command_result *result, lc_error *error);
   int (*fail_command)(lc_workflow_transaction *self,
@@ -297,7 +288,7 @@ struct lc_workflow_participant {
 };
 ```
 
-The proposed command records are deliberately small and transport-neutral:
+The command records are deliberately small and transport-neutral:
 
 ```c
 struct lc_command_identity {
@@ -330,6 +321,7 @@ struct lc_command_result {
 struct lc_command_receipt {
   int state;
   int duplicate;
+  char *command_id;
   char *scope;
   char *command_type;
   char *idempotency_key;
@@ -352,8 +344,7 @@ successful completion supplies no failure fields; a terminal failure supplies
 no success body or success result fields. The implementation must reject
 contradictory combinations before any state is staged.
 
-Exact type and method names remain subject to ABI review, but these interaction
-boundaries are fixed:
+The ABI-reviewed names below establish these interaction boundaries:
 
 - `lc_workflow_config_init()`, participant acquisition records, and every
   transparent entry/retry/configuration record have matching initializers.
@@ -729,10 +720,10 @@ does not claim a dispatcher job, invoke user code, or perform a reconciliation
 query.
 
 A command receipt without its associated domain/outbox transaction is not the
-feature's correctness goal. The command-receipt extension therefore ships as a
-Pouch capability first. It must not be advertised for remote lockd until the
-compose-backed remote E2E proof demonstrates atomic command + domain + outbox
-publication with the repaired implicit-XA enrollment contract.
+feature's correctness goal. The public command-receipt API is endpoint-neutral
+and uses the same workflow composition for Pouch and remote lockd. This release
+proves it for Pouch first; compose-backed remote E2E proof remains deferred
+until lockd repairs its implicit-XA enrollment contract.
 
 ### Message consumer that starts an owned command
 
@@ -923,10 +914,10 @@ can reclaim and recheck the durable envelope. Remote lockd is expected to
 provide the same boundary after its implicit-XA enrollment defect is fixed.
 
 The outbox envelope is also the external-delivery receipt for its one
-`effect_key`; a separate generic external-delivery table is unnecessary. The
-next surface extends `job->complete()` with an optional completion record that
-persists a bounded provider/broker delivery reference and response digest with
-the `completed` transition. This is evidence for diagnosis and provider
+`effect_key`; a separate generic external-delivery table is unnecessary.
+`job->complete(job, completion, error)` accepts optional completion evidence
+that persists a bounded provider/broker delivery reference and response digest
+with the `completed` transition. This is evidence for diagnosis and provider
 reconciliation, not proof that an uncooperative provider performed exactly one
 effect. On an uncertain provider outcome, the host must either retry with the
 same `effect_key` when the provider supports idempotency, or retain/dead-letter

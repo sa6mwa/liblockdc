@@ -77,7 +77,7 @@ set(LOCKDC_LIBLQL_ABI_VERSION "0" CACHE STRING "Pinned liblql shared-library ABI
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.9.0" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
 set(LOCKDC_CPKT_VERSION "0.9.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version." FORCE)
-set(LOCKDC_MIN_ABI_VERSION "2")
+set(LOCKDC_MIN_ABI_VERSION "3")
 set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
 if(LOCKDC_ABI_VERSION MATCHES "^[0-9]+$" AND LOCKDC_ABI_VERSION LESS LOCKDC_MIN_ABI_VERSION)
     set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc." FORCE)

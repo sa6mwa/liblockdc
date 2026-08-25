@@ -82,6 +82,7 @@ static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
   static const char state[] =
       "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"recovery-op\","
       "\"effect_id\":\"recovery-effect\",\"effect_key\":\"recovery-key\","
+      "\"message_id\":\"msg_recovery\","
       "\"kind\":\"test\",\"destination\":\"recovery://target\","
       "\"content_type\":\"text/plain\",\"dispatch_state\":\"pending\","
       "\"attempt_count\":0,\"not_before_unix\":0}";
@@ -204,7 +205,7 @@ workflow_shared_process_claim(const char *root, const char *namespace_name,
     result.rc = lc_workflow_next(workflow, 5000L, &job, &error);
   if (result.rc == LC_OK && job != NULL) {
     result.got_job = 1;
-    result.rc = lc_outbox_job_complete(job, &error);
+    result.rc = lc_outbox_job_complete(job, NULL, &error);
     if (result.rc == LC_OK)
       result.delivered = 1UL;
   }
@@ -284,7 +285,7 @@ workflow_shared_process_drain(const char *root, const char *namespace_name,
     }
     idle_count = 0U;
     result.got_job = 1;
-    result.rc = lc_outbox_job_complete(job, &error);
+    result.rc = lc_outbox_job_complete(job, NULL, &error);
     lc_outbox_job_close(job);
     if (result.rc == LC_OK)
       ++result.delivered;
@@ -435,7 +436,9 @@ test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts(void **state) {
   entry.operation_id = "immutable-envelope-operation";
   entry.effect_id = "immutable-envelope-effect";
   entry.effect_key = "immutable-envelope-effect-key";
+  entry.causation_id = "command-immutable-1";
   entry.kind = "http";
+  entry.schema_version = "v1";
   entry.destination = "https://example.invalid/immutable-envelope";
   entry.content_type = "text/plain";
   entry.headers_json = "{\"x-request-id\":\"first\"}";
@@ -474,6 +477,24 @@ test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts(void **state) {
   lc_error_cleanup(&error);
   lc_error_init(&error);
   entry.headers_json = "{\"x-request-id\":\"first\"}";
+
+  entry.causation_id = "command-immutable-2";
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_ERR_SERVER);
+  assert_null(transaction);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  entry.causation_id = "command-immutable-1";
+
+  entry.schema_version = "v2";
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_ERR_SERVER);
+  assert_null(transaction);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  entry.schema_version = "v1";
 
   entry.trace_context = "trace-second";
   assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
@@ -615,7 +636,7 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   assert_int_equal(payload_length, 7U);
   assert_memory_equal(payload_bytes, "payload", 7U);
   lc_sink_close(payload_sink);
-  assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
   lc_outbox_job_close(job);
   lc_source_close(payload);
   payload = NULL;
@@ -651,7 +672,7 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   assert_non_null(job);
   assert_string_equal(job->effect_key, "foreign-idempotency-retry");
   assert_int_equal(job->attempt, 2);
-  assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
   lc_outbox_job_close(job);
   lc_source_close(payload);
   payload = NULL;
@@ -687,6 +708,266 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
   lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_command_request command;
+  lc_command_receipt receipt, duplicate_receipt;
+  lc_workflow_transaction *transaction, *duplicate_transaction;
+  lc_workflow_participant_request participant_request;
+  lc_workflow_participant *participant;
+  lc_outbox_entry entry;
+  lc_outbox_receipt outbox_receipt;
+  lc_command_result command_result;
+  lc_outbox_completion completion;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_source *payload, *result_body, *domain_state;
+  lc_sink *sink;
+  const void *bytes;
+  size_t length, written;
+  lc_outbox_job *job;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "command-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  participant = NULL;
+  payload = NULL;
+  result_body = NULL;
+  domain_state = NULL;
+  job = NULL;
+  lc_command_receipt_init(&receipt);
+  lc_command_receipt_init(&duplicate_receipt);
+  lc_outbox_receipt_init(&outbox_receipt);
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "command-workflow";
+  workflow_config.owner = "command-owner";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_command_request_init(&command);
+  command.identity.scope = "tenant-a";
+  command.identity.command_type = "orders.create.v1";
+  command.identity.idempotency_key = "request-1";
+  command.request_digest = "semantic-request-digest-1";
+  command.operation_id = "order-operation-1";
+  assert_int_equal(lc_workflow_accept_command(workflow, &command, &transaction,
+                                              &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  assert_int_equal(receipt.state, LC_COMMAND_PENDING);
+  assert_false(receipt.duplicate);
+  assert_non_null(receipt.command_id);
+  lc_workflow_participant_request_init(&participant_request);
+  participant_request.acquire.namespace_name = "orders";
+  participant_request.acquire.key = "order-command-1";
+  participant_request.acquire.owner = "orders";
+  participant_request.acquire.ttl_seconds = 30L;
+  assert_int_equal(lc_workflow_transaction_acquire(
+                       transaction, &participant_request, &participant, &error),
+                   LC_OK);
+  assert_int_equal(lc_source_from_memory("{\"status\":\"created\"}", 20U,
+                                         &domain_state, &error),
+                   LC_OK);
+  assert_int_equal(participant->update(participant, domain_state, NULL, &error),
+                   LC_OK);
+  lc_source_close(domain_state);
+  domain_state = NULL;
+  lc_workflow_participant_close(participant);
+  participant = NULL;
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "order-operation-1";
+  entry.effect_id = "order-created";
+  entry.effect_key = "foreign-order-created-1";
+  entry.kind = "http";
+  entry.schema_version = "v1";
+  entry.destination = "https://example.invalid/orders";
+  entry.content_type = "text/plain";
+  assert_int_equal(lc_source_from_memory("outbox", 6U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_append_outbox(
+                       transaction, &entry, payload, &outbox_receipt, &error),
+                   LC_OK);
+  assert_int_equal(lc_source_from_memory("created", 7U, &result_body, &error),
+                   LC_OK);
+  lc_command_result_init(&command_result);
+  command_result.result_code = "created";
+  command_result.result_reference = "order-command-1";
+  command_result.content_type = "text/plain";
+  command_result.body = result_body;
+  assert_int_equal(lc_workflow_transaction_complete_command(
+                       transaction, &command_result, &error),
+                   LC_OK);
+  lc_source_close(result_body);
+  result_body = NULL;
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  lc_command_receipt_cleanup(&receipt);
+  assert_int_equal(lc_workflow_get_command_receipt(workflow, &command.identity,
+                                                   &receipt, &error),
+                   LC_OK);
+  assert_int_equal(receipt.state, LC_COMMAND_COMPLETED);
+  assert_string_equal(receipt.result_code, "created");
+  assert_true(receipt.has_result_body);
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  written = 0U;
+  assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+  assert_int_equal(lc_workflow_write_command_result(workflow, &command.identity,
+                                                    sink, &written, &error),
+                   LC_OK);
+  assert_int_equal(lc_sink_memory_bytes(sink, &bytes, &length, &error), LC_OK);
+  assert_int_equal(written, 7U);
+  assert_memory_equal(bytes, "created", 7U);
+  lc_sink_close(sink);
+  duplicate_transaction = (lc_workflow_transaction *)1;
+  assert_int_equal(lc_workflow_accept_command(workflow, &command,
+                                              &duplicate_transaction,
+                                              &duplicate_receipt, &error),
+                   LC_OK);
+  assert_null(duplicate_transaction);
+  assert_true(duplicate_receipt.duplicate);
+  assert_int_equal(duplicate_receipt.state, LC_COMMAND_COMPLETED);
+  command.request_digest = "conflicting-digest";
+  assert_int_equal(lc_workflow_accept_command(workflow, &command,
+                                              &duplicate_transaction,
+                                              &duplicate_receipt, &error),
+                   LC_ERR_SERVER);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  command.request_digest = "semantic-request-digest-1";
+  assert_int_equal(lc_workflow_next(workflow, 2000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_non_null(job->message_id);
+  assert_string_equal(job->causation_id, receipt.command_id);
+  assert_string_equal(job->schema_version, "v1");
+  lc_outbox_completion_init(&completion);
+  completion.delivery_reference = "provider-delivery-1";
+  completion.response_digest = "provider-response-digest";
+  assert_int_equal(lc_outbox_job_complete(job, &completion, &error), LC_OK);
+  lc_outbox_job_close(job);
+  job = NULL;
+  duplicate_transaction = (lc_workflow_transaction *)1;
+  assert_int_equal(lc_workflow_resume_command(workflow, &command.identity,
+                                              &duplicate_transaction,
+                                              &duplicate_receipt, &error),
+                   LC_OK);
+  assert_null(duplicate_transaction);
+  assert_int_equal(duplicate_receipt.state, LC_COMMAND_COMPLETED);
+  lc_outbox_receipt_cleanup(&outbox_receipt);
+  lc_command_receipt_cleanup(&duplicate_receipt);
+  lc_command_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_shared_command_resume_is_durable(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_command_request command;
+  lc_command_receipt receipt;
+  lc_command_result result;
+  lc_workflow_transaction *transaction;
+  lc_client *first_client, *second_client;
+  lc_workflow *first_workflow, *second_workflow;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "command-shared-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?single_writer=false", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "command-shared";
+  workflow_config.owner = "command-shared-first";
+  first_client = NULL;
+  first_workflow = NULL;
+  second_client = NULL;
+  second_workflow = NULL;
+  transaction = NULL;
+  lc_command_receipt_init(&receipt);
+  lc_command_request_init(&command);
+  command.identity.scope = "tenant-shared";
+  command.identity.command_type = "orders.cancel.v1";
+  command.identity.idempotency_key = "shared-request";
+  command.request_digest = "shared-request-digest";
+  assert_int_equal(lc_client_open(&client_config, &first_client, &error),
+                   LC_OK);
+  assert_int_equal(lc_client_new_workflow(first_client, &workflow_config,
+                                          &first_workflow, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_accept_command(first_workflow, &command,
+                                              &transaction, &receipt, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  lc_workflow_close(first_workflow);
+  lc_client_close(first_client);
+  workflow_config.owner = "command-shared-second";
+  assert_int_equal(lc_client_open(&client_config, &second_client, &error),
+                   LC_OK);
+  assert_int_equal(lc_client_new_workflow(second_client, &workflow_config,
+                                          &second_workflow, &error),
+                   LC_OK);
+  lc_command_receipt_cleanup(&receipt);
+  assert_int_equal(lc_workflow_resume_command(second_workflow,
+                                              &command.identity, &transaction,
+                                              &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  lc_command_result_init(&result);
+  result.failure_code = "cancelled";
+  result.failure_message = "order was already cancelled";
+  assert_int_equal(
+      lc_workflow_transaction_fail_command(transaction, &result, &error),
+      LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  lc_command_receipt_cleanup(&receipt);
+  assert_int_equal(lc_workflow_get_command_receipt(
+                       second_workflow, &command.identity, &receipt, &error),
+                   LC_OK);
+  assert_int_equal(receipt.state, LC_COMMAND_FAILED);
+  assert_string_equal(receipt.failure_code, "cancelled");
+  lc_command_receipt_cleanup(&receipt);
+  lc_workflow_close(second_workflow);
+  lc_client_close(second_client);
   lc_error_cleanup(&error);
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
@@ -876,7 +1157,7 @@ static void test_pouch_reconciliation_retains_overflow_request(void **state) {
       delivered_recovered = 1;
     else
       fail_msg("unexpected reconciled outbox job");
-    assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+    assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
     lc_outbox_job_close(job);
   }
   lc_workflow_test_after_reconcile_query_hook = NULL;
@@ -1066,7 +1347,7 @@ static void test_pouch_dead_letter_operations(void **state) {
   assert_non_null(job);
   assert_string_equal(job->effect_key, entry.effect_key);
   assert_int_equal(job->attempt, 1);
-  assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
   lc_outbox_job_close(job);
   lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
@@ -1134,7 +1415,7 @@ static void test_pouch_startup_recovery_claims_seeded_outbox(void **state) {
   assert_non_null(job);
   assert_string_equal(job->effect_key, "recovery-key");
   assert_int_equal(job->attempt, 2);
-  assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
   lc_outbox_job_close(job);
   lc_workflow_close(workflow);
   lc_client_close(client);
@@ -1241,7 +1522,7 @@ static void test_pouch_reopen_reconciles_durable_index_mode(int shared) {
   assert_non_null(job);
   assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &finished), 0);
   assert_true(workflow_elapsed_milliseconds(&started, &finished) < 5000L);
-  assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
   lc_outbox_job_close(job);
   lc_workflow_close(workflow);
   lc_client_close(client);
@@ -1315,7 +1596,7 @@ static void test_pouch_reconciliation_pages_large_outbox(void **state) {
     job = NULL;
     assert_int_equal(lc_workflow_next(workflow, 30000L, &job, &error), LC_OK);
     assert_non_null(job);
-    assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+    assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
     lc_outbox_job_close(job);
   }
   assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &finished), 0);
@@ -1488,7 +1769,7 @@ static void test_pouch_shared_process_dispatches_once(void **state) {
   assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
   if (job != NULL) {
     parent_got_job = 1;
-    assert_int_equal(lc_outbox_job_complete(job, &error), LC_OK);
+    assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
     lc_outbox_job_close(job);
   }
   assert_int_equal(read(result_pipe[0], &child_result, sizeof(child_result)),
@@ -1667,10 +1948,10 @@ static void test_pouch_expired_claim_rejects_stale_terminal(void **state) {
                    LC_OK);
   assert_non_null(replacement);
   assert_string_equal(replacement->effect_key, stale->effect_key);
-  assert_true(lc_outbox_job_complete(stale, &error) != LC_OK);
+  assert_true(lc_outbox_job_complete(stale, NULL, &error) != LC_OK);
   lc_error_cleanup(&error);
   lc_error_init(&error);
-  assert_int_equal(lc_outbox_job_complete(replacement, &error), LC_OK);
+  assert_int_equal(lc_outbox_job_complete(replacement, NULL, &error), LC_OK);
   lc_outbox_job_close(replacement);
   lc_outbox_job_close(stale);
   lc_workflow_close(second);
@@ -1684,6 +1965,9 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts),
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
+      cmocka_unit_test(
+          test_pouch_command_receipt_commits_with_outbox_and_result),
+      cmocka_unit_test(test_pouch_shared_command_resume_is_durable),
       cmocka_unit_test(test_pouch_multikey_terminal_failure_publishes_nothing),
       cmocka_unit_test(test_pouch_reconciliation_retains_overflow_request),
       cmocka_unit_test(test_pouch_dead_letter_operations),

@@ -592,6 +592,18 @@ local function test_workflow_facade_lifecycle()
       captured.later_payload = payload
       return { outbox_key = 'later-key', duplicate = false }
     end,
+    accept_command = function(_, request)
+      captured.txn_command_request = request
+      return { command_id = 'cmd-1', state = 1, duplicate = false }
+    end,
+    complete_command = function(_, result)
+      captured.command_result = result
+      return true
+    end,
+    fail_command = function(_, result)
+      captured.command_failure = result
+      return true
+    end,
     commit = function(self)
       self.committed = true
       return true
@@ -614,8 +626,9 @@ local function test_workflow_facade_lifecycle()
       captured.renew_ttl = ttl
       return { lease_expires_at_unix = 99 }
     end,
-    complete = function(self)
+    complete = function(self, completion)
       self.completed = true
+      captured.delivery_completion = completion
       return true
     end,
     retry = function(self, req)
@@ -629,6 +642,23 @@ local function test_workflow_facade_lifecycle()
     close = function(self) self.closed = true end,
   }
   local workflow_core = {
+    accept_command = function(_, request)
+      captured.command_request = request
+      return transaction_core, { command_id = 'cmd-1', state = 1, duplicate = false }
+    end,
+    get_command_receipt = function(_, identity)
+      captured.command_identity = identity
+      return { command_id = 'cmd-1', state = 2, result_code = 'created' }
+    end,
+    write_command_result = function(_, identity, destination)
+      captured.command_result_identity = identity
+      captured.command_result_destination = destination
+      return 'result-bytes', 12
+    end,
+    resume_command = function(_, identity)
+      captured.resume_identity = identity
+      return nil, { command_id = 'cmd-1', state = 2, duplicate = true }
+    end,
     append_outbox = function(_, entry, payload)
       captured.first_entry = entry
       captured.first_payload = payload
@@ -736,13 +766,44 @@ local function test_workflow_facade_lifecycle()
   assert_eq(duplicate.duplicate, true, 'duplicate inbox should retain the result')
   assert_eq(captured.inbox_message.message_id, 'message-1', 'inbox identity should pass through')
 
+  local command_txn, command_receipt = assert(workflow:accept_command({
+    scope = 'tenant-a', command_type = 'orders.create.v1',
+    idempotency_key = 'request-1', request_digest = 'digest-1',
+  }))
+  assert_eq(captured.command_request.request_digest, 'digest-1',
+      'command request should preserve durable digest')
+  assert_eq(command_receipt.command_id, 'cmd-1', 'command receipt should pass through')
+  assert_truthy(command_txn:complete_command({ result_code = 'created' }),
+      'command completion should delegate')
+  assert_eq(captured.command_result.result_code, 'created',
+      'command result should pass through')
+  assert_truthy(command_txn:fail_command({ failure_code = 'declined' }),
+      'command failure should delegate')
+  local status = assert(workflow:command_receipt({
+    scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
+  }))
+  assert_eq(status.result_code, 'created', 'command status should delegate')
+  local result_bytes, result_written = assert(workflow:write_command_result({
+    scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
+  }, { path = '/tmp/command-result' }))
+  assert_eq(result_bytes, 'result-bytes', 'command result should preserve streamed output')
+  assert_eq(result_written, 12, 'command result should preserve byte count')
+  local resumed_txn, resumed = workflow:resume_command({
+    scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
+  })
+  assert_eq(resumed_txn, nil, 'terminal command resume should not expose a transaction')
+  assert_eq(resumed.duplicate, true, 'terminal command resume should return receipt')
+
   local job = assert(workflow:next(123))
   assert_eq(captured.next_timeout, 123, 'workflow next should pass its timeout')
   assert_eq(job:payload_json(), lockdc.json_null, 'job payload_json should decode JSON null')
   assert_truthy(job:renew(90), 'job renewal should delegate')
   assert_eq(captured.renew_ttl, 90, 'job renewal should preserve TTL')
-  assert_truthy(job:complete(), 'job completion should delegate')
+  assert_truthy(job:complete({ delivery_reference = 'provider-1' }),
+      'job completion should delegate')
   assert_truthy(job_core.completed, 'job core should observe completion')
+  assert_eq(captured.delivery_completion.delivery_reference, 'provider-1',
+      'job completion evidence should pass through')
   job:close()
   assert_truthy(job_core.closed,
       'job close must release the native job after completion')

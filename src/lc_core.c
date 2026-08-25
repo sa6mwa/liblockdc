@@ -1971,6 +1971,11 @@ LC_INIT_STRUCT_FUNC(lc_dead_letter_export_res, lc_dead_letter_export_res_init)
 LC_INIT_STRUCT_FUNC(lc_workflow_stats, lc_workflow_stats_init)
 LC_INIT_STRUCT_FUNC(lc_outbox_entry, lc_outbox_entry_init)
 LC_INIT_STRUCT_FUNC(lc_inbox_message, lc_inbox_message_init)
+LC_INIT_STRUCT_FUNC(lc_command_identity, lc_command_identity_init)
+LC_INIT_STRUCT_FUNC(lc_command_request, lc_command_request_init)
+LC_INIT_STRUCT_FUNC(lc_command_result, lc_command_result_init)
+LC_INIT_STRUCT_FUNC(lc_command_receipt, lc_command_receipt_init)
+LC_INIT_STRUCT_FUNC(lc_outbox_completion, lc_outbox_completion_init)
 LC_INIT_STRUCT_FUNC(lc_outbox_retry, lc_outbox_retry_init)
 LC_INIT_STRUCT_FUNC(lc_workflow_participant_request,
                     lc_workflow_participant_request_init)
@@ -1993,6 +1998,22 @@ void lc_outbox_receipt_cleanup(lc_outbox_receipt *receipt) {
   }
   free(receipt->outbox_key);
   free(receipt->effect_key);
+  memset(receipt, 0, sizeof(*receipt));
+}
+
+void lc_command_receipt_cleanup(lc_command_receipt *receipt) {
+  if (receipt == NULL) {
+    return;
+  }
+  free(receipt->command_id);
+  free(receipt->scope);
+  free(receipt->command_type);
+  free(receipt->idempotency_key);
+  free(receipt->operation_id);
+  free(receipt->result_code);
+  free(receipt->result_reference);
+  free(receipt->failure_code);
+  free(receipt->failure_message);
   memset(receipt, 0, sizeof(*receipt));
 }
 

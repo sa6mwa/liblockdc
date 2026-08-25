@@ -276,6 +276,30 @@ int lc_workflow_accept_inbox(lc_workflow *workflow,
                              lc_inbox_accept_result *result, lc_error *error) {
   return workflow->accept_inbox(workflow, message, out_txn, result, error);
 }
+int lc_workflow_accept_command(lc_workflow *workflow,
+                               const lc_command_request *request,
+                               lc_workflow_transaction **out_txn,
+                               lc_command_receipt *receipt, lc_error *error) {
+  return workflow->accept_command(workflow, request, out_txn, receipt, error);
+}
+int lc_workflow_get_command_receipt(lc_workflow *workflow,
+                                    const lc_command_identity *identity,
+                                    lc_command_receipt *out, lc_error *error) {
+  return workflow->get_command_receipt(workflow, identity, out, error);
+}
+int lc_workflow_write_command_result(lc_workflow *workflow,
+                                     const lc_command_identity *identity,
+                                     lc_sink *dst, size_t *written,
+                                     lc_error *error) {
+  return workflow->write_command_result(workflow, identity, dst, written,
+                                        error);
+}
+int lc_workflow_resume_command(lc_workflow *workflow,
+                               const lc_command_identity *identity,
+                               lc_workflow_transaction **out_txn,
+                               lc_command_receipt *receipt, lc_error *error) {
+  return workflow->resume_command(workflow, identity, out_txn, receipt, error);
+}
 int lc_workflow_next(lc_workflow *workflow, long timeout_ms,
                      lc_outbox_job **out, lc_error *error) {
   return workflow->next(workflow, timeout_ms, out, error);
@@ -313,8 +337,10 @@ int lc_outbox_job_write_payload(lc_outbox_job *job, lc_sink *dst,
 int lc_outbox_job_renew(lc_outbox_job *job, long ttl_seconds, lc_error *error) {
   return job->renew(job, ttl_seconds, error);
 }
-int lc_outbox_job_complete(lc_outbox_job *job, lc_error *error) {
-  return job->complete(job, error);
+int lc_outbox_job_complete(lc_outbox_job *job,
+                           const lc_outbox_completion *completion,
+                           lc_error *error) {
+  return job->complete(job, completion, error);
 }
 int lc_outbox_job_retry(lc_outbox_job *job, const lc_outbox_retry *request,
                         lc_error *error) {
@@ -340,6 +366,22 @@ int lc_workflow_transaction_append_outbox(lc_workflow_transaction *transaction,
                                           lc_outbox_receipt *out,
                                           lc_error *error) {
   return transaction->append_outbox(transaction, entry, payload, out, error);
+}
+int lc_workflow_transaction_accept_command(lc_workflow_transaction *transaction,
+                                           const lc_command_request *request,
+                                           lc_command_receipt *receipt,
+                                           lc_error *error) {
+  return transaction->accept_command(transaction, request, receipt, error);
+}
+int lc_workflow_transaction_complete_command(
+    lc_workflow_transaction *transaction, const lc_command_result *result,
+    lc_error *error) {
+  return transaction->complete_command(transaction, result, error);
+}
+int lc_workflow_transaction_fail_command(lc_workflow_transaction *transaction,
+                                         const lc_command_result *result,
+                                         lc_error *error) {
+  return transaction->fail_command(transaction, result, error);
 }
 int lc_workflow_transaction_commit(lc_workflow_transaction *transaction,
                                    lc_error *error) {

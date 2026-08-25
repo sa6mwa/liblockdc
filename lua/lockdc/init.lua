@@ -623,6 +623,44 @@ function Workflow:accept_inbox(message)
   return wrap_workflow_transaction(transaction), result_or_err
 end
 
+function Workflow:accept_command(request)
+  local transaction, receipt_or_err = self._core:accept_command(request)
+
+  if transaction == nil and receipt_or_err == nil then
+    return nil
+  end
+  if transaction == nil and type(receipt_or_err) ~= "table" then
+    return nil, receipt_or_err
+  end
+  if transaction == nil then
+    return nil, receipt_or_err
+  end
+  return wrap_workflow_transaction(transaction), receipt_or_err
+end
+
+function Workflow:command_receipt(identity)
+  return self._core:get_command_receipt(identity)
+end
+
+function Workflow:write_command_result(identity, dest)
+  return self._core:write_command_result(identity, dest)
+end
+
+function Workflow:resume_command(identity)
+  local transaction, receipt_or_err = self._core:resume_command(identity)
+
+  if transaction == nil and receipt_or_err == nil then
+    return nil
+  end
+  if transaction == nil and type(receipt_or_err) ~= "table" then
+    return nil, receipt_or_err
+  end
+  if transaction == nil then
+    return nil, receipt_or_err
+  end
+  return wrap_workflow_transaction(transaction), receipt_or_err
+end
+
 function Workflow:next(timeout_ms)
   local job, err = self._core:next(timeout_ms)
 
@@ -675,6 +713,18 @@ end
 
 function WorkflowTransaction:append_outbox(entry, payload)
   return self._core:append_outbox(normalize_outbox_entry(entry), payload)
+end
+
+function WorkflowTransaction:accept_command(request)
+  return self._core:accept_command(request)
+end
+
+function WorkflowTransaction:complete_command(result)
+  return self._core:complete_command(result)
+end
+
+function WorkflowTransaction:fail_command(result)
+  return self._core:fail_command(result)
 end
 
 function WorkflowTransaction:commit()
@@ -806,8 +856,8 @@ function OutboxJob:renew(ttl_seconds)
   return self._core:renew(ttl_seconds)
 end
 
-function OutboxJob:complete()
-  local ok, err = normalize_result(self._core:complete())
+function OutboxJob:complete(completion)
+  local ok, err = normalize_result(self._core:complete(completion))
 
   if ok ~= nil then
     self._terminal = true
