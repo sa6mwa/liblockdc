@@ -243,23 +243,46 @@ returns `nil, result` on an accepted duplicate, where `result.duplicate` is
 true. Otherwise it returns a `WorkflowTransaction` and `result.accepted` is
 true.
 
-Workflow receivers are explicit and owned:
+Workflow receivers are explicit and owned. Parent acceptance and append
+operations return a new `WorkflowTransaction` only when they created fresh
+durable work:
 
-- `workflow:append_outbox(entry, payload)`
-- `workflow:accept_inbox(message)`
-- `workflow:next(timeout_ms)`
-- `workflow:close()`
-- `txn:acquire(req)`, `txn:append_outbox(entry, payload)`, `txn:commit()`,
-  `txn:rollback()`, `txn:close()`
-- participant `describe`, `get_raw`, `get_json`, `update_raw`, `update_json`,
-  metadata, remove, keepalive, and attachment methods
-- job `info`, `write_payload` (also `payload`), `payload_json`, `renew`,
-  `complete`, `retry`, `dead_letter`, and `close`
+- `workflow:append_outbox(entry, payload)` returns `txn, receipt`; a matching
+  effect returns `nil, receipt` with `receipt.duplicate`.
+- `workflow:accept_inbox(message)` returns `txn, result`; a matching source
+  message returns `nil, result` with `result.duplicate`.
+- `workflow:accept_command(request)` returns `txn, receipt`; a matching
+  command returns `nil, receipt` with `receipt.duplicate`. Use
+  `workflow:command_receipt(identity)` for a direct durable status read,
+  `workflow:write_command_result(identity, destination)` to stream a completed
+  result body, and `workflow:resume_command(identity)` to obtain a transaction
+  for a pending command. A terminal command resumes as `nil, receipt`.
+- `workflow:next(timeout_ms)` returns a claimed job. `0` only checks the local
+  ready set and `-1` waits indefinitely.
+- `workflow:stats()` returns process-local dispatcher counters;
+  `workflow:reconcile()` requests an asynchronous durable recovery sweep.
+- `workflow:replay_dead_letter(outbox_key)` returns one dead-lettered effect to
+  pending; `workflow:delete_dead_letter(outbox_key)` permanently deletes it and
+  its payload. `workflow:export_dead_letters(options, destination)` exports
+  envelopes as `"json"` or `"jsonl"`; omitting `destination` returns a
+  materialized Lua string, while file/fd destinations stream directly.
+- `workflow:close()` stops and joins the private dispatcher.
 
-Participants deliberately have no release or terminal-decision method. A
-workflow job is the only handoff to host effect execution; keep its claim
-alive with `job:renew()` for longer foreign operations, then select exactly one
-terminal operation.
+Transactions provide `acquire`, `append_outbox`, `accept_command`,
+`complete_command`, `fail_command`, `commit`, `rollback`, and `close`.
+`accept_command` permits at most one command receipt per transaction.
+Participants provide `info`, `describe`, `get_raw`, `get_json`, `update_raw`,
+`update_json`, `mutate`, `mutate_local`, `metadata`, `remove`, `keepalive`, and
+the full attachment surface. Jobs provide `info`, `write_payload` (also
+`payload`), `payload_json`, `renew`, `complete`, `retry`, `dead_letter`, and
+`close`.
+
+Participants deliberately have no release or terminal-decision method. Closing
+or deciding a transaction invalidates its participants, so close each view when
+finished. A workflow job is the only handoff to host effect execution; keep its
+claim alive with `job:renew()` for longer foreign operations, then select
+exactly one terminal operation. `job:close()` only drops the local handle: it
+does not retry or complete the durable job.
 
 `client:acquire_for_update(req, handler)` wraps the common acquire, snapshot,
 update, release workflow. The handler receives a context table with:

@@ -216,11 +216,11 @@ dispatcher notifications themselves.
 
 ### C receiver surface
 
-The primary C entry point is an opaque workflow handle created from an existing
-client. It follows the public library's receiver-function convention and
-zero-initializable configuration/request records. The command-receipt methods,
-message envelope fields, and completion evidence below are the current public
-surface.
+The primary C entry point is a receiver-style workflow handle with
+implementation-private state, created from an existing client. It follows the
+public library's receiver-function convention and zero-initializable
+configuration/request records. The command-receipt methods, message envelope
+fields, and completion evidence below are the current public surface.
 
 ```c
 typedef struct lc_workflow lc_workflow;
@@ -292,7 +292,7 @@ struct lc_workflow_transaction {
 };
 
 struct lc_workflow_participant {
-  /* The non-terminal lc_lease operations: describe, get/load, save/update,
+  /* The non-terminal lc_lease operations: describe, get, update,
      mutate/mutate_local, metadata/remove, keepalive, and attachment access. */
   /* No release or transaction-decision operation is exposed. */
   void (*close)(lc_workflow_participant *self);
@@ -597,11 +597,8 @@ kind                 caller-defined bounded routing label
 schema_version       optional caller-defined message schema version
 destination          caller-defined transport target
 content_type
-headers              bounded key/value metadata
+headers_json         optional JSON object string containing envelope headers
 trace_context        optional bounded trace metadata
-payload_digest
-payload_bytes
-created_at
 ```
 
 It has mutable delivery fields:
@@ -609,11 +606,10 @@ It has mutable delivery fields:
 ```text
 dispatch_state       pending | claimed | retry_wait | completed | dead_letter
 attempt_count
-not_before
-claim_owner
-claim_expires_at
-last_error_code
-last_error_message
+not_before_unix
+last_error
+delivery_reference
+response_digest
 completed_at
 dead_lettered_at_unix
 replay_count
@@ -650,17 +646,13 @@ source_kind
 source_id
 message_id
 payload_digest       when the source payload participates in the contract
-accepted_at
 operation_id
-resulting_outbox_ids
 processing_state
 ```
 
-The inbox key is the durable receipt. It need not retain the source payload
-when the application has transformed it into an outbox attachment and no audit
-or replay requirement calls for retention. If source-payload retention is
-enabled, it uses an attachment with the same streaming rules as an outbox
-payload.
+The inbox key is the durable receipt. The current component retains only this
+metadata; it does not retain source payload bytes or derive resulting outbox
+identities. A host that needs either for audit or replay owns that retention.
 
 An inbox receipt and a command receipt must not be collapsed. The inbox says a
 specific consumer durably handled one delivery. A command receipt says the
@@ -689,8 +681,8 @@ the associated domain mutation. The first `workflow->accept_command()`,
 deterministic record key with the create-only precondition before returning a
 transaction. A committed matching record yields the normal duplicate outcome
 before a new domain effect is staged; an immutable mismatch is a conflict. A
-currently leased record is retried or reported as in-progress according to the
-bounded request policy, never treated as a fresh duplicate.
+currently leased record is neither a duplicate nor fresh work: the operation
+reports its acquire/read failure and the host decides whether to retry.
 
 ### Command acceptance and result
 
@@ -714,8 +706,9 @@ identity is exactly `(scope, command_type, idempotency_key)`. Its
 For a duplicate identity, the component compares every immutable command field,
 including scope, command type, idempotency key, request digest, and any
 declared operation ID. A matching receipt is a successful result and returns no
-transaction. A mismatch is `LC_ERR_CONFLICT` (or the public equivalent) and
-must identify the command identity without exposing request bytes or digest.
+transaction. A mismatch fails visibly as a structured error, not as a
+duplicate, and identifies the command identity without exposing request bytes
+or digest.
 
 A command may intentionally remain `pending` after the acceptance transaction
 commits. `workflow->resume_command()` acquires the existing pending receipt as
@@ -905,7 +898,7 @@ pending ---- claim ----> claimed ---- complete ----> completed
   ^                            |
   |                            +---- retry ----> retry_wait
   |                                               |
-  +----------------------- eligible at not_before+
+  +----------------------- eligible at not_before_unix+
 
 claimed ---- expiry recovery ----> pending
 claimed / retry_wait ---- dead-letter ----> dead_letter
@@ -917,12 +910,12 @@ reread and validates state, timing, and claim generation before handing the
 job out. Completion, retry, and dead-letter transitions require that same
 lease. A stale claim cannot change a later claimant's record.
 
-The envelope's `claimed` fields are durable diagnostics and recovery inputs,
-not the authority. Pouch keeps transaction-bound changes invisible to public
-reads until every enrolled participant has committed. On host loss, recovery
-rolls an expired undecided transaction back, after which a later lease holder
-can reclaim and recheck the durable envelope. Remote lockd is expected to
-provide the same boundary after its implicit-XA enrollment defect is fixed.
+The active outbox-key lease is not copied into the durable envelope. Pouch
+keeps transaction-bound changes invisible to public reads until every enrolled
+participant has committed. On host loss, recovery rolls an expired undecided
+transaction back, after which a later lease holder can reclaim and recheck the
+durable envelope. Remote lockd is expected to provide the same boundary after
+its implicit-XA enrollment defect is fixed.
 
 The outbox envelope is also the external-delivery receipt for its one
 `effect_key`; a separate generic external-delivery table is unnecessary.
@@ -935,10 +928,10 @@ same `effect_key` when the provider supports idempotency, or retain/dead-letter
 the job for explicit provider reconciliation. It must not call completion based
 on an assumed success.
 
-Retry atomically increments `attempt_count`, records a bounded diagnostic, and
-sets `not_before`. Exhausting the configured retry budget transitions to
-`dead_letter`; it never silently removes the record. Dead-letter replay retains
-the original `effect_key`.
+Each successful claim atomically increments `attempt_count`. Retry records a
+diagnostic and sets `not_before_unix`; once the configured attempt budget is
+exhausted, it transitions to `dead_letter` rather than silently removing the
+record. Dead-letter replay retains the original `effect_key`.
 
 ### Dead-letter operations
 
