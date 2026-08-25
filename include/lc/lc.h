@@ -2218,7 +2218,11 @@ struct lc_workflow_transaction {
   void *impl;
 };
 
-/** Restricted non-terminal view over a workflow-owned lease. */
+/**
+ * Restricted non-terminal view over a workflow-owned lease. A terminal
+ * transaction decision or transaction close invalidates the view; subsequent
+ * methods fail with `LC_ERR_INVALID`, but `close` remains required and safe.
+ */
 struct lc_workflow_participant {
   int (*describe)(lc_workflow_participant *self, lc_error *error);
   int (*get)(lc_workflow_participant *self, lc_sink *dst,

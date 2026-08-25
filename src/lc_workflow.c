@@ -256,6 +256,7 @@ struct lc_workflow_transaction_handle {
   lc_lease **leases;
   size_t lease_count;
   size_t lease_capacity;
+  lc_workflow_participant_handle *participants;
   lc_lease *command_lease;
   char *causation_id;
   int command_terminal;
@@ -264,8 +265,10 @@ struct lc_workflow_transaction_handle {
 
 struct lc_workflow_participant_handle {
   lc_workflow_participant pub;
+  lc_workflow_handle *workflow;
   lc_workflow_transaction_handle *transaction;
   lc_lease *lease;
+  lc_workflow_participant_handle *next;
 };
 
 struct lc_outbox_job_handle {
@@ -1813,6 +1816,77 @@ static void lc_workflow_participant_refresh(lc_workflow_participant_handle *p) {
   p->pub.state_etag = p->lease->state_etag;
 }
 
+static void
+lc_workflow_participant_invalidate(lc_workflow_participant_handle *p) {
+  if (p == NULL)
+    return;
+  p->transaction = NULL;
+  p->lease = NULL;
+  p->next = NULL;
+  p->pub.namespace_name = NULL;
+  p->pub.key = NULL;
+  p->pub.txn_id = NULL;
+  p->pub.fencing_token = 0L;
+  p->pub.version = 0;
+  p->pub.state_etag = NULL;
+}
+
+static void lc_workflow_transaction_remove_participant(
+    lc_workflow_transaction_handle *transaction,
+    lc_workflow_participant_handle *participant) {
+  lc_workflow_participant_handle **cursor;
+
+  if (transaction == NULL || participant == NULL)
+    return;
+  cursor = &transaction->participants;
+  while (*cursor != NULL) {
+    if (*cursor == participant) {
+      *cursor = participant->next;
+      participant->transaction = NULL;
+      participant->next = NULL;
+      return;
+    }
+    cursor = &(*cursor)->next;
+  }
+  participant->transaction = NULL;
+  participant->next = NULL;
+}
+
+static void lc_workflow_transaction_invalidate_lease_participant(
+    lc_workflow_transaction_handle *transaction, lc_lease *lease) {
+  lc_workflow_participant_handle **cursor;
+
+  if (transaction == NULL || lease == NULL)
+    return;
+  cursor = &transaction->participants;
+  while (*cursor != NULL) {
+    lc_workflow_participant_handle *participant = *cursor;
+
+    if (participant->lease == lease) {
+      *cursor = participant->next;
+      lc_workflow_participant_invalidate(participant);
+      return;
+    }
+    cursor = &participant->next;
+  }
+}
+
+static void lc_workflow_transaction_invalidate_participants(
+    lc_workflow_transaction_handle *transaction) {
+  lc_workflow_participant_handle *participant;
+
+  if (transaction == NULL)
+    return;
+  participant = transaction->participants;
+  transaction->participants = NULL;
+  while (participant != NULL) {
+    lc_workflow_participant_handle *next = participant->next;
+
+    lc_workflow_participant_invalidate(participant);
+    participant = next;
+  }
+}
+
 static int lc_workflow_participant_describe(lc_workflow_participant *self,
                                             lc_error *error) {
   lc_workflow_participant_handle *p = (lc_workflow_participant_handle *)self;
@@ -1961,7 +2035,12 @@ static void
 lc_workflow_participant_close_method(lc_workflow_participant *self) {
   lc_workflow_participant_handle *p = (lc_workflow_participant_handle *)self;
   if (p != NULL) {
-    lc_client_free(p->transaction->workflow->client, p);
+    lc_workflow_handle *workflow = p->workflow;
+
+    if (p->transaction != NULL)
+      lc_workflow_transaction_remove_participant(p->transaction, p);
+    lc_client_free(workflow->client, p);
+    lc_workflow_release(workflow);
   }
 }
 
@@ -2007,8 +2086,12 @@ static int lc_workflow_transaction_acquire_method(
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate workflow participant", NULL, NULL,
                         NULL);
+  lc_workflow_retain(transaction->workflow);
+  participant->workflow = transaction->workflow;
   participant->transaction = transaction;
   participant->lease = lease;
+  participant->next = transaction->participants;
+  transaction->participants = participant;
   participant->pub.describe = lc_workflow_participant_describe;
   participant->pub.get = lc_workflow_participant_get;
   participant->pub.update = lc_workflow_participant_update;
@@ -2238,6 +2321,8 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
       lc_client_free(transaction->workflow->client, notification_keys);
       return rc;
     }
+    lc_workflow_transaction_invalidate_lease_participant(
+        transaction, transaction->leases[i]);
     transaction->leases[i] = NULL;
   }
   transaction->terminal = 1;
@@ -2272,6 +2357,7 @@ lc_workflow_transaction_close_method(lc_workflow_transaction *self) {
   workflow = transaction->workflow;
   if (!transaction->terminal)
     (void)lc_workflow_transaction_terminal(self, 1, NULL);
+  lc_workflow_transaction_invalidate_participants(transaction);
   for (i = 0U; i < transaction->lease_count; ++i)
     lc_lease_close(transaction->leases[i]);
   lc_client_free(workflow->client, transaction->leases);

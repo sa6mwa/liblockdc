@@ -713,6 +713,94 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
 }
 
 static void
+test_pouch_participant_cleanup_after_transaction_close(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_inbox_message inbox;
+  lc_inbox_accept_result inbox_result;
+  lc_workflow_participant_request participant_request;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_workflow_participant *participant;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "participant-lifetime-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  participant = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "participant-lifetime";
+  workflow_config.owner = "participant-lifetime-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_inbox_message_init(&inbox);
+  inbox.consumer_id = "participant-lifetime-consumer";
+  inbox.source_kind = "http";
+  inbox.source_id = "participant-lifetime-source";
+  inbox.message_id = "participant-lifetime-message";
+  inbox.payload_digest = "participant-lifetime-digest";
+  inbox.operation_id = "participant-lifetime-operation";
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox, &transaction,
+                                            &inbox_result, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  lc_workflow_participant_request_init(&participant_request);
+  participant_request.acquire.namespace_name = "participant-lifetime";
+  participant_request.acquire.key = "participant-lifetime-domain";
+  participant_request.acquire.owner = "participant-lifetime-test";
+  participant_request.acquire.ttl_seconds = 30L;
+  assert_int_equal(lc_workflow_transaction_acquire(
+                       transaction, &participant_request, &participant, &error),
+                   LC_OK);
+  assert_non_null(participant);
+  assert_string_equal(participant->key, "participant-lifetime-domain");
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+
+  /* Terminal leases are owned by the transaction. Views must fail closed
+   * rather than retain a pointer to a released lease. */
+  assert_int_equal(participant->describe(participant, &error), LC_ERR_INVALID);
+  assert_null(participant->key);
+  assert_null(participant->txn_id);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  /* This is the normal cleanup order when a host retains a participant view:
+   * close the workflow and transaction first, then close the view. */
+  lc_workflow_close(workflow);
+  workflow = NULL;
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(participant->describe(participant, &error), LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_workflow_participant_close(participant);
+  participant = NULL;
+
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
 test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   char root[256], template_path[256], endpoint[320];
   const char *endpoints[1];
@@ -1965,6 +2053,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts),
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
+      cmocka_unit_test(test_pouch_participant_cleanup_after_transaction_close),
       cmocka_unit_test(
           test_pouch_command_receipt_commits_with_outbox_and_result),
       cmocka_unit_test(test_pouch_shared_command_resume_is_durable),

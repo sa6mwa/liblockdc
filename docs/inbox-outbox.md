@@ -74,7 +74,12 @@ coordinator API. Each terminal workflow release uses the endpoint's implicit
 XA path. Current remote lockd incorrectly permits the first, non-explicit
 lease to publish on its release after a later participant joins. liblockdc does
 not rely on that behavior; remote multi-participant workflow atomicity remains
-unavailable until lockd fixes the reported defect.
+unavailable until lockd fixes the reported defect. The workflow API remains
+available for remote endpoints so a fixed lockd works without a client-library
+upgrade: lockd exposes no endpoint-version capability that would let liblockdc
+reliably gate only affected server versions. Applications requiring atomic
+remote multi-participant workflows must therefore deploy a lockd version with
+the reported fix.
 
 ### Local Pouch
 
