@@ -1,16 +1,18 @@
-# liblockdc Inbox/Outbox Design Specification
+# liblockdc Transactional Messaging Design Specification
 
-Status: implemented v0 design for Pouch; operational recovery and dead-letter
-controls are part of the public workflow surface. Remote lockd parity for a
-workflow that adds a second participant is blocked on the upstream implicit-XA
-enrollment defect recorded in its bug tracker.
+Status: inbox, outbox, operational recovery, and dead-letter controls are
+implemented for Pouch. This document also specifies the next command-receipt
+extension, its explicit message/causation envelope identity, and delivery
+completion evidence; those are not yet public APIs. Remote lockd parity for
+every workflow that adds a second participant is blocked on the upstream
+implicit-XA enrollment defect recorded in its bug tracker.
 
 ## Purpose
 
-This specification defines a `liblockdc` facility for durable inbox and
-outbox workflows. It lets an application make a lockd-backed state transition,
-record an external-effect intent, and later perform that effect without the
-dual-write failure window.
+This specification defines a `liblockdc` facility for durable transactional
+messaging. It lets an application make a lockd-backed state transition, record
+command acceptance, record an external-effect intent, and later perform that
+effect without the dual-write failure window.
 
 The implementation uses existing liblockdc state, attachment, transaction,
 lease, and query capabilities. It works against either a remote lockd endpoint
@@ -22,17 +24,21 @@ foreign system is the required idempotency mechanism for that boundary.
 
 ## Design Decisions
 
-- One configured workflow namespace contains both inbox and outbox records.
-- Inbox and outbox records are ordinary state keys. Payloads are immutable
-  attachments, not JSON fields.
-- State change, inbox/outbox intent, and payload attachment commit in one
+- One configured workflow namespace contains command, inbox, and outbox
+  records.
+- Command receipts, inbox records, and outbox records are distinct durable
+  facts. They use the same workflow namespace and transaction machinery, but
+  they are never aliases for one another.
+- Command, inbox, and outbox records are ordinary state keys. Payloads and
+  optional command results are immutable attachments, not JSON fields.
+- State change, command/inbox/outbox intent, and attachment commit in one
   existing lockd/Pouch transaction.
-- The first durable inbox or outbox acquire omits `txn_id` and retains the
-  endpoint-minted rs/xid-compatible identifier from its lease. Every later
-  participant supplies that identifier. Pouch durably enrolls the first lease
-  when the second participant arrives; terminal releases vote and publish only
-  after every enrolled participant commits. The workflow owns the participant
-  ledger and terminal releases, and exposes no new coordinator.
+- The first durable command, inbox, or outbox acquire omits `txn_id` and
+  retains the endpoint-minted rs/xid-compatible identifier from its lease.
+  Every later participant supplies that identifier. Pouch durably enrolls the
+  first lease when the second participant arrives; terminal releases vote and
+  publish only after every enrolled participant commits. The workflow owns the
+  participant ledger and terminal releases, and exposes no new coordinator.
 - The normal dispatch path passes the newly committed outbox key to an
   internal dispatcher. The host sees work only through `workflow->next()`;
   it does not query the namespace or manage dispatcher internals.
@@ -43,6 +49,9 @@ foreign system is the required idempotency mechanism for that boundary.
 - The library owns no external broker transport and invokes no host callbacks
   on its dispatcher thread. Host code pulls claimed jobs and reports their
   result.
+- The host authenticates an API command before it reaches this API and passes a
+  stable, service-owned scope. `liblockdc` persists and compares that scope;
+  it does not authenticate an HTTP header, MQ property, or caller identity.
 
 ## Verified Transaction Contract
 
@@ -57,7 +66,7 @@ them.
 
 `lc_acquire_req.txn_id` binds a later key to the xid returned by the first
 acquire. The intended server contract is that this retroactively enrolls that
-first normal lease as well. Every domain, inbox, outbox, metadata, or
+first normal lease as well. Every domain, command, inbox, outbox, metadata, or
 attachment participant then carries the same xid and stages its change.
 
 Ordinary application credentials do not call the privileged transaction
@@ -82,11 +91,11 @@ caller-supplied transaction id and uses only the endpoint-minted one.
 
 ### Workflow adapter rules
 
-- `append_outbox()` or `accept_inbox()` is the first workflow operation. It
-  acquires its deterministic record key without an xid, retains the
-  endpoint-minted xid, and creates the transaction receiver.
-- Every later domain, inbox, and outbox lease uses that xid and is recorded
-  exactly once as a `(namespace, key)` participant.
+- `accept_command()`, `append_outbox()`, or `accept_inbox()` is the first
+  workflow operation. It acquires its deterministic record key without an xid,
+  retains the endpoint-minted xid, and creates the transaction receiver.
+- Every later domain, command, inbox, and outbox lease uses that xid and is
+  recorded exactly once as a `(namespace, key)` participant.
 - `commit()`/`rollback()` invokes the backend's implicit XA terminal release
   path. It does not call the privileged transaction-coordinator API.
 - A successful terminal decision consumes every enrolled lease. Calling
@@ -100,6 +109,7 @@ caller-supplied transaction id and uses only the endpoint-minted one.
 
 The component covers:
 
+- durable command acceptance, outcome, and status receipts;
 - durable idempotent outbox intent recording;
 - durable inbox deduplication;
 - true streaming of arbitrary payload bytes;
@@ -116,12 +126,43 @@ It deliberately does not cover:
 - exactly-once foreign effects;
 - a queue implementation or use of lockd queues as an implementation detail;
 - a generic transport plugin or dispatcher-owned host callback; or
+- request canonicalization, request hashing, authentication, authorization,
+  or an HTTP/MQ protocol adapter; or
 - a global ordering guarantee.
 
 ## Terms
 
+**Command receipt**
+  The durable fact that a service accepted one command in its owned scope and
+  the current or terminal result of that command. It is the idempotency
+  boundary for an HTTP/RPC/UI command and for a message that starts a distinct
+  operation in the receiving service.
+
+**Scope**
+  A stable service-owned authorization or tenancy boundary. The host derives it
+  after authentication. It is part of command identity and is never inferred
+  from an untrusted transport header.
+
+**Command type**
+  A stable, service-owned operation name, such as `orders.create.v1`. It is
+  part of command identity, not a display string.
+
+**Idempotency key**
+  An opaque caller-supplied stable identity for retries of one command within a
+  `(scope, command_type)` boundary. For an API command this is the usual
+  idempotency key. It may be the same value as the cross-service operation ID,
+  but the two concepts are not required to be coupled.
+
+**Request digest**
+  An opaque, durable binding to the semantic command input. A host normally
+  supplies a versioned digest of the canonical request body and the request
+  fields that change meaning. liblockdc stores and compares it; it neither
+  canonicalizes nor hashes arbitrary HTTP or MQ payloads. The same command
+  identity with a different request digest is a conflict, never a duplicate.
+
 **Operation ID**
-  Caller-supplied stable identity for one business operation.
+  Caller-supplied stable identity for one business operation across a workflow
+  chain. It supports correlation and may equal an API idempotency key.
 
 **Effect ID**
   Caller-supplied stable identity for one external effect belonging to an
@@ -135,6 +176,16 @@ It deliberately does not cover:
 **Inbox identity**
   The tuple `(consumer_id, source_kind, source_id, message_id)`. The
   `consumer_id` distinguishes independent consumers of the same source event.
+
+**Message ID**
+  The component-generated, stable identity of one outbox transport message.
+  It is sent unchanged on every dispatch attempt and is the normal
+  `message_id` supplied to a receiving inbox. It is distinct from both the
+  outbox record key and the foreign `effect_key`.
+
+**Causation ID**
+  The durable message or command receipt that directly caused a new outbox
+  message. It preserves lineage without becoming an ordering guarantee.
 
 **Claim**
   An active lease on one outbox key. A claim expires automatically if its owner
@@ -156,18 +207,43 @@ dispatcher notifications themselves.
 
 The primary C entry point is an opaque workflow handle created from an existing
 client. It follows the public library's receiver-function convention and
-zero-initializable configuration/request records:
+zero-initializable configuration/request records. The inbox/outbox methods
+below are current. The command-receipt methods and records marked *proposed*
+are the required next public-surface extension; they are intentionally shown
+here before implementation so C and Lua can make one clean cutover.
 
 ```c
 typedef struct lc_workflow lc_workflow;
 typedef struct lc_workflow_transaction lc_workflow_transaction;
 typedef struct lc_workflow_participant lc_workflow_participant;
 typedef struct lc_outbox_job lc_outbox_job;
+typedef struct lc_command_identity lc_command_identity;     /* proposed */
+typedef struct lc_command_request lc_command_request;       /* proposed */
+typedef struct lc_command_receipt lc_command_receipt;       /* proposed */
+typedef struct lc_command_result lc_command_result;         /* proposed */
 
 int (*new_workflow)(lc_client *self, const lc_workflow_config *config,
                     lc_workflow **out, lc_error *error);
 
 struct lc_workflow {
+  /* Proposed: creates the command receipt as the first transaction record. */
+  int (*accept_command)(lc_workflow *self,
+                        const lc_command_request *request,
+                        lc_workflow_transaction **out,
+                        lc_command_receipt *receipt, lc_error *error);
+  /* Proposed: reads a durable status/result snapshot without claiming work. */
+  int (*get_command_receipt)(lc_workflow *self,
+                             const lc_command_identity *identity,
+                             lc_command_receipt *out, lc_error *error);
+  /* Proposed: streams the immutable terminal result attachment, if present. */
+  int (*write_command_result)(lc_workflow *self,
+                              const lc_command_identity *identity,
+                              lc_sink *dst, size_t *written, lc_error *error);
+  /* Proposed: starts a transaction to terminally resolve a pending command. */
+  int (*resume_command)(lc_workflow *self,
+                        const lc_command_identity *identity,
+                        lc_workflow_transaction **out,
+                        lc_command_receipt *receipt, lc_error *error);
   int (*append_outbox)(lc_workflow *self, const lc_outbox_entry *entry,
                        lc_source *payload, lc_workflow_transaction **out,
                        lc_outbox_receipt *receipt, lc_error *error);
@@ -191,12 +267,23 @@ struct lc_workflow {
 };
 
 struct lc_workflow_transaction {
+  /* Proposed: adds a command receipt after an inbox receipt already started
+     this transaction. It returns an existing receipt on a command duplicate. */
+  int (*accept_command)(lc_workflow_transaction *self,
+                        const lc_command_request *request,
+                        lc_command_receipt *receipt, lc_error *error);
   int (*acquire)(lc_workflow_transaction *self,
                  const lc_workflow_participant_request *request,
                  lc_workflow_participant **out, lc_error *error);
   int (*append_outbox)(lc_workflow_transaction *self,
                         const lc_outbox_entry *entry, lc_source *payload,
                         lc_outbox_receipt *out, lc_error *error);
+  /* Proposed: persists one immutable terminal command outcome with this
+     transaction. No terminal result leaves the new receipt pending. */
+  int (*complete_command)(lc_workflow_transaction *self,
+                          const lc_command_result *result, lc_error *error);
+  int (*fail_command)(lc_workflow_transaction *self,
+                      const lc_command_result *result, lc_error *error);
   int (*commit)(lc_workflow_transaction *self, lc_error *error);
   int (*rollback)(lc_workflow_transaction *self, lc_error *error);
   void (*close)(lc_workflow_transaction *self);
@@ -210,6 +297,61 @@ struct lc_workflow_participant {
 };
 ```
 
+The proposed command records are deliberately small and transport-neutral:
+
+```c
+struct lc_command_identity {
+  const char *scope;
+  const char *command_type;
+  const char *idempotency_key;
+};
+
+struct lc_command_request {
+  lc_command_identity identity;
+  const char *request_digest;
+  const char *operation_id; /* optional correlation identity */
+};
+
+enum {
+  LC_COMMAND_PENDING = 1,
+  LC_COMMAND_COMPLETED = 2,
+  LC_COMMAND_FAILED = 3
+};
+
+struct lc_command_result {
+  const char *result_code;       /* completed result class */
+  const char *result_reference;  /* optional resource/status reference */
+  const char *content_type;      /* required with a result attachment */
+  lc_source *body;               /* optional; streamed into `result` */
+  const char *failure_code;      /* failed result class */
+  const char *failure_message;   /* bounded safe terminal message */
+};
+
+struct lc_command_receipt {
+  int state;
+  int duplicate;
+  char *scope;
+  char *command_type;
+  char *idempotency_key;
+  char *operation_id;
+  char *result_code;
+  char *result_reference;
+  char *failure_code;
+  char *failure_message;
+  int has_result_body;
+};
+```
+
+`lc_command_identity` selects one receipt for status and resume operations.
+`lc_command_request` adds immutable acceptance binding; it is not a
+request-body carrier. The host remains responsible for parsing, authenticating,
+and optionally retaining the incoming request. `request_digest` is required
+for an externally retriable command and is compared exactly as an opaque bounded
+string. `lc_command_result` is valid in one terminal direction only: a
+successful completion supplies no failure fields; a terminal failure supplies
+no success body or success result fields. The implementation must reject
+contradictory combinations before any state is staged.
+
 Exact type and method names remain subject to ABI review, but these interaction
 boundaries are fixed:
 
@@ -219,11 +361,12 @@ boundaries are fixed:
   construction, payload attachment naming, participant tracking, post-commit
   notification, and lease references. `effect_key` is caller supplied,
   immutable, and retained for every foreign-effect retry.
-- `workflow->append_outbox()` or `workflow->accept_inbox()` is the first
-  workflow operation. It acquires its deterministic record lease without an
-  xid and retains the endpoint-minted xid returned on that lease. It returns
-  the transaction only after the duplicate barrier succeeds. A duplicate inbox result returns
-  a successful structured result and no transaction.
+- `workflow->accept_command()`, `workflow->append_outbox()`, or
+  `workflow->accept_inbox()` is the first workflow operation. It acquires its
+  deterministic record lease without an xid and retains the endpoint-minted
+  xid returned on that lease. It returns the transaction only after the
+  relevant duplicate barrier succeeds. A duplicate command or inbox result
+  returns a successful structured receipt and no transaction.
 - `txn->acquire()` is the normal way to obtain a domain lease inside the
   workflow transaction. It supplies the workflow transaction id and retains
   the participant for terminal processing. It returns a workflow participant
@@ -239,6 +382,12 @@ boundaries are fixed:
 - Inbox acceptance reports `accepted` or `duplicate` as successful structured
   outcomes. It does not force callers to inspect an error string to distinguish
   a normal duplicate from a conflict.
+- Command acceptance reports a durable `pending`, `completed`, or `failed`
+  receipt. A duplicate with the same immutable command binding returns that
+  receipt; a changed binding is a conflict. A result body, when requested,
+  uses a fixed immutable attachment and the parent
+  `write_command_result()` streaming receiver rather than a materialized
+  result buffer.
 - Transaction commit is the single success boundary. It invokes the endpoint's
   implicit-XA terminal decision; there is no separate `signal()` call for the
   application to forget.
@@ -246,19 +395,20 @@ boundaries are fixed:
   and only the terminal/renewal operations valid for their owned claim.
 
 Errors must identify the failed semantic operation and relevant identity
-(`operation_id`, inbox identity, or outbox receipt) without logging payload
-bytes or credentials. The API must reject contradictory configuration before a
-worker thread starts.
+(`idempotency_key`, operation ID, inbox identity, or outbox receipt) without
+logging payload bytes, request digests, or credentials. The API must reject
+contradictory configuration before a worker thread starts.
 
 ### Transaction creation and ownership
 
-There is no public begin, join, or lease-adoption surface. To start outbound
-work, `workflow->append_outbox()` derives the deterministic key, acquires its
-record without an xid, and retains the endpoint-minted xid. To start inbound
-work, `workflow->accept_inbox()` does the same for the inbox receipt.
-liblockdc keeps the xid inside the owned workflow transaction and supplies it
-for every later participant. A duplicate inbox result is successful and returns
-no transaction.
+There is no public begin, join, or lease-adoption surface. To start an API
+command, `workflow->accept_command()` derives the command-receipt key,
+acquires it without an xid, and retains the endpoint-minted xid. To start
+outbound or inbound work, `workflow->append_outbox()` or
+`workflow->accept_inbox()` does the same for its own durable record. liblockdc
+keeps the xid inside the owned workflow transaction and supplies it for every
+later participant. A duplicate command or inbox result is successful and
+returns no transaction.
 
 Once a lease is acquired through the transaction, terminal ownership belongs
 to the workflow. Application code receives only its participant receiver for
@@ -275,6 +425,26 @@ semantics must match the C surface:
 
 ```lua
 local workflow = client:new_workflow({ namespace = "app-workflow" })
+
+local command_txn, command = workflow:accept_command({
+  scope = tenant_id,
+  command_type = "orders.create.v1",
+  idempotency_key = client_idempotency_key,
+  request_digest = semantic_request_digest,
+  operation_id = order_operation_id,
+})
+if command_txn then
+  local order = command_txn:acquire({ namespace = "orders", key = order_id,
+                                      owner = "orders-api", ttl_seconds = 30 })
+  order:update_raw(order_update_source)
+  command_txn:append_outbox(entry, payload_source)
+  command_txn:complete_command({ result_code = "created",
+                                  result_reference = order_id })
+  command_txn:commit()
+end
+-- A duplicate returns the stored command receipt, including pending or
+-- terminal outcome, and never repeats the domain mutation.
+
 local txn, receipt = workflow:append_outbox(entry, payload_source)
 
 local order = txn:acquire({ namespace = "orders", key = order_id,
@@ -285,7 +455,17 @@ local result = txn:commit()
 
 local inbound_txn, accepted = workflow:accept_inbox(message)
 if accepted.accepted then
-  inbound_txn:append_outbox(entry, payload_source)
+  local command = inbound_txn:accept_command({
+    scope = tenant_id,
+    command_type = "orders.fulfill.v1",
+    idempotency_key = message.command_id,
+    request_digest = message.command_digest,
+    operation_id = message.operation_id,
+  })
+  if not command.duplicate then
+    inbound_txn:append_outbox(entry, payload_source)
+    inbound_txn:complete_command({ result_code = "accepted" })
+  end
   inbound_txn:commit()
 end
 
@@ -310,30 +490,41 @@ The Lua façade supplies the matching parent operations as `workflow:stats()`,
 `"json"` or `"jsonl"`; an omitted destination returns the bounded export as a
 Lua string, while the usual Lua file/fd destination forms stream directly.
 
+The command-receipt extension adds `workflow:accept_command(request)`,
+`workflow:command_receipt(identity)`, and
+`workflow:resume_command(identity)`. Transactions add
+`txn:accept_command(request)`, `txn:complete_command(result)`, and
+`txn:fail_command(result)`. A receipt result body is exposed only by
+`workflow:write_command_result(identity, sink)`; Lua never receives a hidden
+materialized string.
+
 ### Cross-language parity
 
 The C and Lua surfaces must have parity for workflow creation, first-operation
-outbox/inbox transaction creation, commit/rollback, later outbox append,
-parent `next()`, job inspection, payload streaming, renewal, retry, completion,
-and dead-lettering. Host integrations may add conveniences, but may not weaken
+command/outbox/inbox transaction creation, command status and terminal result,
+commit/rollback, later outbox append, parent `next()`, job inspection, payload
+streaming, renewal, retry, completion, and dead-lettering. Host integrations
+may add conveniences, but may not weaken
 the durable semantics or replace direct job ownership with callbacks.
 
 ## Namespace and Key Layout
 
-`lc_inbox_outbox_config` supplies one non-empty `workflow_namespace`. Both
-record classes live in that namespace; it may be the same as, or distinct from,
-the application's domain-state namespace.
+`lc_workflow_config` supplies one non-empty workflow namespace. Command, inbox,
+and outbox record classes live in that namespace; it may be the same as, or
+distinct from, the application's domain-state namespace.
 
 The following reserved key prefix is owned by liblockdc:
 
 ```text
+__lockdc_io/v1/command/<command-identity-digest>
 __lockdc_io/v1/inbox/<inbox-identity-digest>
 __lockdc_io/v1/outbox/<operation-id-digest>/<effect-id-digest>
 ```
 
 Key components are deterministic, bounded digests. SHA-256 components use
 unpadded base64url (43 characters), not hexadecimal, so the complete reserved
-key remains below lockd's 128-character key limit. The inbox digest covers the
+key remains below lockd's 128-character key limit. The command digest covers
+`scope`, `command_type`, and `idempotency_key`; the inbox digest covers the
 consumer and complete source identity. liblockdc never creates a key by
 directly concatenating source-supplied identifiers. The original identifiers
 remain in the state body and are checked when an existing key is reused. A
@@ -349,6 +540,46 @@ the matching keys.
 The record body is compact JSON metadata with `application/json` content type.
 Payload bytes are not embedded in it.
 
+### Command receipt key
+
+A command receipt has immutable command-binding fields:
+
+```text
+record_type          "lockdc.command.v1"
+scope
+command_type
+idempotency_key
+request_digest
+operation_id         optional cross-service correlation identity
+accepted_at_unix
+```
+
+It has a mutable, monotonic outcome:
+
+```text
+state                pending | completed | failed
+result_code          host-defined safe result/status code
+result_reference     optional created resource, workflow, or status reference
+result_content_type  optional, required when a result attachment exists
+completed_at_unix
+failed_at_unix
+failure_code         host-defined safe terminal business failure code
+failure_message      bounded safe terminal business failure message
+```
+
+`pending` means the service durably accepted the command but has not recorded a
+terminal business outcome. `completed` and `failed` are terminal. A failure to
+reach or commit the local transaction is not a terminal command failure: it
+leaves no receipt or a recoverable pending receipt, depending on which local
+transaction had already committed. The component must never convert a timeout,
+process crash, or transient dependency error into `failed` automatically.
+
+When an application needs a replayable result body, the component writes it as
+an immutable attachment named `result` in the same transaction as the terminal
+receipt update. The result is read only through a streaming sink receiver. The
+receipt body contains metadata and a result reference, never materialized
+result bytes.
+
 ### Outbox key
 
 An outbox record has immutable fields:
@@ -358,7 +589,10 @@ record_type          "lockdc.outbox.v1"
 operation_id
 effect_id
 effect_key           caller-supplied immutable foreign-effect idempotency key
+message_id           component-generated immutable transport-message identity
+causation_id         optional command or message that caused this message
 kind                 caller-defined bounded routing label
+schema_version       optional caller-defined message schema version
 destination          caller-defined transport target
 content_type
 headers              bounded key/value metadata
@@ -391,6 +625,18 @@ attachment directly into a caller-owned `lc_sink`; it must preserve real
 bounded-buffer streaming for both backends and must not materialize the full
 payload behind a source-looking facade.
 
+`message_id` is generated from the immutable durable outbox identity and is
+stable across retries, claim expiry, dead-letter replay, and process restart.
+It is an opaque transport value, not a storage key and not an `effect_key`.
+The host sends it with every MQ delivery or HTTP command. A receiving service
+normally uses it as `lc_inbox_message.message_id`.
+
+`causation_id` is immutable once committed. When an outbox entry is appended
+inside an accepted inbox transaction and the caller does not provide one, the
+component uses the source message ID. When appended inside a command receipt
+transaction, it uses the receipt's stable command identity. A caller may set a
+different causation ID only when it is the actual immediate cause.
+
 ### Inbox key
 
 An inbox record contains:
@@ -414,6 +660,12 @@ or replay requirement calls for retention. If source-payload retention is
 enabled, it uses an attachment with the same streaming rules as an outbox
 payload.
 
+An inbox receipt and a command receipt must not be collapsed. The inbox says a
+specific consumer durably handled one delivery. A command receipt says the
+service owns one business operation and records its result. One inbound message
+may have no command receipt, or it may transactionally create a distinct local
+command receipt.
+
 ## Atomic Operations
 
 `lc_workflow` and its transaction receiver provide the workflow transaction
@@ -421,22 +673,88 @@ wrapper over existing lockd and Pouch transaction facilities. The receiver
 surface in [Consumer Experience and Public Surface](#consumer-experience-and-public-surface)
 is the intended public boundary.
 
-The transaction has an explicit participant ledger. Its first inbox or outbox
-record lease receives an endpoint-minted xid; every later participant supplies
-that xid and, in Pouch, makes the first lease a durable participant before
-returning. The application obtains a domain participant through
+The transaction has an explicit participant ledger. Its first command, inbox,
+or outbox record lease receives an endpoint-minted xid; every later participant
+supplies that xid and, in Pouch, makes the first lease a durable participant
+before returning. The application obtains a domain participant through
 `txn->acquire()`, mutates through that receiver, and leaves terminal processing
-to the workflow. The wrapper stages inbox/outbox keys and attachments under
-that same transaction id.
+to the workflow. The wrapper stages command/inbox/outbox keys and attachments
+under that same transaction id.
 
 The workflow must choose its duplicate barrier before the application performs
-the associated domain mutation. The first `workflow->append_outbox()` or
-`workflow->accept_inbox()` call acquires its deterministic record key with the
-create-only precondition before returning a transaction. A committed matching
-record yields the normal duplicate outcome before a new domain effect is
-staged; an immutable mismatch is a conflict. A currently leased record is
-retried or reported as in-progress according to the bounded request policy,
-never treated as a fresh duplicate.
+the associated domain mutation. The first `workflow->accept_command()`,
+`workflow->append_outbox()`, or `workflow->accept_inbox()` call acquires its
+deterministic record key with the create-only precondition before returning a
+transaction. A committed matching record yields the normal duplicate outcome
+before a new domain effect is staged; an immutable mismatch is a conflict. A
+currently leased record is retried or reported as in-progress according to the
+bounded request policy, never treated as a fresh duplicate.
+
+### Command acceptance and result
+
+A command receipt is the duplicate barrier for an API command. The command
+identity is exactly `(scope, command_type, idempotency_key)`. Its
+`request_digest` is immutable binding data, not another identity component.
+
+1. The authenticated host supplies a trusted scope, stable command type,
+   idempotency key, and opaque request digest to
+   `workflow->accept_command()` before it stages business state.
+2. The component derives the receipt key and applies a create-only precondition
+   under the first, endpoint-minted workflow xid. It stages a `pending`
+   receipt and returns the owned transaction only for a new command.
+3. The caller stages domain mutation and zero or more outbox effects through
+   that transaction. A synchronous command may record `completed` or `failed`
+   by calling the corresponding transaction method before `commit()`.
+4. Commit makes the receipt, business state, terminal result when present, and
+   outbox intent visible together. Lost transport responses are safe because a
+   retry reads this same receipt.
+
+For a duplicate identity, the component compares every immutable command field,
+including scope, command type, idempotency key, request digest, and any
+declared operation ID. A matching receipt is a successful result and returns no
+transaction. A mismatch is `LC_ERR_CONFLICT` (or the public equivalent) and
+must identify the command identity without exposing request bytes or digest.
+
+A command may intentionally remain `pending` after the acceptance transaction
+commits. `workflow->resume_command()` acquires the existing pending receipt as
+the first participant of a new workflow transaction. It may then stage the
+next owned domain transition, output effects, and exactly one terminal outcome.
+It returns the current receipt without a transaction when the receipt is
+already terminal. No API permits `completed` or `failed` to become pending or
+to overwrite a previous terminal result.
+
+`workflow->get_command_receipt()` is a direct read of this durable state. It is
+the required status-resource primitive for long-running HTTP/RPC commands; it
+does not claim a dispatcher job, invoke user code, or perform a reconciliation
+query.
+
+A command receipt without its associated domain/outbox transaction is not the
+feature's correctness goal. The command-receipt extension therefore ships as a
+Pouch capability first. It must not be advertised for remote lockd until the
+compose-backed remote E2E proof demonstrates atomic command + domain + outbox
+publication with the repaired implicit-XA enrollment contract.
+
+### Message consumer that starts an owned command
+
+An inbox duplicate barrier and a command receipt compose in one transaction;
+neither replaces the other:
+
+1. A consumer calls `workflow->accept_inbox()` using the immutable incoming
+   `message_id`, and receives a transaction only for a new delivery.
+2. It calls `txn->accept_command()` if the delivery starts a separately owned
+   operation. A matching existing command receipt is a normal result: the
+   caller commits the new inbox receipt but stages no duplicate domain effect.
+3. For a new command, it stages domain state and any reply or downstream
+   outbox effects. The reply's `causation_id` defaults to the input message ID.
+4. It commits, then acknowledges the broker delivery. It never acknowledges
+   before durable inbox acceptance, and it never lets an acknowledgement decide
+   command success.
+
+This supports request/reply MQ chains without turning liblockdc into a broker
+client. The receiving host maps the outbox job's immutable `message_id`,
+`operation_id`, `causation_id`, routing metadata, and streaming payload into
+the broker protocol. A reply is an ordinary outbox effect; the reply consumer
+uses an inbox receipt exactly as for any other message.
 
 ### Outbox append
 
@@ -453,10 +771,11 @@ never treated as a fresh duplicate.
    dispatcher with the returned outbox key.
 
 Submitting the same `(operation_id, effect_id)` again is idempotent only when
-all immutable fields, including `effect_key`, match. A conflicting repeat
-fails visibly. A matching committed repeat returns the existing outbox receipt
-with `duplicate` set and no transaction; it does not create or stage any new
-domain or outbox participant.
+all immutable fields, including `effect_key`, `causation_id`, routing metadata,
+and schema version, match. A conflicting repeat fails visibly. A matching
+committed repeat returns the existing outbox receipt with `duplicate` set and
+no transaction; it does not create or stage any new domain or outbox
+participant.
 
 ### Inbox acceptance
 
@@ -473,6 +792,55 @@ domain or outbox participant.
 
 If an incoming source payload is part of duplicate validation, the supplied
 digest must match the stored digest. A mismatch is a conflict.
+
+## HTTP, RPC, and MQ Boundary Contract
+
+liblockdc owns durable facts and their local transaction. The host owns
+protocol parsing, authentication, authorization, broker acknowledgement, HTTP
+status formatting, and the actual foreign call. The following logical fields
+are the contract; this component intentionally does not prescribe HTTP header
+names, CloudEvents fields, AMQP properties, or a serialization format.
+
+| Durable field | HTTP/RPC mapping | MQ mapping |
+| --- | --- | --- |
+| `scope` | Authenticated service/tenant/actor boundary | Authenticated producer or tenant boundary established by the consumer |
+| `command_type` | Stable route/operation name | Stable command message type |
+| `idempotency_key` | Caller retry key | Command identity supplied by producer |
+| `request_digest` | Host's durable semantic request binding | Host's durable semantic command binding |
+| `message_id` | Outbound request/message identity | Broker message identity; inbound inbox identity |
+| `operation_id` | Business correlation | Business correlation across hops |
+| `causation_id` | Command or received message that caused the call | Received command/event that caused the message |
+| `effect_key` | Foreign-service/provider idempotency key | Producer-side dispatch effect key |
+| `trace_context` | Trace propagation only | Trace propagation only |
+
+### Idempotent HTTP or RPC command
+
+The host authenticates the request, derives scope, calls
+`accept_command()`, stages its local state and zero or more outbox effects, and
+commits. A completed or failed receipt maps to the service's recorded safe
+response. A pending receipt maps to a status resource/reference selected by the
+service. A retried request never re-executes business work merely because the
+original response was lost.
+
+An outbound HTTP/RPC command is an outbox job. The host sends its stable
+`message_id`, `operation_id`, `causation_id`, and `effect_key` using the target
+service's agreed protocol. The target service independently establishes its
+own command receipt; the producer's outbox completion only records delivery
+progress, not the target's business result.
+
+### Message command and request/reply
+
+The host maps an incoming broker delivery to `lc_inbox_message`, including its
+immutable broker `message_id` and any source identity. It commits the inbox
+transaction before acknowledgement. If the delivery is a command owned by this
+service, it also records a command receipt as described above. A response is a
+new outbox effect with the input message as causation; it is not a special
+reply channel inside liblockdc. The requester deduplicates that response with
+its own inbox record.
+
+Transport redelivery and API retry are normal. Neither is global XA, and a
+foreign receiver that declines to deduplicate the stable identity it is given
+remains the limiting correctness boundary.
 
 ## Dispatcher
 
@@ -553,6 +921,17 @@ reads until every enrolled participant has committed. On host loss, recovery
 rolls an expired undecided transaction back, after which a later lease holder
 can reclaim and recheck the durable envelope. Remote lockd is expected to
 provide the same boundary after its implicit-XA enrollment defect is fixed.
+
+The outbox envelope is also the external-delivery receipt for its one
+`effect_key`; a separate generic external-delivery table is unnecessary. The
+next surface extends `job->complete()` with an optional completion record that
+persists a bounded provider/broker delivery reference and response digest with
+the `completed` transition. This is evidence for diagnosis and provider
+reconciliation, not proof that an uncooperative provider performed exactly one
+effect. On an uncertain provider outcome, the host must either retry with the
+same `effect_key` when the provider supports idempotency, or retain/dead-letter
+the job for explicit provider reconciliation. It must not call completion based
+on an assumed success.
 
 Retry atomically increments `attempt_count`, records a bounded diagnostic, and
 sets `not_before`. Exhausting the configured retry budget transitions to
@@ -648,11 +1027,28 @@ define an explicit lease-protected ordering model and version it separately.
 
 Configuration must bound:
 
-- operation, effect, source, consumer, kind, destination, and header sizes;
+- scope, command type, idempotency key, request digest, operation, effect,
+  source, consumer, kind, destination, schema, and header sizes;
 - attachment size when the application requests a maximum;
 - dispatcher notification and preclaimed-job capacity;
 - claim TTL, renewal cadence, retry delay, and maximum attempts; and
 - retained diagnostics and dead-letter retention.
+
+### Receipt retention and privacy
+
+Command receipt, inbox, outbox, and external-delivery evidence have different
+retention purposes and must have independently configured retention policies.
+A receipt must outlive the maximum retry, redelivery, and client-status window
+for its boundary; deleting it earlier deliberately reopens duplicate execution
+for that identity. v0 defaults to no automatic deletion. A later retention
+sweeper may delete only terminal records older than an explicit configured
+window and must remove a command result attachment atomically with its receipt.
+
+The durable `request_digest` is comparison material, not audit payload. It and
+all result, source, and outbox attachments may be sensitive. Public errors,
+logs, workflow stats, dead-letter export, and default command-status responses
+must not expose them. A host chooses which terminal result fields are safe to
+return to a caller and which records are available to an operator export.
 
 ### Default delivery policy
 
@@ -703,58 +1099,84 @@ state keys remain the sole recovery source of truth.
 
 ## Required Verification
 
-Implementation is not complete until the following behavior is proven for both
-Pouch and the repository's compose-backed remote lockd E2E environment.
+The existing inbox/outbox surface is not complete until its applicable behavior
+is proven for both Pouch and the repository's compose-backed remote lockd E2E
+environment. The command-receipt extension is not complete until every command
+composition obligation is proven for Pouch; it gains remote parity only after
+the repaired remote implicit-XA contract is present in that E2E environment.
 
-1. The first `append_outbox()` or `accept_inbox()` acquire omits `txn_id` and
-   retains the endpoint-minted xid. Every later domain or outbox participant
-   propagates that xid. There is no caller transaction-id construction, join,
-   or lease-adoption surface.
-2. One workflow participant ledger containing domain mutation, inbox/outbox
-   key, and payload attachment commits atomically; rollback exposes none of
+1. The first `accept_command()`, `append_outbox()`, or `accept_inbox()` acquire
+   omits `txn_id` and retains the endpoint-minted xid. Every later domain,
+   command, inbox, or outbox participant propagates that xid. There is no
+   caller transaction-id construction, join, or lease-adoption surface.
+2. One workflow participant ledger containing domain mutation, command/inbox/
+   outbox key, and attachment commits atomically; rollback exposes none of
    them. Pouch proves that releasing the first participant before the last
    keeps every staged value private. Remote lockd requires the upstream
    implicit-XA enrollment fix before it can satisfy this criterion.
-3. Repeated outbox append with the same operation/effect identity creates one
+3. A command retry with matching scope, command type, idempotency key, and
+   request digest returns the exact durable pending or terminal receipt without
+   a transaction or repeated domain mutation. Reuse with any changed immutable
+   command field is a conflict.
+4. A synchronous command commits its domain state, command result, and outbox
+   records together. A lost HTTP/RPC response followed by a retry returns the
+   recorded result. Pending-command resume can record exactly one terminal
+   result and cannot overwrite a terminal receipt.
+5. An incoming message that starts an owned command commits inbox receipt,
+   command receipt, domain state, and reply/downstream outbox effects together.
+   Broker acknowledgement occurs only after that commit. Duplicate delivery and
+   a duplicate command each avoid a second business effect.
+6. Repeated outbox append with the same operation/effect identity creates one
    intent; a conflicting immutable repeat fails.
-4. Inbox redelivery is idempotent and a payload-digest conflict is rejected.
-5. The ordinary append-to-dispatch path performs no recovery query.
-6. A process crash after commit and before notification is recovered by another
+7. Inbox redelivery is idempotent and a payload-digest conflict is rejected.
+8. The ordinary append-to-dispatch path performs no recovery query.
+9. A process crash after commit and before notification is recovered by another
    dispatcher from an indexed query.
-7. A crash after the foreign effect and before completion redelivers the same
+10. A crash after the foreign effect and before completion redelivers the same
    `effect_key`.
-8. Stale completion, retry, and dead-letter operations cannot alter a later
+11. Stale completion, retry, and dead-letter operations cannot alter a later
    claim.
-9. Retry scheduling, retry-budget exhaustion, dead-lettering, and replay are
+12. Retry scheduling, retry-budget exhaustion, dead-lettering, and replay are
    durable and observable. Default policy tests prove 100 attempts including
    the first, full-jitter exponential delay from one second capped at fifteen
    minutes, a one-hour host-delay limit, and dead-lettering without deletion.
-10. Payload reads remain streaming under fragmented reads, large attachments,
+13. Payload and command-result reads remain streaming under fragmented reads, large attachments,
    cancellation, and backend failover/reopen; tests prove no full-payload
    materialization.
-11. Competing remote dispatchers and shared-root Pouch dispatchers produce one
+14. Competing remote dispatchers and shared-root Pouch dispatchers produce one
     active lease-authorized claim and recover abandoned claims. Tests must not
     assert identical public visibility of a live `claimed` envelope across the
     two backends.
-12. The regression baseline seeds 256 pending records with a 16-key
+15. The regression baseline seeds 256 pending records with a 16-key
     notification bound, proves paged indexed reconciliation delivers every
     record, and records wall-clock latency under a deliberately broad 30-second
     failure bound. A separate load benchmark before v1 release must extend this
     profile with retained terminal population, continuous state-transition
     churn, and an un-compacted Pouch log; payload size must not change
     discovery cost.
-13. Parent close behavior leaves incomplete claims for later expiry recovery
+16. Parent close behavior leaves incomplete claims for later expiry recovery
     and never manufactures completion.
-14. The dispatcher never invokes host callbacks or host-runtime code on its
+17. The dispatcher never invokes host callbacks or host-runtime code on its
     thread; a host worker receives work only through `next()` and owns its
     execution context.
-15. Shutdown stops new claims, wakes blocked parent `next()` callers, joins
+18. Shutdown stops new claims, wakes blocked parent `next()` callers, joins
     the private dispatcher within the configured deadline, and permits an
     active host job to recover through lease expiry after its grace period.
-16. C and Lua integration tests prove the same observable workflow outcomes:
-    idempotent append/accept, explicit duplicate results, parent `next()`
-    streamed-payload handoff, and terminal job transitions without dispatcher
-    thread callbacks.
+19. C and Lua integration tests prove the same observable workflow outcomes:
+    idempotent command/append/accept, explicit duplicate results, command
+    result status/streaming, parent `next()` streamed-payload handoff, and
+    terminal job transitions without dispatcher thread callbacks.
+20. Transaction ownership is enforced: a workflow participant exposes no
+    release/decision method; the transaction begins only from its deterministic
+    first record lease; the Pouch terminal decision contains every enrolled
+    participant; and a consumed participant cannot be reused.
+21. A matching committed outbox duplicate returns its existing receipt with no
+    transaction and cannot stage a second domain mutation or outbox intent.
+22. Dead-letter export contains envelope JSON but no payload bytes; explicit
+    replay keeps `effect_key`, resets the attempt, records replay provenance,
+    and deletion removes both envelope and attachment atomically. The same
+    outcomes are covered through the C and Lua surfaces, including opt-in
+    startup replay.
 
 ## Reconciliation Performance Benchmark
 
@@ -804,17 +1226,6 @@ storage media, remote TLS, and lockd deployment topology materially affect the
 absolute number. Before v1, record representative Pouch and remote baselines
 on the supported deployment hardware and promote agreed budgets into an
 explicit performance gate.
-17. Transaction ownership is enforced: a workflow participant exposes no
-    release/decision method; the transaction begins only from its deterministic
-    first record lease; the Pouch terminal decision contains every enrolled
-    participant; and a consumed participant cannot be reused.
-18. A matching committed outbox duplicate returns its existing receipt with no
-    transaction and cannot stage a second domain mutation or outbox intent.
-19. Dead-letter export contains envelope JSON but no payload bytes; explicit
-    replay keeps `effect_key`, resets the attempt, records replay provenance,
-    and deletion removes both envelope and attachment atomically. The same
-    outcomes are covered through the C and Lua surfaces, including opt-in
-    startup replay.
 
 ## Proof Obligations and Open Decisions
 
@@ -822,19 +1233,33 @@ The following are not generic lockd deployment concerns; they are the remaining
 component-specific design or proof obligations:
 
 1. Finalize ABI names and request records for first-operation
-   `append_outbox()`/`accept_inbox()`, transaction participants, parent
-   `next()`, and jobs; the semantic requirements above are fixed.
-2. Decide the exact v1 routing metadata surface and its limits.
-3. Establish quantitative recovery-query performance budgets from the Pouch and
+   `accept_command()`/`append_outbox()`/`accept_inbox()`, command receipt
+   reads/resume/result streaming, transaction participants, parent `next()`,
+   and jobs. Because this extends public receiver structs, implementation must
+   derive and apply any necessary shared-library ABI bump from the latest
+   released artifact, not from this branch.
+2. Finalize the exact outbox transport metadata surface: generated `message_id`,
+   optional `causation_id`, schema version, and completion/provider reference.
+   The logical semantics above are fixed; field spelling and size limits are
+   still subject to public-API review.
+3. Define the command-result safe-response contract and terminal failure code
+   taxonomy without making liblockdc an HTTP status-code policy engine.
+4. Define independent terminal retention windows for command, inbox, outbox,
+   dead-letter, and optional request/result attachments before adding an
+   automatic sweeper.
+5. Establish quantitative recovery-query performance budgets from the Pouch and
    remote-lockd benchmark matrix before treating indexing as sufficient.
-4. Define terminal-record and optional source-payload retention/replay policy.
+6. Prove remote command receipt composition only after the upstream implicit-XA
+   enrollment fix is available in the repository's pinned E2E lockd image.
 
 ## Design Basis
 
 The design follows the transactional outbox rule that the durable intent is
 committed with the business state and that a later relay can repeat an external
 send. It also follows the idempotent-consumer rule that processed-message
-identity is persisted as part of the durable processing transaction.
+identity is persisted as part of the durable processing transaction, and the
+idempotent-command rule that API acceptance and its replayable result are
+durable service-owned state.
 
 - [Transactional Outbox pattern](https://microservices.io/patterns/data/transactional-outbox)
 - [Idempotent Consumer pattern](https://microservices.io/patterns/communication-style/idempotent-consumer.html)
