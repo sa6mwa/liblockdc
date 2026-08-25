@@ -25,6 +25,18 @@ static void lc_workflow_retain(lc_workflow_handle *workflow);
 lc_workflow_test_after_reconcile_query_hook_fn
     lc_workflow_test_after_reconcile_query_hook = NULL;
 void *lc_workflow_test_after_reconcile_query_context = NULL;
+lc_workflow_test_failure_hook_fn lc_workflow_test_before_ledger_append_hook =
+    NULL;
+void *lc_workflow_test_before_ledger_append_context = NULL;
+lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_participant_allocation_hook = NULL;
+void *lc_workflow_test_before_participant_allocation_context = NULL;
+lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_command_receipt_copy_hook = NULL;
+void *lc_workflow_test_before_command_receipt_copy_context = NULL;
+lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_outbox_receipt_copy_hook = NULL;
+void *lc_workflow_test_before_outbox_receipt_copy_context = NULL;
 #endif
 
 typedef struct lc_workflow_outbox_record {
@@ -258,6 +270,7 @@ struct lc_workflow_transaction_handle {
   size_t lease_capacity;
   lc_workflow_participant_handle *participants;
   lc_lease *command_lease;
+  int command_causation_owned;
   char *causation_id;
   int command_terminal;
   int terminal;
@@ -414,6 +427,15 @@ lc_workflow_transaction_add_lease(lc_workflow_transaction_handle *transaction,
   lc_lease **grown;
   size_t capacity;
 
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_before_ledger_append_hook != NULL) {
+    int rc = lc_workflow_test_before_ledger_append_hook(
+        lc_workflow_test_before_ledger_append_context, error);
+
+    if (rc != LC_OK)
+      return rc;
+  }
+#endif
   if (transaction->lease_count == transaction->lease_capacity) {
     capacity = transaction->lease_capacity == 0U
                    ? 4U
@@ -431,6 +453,26 @@ lc_workflow_transaction_add_lease(lc_workflow_transaction_handle *transaction,
   }
   transaction->leases[transaction->lease_count++] = lease;
   return LC_OK;
+}
+
+static void lc_workflow_transaction_remove_lease(
+    lc_workflow_transaction_handle *transaction, lc_lease *lease) {
+  size_t index;
+
+  if (transaction == NULL || lease == NULL)
+    return;
+  for (index = 0U; index < transaction->lease_count; ++index) {
+    if (transaction->leases[index] == lease) {
+      size_t remaining = transaction->lease_count - index - 1U;
+
+      if (remaining > 0U) {
+        memmove(&transaction->leases[index], &transaction->leases[index + 1U],
+                remaining * sizeof(*transaction->leases));
+      }
+      transaction->leases[--transaction->lease_count] = NULL;
+      return;
+    }
+  }
 }
 
 static int lc_workflow_digest(const char *value, char out[44],
@@ -936,9 +978,23 @@ lc_workflow_transaction_set_command(lc_workflow_transaction_handle *transaction,
                           NULL, NULL);
     }
     transaction->causation_id = cause;
+    transaction->command_causation_owned = 1;
   }
   transaction->command_lease = lease;
   return LC_OK;
+}
+
+static void lc_workflow_transaction_clear_command(
+    lc_workflow_transaction_handle *transaction, lc_lease *lease) {
+  if (transaction == NULL || transaction->command_lease != lease)
+    return;
+  transaction->command_lease = NULL;
+  transaction->command_terminal = 0;
+  if (transaction->command_causation_owned) {
+    lc_client_free(transaction->workflow->client, transaction->causation_id);
+    transaction->causation_id = NULL;
+  }
+  transaction->command_causation_owned = 0;
 }
 
 static int
@@ -2044,6 +2100,27 @@ lc_workflow_participant_close_method(lc_workflow_participant *self) {
   }
 }
 
+/* A later participant is already durably enrolled in the implicit-XA xid
+ * before a workflow operation can report a post-enrollment failure. Rolling
+ * that participant back therefore decides rollback for the whole xid; keep
+ * the local transaction equally terminal and release every retained handle. */
+static void lc_workflow_transaction_abort_enrolled_lease(
+    lc_workflow_transaction_handle *transaction, lc_lease *lease) {
+  size_t index;
+
+  if (transaction == NULL)
+    return;
+  lc_workflow_transaction_clear_command(transaction, lease);
+  lc_workflow_transaction_remove_lease(transaction, lease);
+  lc_workflow_transaction_invalidate_participants(transaction);
+  lc_workflow_rollback_lease(lease);
+  for (index = 0U; index < transaction->lease_count; ++index) {
+    lc_workflow_rollback_lease(transaction->leases[index]);
+    transaction->leases[index] = NULL;
+  }
+  transaction->terminal = 1;
+}
+
 static int lc_workflow_transaction_acquire_method(
     lc_workflow_transaction *self,
     const lc_workflow_participant_request *request,
@@ -2077,15 +2154,27 @@ static int lc_workflow_transaction_acquire_method(
     return rc;
   rc = lc_workflow_transaction_add_lease(transaction, lease, error);
   if (rc != LC_OK) {
-    lc_lease_close(lease);
+    lc_workflow_transaction_abort_enrolled_lease(transaction, lease);
     return rc;
   }
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_before_participant_allocation_hook != NULL) {
+    rc = lc_workflow_test_before_participant_allocation_hook(
+        lc_workflow_test_before_participant_allocation_context, error);
+    if (rc != LC_OK) {
+      lc_workflow_transaction_abort_enrolled_lease(transaction, lease);
+      return rc;
+    }
+  }
+#endif
   participant = (lc_workflow_participant_handle *)lc_client_calloc(
       transaction->workflow->client, 1U, sizeof(*participant));
-  if (participant == NULL)
+  if (participant == NULL) {
+    lc_workflow_transaction_abort_enrolled_lease(transaction, lease);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate workflow participant", NULL, NULL,
                         NULL);
+  }
   lc_workflow_retain(transaction->workflow);
   participant->workflow = transaction->workflow;
   participant->transaction = transaction;
@@ -2165,11 +2254,7 @@ static int lc_workflow_transaction_accept_command_method(
     rc = lc_workflow_transaction_set_command(transaction, lease, command_id,
                                              error);
   if (rc != LC_OK) {
-    if (transaction->lease_count > 0U &&
-        transaction->leases[transaction->lease_count - 1U] == lease) {
-      transaction->leases[--transaction->lease_count] = NULL;
-    }
-    lc_workflow_rollback_lease(lease);
+    lc_workflow_transaction_abort_enrolled_lease(transaction, lease);
     free(key);
     return rc;
   }
@@ -2181,8 +2266,22 @@ static int lc_workflow_transaction_accept_command_method(
   record.idempotency_key = (char *)request->identity.idempotency_key;
   record.state = "pending";
   record.operation_id = (char *)request->operation_id;
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_before_command_receipt_copy_hook != NULL) {
+    rc = lc_workflow_test_before_command_receipt_copy_hook(
+        lc_workflow_test_before_command_receipt_copy_context, error);
+    if (rc != LC_OK) {
+      free(key);
+      lc_workflow_transaction_abort_enrolled_lease(transaction, lease);
+      return rc;
+    }
+  }
+#endif
   rc = lc_workflow_command_receipt_from_record(&record, receipt, error);
   free(key);
+  if (rc != LC_OK) {
+    lc_workflow_transaction_abort_enrolled_lease(transaction, lease);
+  }
   return rc;
 }
 
@@ -2246,24 +2345,35 @@ static int lc_workflow_transaction_append_outbox_method(
   }
   rc = lc_workflow_stage_outbox(lease, &effective_entry, payload, error);
   if (rc != LC_OK) {
-    lc_release_req rollback;
-    lc_release_req_init(&rollback);
-    rollback.rollback = 1;
-    (void)lc_lease_release(lease, &rollback, NULL);
+    lc_workflow_transaction_abort_enrolled_lease(transaction, lease);
     free(key);
     return rc;
   }
   rc = lc_workflow_transaction_add_lease(transaction, lease, error);
   if (rc != LC_OK) {
-    lc_lease_close(lease);
+    lc_workflow_transaction_abort_enrolled_lease(transaction, lease);
     free(key);
     return rc;
   }
-  receipt->outbox_key = key;
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_before_outbox_receipt_copy_hook != NULL) {
+    rc = lc_workflow_test_before_outbox_receipt_copy_hook(
+        lc_workflow_test_before_outbox_receipt_copy_context, error);
+    if (rc != LC_OK) {
+      lc_workflow_transaction_abort_enrolled_lease(transaction, lease);
+      free(key);
+      return rc;
+    }
+  }
+#endif
   receipt->effect_key = lc_strdup_local(entry->effect_key);
-  if (receipt->effect_key == NULL)
+  if (receipt->effect_key == NULL) {
+    lc_workflow_transaction_abort_enrolled_lease(transaction, lease);
+    free(key);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate outbox receipt", NULL, NULL, NULL);
+  }
+  receipt->outbox_key = key;
   return LC_OK;
 }
 

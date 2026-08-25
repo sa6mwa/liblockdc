@@ -2197,6 +2197,8 @@ struct lc_consumer_service {
  * One owned workflow transaction. The first inbox or outbox operation obtains
  * its xid from the endpoint; later participant acquires automatically carry
  * that xid. Only this receiver can make the terminal decision.
+ * If an operation fails after enrolling a later participant, implicit XA has
+ * rolled the xid back; close this transaction and begin a new one to retry.
  */
 struct lc_workflow_transaction {
   int (*accept_command)(lc_workflow_transaction *self,

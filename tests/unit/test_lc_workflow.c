@@ -24,6 +24,23 @@
 #define WORKFLOW_CLEAN_REOPEN_FOREIGN_CHURN 16U
 #define WORKFLOW_CLEAN_REOPEN_PENDING_RECORDS 32U
 
+static int workflow_fail_allocation(void *context, lc_error *error) {
+  (void)context;
+  return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                      "forced workflow allocation failure", NULL, NULL, NULL);
+}
+
+static void workflow_reset_allocation_failures(void) {
+  lc_workflow_test_before_ledger_append_hook = NULL;
+  lc_workflow_test_before_ledger_append_context = NULL;
+  lc_workflow_test_before_participant_allocation_hook = NULL;
+  lc_workflow_test_before_participant_allocation_context = NULL;
+  lc_workflow_test_before_command_receipt_copy_hook = NULL;
+  lc_workflow_test_before_command_receipt_copy_context = NULL;
+  lc_workflow_test_before_outbox_receipt_copy_hook = NULL;
+  lc_workflow_test_before_outbox_receipt_copy_context = NULL;
+}
+
 static int workflow_bytes_contains(const void *bytes, size_t length,
                                    const char *needle) {
   size_t needle_length;
@@ -796,6 +813,371 @@ test_pouch_participant_cleanup_after_transaction_close(void **state) {
   participant = NULL;
 
   lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_participant_allocation_failure_rolls_back_enrollment(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_inbox_message inbox;
+  lc_inbox_accept_result inbox_result;
+  lc_workflow_participant_request participant_request;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_workflow_participant *participant;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "participant-oom-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  participant = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "participant-oom";
+  workflow_config.owner = "participant-oom-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_inbox_message_init(&inbox);
+  inbox.consumer_id = "participant-oom-consumer";
+  inbox.source_kind = "http";
+  inbox.source_id = "participant-oom-source";
+  inbox.message_id = "participant-oom-message";
+  inbox.payload_digest = "participant-oom-digest";
+  inbox.operation_id = "participant-oom-operation";
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox, &transaction,
+                                            &inbox_result, &error),
+                   LC_OK);
+  lc_workflow_participant_request_init(&participant_request);
+  participant_request.acquire.namespace_name = "participant-oom";
+  participant_request.acquire.key = "participant-oom-domain";
+  participant_request.acquire.owner = "participant-oom-test";
+  participant_request.acquire.ttl_seconds = 30L;
+
+  workflow_reset_allocation_failures();
+  lc_workflow_test_before_participant_allocation_hook =
+      workflow_fail_allocation;
+  rc = lc_workflow_transaction_acquire(transaction, &participant_request,
+                                       &participant, &error);
+  workflow_reset_allocation_failures();
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_null(participant);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  /* The implicit-XA rollback is terminal. A caller retries in a new workflow
+   * transaction, never by committing the failed xid. */
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  inbox.message_id = "participant-oom-retry-message";
+  inbox.payload_digest = "participant-oom-retry-digest";
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox, &transaction,
+                                            &inbox_result, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_acquire(
+                       transaction, &participant_request, &participant, &error),
+                   LC_OK);
+  assert_non_null(participant);
+  lc_workflow_participant_close(participant);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  workflow_reset_allocation_failures();
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_command_receipt_allocation_failure_rolls_back_enrollment(
+    void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_inbox_message inbox;
+  lc_inbox_accept_result inbox_result;
+  lc_command_request command;
+  lc_command_receipt receipt;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "command-oom-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  lc_command_receipt_init(&receipt);
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "command-oom";
+  workflow_config.owner = "command-oom-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_inbox_message_init(&inbox);
+  inbox.consumer_id = "command-oom-consumer";
+  inbox.source_kind = "http";
+  inbox.source_id = "command-oom-source";
+  inbox.message_id = "command-oom-message";
+  inbox.payload_digest = "command-oom-digest";
+  inbox.operation_id = "command-oom-operation";
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox, &transaction,
+                                            &inbox_result, &error),
+                   LC_OK);
+  lc_command_request_init(&command);
+  command.identity.scope = "command-oom-scope";
+  command.identity.command_type = "command-oom-type";
+  command.identity.idempotency_key = "command-oom-key";
+  command.request_digest = "command-oom-digest";
+  command.operation_id = "command-oom-operation";
+
+  workflow_reset_allocation_failures();
+  lc_workflow_test_before_command_receipt_copy_hook = workflow_fail_allocation;
+  rc = lc_workflow_transaction_accept_command(transaction, &command, &receipt,
+                                              &error);
+  workflow_reset_allocation_failures();
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_null(receipt.command_id);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  inbox.message_id = "command-oom-retry-message";
+  inbox.payload_digest = "command-oom-retry-digest";
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox, &transaction,
+                                            &inbox_result, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_accept_command(transaction, &command,
+                                                          &receipt, &error),
+                   LC_OK);
+  assert_int_equal(receipt.state, LC_COMMAND_PENDING);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  lc_command_receipt_cleanup(&receipt);
+  assert_int_equal(lc_workflow_get_command_receipt(workflow, &command.identity,
+                                                   &receipt, &error),
+                   LC_OK);
+  assert_false(receipt.duplicate);
+  assert_int_equal(receipt.state, LC_COMMAND_PENDING);
+  lc_command_receipt_cleanup(&receipt);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  workflow_reset_allocation_failures();
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_outbox_allocation_failures_roll_back_enrollment(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_inbox_message inbox;
+  lc_inbox_accept_result inbox_result;
+  lc_workflow_participant_request participant_request;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_workflow_participant *participant;
+  lc_source *payload;
+  lc_error error;
+  size_t index;
+  int rc;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "outbox-oom-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  participant = NULL;
+  payload = NULL;
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "outbox-oom";
+  workflow_config.owner = "outbox-oom-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_inbox_message_init(&inbox);
+  inbox.consumer_id = "outbox-oom-consumer";
+  inbox.source_kind = "http";
+  inbox.source_id = "outbox-oom-source";
+  inbox.message_id = "outbox-oom-message";
+  inbox.payload_digest = "outbox-oom-digest";
+  inbox.operation_id = "outbox-oom-operation";
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox, &transaction,
+                                            &inbox_result, &error),
+                   LC_OK);
+  lc_workflow_participant_request_init(&participant_request);
+  participant_request.acquire.namespace_name = "outbox-oom";
+  participant_request.acquire.owner = "outbox-oom-test";
+  participant_request.acquire.ttl_seconds = 30L;
+  for (index = 0U; index < 3U; ++index) {
+    char key[64];
+
+    assert_true(snprintf(key, sizeof(key), "outbox-oom-domain-%lu",
+                         (unsigned long)index) > 0);
+    participant_request.acquire.key = key;
+    assert_int_equal(lc_workflow_transaction_acquire(transaction,
+                                                     &participant_request,
+                                                     &participant, &error),
+                     LC_OK);
+    lc_workflow_participant_close(participant);
+    participant = NULL;
+  }
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "outbox-oom-operation";
+  entry.effect_id = "outbox-oom-ledger";
+  entry.effect_key = "outbox-oom-ledger-effect";
+  entry.kind = "test";
+  entry.destination = "outbox://oom-ledger";
+  entry.content_type = "text/plain";
+  assert_int_equal(lc_source_from_memory("outbox", 6U, &payload, &error),
+                   LC_OK);
+
+  /* The ledger grows after staging the outbox attachment. Its allocation
+   * failure must roll that staged lease back, so the exact retry succeeds. */
+  workflow_reset_allocation_failures();
+  lc_workflow_test_before_ledger_append_hook = workflow_fail_allocation;
+  rc = lc_workflow_transaction_append_outbox(transaction, &entry, payload,
+                                             &receipt, &error);
+  workflow_reset_allocation_failures();
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_null(receipt.outbox_key);
+  lc_source_close(payload);
+  payload = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  inbox.message_id = "outbox-oom-ledger-retry-message";
+  inbox.payload_digest = "outbox-oom-ledger-retry-digest";
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox, &transaction,
+                                            &inbox_result, &error),
+                   LC_OK);
+  assert_int_equal(lc_source_from_memory("outbox", 6U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_append_outbox(
+                       transaction, &entry, payload, &receipt, &error),
+                   LC_OK);
+  lc_source_close(payload);
+  payload = NULL;
+  lc_outbox_receipt_cleanup(&receipt);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+
+  /* The receipt copy happens after the outbox is enrolled. Failing it must
+   * likewise remove the staged effect before the caller retries. */
+  inbox.message_id = "outbox-oom-receipt-message";
+  inbox.payload_digest = "outbox-oom-receipt-digest";
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox, &transaction,
+                                            &inbox_result, &error),
+                   LC_OK);
+  entry.effect_id = "outbox-oom-receipt";
+  entry.effect_key = "outbox-oom-receipt-effect";
+  entry.destination = "outbox://oom-receipt";
+  assert_int_equal(lc_source_from_memory("receipt", 7U, &payload, &error),
+                   LC_OK);
+  workflow_reset_allocation_failures();
+  lc_workflow_test_before_outbox_receipt_copy_hook = workflow_fail_allocation;
+  rc = lc_workflow_transaction_append_outbox(transaction, &entry, payload,
+                                             &receipt, &error);
+  workflow_reset_allocation_failures();
+  assert_int_equal(rc, LC_ERR_NOMEM);
+  assert_null(receipt.outbox_key);
+  lc_source_close(payload);
+  payload = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  inbox.message_id = "outbox-oom-receipt-retry-message";
+  inbox.payload_digest = "outbox-oom-receipt-retry-digest";
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox, &transaction,
+                                            &inbox_result, &error),
+                   LC_OK);
+  assert_int_equal(lc_source_from_memory("receipt", 7U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_append_outbox(
+                       transaction, &entry, payload, &receipt, &error),
+                   LC_OK);
+  lc_source_close(payload);
+  lc_outbox_receipt_cleanup(&receipt);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  workflow_reset_allocation_failures();
   lc_error_cleanup(&error);
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
@@ -2054,6 +2436,12 @@ int main(void) {
           test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts),
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
       cmocka_unit_test(test_pouch_participant_cleanup_after_transaction_close),
+      cmocka_unit_test(
+          test_pouch_participant_allocation_failure_rolls_back_enrollment),
+      cmocka_unit_test(
+          test_pouch_command_receipt_allocation_failure_rolls_back_enrollment),
+      cmocka_unit_test(
+          test_pouch_outbox_allocation_failures_roll_back_enrollment),
       cmocka_unit_test(
           test_pouch_command_receipt_commits_with_outbox_and_result),
       cmocka_unit_test(test_pouch_shared_command_resume_is_durable),

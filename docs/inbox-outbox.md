@@ -62,6 +62,12 @@ lease is not publication; all enrolled participants must commit before their
 staged state becomes public. A rollback or expiry decides rollback for all of
 them.
 
+An operation can fail after it has enrolled a later participant but before it
+returns its local receipt or view. At that point, rollback is necessarily an
+XA-wide decision: liblockdc aborts the workflow transaction, invalidates its
+participant views, and rejects a later `commit()`. The application closes that
+transaction and begins a new command, inbox, or outbox transaction to retry.
+
 ### Remote lockd
 
 `lc_acquire_req.txn_id` binds a later key to the xid returned by the first
