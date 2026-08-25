@@ -2214,8 +2214,8 @@ test_pouch_compacted_reopen_reconciles_released_outbox(void **state) {
   maintenance_options.namespace_name = "workflow-compacted-reopen";
   maintenance_options.force = 1;
   assert_int_equal(lc_pouch_maintenance_run(client_handle->pouch,
-                                             &maintenance_options,
-                                             &maintenance_result, &error),
+                                            &maintenance_options,
+                                            &maintenance_result, &error),
                    LC_OK);
   assert_true(maintenance_result.compacted);
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
@@ -2227,9 +2227,9 @@ test_pouch_compacted_reopen_reconciles_released_outbox(void **state) {
   workflow_config.namespace_name = "workflow-compacted-reopen";
   workflow_config.owner = "workflow-compacted-reopen-test";
   workflow_config.notification_capacity = 16U;
-  assert_int_equal(lc_client_new_workflow(client, &workflow_config, &workflow,
-                                          &error),
-                   LC_OK);
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
   for (index = 0U; index < 16U; ++index) {
     job = NULL;
     assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
@@ -2750,8 +2750,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_startup_recovery_claims_seeded_outbox),
       cmocka_unit_test(test_pouch_clean_reopen_reconciles_durable_index),
       cmocka_unit_test(test_pouch_shared_reopen_reconciles_durable_index),
-      cmocka_unit_test(
-          test_pouch_compacted_reopen_reconciles_released_outbox),
+      cmocka_unit_test(test_pouch_compacted_reopen_reconciles_released_outbox),
       cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
       cmocka_unit_test(test_pouch_reconciliation_preserves_allocator_domains),
       cmocka_unit_test(test_pouch_recovery_prefetch_is_bounded),

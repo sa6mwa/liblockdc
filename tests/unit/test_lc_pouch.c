@@ -10551,12 +10551,11 @@ test_compaction_reopen_preserves_released_implicit_xa_leases(void **state) {
   handle = (lc_client_handle *)client;
   for (rewrite = 0L; rewrite < 5L; ++rewrite) {
     for (document = 0L; document < 64L; ++document) {
-      assert_true(snprintf(key, sizeof(key), "outbox/released-%03ld", document) >
-                  0);
+      assert_true(
+          snprintf(key, sizeof(key), "outbox/released-%03ld", document) > 0);
       write_client_state(client, key,
-                         rewrite == 4L
-                             ? "{\"dispatch_state\":\"pending\"}"
-                             : "{\"dispatch_state\":\"completed\"}",
+                         rewrite == 4L ? "{\"dispatch_state\":\"pending\"}"
+                                       : "{\"dispatch_state\":\"completed\"}",
                          NULL, 0L, 0, &update_result, &error);
       lc_update_res_cleanup(&update_result);
       memset(&update_result, 0, sizeof(update_result));
