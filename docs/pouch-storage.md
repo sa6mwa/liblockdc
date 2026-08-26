@@ -30,20 +30,20 @@ implementation.
 
 Relevant Go disk files:
 
-- `../lockd/internal/storage/disk/logstore_record.go`
-- `../lockd/internal/storage/disk/logstore.go`
-- `../lockd/internal/storage/disk/logstore_support.go`
-- `../lockd/internal/storage/disk/logstore_compaction.go`
-- `../lockd/internal/storage/disk/staging.go`
-- `../lockd/internal/storage/disk/disk.go`
-- `../lockd/internal/storage/storage.go`
-- `../lockd/internal/storage/attachments.go`
-- `../lockd/internal/queue/service.go`
-- `../lockd/internal/queue/keys.go`
-- `../lockd/internal/core/locks.go`
-- `../lockd/internal/core/update.go`
-- `../lockd/internal/core/txn_marker_apply.go`
-- `../lockd/namespaces/config_store.go`
+- `internal/storage/disk/logstore_record.go`
+- `internal/storage/disk/logstore.go`
+- `internal/storage/disk/logstore_support.go`
+- `internal/storage/disk/logstore_compaction.go`
+- `internal/storage/disk/staging.go`
+- `internal/storage/disk/disk.go`
+- `internal/storage/storage.go`
+- `internal/storage/attachments.go`
+- `internal/queue/service.go`
+- `internal/queue/keys.go`
+- `internal/core/locks.go`
+- `internal/core/update.go`
+- `internal/core/txn_marker_apply.go`
+- `namespaces/config_store.go`
 
 ### Alignment Record
 
