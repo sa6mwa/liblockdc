@@ -162,6 +162,9 @@ lc_add_unit_test(lc_unit_consumer_service test_lc_consumer_service.c)
 lc_add_unit_test(lc_unit_workflow test_lc_workflow.c
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
 target_compile_definitions(lc_unit_workflow PRIVATE LOCKDC_TEST_BUILD=1)
+# The workflow suite intentionally exercises durable expiry/recovery paths.
+# Under QEMU musl those bounded waits exceed the generic 60-second unit cap.
+set_tests_properties(lc_unit_workflow PROPERTIES TIMEOUT 90)
 target_link_options(lc_unit_consumer_service PRIVATE
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_client_open>
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_engine_client_subscribe>

@@ -33,6 +33,21 @@ static int workflow_fail_allocation(void *context, lc_error *error) {
                       "forced workflow allocation failure", NULL, NULL, NULL);
 }
 
+typedef struct workflow_fail_once {
+  unsigned int calls;
+} workflow_fail_once;
+
+static int workflow_fail_first_call(void *context, lc_error *error) {
+  workflow_fail_once *failure = (workflow_fail_once *)context;
+
+  if (failure != NULL && failure->calls++ == 0U) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "forced workflow transient claim failure", NULL, NULL,
+                        NULL);
+  }
+  return LC_OK;
+}
+
 static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_after_close_requested_hook = NULL;
   lc_workflow_test_after_close_requested_context = NULL;
@@ -50,6 +65,8 @@ static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_before_outbox_receipt_copy_context = NULL;
   lc_workflow_test_before_notification_copy_hook = NULL;
   lc_workflow_test_before_notification_copy_context = NULL;
+  lc_workflow_test_before_claim_outbox_hook = NULL;
+  lc_workflow_test_before_claim_outbox_context = NULL;
 }
 
 static int workflow_bytes_contains(const void *bytes, size_t length,
@@ -989,6 +1006,17 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
                    LC_OK);
   assert_null(inbox_transaction);
   assert_true(inbox_result.duplicate);
+  inbox.operation_id = "operation-inbox-conflict";
+  inbox_transaction = (lc_workflow_transaction *)1;
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox,
+                                            &inbox_transaction, &inbox_result,
+                                            &error),
+                   LC_ERR_SERVER);
+  assert_null(inbox_transaction);
+  assert_false(inbox_result.duplicate);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
   lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
   lc_client_close(client);
@@ -1603,6 +1631,164 @@ test_pouch_retry_notification_allocation_failure_recovers_at_deadline(
   assert_int_equal(job->attempt, 2);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
   lc_outbox_job_close(job);
+  lc_source_close(payload);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  workflow_reset_allocation_failures();
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_transient_claim_failure_is_rescheduled(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_workflow_stats stats;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_error error;
+  workflow_fail_once failure;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "claim-retry-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  job = NULL;
+  payload = NULL;
+  memset(&failure, 0, sizeof(failure));
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "claim-retry";
+  workflow_config.owner = "claim-retry-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "claim-retry-operation";
+  entry.effect_id = "claim-retry-effect";
+  entry.effect_key = "claim-retry-key";
+  entry.kind = "test";
+  entry.destination = "test://claim-retry";
+  entry.content_type = "text/plain";
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  lc_workflow_test_before_claim_outbox_hook = workflow_fail_first_call;
+  lc_workflow_test_before_claim_outbox_context = &failure;
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  assert_int_equal(failure.calls, 2U);
+  lc_workflow_stats_init(&stats);
+  assert_int_equal(lc_workflow_get_stats(workflow, &stats, &error), LC_OK);
+  assert_true(stats.claim_losses >= 1U);
+  lc_workflow_stats_cleanup(&stats);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  lc_outbox_job_close(job);
+  lc_source_close(payload);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  workflow_reset_allocation_failures();
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_claim_recovery_allocation_failure_recovers_at_expiry(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_outbox_job *first, *replacement;
+  lc_source *payload;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "claim-recovery-oom-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  first = NULL;
+  replacement = NULL;
+  payload = NULL;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "claim-recovery-oom";
+  workflow_config.owner = "claim-recovery-oom-test";
+  workflow_config.claim_ttl_seconds = workflow_claim_ttl_seconds();
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "claim-recovery-oom-operation";
+  entry.effect_id = "claim-recovery-oom-effect";
+  entry.effect_key = "claim-recovery-oom-key";
+  entry.kind = "test";
+  entry.destination = "test://claim-recovery-oom";
+  entry.content_type = "text/plain";
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &first, &error),
+                   LC_OK);
+  assert_non_null(first);
+  lc_workflow_test_before_notification_copy_hook = workflow_fail_allocation;
+  lc_outbox_job_close(first);
+  first = NULL;
+  lc_workflow_test_before_notification_copy_hook = NULL;
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &replacement, &error),
+                   LC_OK);
+  assert_non_null(replacement);
+  assert_int_equal(replacement->attempt, 2);
+  assert_int_equal(lc_outbox_job_complete(replacement, NULL, &error), LC_OK);
+  lc_outbox_job_close(replacement);
   lc_source_close(payload);
   lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
@@ -3427,6 +3613,9 @@ int main(void) {
           test_pouch_notification_allocation_failure_reconciles_committed_outbox),
       cmocka_unit_test(
           test_pouch_retry_notification_allocation_failure_recovers_at_deadline),
+      cmocka_unit_test(test_pouch_transient_claim_failure_is_rescheduled),
+      cmocka_unit_test(
+          test_pouch_claim_recovery_allocation_failure_recovers_at_expiry),
       cmocka_unit_test(
           test_pouch_command_receipt_commits_with_outbox_and_result),
       cmocka_unit_test(test_pouch_shared_command_resume_is_durable),

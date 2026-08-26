@@ -47,6 +47,9 @@ void *lc_workflow_test_before_outbox_receipt_copy_context = NULL;
 lc_workflow_test_failure_hook_fn
     lc_workflow_test_before_notification_copy_hook = NULL;
 void *lc_workflow_test_before_notification_copy_context = NULL;
+lc_workflow_test_failure_hook_fn lc_workflow_test_before_claim_outbox_hook =
+    NULL;
+void *lc_workflow_test_before_claim_outbox_context = NULL;
 #endif
 
 typedef struct lc_workflow_outbox_record {
@@ -327,6 +330,24 @@ static void lc_workflow_request_recovery(lc_workflow_handle *workflow,
   pthread_mutex_unlock(&workflow->notification_mutex);
 }
 
+static void
+lc_workflow_request_claim_recovery(lc_workflow_handle *workflow,
+                                   lc_unix_seconds claim_expires_at_unix) {
+  if (workflow == NULL || claim_expires_at_unix <= 0)
+    return;
+  pthread_mutex_lock(&workflow->notification_mutex);
+  if (!workflow->closed) {
+    workflow->recovery_needed = 1;
+    workflow->recovery_claims_pending = 1;
+    if (workflow->next_recovery_unix == 0 ||
+        claim_expires_at_unix < workflow->next_recovery_unix) {
+      workflow->next_recovery_unix = claim_expires_at_unix;
+    }
+    pthread_cond_signal(&workflow->notification_cond);
+  }
+  pthread_mutex_unlock(&workflow->notification_mutex);
+}
+
 static void lc_workflow_notify(lc_workflow_handle *workflow, const char *key) {
   char *copy;
   if (workflow == NULL || key == NULL ||
@@ -444,9 +465,19 @@ lc_workflow_schedule_claim_recovery(lc_workflow_handle *workflow,
 
   if (workflow == NULL || key == NULL || claim_expires_at_unix <= 0)
     return;
-  copy = lc_client_strdup(workflow->client, key);
-  if (copy == NULL)
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_before_notification_copy_hook != NULL &&
+      lc_workflow_test_before_notification_copy_hook(
+          lc_workflow_test_before_notification_copy_context, NULL) != LC_OK) {
+    lc_workflow_request_claim_recovery(workflow, claim_expires_at_unix);
     return;
+  }
+#endif
+  copy = lc_client_strdup(workflow->client, key);
+  if (copy == NULL) {
+    lc_workflow_request_claim_recovery(workflow, claim_expires_at_unix);
+    return;
+  }
   pthread_mutex_lock(&workflow->notification_mutex);
   if (!workflow->closed) {
     for (index = 0U; index < workflow->delayed_notification_count; ++index) {
@@ -467,6 +498,9 @@ lc_workflow_schedule_claim_recovery(lc_workflow_handle *workflow,
         delayed->eligible_at_unix = claim_expires_at_unix;
         copy = NULL;
       } else {
+        /* The key cannot be retained locally; recover the durable claim at
+         * expiry rather than letting an idle local Pouch dispatcher strand it.
+         */
         workflow->recovery_needed = 1;
         workflow->recovery_claims_pending = 1;
         if (workflow->next_recovery_unix == 0 ||
@@ -1092,7 +1126,9 @@ static int lc_workflow_existing_inbox(lc_workflow_handle *workflow,
        strcmp(record.message_id, message->message_id) != 0 ||
        ((record.payload_digest == NULL) != (message->payload_digest == NULL)) ||
        (record.payload_digest != NULL &&
-        strcmp(record.payload_digest, message->payload_digest) != 0))) {
+        strcmp(record.payload_digest, message->payload_digest) != 0) ||
+       !lc_workflow_nullable_string_equal(record.operation_id,
+                                          message->operation_id))) {
     rc = lc_error_set(error, LC_ERR_SERVER, 0L,
                       "inbox immutable fields conflict with an existing record",
                       NULL, NULL, NULL);
@@ -1770,6 +1806,14 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   int rc;
 
   *out = NULL;
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_before_claim_outbox_hook != NULL) {
+    rc = lc_workflow_test_before_claim_outbox_hook(
+        lc_workflow_test_before_claim_outbox_context, error);
+    if (rc != LC_OK)
+      return rc;
+  }
+#endif
   lc_acquire_req_init(&acquire);
   acquire.namespace_name = workflow->namespace_name;
   acquire.key = key;
@@ -2223,6 +2267,21 @@ static void *lc_workflow_dispatcher_main(void *context) {
       ++workflow->claim_losses;
       pthread_mutex_unlock(&workflow->notification_mutex);
       lc_workflow_record_error(workflow, &error);
+      if (error.code != LC_ERR_INVALID) {
+        time_t now = time(NULL);
+
+        /* A failed foreground claim has consumed its only direct signal, but
+         * has not changed the durable outbox record. Requeue it with the
+         * normal bounded delay; if that key allocation fails, the scheduler's
+         * durable-recovery fallback retains the deadline. */
+        if (now != (time_t)-1) {
+          lc_workflow_schedule_retry(workflow, key,
+                                     (lc_unix_seconds)now +
+                                         workflow->retry_initial_delay_seconds);
+        } else {
+          lc_workflow_request_recovery(workflow, 0);
+        }
+      }
     }
     if (job != NULL)
       job->close(job);
