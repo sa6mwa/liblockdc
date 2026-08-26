@@ -34,6 +34,10 @@ lc_workflow_test_hook_fn lc_workflow_test_before_ready_job_detach_hook = NULL;
 void *lc_workflow_test_before_ready_job_detach_context = NULL;
 lc_workflow_test_hook_fn lc_workflow_test_before_ready_job_teardown_hook = NULL;
 void *lc_workflow_test_before_ready_job_teardown_context = NULL;
+lc_workflow_test_hook_fn lc_workflow_test_before_dispatcher_wait_hook = NULL;
+void *lc_workflow_test_before_dispatcher_wait_context = NULL;
+lc_workflow_test_hook_fn lc_workflow_test_before_next_wait_hook = NULL;
+void *lc_workflow_test_before_next_wait_context = NULL;
 lc_workflow_test_failure_hook_fn lc_workflow_test_before_ledger_append_hook =
     NULL;
 void *lc_workflow_test_before_ledger_append_context = NULL;
@@ -237,6 +241,7 @@ struct lc_workflow_handle {
   int replay_dead_letters_on_startup;
   pthread_mutex_t notification_mutex;
   pthread_cond_t notification_cond;
+  pthread_cond_t dispatcher_cond;
   char **notifications;
   size_t notification_count;
   size_t notification_capacity;
@@ -249,6 +254,7 @@ struct lc_workflow_handle {
   lc_unix_seconds next_recovery_unix;
   int notification_mutex_initialized;
   int notification_cond_initialized;
+  int dispatcher_cond_initialized;
   pthread_t dispatcher_thread;
   int dispatcher_started;
   lc_outbox_job_handle *ready_head;
@@ -315,6 +321,14 @@ struct lc_outbox_job_handle {
   lc_outbox_job_handle *next;
 };
 
+/* The dispatcher and public next() callers wait for different predicates.
+ * Keep their wakeups separate so a public waiter cannot consume the dispatch
+ * signal that makes a durable outbox record eligible for a host job. */
+static void lc_workflow_signal_dispatcher_locked(lc_workflow_handle *workflow) {
+  if (workflow->dispatcher_cond_initialized)
+    pthread_cond_signal(&workflow->dispatcher_cond);
+}
+
 static void lc_workflow_request_recovery(lc_workflow_handle *workflow,
                                          lc_unix_seconds not_before_unix) {
   if (workflow == NULL)
@@ -327,7 +341,7 @@ static void lc_workflow_request_recovery(lc_workflow_handle *workflow,
          not_before_unix < workflow->next_recovery_unix)) {
       workflow->next_recovery_unix = not_before_unix;
     }
-    pthread_cond_signal(&workflow->notification_cond);
+    lc_workflow_signal_dispatcher_locked(workflow);
   }
   pthread_mutex_unlock(&workflow->notification_mutex);
 }
@@ -345,7 +359,7 @@ lc_workflow_request_claim_recovery(lc_workflow_handle *workflow,
         claim_expires_at_unix < workflow->next_recovery_unix) {
       workflow->next_recovery_unix = claim_expires_at_unix;
     }
-    pthread_cond_signal(&workflow->notification_cond);
+    lc_workflow_signal_dispatcher_locked(workflow);
   }
   pthread_mutex_unlock(&workflow->notification_mutex);
 }
@@ -374,12 +388,12 @@ static void lc_workflow_notify(lc_workflow_handle *workflow, const char *key) {
       workflow->notification_count < workflow->notification_capacity) {
     workflow->notifications[workflow->notification_count++] = copy;
     ++workflow->direct_notifications;
-    pthread_cond_signal(&workflow->notification_cond);
+    lc_workflow_signal_dispatcher_locked(workflow);
     copy = NULL;
   } else if (!workflow->closed) {
     workflow->recovery_needed = 1;
     ++workflow->notification_overflows;
-    pthread_cond_signal(&workflow->notification_cond);
+    lc_workflow_signal_dispatcher_locked(workflow);
   }
   pthread_mutex_unlock(&workflow->notification_mutex);
   lc_client_free(workflow->client, copy);
@@ -450,7 +464,7 @@ static void lc_workflow_schedule_retry(lc_workflow_handle *workflow,
         }
       }
     }
-    pthread_cond_signal(&workflow->notification_cond);
+    lc_workflow_signal_dispatcher_locked(workflow);
   }
   pthread_mutex_unlock(&workflow->notification_mutex);
   lc_client_free(workflow->client, copy);
@@ -511,7 +525,7 @@ lc_workflow_schedule_claim_recovery(lc_workflow_handle *workflow,
         }
       }
     }
-    pthread_cond_signal(&workflow->notification_cond);
+    lc_workflow_signal_dispatcher_locked(workflow);
   }
   pthread_mutex_unlock(&workflow->notification_mutex);
   lc_client_free(workflow->client, copy);
@@ -2220,7 +2234,7 @@ static void *lc_workflow_dispatcher_main(void *context) {
       lc_unix_seconds now = (lc_unix_seconds)time(NULL);
       lc_unix_seconds due;
       if (workflow->ready_count >= workflow->notification_capacity) {
-        pthread_cond_wait(&workflow->notification_cond,
+        pthread_cond_wait(&workflow->dispatcher_cond,
                           &workflow->notification_mutex);
         continue;
       }
@@ -2234,7 +2248,7 @@ static void *lc_workflow_dispatcher_main(void *context) {
         struct timespec deadline;
         deadline.tv_sec = due;
         deadline.tv_nsec = 0L;
-        if (pthread_cond_timedwait(&workflow->notification_cond,
+        if (pthread_cond_timedwait(&workflow->dispatcher_cond,
                                    &workflow->notification_mutex,
                                    &deadline) == ETIMEDOUT) {
           now = (lc_unix_seconds)time(NULL);
@@ -2248,7 +2262,13 @@ static void *lc_workflow_dispatcher_main(void *context) {
           }
         }
       } else {
-        pthread_cond_wait(&workflow->notification_cond,
+#ifdef LOCKDC_TEST_BUILD
+        if (lc_workflow_test_before_dispatcher_wait_hook != NULL) {
+          lc_workflow_test_before_dispatcher_wait_hook(
+              lc_workflow_test_before_dispatcher_wait_context);
+        }
+#endif
+        pthread_cond_wait(&workflow->dispatcher_cond,
                           &workflow->notification_mutex);
       }
     }
@@ -2351,6 +2371,7 @@ static void *lc_workflow_dispatcher_main(void *context) {
 static int lc_workflow_wait_for_ready(lc_workflow_handle *workflow,
                                       long timeout_ms, lc_outbox_job **out,
                                       lc_error *error) {
+  struct timespec deadline;
   int wait_rc;
 
   if (timeout_ms < -1L) {
@@ -2359,27 +2380,33 @@ static int lc_workflow_wait_for_ready(lc_workflow_handle *workflow,
                         NULL, NULL, NULL);
   }
   *out = NULL;
+  if (timeout_ms > 0L) {
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+      return lc_error_set(error, LC_ERR_PROTOCOL, errno,
+                          "failed to construct workflow wait deadline", NULL,
+                          NULL, NULL);
+    }
+    deadline.tv_sec += timeout_ms / 1000L;
+    deadline.tv_nsec += (timeout_ms % 1000L) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+      ++deadline.tv_sec;
+      deadline.tv_nsec -= 1000000000L;
+    }
+  }
   pthread_mutex_lock(&workflow->notification_mutex);
   while (!workflow->closed && workflow->ready_head == NULL) {
     if (timeout_ms == 0L)
       break;
+#ifdef LOCKDC_TEST_BUILD
+    if (lc_workflow_test_before_next_wait_hook != NULL) {
+      lc_workflow_test_before_next_wait_hook(
+          lc_workflow_test_before_next_wait_context);
+    }
+#endif
     if (timeout_ms < 0L) {
       wait_rc = pthread_cond_wait(&workflow->notification_cond,
                                   &workflow->notification_mutex);
     } else {
-      struct timespec deadline;
-      if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
-        pthread_mutex_unlock(&workflow->notification_mutex);
-        return lc_error_set(error, LC_ERR_PROTOCOL, errno,
-                            "failed to construct workflow wait deadline", NULL,
-                            NULL, NULL);
-      }
-      deadline.tv_sec += timeout_ms / 1000L;
-      deadline.tv_nsec += (timeout_ms % 1000L) * 1000000L;
-      if (deadline.tv_nsec >= 1000000000L) {
-        ++deadline.tv_sec;
-        deadline.tv_nsec -= 1000000000L;
-      }
       wait_rc =
           pthread_cond_timedwait(&workflow->notification_cond,
                                  &workflow->notification_mutex, &deadline);
@@ -2406,11 +2433,25 @@ static int lc_workflow_wait_for_ready(lc_workflow_handle *workflow,
     job->next = NULL;
     --workflow->ready_count;
     pthread_cond_broadcast(&workflow->notification_cond);
+    lc_workflow_signal_dispatcher_locked(workflow);
     *out = &job->pub;
   }
   pthread_mutex_unlock(&workflow->notification_mutex);
   return LC_OK;
 }
+
+#ifdef LOCKDC_TEST_BUILD
+void lc_workflow_test_wake_next_waiters(lc_workflow *self) {
+  lc_workflow_handle *workflow = (lc_workflow_handle *)self;
+
+  if (workflow == NULL || !workflow->notification_mutex_initialized ||
+      !workflow->notification_cond_initialized)
+    return;
+  pthread_mutex_lock(&workflow->notification_mutex);
+  pthread_cond_broadcast(&workflow->notification_cond);
+  pthread_mutex_unlock(&workflow->notification_mutex);
+}
+#endif
 
 static void lc_workflow_participant_refresh(lc_workflow_participant_handle *p) {
   if (p->lease == NULL) {
@@ -3465,7 +3506,7 @@ static int lc_workflow_reconcile_method(lc_workflow *self, lc_error *error) {
   }
   workflow->recovery_needed = 1;
   workflow->recovery_claims_pending = 1;
-  pthread_cond_signal(&workflow->notification_cond);
+  lc_workflow_signal_dispatcher_locked(workflow);
   pthread_mutex_unlock(&workflow->notification_mutex);
   return LC_OK;
 }
@@ -3692,7 +3733,7 @@ lc_workflow_replay_dead_letters_on_startup(lc_workflow_handle *workflow,
   else {
     pthread_mutex_lock(&workflow->notification_mutex);
     workflow->recovery_needed = 1;
-    pthread_cond_signal(&workflow->notification_cond);
+    lc_workflow_signal_dispatcher_locked(workflow);
     pthread_mutex_unlock(&workflow->notification_mutex);
   }
   return LC_OK;
@@ -3907,6 +3948,8 @@ static void lc_workflow_destroy(lc_workflow_handle *workflow) {
   lc_client_free(client, workflow->delayed_notifications);
   free(workflow->recovery_cursor);
   lc_client_free(client, workflow->last_error);
+  if (workflow->dispatcher_cond_initialized)
+    pthread_cond_destroy(&workflow->dispatcher_cond);
   if (workflow->notification_cond_initialized)
     pthread_cond_destroy(&workflow->notification_cond);
   if (workflow->notification_mutex_initialized)
@@ -3956,6 +3999,9 @@ static void lc_workflow_close_method(lc_workflow *self) {
   workflow->closed = 1;
   if (workflow->notification_cond_initialized) {
     pthread_cond_broadcast(&workflow->notification_cond);
+  }
+  if (workflow->dispatcher_cond_initialized) {
+    pthread_cond_broadcast(&workflow->dispatcher_cond);
   }
   pthread_mutex_unlock(&workflow->notification_mutex);
 #ifdef LOCKDC_TEST_BUILD
@@ -4113,6 +4159,13 @@ int lc_client_new_workflow_method(lc_client *self,
                         NULL, NULL);
   }
   workflow->notification_cond_initialized = 1;
+  if (pthread_cond_init(&workflow->dispatcher_cond, NULL) != 0) {
+    lc_workflow_close_method(&workflow->pub);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to initialize workflow dispatcher state", NULL,
+                        NULL, NULL);
+  }
+  workflow->dispatcher_cond_initialized = 1;
   if (client->is_pouch) {
     lc_client_handle_retain(client);
     workflow->dispatcher_client = client;

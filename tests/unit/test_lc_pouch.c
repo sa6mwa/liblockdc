@@ -25669,7 +25669,10 @@ static void test_txn_decision_skips_newer_state_lease(void **state) {
   open_pouch_client(root, &client, &error);
   acquire_req.key = key;
   acquire_req.owner = "old-owner";
-  acquire_req.ttl_seconds = 1L;
+  /* The old lease must remain live through its staged update, even under
+   * Memcheck. It is deliberately allowed to expire before the replacement
+   * lease and old transaction decision below. */
+  acquire_req.ttl_seconds = 5L;
   acquire_req.txn_id = test_xid_for_label("txn-old");
   rc = client->acquire(client, &acquire_req, &old_lease, &error);
   assert_int_equal(rc, LC_OK);
@@ -25681,7 +25684,7 @@ static void test_txn_decision_skips_newer_state_lease(void **state) {
   assert_int_equal(rc, LC_OK);
   old_lease->close(old_lease);
   old_lease = NULL;
-  sleep(2U);
+  sleep(6U);
 
   acquire_req.owner = "new-owner";
   acquire_req.ttl_seconds = 30L;

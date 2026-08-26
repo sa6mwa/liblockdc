@@ -76,6 +76,10 @@ static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_before_ready_job_detach_context = NULL;
   lc_workflow_test_before_ready_job_teardown_hook = NULL;
   lc_workflow_test_before_ready_job_teardown_context = NULL;
+  lc_workflow_test_before_dispatcher_wait_hook = NULL;
+  lc_workflow_test_before_dispatcher_wait_context = NULL;
+  lc_workflow_test_before_next_wait_hook = NULL;
+  lc_workflow_test_before_next_wait_context = NULL;
   lc_workflow_test_before_ledger_append_hook = NULL;
   lc_workflow_test_before_ledger_append_context = NULL;
   lc_workflow_test_before_participant_allocation_hook = NULL;
@@ -111,6 +115,92 @@ static int workflow_slow_test_runtime(void) {
   const char *value = getenv("LOCKDC_SLOW_TEST_RUNTIME");
 
   return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
+}
+
+typedef struct workflow_next_wait_race {
+  pthread_mutex_t mutex;
+  pthread_cond_t condition;
+  lc_workflow *workflow;
+  long timeout_ms;
+  int dispatcher_wait_entered;
+  int allow_dispatcher_wait;
+  int next_wait_entered;
+  int allow_next_wait;
+  int next_finished;
+  int next_rc;
+  lc_outbox_job *job;
+  struct timespec started;
+  struct timespec finished;
+} workflow_next_wait_race;
+
+static int workflow_next_wait_race_wait(workflow_next_wait_race *race,
+                                        int *flag) {
+  struct timespec deadline;
+  int reached;
+  int rc;
+
+  if (clock_gettime(CLOCK_REALTIME, &deadline) != 0)
+    return 0;
+  deadline.tv_sec += 5L;
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  rc = 0;
+  while (!*flag && rc == 0)
+    rc = pthread_cond_timedwait(&race->condition, &race->mutex, &deadline);
+  reached = *flag;
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+  return rc == 0 && reached;
+}
+
+static void workflow_dispatcher_wait_hook(void *context) {
+  workflow_next_wait_race *race = (workflow_next_wait_race *)context;
+
+  (void)pthread_mutex_lock(&race->mutex);
+  race->dispatcher_wait_entered = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  while (!race->allow_dispatcher_wait)
+    (void)pthread_cond_wait(&race->condition, &race->mutex);
+  (void)pthread_mutex_unlock(&race->mutex);
+}
+
+static void workflow_next_wait_hook(void *context) {
+  workflow_next_wait_race *race = (workflow_next_wait_race *)context;
+
+  (void)pthread_mutex_lock(&race->mutex);
+  race->next_wait_entered = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  while (!race->allow_next_wait)
+    (void)pthread_cond_wait(&race->condition, &race->mutex);
+  (void)pthread_mutex_unlock(&race->mutex);
+}
+
+static void workflow_next_wait_observed_hook(void *context) {
+  workflow_next_wait_race *race = (workflow_next_wait_race *)context;
+
+  (void)pthread_mutex_lock(&race->mutex);
+  race->next_wait_entered = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  (void)pthread_mutex_unlock(&race->mutex);
+}
+
+static void *workflow_next_wait_thread(void *context) {
+  workflow_next_wait_race *race = (workflow_next_wait_race *)context;
+  lc_error error;
+  lc_outbox_job *job;
+  int rc;
+
+  job = NULL;
+  lc_error_init(&error);
+  assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &race->started), 0);
+  rc = lc_workflow_next(race->workflow, race->timeout_ms, &job, &error);
+  assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &race->finished), 0);
+  lc_error_cleanup(&error);
+  (void)pthread_mutex_lock(&race->mutex);
+  race->next_rc = rc;
+  race->job = job;
+  race->next_finished = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  (void)pthread_mutex_unlock(&race->mutex);
+  return NULL;
 }
 
 static long workflow_claim_ttl_seconds(void) {
@@ -2931,6 +3021,165 @@ static long workflow_elapsed_milliseconds(const struct timespec *started,
   return seconds * 1000L + nanoseconds / 1000000L;
 }
 
+static void
+test_pouch_dispatcher_wakeup_isolated_from_next_waiters(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_workflow_transaction *transaction;
+  lc_source *payload;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_error error;
+  workflow_next_wait_race race;
+  pthread_t next_thread;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "dispatcher-wakeup-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  payload = NULL;
+  lc_outbox_receipt_init(&receipt);
+  memset(&race, 0, sizeof(race));
+  assert_int_equal(pthread_mutex_init(&race.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&race.condition, NULL), 0);
+  workflow_reset_allocation_failures();
+  lc_workflow_test_before_dispatcher_wait_hook = workflow_dispatcher_wait_hook;
+  lc_workflow_test_before_dispatcher_wait_context = &race;
+  lc_workflow_test_before_next_wait_hook = workflow_next_wait_hook;
+  lc_workflow_test_before_next_wait_context = &race;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "dispatcher-wakeup";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  race.workflow = workflow;
+  race.timeout_ms = workflow_slow_test_runtime() ? 10000L : 3000L;
+  assert_true(
+      workflow_next_wait_race_wait(&race, &race.dispatcher_wait_entered));
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  race.allow_dispatcher_wait = 1;
+  assert_int_equal(pthread_cond_broadcast(&race.condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+  assert_int_equal(
+      pthread_create(&next_thread, NULL, workflow_next_wait_thread, &race), 0);
+  assert_true(workflow_next_wait_race_wait(&race, &race.next_wait_entered));
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  race.allow_next_wait = 1;
+  assert_int_equal(pthread_cond_broadcast(&race.condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "dispatcher-wakeup-operation";
+  entry.effect_id = "dispatcher-wakeup-effect";
+  entry.effect_key = "dispatcher-wakeup-key";
+  entry.kind = "http";
+  entry.destination = "https://example.invalid/dispatcher-wakeup";
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  assert_true(workflow_next_wait_race_wait(&race, &race.next_finished));
+  assert_int_equal(pthread_join(next_thread, NULL), 0);
+  assert_int_equal(race.next_rc, LC_OK);
+  assert_non_null(race.job);
+  assert_int_equal(lc_outbox_job_complete(race.job, NULL, &error), LC_OK);
+  lc_outbox_job_close(race.job);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  workflow_reset_allocation_failures();
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  assert_int_equal(pthread_cond_destroy(&race.condition), 0);
+  assert_int_equal(pthread_mutex_destroy(&race.mutex), 0);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_next_timeout_uses_one_deadline(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_error error;
+  workflow_next_wait_race race;
+  pthread_t next_thread;
+  struct timespec delay;
+  long timeout_ms;
+  long elapsed_ms;
+  size_t index;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "next-deadline-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  memset(&race, 0, sizeof(race));
+  assert_int_equal(pthread_mutex_init(&race.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&race.condition, NULL), 0);
+  timeout_ms = workflow_slow_test_runtime() ? 1500L : 500L;
+  delay.tv_sec = 0;
+  delay.tv_nsec = workflow_slow_test_runtime() ? 200000000L : 100000000L;
+  workflow_reset_allocation_failures();
+  lc_workflow_test_before_next_wait_hook = workflow_next_wait_observed_hook;
+  lc_workflow_test_before_next_wait_context = &race;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "next-deadline";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  race.workflow = workflow;
+  race.timeout_ms = timeout_ms;
+  assert_int_equal(
+      pthread_create(&next_thread, NULL, workflow_next_wait_thread, &race), 0);
+  assert_true(workflow_next_wait_race_wait(&race, &race.next_wait_entered));
+  for (index = 0U; index < 3U; ++index) {
+    (void)nanosleep(&delay, NULL);
+    lc_workflow_test_wake_next_waiters(workflow);
+  }
+  assert_int_equal(pthread_join(next_thread, NULL), 0);
+  assert_int_equal(race.next_rc, LC_OK);
+  assert_null(race.job);
+  elapsed_ms = workflow_elapsed_milliseconds(&race.started, &race.finished);
+  assert_true(elapsed_ms >= timeout_ms - timeout_ms / 4L);
+  assert_true(elapsed_ms < timeout_ms + timeout_ms / 2L);
+  workflow_reset_allocation_failures();
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  assert_int_equal(pthread_cond_destroy(&race.condition), 0);
+  assert_int_equal(pthread_mutex_destroy(&race.mutex), 0);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void test_pouch_reconciliation_pages_large_outbox(void **state) {
   char root[256];
   char template_path[256];
@@ -3835,6 +4084,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_clean_reopen_reconciles_durable_index),
       cmocka_unit_test(test_pouch_shared_reopen_reconciles_durable_index),
       cmocka_unit_test(test_pouch_compacted_reopen_reconciles_released_outbox),
+      cmocka_unit_test(test_pouch_dispatcher_wakeup_isolated_from_next_waiters),
+      cmocka_unit_test(test_pouch_next_timeout_uses_one_deadline),
       cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
       cmocka_unit_test(test_pouch_reconciliation_preserves_allocator_domains),
       cmocka_unit_test(test_pouch_recovery_prefetch_is_bounded),
