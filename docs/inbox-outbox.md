@@ -528,7 +528,8 @@ unpadded base64url (43 characters), not hexadecimal, so the complete reserved
 key remains below lockd's 128-character key limit. The command digest covers
 `scope`, `command_type`, and `idempotency_key`; the inbox digest covers the
 consumer and complete source identity. liblockdc never creates a key by
-directly concatenating source-supplied identifiers. The original identifiers
+directly concatenating source-supplied identifiers: every identity component
+is length-prefixed before hashing. The original identifiers
 remain in the state body and are checked when an existing key is reused. A
 mismatch is a conflict, not a duplicate.
 
@@ -940,7 +941,9 @@ the job for explicit provider reconciliation. It must not call completion based
 on an assumed success.
 
 Each successful claim atomically increments `attempt_count`. Retry records a
-diagnostic and sets `not_before_unix`; once the configured attempt budget is
+diagnostic of at most `LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES` (4096) bytes and sets
+`not_before_unix`; oversized diagnostics are rejected without changing the
+claimed job. Once the configured attempt budget is
 exhausted, it transitions to `dead_letter` rather than silently removing the
 record. Dead-letter replay retains the original `effect_key`.
 

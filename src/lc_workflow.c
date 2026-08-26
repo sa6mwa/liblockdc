@@ -26,6 +26,12 @@ static void lc_workflow_retain(lc_workflow_handle *workflow);
 lc_workflow_test_after_reconcile_query_hook_fn
     lc_workflow_test_after_reconcile_query_hook = NULL;
 void *lc_workflow_test_after_reconcile_query_context = NULL;
+lc_workflow_test_hook_fn lc_workflow_test_after_close_requested_hook = NULL;
+void *lc_workflow_test_after_close_requested_context = NULL;
+lc_workflow_test_hook_fn lc_workflow_test_before_ready_job_detach_hook = NULL;
+void *lc_workflow_test_before_ready_job_detach_context = NULL;
+lc_workflow_test_hook_fn lc_workflow_test_before_ready_job_teardown_hook = NULL;
+void *lc_workflow_test_before_ready_job_teardown_context = NULL;
 lc_workflow_test_failure_hook_fn lc_workflow_test_before_ledger_append_hook =
     NULL;
 void *lc_workflow_test_before_ledger_append_context = NULL;
@@ -639,6 +645,23 @@ static int lc_workflow_is_outbox_key(const char *key) {
   return key != NULL && strncmp(key, prefix, sizeof(prefix) - 1U) == 0;
 }
 
+static int lc_workflow_digest_identity_part(EVP_MD_CTX *ctx, const char *part) {
+  uint64_t length;
+  unsigned char encoded_length[8];
+  size_t byte;
+
+  if (ctx == NULL || part == NULL)
+    return 0;
+  length = (uint64_t)strlen(part);
+  for (byte = 0U; byte < sizeof(encoded_length); ++byte) {
+    encoded_length[sizeof(encoded_length) - 1U - byte] =
+        (unsigned char)(length & 0xffU);
+    length >>= 8U;
+  }
+  return EVP_DigestUpdate(ctx, encoded_length, sizeof(encoded_length)) == 1 &&
+         EVP_DigestUpdate(ctx, part, strlen(part)) == 1;
+}
+
 static int lc_workflow_inbox_key(lc_workflow_handle *workflow,
                                  const lc_inbox_message *message, char **out,
                                  lc_error *error) {
@@ -662,17 +685,10 @@ static int lc_workflow_inbox_key(lc_workflow_handle *workflow,
   ctx = EVP_MD_CTX_new();
   length = 0U;
   if (ctx == NULL || EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1 ||
-      EVP_DigestUpdate(ctx, message->consumer_id,
-                       strlen(message->consumer_id)) != 1 ||
-      EVP_DigestUpdate(ctx, "\n", 1U) != 1 ||
-      EVP_DigestUpdate(ctx, message->source_kind,
-                       strlen(message->source_kind)) != 1 ||
-      EVP_DigestUpdate(ctx, "\n", 1U) != 1 ||
-      EVP_DigestUpdate(ctx, message->source_id, strlen(message->source_id)) !=
-          1 ||
-      EVP_DigestUpdate(ctx, "\n", 1U) != 1 ||
-      EVP_DigestUpdate(ctx, message->message_id, strlen(message->message_id)) !=
-          1 ||
+      !lc_workflow_digest_identity_part(ctx, message->consumer_id) ||
+      !lc_workflow_digest_identity_part(ctx, message->source_kind) ||
+      !lc_workflow_digest_identity_part(ctx, message->source_id) ||
+      !lc_workflow_digest_identity_part(ctx, message->message_id) ||
       EVP_DigestFinal_ex(ctx, digest, &length) != 1 || length != 32U) {
     EVP_MD_CTX_free(ctx);
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
@@ -735,16 +751,7 @@ static int lc_workflow_command_key(const lc_command_identity *identity,
                         "failed to digest command identity", NULL, NULL, NULL);
   }
   for (index = 0U; index < 3U; ++index) {
-    uint64_t length = (uint64_t)strlen(parts[index]);
-    unsigned char encoded_length[8];
-    size_t byte;
-    for (byte = 0U; byte < sizeof(encoded_length); ++byte) {
-      encoded_length[sizeof(encoded_length) - 1U - byte] =
-          (unsigned char)(length & 0xffU);
-      length >>= 8U;
-    }
-    if (EVP_DigestUpdate(ctx, encoded_length, sizeof(encoded_length)) != 1 ||
-        EVP_DigestUpdate(ctx, parts[index], strlen(parts[index])) != 1) {
+    if (!lc_workflow_digest_identity_part(ctx, parts[index])) {
       EVP_MD_CTX_free(ctx);
       return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                           "failed to digest command identity", NULL, NULL,
@@ -784,6 +791,71 @@ static int lc_workflow_command_key(const lc_command_identity *identity,
   snprintf(command_id, 48U, "cmd_%s", identity_digest);
   *out = key;
   return LC_OK;
+}
+
+typedef struct lc_workflow_headers_json_validation {
+  int root_is_object;
+} lc_workflow_headers_json_validation;
+
+static lonejson_status lc_workflow_headers_json_object_begin(
+    void *context, const lonejson_value_path *path, lonejson_error *error) {
+  lc_workflow_headers_json_validation *validation =
+      (lc_workflow_headers_json_validation *)context;
+
+  (void)error;
+  if (validation != NULL && path != NULL && path->segment_count == 0U)
+    validation->root_is_object = 1;
+  return LONEJSON_STATUS_OK;
+}
+
+static int lc_workflow_validate_headers_json(const char *headers_json,
+                                             lc_error *error) {
+  lonejson_path_value_visitor visitor;
+  lonejson_error json_error;
+  lonejson *runtime;
+  lonejson_status status;
+  lc_workflow_headers_json_validation validation;
+
+  if (headers_json == NULL)
+    return LC_OK;
+  runtime = lc_thread_lonejson_runtime();
+  if (runtime == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to initialize workflow JSON runtime", NULL,
+                        NULL, NULL);
+  }
+  memset(&validation, 0, sizeof(validation));
+  visitor = lonejson_default_path_value_visitor();
+  visitor.object_begin = lc_workflow_headers_json_object_begin;
+  lonejson_error_init(&json_error);
+  status = runtime->visit_path_value_cstr(runtime, headers_json, &visitor,
+                                          &validation, &json_error);
+  if (status != LONEJSON_STATUS_OK || !validation.root_is_object) {
+    return lc_error_set(
+        error,
+        status == LONEJSON_STATUS_ALLOCATION_FAILED ? LC_ERR_NOMEM
+                                                    : LC_ERR_INVALID,
+        0L, "outbox headers_json must be a valid JSON object",
+        status == LONEJSON_STATUS_OK ? NULL : json_error.message,
+        status == LONEJSON_STATUS_OK ? NULL : lonejson_status_string(status),
+        NULL);
+  }
+  return LC_OK;
+}
+
+static int lc_workflow_validate_diagnostic(const char *diagnostic,
+                                           lc_error *error) {
+  size_t length;
+
+  if (diagnostic == NULL)
+    return LC_OK;
+  for (length = 0U; length <= LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES; ++length) {
+    if (diagnostic[length] == '\0')
+      return LC_OK;
+  }
+  return lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "outbox diagnostic exceeds the retained size limit", NULL,
+                      NULL, NULL);
 }
 
 static int lc_workflow_command_receipt_from_record(
@@ -1179,6 +1251,9 @@ static int lc_workflow_stage_outbox(lc_lease *lease,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "outbox payload source is required", NULL, NULL, NULL);
   }
+  rc = lc_workflow_validate_headers_json(entry->headers_json, error);
+  if (rc != LC_OK)
+    return rc;
   memset(&record, 0, sizeof(record));
   record.record_type = "lockdc.outbox.v1";
   record.operation_id = (char *)entry->operation_id;
@@ -1422,6 +1497,9 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
     return lc_error_set(error, LC_ERR_INVALID, 0L, "outbox job is closed", NULL,
                         NULL, NULL);
   }
+  rc = lc_workflow_validate_diagnostic(diagnostic, error);
+  if (rc != LC_OK)
+    return rc;
   record = job->record;
   record.dispatch_state = (char *)state;
   record.claim_expires_at_unix = 0;
@@ -1660,8 +1738,8 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   lease = NULL;
   if (lc_workflow_pouch_shared_live_claim(workflow, key)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "outbox candidate remains actively claimed", NULL,
-                        NULL, NULL);
+                        "outbox candidate remains actively claimed", NULL, NULL,
+                        NULL);
   }
   rc = lc_acquire(&client->pub, &acquire, &lease, error);
   if (rc != LC_OK) {
@@ -2151,6 +2229,12 @@ static int lc_workflow_wait_for_ready(lc_workflow_handle *workflow,
   }
   if (workflow->ready_head != NULL) {
     lc_outbox_job_handle *job = workflow->ready_head;
+#ifdef LOCKDC_TEST_BUILD
+    if (lc_workflow_test_before_ready_job_detach_hook != NULL) {
+      lc_workflow_test_before_ready_job_detach_hook(
+          lc_workflow_test_before_ready_job_detach_context);
+    }
+#endif
     workflow->ready_head = job->next;
     if (workflow->ready_head == NULL)
       workflow->ready_tail = NULL;
@@ -2622,6 +2706,9 @@ static int lc_workflow_transaction_append_outbox_method(
   effective_entry = *entry;
   if (effective_entry.causation_id == NULL)
     effective_entry.causation_id = transaction->causation_id;
+  rc = lc_workflow_validate_headers_json(effective_entry.headers_json, error);
+  if (rc != LC_OK)
+    return rc;
   key = NULL;
   rc = lc_workflow_outbox_key(transaction->workflow, &effective_entry, &key,
                               error);
@@ -2829,6 +2916,10 @@ static int lc_workflow_append_outbox_method(lc_workflow *self,
         NULL);
   *out_txn = NULL;
   lc_outbox_receipt_cleanup(receipt);
+  rc = lc_workflow_validate_headers_json(
+      entry != NULL ? entry->headers_json : NULL, error);
+  if (rc != LC_OK)
+    return rc;
   key = NULL;
   rc = lc_workflow_outbox_key(workflow, entry, &key, error);
   if (rc != LC_OK)
@@ -3683,6 +3774,7 @@ static void lc_workflow_release(lc_workflow_handle *workflow) {
 
 static void lc_workflow_close_method(lc_workflow *self) {
   lc_workflow_handle *workflow = (lc_workflow_handle *)self;
+  lc_outbox_job_handle *ready_head;
 
   if (workflow == NULL)
     return;
@@ -3701,15 +3793,32 @@ static void lc_workflow_close_method(lc_workflow *self) {
     pthread_cond_broadcast(&workflow->notification_cond);
   }
   pthread_mutex_unlock(&workflow->notification_mutex);
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_after_close_requested_hook != NULL) {
+    lc_workflow_test_after_close_requested_hook(
+        lc_workflow_test_after_close_requested_context);
+  }
+#endif
   if (workflow->dispatcher_started) {
     (void)pthread_join(workflow->dispatcher_thread, NULL);
     workflow->dispatcher_started = 0;
   }
-  while (workflow->ready_head != NULL) {
-    lc_outbox_job_handle *job = workflow->ready_head;
-    workflow->ready_head = job->next;
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_before_ready_job_teardown_hook != NULL) {
+    lc_workflow_test_before_ready_job_teardown_hook(
+        lc_workflow_test_before_ready_job_teardown_context);
+  }
+#endif
+  pthread_mutex_lock(&workflow->notification_mutex);
+  ready_head = workflow->ready_head;
+  workflow->ready_head = NULL;
+  workflow->ready_tail = NULL;
+  workflow->ready_count = 0U;
+  pthread_mutex_unlock(&workflow->notification_mutex);
+  while (ready_head != NULL) {
+    lc_outbox_job_handle *job = ready_head;
+    ready_head = job->next;
     job->next = NULL;
-    --workflow->ready_count;
     job->pub.close(&job->pub);
   }
   lc_workflow_release(workflow);

@@ -34,6 +34,13 @@ typedef void (*lc_workflow_test_after_reconcile_query_hook_fn)(void *context);
 extern lc_workflow_test_after_reconcile_query_hook_fn
     lc_workflow_test_after_reconcile_query_hook;
 extern void *lc_workflow_test_after_reconcile_query_context;
+typedef void (*lc_workflow_test_hook_fn)(void *context);
+extern lc_workflow_test_hook_fn lc_workflow_test_after_close_requested_hook;
+extern void *lc_workflow_test_after_close_requested_context;
+extern lc_workflow_test_hook_fn lc_workflow_test_before_ready_job_detach_hook;
+extern void *lc_workflow_test_before_ready_job_detach_context;
+extern lc_workflow_test_hook_fn lc_workflow_test_before_ready_job_teardown_hook;
+extern void *lc_workflow_test_before_ready_job_teardown_context;
 typedef int (*lc_workflow_test_failure_hook_fn)(void *context, lc_error *error);
 extern lc_workflow_test_failure_hook_fn
     lc_workflow_test_before_ledger_append_hook;

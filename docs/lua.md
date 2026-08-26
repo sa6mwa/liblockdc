@@ -243,6 +243,9 @@ returns `nil, result` on an accepted duplicate, where `result.duplicate` is
 true. Otherwise it returns a `WorkflowTransaction` and `result.accepted` is
 true.
 
+`max_attempts` must fit the C API's signed 32-bit integer range; values outside
+that range are rejected instead of being narrowed or defaulted.
+
 Workflow receivers are explicit and owned. Parent acceptance and append
 operations return a new `WorkflowTransaction` only when they created fresh
 durable work:

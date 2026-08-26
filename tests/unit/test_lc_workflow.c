@@ -9,6 +9,7 @@
 #include "lc_api_internal.h"
 #include "lc_pouch_internal.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,12 @@ static int workflow_fail_allocation(void *context, lc_error *error) {
 }
 
 static void workflow_reset_allocation_failures(void) {
+  lc_workflow_test_after_close_requested_hook = NULL;
+  lc_workflow_test_after_close_requested_context = NULL;
+  lc_workflow_test_before_ready_job_detach_hook = NULL;
+  lc_workflow_test_before_ready_job_detach_context = NULL;
+  lc_workflow_test_before_ready_job_teardown_hook = NULL;
+  lc_workflow_test_before_ready_job_teardown_context = NULL;
   lc_workflow_test_before_ledger_append_hook = NULL;
   lc_workflow_test_before_ledger_append_context = NULL;
   lc_workflow_test_before_participant_allocation_hook = NULL;
@@ -60,8 +67,123 @@ static int workflow_bytes_contains(const void *bytes, size_t length,
   return 0;
 }
 
+static int workflow_slow_test_runtime(void) {
+  const char *value = getenv("LOCKDC_SLOW_TEST_RUNTIME");
+
+  return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0;
+}
+
+static long workflow_claim_ttl_seconds(void) {
+  return workflow_slow_test_runtime() ? 2L : 1L;
+}
+
+static long workflow_claim_next_timeout_ms(void) {
+  return workflow_slow_test_runtime() ? 10000L : 5000L;
+}
+
+static unsigned int workflow_claim_expiry_wait_seconds(void) {
+  return workflow_slow_test_runtime() ? 3U : 2U;
+}
+
 static long workflow_elapsed_milliseconds(const struct timespec *started,
                                           const struct timespec *finished);
+
+typedef struct workflow_shutdown_race {
+  pthread_mutex_t mutex;
+  pthread_cond_t condition;
+  int close_requested;
+  int allow_close;
+  int ready_detach_entered;
+  int allow_ready_detach;
+  int teardown_entered;
+  int allow_teardown;
+  int close_finished;
+  int next_finished;
+  int next_rc;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+} workflow_shutdown_race;
+
+static int workflow_shutdown_race_wait(workflow_shutdown_race *race,
+                                       int *flag) {
+  struct timespec deadline;
+  int reached;
+  int rc;
+
+  if (clock_gettime(CLOCK_REALTIME, &deadline) != 0)
+    return 0;
+  deadline.tv_sec += 5L;
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  rc = 0;
+  while (!*flag && rc == 0)
+    rc = pthread_cond_timedwait(&race->condition, &race->mutex, &deadline);
+  reached = *flag;
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+  return rc == 0 && reached;
+}
+
+static void workflow_shutdown_race_after_close_requested(void *context) {
+  workflow_shutdown_race *race = (workflow_shutdown_race *)context;
+
+  (void)pthread_mutex_lock(&race->mutex);
+  race->close_requested = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  while (!race->allow_close)
+    (void)pthread_cond_wait(&race->condition, &race->mutex);
+  (void)pthread_mutex_unlock(&race->mutex);
+}
+
+static void workflow_shutdown_race_before_ready_detach(void *context) {
+  workflow_shutdown_race *race = (workflow_shutdown_race *)context;
+
+  (void)pthread_mutex_lock(&race->mutex);
+  race->ready_detach_entered = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  while (!race->allow_ready_detach)
+    (void)pthread_cond_wait(&race->condition, &race->mutex);
+  (void)pthread_mutex_unlock(&race->mutex);
+}
+
+static void workflow_shutdown_race_before_teardown(void *context) {
+  workflow_shutdown_race *race = (workflow_shutdown_race *)context;
+
+  (void)pthread_mutex_lock(&race->mutex);
+  race->teardown_entered = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  while (!race->allow_teardown)
+    (void)pthread_cond_wait(&race->condition, &race->mutex);
+  (void)pthread_mutex_unlock(&race->mutex);
+}
+
+static void *workflow_shutdown_race_close_thread(void *context) {
+  workflow_shutdown_race *race = (workflow_shutdown_race *)context;
+
+  lc_workflow_close(race->workflow);
+  (void)pthread_mutex_lock(&race->mutex);
+  race->close_finished = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  (void)pthread_mutex_unlock(&race->mutex);
+  return NULL;
+}
+
+static void *workflow_shutdown_race_next_thread(void *context) {
+  workflow_shutdown_race *race = (workflow_shutdown_race *)context;
+  lc_error error;
+  lc_outbox_job *job;
+  int rc;
+
+  lc_error_init(&error);
+  job = NULL;
+  rc = lc_workflow_next(race->workflow, 0L, &job, &error);
+  lc_error_cleanup(&error);
+  (void)pthread_mutex_lock(&race->mutex);
+  race->next_rc = rc;
+  race->job = job;
+  race->next_finished = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  (void)pthread_mutex_unlock(&race->mutex);
+  return NULL;
+}
 
 typedef struct workflow_query_count {
   unsigned long count;
@@ -2699,21 +2821,24 @@ static void test_pouch_expired_claim_rejects_stale_terminal(void **state) {
   lc_workflow_config_init(&config);
   config.namespace_name = "workflow-stale-terminal";
   config.owner = "workflow-stale-first";
-  config.claim_ttl_seconds = 1L;
+  config.claim_ttl_seconds = workflow_claim_ttl_seconds();
   first = NULL;
   assert_int_equal(lc_client_new_workflow(client, &config, &first, &error),
                    LC_OK);
   stale = NULL;
-  assert_int_equal(lc_workflow_next(first, 5000L, &stale, &error), LC_OK);
+  assert_int_equal(
+      lc_workflow_next(first, workflow_claim_next_timeout_ms(), &stale, &error),
+      LC_OK);
   assert_non_null(stale);
   lc_workflow_close(first);
-  sleep(2U);
+  sleep(workflow_claim_expiry_wait_seconds());
   config.owner = "workflow-stale-second";
   second = NULL;
   assert_int_equal(lc_client_new_workflow(client, &config, &second, &error),
                    LC_OK);
   replacement = NULL;
-  assert_int_equal(lc_workflow_next(second, 5000L, &replacement, &error),
+  assert_int_equal(lc_workflow_next(second, workflow_claim_next_timeout_ms(),
+                                    &replacement, &error),
                    LC_OK);
   assert_non_null(replacement);
   assert_string_equal(replacement->effect_key, stale->effect_key);
@@ -2764,14 +2889,16 @@ test_pouch_expired_claim_recovers_and_preserves_attempt_budget(void **state) {
   lc_workflow_config_init(&config);
   config.namespace_name = "workflow-expired-budget";
   config.owner = "workflow-expired-budget";
-  config.claim_ttl_seconds = 1L;
+  config.claim_ttl_seconds = workflow_claim_ttl_seconds();
   config.max_attempts = 2;
   workflow = NULL;
   assert_int_equal(lc_client_new_workflow(client, &config, &workflow, &error),
                    LC_OK);
 
   first = NULL;
-  assert_int_equal(lc_workflow_next(workflow, 5000L, &first, &error), LC_OK);
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &first, &error),
+                   LC_OK);
   assert_non_null(first);
   assert_int_equal(first->attempt, 1);
   /* Closing an unfinished job must wake the local dispatcher at lease expiry;
@@ -2779,7 +2906,9 @@ test_pouch_expired_claim_recovers_and_preserves_attempt_budget(void **state) {
   lc_outbox_job_close(first);
 
   second = NULL;
-  assert_int_equal(lc_workflow_next(workflow, 5000L, &second, &error), LC_OK);
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &second, &error),
+                   LC_OK);
   assert_non_null(second);
   assert_int_equal(second->attempt, 2);
   lc_outbox_job_close(second);
@@ -2787,7 +2916,8 @@ test_pouch_expired_claim_recovers_and_preserves_attempt_budget(void **state) {
   /* A second abandoned claim consumes the final durable attempt. Expiry must
    * dead-letter it rather than reset the counter and hand out attempt three. */
   unexpected = (lc_outbox_job *)1;
-  assert_int_equal(lc_workflow_next(workflow, 5000L, &unexpected, &error),
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &unexpected, &error),
                    LC_OK);
   assert_null(unexpected);
 
@@ -2812,6 +2942,305 @@ test_pouch_expired_claim_recovers_and_preserves_attempt_budget(void **state) {
   lc_sink_close(sink);
   assert_int_equal(lc_lease_release(lease, NULL, &error), LC_OK);
   lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_workflow_validates_durable_input_contracts(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  char *oversized_diagnostic;
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_inbox_message inbox;
+  lc_inbox_accept_result inbox_result;
+  lc_outbox_retry retry;
+  lc_outbox_receipt receipt;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_source *second_payload;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "input-contracts-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  job = NULL;
+  payload = NULL;
+  second_payload = NULL;
+  oversized_diagnostic = NULL;
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-input-contracts";
+  workflow_config.owner = "workflow-input-contracts-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "input-contract-operation";
+  entry.effect_id = "input-contract-effect";
+  entry.effect_key = "input-contract-effect-key";
+  entry.kind = "test";
+  entry.destination = "input-contract://destination";
+  entry.content_type = "text/plain";
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+
+  entry.headers_json = "{";
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_ERR_INVALID);
+  assert_null(transaction);
+  assert_null(receipt.outbox_key);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  entry.headers_json = "[]";
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_ERR_INVALID);
+  assert_null(transaction);
+  assert_null(receipt.outbox_key);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  entry.headers_json = "{\"x-request-id\":\"contract\"}";
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+
+  /* Input validation precedes duplicate lookup: invalid metadata must not be
+   * silently accepted just because a valid entry with the same identity exists.
+   */
+  entry.headers_json = "{";
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_ERR_INVALID);
+  assert_null(transaction);
+  assert_null(receipt.outbox_key);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  entry.headers_json = "{\"x-request-id\":\"contract\"}";
+
+  assert_int_equal(lc_workflow_next(workflow, 3000L, &job, &error), LC_OK);
+  assert_non_null(job);
+
+  oversized_diagnostic = (char *)malloc(LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES + 2U);
+  assert_non_null(oversized_diagnostic);
+  memset(oversized_diagnostic, 'x', LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES + 1U);
+  oversized_diagnostic[LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES + 1U] = '\0';
+  lc_outbox_retry_init(&retry);
+  retry.diagnostic = oversized_diagnostic;
+  assert_int_equal(lc_outbox_job_retry(job, &retry, &error), LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_outbox_job_dead_letter(job, oversized_diagnostic, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  lc_outbox_job_close(job);
+  job = NULL;
+  free(oversized_diagnostic);
+  oversized_diagnostic = NULL;
+
+  /* A rejected append cannot roll back already-enrolled work. */
+  entry.effect_id = "input-contract-preserve";
+  entry.effect_key = "input-contract-preserve-key";
+  entry.headers_json = "{\"x-request-id\":\"preserve\"}";
+  assert_int_equal(
+      lc_source_from_memory("preserve", 8U, &second_payload, &error), LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, second_payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  entry.effect_id = "input-contract-rejected";
+  entry.effect_key = "input-contract-rejected-key";
+  entry.headers_json = "{";
+  assert_int_equal(lc_workflow_transaction_append_outbox(
+                       transaction, &entry, second_payload, &receipt, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 3000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  lc_outbox_job_close(job);
+  job = NULL;
+  lc_source_close(second_payload);
+  second_payload = NULL;
+
+  lc_inbox_message_init(&inbox);
+  inbox.consumer_id = "a\nb";
+  inbox.source_kind = "c";
+  inbox.source_id = "d";
+  inbox.message_id = "e";
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox, &transaction,
+                                            &inbox_result, &error),
+                   LC_OK);
+  assert_true(inbox_result.accepted);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+
+  inbox.consumer_id = "a";
+  inbox.source_kind = "b";
+  inbox.source_id = "c\nd";
+  inbox.message_id = "e";
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox, &transaction,
+                                            &inbox_result, &error),
+                   LC_OK);
+  assert_true(inbox_result.accepted);
+  assert_false(inbox_result.duplicate);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_workflow_close_serializes_ready_job_detach(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_workflow_stats stats;
+  workflow_shutdown_race race;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_error error;
+  pthread_t close_thread, next_thread;
+  size_t attempt;
+  int close_finished_before_next_detach;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "shutdown-race-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  seed_recovery_outbox(client, "workflow-shutdown-race",
+                       "__lockdc_io/v1/outbox/shutdown-race", &error);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-shutdown-race";
+  workflow_config.owner = "workflow-shutdown-race-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  memset(&stats, 0, sizeof(stats));
+  for (attempt = 0U; attempt < 500U; ++attempt) {
+    assert_int_equal(lc_workflow_get_stats(workflow, &stats, &error), LC_OK);
+    if (stats.ready_jobs == 1U)
+      break;
+    lc_workflow_stats_cleanup(&stats);
+    memset(&stats, 0, sizeof(stats));
+    {
+      struct timespec delay;
+      delay.tv_sec = 0;
+      delay.tv_nsec = 10000000L;
+      (void)nanosleep(&delay, NULL);
+    }
+  }
+  assert_int_equal(stats.ready_jobs, 1U);
+  lc_workflow_stats_cleanup(&stats);
+
+  memset(&race, 0, sizeof(race));
+  race.workflow = workflow;
+  assert_int_equal(pthread_mutex_init(&race.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&race.condition, NULL), 0);
+  workflow_reset_allocation_failures();
+  lc_workflow_test_after_close_requested_hook =
+      workflow_shutdown_race_after_close_requested;
+  lc_workflow_test_after_close_requested_context = &race;
+  lc_workflow_test_before_ready_job_detach_hook =
+      workflow_shutdown_race_before_ready_detach;
+  lc_workflow_test_before_ready_job_detach_context = &race;
+  lc_workflow_test_before_ready_job_teardown_hook =
+      workflow_shutdown_race_before_teardown;
+  lc_workflow_test_before_ready_job_teardown_context = &race;
+  assert_int_equal(pthread_create(&close_thread, NULL,
+                                  workflow_shutdown_race_close_thread, &race),
+                   0);
+  assert_true(workflow_shutdown_race_wait(&race, &race.close_requested));
+  assert_int_equal(pthread_create(&next_thread, NULL,
+                                  workflow_shutdown_race_next_thread, &race),
+                   0);
+  assert_true(workflow_shutdown_race_wait(&race, &race.ready_detach_entered));
+
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  race.allow_close = 1;
+  assert_int_equal(pthread_cond_broadcast(&race.condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+  assert_true(workflow_shutdown_race_wait(&race, &race.teardown_entered));
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  race.allow_teardown = 1;
+  assert_int_equal(pthread_cond_broadcast(&race.condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+  {
+    struct timespec delay;
+    delay.tv_sec = 0;
+    delay.tv_nsec = 50000000L;
+    (void)nanosleep(&delay, NULL);
+  }
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  close_finished_before_next_detach = race.close_finished;
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  race.allow_ready_detach = 1;
+  assert_int_equal(pthread_cond_broadcast(&race.condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+  assert_true(workflow_shutdown_race_wait(&race, &race.next_finished));
+  assert_int_equal(pthread_join(next_thread, NULL), 0);
+  assert_int_equal(race.next_rc, LC_OK);
+  assert_non_null(race.job);
+  lc_outbox_job_close(race.job);
+  assert_int_equal(pthread_join(close_thread, NULL), 0);
+  assert_false(close_finished_before_next_detach);
+  workflow_reset_allocation_failures();
+  pthread_cond_destroy(&race.condition);
+  pthread_mutex_destroy(&race.mutex);
+
   lc_client_close(client);
   lc_error_cleanup(&error);
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
@@ -2847,6 +3276,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_expired_claim_rejects_stale_terminal),
       cmocka_unit_test(
           test_pouch_expired_claim_recovers_and_preserves_attempt_budget),
+      cmocka_unit_test(test_pouch_workflow_validates_durable_input_contracts),
+      cmocka_unit_test(test_pouch_workflow_close_serializes_ready_job_detach),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

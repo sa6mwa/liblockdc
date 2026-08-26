@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -219,6 +220,25 @@ static int lcdc_opt_integer_field(lua_State *L, int index, const char *name,
     lua_pop(L, 1);
   }
   return 0;
+}
+
+static int lcdc_opt_int_field(lua_State *L, int index, const char *name,
+                              int *out) {
+  lua_Integer value;
+
+  if (!lua_istable(L, index))
+    return 0;
+  lua_getfield(L, index, name);
+  if (lua_isnil(L, -1)) {
+    lua_pop(L, 1);
+    return 0;
+  }
+  value = luaL_checkinteger(L, -1);
+  if (value < (lua_Integer)INT_MIN || value > (lua_Integer)INT_MAX)
+    luaL_error(L, "%s must fit a signed 32-bit integer", name);
+  *out = (int)value;
+  lua_pop(L, 1);
+  return 1;
 }
 
 static const char *lcdc_opt_string_field(lua_State *L, int index,
@@ -1978,14 +1998,7 @@ static int lcdc_client_enqueue(lua_State *L) {
   lcdc_opt_integer_field(L, 2, "visibility_timeout_seconds",
                          &req.visibility_timeout_seconds);
   lcdc_opt_integer_field(L, 2, "ttl_seconds", &req.ttl_seconds);
-  {
-    long max_attempts;
-
-    max_attempts = 0L;
-    if (lcdc_opt_integer_field(L, 2, "max_attempts", &max_attempts)) {
-      req.max_attempts = (int)max_attempts;
-    }
-  }
+  lcdc_opt_int_field(L, 2, "max_attempts", &req.max_attempts);
   req.content_type = lcdc_opt_string_field(L, 2, "content_type");
   rc = lcdc_source_from_value(L, 3, &src, &error);
   if (rc != LC_OK) {
@@ -2812,12 +2825,7 @@ static int lcdc_client_new_workflow(lua_State *L) {
   lcdc_opt_integer_field(L, 2, "transaction_ttl_seconds",
                          &config.transaction_ttl_seconds);
   lcdc_opt_integer_field(L, 2, "claim_ttl_seconds", &config.claim_ttl_seconds);
-  {
-    long max_attempts = 0L;
-    if (lcdc_opt_integer_field(L, 2, "max_attempts", &max_attempts)) {
-      config.max_attempts = (int)max_attempts;
-    }
-  }
+  lcdc_opt_int_field(L, 2, "max_attempts", &config.max_attempts);
   lcdc_opt_integer_field(L, 2, "retry_initial_delay_seconds",
                          &config.retry_initial_delay_seconds);
   lcdc_opt_integer_field(L, 2, "retry_max_delay_seconds",

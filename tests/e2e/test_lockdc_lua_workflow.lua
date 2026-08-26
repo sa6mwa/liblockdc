@@ -11,6 +11,29 @@ if client == nil then
     open_err and open_err.message or tostring(open_err)))
 end
 
+local oversized_attempts_ok = pcall(function()
+  return client:new_workflow({
+    namespace = "lua-workflow-invalid-max-attempts",
+    max_attempts = 4294967296,
+  })
+end)
+if oversized_attempts_ok then
+  client:close()
+  error("Lua workflow accepted max_attempts outside the C int range")
+end
+
+local oversized_queue_attempts_ok = pcall(function()
+  return client:enqueue({
+    namespace_name = "lua-workflow-invalid-max-attempts",
+    queue = "invalid-attempts",
+    max_attempts = 4294967296,
+  }, "ignored")
+end)
+if oversized_queue_attempts_ok then
+  client:close()
+  error("Lua enqueue accepted max_attempts outside the C int range")
+end
+
 local workflow, workflow_err = client:new_workflow({
   namespace = "lua-workflow-records",
   owner = "lua-workflow-worker",

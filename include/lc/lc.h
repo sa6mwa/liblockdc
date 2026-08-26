@@ -1785,11 +1785,17 @@ typedef struct lc_inbox_accept_result {
   int duplicate;
 } lc_inbox_accept_result;
 
+/** Maximum retained byte length of an outbox failure diagnostic. */
+#define LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES 4096U
+
 /** Durable outcome requested for a claimed outbox job. */
 typedef struct lc_outbox_retry {
   /** Delay before the next eligible delivery, in seconds. Zero uses policy. */
   long delay_seconds;
-  /** Optional bounded failure diagnostic retained with the record. */
+  /**
+   * Optional failure diagnostic retained with the record. At most
+   * `LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES` bytes are accepted.
+   */
   const char *diagnostic;
 } lc_outbox_retry;
 
