@@ -29,7 +29,13 @@ The library itself is delivered as:
 - mapped JSON state load/save through `lonejson`
 - streamed query-key callbacks and streaming queue subscribe/watch flows
 - managed consumer support with blocking and explicit start/stop/wait service modes
+- durable command-receipt, inbox, outbox, dispatcher, retry, reconciliation,
+  and dead-letter workflow receivers
 - integrated SDK logging through `libpslog`
+
+The transactional messaging model, endpoint constraints, and C receiver
+surface are specified in [the workflow design](docs/inbox-outbox.md). The Lua
+workflow facade is documented in [the Lua SDK guide](docs/lua.md).
 
 ## Pouch storage
 
