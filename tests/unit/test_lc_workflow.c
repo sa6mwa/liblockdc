@@ -48,6 +48,8 @@ static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_before_command_receipt_copy_context = NULL;
   lc_workflow_test_before_outbox_receipt_copy_hook = NULL;
   lc_workflow_test_before_outbox_receipt_copy_context = NULL;
+  lc_workflow_test_before_notification_copy_hook = NULL;
+  lc_workflow_test_before_notification_copy_context = NULL;
 }
 
 static int workflow_bytes_contains(const void *bytes, size_t length,
@@ -1440,6 +1442,169 @@ test_pouch_outbox_allocation_failures_roll_back_enrollment(void **state) {
   lc_outbox_receipt_cleanup(&receipt);
   assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
   lc_workflow_transaction_close(transaction);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  workflow_reset_allocation_failures();
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_notification_allocation_failure_reconciles_committed_outbox(
+    void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "notify-oom-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  job = NULL;
+  payload = NULL;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "notify-oom";
+  workflow_config.owner = "notify-oom-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "notify-oom-operation";
+  entry.effect_id = "notify-oom-effect";
+  entry.effect_key = "notify-oom-key";
+  entry.kind = "test";
+  entry.destination = "test://notify-oom";
+  entry.content_type = "text/plain";
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+
+  /* The commit is durable before its best-effort direct-key signal. Losing
+   * that allocation must make the private dispatcher reconcile instead. */
+  lc_workflow_test_before_notification_copy_hook = workflow_fail_allocation;
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_test_before_notification_copy_hook = NULL;
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, entry.effect_key);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  lc_outbox_job_close(job);
+  lc_source_close(payload);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  workflow_reset_allocation_failures();
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_retry_notification_allocation_failure_recovers_at_deadline(
+    void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_outbox_retry retry;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "retry-oom-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  job = NULL;
+  payload = NULL;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "retry-oom";
+  workflow_config.owner = "retry-oom-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "retry-oom-operation";
+  entry.effect_id = "retry-oom-effect";
+  entry.effect_key = "retry-oom-key";
+  entry.kind = "test";
+  entry.destination = "test://retry-oom";
+  entry.content_type = "text/plain";
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  lc_outbox_retry_init(&retry);
+  retry.delay_seconds = 1L;
+
+  /* `retry_wait` is already durable when its delayed-key allocation fails.
+   * The dispatcher must retain a recovery deadline instead of stranding it. */
+  lc_workflow_test_before_notification_copy_hook = workflow_fail_allocation;
+  assert_int_equal(lc_outbox_job_retry(job, &retry, &error), LC_OK);
+  lc_workflow_test_before_notification_copy_hook = NULL;
+  lc_outbox_job_close(job);
+  job = NULL;
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  assert_int_equal(job->attempt, 2);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  lc_outbox_job_close(job);
+  lc_source_close(payload);
+  lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
   lc_client_close(client);
   workflow_reset_allocation_failures();
@@ -3258,6 +3423,10 @@ int main(void) {
           test_pouch_command_receipt_allocation_failure_rolls_back_enrollment),
       cmocka_unit_test(
           test_pouch_outbox_allocation_failures_roll_back_enrollment),
+      cmocka_unit_test(
+          test_pouch_notification_allocation_failure_reconciles_committed_outbox),
+      cmocka_unit_test(
+          test_pouch_retry_notification_allocation_failure_recovers_at_deadline),
       cmocka_unit_test(
           test_pouch_command_receipt_commits_with_outbox_and_result),
       cmocka_unit_test(test_pouch_shared_command_resume_is_durable),

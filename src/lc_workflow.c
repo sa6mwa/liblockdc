@@ -44,6 +44,9 @@ void *lc_workflow_test_before_command_receipt_copy_context = NULL;
 lc_workflow_test_failure_hook_fn
     lc_workflow_test_before_outbox_receipt_copy_hook = NULL;
 void *lc_workflow_test_before_outbox_receipt_copy_context = NULL;
+lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_notification_copy_hook = NULL;
+void *lc_workflow_test_before_notification_copy_context = NULL;
 #endif
 
 typedef struct lc_workflow_outbox_record {
@@ -307,15 +310,42 @@ struct lc_outbox_job_handle {
   lc_outbox_job_handle *next;
 };
 
+static void lc_workflow_request_recovery(lc_workflow_handle *workflow,
+                                         lc_unix_seconds not_before_unix) {
+  if (workflow == NULL)
+    return;
+  pthread_mutex_lock(&workflow->notification_mutex);
+  if (!workflow->closed) {
+    workflow->recovery_needed = 1;
+    if (not_before_unix > 0 &&
+        (workflow->next_recovery_unix == 0 ||
+         not_before_unix < workflow->next_recovery_unix)) {
+      workflow->next_recovery_unix = not_before_unix;
+    }
+    pthread_cond_signal(&workflow->notification_cond);
+  }
+  pthread_mutex_unlock(&workflow->notification_mutex);
+}
+
 static void lc_workflow_notify(lc_workflow_handle *workflow, const char *key) {
   char *copy;
   if (workflow == NULL || key == NULL ||
       strncmp(key, "__lockdc_io/v1/outbox/",
               sizeof("__lockdc_io/v1/outbox/") - 1U) != 0)
     return;
-  copy = lc_client_strdup(workflow->client, key);
-  if (copy == NULL)
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_before_notification_copy_hook != NULL &&
+      lc_workflow_test_before_notification_copy_hook(
+          lc_workflow_test_before_notification_copy_context, NULL) != LC_OK) {
+    lc_workflow_request_recovery(workflow, 0);
     return;
+  }
+#endif
+  copy = lc_client_strdup(workflow->client, key);
+  if (copy == NULL) {
+    lc_workflow_request_recovery(workflow, 0);
+    return;
+  }
   pthread_mutex_lock(&workflow->notification_mutex);
   if (!workflow->closed &&
       workflow->notification_count < workflow->notification_capacity) {
@@ -355,9 +385,19 @@ static void lc_workflow_schedule_retry(lc_workflow_handle *workflow,
 
   if (workflow == NULL || key == NULL || eligible_at_unix <= 0)
     return;
-  copy = lc_client_strdup(workflow->client, key);
-  if (copy == NULL)
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_before_notification_copy_hook != NULL &&
+      lc_workflow_test_before_notification_copy_hook(
+          lc_workflow_test_before_notification_copy_context, NULL) != LC_OK) {
+    lc_workflow_request_recovery(workflow, eligible_at_unix);
     return;
+  }
+#endif
+  copy = lc_client_strdup(workflow->client, key);
+  if (copy == NULL) {
+    lc_workflow_request_recovery(workflow, eligible_at_unix);
+    return;
+  }
   pthread_mutex_lock(&workflow->notification_mutex);
   if (!workflow->closed) {
     for (index = 0U; index < workflow->delayed_notification_count; ++index) {
@@ -2142,11 +2182,20 @@ static void *lc_workflow_dispatcher_main(void *context) {
       if (recovery_rc != LC_OK) {
         workflow->recovery_needed = 0;
         workflow->next_recovery_unix = (lc_unix_seconds)time(NULL) + 1L;
-      } else if (workflow->recovery_interval_seconds > 0L) {
-        workflow->next_recovery_unix =
-            (lc_unix_seconds)time(NULL) + workflow->recovery_interval_seconds;
       } else {
-        workflow->next_recovery_unix = 0;
+        lc_unix_seconds now = (lc_unix_seconds)time(NULL);
+        lc_unix_seconds periodic =
+            workflow->recovery_interval_seconds > 0L
+                ? now + workflow->recovery_interval_seconds
+                : 0;
+
+        /* A retry whose delayed-key allocation failed has no in-memory entry,
+         * so retain its durable-recovery deadline across this eager sweep. */
+        if (workflow->next_recovery_unix <= now ||
+            (periodic > 0 && (workflow->next_recovery_unix == 0 ||
+                              periodic < workflow->next_recovery_unix))) {
+          workflow->next_recovery_unix = periodic;
+        }
       }
       pthread_mutex_unlock(&workflow->notification_mutex);
       continue;
