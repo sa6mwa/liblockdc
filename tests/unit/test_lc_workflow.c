@@ -4008,16 +4008,20 @@ test_pouch_workflow_close_serializes_ready_job_detach(void **state) {
                                   workflow_shutdown_race_close_thread, &race),
                    0);
   assert_true(workflow_shutdown_race_wait(&race, &race.close_requested));
-  assert_int_equal(pthread_create(&next_thread, NULL,
-                                  workflow_shutdown_race_next_thread, &race),
-                   0);
-  assert_true(workflow_shutdown_race_wait(&race, &race.ready_detach_entered));
-
   assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
   race.allow_close = 1;
   assert_int_equal(pthread_cond_broadcast(&race.condition), 0);
   assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
   assert_true(workflow_shutdown_race_wait(&race, &race.teardown_entered));
+
+  /* close() has joined the dispatcher before it reaches this hook. Race the
+   * remaining ready-job teardown against next() now, rather than blocking a
+   * next() caller while the dispatcher still needs the same mutex to notice
+   * close_requested. */
+  assert_int_equal(pthread_create(&next_thread, NULL,
+                                  workflow_shutdown_race_next_thread, &race),
+                   0);
+  assert_true(workflow_shutdown_race_wait(&race, &race.ready_detach_entered));
   assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
   race.allow_teardown = 1;
   assert_int_equal(pthread_cond_broadcast(&race.condition), 0);
