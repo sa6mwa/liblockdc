@@ -21,6 +21,8 @@ typedef struct lc_workflow_delayed_notification {
 
 static void lc_workflow_release(lc_workflow_handle *workflow);
 static void lc_workflow_retain(lc_workflow_handle *workflow);
+static void lc_workflow_transaction_abort_enrolled_lease(
+    lc_workflow_transaction_handle *transaction, lc_lease *lease);
 
 #ifdef LOCKDC_TEST_BUILD
 lc_workflow_test_after_reconcile_query_hook_fn
@@ -932,6 +934,32 @@ static int lc_workflow_validate_diagnostic(const char *diagnostic,
                       NULL, NULL);
 }
 
+static int lc_workflow_timestamp_add(lc_unix_seconds base, long delta,
+                                     const char *field, lc_unix_seconds *out,
+                                     lc_error *error) {
+  char message[128];
+
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow timestamp addition requires output", NULL,
+                        NULL, NULL);
+  }
+  if (delta < 0L) {
+    snprintf(message, sizeof(message), "workflow %s must be non-negative",
+             field != NULL ? field : "duration");
+    return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
+  }
+  if ((uintmax_t)delta > (uintmax_t)LC_I64_MAX ||
+      base > LC_I64_MAX - (lc_unix_seconds)delta) {
+    snprintf(message, sizeof(message),
+             "workflow %s exceeds supported timestamp range",
+             field != NULL ? field : "duration");
+    return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
+  }
+  *out = base + (lc_unix_seconds)delta;
+  return LC_OK;
+}
+
 static int lc_workflow_command_receipt_from_record(
     const lc_workflow_command_record *record, lc_command_receipt *receipt,
     lc_error *error) {
@@ -1304,6 +1332,13 @@ lc_workflow_stage_command_terminal(lc_workflow_transaction_handle *transaction,
     rc = lc_lease_attach(transaction->command_lease, &attach, result->body,
                          &attach_result, error);
     lc_attach_res_cleanup(&attach_result);
+    if (rc != LC_OK) {
+      /* The receipt was staged before its required attachment. An attachment
+       * failure must decide rollback for the entire implicit-XA transaction so
+       * that no caller can later publish an incomplete terminal receipt. */
+      lc_workflow_transaction_abort_enrolled_lease(transaction,
+                                                   transaction->command_lease);
+    }
   }
   lc_thread_lonejson_runtime()->cleanup(
       lc_thread_lonejson_runtime(), &lc_workflow_command_record_map, &record);
@@ -1561,7 +1596,8 @@ static int lc_outbox_job_renew_method(lc_outbox_job *self, long ttl_seconds,
 }
 
 static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
-                                  long not_before_unix, const char *diagnostic,
+                                  lc_unix_seconds not_before_unix,
+                                  const char *diagnostic,
                                   const lc_outbox_completion *completion,
                                   lc_error *error) {
   lc_outbox_job_handle *job = (lc_outbox_job_handle *)self;
@@ -1662,6 +1698,8 @@ static int lc_outbox_job_retry_method(lc_outbox_job *self,
   lc_outbox_job_handle *job = (lc_outbox_job_handle *)self;
   long delay;
   time_t now;
+  lc_unix_seconds deadline;
+  int rc;
 
   if (job == NULL || request == NULL || request->delay_seconds < 0L ||
       request->delay_seconds > job->workflow->host_retry_delay_max_seconds) {
@@ -1677,11 +1715,15 @@ static int lc_outbox_job_retry_method(lc_outbox_job *self,
                         "failed to read workflow retry clock", NULL, NULL,
                         NULL);
   }
+  rc = lc_workflow_timestamp_add((lc_unix_seconds)now, delay, "retry delay",
+                                 &deadline, error);
+  if (rc != LC_OK)
+    return rc;
   if (job->record.attempt_count >= job->pub.max_attempts) {
     return lc_outbox_job_terminal(self, "dead_letter", 0L, request->diagnostic,
                                   NULL, error);
   }
-  return lc_outbox_job_terminal(self, "retry_wait", (long)(now + delay),
+  return lc_outbox_job_terminal(self, "retry_wait", deadline,
                                 request->diagnostic, NULL, error);
 }
 
@@ -1797,7 +1839,7 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   lonejson *runtime;
   lc_outbox_job_handle *job;
   time_t now;
-  lc_unix_seconds claim_expires_at_unix;
+  lc_unix_seconds claim_expires_at_unix = 0;
   char *original_dispatch_state;
   char *original_last_error;
   lonejson_int64 original_attempt_count;
@@ -1820,6 +1862,17 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   acquire.owner = workflow->owner;
   acquire.ttl_seconds = workflow->claim_ttl_seconds;
   lease = NULL;
+  now = time(NULL);
+  if (now == (time_t)-1) {
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "failed to read workflow claim clock", NULL, NULL,
+                        NULL);
+  }
+  rc = lc_workflow_timestamp_add((lc_unix_seconds)now,
+                                 workflow->claim_ttl_seconds, "claim ttl",
+                                 &claim_expires_at_unix, error);
+  if (rc != LC_OK)
+    return rc;
   if (lc_workflow_pouch_shared_live_claim(workflow, key)) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "outbox candidate remains actively claimed", NULL, NULL,
@@ -1827,11 +1880,7 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   }
   rc = lc_acquire(&client->pub, &acquire, &lease, error);
   if (rc != LC_OK) {
-    now = time(NULL);
-    if (now != (time_t)-1) {
-      lc_workflow_schedule_claim_recovery(
-          workflow, key, (lc_unix_seconds)now + workflow->claim_ttl_seconds);
-    }
+    lc_workflow_schedule_claim_recovery(workflow, key, claim_expires_at_unix);
     return rc;
   }
   memset(&record, 0, sizeof(record));
@@ -1908,7 +1957,15 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
     original_dispatch_state = record.dispatch_state;
     original_attempt_count = record.attempt_count;
     original_claim_expires_at_unix = record.claim_expires_at_unix;
-    claim_expires_at_unix = (lc_unix_seconds)now + workflow->claim_ttl_seconds;
+    rc = lc_workflow_timestamp_add((lc_unix_seconds)now,
+                                   workflow->claim_ttl_seconds, "claim ttl",
+                                   &claim_expires_at_unix, error);
+    if (rc != LC_OK) {
+      runtime->cleanup(runtime, &lc_workflow_outbox_record_map, &record);
+      lc_get_res_cleanup(&result);
+      lc_workflow_rollback_lease(lease);
+      return rc;
+    }
     record.dispatch_state = "claimed";
     ++record.attempt_count;
     record.claim_expires_at_unix = (lonejson_int64)claim_expires_at_unix;
@@ -3937,6 +3994,8 @@ int lc_client_new_workflow_method(lc_client *self,
                                   lc_workflow **out, lc_error *error) {
   lc_client_handle *client;
   lc_workflow_handle *workflow;
+  lc_unix_seconds configured_claim_deadline;
+  time_t now;
   int rc;
   if (self == NULL || config == NULL || out == NULL ||
       config->namespace_name == NULL || config->namespace_name[0] == '\0')
@@ -4012,6 +4071,20 @@ int lc_client_new_workflow_method(lc_client *self,
         error, LC_ERR_INVALID, 0L,
         "workflow claim, retry, and recovery configuration is invalid", NULL,
         NULL, NULL);
+  }
+  now = time(NULL);
+  if (now == (time_t)-1) {
+    lc_workflow_close_method(&workflow->pub);
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "failed to read workflow configuration clock", NULL,
+                        NULL, NULL);
+  }
+  rc = lc_workflow_timestamp_add((lc_unix_seconds)now,
+                                 workflow->claim_ttl_seconds, "claim ttl",
+                                 &configured_claim_deadline, error);
+  if (rc != LC_OK) {
+    lc_workflow_close_method(&workflow->pub);
+    return rc;
   }
   workflow->notification_capacity = config->notification_capacity == 0U
                                         ? 1024U

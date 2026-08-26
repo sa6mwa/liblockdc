@@ -1550,8 +1550,9 @@ typedef struct lc_consumer_service_config {
 /** Settings for one inbox/outbox workflow namespace.
  *
  * `namespace_name` is required. All zero duration/count fields use the
- * documented defaults; negative values and invalid retry ranges are rejected
- * during `lc_client_new_workflow()` before its dispatcher thread starts.
+ * documented defaults; negative values, invalid retry ranges, and claim TTLs
+ * that cannot produce an `lc_unix_seconds` deadline are rejected during
+ * `lc_client_new_workflow()` before its dispatcher thread starts.
  */
 typedef struct lc_workflow_config {
   /** Required namespace that contains both inbox and outbox records. */

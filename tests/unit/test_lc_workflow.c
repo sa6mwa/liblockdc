@@ -10,7 +10,9 @@
 #include "lc_pouch_internal.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,6 +48,25 @@ static int workflow_fail_first_call(void *context, lc_error *error) {
                         NULL);
   }
   return LC_OK;
+}
+
+static size_t workflow_failing_source_read(void *context, void *buffer,
+                                           size_t count, lc_error *error) {
+  (void)context;
+  (void)buffer;
+  (void)count;
+  (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                     "forced workflow result attachment failure", NULL, NULL,
+                     NULL);
+  return 0U;
+}
+
+static int workflow_duration_overflows_unix_range(long duration) {
+  time_t now = time(NULL);
+
+  return duration > 0L && now != (time_t)-1 &&
+         (uintmax_t)now <= (uintmax_t)LC_I64_MAX &&
+         (uintmax_t)duration > (uintmax_t)LC_I64_MAX - (uintmax_t)now;
 }
 
 static void workflow_reset_allocation_failures(void) {
@@ -1972,6 +1993,191 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void
+test_pouch_command_attachment_failure_aborts_transaction(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_command_request command;
+  lc_command_receipt receipt, retry_receipt;
+  lc_command_result result;
+  lc_workflow_transaction *transaction;
+  lc_source *body;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX
+                       "command-attachment-failure-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  body = NULL;
+  lc_command_receipt_init(&receipt);
+  lc_command_receipt_init(&retry_receipt);
+  lc_command_request_init(&command);
+  command.identity.scope = "tenant-attachment";
+  command.identity.command_type = "orders.attach-result.v1";
+  command.identity.idempotency_key = "attachment-failure-request";
+  command.request_digest = "attachment-failure-digest";
+  command.operation_id = "attachment-failure-operation";
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "command-attachment-failure";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  assert_int_equal(lc_workflow_accept_command(workflow, &command, &transaction,
+                                              &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  assert_int_equal(lc_source_from_callbacks(workflow_failing_source_read, NULL,
+                                            NULL, NULL, &body, &error),
+                   LC_OK);
+  lc_command_result_init(&result);
+  result.result_code = "created";
+  result.content_type = "text/plain";
+  result.body = body;
+  assert_int_equal(
+      lc_workflow_transaction_complete_command(transaction, &result, &error),
+      LC_ERR_TRANSPORT);
+  assert_string_equal(error.message,
+                      "forced workflow result attachment failure");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_source_close(body);
+  body = NULL;
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+
+  /* The failed terminal result must not create a duplicate or a receipt that
+   * advertises the missing attachment. */
+  assert_int_equal(lc_workflow_accept_command(workflow, &command, &transaction,
+                                              &retry_receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  assert_false(retry_receipt.duplicate);
+  lc_command_result_init(&result);
+  result.result_code = "created";
+  assert_int_equal(
+      lc_workflow_transaction_complete_command(transaction, &result, &error),
+      LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  lc_command_receipt_cleanup(&retry_receipt);
+  assert_int_equal(lc_workflow_get_command_receipt(workflow, &command.identity,
+                                                   &retry_receipt, &error),
+                   LC_OK);
+  assert_int_equal(retry_receipt.state, LC_COMMAND_COMPLETED);
+  assert_false(retry_receipt.has_result_body);
+  lc_command_receipt_cleanup(&retry_receipt);
+  lc_command_receipt_cleanup(&receipt);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_workflow_rejects_overflowing_deadlines(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_outbox_retry retry;
+  lc_workflow_transaction *transaction;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_error error;
+
+  (void)state;
+  if (!workflow_duration_overflows_unix_range(LONG_MAX))
+    return;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "deadline-overflow-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  job = NULL;
+  payload = NULL;
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "deadline-overflow";
+  workflow_config.claim_ttl_seconds = LONG_MAX;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_ERR_INVALID);
+  assert_null(workflow);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "deadline-overflow";
+  workflow_config.host_retry_delay_max_seconds = LONG_MAX;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "deadline-overflow-operation";
+  entry.effect_id = "deadline-overflow-effect";
+  entry.effect_key = "deadline-overflow-key";
+  entry.kind = "http";
+  entry.destination = "https://example.invalid/deadline-overflow";
+  entry.content_type = "text/plain";
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 2000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  lc_outbox_retry_init(&retry);
+  retry.delay_seconds = LONG_MAX;
+  assert_int_equal(lc_outbox_job_retry(job, &retry, &error), LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(
+      lc_outbox_job_dead_letter(job, "overflow regression", &error), LC_OK);
+  lc_outbox_job_close(job);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void test_pouch_shared_command_resume_is_durable(void **state) {
   char root[256], template_path[256], endpoint[320];
   const char *endpoints[1];
@@ -3618,6 +3824,9 @@ int main(void) {
           test_pouch_claim_recovery_allocation_failure_recovers_at_expiry),
       cmocka_unit_test(
           test_pouch_command_receipt_commits_with_outbox_and_result),
+      cmocka_unit_test(
+          test_pouch_command_attachment_failure_aborts_transaction),
+      cmocka_unit_test(test_pouch_workflow_rejects_overflowing_deadlines),
       cmocka_unit_test(test_pouch_shared_command_resume_is_durable),
       cmocka_unit_test(test_pouch_multikey_terminal_failure_publishes_nothing),
       cmocka_unit_test(test_pouch_reconciliation_retains_overflow_request),
