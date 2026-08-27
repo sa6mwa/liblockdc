@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -210,16 +211,40 @@ static int lcdc_opt_boolean_field(lua_State *L, int index, const char *name,
 
 static int lcdc_opt_integer_field(lua_State *L, int index, const char *name,
                                   long *out) {
+  lua_Integer value;
+
   if (lua_istable(L, index)) {
     lua_getfield(L, index, name);
     if (!lua_isnil(L, -1)) {
-      *out = (long)luaL_checkinteger(L, -1);
+      value = luaL_checkinteger(L, -1);
+      if (value < (lua_Integer)LONG_MIN || value > (lua_Integer)LONG_MAX)
+        luaL_error(L, "%s must fit a C long", name);
+      *out = (long)value;
       lua_pop(L, 1);
       return 1;
     }
     lua_pop(L, 1);
   }
   return 0;
+}
+
+static int lcdc_opt_size_field(lua_State *L, int index, const char *name,
+                               size_t *out) {
+  lua_Integer value;
+
+  if (!lua_istable(L, index))
+    return 0;
+  lua_getfield(L, index, name);
+  if (lua_isnil(L, -1)) {
+    lua_pop(L, 1);
+    return 0;
+  }
+  value = luaL_checkinteger(L, -1);
+  if (value < 0 || (uintmax_t)value > (uintmax_t)SIZE_MAX)
+    luaL_error(L, "%s must be a non-negative size", name);
+  *out = (size_t)value;
+  lua_pop(L, 1);
+  return 1;
 }
 
 static int lcdc_opt_int_field(lua_State *L, int index, const char *name,
@@ -2838,13 +2863,8 @@ static int lcdc_client_new_workflow(lua_State *L) {
                          &config.shutdown_timeout_ms);
   lcdc_opt_boolean_field(L, 2, "replay_dead_letters_on_startup",
                          &config.replay_dead_letters_on_startup);
-  {
-    long notification_capacity = 0L;
-    if (lcdc_opt_integer_field(L, 2, "notification_capacity",
-                               &notification_capacity)) {
-      config.notification_capacity = (size_t)notification_capacity;
-    }
-  }
+  (void)lcdc_opt_size_field(L, 2, "notification_capacity",
+                            &config.notification_capacity);
   rc = lc_client_new_workflow(client_ud->client, &config, &workflow, &error);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);

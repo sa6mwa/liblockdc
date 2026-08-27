@@ -22,6 +22,17 @@ if oversized_attempts_ok then
   error("Lua workflow accepted max_attempts outside the C int range")
 end
 
+local negative_notification_capacity_ok = pcall(function()
+  return client:new_workflow({
+    namespace = "lua-workflow-invalid-notification-capacity",
+    notification_capacity = -1,
+  })
+end)
+if negative_notification_capacity_ok then
+  client:close()
+  error("Lua workflow accepted a negative notification_capacity")
+end
+
 local oversized_queue_attempts_ok = pcall(function()
   return client:enqueue({
     namespace_name = "lua-workflow-invalid-max-attempts",

@@ -21,6 +21,7 @@ typedef struct lc_workflow_delayed_notification {
 
 static void lc_workflow_release(lc_workflow_handle *workflow);
 static void lc_workflow_retain(lc_workflow_handle *workflow);
+static void lc_workflow_rollback_lease(lc_lease *lease);
 static void lc_workflow_transaction_abort_enrolled_lease(
     lc_workflow_transaction_handle *transaction, lc_lease *lease);
 
@@ -1076,7 +1077,7 @@ static int lc_workflow_nullable_string_equal(const char *left,
 }
 
 static int lc_workflow_existing_outbox(lc_workflow_handle *workflow,
-                                       const char *key,
+                                       lc_lease *lease, const char *key,
                                        const lc_outbox_entry *entry,
                                        lc_outbox_receipt *receipt,
                                        lc_error *error) {
@@ -1094,9 +1095,14 @@ static int lc_workflow_existing_outbox(lc_workflow_handle *workflow,
   content_type = entry->content_type != NULL ? entry->content_type
                                              : "application/octet-stream";
   runtime = lc_thread_lonejson_runtime();
-  rc = lc_load_in_namespace(&workflow->client->pub, workflow->namespace_name,
-                            key, &lc_workflow_outbox_record_map, &record,
-                            &options, &result, error);
+  if (lease != NULL) {
+    rc = lc_lease_load(lease, &lc_workflow_outbox_record_map, &record, NULL,
+                       &result, error);
+  } else {
+    rc = lc_load_in_namespace(&workflow->client->pub, workflow->namespace_name,
+                              key, &lc_workflow_outbox_record_map, &record,
+                              &options, &result, error);
+  }
   if (rc == LC_OK && (result.no_content || record.record_type == NULL ||
                       record.operation_id == NULL || record.effect_id == NULL ||
                       record.effect_key == NULL || record.message_id == NULL ||
@@ -1139,7 +1145,7 @@ static int lc_workflow_existing_outbox(lc_workflow_handle *workflow,
 }
 
 static int lc_workflow_existing_inbox(lc_workflow_handle *workflow,
-                                      const char *key,
+                                      lc_lease *lease, const char *key,
                                       const lc_inbox_message *message,
                                       lc_inbox_accept_result *result,
                                       lc_error *error) {
@@ -1154,9 +1160,14 @@ static int lc_workflow_existing_inbox(lc_workflow_handle *workflow,
   lc_get_opts_init(&options);
   options.public_read = 1;
   runtime = lc_thread_lonejson_runtime();
-  rc = lc_load_in_namespace(&workflow->client->pub, workflow->namespace_name,
-                            key, &lc_workflow_inbox_record_map, &record,
-                            &options, &load_result, error);
+  if (lease != NULL) {
+    rc = lc_lease_load(lease, &lc_workflow_inbox_record_map, &record, NULL,
+                       &load_result, error);
+  } else {
+    rc = lc_load_in_namespace(&workflow->client->pub, workflow->namespace_name,
+                              key, &lc_workflow_inbox_record_map, &record,
+                              &options, &load_result, error);
+  }
   if (rc == LC_OK &&
       (load_result.no_content || record.record_type == NULL ||
        record.consumer_id == NULL || record.source_kind == NULL ||
@@ -1183,7 +1194,7 @@ static int lc_workflow_existing_inbox(lc_workflow_handle *workflow,
 }
 
 static int lc_workflow_existing_command(lc_workflow_handle *workflow,
-                                        const char *key,
+                                        lc_lease *lease, const char *key,
                                         const lc_command_request *request,
                                         lc_command_receipt *receipt,
                                         lc_error *error) {
@@ -1198,9 +1209,14 @@ static int lc_workflow_existing_command(lc_workflow_handle *workflow,
   lc_get_opts_init(&options);
   options.public_read = 1;
   runtime = lc_thread_lonejson_runtime();
-  rc = lc_load_in_namespace(&workflow->client->pub, workflow->namespace_name,
-                            key, &lc_workflow_command_record_map, &record,
-                            &options, &load_result, error);
+  if (lease != NULL) {
+    rc = lc_lease_load(lease, &lc_workflow_command_record_map, &record, NULL,
+                       &load_result, error);
+  } else {
+    rc = lc_load_in_namespace(&workflow->client->pub, workflow->namespace_name,
+                              key, &lc_workflow_command_record_map, &record,
+                              &options, &load_result, error);
+  }
   if (rc == LC_OK &&
       (load_result.no_content || record.record_type == NULL ||
        record.scope == NULL || record.command_type == NULL ||
@@ -1225,6 +1241,51 @@ static int lc_workflow_existing_command(lc_workflow_handle *workflow,
   if (rc == LC_OK && request != NULL)
     receipt->duplicate = 1;
   return rc;
+}
+
+/* A create-only acquire cannot distinguish an active lease from a committed
+ * duplicate: both are expected rejections. Probe with an ordinary lease and
+ * retain it through validation, so a duplicate is reported only from a
+ * stable, currently unleased committed record. */
+static int lc_workflow_probe_duplicate_barrier(lc_workflow_handle *workflow,
+                                               const char *key, int acquire_rc,
+                                               lc_lease **out,
+                                               lc_error *error) {
+  lc_acquire_req acquire;
+  lc_error acquire_error;
+  lc_lease *lease;
+  int rc;
+
+  if (workflow == NULL || key == NULL || out == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow duplicate probe requires workflow, key, and "
+                        "lease output",
+                        NULL, NULL, NULL);
+  *out = NULL;
+  lc_error_init(&acquire_error);
+  if (error != NULL) {
+    acquire_error = *error;
+    lc_error_init(error);
+  }
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = workflow->namespace_name;
+  acquire.key = key;
+  acquire.owner = workflow->owner;
+  acquire.ttl_seconds = workflow->transaction_ttl_seconds;
+  lease = NULL;
+  rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error);
+  if (rc == LC_OK) {
+    lc_error_cleanup(&acquire_error);
+    *out = lease;
+    return LC_OK;
+  }
+  if (error != NULL) {
+    lc_error_cleanup(error);
+    *error = acquire_error;
+    lc_error_init(&acquire_error);
+  }
+  lc_error_cleanup(&acquire_error);
+  return acquire_rc;
 }
 
 static int
@@ -2831,12 +2892,16 @@ static int lc_workflow_transaction_accept_command_method(
   lease = NULL;
   rc = lc_acquire(&transaction->workflow->client->pub, &acquire, &lease, error);
   if (rc != LC_OK) {
-    if (error != NULL) {
-      lc_error_cleanup(error);
-      lc_error_init(error);
+    lc_lease *duplicate_lease;
+
+    duplicate_lease = NULL;
+    rc = lc_workflow_probe_duplicate_barrier(transaction->workflow, key, rc,
+                                             &duplicate_lease, error);
+    if (rc == LC_OK) {
+      rc = lc_workflow_existing_command(transaction->workflow, duplicate_lease,
+                                        key, request, receipt, error);
+      lc_workflow_rollback_lease(duplicate_lease);
     }
-    rc = lc_workflow_existing_command(transaction->workflow, key, request,
-                                      receipt, error);
     free(key);
     return rc;
   }
@@ -2930,12 +2995,16 @@ static int lc_workflow_transaction_append_outbox_method(
   lease = NULL;
   rc = lc_acquire(&transaction->workflow->client->pub, &acquire, &lease, error);
   if (rc != LC_OK) {
-    if (error != NULL) {
-      lc_error_cleanup(error);
-      lc_error_init(error);
+    lc_lease *duplicate_lease;
+
+    duplicate_lease = NULL;
+    rc = lc_workflow_probe_duplicate_barrier(transaction->workflow, key, rc,
+                                             &duplicate_lease, error);
+    if (rc == LC_OK) {
+      rc = lc_workflow_existing_outbox(transaction->workflow, duplicate_lease,
+                                       key, &effective_entry, receipt, error);
+      lc_workflow_rollback_lease(duplicate_lease);
     }
-    rc = lc_workflow_existing_outbox(transaction->workflow, key,
-                                     &effective_entry, receipt, error);
     free(key);
     return rc;
   }
@@ -3139,11 +3208,16 @@ static int lc_workflow_append_outbox_method(lc_workflow *self,
   lease = NULL;
   rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error);
   if (rc != LC_OK) {
-    if (error != NULL) {
-      lc_error_cleanup(error);
-      lc_error_init(error);
+    lc_lease *duplicate_lease;
+
+    duplicate_lease = NULL;
+    rc = lc_workflow_probe_duplicate_barrier(workflow, key, rc,
+                                             &duplicate_lease, error);
+    if (rc == LC_OK) {
+      rc = lc_workflow_existing_outbox(workflow, duplicate_lease, key, entry,
+                                       receipt, error);
+      lc_workflow_rollback_lease(duplicate_lease);
     }
-    rc = lc_workflow_existing_outbox(workflow, key, entry, receipt, error);
     free(key);
     return rc;
   }
@@ -3202,11 +3276,16 @@ static int lc_workflow_accept_inbox_method(lc_workflow *self,
   lease = NULL;
   rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error);
   if (rc != LC_OK) {
-    if (error != NULL) {
-      lc_error_cleanup(error);
-      lc_error_init(error);
+    lc_lease *duplicate_lease;
+
+    duplicate_lease = NULL;
+    rc = lc_workflow_probe_duplicate_barrier(workflow, key, rc,
+                                             &duplicate_lease, error);
+    if (rc == LC_OK) {
+      rc = lc_workflow_existing_inbox(workflow, duplicate_lease, key, message,
+                                      result, error);
+      lc_workflow_rollback_lease(duplicate_lease);
     }
-    rc = lc_workflow_existing_inbox(workflow, key, message, result, error);
     free(key);
     return rc;
   }
@@ -3272,11 +3351,16 @@ static int lc_workflow_accept_command_method(lc_workflow *self,
   lease = NULL;
   rc = lc_acquire(&workflow->client->pub, &acquire, &lease, error);
   if (rc != LC_OK) {
-    if (error != NULL) {
-      lc_error_cleanup(error);
-      lc_error_init(error);
+    lc_lease *duplicate_lease;
+
+    duplicate_lease = NULL;
+    rc = lc_workflow_probe_duplicate_barrier(workflow, key, rc,
+                                             &duplicate_lease, error);
+    if (rc == LC_OK) {
+      rc = lc_workflow_existing_command(workflow, duplicate_lease, key, request,
+                                        receipt, error);
+      lc_workflow_rollback_lease(duplicate_lease);
     }
-    rc = lc_workflow_existing_command(workflow, key, request, receipt, error);
     free(key);
     return rc;
   }
@@ -3333,7 +3417,8 @@ static int lc_workflow_get_command_receipt_method(
   key = NULL;
   rc = lc_workflow_command_key(identity, &key, command_id, error);
   if (rc == LC_OK)
-    rc = lc_workflow_existing_command(workflow, key, NULL, receipt, error);
+    rc =
+        lc_workflow_existing_command(workflow, NULL, key, NULL, receipt, error);
   free(key);
   return rc;
 }
@@ -3397,7 +3482,7 @@ static int lc_workflow_resume_command_method(
   rc = lc_workflow_command_key(identity, &key, command_id, error);
   if (rc != LC_OK)
     return rc;
-  rc = lc_workflow_existing_command(workflow, key, NULL, receipt, error);
+  rc = lc_workflow_existing_command(workflow, NULL, key, NULL, receipt, error);
   if (rc != LC_OK || receipt->state != LC_COMMAND_PENDING) {
     free(key);
     return rc;

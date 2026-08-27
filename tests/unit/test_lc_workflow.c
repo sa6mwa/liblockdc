@@ -820,6 +820,7 @@ test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts(void **state) {
   lc_client *client;
   lc_workflow *workflow;
   lc_workflow_transaction *transaction;
+  lc_outbox_job *job;
   lc_outbox_receipt receipt;
   lc_source *payload;
   lc_error error;
@@ -867,6 +868,11 @@ test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts(void **state) {
   assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
   lc_workflow_transaction_close(transaction);
   transaction = NULL;
+  job = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 3000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  lc_outbox_job_close(job);
 
   entry.content_type = "application/json";
   assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
@@ -944,6 +950,9 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_inbox_accept_result inbox_result;
   lc_workflow_transaction *inbox_transaction;
   lc_outbox_job *job;
+  lc_acquire_req duplicate_barrier_acquire;
+  lc_release_req duplicate_barrier_release;
+  lc_lease *duplicate_barrier_lease;
   lc_source *payload;
   lc_source *state_source;
   lc_sink *payload_sink;
@@ -1020,19 +1029,6 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   assert_string_equal(job->effect_key, entry.effect_key);
   assert_string_equal(job->destination, entry.destination);
   assert_int_equal(job->attempt, 1);
-  lc_source_close(payload);
-  payload = NULL;
-  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
-                   LC_OK);
-  lc_outbox_receipt_init(&duplicate_receipt);
-  duplicate_transaction = (lc_workflow_transaction *)1;
-  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
-                                             &duplicate_transaction,
-                                             &duplicate_receipt, &error),
-                   LC_OK);
-  assert_null(duplicate_transaction);
-  assert_true(duplicate_receipt.duplicate);
-  assert_string_equal(receipt.outbox_key, duplicate_receipt.outbox_key);
   payload_sink = NULL;
   payload_bytes = NULL;
   payload_length = 0U;
@@ -1050,6 +1046,45 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_sink_close(payload_sink);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
   lc_outbox_job_close(job);
+  job = NULL;
+  lc_source_close(payload);
+  payload = NULL;
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+  lc_outbox_receipt_init(&duplicate_receipt);
+  lc_acquire_req_init(&duplicate_barrier_acquire);
+  duplicate_barrier_acquire.namespace_name = workflow_config.namespace_name;
+  duplicate_barrier_acquire.key = receipt.outbox_key;
+  duplicate_barrier_acquire.owner = "duplicate-barrier-holder";
+  duplicate_barrier_acquire.ttl_seconds = 30L;
+  duplicate_barrier_lease = NULL;
+  assert_int_equal(lc_acquire(client, &duplicate_barrier_acquire,
+                              &duplicate_barrier_lease, &error),
+                   LC_OK);
+  duplicate_transaction = (lc_workflow_transaction *)1;
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &duplicate_transaction,
+                                             &duplicate_receipt, &error),
+                   LC_ERR_INVALID);
+  assert_null(duplicate_transaction);
+  assert_false(duplicate_receipt.duplicate);
+  assert_null(duplicate_receipt.outbox_key);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_release_req_init(&duplicate_barrier_release);
+  duplicate_barrier_release.rollback = 1;
+  assert_int_equal(lc_lease_release(duplicate_barrier_lease,
+                                    &duplicate_barrier_release, &error),
+                   LC_OK);
+  duplicate_barrier_lease = NULL;
+  duplicate_transaction = (lc_workflow_transaction *)1;
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &duplicate_transaction,
+                                             &duplicate_receipt, &error),
+                   LC_OK);
+  assert_null(duplicate_transaction);
+  assert_true(duplicate_receipt.duplicate);
+  assert_string_equal(receipt.outbox_key, duplicate_receipt.outbox_key);
   lc_source_close(payload);
   payload = NULL;
   lc_outbox_receipt_cleanup(&receipt);
@@ -1916,8 +1951,11 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   lc_client_config client_config;
   lc_workflow_config workflow_config;
   lc_command_request command;
-  lc_command_receipt receipt, duplicate_receipt;
-  lc_workflow_transaction *transaction, *duplicate_transaction;
+  lc_command_request active_command;
+  lc_command_receipt receipt, duplicate_receipt, active_receipt,
+      active_duplicate_receipt;
+  lc_workflow_transaction *transaction, *duplicate_transaction,
+      *active_transaction, *active_duplicate_transaction;
   lc_workflow_participant_request participant_request;
   lc_workflow_participant *participant;
   lc_outbox_entry entry;
@@ -1954,6 +1992,8 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   job = NULL;
   lc_command_receipt_init(&receipt);
   lc_command_receipt_init(&duplicate_receipt);
+  lc_command_receipt_init(&active_receipt);
+  lc_command_receipt_init(&active_duplicate_receipt);
   lc_outbox_receipt_init(&outbox_receipt);
   assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
   lc_workflow_config_init(&workflow_config);
@@ -2047,6 +2087,49 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   assert_null(duplicate_transaction);
   assert_true(duplicate_receipt.duplicate);
   assert_int_equal(duplicate_receipt.state, LC_COMMAND_COMPLETED);
+  lc_command_request_init(&active_command);
+  active_command.identity.scope = "tenant-a";
+  active_command.identity.command_type = "orders.create.v1";
+  active_command.identity.idempotency_key = "active-request";
+  active_command.request_digest = "active-semantic-request-digest";
+  active_command.operation_id = "active-order-operation";
+  active_transaction = NULL;
+  assert_int_equal(lc_workflow_accept_command(workflow, &active_command,
+                                              &active_transaction,
+                                              &active_receipt, &error),
+                   LC_OK);
+  assert_non_null(active_transaction);
+  assert_int_equal(lc_workflow_transaction_commit(active_transaction, &error),
+                   LC_OK);
+  lc_workflow_transaction_close(active_transaction);
+  active_transaction = NULL;
+  assert_int_equal(
+      lc_workflow_resume_command(workflow, &active_command.identity,
+                                 &active_transaction, &active_receipt, &error),
+      LC_OK);
+  assert_non_null(active_transaction);
+  active_duplicate_transaction = (lc_workflow_transaction *)1;
+  assert_int_equal(lc_workflow_accept_command(
+                       workflow, &active_command, &active_duplicate_transaction,
+                       &active_duplicate_receipt, &error),
+                   LC_ERR_INVALID);
+  assert_null(active_duplicate_transaction);
+  assert_false(active_duplicate_receipt.duplicate);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_workflow_transaction_rollback(active_transaction, &error),
+                   LC_OK);
+  lc_workflow_transaction_close(active_transaction);
+  active_transaction = NULL;
+  active_duplicate_transaction = (lc_workflow_transaction *)1;
+  assert_int_equal(lc_workflow_accept_command(
+                       workflow, &active_command, &active_duplicate_transaction,
+                       &active_duplicate_receipt, &error),
+                   LC_OK);
+  assert_null(active_duplicate_transaction);
+  assert_true(active_duplicate_receipt.duplicate);
+  lc_command_receipt_cleanup(&active_duplicate_receipt);
+  lc_command_receipt_cleanup(&active_receipt);
   command.request_digest = "conflicting-digest";
   assert_int_equal(lc_workflow_accept_command(workflow, &command,
                                               &duplicate_transaction,
