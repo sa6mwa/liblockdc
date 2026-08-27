@@ -10,6 +10,7 @@
 #include <lc/lc.h>
 
 #include "lc_api_internal.h"
+#include "lc_intcompat.h"
 
 #define LCDC_CLIENT_MT "lockdc.client"
 #define LCDC_LEASE_MT "lockdc.lease"
@@ -209,17 +210,21 @@ static int lcdc_opt_boolean_field(lua_State *L, int index, const char *name,
   return 0;
 }
 
+static long lcdc_check_long(lua_State *L, int index, const char *name) {
+  lua_Integer value = luaL_checkinteger(L, index);
+  long result;
+
+  if (!lc_i64_to_long_checked((lc_i64)value, &result))
+    luaL_error(L, "%s must fit a C long", name);
+  return result;
+}
+
 static int lcdc_opt_integer_field(lua_State *L, int index, const char *name,
                                   long *out) {
-  lua_Integer value;
-
   if (lua_istable(L, index)) {
     lua_getfield(L, index, name);
     if (!lua_isnil(L, -1)) {
-      value = luaL_checkinteger(L, -1);
-      if (value < (lua_Integer)LONG_MIN || value > (lua_Integer)LONG_MAX)
-        luaL_error(L, "%s must fit a C long", name);
-      *out = (long)value;
+      *out = lcdc_check_long(L, -1, name);
       lua_pop(L, 1);
       return 1;
     }
@@ -3065,7 +3070,7 @@ static int lcdc_workflow_next(lua_State *L) {
   int rc;
 
   if (!lua_isnoneornil(L, 2))
-    timeout_ms = (long)luaL_checkinteger(L, 2);
+    timeout_ms = lcdc_check_long(L, 2, "workflow next timeout");
   lc_error_init(&error);
   rc = lc_workflow_next(ud->workflow, timeout_ms, &job, &error);
   if (rc != LC_OK) {
@@ -3792,7 +3797,7 @@ static int lcdc_outbox_job_write_payload(lua_State *L) {
 static int lcdc_outbox_job_renew(lua_State *L) {
   lcdc_outbox_job_ud *ud = lcdc_check_outbox_job(L, 1);
   lc_error error;
-  long ttl_seconds = (long)luaL_checkinteger(L, 2);
+  long ttl_seconds = lcdc_check_long(L, 2, "outbox renewal ttl");
   int rc;
 
   lc_error_init(&error);

@@ -1,3 +1,4 @@
+#include <limits.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -1030,6 +1031,9 @@ static void test_intcompat_rejects_out_of_range_narrowing(void **state) {
   assert_false(lc_parse_int_base10_checked("2147483648", &ivalue));
   assert_false(lc_parse_long_base10_checked("9223372036854775808", &lvalue));
   assert_false(lc_parse_ulong_base10_checked("-1", &uvalue));
+  if ((lc_i64)LONG_MAX < LC_I64_MAX) {
+    assert_false(lc_i64_to_long_checked(LC_I64_MAX, &lvalue));
+  }
 }
 
 int main(void) {
