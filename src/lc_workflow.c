@@ -4171,8 +4171,8 @@ int lc_client_new_workflow_method(lc_client *self,
     workflow->dispatcher_client = client;
   } else {
     lc_client *dispatcher_client = NULL;
-    rc = lc_client_clone_remote(client, workflow->shutdown_timeout_ms,
-                                &dispatcher_client, error);
+    rc = lc_client_clone_remote_for_workflow(
+        client, workflow->shutdown_timeout_ms, &dispatcher_client, error);
     if (rc != LC_OK) {
       lc_workflow_close_method(&workflow->pub);
       return rc;

@@ -256,8 +256,11 @@ typedef struct lc_client_config {
   int insecure_skip_verify;
   /** Prefers HTTP/2 when the endpoint and libcurl build support it. */
   int prefer_http_2;
-  /** Maximum typed JSON response bytes parsed through lonejson. Zero uses
-   * `LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT`.
+  /** Maximum typed JSON response bytes parsed through lonejson for operations
+   * issued through this client. Zero uses
+   * `LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT`. A remote workflow owns a separate
+   * dispatcher client with the standard bounded limit so a lower
+   * application-facing limit cannot strand its library-owned durable envelopes.
    */
   size_t http_json_response_limit_bytes;
   /** Borrowed client logger used for SDK diagnostics. Defaults to a no-op

@@ -535,8 +535,11 @@ static int teardown_pouch_e2e_group(void **state) {
   return 0;
 }
 
-static void open_tcp_client(const char *endpoint, const char *bundle_path,
-                            lc_client **out, lc_error *error) {
+static void open_tcp_client_with_json_response_limit(const char *endpoint,
+                                                     const char *bundle_path,
+                                                     size_t json_response_limit,
+                                                     lc_client **out,
+                                                     lc_error *error) {
   lc_client_config config;
   lc_source *bundle_source;
   const char *endpoints[1];
@@ -553,9 +556,16 @@ static void open_tcp_client(const char *endpoint, const char *bundle_path,
   config.default_namespace = "default";
   config.timeout_ms = 5000L;
   config.insecure_skip_verify = 1;
+  config.http_json_response_limit_bytes = json_response_limit;
   rc = lc_client_open(&config, out, error);
   lc_source_close(bundle_source);
   assert_lc_ok(rc, error);
+}
+
+static void open_tcp_client(const char *endpoint, const char *bundle_path,
+                            lc_client **out, lc_error *error) {
+  open_tcp_client_with_json_response_limit(endpoint, bundle_path, 0U, out,
+                                           error);
 }
 
 static void open_tcp_client_allow_error(const char *endpoint,
@@ -4723,6 +4733,85 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_disk_workflow_dispatcher_uses_internal_json_limit(void **state) {
+  const char *endpoint;
+  const char *bundle_path;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_config config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_workflow_transaction *transaction;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_error error;
+  char effect_key[128];
+  char header_value[1537];
+  char headers_json[1600];
+  int header_length;
+  int rc;
+
+  (void)state;
+  endpoint =
+      env_or_default("LOCKDC_E2E_DISK_ENDPOINT", "https://localhost:19441");
+  bundle_path =
+      env_or_default("LOCKDC_E2E_DISK_BUNDLE",
+                     "./devenv/volumes/lockd-disk-a-config/client.pem");
+  require_file_or_skip(bundle_path);
+  make_unique_name("workflow-response-limit", effect_key, sizeof(effect_key));
+  memset(header_value, 'a', sizeof(header_value) - 1U);
+  header_value[sizeof(header_value) - 1U] = '\0';
+  header_length = snprintf(headers_json, sizeof(headers_json),
+                           "{\"x-workflow-proof\":\"%s\"}", header_value);
+  assert_true(header_length > 1024);
+  assert_true((size_t)header_length < sizeof(headers_json));
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  job = NULL;
+  payload = NULL;
+  lc_error_init(&error);
+  open_tcp_client_with_json_response_limit(endpoint, bundle_path, 1024U,
+                                           &client, &error);
+  lc_workflow_config_init(&config);
+  config.namespace_name = "default";
+  config.owner = "workflow-response-limit-e2e";
+  rc = lc_client_new_workflow(client, &config, &workflow, &error);
+  assert_lc_ok(rc, &error);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = effect_key;
+  entry.effect_id = "notify";
+  entry.effect_key = effect_key;
+  entry.kind = "test";
+  entry.destination = "https://example.invalid/workflow-response-limit";
+  entry.content_type = "text/plain";
+  entry.headers_json = headers_json;
+  rc = lc_source_from_memory("workflow-payload", 16U, &payload, &error);
+  assert_lc_ok(rc, &error);
+  lc_outbox_receipt_init(&receipt);
+  rc = lc_workflow_append_outbox(workflow, &entry, payload, &transaction,
+                                 &receipt, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(transaction);
+  rc = lc_workflow_transaction_commit(transaction, &error);
+  assert_lc_ok(rc, &error);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  rc = lc_workflow_next(workflow, 5000L, &job, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, effect_key);
+  rc = lc_outbox_job_complete(job, NULL, &error);
+  assert_lc_ok(rc, &error);
+  lc_outbox_job_close(job);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
 static void test_disk_workflow_retry_redelivery(void **state) {
   const char *endpoint;
   const char *bundle_path;
@@ -4948,6 +5037,7 @@ int main(void) {
       cmocka_unit_test(test_disk_lease_state_roundtrip),
       cmocka_unit_test(test_disk_server_minted_multikey_xa_transaction),
       cmocka_unit_test(test_disk_workflow_implicit_xa_roundtrip),
+      cmocka_unit_test(test_disk_workflow_dispatcher_uses_internal_json_limit),
       cmocka_unit_test(test_disk_workflow_retry_redelivery),
       cmocka_unit_test(test_disk_workflow_startup_recovery),
       cmocka_unit_test(test_disk_server_explicit_xa_enlists_on_acquire),

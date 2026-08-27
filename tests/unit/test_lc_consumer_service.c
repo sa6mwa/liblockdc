@@ -2798,6 +2798,46 @@ test_consumer_service_worker_clone_preserves_json_response_limit(void **state) {
 }
 
 static void
+test_workflow_dispatcher_clone_uses_standard_json_response_limit(void **state) {
+  tracked_allocator_state alloc_state;
+  lc_allocator allocator;
+  lc_client_handle client;
+  lc_client *dispatcher_client;
+  consumer_test_state runtime_state;
+  lc_error error;
+
+  (void)state;
+  tracked_allocator_state_init(&alloc_state);
+  tracked_allocator_init(&allocator, &alloc_state);
+  g_test_allocator = allocator;
+  g_test_client_logger = NULL;
+  init_fake_root_client(&client, &allocator);
+  client.http_json_response_limit_bytes = 1U;
+  client.timeout_ms = 123L;
+  memset(&runtime_state, 0, sizeof(runtime_state));
+  assert_int_equal(pthread_mutex_init(&runtime_state.mutex, NULL), 0);
+  lc_error_init(&error);
+  dispatcher_client = NULL;
+  g_consumer_test_state = &runtime_state;
+
+  assert_int_equal(lc_client_clone_remote_for_workflow(
+                       &client, 456L, &dispatcher_client, &error),
+                   LC_OK);
+  assert_non_null(dispatcher_client);
+  assert_int_equal(runtime_state.last_client_open_json_limit,
+                   LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT);
+  assert_int_equal(
+      ((lc_client_handle *)dispatcher_client)->http_json_response_limit_bytes,
+      LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT);
+
+  dispatcher_client->close(dispatcher_client);
+  g_consumer_test_state = NULL;
+  lc_error_cleanup(&error);
+  assert_int_equal(pthread_mutex_destroy(&runtime_state.mutex), 0);
+  tracked_allocator_state_cleanup(&alloc_state);
+}
+
+static void
 test_consumer_service_worker_clone_preserves_pouch_compression(void **state) {
   tracked_allocator_state alloc_state;
   lc_allocator allocator;
@@ -2965,6 +3005,8 @@ int main(void) {
       cmocka_unit_test(test_consumer_service_message_factory_failure_is_fatal),
       cmocka_unit_test(
           test_consumer_service_worker_clone_preserves_json_response_limit),
+      cmocka_unit_test(
+          test_workflow_dispatcher_clone_uses_standard_json_response_limit),
       cmocka_unit_test(
           test_consumer_service_worker_clone_preserves_pouch_compression),
       cmocka_unit_test(

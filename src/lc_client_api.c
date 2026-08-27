@@ -2813,8 +2813,9 @@ int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
   return LC_OK;
 }
 
-int lc_client_clone_remote(lc_client_handle *source, long timeout_ms,
-                           lc_client **out, lc_error *error) {
+int lc_client_clone_remote_for_workflow(lc_client_handle *source,
+                                        long timeout_ms, lc_client **out,
+                                        lc_error *error) {
   lc_client_config config;
   int rc;
 
@@ -2843,8 +2844,11 @@ int lc_client_clone_remote(lc_client_handle *source, long timeout_ms,
   config.disable_mtls = source->disable_mtls;
   config.insecure_skip_verify = source->insecure_skip_verify;
   config.prefer_http_2 = source->prefer_http_2;
-  config.http_json_response_limit_bytes =
-      source->http_json_response_limit_bytes;
+  /* The root-client limit protects application-facing typed JSON reads. A
+   * workflow dispatcher must always be able to read its library-owned,
+   * bounded durable envelope, so do not inherit an arbitrarily smaller
+   * application limit here. */
+  config.http_json_response_limit_bytes = LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
   config.disable_logger_sys_field = source->disable_logger_sys_field;
   config.logger = source->base_logger;
   config.allocator = source->allocator;
