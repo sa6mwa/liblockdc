@@ -16829,18 +16829,29 @@ int lc_pouch_state_query_index_seq(lc_pouch *pouch, const char *namespace_name,
                         NULL, NULL, "pouch");
   }
   *out = 0UL;
+  memset(&cache_guard, 0, sizeof(cache_guard));
   single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
-  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
   /* The exclusive owner updates this projection in the same mutation path
    * that changes public query candidates. Once it is initialized under the
    * current ownership epoch, its watermark is authoritative; reopening the
    * clean checkpoint on every query only repeats durable I/O. Shared Pouch
    * deliberately retains the recovery path below because another process may
-   * have advanced the namespace. */
-  if (single_writer && cache != NULL && cache->initialized &&
-      cache->writer_mode_epoch == writer_mode_epoch) {
-    *out = cache->max_query_index_seq;
-    return LC_OK;
+   * have advanced the namespace. The resident fields are mutable projection
+   * state, so snapshot them under the same namespace authority as writers. */
+  if (single_writer) {
+    rc = lc_pouch_state_cache_guard_lock(pouch, namespace_name, &cache_guard,
+                                         error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
+    if (cache != NULL && cache->initialized &&
+        cache->writer_mode_epoch == writer_mode_epoch) {
+      *out = cache->max_query_index_seq;
+      lc_pouch_state_cache_guard_unlock(pouch, &cache_guard);
+      return LC_OK;
+    }
+    lc_pouch_state_cache_guard_unlock(pouch, &cache_guard);
   }
   /* An exclusive owner writes this checkpoint only after its append workers
    * have stopped and every state record is durable. Its public-query
@@ -16875,7 +16886,6 @@ int lc_pouch_state_query_index_seq(lc_pouch *pouch, const char *namespace_name,
       return LC_OK;
     }
   }
-  memset(&cache_guard, 0, sizeof(cache_guard));
   /* Query freshness excludes lease-only and internal-object mutations. That
    * distinction exists only in the state projection, so a first query after
    * reopening must warm it even on the exclusive fast path. */

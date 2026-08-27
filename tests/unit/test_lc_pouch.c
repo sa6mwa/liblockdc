@@ -368,6 +368,22 @@ typedef struct pouch_maintenance_barrier_context {
   lc_error error;
 } pouch_maintenance_barrier_context;
 
+typedef struct pouch_query_watermark_overlap {
+  lc_pouch *pouch;
+  const char *namespace_name;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+  int mutation_entered;
+  int query_started;
+  int query_finished;
+  int release_mutation;
+  lc_pouch_generation query_seq;
+  int mutation_rc;
+  int query_rc;
+  lc_error mutation_error;
+  lc_error query_error;
+} pouch_query_watermark_overlap;
+
 static const lonejson_field pouch_value_fields[] = {
     LONEJSON_FIELD_I64(pouch_value_doc, value, "value")};
 
@@ -855,6 +871,29 @@ static int pouch_projection_overlap_wait(pouch_projection_overlap *overlap,
 }
 
 static int
+pouch_query_watermark_overlap_wait(pouch_query_watermark_overlap *overlap,
+                                   int *flag) {
+  struct timespec deadline;
+  int wait_rc;
+  int ready;
+
+  if (overlap == NULL || flag == NULL ||
+      clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+    return 0;
+  }
+  deadline.tv_sec += 1;
+  wait_rc = 0;
+  assert_int_equal(pthread_mutex_lock(&overlap->mutex), 0);
+  while (!*flag && wait_rc == 0) {
+    wait_rc =
+        pthread_cond_timedwait(&overlap->cond, &overlap->mutex, &deadline);
+  }
+  ready = *flag;
+  assert_int_equal(pthread_mutex_unlock(&overlap->mutex), 0);
+  return ready;
+}
+
+static int
 pouch_metadata_worker_overlap_wait(pouch_metadata_worker_overlap *overlap,
                                    int *flag) {
   struct timespec deadline;
@@ -1111,6 +1150,62 @@ static void *pouch_maintenance_wait_for_key(void *context) {
   maintenance->finished = 1;
   (void)pthread_cond_broadcast(&maintenance->cond);
   (void)pthread_mutex_unlock(&maintenance->mutex);
+  return NULL;
+}
+
+static int pouch_query_watermark_hold_mutation(void *context, lc_error *error) {
+  pouch_query_watermark_overlap *overlap;
+  int pthread_rc;
+
+  overlap = (pouch_query_watermark_overlap *)context;
+  pthread_rc = pthread_mutex_lock(&overlap->mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock query watermark overlap",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  overlap->mutation_entered = 1;
+  (void)pthread_cond_broadcast(&overlap->cond);
+  while (!overlap->release_mutation) {
+    pthread_rc = pthread_cond_wait(&overlap->cond, &overlap->mutex);
+    if (pthread_rc != 0) {
+      (void)pthread_mutex_unlock(&overlap->mutex);
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to wait for query watermark overlap",
+                          strerror(pthread_rc), NULL, "pouch");
+    }
+  }
+  (void)pthread_mutex_unlock(&overlap->mutex);
+  return LC_OK;
+}
+
+static void *pouch_query_watermark_hold_mutation_thread(void *context) {
+  pouch_query_watermark_overlap *overlap;
+
+  overlap = (pouch_query_watermark_overlap *)context;
+  lc_error_init(&overlap->mutation_error);
+  overlap->mutation_rc = lc_pouch_state_with_namespace_lock(
+      overlap->pouch, overlap->namespace_name,
+      pouch_query_watermark_hold_mutation, overlap, &overlap->mutation_error);
+  return NULL;
+}
+
+static void *pouch_query_watermark_read_thread(void *context) {
+  pouch_query_watermark_overlap *overlap;
+
+  overlap = (pouch_query_watermark_overlap *)context;
+  lc_error_init(&overlap->query_error);
+  assert_int_equal(pthread_mutex_lock(&overlap->mutex), 0);
+  overlap->query_started = 1;
+  assert_int_equal(pthread_cond_broadcast(&overlap->cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&overlap->mutex), 0);
+  overlap->query_rc = lc_pouch_state_query_index_seq(
+      overlap->pouch, overlap->namespace_name, &overlap->query_seq,
+      &overlap->query_error);
+  assert_int_equal(pthread_mutex_lock(&overlap->mutex), 0);
+  overlap->query_finished = 1;
+  assert_int_equal(pthread_cond_broadcast(&overlap->cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&overlap->mutex), 0);
   return NULL;
 }
 
@@ -16741,6 +16836,75 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
   lc_pouch_state_write_result_cleanup(NULL, &internal_result);
   lc_pouch_state_write_result_cleanup(NULL, &delete_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_query_watermark_waits_for_exclusive_namespace_mutation(void **state) {
+  static const char namespace_name[] = "docs/query-watermark-lock";
+  pouch_query_watermark_overlap overlap;
+  pthread_t mutation_thread;
+  pthread_t query_thread;
+  lc_pouch_generation expected_query_seq;
+  lc_pouch *pouch;
+  lc_error error;
+  char root[512];
+  int query_finished_while_held;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  expected_query_seq = 0UL;
+  memset(&overlap, 0, sizeof(overlap));
+  lc_error_init(&error);
+  make_root("query-watermark-lock", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  pouch_write_json_state(pouch, namespace_name, "doc/initial",
+                         "{\"kind\":\"initial\"}", NULL, &error);
+  rc = lc_pouch_state_query_index_seq(pouch, namespace_name,
+                                      &expected_query_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(expected_query_seq > 0UL);
+
+  overlap.pouch = pouch;
+  overlap.namespace_name = namespace_name;
+  assert_int_equal(pthread_mutex_init(&overlap.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&overlap.cond, NULL), 0);
+  assert_int_equal(pthread_create(&mutation_thread, NULL,
+                                  pouch_query_watermark_hold_mutation_thread,
+                                  &overlap),
+                   0);
+  assert_true(
+      pouch_query_watermark_overlap_wait(&overlap, &overlap.mutation_entered));
+  assert_int_equal(pthread_create(&query_thread, NULL,
+                                  pouch_query_watermark_read_thread, &overlap),
+                   0);
+  assert_true(
+      pouch_query_watermark_overlap_wait(&overlap, &overlap.query_started));
+
+  query_finished_while_held =
+      pouch_query_watermark_overlap_wait(&overlap, &overlap.query_finished);
+  assert_int_equal(pthread_mutex_lock(&overlap.mutex), 0);
+  overlap.release_mutation = 1;
+  assert_int_equal(pthread_cond_broadcast(&overlap.cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&overlap.mutex), 0);
+  assert_int_equal(pthread_join(mutation_thread, NULL), 0);
+  assert_int_equal(pthread_join(query_thread, NULL), 0);
+
+  assert_false(query_finished_while_held);
+  assert_int_equal(overlap.mutation_rc, LC_OK);
+  assert_int_equal(overlap.query_rc, LC_OK);
+  assert_int_equal(overlap.query_seq, expected_query_seq);
+
+  lc_error_cleanup(&overlap.query_error);
+  lc_error_cleanup(&overlap.mutation_error);
+  assert_int_equal(pthread_cond_destroy(&overlap.cond), 0);
+  assert_int_equal(pthread_mutex_destroy(&overlap.mutex), 0);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -32655,6 +32819,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_compaction_reclaims_expired_obsolete_files),
       cmocka_unit_test(test_snapshot_high_water_survives_compaction_reopen),
       cmocka_unit_test(test_query_freshness_delete_survives_compaction_reopen),
+      cmocka_unit_test(
+          test_query_watermark_waits_for_exclusive_namespace_mutation),
       cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),
       cmocka_unit_test(test_namespace_manifest_repairs_from_existing_segments),
       cmocka_unit_test(test_staged_state_writes_durable_decision_records),
