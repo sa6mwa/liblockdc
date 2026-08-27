@@ -197,10 +197,26 @@ typedef struct lc_pouch_query_index_text {
   size_t capacity;
 } lc_pouch_query_index_text;
 
+typedef struct lc_pouch_query_index_docid_bitmap {
+  const lc_allocator *allocator;
+  unsigned char *bits;
+  size_t length;
+  unsigned long doc_count;
+} lc_pouch_query_index_docid_bitmap;
+
+typedef struct lc_pouch_query_index_direct_posting_append {
+  const lc_allocator *allocator;
+  const lc_pouch_index_result_docid_list *filter;
+  lc_pouch_index_result_docid_list *docids;
+  size_t value_index;
+} lc_pouch_query_index_direct_posting_append;
+
 static int
 lc_pouch_query_index_text_append_cstr(lc_pouch_query_index_text *text,
                                       const char *bytes, unsigned long *hash,
                                       lc_error *error);
+static int lc_pouch_query_index_direct_posting_append_docid(
+    void *context, unsigned long doc_id, lc_error *error);
 static int lc_pouch_query_index_exact_generation_number_text_hex(
     const lc_allocator *allocator, const char *value, size_t value_len,
     char **out, lc_error *error);
@@ -296,6 +312,8 @@ struct lc_pouch_query_index_generation_cache_entry {
   lc_pouch_index_term_generation direct_generation;
   int has_direct_generation;
   int direct_generation_is_text;
+  size_t *direct_text_prefix_indices;
+  size_t direct_text_prefix_count;
   struct lc_pouch_query_index_generation_cache_entry *next;
 };
 
@@ -885,6 +903,10 @@ static int lc_pouch_query_index_generation_cache_adopt_trigrams(
 static int lc_pouch_query_index_generation_cache_adopt_text(
     lc_pouch *pouch, const char *path,
     lc_pouch_index_term_generation *generation);
+static int lc_pouch_query_index_doc_table_cache_adopt(
+    lc_pouch *pouch, const char *path, lc_pouch_generation index_seq,
+    unsigned long row_count, unsigned long row_hash,
+    lc_pouch_index_doc_table *table);
 static int lc_pouch_query_index_segmented_paths(
     lc_pouch *pouch, const char *namespace_name, const char *segment_id,
     char **header_path, char **doc_table_path, char **exact_term_path,
@@ -9872,6 +9894,60 @@ static void lc_pouch_query_index_trigram_generation_remove_docid_for_field(
   }
 }
 
+static uint64_t lc_pouch_query_index_text_trigram_bloom_add(uint64_t bloom,
+                                                            unsigned long key) {
+  unsigned int first;
+  unsigned int second;
+
+  first = (unsigned int)(key & 63UL);
+  second = (unsigned int)((key >> 6U) & 63UL);
+  return bloom | ((uint64_t)1U << first) | ((uint64_t)1U << second);
+}
+
+/* Case-insensitive text matching folds ASCII bytes only, so this compact
+ * raw-byte summary can reject a complete short value without false negatives.
+ */
+static uint64_t
+lc_pouch_query_index_text_trigram_bloom_hex(const char *value_hex) {
+  size_t length;
+  size_t index;
+  uint64_t bloom;
+
+  if (value_hex == NULL) {
+    return 0U;
+  }
+  length = strlen(value_hex);
+  if ((length & 1U) != 0U || length < 6U) {
+    return 0U;
+  }
+  bloom = 0U;
+  for (index = 0U; index + 5U < length; index += 2U) {
+    int high;
+    int low;
+    unsigned char bytes[3];
+    size_t byte_index;
+    unsigned long key;
+
+    for (byte_index = 0U; byte_index < 3U; ++byte_index) {
+      high = lc_pouch_query_index_hex_value(
+          (unsigned char)value_hex[index + (byte_index * 2U)]);
+      low = lc_pouch_query_index_hex_value(
+          (unsigned char)value_hex[index + (byte_index * 2U) + 1U]);
+      if (high < 0 || low < 0) {
+        return 0U;
+      }
+      bytes[byte_index] = (unsigned char)((high << 4) | low);
+      if (bytes[byte_index] >= 'A' && bytes[byte_index] <= 'Z') {
+        bytes[byte_index] = (unsigned char)(bytes[byte_index] - 'A' + 'a');
+      }
+    }
+    key = ((unsigned long)bytes[0] << 16U) | ((unsigned long)bytes[1] << 8U) |
+          (unsigned long)bytes[2];
+    bloom = lc_pouch_query_index_text_trigram_bloom_add(bloom, key);
+  }
+  return bloom;
+}
+
 static int lc_pouch_query_index_text_generation_add_term(
     const lc_allocator *allocator, lc_pouch_index_term_generation *generation,
     lc_pouch_query_index_exact_generation_accumulator *accumulator,
@@ -9888,6 +9964,15 @@ static int lc_pouch_query_index_text_generation_add_term(
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_exact_generation_accumulator_append(
         allocator, accumulator, term_id, doc_id, error);
+  }
+  if (rc == LC_OK &&
+      (value_type == 's' ||
+       value_type == LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE) &&
+      term_id > 0UL && term_id <= generation->terms.count &&
+      generation->terms.items[term_id - 1U].term_id == term_id) {
+    generation->terms.items[term_id - 1U].text_trigram_bloom =
+        lc_pouch_query_index_text_trigram_bloom_hex(value_hex);
+    generation->terms.items[term_id - 1U].has_text_trigram_bloom = 1;
   }
   return rc;
 }
@@ -13125,6 +13210,11 @@ extracted:
     lc_pouch_query_index_packed_cache_adopt(
         pouch, packed_path, &packed_generation, &packed_generation_length);
     if (lc_pouch_single_writer_enabled(pouch)) {
+      if (memtable_usable && memtable != NULL) {
+        (void)lc_pouch_query_index_doc_table_cache_adopt(
+            pouch, doc_table_path, state_index_seq, segment_row_count, row_hash,
+            &memtable->doc_table);
+      }
       (void)lc_pouch_query_index_generation_cache_adopt_text(
           pouch, text_term_path, &text_cache_generation);
       (void)lc_pouch_query_index_generation_cache_adopt_trigrams(
@@ -13702,6 +13792,7 @@ static void lc_pouch_query_index_generation_cache_entry_cleanup(
   lc_free_with_allocator(allocator, entry->terms);
   lc_free_with_allocator(allocator, entry->fields);
   lc_free_with_allocator(allocator, entry->postings);
+  lc_free_with_allocator(allocator, entry->direct_text_prefix_indices);
   lc_pouch_index_term_generation_cleanup(allocator, &entry->direct_generation);
   memset(entry, 0, sizeof(*entry));
 }
@@ -14710,6 +14801,47 @@ static int lc_pouch_query_index_direct_generation_cache_fields(
   return 1;
 }
 
+static int lc_pouch_query_index_direct_generation_cache_text_prefixes(
+    const lc_allocator *allocator,
+    const lc_pouch_index_term_generation *generation,
+    lc_pouch_query_index_generation_cache_entry *entry) {
+  size_t count;
+  size_t index;
+
+  if (allocator == NULL || generation == NULL || entry == NULL) {
+    return 0;
+  }
+  count = 0U;
+  for (index = 0U; index < generation->terms.count; ++index) {
+    if (!generation->terms.items[index].value_is_trigram_key &&
+        generation->terms.items[index].value_type ==
+            LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE) {
+      ++count;
+    }
+  }
+  if (count == 0U) {
+    return 1;
+  }
+  if (count > (size_t)-1 / sizeof(entry->direct_text_prefix_indices[0])) {
+    return 0;
+  }
+  entry->direct_text_prefix_indices = (size_t *)lc_alloc_with_allocator(
+      allocator, count * sizeof(entry->direct_text_prefix_indices[0]));
+  if (entry->direct_text_prefix_indices == NULL) {
+    return 0;
+  }
+  entry->direct_text_prefix_count = 0U;
+  for (index = 0U; index < generation->terms.count; ++index) {
+    if (!generation->terms.items[index].value_is_trigram_key &&
+        generation->terms.items[index].value_type ==
+            LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE) {
+      entry->direct_text_prefix_indices[entry->direct_text_prefix_count++] =
+          index;
+    }
+  }
+  return 1;
+}
+
 /* An exclusive writer has just built this text generation from the durable
  * tail it is publishing. Keep that body-free structure for its first text
  * query instead of immediately parsing the identical packed component. */
@@ -14738,6 +14870,18 @@ static int lc_pouch_query_index_generation_cache_adopt_text(
   entry->index_seq = generation->index_seq;
   entry->row_count = generation->row_count;
   entry->row_hash = generation->row_hash;
+  /* New text generations retain concrete JSON fields for `/...` queries;
+   * unlike trigram lookups they do not need a field directory to enumerate
+   * that logical selector. Avoid allocating one at publication time. Parsed
+   * on-disk generations (including historical layouts) retain their existing
+   * validated lookup path. */
+  if (!lc_pouch_query_index_direct_generation_cache_text_prefixes(
+          &pouch->allocator, generation, entry)) {
+    lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
+                                                        entry);
+    lc_free_with_allocator(&pouch->allocator, entry);
+    return 0;
+  }
   entry->direct_generation = *generation;
   memset(generation, 0, sizeof(*generation));
   entry->has_direct_generation = 1;
@@ -15485,7 +15629,6 @@ static int lc_pouch_query_index_doc_table_cache_get(
     lc_error *error) {
   lc_pouch_query_index_doc_table_cache_entry *entry;
   lc_pouch_query_index_doc_table_cache_entry *previous;
-  size_t index;
   int rc;
 
   if (pouch == NULL || path == NULL || out == NULL || present == NULL ||
@@ -15562,17 +15705,6 @@ static int lc_pouch_query_index_doc_table_cache_get(
            entry->table.count * sizeof(entry->decoded_keys[0]));
     entry->decoded_key_count = entry->table.count;
   }
-  for (index = 0U; index < entry->table.count; ++index) {
-    entry->decoded_keys[index] = lc_pouch_query_index_hex_decode(
-        &pouch->allocator, entry->table.items[index].key_hex, error);
-    if (entry->decoded_keys[index] == NULL) {
-      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
-      lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
-                                                         entry);
-      lc_free_with_allocator(&pouch->allocator, entry);
-      return rc;
-    }
-  }
   entry->next = pouch->query_doc_table_cache;
   pouch->query_doc_table_cache = entry;
   ++pouch->query_doc_table_cache_count;
@@ -15597,6 +15729,97 @@ static int lc_pouch_query_index_doc_table_cache_get(
   }
   *out = entry;
   return LC_OK;
+}
+
+/* A single writer has just encoded this table and published the manifest that
+ * references it. Retain that exact in-memory table for the first query rather
+ * than immediately reparsing the packed artifact. Reopen and shared-writer
+ * paths still validate and load from durable storage. */
+static int lc_pouch_query_index_doc_table_cache_adopt(
+    lc_pouch *pouch, const char *path, lc_pouch_generation index_seq,
+    unsigned long row_count, unsigned long row_hash,
+    lc_pouch_index_doc_table *table) {
+  lc_pouch_query_index_doc_table_cache_entry *entry;
+  lc_pouch_query_index_doc_table_cache_entry *previous;
+  lc_pouch_query_index_doc_table_cache_entry *existing;
+
+  if (pouch == NULL || path == NULL || table == NULL ||
+      table->count != (size_t)row_count) {
+    return 0;
+  }
+  entry =
+      (lc_pouch_query_index_doc_table_cache_entry *)lc_calloc_with_allocator(
+          &pouch->allocator, 1U, sizeof(*entry));
+  if (entry == NULL) {
+    return 0;
+  }
+  entry->path = lc_strdup_with_allocator(&pouch->allocator, path);
+  if (entry->path == NULL) {
+    lc_free_with_allocator(&pouch->allocator, entry);
+    return 0;
+  }
+  if (table->count > 0U) {
+    entry->decoded_keys = (char **)lc_calloc_with_allocator(
+        &pouch->allocator, table->count, sizeof(entry->decoded_keys[0]));
+    if (entry->decoded_keys == NULL) {
+      lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
+                                                         entry);
+      lc_free_with_allocator(&pouch->allocator, entry);
+      return 0;
+    }
+    entry->decoded_key_count = table->count;
+  }
+  entry->index_seq = index_seq;
+  entry->row_count = row_count;
+  entry->row_hash = row_hash;
+  entry->table = *table;
+  memset(table, 0, sizeof(*table));
+
+  previous = NULL;
+  existing = pouch->query_doc_table_cache;
+  while (existing != NULL) {
+    lc_pouch_query_index_doc_table_cache_entry *next;
+
+    next = existing->next;
+    if (strcmp(existing->path, path) == 0) {
+      if (previous != NULL) {
+        previous->next = next;
+      } else {
+        pouch->query_doc_table_cache = next;
+      }
+      lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
+                                                         existing);
+      lc_free_with_allocator(&pouch->allocator, existing);
+      --pouch->query_doc_table_cache_count;
+      existing = next;
+      continue;
+    }
+    previous = existing;
+    existing = next;
+  }
+  entry->next = pouch->query_doc_table_cache;
+  pouch->query_doc_table_cache = entry;
+  ++pouch->query_doc_table_cache_count;
+  while (pouch->query_doc_table_cache_count > 64U) {
+    lc_pouch_query_index_doc_table_cache_entry *victim_previous;
+    lc_pouch_query_index_doc_table_cache_entry *victim;
+
+    victim_previous = NULL;
+    victim = pouch->query_doc_table_cache;
+    while (victim != NULL && victim->next != NULL) {
+      victim_previous = victim;
+      victim = victim->next;
+    }
+    if (victim == NULL || victim_previous == NULL) {
+      break;
+    }
+    victim_previous->next = NULL;
+    lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
+                                                       victim);
+    lc_free_with_allocator(&pouch->allocator, victim);
+    --pouch->query_doc_table_cache_count;
+  }
+  return 1;
 }
 
 static int lc_pouch_query_index_warm_generation_artifact(
@@ -15869,25 +16092,150 @@ static int lc_pouch_query_index_direct_append_posting(
     size_t value_index,
     const lc_pouch_index_result_docid_list *docid_filter_sorted,
     lc_pouch_index_result_docid_list *docids, lc_error *error) {
-  lc_pouch_index_docid_set direct_docids;
-  size_t index;
+  lc_pouch_query_index_direct_posting_append append;
+
+  if (allocator == NULL || generation == NULL || docids == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch direct posting append requires inputs", NULL,
+                        NULL, "pouch");
+  }
+  memset(&append, 0, sizeof(append));
+  append.allocator = allocator;
+  append.filter = docid_filter_sorted;
+  append.docids = docids;
+  append.value_index = value_index;
+  return lc_pouch_index_term_posting_table_visit(
+      &generation->postings, term_id,
+      lc_pouch_query_index_direct_posting_append_docid, &append, error);
+}
+
+static void lc_pouch_query_index_docid_bitmap_cleanup(
+    lc_pouch_query_index_docid_bitmap *bitmap) {
+  if (bitmap == NULL) {
+    return;
+  }
+  lc_free_with_allocator(bitmap->allocator, bitmap->bits);
+  memset(bitmap, 0, sizeof(*bitmap));
+}
+
+static int lc_pouch_query_index_docid_bitmap_init(
+    const lc_allocator *allocator, unsigned long doc_count,
+    lc_pouch_query_index_docid_bitmap *bitmap, lc_error *error) {
+  size_t length;
+
+  if (allocator == NULL || bitmap == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query bitmap requires allocator and output",
+                        NULL, NULL, NULL);
+  }
+  memset(bitmap, 0, sizeof(*bitmap));
+  if (doc_count == 0UL) {
+    bitmap->allocator = allocator;
+    return LC_OK;
+  }
+  if (doc_count > (unsigned long)((size_t)-1 - ((size_t)CHAR_BIT - 1U))) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "pouch query bitmap exceeds local limit", NULL, NULL,
+                        "pouch");
+  }
+  length = ((size_t)doc_count + (size_t)CHAR_BIT - 1U) / (size_t)CHAR_BIT;
+  bitmap->bits = (unsigned char *)lc_calloc_with_allocator(
+      allocator, length, sizeof(*bitmap->bits));
+  if (bitmap->bits == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch query bitmap", NULL, NULL,
+                        NULL);
+  }
+  bitmap->allocator = allocator;
+  bitmap->length = length;
+  bitmap->doc_count = doc_count;
+  return LC_OK;
+}
+
+static int lc_pouch_query_index_docid_bitmap_mark(void *context,
+                                                  unsigned long doc_id,
+                                                  lc_error *error) {
+  lc_pouch_query_index_docid_bitmap *bitmap;
+  size_t byte_index;
+
+  bitmap = (lc_pouch_query_index_docid_bitmap *)context;
+  if (bitmap == NULL || (bitmap->length > 0U && bitmap->bits == NULL) ||
+      doc_id >= bitmap->doc_count) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query bitmap received invalid docID", NULL, NULL,
+                        "pouch");
+  }
+  byte_index = (size_t)(doc_id / (unsigned long)CHAR_BIT);
+  bitmap->bits[byte_index] =
+      (unsigned char)(bitmap->bits[byte_index] |
+                      (unsigned char)(1U << (doc_id % CHAR_BIT)));
+  return LC_OK;
+}
+
+static int lc_pouch_query_index_docid_bitmap_has(
+    const lc_pouch_query_index_docid_bitmap *bitmap, unsigned long doc_id) {
+  size_t byte_index;
+
+  if (bitmap == NULL || (bitmap->length > 0U && bitmap->bits == NULL) ||
+      doc_id >= bitmap->doc_count) {
+    return 0;
+  }
+  byte_index = (size_t)(doc_id / (unsigned long)CHAR_BIT);
+  return (bitmap->bits[byte_index] &
+          (unsigned char)(1U << (doc_id % CHAR_BIT))) != 0U;
+}
+
+static int lc_pouch_query_index_docid_bitmap_append(
+    const lc_allocator *allocator,
+    const lc_pouch_query_index_docid_bitmap *bitmap,
+    lc_pouch_index_result_docid_list *docids, lc_error *error) {
+  unsigned long doc_id;
   int rc;
 
-  memset(&direct_docids, 0, sizeof(direct_docids));
-  rc = lc_pouch_index_term_posting_table_append_to_set(
-      &generation->postings, term_id, &direct_docids, allocator, error);
-  for (index = 0U; rc == LC_OK && index < direct_docids.count; ++index) {
-    unsigned long doc_id;
+  if (bitmap == NULL || docids == NULL ||
+      (bitmap->length > 0U && bitmap->bits == NULL)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query bitmap append requires inputs", NULL, NULL,
+                        NULL);
+  }
+  rc = LC_OK;
+  for (doc_id = 0UL; rc == LC_OK && doc_id < bitmap->doc_count; ++doc_id) {
+    size_t byte_index;
 
-    doc_id = direct_docids.items[index];
-    if (lc_pouch_query_index_docid_list_contains_sorted(docid_filter_sorted,
-                                                        doc_id)) {
-      rc = lc_pouch_index_result_docid_list_add(allocator, docids, doc_id,
-                                                value_index, error);
+    byte_index = (size_t)(doc_id / (unsigned long)CHAR_BIT);
+    if ((bitmap->bits[byte_index] &
+         (unsigned char)(1U << (doc_id % CHAR_BIT))) != 0U) {
+      rc = lc_pouch_index_result_docid_list_add(allocator, docids, doc_id, 0U,
+                                                error);
     }
   }
-  lc_pouch_index_docid_set_cleanup(allocator, &direct_docids);
   return rc;
+}
+
+static int lc_pouch_query_index_direct_mark_posting(
+    const lc_pouch_index_term_generation *generation, unsigned long term_id,
+    lc_pouch_query_index_docid_bitmap *bitmap, lc_error *error) {
+  int dense_applied;
+
+  if (generation == NULL || bitmap == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch direct bitmap posting requires inputs", NULL,
+                        NULL, NULL);
+  }
+  dense_applied = 0;
+  if (bitmap->length > 0U) {
+    int rc;
+
+    rc = lc_pouch_index_term_posting_table_or_dense_bits(
+        &generation->postings, term_id, bitmap->bits, bitmap->length,
+        &dense_applied, error);
+    if (rc != LC_OK || dense_applied) {
+      return rc;
+    }
+  }
+  return lc_pouch_index_term_posting_table_visit(
+      &generation->postings, term_id, lc_pouch_query_index_docid_bitmap_mark,
+      bitmap, error);
 }
 
 static int lc_pouch_query_index_direct_collect_trigram_docids(
@@ -15930,19 +16278,32 @@ static int lc_pouch_query_index_direct_collect_trigram_docids(
     }
     return rc;
   }
-  for (index = 0U; rc == LC_OK && index < entry->field_count; ++index) {
-    const char *candidate_field;
-    unsigned long term_id;
+  {
+    lc_pouch_query_index_docid_bitmap bitmap;
 
-    candidate_field = entry->fields[index].field_hex;
-    if (!lc_pouch_query_index_field_hex_is_any_text(candidate_field)) {
+    memset(&bitmap, 0, sizeof(bitmap));
+    rc = lc_pouch_query_index_docid_bitmap_init(
+        &pouch->allocator, generation->row_count, &bitmap, error);
+    for (index = 0U; rc == LC_OK && index < entry->field_count; ++index) {
+      const char *candidate_field;
+      unsigned long term_id;
+
+      candidate_field = entry->fields[index].field_hex;
+      if (lc_pouch_query_index_field_hex_is_any_text(candidate_field)) {
+        continue;
+      }
       term_id = 0UL;
       if (lc_pouch_query_index_direct_find_trigram(generation, candidate_field,
                                                    trigram_key, &term_id)) {
-        rc = lc_pouch_query_index_direct_append_posting(
-            &pouch->allocator, generation, term_id, 0U, NULL, docids, error);
+        rc = lc_pouch_query_index_direct_mark_posting(generation, term_id,
+                                                      &bitmap, error);
       }
     }
+    if (rc == LC_OK) {
+      rc = lc_pouch_query_index_docid_bitmap_append(&pouch->allocator, &bitmap,
+                                                    docids, error);
+    }
+    lc_pouch_query_index_docid_bitmap_cleanup(&bitmap);
   }
   return rc;
 }
@@ -16007,6 +16368,40 @@ static int lc_pouch_query_index_docid_list_contains_sorted(
     }
   }
   return 0;
+}
+
+static int lc_pouch_query_index_docid_list_covers_generation(
+    const lc_pouch_index_result_docid_list *list,
+    unsigned long generation_row_count) {
+  size_t index;
+
+  if (list == NULL || list->count != (size_t)generation_row_count) {
+    return 0;
+  }
+  for (index = 0U; index < list->count; ++index) {
+    if (list->items[index].doc_id != (unsigned long)index) {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+static int lc_pouch_query_index_direct_posting_append_docid(
+    void *context, unsigned long doc_id, lc_error *error) {
+  lc_pouch_query_index_direct_posting_append *append;
+
+  append = (lc_pouch_query_index_direct_posting_append *)context;
+  if (append == NULL || append->docids == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch direct posting append requires context", NULL,
+                        NULL, "pouch");
+  }
+  if (!lc_pouch_query_index_docid_list_contains_sorted(append->filter,
+                                                       doc_id)) {
+    return LC_OK;
+  }
+  return lc_pouch_index_result_docid_list_add(
+      append->allocator, append->docids, doc_id, append->value_index, error);
 }
 
 static int lc_pouch_query_index_docid_list_intersect_sorted(
@@ -16123,6 +16518,117 @@ static int lc_pouch_query_index_collect_trigram_docids(
   return rc;
 }
 
+/* For an all-text direct generation, each trigram's postings are the union
+ * across indexed fields. Intersect those unions as bitmaps and materialize
+ * candidate docIDs once. This preserves the fallback posting, which is not
+ * constrained by trigrams because it represents values that were not fully
+ * indexed. */
+static int lc_pouch_query_index_direct_collect_all_text_trigram_intersection(
+    lc_pouch *pouch, const lc_pouch_query_index_generation_cache_entry *entry,
+    const char trigrams[][7], size_t trigram_count,
+    lc_pouch_index_result_docid_list *docids, lc_error *error) {
+  const lc_pouch_index_term_generation *generation;
+  lc_pouch_query_index_docid_bitmap intersection;
+  lc_pouch_query_index_docid_bitmap matches;
+  size_t trigram_index;
+  size_t field_index;
+  size_t byte_index;
+  unsigned long trigram_key;
+  int rc;
+
+  if (pouch == NULL || entry == NULL || trigrams == NULL ||
+      trigram_count == 0U || docids == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch direct all-text trigram intersection requires "
+                        "inputs",
+                        NULL, NULL, NULL);
+  }
+  generation = &entry->direct_generation;
+  memset(&intersection, 0, sizeof(intersection));
+  memset(&matches, 0, sizeof(matches));
+  rc = lc_pouch_query_index_docid_bitmap_init(
+      &pouch->allocator, generation->row_count, &intersection, error);
+  if (rc == LC_OK && intersection.length > 0U) {
+    memset(intersection.bits, UCHAR_MAX, intersection.length);
+  }
+  for (trigram_index = 0U; rc == LC_OK && trigram_index < trigram_count;
+       ++trigram_index) {
+    if (!lc_pouch_query_index_direct_trigram_key(trigrams[trigram_index],
+                                                 &trigram_key)) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch direct all-text trigram is invalid", NULL, NULL,
+                        "pouch");
+      break;
+    }
+    rc = lc_pouch_query_index_docid_bitmap_init(
+        &pouch->allocator, generation->row_count, &matches, error);
+    for (field_index = 0U; rc == LC_OK && field_index < entry->field_count;
+         ++field_index) {
+      const char *candidate_field;
+      unsigned long term_id;
+
+      candidate_field = entry->fields[field_index].field_hex;
+      if (lc_pouch_query_index_field_hex_is_any_text(candidate_field)) {
+        continue;
+      }
+      term_id = 0UL;
+      if (lc_pouch_query_index_direct_find_trigram(generation, candidate_field,
+                                                   trigram_key, &term_id)) {
+        rc = lc_pouch_query_index_direct_mark_posting(generation, term_id,
+                                                      &matches, error);
+      }
+    }
+    for (byte_index = 0U; rc == LC_OK && byte_index < intersection.length;
+         ++byte_index) {
+      intersection.bits[byte_index] =
+          (unsigned char)(intersection.bits[byte_index] &
+                          matches.bits[byte_index]);
+    }
+    lc_pouch_query_index_docid_bitmap_cleanup(&matches);
+  }
+  if (rc == LC_OK) {
+    if (!lc_pouch_query_index_direct_trigram_key(
+            LC_POUCH_QUERY_INDEX_TRIGRAM_FALLBACK_HEX, &trigram_key)) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch direct all-text fallback trigram is invalid",
+                        NULL, NULL, "pouch");
+    }
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_docid_bitmap_init(
+        &pouch->allocator, generation->row_count, &matches, error);
+  }
+  for (field_index = 0U; rc == LC_OK && field_index < entry->field_count;
+       ++field_index) {
+    const char *candidate_field;
+    unsigned long term_id;
+
+    candidate_field = entry->fields[field_index].field_hex;
+    if (lc_pouch_query_index_field_hex_is_any_text(candidate_field)) {
+      continue;
+    }
+    term_id = 0UL;
+    if (lc_pouch_query_index_direct_find_trigram(generation, candidate_field,
+                                                 trigram_key, &term_id)) {
+      rc = lc_pouch_query_index_direct_mark_posting(generation, term_id,
+                                                    &matches, error);
+    }
+  }
+  for (byte_index = 0U; rc == LC_OK && byte_index < intersection.length;
+       ++byte_index) {
+    intersection.bits[byte_index] =
+        (unsigned char)(intersection.bits[byte_index] |
+                        matches.bits[byte_index]);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_docid_bitmap_append(&pouch->allocator,
+                                                  &intersection, docids, error);
+  }
+  lc_pouch_query_index_docid_bitmap_cleanup(&matches);
+  lc_pouch_query_index_docid_bitmap_cleanup(&intersection);
+  return rc;
+}
+
 static int lc_pouch_query_index_collect_trigram_intersection_docids(
     lc_pouch *pouch, const char *namespace_name, const char *path,
     lc_pouch_generation expected_index_seq, unsigned long expected_row_count,
@@ -16151,6 +16657,12 @@ static int lc_pouch_query_index_collect_trigram_intersection_docids(
       expected_row_hash, &entry, present, valid, error);
   if (rc != LC_OK || !*present || !*valid) {
     return rc;
+  }
+  if (entry->has_direct_generation &&
+      lc_pouch_query_index_field_hex_is_any_text(field_hex) &&
+      !lc_pouch_query_index_generation_cache_has_field(entry, field_hex)) {
+    return lc_pouch_query_index_direct_collect_all_text_trigram_intersection(
+        pouch, entry, trigrams, trigram_count, docids, error);
   }
 
   memset(&intersection, 0, sizeof(intersection));
@@ -16415,6 +16927,124 @@ static int lc_pouch_query_index_generation_term_matches(
   return LC_OK;
 }
 
+/* A retained prefix can conclusively satisfy a contains query. Resolve those
+ * terms before scanning complete values: common large-payload documents then
+ * avoid walking unrelated text terms once every trigram candidate is known to
+ * match. Prefix misses remain in the normal verifier path. */
+static int lc_pouch_query_index_direct_collect_text_prefix_docids(
+    lc_pouch *pouch, const lc_pouch_query_index_generation_cache_entry *entry,
+    const char *field_hex, const char *needle_hex, const char *needle_text,
+    int ignore_case,
+    const lc_pouch_index_result_docid_list *docid_filter_sorted,
+    lc_pouch_index_result_docid_list *docids, int *text_prefix_seen,
+    int *all_candidates_matched, lc_error *error) {
+  lc_pouch_query_index_docid_bitmap bitmap;
+  const lc_pouch_index_term_generation *generation;
+  size_t index;
+  int any_text_direct;
+  int any_text_lookup;
+  uint64_t needle_bloom;
+  int rc;
+
+  if (pouch == NULL || entry == NULL || field_hex == NULL ||
+      needle_hex == NULL || needle_text == NULL ||
+      docid_filter_sorted == NULL || docids == NULL ||
+      all_candidates_matched == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch direct text prefix lookup requires inputs", NULL,
+                        NULL, "pouch");
+  }
+  generation = &entry->direct_generation;
+  *all_candidates_matched = 0;
+  needle_bloom = ignore_case
+                     ? lc_pouch_query_index_text_trigram_bloom_hex(needle_hex)
+                     : 0U;
+  memset(&bitmap, 0, sizeof(bitmap));
+  any_text_lookup = lc_pouch_query_index_field_hex_is_any_text(field_hex);
+  any_text_direct =
+      any_text_lookup &&
+      lc_pouch_query_index_generation_cache_has_field(entry, field_hex);
+  rc = lc_pouch_query_index_docid_bitmap_init(
+      &pouch->allocator, generation->row_count, &bitmap, error);
+  for (index = 0U; rc == LC_OK && index < entry->direct_text_prefix_count;
+       ++index) {
+    const lc_pouch_index_term_entry *term;
+    size_t term_index;
+    int matched;
+
+    term_index = entry->direct_text_prefix_indices[index];
+    if (term_index >= generation->terms.count) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch direct text prefix directory is invalid", NULL,
+                        NULL, "pouch");
+      break;
+    }
+    term = &generation->terms.items[term_index];
+    if (term->field_hex == NULL || term->value_hex == NULL ||
+        term->value_is_trigram_key) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch direct text generation is invalid", NULL, NULL,
+                        "pouch");
+      break;
+    }
+    if ((any_text_direct || !any_text_lookup) &&
+        strcmp(term->field_hex, field_hex) != 0) {
+      continue;
+    }
+    if (text_prefix_seen != NULL) {
+      *text_prefix_seen = 1;
+    }
+    if (needle_bloom != 0U && term->has_text_trigram_bloom &&
+        (term->text_trigram_bloom & needle_bloom) != needle_bloom) {
+      continue;
+    }
+    /* This directory contains only retained text prefixes. Its field has
+     * already been selected above, so avoid the generic multi-index matcher
+     * for every trigram candidate. Keep the same ASCII-folded verification:
+     * the aligned form is a fast positive; the byte-wise verifier covers
+     * mixed case. */
+    matched = 0;
+    if (ignore_case && lc_pouch_query_index_hex_contains_aligned(
+                           term->value_hex, needle_hex)) {
+      matched = 1;
+    } else {
+      matched = ignore_case
+                    ? lc_pouch_query_index_hex_text_contains(term->value_hex,
+                                                             needle_text, 1)
+                    : lc_pouch_query_index_hex_contains_aligned(term->value_hex,
+                                                                needle_hex);
+    }
+    if (matched) {
+      rc = lc_pouch_query_index_direct_mark_posting(generation, term->term_id,
+                                                    &bitmap, error);
+    }
+  }
+  if (rc == LC_OK) {
+    size_t matched_count;
+
+    matched_count = 0U;
+    for (index = 0U; index < docid_filter_sorted->count; ++index) {
+      unsigned long doc_id;
+
+      doc_id = docid_filter_sorted->items[index].doc_id;
+      if (!lc_pouch_query_index_docid_bitmap_has(&bitmap, doc_id)) {
+        continue;
+      }
+      ++matched_count;
+      rc = lc_pouch_index_result_docid_list_add(&pouch->allocator, docids,
+                                                doc_id, 0U, error);
+      if (rc != LC_OK) {
+        break;
+      }
+    }
+    if (rc == LC_OK && matched_count == docid_filter_sorted->count) {
+      *all_candidates_matched = 1;
+    }
+  }
+  lc_pouch_query_index_docid_bitmap_cleanup(&bitmap);
+  return rc;
+}
+
 static int lc_pouch_query_index_direct_collect_text_docids(
     lc_pouch *pouch, const lc_pouch_query_index_generation_cache_entry *entry,
     const char *field_hex, const char *needle_hex, const char *needle_text,
@@ -16424,8 +17054,12 @@ static int lc_pouch_query_index_direct_collect_text_docids(
     lc_error *error) {
   const lc_pouch_index_term_generation *generation;
   size_t index;
+  uint64_t needle_bloom;
   int any_text_direct;
   int any_text_lookup;
+  int all_candidates_matched;
+  int prefix_prepass;
+  const lc_pouch_index_result_docid_list *posting_filter;
   int rc;
 
   if (pouch == NULL || entry == NULL || field_hex == NULL ||
@@ -16435,16 +17069,29 @@ static int lc_pouch_query_index_direct_collect_text_docids(
                         "pouch");
   }
   generation = &entry->direct_generation;
-  any_text_lookup = lc_pouch_query_index_field_hex_is_any_text(field_hex);
-  any_text_direct = 0;
-  if (any_text_lookup) {
-    for (index = 0U; index < generation->terms.count; ++index) {
-      if (strcmp(generation->terms.items[index].field_hex, field_hex) == 0) {
-        any_text_direct = 1;
-        break;
-      }
+  needle_bloom = ignore_case && contains_match
+                     ? lc_pouch_query_index_text_trigram_bloom_hex(needle_hex)
+                     : 0U;
+  prefix_prepass = contains_match && docid_filter_sorted != NULL &&
+                   entry->direct_text_prefix_count > 0U;
+  all_candidates_matched = 0;
+  if (prefix_prepass) {
+    rc = lc_pouch_query_index_direct_collect_text_prefix_docids(
+        pouch, entry, field_hex, needle_hex, needle_text, ignore_case,
+        docid_filter_sorted, docids, text_prefix_seen, &all_candidates_matched,
+        error);
+    if (rc != LC_OK || all_candidates_matched) {
+      return rc;
     }
   }
+  any_text_lookup = lc_pouch_query_index_field_hex_is_any_text(field_hex);
+  any_text_direct =
+      any_text_lookup &&
+      lc_pouch_query_index_generation_cache_has_field(entry, field_hex);
+  posting_filter = lc_pouch_query_index_docid_list_covers_generation(
+                       docid_filter_sorted, generation->row_count)
+                       ? NULL
+                       : docid_filter_sorted;
   rc = LC_OK;
   for (index = 0U; rc == LC_OK && index < generation->terms.count; ++index) {
     const lc_pouch_index_term_entry *term;
@@ -16467,6 +17114,15 @@ static int lc_pouch_query_index_direct_collect_text_docids(
         (any_text_lookup || strcmp(term->field_hex, field_hex) == 0)) {
       *text_prefix_seen = 1;
     }
+    if (prefix_prepass &&
+        term->value_type == LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE) {
+      continue;
+    }
+    if (needle_bloom != 0U && term->value_type == 's' &&
+        term->has_text_trigram_bloom &&
+        (term->text_trigram_bloom & needle_bloom) != needle_bloom) {
+      continue;
+    }
     value_index = index;
     matched = 0;
     rc = lc_pouch_query_index_generation_term_matches(
@@ -16477,7 +17133,7 @@ static int lc_pouch_query_index_direct_collect_text_docids(
     if (rc == LC_OK && matched) {
       rc = lc_pouch_query_index_direct_append_posting(
           &pouch->allocator, generation, term->term_id, value_index,
-          docid_filter_sorted, docids, error);
+          posting_filter, docids, error);
     }
   }
   return rc;
@@ -16636,7 +17292,7 @@ static int lc_pouch_query_index_result_row_list_add_view(
 
 static int lc_pouch_query_index_docid_rows_build(
     const lc_allocator *allocator, lc_pouch_index_result_docid_list *docids,
-    const lc_pouch_index_doc_table *doc_table, char *const *decoded_keys,
+    const lc_pouch_index_doc_table *doc_table, char **decoded_keys,
     lc_pouch_index_result_row_list *rows, lc_error *error) {
   const lc_pouch_index_doc *doc;
   char *key;
@@ -16688,7 +17344,12 @@ static int lc_pouch_query_index_docid_rows_build(
         rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
         break;
       }
-      key_owned = 1;
+      if (decoded_keys != NULL &&
+          docids->items[index].doc_id < doc_table->count) {
+        decoded_keys[docids->items[index].doc_id] = key;
+      } else {
+        key_owned = 1;
+      }
     }
     rc = lc_pouch_query_index_result_row_list_add_view(
         allocator, rows, key, (char *)doc->key_hex, key_owned, 0,
@@ -16747,8 +17408,20 @@ lc_pouch_query_index_result_rows_sort(const lc_allocator *allocator,
                                       lc_pouch_index_result_row_list *rows) {
   size_t index;
   size_t write_index;
+  int sorted_unique;
 
   if (rows == NULL || rows->count <= 1U) {
+    return;
+  }
+  sorted_unique = 1;
+  for (index = 1U; index < rows->count; ++index) {
+    if (lc_pouch_query_index_result_row_compare_key(&rows->items[index - 1U],
+                                                    &rows->items[index]) >= 0) {
+      sorted_unique = 0;
+      break;
+    }
+  }
+  if (sorted_unique) {
     return;
   }
   qsort(rows->items, rows->count, sizeof(rows->items[0]),
@@ -17276,7 +17949,7 @@ static int lc_pouch_query_index_segmented_collect(
       rc = lc_pouch_query_index_segmented_rows_move_visible(
           &pouch->allocator, rows, &segment_rows, &hidden, error);
     }
-    if (rc == LC_OK) {
+    if (rc == LC_OK && segment_index + 1U < manifest.segment_count) {
       rc = lc_pouch_query_index_segmented_mark_changed(
           &pouch->allocator, doc_table, &hidden, error);
     }

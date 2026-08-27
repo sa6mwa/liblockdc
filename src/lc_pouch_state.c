@@ -16815,8 +16815,10 @@ int lc_pouch_state_query_index_seq(lc_pouch *pouch, const char *namespace_name,
   lc_pouch_generation checkpoint;
   lc_pouch_generation checkpoint_query;
   uint64_t checkpoint_identity;
+  uint64_t writer_mode_epoch;
   int checkpoint_valid;
   int checkpoint_query_valid;
+  int single_writer;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -16827,12 +16829,25 @@ int lc_pouch_state_query_index_seq(lc_pouch *pouch, const char *namespace_name,
                         NULL, NULL, "pouch");
   }
   *out = 0UL;
+  single_writer = lc_pouch_single_writer_snapshot(pouch, &writer_mode_epoch);
+  cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
+  /* The exclusive owner updates this projection in the same mutation path
+   * that changes public query candidates. Once it is initialized under the
+   * current ownership epoch, its watermark is authoritative; reopening the
+   * clean checkpoint on every query only repeats durable I/O. Shared Pouch
+   * deliberately retains the recovery path below because another process may
+   * have advanced the namespace. */
+  if (single_writer && cache != NULL && cache->initialized &&
+      cache->writer_mode_epoch == writer_mode_epoch) {
+    *out = cache->max_query_index_seq;
+    return LC_OK;
+  }
   /* An exclusive owner writes this checkpoint only after its append workers
    * have stopped and every state record is durable. Its public-query
    * watermark stays valid across lease-only and private staging writes, which
    * cannot change an indexed document. A public mutation invalidates it
    * before append, preserving crash recovery correctness. */
-  if (lc_pouch_single_writer_enabled(pouch)) {
+  if (single_writer) {
     checkpoint = 0UL;
     checkpoint_query = 0UL;
     checkpoint_identity = 0U;

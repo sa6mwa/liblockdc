@@ -27414,6 +27414,96 @@ static void test_query_keys_index_scalar_in_uses_array_postings(void **state) {
 }
 
 static void
+test_query_keys_index_all_text_direct_cache_preserves_complete_matches(
+    void **state) {
+  static const char namespace_name[] = "docs/query-index-all-text-direct";
+  static const char selector[] =
+      "{\"icontains\":{\"field\":\"/...\",\"value\":\"audit\"}}";
+  static const char large_prefix[] = "{\"payload\":\"";
+  static const char large_suffix[] = "AuDiT tail\"}";
+  lc_client *client;
+  lc_pouch *pouch;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  pouch_query_key_capture direct_page;
+  pouch_query_key_capture reopened_page;
+  lc_error error;
+  char long_json[384];
+  char root[512];
+  size_t long_json_length;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  pouch = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&direct_page, 0, sizeof(direct_page));
+  memset(&reopened_page, 0, sizeof(reopened_page));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-keys-index-all-text-direct", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  pouch_write_json_state(pouch, namespace_name, "doc/duplicate",
+                         "{\"first\":\"AUDIT\",\"second\":\"audit log\"}", NULL,
+                         &error);
+  pouch_write_json_state(pouch, namespace_name, "doc/other",
+                         "{\"first\":\"ordinary\",\"second\":\"record\"}", NULL,
+                         &error);
+  long_json_length =
+      (sizeof(large_prefix) - 1U) + 300U + (sizeof(large_suffix) - 1U);
+  assert_true(long_json_length < sizeof(long_json));
+  memcpy(long_json, large_prefix, sizeof(large_prefix) - 1U);
+  memset(long_json + sizeof(large_prefix) - 1U, 'x', 300U);
+  memcpy(long_json + sizeof(large_prefix) - 1U + 300U, large_suffix,
+         sizeof(large_suffix) - 1U);
+  long_json[long_json_length] = '\0';
+  pouch_write_json_state(pouch, namespace_name, "doc/large", long_json, NULL,
+                         &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_pouch_client(root, &client, &error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+  query_req.namespace_name = namespace_name;
+  query_req.selector_json = selector;
+  query_req.engine = "index";
+  query_req.refresh = "wait_for";
+  rc = client->query_keys(client, &query_req, &handler, &direct_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(direct_page.count, 2);
+  assert_true(pouch_query_capture_has(&direct_page, "doc/duplicate"));
+  assert_true(pouch_query_capture_has(&direct_page, "doc/large"));
+  assert_false(pouch_query_capture_has(&direct_page, "doc/other"));
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  client = NULL;
+
+  open_pouch_client(root, &client, &error);
+  memset(&query_res, 0, sizeof(query_res));
+  query_req.refresh = NULL;
+  rc = client->query_keys(client, &query_req, &handler, &reopened_page,
+                          &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(reopened_page.count, 2);
+  assert_true(pouch_query_capture_has(&reopened_page, "doc/duplicate"));
+  assert_true(pouch_query_capture_has(&reopened_page, "doc/large"));
+  assert_false(pouch_query_capture_has(&reopened_page, "doc/other"));
+
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_query_keys_index_preserves_strict_json_pointer_paths(void **state) {
   static const char *const selectors[] = {
       "{\"eq\":{\"field\":\"/0\",\"value\":\"object-numeric\"}}",
@@ -32814,6 +32904,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_query_keys_index_repairs_unknown_generation_posting_term),
       cmocka_unit_test(test_query_keys_index_scalar_in_uses_array_postings),
+      cmocka_unit_test(
+          test_query_keys_index_all_text_direct_cache_preserves_complete_matches),
       cmocka_unit_test(
           test_query_keys_index_preserves_strict_json_pointer_paths),
       cmocka_unit_test(test_query_keys_index_preserves_json_scalar_types),

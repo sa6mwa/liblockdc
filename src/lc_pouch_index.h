@@ -37,6 +37,10 @@ typedef struct lc_pouch_index_docid_set {
   size_t capacity;
 } lc_pouch_index_docid_set;
 
+typedef int (*lc_pouch_index_docid_visit_fn)(void *context,
+                                             unsigned long doc_id,
+                                             lc_error *error);
+
 typedef struct lc_pouch_index_doc {
   const char *key_hex;
   uint64_t version;
@@ -188,10 +192,12 @@ typedef struct lc_pouch_index_term_entry {
   char *field_hex;
   char *value_hex;
   unsigned long trigram_key;
+  uint64_t text_trigram_bloom;
   char value_type;
   unsigned long term_id;
   int owns_field_hex;
   int value_is_trigram_key;
+  int has_text_trigram_bloom;
 } lc_pouch_index_term_entry;
 
 typedef struct lc_pouch_index_term_table {
@@ -412,6 +418,15 @@ int lc_pouch_index_term_posting_table_append_to_set(
     const lc_pouch_index_term_posting_table *table, unsigned long term_id,
     lc_pouch_index_docid_set *set, const lc_allocator *allocator,
     lc_error *error);
+int lc_pouch_index_term_posting_table_visit(
+    const lc_pouch_index_term_posting_table *table, unsigned long term_id,
+    lc_pouch_index_docid_visit_fn visit, void *context, lc_error *error);
+/* Applies a dense posting directly to an equally bounded caller bitmap.
+ * Returns success with applied == 0 for sparse or absent postings. This is an
+ * internal fast path for validated in-memory index generations. */
+int lc_pouch_index_term_posting_table_or_dense_bits(
+    const lc_pouch_index_term_posting_table *table, unsigned long term_id,
+    unsigned char *bits, size_t length, int *applied, lc_error *error);
 void lc_pouch_index_term_generation_cleanup(
     const lc_allocator *allocator, lc_pouch_index_term_generation *generation);
 /** Orders terms for immutable generation encoding without changing term IDs or
@@ -472,6 +487,9 @@ int lc_pouch_index_posting_append_to_set(const lc_pouch_index_posting *posting,
                                          lc_pouch_index_docid_set *set,
                                          const lc_allocator *allocator,
                                          lc_error *error);
+int lc_pouch_index_posting_visit(const lc_pouch_index_posting *posting,
+                                 lc_pouch_index_docid_visit_fn visit,
+                                 void *context, lc_error *error);
 void lc_pouch_index_dense_posting_cleanup(
     const lc_allocator *allocator, lc_pouch_index_dense_posting *posting);
 int lc_pouch_index_dense_posting_append_sorted_unique(
@@ -480,6 +498,9 @@ int lc_pouch_index_dense_posting_append_sorted_unique(
 int lc_pouch_index_dense_posting_append_to_set(
     const lc_pouch_index_dense_posting *posting, lc_pouch_index_docid_set *set,
     const lc_allocator *allocator, lc_error *error);
+int lc_pouch_index_dense_posting_visit(
+    const lc_pouch_index_dense_posting *posting,
+    lc_pouch_index_docid_visit_fn visit, void *context, lc_error *error);
 void lc_pouch_index_adaptive_posting_cleanup(
     const lc_allocator *allocator, lc_pouch_index_adaptive_posting *posting);
 void lc_pouch_index_adaptive_posting_rebind_inline_storage(
@@ -497,6 +518,9 @@ int lc_pouch_index_adaptive_posting_append_to_set(
     const lc_pouch_index_adaptive_posting *posting,
     lc_pouch_index_docid_set *set, const lc_allocator *allocator,
     lc_error *error);
+int lc_pouch_index_adaptive_posting_visit(
+    const lc_pouch_index_adaptive_posting *posting,
+    lc_pouch_index_docid_visit_fn visit, void *context, lc_error *error);
 int lc_pouch_index_parse_lql_datetime(const char *text,
                                       lc_pouch_index_instant *out);
 int lc_pouch_index_parse_date_bounds(const lc_pouch_index_date_bounds *bounds,
