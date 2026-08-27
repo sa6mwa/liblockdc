@@ -1581,7 +1581,8 @@ typedef struct lc_workflow_config {
    * Infrequent durable-recovery cadence. Zero defaults to five minutes for a
    * remote endpoint and disables routine scans for local Pouch; startup and
    * overflow reconciliation always run. Set a positive value for shared-root
-   * Pouch dispatch.
+   * Pouch dispatch. A positive interval must produce a supported Unix
+   * timestamp from the workflow creation time.
    */
   long recovery_interval_seconds;
   /**
@@ -1608,6 +1609,7 @@ typedef struct lc_dead_letter_export_opts {
   /** `LC_DEAD_LETTER_EXPORT_JSON` or `LC_DEAD_LETTER_EXPORT_JSONL`. */
   int format;
   /** Maximum records to export; zero uses the workflow notification capacity.
+   * Values larger than `LONG_MAX` are rejected with `LC_ERR_INVALID`.
    */
   size_t limit;
 } lc_dead_letter_export_opts;

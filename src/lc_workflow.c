@@ -5,6 +5,7 @@
 #include <openssl/rand.h>
 
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <time.h>
@@ -2362,14 +2363,44 @@ static void *lc_workflow_dispatcher_main(void *context) {
       lc_error_cleanup(&error);
       pthread_mutex_lock(&workflow->notification_mutex);
       if (recovery_rc != LC_OK) {
+        lc_unix_seconds retry_at = 0;
+        time_t retry_now = time(NULL);
+
         workflow->recovery_needed = 0;
-        workflow->next_recovery_unix = (lc_unix_seconds)time(NULL) + 1L;
+        if (retry_now != (time_t)-1) {
+          lc_error retry_error;
+
+          lc_error_init(&retry_error);
+          if (lc_workflow_timestamp_add((lc_unix_seconds)retry_now, 1L,
+                                        "recovery retry", &retry_at,
+                                        &retry_error) == LC_OK) {
+            workflow->next_recovery_unix = retry_at;
+          } else {
+            workflow->next_recovery_unix = 0;
+          }
+          lc_error_cleanup(&retry_error);
+        } else {
+          workflow->next_recovery_unix = 0;
+        }
       } else {
         lc_unix_seconds now = (lc_unix_seconds)time(NULL);
-        lc_unix_seconds periodic =
-            workflow->recovery_interval_seconds > 0L
-                ? now + workflow->recovery_interval_seconds
-                : 0;
+        lc_unix_seconds periodic = 0;
+
+        if (workflow->recovery_interval_seconds > 0L) {
+          lc_error schedule_error;
+
+          lc_error_init(&schedule_error);
+          if (lc_workflow_timestamp_add(
+                  now, workflow->recovery_interval_seconds, "recovery interval",
+                  &periodic, &schedule_error) != LC_OK) {
+            /* A clock jump beyond the representable range must not invoke
+             * signed overflow or silently create a bogus timer. The initial
+             * configuration path already rejects ordinary invalid intervals. */
+            lc_workflow_record_error(workflow, &schedule_error);
+            periodic = 0;
+          }
+          lc_error_cleanup(&schedule_error);
+        }
 
         /* A retry whose delayed-key allocation failed has no in-memory entry,
          * so retain its durable-recovery deadline across this eager sweep. */
@@ -3960,6 +3991,7 @@ static int lc_workflow_export_dead_letters_method(
   lc_query_key_handler handler;
   lc_query_res query_result;
   lc_workflow_dead_letter_export_capture capture;
+  size_t limit;
   int rc;
 
   if (workflow == NULL || dst == NULL || out == NULL) {
@@ -3976,6 +4008,13 @@ static int lc_workflow_export_dead_letters_method(
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "dead-letter export format is invalid", NULL, NULL,
                         NULL);
+  }
+  limit =
+      options->limit == 0U ? workflow->notification_capacity : options->limit;
+  if ((uintmax_t)limit > (uintmax_t)LONG_MAX) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "dead-letter export limit exceeds supported range",
+                        NULL, NULL, NULL);
   }
   memset(&capture, 0, sizeof(capture));
   capture.workflow = workflow;
@@ -4003,8 +4042,7 @@ static int lc_workflow_export_dead_letters_method(
     return rc;
   request.namespace_name = workflow->namespace_name;
   request.selector_json = selector;
-  request.limit = (long)(options->limit == 0U ? workflow->notification_capacity
-                                              : options->limit);
+  request.limit = (long)limit;
   request.engine = "index";
   request.refresh = "wait_for";
   handler.begin = lc_workflow_dead_letter_export_begin;
@@ -4217,6 +4255,15 @@ int lc_client_new_workflow_method(lc_client *self,
     lc_workflow_close_method(&workflow->pub);
     return rc;
   }
+  if (workflow->recovery_interval_seconds > 0L) {
+    rc = lc_workflow_timestamp_add(
+        (lc_unix_seconds)now, workflow->recovery_interval_seconds,
+        "recovery interval", &workflow->next_recovery_unix, error);
+    if (rc != LC_OK) {
+      lc_workflow_close_method(&workflow->pub);
+      return rc;
+    }
+  }
   workflow->notification_capacity = config->notification_capacity == 0U
                                         ? 1024U
                                         : config->notification_capacity;
@@ -4269,10 +4316,6 @@ int lc_client_new_workflow_method(lc_client *self,
   }
   workflow->recovery_needed = 1;
   workflow->recovery_claims_pending = 1;
-  if (workflow->recovery_interval_seconds > 0L) {
-    workflow->next_recovery_unix =
-        (lc_unix_seconds)time(NULL) + workflow->recovery_interval_seconds;
-  }
   workflow->pub.accept_command = lc_workflow_accept_command_method;
   workflow->pub.get_command_receipt = lc_workflow_get_command_receipt_method;
   workflow->pub.write_command_result = lc_workflow_write_command_result_method;

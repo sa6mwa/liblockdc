@@ -20,6 +20,11 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef LOCKDC_TEST_BUILD
+lc_pouch_test_hook lc_pouch_test_after_doc_table_cache_borrow_hook = NULL;
+void *lc_pouch_test_after_doc_table_cache_borrow_context = NULL;
+#endif
+
 #define LC_POUCH_QUERY_INDEX_FORMAT "pouch-query-index"
 #define LC_POUCH_QUERY_INDEX_VERSION 12UL
 #define LC_POUCH_QUERY_INDEX_LEAF "query.index"
@@ -325,6 +330,11 @@ struct lc_pouch_query_index_doc_table_cache_entry {
   lc_pouch_index_doc_table table;
   char **decoded_keys;
   size_t decoded_key_count;
+  /* A query holds a borrow from lookup until it has copied every row it needs.
+   * Replaced and evicted entries retire first and are freed by the final
+   * borrower, so publication can never invalidate an in-flight query. */
+  size_t borrow_count;
+  int retired;
   struct lc_pouch_query_index_doc_table_cache_entry *next;
 };
 
@@ -13814,6 +13824,108 @@ static void lc_pouch_query_index_doc_table_cache_entry_cleanup(
   memset(entry, 0, sizeof(*entry));
 }
 
+static int lc_pouch_query_index_doc_table_cache_lock(lc_pouch *pouch,
+                                                     lc_error *error) {
+  int pthread_rc;
+
+  if (pouch == NULL || !pouch->query_doc_table_cache_mutex_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch doc-table cache requires an open pouch", NULL,
+                        NULL, "pouch");
+  }
+  pthread_rc = pthread_mutex_lock(&pouch->query_doc_table_cache_mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch doc-table cache",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  return LC_OK;
+}
+
+static void lc_pouch_query_index_doc_table_cache_unlock(lc_pouch *pouch) {
+  if (pouch != NULL && pouch->query_doc_table_cache_mutex_initialized) {
+    (void)pthread_mutex_unlock(&pouch->query_doc_table_cache_mutex);
+  }
+}
+
+/* Requires query_doc_table_cache_mutex. */
+static void lc_pouch_query_index_doc_table_cache_retire(
+    lc_pouch *pouch, lc_pouch_query_index_doc_table_cache_entry *entry) {
+  if (entry == NULL) {
+    return;
+  }
+  entry->next = NULL;
+  entry->retired = 1;
+  if (entry->borrow_count == 0U) {
+    lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
+                                                       entry);
+    lc_free_with_allocator(&pouch->allocator, entry);
+  }
+}
+
+/* Requires query_doc_table_cache_mutex. */
+static void lc_pouch_query_index_doc_table_cache_trim(lc_pouch *pouch) {
+  while (pouch->query_doc_table_cache_count > 64U) {
+    lc_pouch_query_index_doc_table_cache_entry *previous;
+    lc_pouch_query_index_doc_table_cache_entry *entry;
+    lc_pouch_query_index_doc_table_cache_entry *victim;
+    lc_pouch_query_index_doc_table_cache_entry *victim_previous;
+
+    previous = NULL;
+    entry = pouch->query_doc_table_cache;
+    victim = NULL;
+    victim_previous = NULL;
+    while (entry != NULL) {
+      if (entry->borrow_count == 0U) {
+        victim = entry;
+        victim_previous = previous;
+      }
+      previous = entry;
+      entry = entry->next;
+    }
+    if (victim == NULL) {
+      /* Every resident entry is in use. Keep the bounded cache temporarily
+       * over capacity; the next lookup or adoption will trim it. */
+      break;
+    }
+    if (victim_previous != NULL) {
+      victim_previous->next = victim->next;
+    } else {
+      pouch->query_doc_table_cache = victim->next;
+    }
+    --pouch->query_doc_table_cache_count;
+    lc_pouch_query_index_doc_table_cache_retire(pouch, victim);
+  }
+}
+
+static void lc_pouch_query_index_doc_table_cache_release(
+    lc_pouch *pouch, lc_pouch_query_index_doc_table_cache_entry **entry_ptr) {
+  lc_pouch_query_index_doc_table_cache_entry *entry;
+
+  if (entry_ptr == NULL || *entry_ptr == NULL) {
+    return;
+  }
+  entry = *entry_ptr;
+  *entry_ptr = NULL;
+  if (pouch == NULL || !pouch->query_doc_table_cache_mutex_initialized ||
+      pthread_mutex_lock(&pouch->query_doc_table_cache_mutex) != 0) {
+    /* Failing to acquire the ownership mutex during teardown must not free a
+     * potentially live cache entry. */
+    return;
+  }
+  if (entry->borrow_count > 0U) {
+    --entry->borrow_count;
+  }
+  if (entry->retired && entry->borrow_count == 0U) {
+    lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
+                                                       entry);
+    lc_free_with_allocator(&pouch->allocator, entry);
+  } else {
+    lc_pouch_query_index_doc_table_cache_trim(pouch);
+  }
+  lc_pouch_query_index_doc_table_cache_unlock(pouch);
+}
+
 static void lc_pouch_query_index_artifact_cache_entry_cleanup(
     const lc_allocator *allocator,
     lc_pouch_query_index_artifact_cache_entry *entry) {
@@ -14368,18 +14480,22 @@ void lc_pouch_query_index_cache_cleanup(lc_pouch *pouch) {
   }
   pouch->query_generation_cache = NULL;
   pouch->query_generation_cache_count = 0U;
-  doc_entry = pouch->query_doc_table_cache;
-  while (doc_entry != NULL) {
-    lc_pouch_query_index_doc_table_cache_entry *next;
+  if (pouch->query_doc_table_cache_mutex_initialized &&
+      pthread_mutex_lock(&pouch->query_doc_table_cache_mutex) == 0) {
+    doc_entry = pouch->query_doc_table_cache;
+    pouch->query_doc_table_cache = NULL;
+    pouch->query_doc_table_cache_count = 0U;
+    while (doc_entry != NULL) {
+      lc_pouch_query_index_doc_table_cache_entry *next;
 
-    next = doc_entry->next;
-    lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
-                                                       doc_entry);
-    lc_free_with_allocator(&pouch->allocator, doc_entry);
-    doc_entry = next;
+      next = doc_entry->next;
+      lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
+                                                         doc_entry);
+      lc_free_with_allocator(&pouch->allocator, doc_entry);
+      doc_entry = next;
+    }
+    (void)pthread_mutex_unlock(&pouch->query_doc_table_cache_mutex);
   }
-  pouch->query_doc_table_cache = NULL;
-  pouch->query_doc_table_cache_count = 0U;
   artifact_entry = pouch->query_artifact_cache;
   while (artifact_entry != NULL) {
     lc_pouch_query_index_artifact_cache_entry *next;
@@ -15640,6 +15756,10 @@ static int lc_pouch_query_index_doc_table_cache_get(
   *out = NULL;
   *present = 0;
   *valid = 0;
+  rc = lc_pouch_query_index_doc_table_cache_lock(pouch, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
   previous = NULL;
   entry = pouch->query_doc_table_cache;
   while (entry != NULL) {
@@ -15652,9 +15772,11 @@ static int lc_pouch_query_index_doc_table_cache_get(
         entry->next = pouch->query_doc_table_cache;
         pouch->query_doc_table_cache = entry;
       }
+      ++entry->borrow_count;
       *present = 1;
       *valid = 1;
       *out = entry;
+      lc_pouch_query_index_doc_table_cache_unlock(pouch);
       return LC_OK;
     }
     previous = entry;
@@ -15664,6 +15786,7 @@ static int lc_pouch_query_index_doc_table_cache_get(
   entry = (lc_pouch_query_index_doc_table_cache_entry *)lc_alloc_with_allocator(
       &pouch->allocator, sizeof(*entry));
   if (entry == NULL) {
+    lc_pouch_query_index_doc_table_cache_unlock(pouch);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch doc-table cache entry", NULL,
                         NULL, NULL);
@@ -15677,6 +15800,7 @@ static int lc_pouch_query_index_doc_table_cache_get(
     lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
                                                        entry);
     lc_free_with_allocator(&pouch->allocator, entry);
+    lc_pouch_query_index_doc_table_cache_unlock(pouch);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch doc-table cache path", NULL,
                         NULL, NULL);
@@ -15688,6 +15812,7 @@ static int lc_pouch_query_index_doc_table_cache_get(
     lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
                                                        entry);
     lc_free_with_allocator(&pouch->allocator, entry);
+    lc_pouch_query_index_doc_table_cache_unlock(pouch);
     return rc;
   }
   if (entry->table.count > 0U) {
@@ -15697,6 +15822,7 @@ static int lc_pouch_query_index_doc_table_cache_get(
       lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
                                                          entry);
       lc_free_with_allocator(&pouch->allocator, entry);
+      lc_pouch_query_index_doc_table_cache_unlock(pouch);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch doc-table decoded keys",
                           NULL, NULL, NULL);
@@ -15708,26 +15834,10 @@ static int lc_pouch_query_index_doc_table_cache_get(
   entry->next = pouch->query_doc_table_cache;
   pouch->query_doc_table_cache = entry;
   ++pouch->query_doc_table_cache_count;
-  while (pouch->query_doc_table_cache_count > 64U) {
-    lc_pouch_query_index_doc_table_cache_entry *victim_prev;
-    lc_pouch_query_index_doc_table_cache_entry *victim;
-
-    victim_prev = NULL;
-    victim = pouch->query_doc_table_cache;
-    while (victim != NULL && victim->next != NULL) {
-      victim_prev = victim;
-      victim = victim->next;
-    }
-    if (victim == NULL || victim_prev == NULL) {
-      break;
-    }
-    victim_prev->next = NULL;
-    lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
-                                                       victim);
-    lc_free_with_allocator(&pouch->allocator, victim);
-    --pouch->query_doc_table_cache_count;
-  }
+  entry->borrow_count = 1U;
+  lc_pouch_query_index_doc_table_cache_trim(pouch);
   *out = entry;
+  lc_pouch_query_index_doc_table_cache_unlock(pouch);
   return LC_OK;
 }
 
@@ -15775,6 +15885,12 @@ static int lc_pouch_query_index_doc_table_cache_adopt(
   entry->table = *table;
   memset(table, 0, sizeof(*table));
 
+  if (lc_pouch_query_index_doc_table_cache_lock(pouch, NULL) != LC_OK) {
+    lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
+                                                       entry);
+    lc_free_with_allocator(&pouch->allocator, entry);
+    return 0;
+  }
   previous = NULL;
   existing = pouch->query_doc_table_cache;
   while (existing != NULL) {
@@ -15787,10 +15903,8 @@ static int lc_pouch_query_index_doc_table_cache_adopt(
       } else {
         pouch->query_doc_table_cache = next;
       }
-      lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
-                                                         existing);
-      lc_free_with_allocator(&pouch->allocator, existing);
       --pouch->query_doc_table_cache_count;
+      lc_pouch_query_index_doc_table_cache_retire(pouch, existing);
       existing = next;
       continue;
     }
@@ -15800,25 +15914,8 @@ static int lc_pouch_query_index_doc_table_cache_adopt(
   entry->next = pouch->query_doc_table_cache;
   pouch->query_doc_table_cache = entry;
   ++pouch->query_doc_table_cache_count;
-  while (pouch->query_doc_table_cache_count > 64U) {
-    lc_pouch_query_index_doc_table_cache_entry *victim_previous;
-    lc_pouch_query_index_doc_table_cache_entry *victim;
-
-    victim_previous = NULL;
-    victim = pouch->query_doc_table_cache;
-    while (victim != NULL && victim->next != NULL) {
-      victim_previous = victim;
-      victim = victim->next;
-    }
-    if (victim == NULL || victim_previous == NULL) {
-      break;
-    }
-    victim_previous->next = NULL;
-    lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
-                                                       victim);
-    lc_free_with_allocator(&pouch->allocator, victim);
-    --pouch->query_doc_table_cache_count;
-  }
+  lc_pouch_query_index_doc_table_cache_trim(pouch);
+  lc_pouch_query_index_doc_table_cache_unlock(pouch);
   return 1;
 }
 
@@ -15991,6 +16088,7 @@ int lc_pouch_query_index_warm_namespace(lc_pouch *pouch,
                         "manifest",
                         NULL, NULL, "pouch");
     }
+    lc_pouch_query_index_doc_table_cache_release(pouch, &doc_entry);
     lc_pouch_query_index_key_hex_set_cleanup(&pouch->allocator, &deletes);
     lc_pouch_query_index_segmented_paths_cleanup(
         pouch, &header_path, &doc_table_path, &exact_term_path,
@@ -17794,6 +17892,12 @@ static int lc_pouch_query_index_segmented_collect(
       }
       if (rc == LC_OK) {
         doc_table = &doc_cache->table;
+#ifdef LOCKDC_TEST_BUILD
+        if (lc_pouch_test_after_doc_table_cache_borrow_hook != NULL) {
+          rc = lc_pouch_test_after_doc_table_cache_borrow_hook(
+              lc_pouch_test_after_doc_table_cache_borrow_context, error);
+        }
+#endif
       }
     }
     if (rc == LC_OK) {
@@ -17967,6 +18071,7 @@ static int lc_pouch_query_index_segmented_collect(
     }
     lc_pouch_index_result_row_list_cleanup(&pouch->allocator, &segment_rows);
     lc_pouch_index_result_docid_list_cleanup(&pouch->allocator, &docids);
+    lc_pouch_query_index_doc_table_cache_release(pouch, &doc_cache);
     lc_pouch_query_index_segmented_paths_cleanup(
         pouch, &header_path, &doc_table_path, &exact_term_path,
         &presence_term_path, &range_term_path, &text_term_path,

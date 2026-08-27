@@ -2314,10 +2314,21 @@ static void test_pouch_workflow_rejects_overflowing_deadlines(void **state) {
 
   lc_workflow_config_init(&workflow_config);
   workflow_config.namespace_name = "deadline-overflow";
+  workflow_config.recovery_interval_seconds = LONG_MAX;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_ERR_INVALID);
+  assert_null(workflow);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "deadline-overflow";
   workflow_config.host_retry_delay_max_seconds = LONG_MAX;
   assert_int_equal(
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
       LC_OK);
+
   lc_outbox_entry_init(&entry);
   entry.operation_id = "deadline-overflow-operation";
   entry.effect_id = "deadline-overflow-effect";
@@ -2689,6 +2700,23 @@ static void test_pouch_dead_letter_operations(void **state) {
   assert_int_equal(
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
       LC_OK);
+  if (SIZE_MAX > (size_t)LONG_MAX) {
+    size_t too_large_limit = (size_t)LONG_MAX;
+
+    ++too_large_limit;
+    lc_dead_letter_export_opts_init(&export_options);
+    export_options.limit = too_large_limit;
+    lc_dead_letter_export_res_init(&export_result);
+    assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+    assert_int_equal(lc_workflow_export_dead_letters(workflow, &export_options,
+                                                     sink, &export_result,
+                                                     &error),
+                     LC_ERR_INVALID);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+    lc_sink_close(sink);
+    sink = NULL;
+  }
   lc_outbox_entry_init(&entry);
   entry.operation_id = "dead-letter-operation";
   entry.effect_id = "dead-letter-effect";

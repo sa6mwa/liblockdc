@@ -5928,6 +5928,152 @@ static int pouch_query_index_count_row(const lc_pouch_query_index_row_view *row,
   return LC_OK;
 }
 
+typedef struct pouch_doc_table_cache_borrow_overlap {
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+  lc_pouch *pouch;
+  int borrowed;
+  int release_borrow;
+  int query_rc;
+  size_t rows;
+  lc_pouch_generation index_seq;
+  lc_error query_error;
+} pouch_doc_table_cache_borrow_overlap;
+
+static int pouch_doc_table_cache_borrow_hold(void *context, lc_error *error) {
+  pouch_doc_table_cache_borrow_overlap *overlap;
+  int pthread_rc;
+
+  (void)error;
+  overlap = (pouch_doc_table_cache_borrow_overlap *)context;
+  pthread_rc = pthread_mutex_lock(&overlap->mutex);
+  if (pthread_rc != 0) {
+    return LC_ERR_TRANSPORT;
+  }
+  overlap->borrowed = 1;
+  (void)pthread_cond_broadcast(&overlap->cond);
+  while (!overlap->release_borrow) {
+    pthread_rc = pthread_cond_wait(&overlap->cond, &overlap->mutex);
+    if (pthread_rc != 0) {
+      (void)pthread_mutex_unlock(&overlap->mutex);
+      return LC_ERR_TRANSPORT;
+    }
+  }
+  (void)pthread_mutex_unlock(&overlap->mutex);
+  return LC_OK;
+}
+
+static int pouch_doc_table_cache_borrow_wait(
+    pouch_doc_table_cache_borrow_overlap *overlap) {
+  struct timespec deadline;
+  int wait_rc;
+  int borrowed;
+
+  if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+    return 0;
+  }
+  deadline.tv_sec += 2;
+  assert_int_equal(pthread_mutex_lock(&overlap->mutex), 0);
+  wait_rc = 0;
+  while (!overlap->borrowed && wait_rc == 0) {
+    wait_rc =
+        pthread_cond_timedwait(&overlap->cond, &overlap->mutex, &deadline);
+  }
+  borrowed = overlap->borrowed;
+  assert_int_equal(pthread_mutex_unlock(&overlap->mutex), 0);
+  return borrowed;
+}
+
+static void *pouch_doc_table_cache_borrow_query(void *context) {
+  pouch_doc_table_cache_borrow_overlap *overlap;
+
+  overlap = (pouch_doc_table_cache_borrow_overlap *)context;
+  lc_error_init(&overlap->query_error);
+  overlap->rows = 0U;
+  overlap->index_seq = 0UL;
+  overlap->query_rc = lc_pouch_query_index_visit(
+      overlap->pouch, "default", pouch_query_index_count_row, &overlap->rows,
+      &overlap->index_seq, &overlap->query_error);
+  return NULL;
+}
+
+static void
+test_query_doc_table_cache_borrow_survives_publication(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_query_index_flush_result flush_result;
+  pouch_doc_table_cache_borrow_overlap overlap;
+  pthread_t query_thread;
+  lc_pouch_generation state_index_seq;
+  lc_pouch_generation query_index_seq;
+  lc_error error;
+  char root[512];
+  size_t row_count;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  memset(&flush_result, 0, sizeof(flush_result));
+  memset(&overlap, 0, sizeof(overlap));
+  lc_error_init(&error);
+  make_root("query-doc-cache-borrow", root, sizeof(root));
+  cleanup_root(root);
+  assert_int_equal(lc_pouch_open(root, NULL, NULL, &pouch, &error), LC_OK);
+  pouch_write_json_state(pouch, "default", "doc/initial", "{\"kind\":\"old\"}",
+                         NULL, &error);
+  state_index_seq = 0UL;
+  assert_int_equal(
+      lc_pouch_state_index_seq(pouch, "default", &state_index_seq, &error),
+      LC_OK);
+  assert_int_equal(lc_pouch_query_index_flush(pouch, "default", state_index_seq,
+                                              &flush_result, &error),
+                   LC_OK);
+
+  overlap.pouch = pouch;
+  assert_int_equal(pthread_mutex_init(&overlap.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&overlap.cond, NULL), 0);
+  lc_pouch_test_after_doc_table_cache_borrow_context = &overlap;
+  lc_pouch_test_after_doc_table_cache_borrow_hook =
+      pouch_doc_table_cache_borrow_hold;
+  assert_int_equal(pthread_create(&query_thread, NULL,
+                                  pouch_doc_table_cache_borrow_query, &overlap),
+                   0);
+  assert_true(pouch_doc_table_cache_borrow_wait(&overlap));
+
+  pouch_write_json_state(pouch, "default", "doc/replacement",
+                         "{\"kind\":\"new\"}", NULL, &error);
+  state_index_seq = 0UL;
+  assert_int_equal(
+      lc_pouch_state_index_seq(pouch, "default", &state_index_seq, &error),
+      LC_OK);
+  assert_int_equal(lc_pouch_query_index_flush(pouch, "default", state_index_seq,
+                                              &flush_result, &error),
+                   LC_OK);
+
+  assert_int_equal(pthread_mutex_lock(&overlap.mutex), 0);
+  overlap.release_borrow = 1;
+  assert_int_equal(pthread_cond_broadcast(&overlap.cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&overlap.mutex), 0);
+  assert_int_equal(pthread_join(query_thread, NULL), 0);
+  lc_pouch_test_after_doc_table_cache_borrow_hook = NULL;
+  lc_pouch_test_after_doc_table_cache_borrow_context = NULL;
+  assert_int_equal(overlap.query_rc, LC_OK);
+  assert_int_equal(overlap.rows, 1U);
+  lc_error_cleanup(&overlap.query_error);
+  assert_int_equal(pthread_cond_destroy(&overlap.cond), 0);
+  assert_int_equal(pthread_mutex_destroy(&overlap.mutex), 0);
+
+  row_count = 0U;
+  query_index_seq = 0UL;
+  rc = lc_pouch_query_index_visit(pouch, "default", pouch_query_index_count_row,
+                                  &row_count, &query_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(query_index_seq, state_index_seq);
+  assert_int_equal(row_count, 2U);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void
 test_parallel_state_writes_keep_query_projection_consistent(void **state) {
   lc_pouch *pouch;
@@ -32975,6 +33121,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_pouch_durable_sync_restores_live_batch_limit),
       cmocka_unit_test(
           test_parallel_state_writes_keep_query_projection_consistent),
+      cmocka_unit_test(test_query_doc_table_cache_borrow_survives_publication),
       cmocka_unit_test(test_shared_query_index_flush_catches_up_durable_state),
       cmocka_unit_test(test_shared_query_index_flush_catches_up_peer_state),
       cmocka_unit_test(test_parallel_query_flush_preserves_later_write),

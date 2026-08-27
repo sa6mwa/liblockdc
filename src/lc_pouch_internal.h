@@ -191,6 +191,9 @@ struct lc_pouch {
   /* Serializes query artifact publication without stalling pending writers. */
   pthread_mutex_t query_flush_mutex;
   int query_flush_mutex_initialized;
+  /* Owns doc-table cache lookup, publication, eviction, and query borrows. */
+  pthread_mutex_t query_doc_table_cache_mutex;
+  int query_doc_table_cache_mutex_initialized;
   pthread_mutex_t exclusive_key_mutexes[LC_POUCH_EXCLUSIVE_KEY_STRIPE_COUNT];
   size_t exclusive_key_mutex_count;
   lc_pouch_fsync_batcher *fsync_batcher;
@@ -252,6 +255,10 @@ struct lc_pouch {
 typedef int (*lc_pouch_test_hook)(void *context, lc_error *error);
 extern lc_pouch_test_hook lc_pouch_test_after_snapshot_write_hook;
 extern void *lc_pouch_test_after_snapshot_write_context;
+/* Invoked after an indexed query borrows a document-table cache entry and
+ * before it dereferences that borrowed table. */
+extern lc_pouch_test_hook lc_pouch_test_after_doc_table_cache_borrow_hook;
+extern void *lc_pouch_test_after_doc_table_cache_borrow_context;
 typedef void (*lc_pouch_test_after_acquire_claim_hook_fn)(void *context);
 extern lc_pouch_test_after_acquire_claim_hook_fn
     lc_pouch_test_after_acquire_claim_hook;
