@@ -23,9 +23,13 @@
 #ifdef LOCKDC_TEST_BUILD
 lc_pouch_test_hook lc_pouch_test_after_doc_table_cache_borrow_hook = NULL;
 void *lc_pouch_test_after_doc_table_cache_borrow_context = NULL;
+lc_pouch_test_hook lc_pouch_test_after_doc_table_cache_rows_attached_hook =
+    NULL;
+void *lc_pouch_test_after_doc_table_cache_rows_attached_context = NULL;
 lc_pouch_test_hook lc_pouch_test_before_doc_table_decoded_key_populate_hook =
     NULL;
 void *lc_pouch_test_before_doc_table_decoded_key_populate_context = NULL;
+size_t lc_pouch_test_doc_table_cache_capacity = 0U;
 #endif
 
 #define LC_POUCH_QUERY_INDEX_FORMAT "pouch-query-index"
@@ -40,6 +44,7 @@ void *lc_pouch_test_before_doc_table_decoded_key_populate_context = NULL;
 #define LC_POUCH_QUERY_INDEX_TEMPORAL_TERM_LEAF "query.index.lcptdg"
 #define LC_POUCH_QUERY_INDEX_DELETE_LEAF "query.index.lcpdel"
 #define LC_POUCH_QUERY_INDEX_PACKED_LEAF "query.index.lcpseg"
+#define LC_POUCH_QUERY_INDEX_DOC_TABLE_CACHE_MAX 64U
 #define LC_POUCH_QUERY_INDEX_PACKED_MAGIC "LPQISEG1"
 #define LC_POUCH_QUERY_INDEX_PACKED_MAGIC_LEN 8U
 #define LC_POUCH_QUERY_INDEX_PACKED_VERSION ((uint64_t)1U)
@@ -333,9 +338,9 @@ struct lc_pouch_query_index_doc_table_cache_entry {
   lc_pouch_index_doc_table table;
   char **decoded_keys;
   size_t decoded_key_count;
-  /* A query holds a borrow from lookup until it has copied every row it needs.
-   * Replaced and evicted entries retire first and are freed by the final
-   * borrower, so publication can never invalidate an in-flight query. */
+  /* A query holds a borrow from lookup until every row view it built has been
+   * emitted. Replaced and evicted entries retire first and are freed by the
+   * final borrower, so publication can never invalidate an in-flight query. */
   size_t borrow_count;
   int retired;
   struct lc_pouch_query_index_doc_table_cache_entry *next;
@@ -346,6 +351,12 @@ typedef struct lc_pouch_query_index_key_hex_set {
   size_t count;
   size_t capacity;
 } lc_pouch_query_index_key_hex_set;
+
+typedef struct lc_pouch_query_index_doc_table_cache_borrow_list {
+  struct lc_pouch_query_index_doc_table_cache_entry **items;
+  size_t count;
+  size_t capacity;
+} lc_pouch_query_index_doc_table_cache_borrow_list;
 
 typedef struct lc_pouch_query_index_memtable lc_pouch_query_index_memtable;
 
@@ -858,12 +869,15 @@ static int lc_pouch_query_index_segmented_collect(
     int prefix_match, int contains_match, int ignore_case,
     const lc_pouch_query_index_range_bounds *range_bounds,
     const lc_pouch_index_parsed_date_bounds *temporal_bounds,
-    lc_pouch_index_result_row_list *rows, lc_pouch_generation *index_seq,
-    int *text_complete_out, lc_error *error);
+    lc_pouch_index_result_row_list *rows,
+    lc_pouch_query_index_doc_table_cache_borrow_list *doc_table_cache_borrows,
+    lc_pouch_generation *index_seq, int *text_complete_out, lc_error *error);
 static int
 lc_pouch_query_index_result_rows_reserve(const lc_allocator *allocator,
                                          lc_pouch_index_result_row_list *rows,
                                          size_t needed, lc_error *error);
+static void lc_pouch_query_index_doc_table_cache_borrow_list_cleanup(
+    lc_pouch *pouch, lc_pouch_query_index_doc_table_cache_borrow_list *list);
 static int lc_pouch_query_index_parse_header_line(const char *line,
                                                   const char *name,
                                                   unsigned long *out);
@@ -13496,6 +13510,7 @@ int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
                                void *context, lc_pouch_generation *index_seq,
                                lc_error *error) {
   lc_pouch_index_result_row_list rows;
+  lc_pouch_query_index_doc_table_cache_borrow_list doc_table_cache_borrows;
   lc_pouch_query_index_row_view row_view;
   size_t row_index;
   int rc;
@@ -13509,9 +13524,11 @@ int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
   }
   *index_seq = 0UL;
   memset(&rows, 0, sizeof(rows));
+  memset(&doc_table_cache_borrows, 0, sizeof(doc_table_cache_borrows));
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_ALL, NULL, 0U, NULL,
-      NULL, NULL, 0, 0, 0, NULL, NULL, &rows, index_seq, NULL, error);
+      NULL, NULL, 0, 0, 0, NULL, NULL, &rows, &doc_table_cache_borrows,
+      index_seq, NULL, error);
   if (rc == LC_OK) {
     for (row_index = 0U; rc == LC_OK && row_index < rows.count; ++row_index) {
       lc_pouch_index_result_row *row;
@@ -13532,6 +13549,8 @@ int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
     }
   }
   lc_pouch_index_result_row_list_cleanup(&pouch->allocator, &rows);
+  lc_pouch_query_index_doc_table_cache_borrow_list_cleanup(
+      pouch, &doc_table_cache_borrows);
   return rc;
 }
 
@@ -13868,7 +13887,15 @@ static void lc_pouch_query_index_doc_table_cache_retire(
 
 /* Requires query_doc_table_cache_mutex. */
 static void lc_pouch_query_index_doc_table_cache_trim(lc_pouch *pouch) {
-  while (pouch->query_doc_table_cache_count > 64U) {
+  size_t capacity;
+
+  capacity = LC_POUCH_QUERY_INDEX_DOC_TABLE_CACHE_MAX;
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_pouch_test_doc_table_cache_capacity > 0U) {
+    capacity = lc_pouch_test_doc_table_cache_capacity;
+  }
+#endif
+  while (pouch->query_doc_table_cache_count > capacity) {
     lc_pouch_query_index_doc_table_cache_entry *previous;
     lc_pouch_query_index_doc_table_cache_entry *entry;
     lc_pouch_query_index_doc_table_cache_entry *victim;
@@ -13927,6 +13954,73 @@ static void lc_pouch_query_index_doc_table_cache_release(
     lc_pouch_query_index_doc_table_cache_trim(pouch);
   }
   lc_pouch_query_index_doc_table_cache_unlock(pouch);
+}
+
+static int lc_pouch_query_index_doc_table_cache_borrow_list_take(
+    lc_pouch *pouch, lc_pouch_query_index_doc_table_cache_borrow_list *list,
+    lc_pouch_query_index_doc_table_cache_entry *entry, lc_error *error) {
+  lc_pouch_query_index_doc_table_cache_entry **items;
+  size_t capacity;
+
+  if (entry == NULL) {
+    return LC_OK;
+  }
+  if (pouch == NULL || list == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch doc-table cache borrow list requires inputs",
+                        NULL, NULL, "pouch");
+  }
+  if (list->count == list->capacity) {
+    if (list->capacity == 0U) {
+      capacity = 4U;
+    } else {
+      if (list->capacity > (size_t)-1 / 2U) {
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "pouch doc-table cache borrow list exceeds local "
+                            "limit",
+                            NULL, NULL, "pouch");
+      }
+      capacity = list->capacity * 2U;
+    }
+    if (capacity > (size_t)-1 / sizeof(*items)) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch doc-table cache borrow list exceeds local "
+                          "limit",
+                          NULL, NULL, "pouch");
+    }
+    items =
+        (lc_pouch_query_index_doc_table_cache_entry **)lc_alloc_with_allocator(
+            &pouch->allocator, capacity * sizeof(*items));
+    if (items == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to retain pouch doc-table cache borrow", NULL,
+                          NULL, "pouch");
+    }
+    if (list->items != NULL) {
+      memcpy(items, list->items, list->count * sizeof(*items));
+      lc_free_with_allocator(&pouch->allocator, list->items);
+    }
+    list->items = items;
+    list->capacity = capacity;
+  }
+  list->items[list->count++] = entry;
+  return LC_OK;
+}
+
+static void lc_pouch_query_index_doc_table_cache_borrow_list_cleanup(
+    lc_pouch *pouch, lc_pouch_query_index_doc_table_cache_borrow_list *list) {
+  size_t index;
+
+  if (list == NULL) {
+    return;
+  }
+  for (index = 0U; index < list->count; ++index) {
+    lc_pouch_query_index_doc_table_cache_release(pouch, &list->items[index]);
+  }
+  if (pouch != NULL) {
+    lc_free_with_allocator(&pouch->allocator, list->items);
+  }
+  memset(list, 0, sizeof(*list));
 }
 
 static void lc_pouch_query_index_artifact_cache_entry_cleanup(
@@ -17673,6 +17767,26 @@ static int lc_pouch_query_index_segmented_rows_move_visible(
   return rc;
 }
 
+static int lc_pouch_query_index_segmented_rows_have_visible(
+    const lc_pouch_index_result_row_list *segment_rows,
+    const lc_pouch_query_index_key_hex_set *hidden) {
+  size_t index;
+
+  if (segment_rows == NULL || hidden == NULL) {
+    return 0;
+  }
+  for (index = 0U; index < segment_rows->count; ++index) {
+    const lc_pouch_index_result_row *row;
+
+    row = &segment_rows->items[index];
+    if (row->key_hex == NULL ||
+        !lc_pouch_query_index_key_hex_set_find(hidden, row->key_hex, NULL)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int lc_pouch_query_index_segmented_mark_changed(
     const lc_allocator *allocator, const lc_pouch_index_doc_table *doc_table,
     lc_pouch_query_index_key_hex_set *hidden, lc_error *error) {
@@ -17701,8 +17815,9 @@ static int lc_pouch_query_index_segmented_collect(
     int prefix_match, int contains_match, int ignore_case,
     const lc_pouch_query_index_range_bounds *range_bounds,
     const lc_pouch_index_parsed_date_bounds *temporal_bounds,
-    lc_pouch_index_result_row_list *rows, lc_pouch_generation *index_seq,
-    int *text_complete_out, lc_error *error) {
+    lc_pouch_index_result_row_list *rows,
+    lc_pouch_query_index_doc_table_cache_borrow_list *doc_table_cache_borrows,
+    lc_pouch_generation *index_seq, int *text_complete_out, lc_error *error) {
   lc_pouch_query_index_manifest manifest;
   lc_pouch_query_index_key_hex_set hidden;
   lc_pouch_query_index_segmented_collect_kind collect_kind;
@@ -17716,7 +17831,7 @@ static int lc_pouch_query_index_segmented_collect(
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      rows == NULL || index_seq == NULL) {
+      rows == NULL || doc_table_cache_borrows == NULL || index_seq == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch segmented query collect requires pouch, "
                         "namespace, rows, and index_seq",
@@ -18096,6 +18211,14 @@ static int lc_pouch_query_index_segmented_collect(
                                                  &docids, doc_table, doc_cache,
                                                  &segment_rows, error);
     }
+    if (rc == LC_OK && lc_pouch_query_index_segmented_rows_have_visible(
+                           &segment_rows, &hidden)) {
+      rc = lc_pouch_query_index_doc_table_cache_borrow_list_take(
+          pouch, doc_table_cache_borrows, doc_cache, error);
+      if (rc == LC_OK) {
+        doc_cache = NULL;
+      }
+    }
     if (rc == LC_OK) {
       rc = lc_pouch_query_index_segmented_rows_move_visible(
           &pouch->allocator, rows, &segment_rows, &hidden, error);
@@ -18119,6 +18242,13 @@ static int lc_pouch_query_index_segmented_collect(
     lc_pouch_index_result_row_list_cleanup(&pouch->allocator, &segment_rows);
     lc_pouch_index_result_docid_list_cleanup(&pouch->allocator, &docids);
     lc_pouch_query_index_doc_table_cache_release(pouch, &doc_cache);
+#ifdef LOCKDC_TEST_BUILD
+    if (rc == LC_OK &&
+        lc_pouch_test_after_doc_table_cache_rows_attached_hook != NULL) {
+      rc = lc_pouch_test_after_doc_table_cache_rows_attached_hook(
+          lc_pouch_test_after_doc_table_cache_rows_attached_context, error);
+    }
+#endif
     lc_pouch_query_index_segmented_paths_cleanup(
         pouch, &header_path, &doc_table_path, &exact_term_path,
         &presence_term_path, &range_term_path, &text_term_path,
@@ -18140,6 +18270,7 @@ static int lc_pouch_query_index_visit_text_generation(
     lc_pouch_query_index_key_visit_fn visit, void *context,
     lc_pouch_generation *index_seq, int *text_complete_out, lc_error *error) {
   lc_pouch_index_result_row_list rows;
+  lc_pouch_query_index_doc_table_cache_borrow_list doc_table_cache_borrows;
   char *field_hex;
   char *needle_hex;
   int rc;
@@ -18166,14 +18297,18 @@ static int lc_pouch_query_index_visit_text_generation(
                         NULL, NULL, NULL);
   }
   memset(&rows, 0, sizeof(rows));
+  memset(&doc_table_cache_borrows, 0, sizeof(doc_table_cache_borrows));
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_TEXT, NULL, 0U,
       field_hex, needle_hex, needle, prefix_match, contains_match, ignore_case,
-      NULL, NULL, &rows, index_seq, text_complete_out, error);
+      NULL, NULL, &rows, &doc_table_cache_borrows, index_seq, text_complete_out,
+      error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_rows_emit(&rows, visit, context, error);
   }
   lc_pouch_index_result_row_list_cleanup(&pouch->allocator, &rows);
+  lc_pouch_query_index_doc_table_cache_borrow_list_cleanup(
+      pouch, &doc_table_cache_borrows);
   lc_free_with_allocator(&pouch->allocator, needle_hex);
   lc_free_with_allocator(&pouch->allocator, field_hex);
   return rc;
@@ -18185,6 +18320,7 @@ static int lc_pouch_query_index_visit_exact_generation(
     lc_pouch_query_index_key_visit_fn visit, void *context,
     lc_pouch_generation *index_seq, lc_error *error) {
   lc_pouch_index_result_row_list rows;
+  lc_pouch_query_index_doc_table_cache_borrow_list doc_table_cache_borrows;
   int rc;
 
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
@@ -18196,15 +18332,18 @@ static int lc_pouch_query_index_visit_exact_generation(
                         NULL, NULL, NULL);
   }
   memset(&rows, 0, sizeof(rows));
+  memset(&doc_table_cache_borrows, 0, sizeof(doc_table_cache_borrows));
   *index_seq = 0UL;
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_EXACT, exact_terms,
-      exact_term_count, NULL, NULL, NULL, 0, 0, 0, NULL, NULL, &rows, index_seq,
-      NULL, error);
+      exact_term_count, NULL, NULL, NULL, 0, 0, 0, NULL, NULL, &rows,
+      &doc_table_cache_borrows, index_seq, NULL, error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_rows_emit(&rows, visit, context, error);
   }
   lc_pouch_index_result_row_list_cleanup(&pouch->allocator, &rows);
+  lc_pouch_query_index_doc_table_cache_borrow_list_cleanup(
+      pouch, &doc_table_cache_borrows);
   return rc;
 }
 
@@ -18586,6 +18725,7 @@ int lc_pouch_query_index_visit_contains_candidates(
     lc_pouch_query_index_key_visit_fn visit, void *context,
     lc_pouch_generation *index_seq, lc_error *error) {
   lc_pouch_index_result_row_list rows;
+  lc_pouch_query_index_doc_table_cache_borrow_list doc_table_cache_borrows;
   char *field_hex;
   char *needle_hex;
   int rc;
@@ -18611,14 +18751,17 @@ int lc_pouch_query_index_visit_contains_candidates(
                         NULL, NULL, NULL);
   }
   memset(&rows, 0, sizeof(rows));
+  memset(&doc_table_cache_borrows, 0, sizeof(doc_table_cache_borrows));
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_TRIGRAM, NULL, 0U,
       field_hex, needle_hex, needle, 0, 1, ignore_case, NULL, NULL, &rows,
-      index_seq, NULL, error);
+      &doc_table_cache_borrows, index_seq, NULL, error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_rows_emit(&rows, visit, context, error);
   }
   lc_pouch_index_result_row_list_cleanup(&pouch->allocator, &rows);
+  lc_pouch_query_index_doc_table_cache_borrow_list_cleanup(
+      pouch, &doc_table_cache_borrows);
   lc_free_with_allocator(&pouch->allocator, needle_hex);
   lc_free_with_allocator(&pouch->allocator, field_hex);
   return rc;
@@ -18630,6 +18773,7 @@ int lc_pouch_query_index_visit_range(
     lc_pouch_query_index_key_visit_fn visit, void *context,
     lc_pouch_generation *index_seq, lc_error *error) {
   lc_pouch_index_result_row_list rows;
+  lc_pouch_query_index_doc_table_cache_borrow_list doc_table_cache_borrows;
   char *field_hex;
   int rc;
 
@@ -18655,14 +18799,17 @@ int lc_pouch_query_index_visit_range(
                         NULL, NULL, NULL);
   }
   memset(&rows, 0, sizeof(rows));
+  memset(&doc_table_cache_borrows, 0, sizeof(doc_table_cache_borrows));
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_RANGE, NULL, 0U,
-      field_hex, NULL, NULL, 0, 0, 0, bounds, NULL, &rows, index_seq, NULL,
-      error);
+      field_hex, NULL, NULL, 0, 0, 0, bounds, NULL, &rows,
+      &doc_table_cache_borrows, index_seq, NULL, error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_rows_emit(&rows, visit, context, error);
   }
   lc_pouch_index_result_row_list_cleanup(&pouch->allocator, &rows);
+  lc_pouch_query_index_doc_table_cache_borrow_list_cleanup(
+      pouch, &doc_table_cache_borrows);
   lc_free_with_allocator(&pouch->allocator, field_hex);
   return rc;
 }
@@ -18674,6 +18821,7 @@ int lc_pouch_query_index_visit_date(
     lc_pouch_generation *index_seq, lc_error *error) {
   lc_pouch_index_parsed_date_bounds parsed_bounds;
   lc_pouch_index_result_row_list rows;
+  lc_pouch_query_index_doc_table_cache_borrow_list doc_table_cache_borrows;
   char *field_hex;
   int rc;
 
@@ -18703,14 +18851,17 @@ int lc_pouch_query_index_visit_date(
                         NULL, NULL, NULL);
   }
   memset(&rows, 0, sizeof(rows));
+  memset(&doc_table_cache_borrows, 0, sizeof(doc_table_cache_borrows));
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_TEMPORAL, NULL, 0U,
-      field_hex, NULL, NULL, 0, 0, 0, NULL, &parsed_bounds, &rows, index_seq,
-      NULL, error);
+      field_hex, NULL, NULL, 0, 0, 0, NULL, &parsed_bounds, &rows,
+      &doc_table_cache_borrows, index_seq, NULL, error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_rows_emit(&rows, visit, context, error);
   }
   lc_pouch_index_result_row_list_cleanup(&pouch->allocator, &rows);
+  lc_pouch_query_index_doc_table_cache_borrow_list_cleanup(
+      pouch, &doc_table_cache_borrows);
   lc_free_with_allocator(&pouch->allocator, field_hex);
   return rc;
 }
@@ -18720,6 +18871,7 @@ int lc_pouch_query_index_visit_exists(
     lc_pouch_query_index_key_visit_fn visit, void *context,
     lc_pouch_generation *index_seq, lc_error *error) {
   lc_pouch_index_result_row_list rows;
+  lc_pouch_query_index_doc_table_cache_borrow_list doc_table_cache_borrows;
   char *field_hex;
   int rc;
 
@@ -18738,14 +18890,17 @@ int lc_pouch_query_index_visit_exists(
                         NULL, NULL, NULL);
   }
   memset(&rows, 0, sizeof(rows));
+  memset(&doc_table_cache_borrows, 0, sizeof(doc_table_cache_borrows));
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_PRESENCE, NULL, 0U,
-      field_hex, NULL, NULL, 0, 0, 0, NULL, NULL, &rows, index_seq, NULL,
-      error);
+      field_hex, NULL, NULL, 0, 0, 0, NULL, NULL, &rows,
+      &doc_table_cache_borrows, index_seq, NULL, error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_rows_emit(&rows, visit, context, error);
   }
   lc_pouch_index_result_row_list_cleanup(&pouch->allocator, &rows);
+  lc_pouch_query_index_doc_table_cache_borrow_list_cleanup(
+      pouch, &doc_table_cache_borrows);
   lc_free_with_allocator(&pouch->allocator, field_hex);
   return rc;
 }

@@ -259,6 +259,14 @@ extern void *lc_pouch_test_after_snapshot_write_context;
  * before it dereferences that borrowed table. */
 extern lc_pouch_test_hook lc_pouch_test_after_doc_table_cache_borrow_hook;
 extern void *lc_pouch_test_after_doc_table_cache_borrow_context;
+/* Invoked after an indexed query has retained cache borrows for result rows,
+ * before it sorts or emits those rows. */
+extern lc_pouch_test_hook
+    lc_pouch_test_after_doc_table_cache_rows_attached_hook;
+extern void *lc_pouch_test_after_doc_table_cache_rows_attached_context;
+/* A nonzero test override shortens the resident doc-table cache for eviction
+ * interleavings. Production always uses its fixed cache capacity. */
+extern size_t lc_pouch_test_doc_table_cache_capacity;
 /* Invoked while holding the doc-table cache mutex immediately before a
  * borrowed entry lazily initializes one decoded key. */
 extern lc_pouch_test_hook
