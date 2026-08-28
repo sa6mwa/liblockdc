@@ -80,6 +80,8 @@ static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_before_dispatcher_wait_context = NULL;
   lc_workflow_test_before_next_wait_hook = NULL;
   lc_workflow_test_before_next_wait_context = NULL;
+  lc_workflow_test_before_next_release_hook = NULL;
+  lc_workflow_test_before_next_release_context = NULL;
   lc_workflow_test_before_ledger_append_hook = NULL;
   lc_workflow_test_before_ledger_append_context = NULL;
   lc_workflow_test_before_participant_allocation_hook = NULL;
@@ -234,6 +236,21 @@ typedef struct workflow_shutdown_race {
   lc_outbox_job *job;
 } workflow_shutdown_race;
 
+typedef struct workflow_blocked_next_close_race {
+  pthread_mutex_t mutex;
+  pthread_cond_t condition;
+  lc_workflow *workflow;
+  int next_wait_entered;
+  int close_requested;
+  int allow_close;
+  int next_release_entered;
+  int allow_next_release;
+  int close_finished;
+  int next_finished;
+  int next_rc;
+  lc_outbox_job *job;
+} workflow_blocked_next_close_race;
+
 static int workflow_shutdown_race_wait(workflow_shutdown_race *race,
                                        int *flag) {
   struct timespec deadline;
@@ -305,6 +322,91 @@ static void *workflow_shutdown_race_next_thread(void *context) {
   lc_error_init(&error);
   job = NULL;
   rc = lc_workflow_next(race->workflow, 0L, &job, &error);
+  lc_error_cleanup(&error);
+  (void)pthread_mutex_lock(&race->mutex);
+  race->next_rc = rc;
+  race->job = job;
+  race->next_finished = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  (void)pthread_mutex_unlock(&race->mutex);
+  return NULL;
+}
+
+static int
+workflow_blocked_next_close_race_wait(workflow_blocked_next_close_race *race,
+                                      int *flag) {
+  struct timespec deadline;
+  int reached;
+  int rc;
+
+  if (clock_gettime(CLOCK_REALTIME, &deadline) != 0)
+    return 0;
+  deadline.tv_sec += 5L;
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  rc = 0;
+  while (!*flag && rc == 0)
+    rc = pthread_cond_timedwait(&race->condition, &race->mutex, &deadline);
+  reached = *flag;
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+  return rc == 0 && reached;
+}
+
+static void workflow_blocked_next_close_before_wait(void *context) {
+  workflow_blocked_next_close_race *race =
+      (workflow_blocked_next_close_race *)context;
+
+  (void)pthread_mutex_lock(&race->mutex);
+  race->next_wait_entered = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  (void)pthread_mutex_unlock(&race->mutex);
+}
+
+static void workflow_blocked_next_close_after_close_requested(void *context) {
+  workflow_blocked_next_close_race *race =
+      (workflow_blocked_next_close_race *)context;
+
+  (void)pthread_mutex_lock(&race->mutex);
+  race->close_requested = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  while (!race->allow_close)
+    (void)pthread_cond_wait(&race->condition, &race->mutex);
+  (void)pthread_mutex_unlock(&race->mutex);
+}
+
+static void workflow_blocked_next_close_before_release(void *context) {
+  workflow_blocked_next_close_race *race =
+      (workflow_blocked_next_close_race *)context;
+
+  (void)pthread_mutex_lock(&race->mutex);
+  race->next_release_entered = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  while (!race->allow_next_release)
+    (void)pthread_cond_wait(&race->condition, &race->mutex);
+  (void)pthread_mutex_unlock(&race->mutex);
+}
+
+static void *workflow_blocked_next_close_thread(void *context) {
+  workflow_blocked_next_close_race *race =
+      (workflow_blocked_next_close_race *)context;
+
+  lc_workflow_close(race->workflow);
+  (void)pthread_mutex_lock(&race->mutex);
+  race->close_finished = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  (void)pthread_mutex_unlock(&race->mutex);
+  return NULL;
+}
+
+static void *workflow_blocked_next_next_thread(void *context) {
+  workflow_blocked_next_close_race *race =
+      (workflow_blocked_next_close_race *)context;
+  lc_error error;
+  lc_outbox_job *job;
+  int rc;
+
+  lc_error_init(&error);
+  job = NULL;
+  rc = lc_workflow_next(race->workflow, -1L, &job, &error);
   lc_error_cleanup(&error);
   (void)pthread_mutex_lock(&race->mutex);
   race->next_rc = rc;
@@ -4253,6 +4355,86 @@ test_pouch_workflow_close_serializes_ready_job_detach(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void test_pouch_workflow_close_retains_blocked_next(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  workflow_blocked_next_close_race race;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_error error;
+  pthread_t close_thread, next_thread;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "blocked-next-close-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  memset(&race, 0, sizeof(race));
+  assert_int_equal(pthread_mutex_init(&race.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&race.condition, NULL), 0);
+  workflow_reset_allocation_failures();
+  lc_workflow_test_before_next_wait_hook =
+      workflow_blocked_next_close_before_wait;
+  lc_workflow_test_before_next_wait_context = &race;
+  lc_workflow_test_after_close_requested_hook =
+      workflow_blocked_next_close_after_close_requested;
+  lc_workflow_test_after_close_requested_context = &race;
+  lc_workflow_test_before_next_release_hook =
+      workflow_blocked_next_close_before_release;
+  lc_workflow_test_before_next_release_context = &race;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "blocked-next-close";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  race.workflow = workflow;
+  assert_int_equal(pthread_create(&next_thread, NULL,
+                                  workflow_blocked_next_next_thread, &race),
+                   0);
+  assert_true(
+      workflow_blocked_next_close_race_wait(&race, &race.next_wait_entered));
+  assert_int_equal(pthread_create(&close_thread, NULL,
+                                  workflow_blocked_next_close_thread, &race),
+                   0);
+  assert_true(
+      workflow_blocked_next_close_race_wait(&race, &race.close_requested));
+  assert_true(
+      workflow_blocked_next_close_race_wait(&race, &race.next_release_entered));
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  race.allow_close = 1;
+  assert_int_equal(pthread_cond_broadcast(&race.condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+  assert_true(
+      workflow_blocked_next_close_race_wait(&race, &race.close_finished));
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  race.allow_next_release = 1;
+  assert_int_equal(pthread_cond_broadcast(&race.condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+  assert_true(
+      workflow_blocked_next_close_race_wait(&race, &race.next_finished));
+  assert_int_equal(pthread_join(next_thread, NULL), 0);
+  assert_int_equal(pthread_join(close_thread, NULL), 0);
+  assert_int_equal(race.next_rc, LC_OK);
+  assert_null(race.job);
+  workflow_reset_allocation_failures();
+  assert_int_equal(pthread_cond_destroy(&race.condition), 0);
+  assert_int_equal(pthread_mutex_destroy(&race.mutex), 0);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(
@@ -4298,6 +4480,7 @@ int main(void) {
           test_pouch_expired_claim_recovers_and_preserves_attempt_budget),
       cmocka_unit_test(test_pouch_workflow_validates_durable_input_contracts),
       cmocka_unit_test(test_pouch_workflow_close_serializes_ready_job_detach),
+      cmocka_unit_test(test_pouch_workflow_close_retains_blocked_next),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

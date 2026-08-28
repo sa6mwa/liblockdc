@@ -40,6 +40,8 @@ lc_workflow_test_hook_fn lc_workflow_test_before_dispatcher_wait_hook = NULL;
 void *lc_workflow_test_before_dispatcher_wait_context = NULL;
 lc_workflow_test_hook_fn lc_workflow_test_before_next_wait_hook = NULL;
 void *lc_workflow_test_before_next_wait_context = NULL;
+lc_workflow_test_hook_fn lc_workflow_test_before_next_release_hook = NULL;
+void *lc_workflow_test_before_next_release_context = NULL;
 lc_workflow_test_failure_hook_fn lc_workflow_test_before_ledger_append_hook =
     NULL;
 void *lc_workflow_test_before_ledger_append_context = NULL;
@@ -3581,12 +3583,26 @@ static int lc_workflow_resume_command_method(
 static int lc_workflow_next_method(lc_workflow *self, long timeout_ms,
                                    lc_outbox_job **out, lc_error *error) {
   lc_workflow_handle *workflow = (lc_workflow_handle *)self;
+  int rc;
+
   if (workflow == NULL || out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "workflow and job output are required", NULL, NULL,
                         NULL);
   }
-  return lc_workflow_wait_for_ready(workflow, timeout_ms, out, error);
+  /* A blocked next() caller is part of the workflow's lifecycle. close()
+   * wakes it, but must not destroy the wait primitives until this call has
+   * returned to its host thread. */
+  lc_workflow_retain(workflow);
+  rc = lc_workflow_wait_for_ready(workflow, timeout_ms, out, error);
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_before_next_release_hook != NULL) {
+    lc_workflow_test_before_next_release_hook(
+        lc_workflow_test_before_next_release_context);
+  }
+#endif
+  lc_workflow_release(workflow);
+  return rc;
 }
 
 static int lc_workflow_get_stats_method(lc_workflow *self,

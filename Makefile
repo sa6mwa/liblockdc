@@ -355,6 +355,7 @@ __test-pouch-workflow-preflight: __build-debug
 	CMOCKA_TEST_FILTER=test_pouch_clean_reopen_reconciles_durable_index $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
 	CMOCKA_TEST_FILTER=test_pouch_shared_reopen_reconciles_durable_index $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
 	CMOCKA_TEST_FILTER=test_pouch_shared_process_reconciles_each_outbox_once $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_workflow_close_retains_blocked_next $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
 
 test-host:
 	$(TIMED) test-host $(MAKE_RECURSE) __test-host

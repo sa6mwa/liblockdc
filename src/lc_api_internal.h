@@ -45,6 +45,8 @@ extern lc_workflow_test_hook_fn lc_workflow_test_before_dispatcher_wait_hook;
 extern void *lc_workflow_test_before_dispatcher_wait_context;
 extern lc_workflow_test_hook_fn lc_workflow_test_before_next_wait_hook;
 extern void *lc_workflow_test_before_next_wait_context;
+extern lc_workflow_test_hook_fn lc_workflow_test_before_next_release_hook;
+extern void *lc_workflow_test_before_next_release_context;
 void lc_workflow_test_wake_next_waiters(lc_workflow *workflow);
 typedef int (*lc_workflow_test_failure_hook_fn)(void *context, lc_error *error);
 extern lc_workflow_test_failure_hook_fn
