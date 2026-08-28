@@ -1251,29 +1251,21 @@ absolute number. Before v1, record representative Pouch and remote baselines
 on the supported deployment hardware and promote agreed budgets into an
 explicit performance gate.
 
-## Proof Obligations and Open Decisions
+## Remaining Proof Obligations and Future Work
 
-The following are not generic lockd deployment concerns; they are the remaining
-component-specific design or proof obligations:
+The public workflow receiver names, request records, envelope metadata, and
+liblockdc shared-library ABI 3 line are finalized for this release. Future
+public-surface changes require the same API and ABI review. The remaining
+component-specific work is:
 
-1. Finalize ABI names and request records for first-operation
-   `accept_command()`/`append_outbox()`/`accept_inbox()`, command receipt
-   reads/resume/result streaming, transaction participants, parent `next()`,
-   and jobs. Because this extends public receiver structs, implementation must
-   derive and apply any necessary shared-library ABI bump from the latest
-   released artifact, not from this branch.
-2. Finalize the exact outbox transport metadata surface: generated `message_id`,
-   optional `causation_id`, schema version, and completion/provider reference.
-   The logical semantics above are fixed; field spelling and size limits are
-   still subject to public-API review.
-3. Define the command-result safe-response contract and terminal failure code
+1. Define the command-result safe-response contract and terminal failure code
    taxonomy without making liblockdc an HTTP status-code policy engine.
-4. Define independent terminal retention windows for command, inbox, outbox,
+2. Define independent terminal retention windows for command, inbox, outbox,
    dead-letter, and optional request/result attachments before adding an
    automatic sweeper.
-5. Establish quantitative recovery-query performance budgets from the Pouch and
+3. Establish quantitative recovery-query performance budgets from the Pouch and
    remote-lockd benchmark matrix before treating indexing as sufficient.
-6. Prove remote command receipt composition only after the upstream implicit-XA
+4. Prove remote command receipt composition only after the upstream implicit-XA
    enrollment fix is available in the repository's pinned E2E lockd image.
 
 ## Design Basis
