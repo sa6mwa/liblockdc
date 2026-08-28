@@ -259,6 +259,11 @@ extern void *lc_pouch_test_after_snapshot_write_context;
  * before it dereferences that borrowed table. */
 extern lc_pouch_test_hook lc_pouch_test_after_doc_table_cache_borrow_hook;
 extern void *lc_pouch_test_after_doc_table_cache_borrow_context;
+/* Invoked while holding the doc-table cache mutex immediately before a
+ * borrowed entry lazily initializes one decoded key. */
+extern lc_pouch_test_hook
+    lc_pouch_test_before_doc_table_decoded_key_populate_hook;
+extern void *lc_pouch_test_before_doc_table_decoded_key_populate_context;
 typedef void (*lc_pouch_test_after_acquire_claim_hook_fn)(void *context);
 extern lc_pouch_test_after_acquire_claim_hook_fn
     lc_pouch_test_after_acquire_claim_hook;

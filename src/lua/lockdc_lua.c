@@ -3224,6 +3224,9 @@ static int lcdc_workflow_txn_acquire(lua_State *L) {
   luaL_checktype(L, 2, LUA_TTABLE);
   request.acquire.namespace_name =
       lcdc_opt_string_field(L, 2, "namespace_name");
+  if (request.acquire.namespace_name == NULL) {
+    request.acquire.namespace_name = lcdc_opt_string_field(L, 2, "namespace");
+  }
   lcdc_require_string_field(L, 2, "key", &request.acquire.key);
   request.acquire.owner = lcdc_opt_string_field(L, 2, "owner");
   lcdc_opt_integer_field(L, 2, "ttl_seconds", &request.acquire.ttl_seconds);

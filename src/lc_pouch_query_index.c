@@ -23,6 +23,9 @@
 #ifdef LOCKDC_TEST_BUILD
 lc_pouch_test_hook lc_pouch_test_after_doc_table_cache_borrow_hook = NULL;
 void *lc_pouch_test_after_doc_table_cache_borrow_context = NULL;
+lc_pouch_test_hook lc_pouch_test_before_doc_table_decoded_key_populate_hook =
+    NULL;
+void *lc_pouch_test_before_doc_table_decoded_key_populate_context = NULL;
 #endif
 
 #define LC_POUCH_QUERY_INDEX_FORMAT "pouch-query-index"
@@ -17388,9 +17391,55 @@ static int lc_pouch_query_index_result_row_list_add_view(
   return LC_OK;
 }
 
+/* A document-table entry stays alive for the caller's borrow, but its lazily
+ * decoded keys are shared by concurrent readers. The cache ownership mutex
+ * covers both the lookup and the one-time publication of each decoded key. */
+static int lc_pouch_query_index_doc_table_cache_decoded_key_get(
+    lc_pouch *pouch, lc_pouch_query_index_doc_table_cache_entry *entry,
+    unsigned long doc_id, const char *key_hex, char **out, lc_error *error) {
+  char *key;
+  int rc;
+
+  if (pouch == NULL || entry == NULL || key_hex == NULL || out == NULL ||
+      doc_id >= entry->decoded_key_count) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch doc-table decoded key requires cached entry",
+                        NULL, NULL, "pouch");
+  }
+  *out = NULL;
+  rc = lc_pouch_query_index_doc_table_cache_lock(pouch, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  key = entry->decoded_keys[doc_id];
+  if (key == NULL) {
+#ifdef LOCKDC_TEST_BUILD
+    if (lc_pouch_test_before_doc_table_decoded_key_populate_hook != NULL) {
+      rc = lc_pouch_test_before_doc_table_decoded_key_populate_hook(
+          lc_pouch_test_before_doc_table_decoded_key_populate_context, error);
+    }
+#endif
+    if (rc == LC_OK) {
+      key = lc_pouch_query_index_hex_decode(&pouch->allocator, key_hex, error);
+      if (key == NULL) {
+        rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+      } else {
+        entry->decoded_keys[doc_id] = key;
+      }
+    }
+  }
+  if (rc == LC_OK) {
+    *out = key;
+  }
+  lc_pouch_query_index_doc_table_cache_unlock(pouch);
+  return rc;
+}
+
 static int lc_pouch_query_index_docid_rows_build(
-    const lc_allocator *allocator, lc_pouch_index_result_docid_list *docids,
-    const lc_pouch_index_doc_table *doc_table, char **decoded_keys,
+    lc_pouch *pouch, const lc_allocator *allocator,
+    lc_pouch_index_result_docid_list *docids,
+    const lc_pouch_index_doc_table *doc_table,
+    lc_pouch_query_index_doc_table_cache_entry *doc_cache,
     lc_pouch_index_result_row_list *rows, lc_error *error) {
   const lc_pouch_index_doc *doc;
   char *key;
@@ -17430,24 +17479,23 @@ static int lc_pouch_query_index_docid_rows_build(
     if (rc != LC_OK) {
       break;
     }
-    key = NULL;
-    if (decoded_keys != NULL &&
-        docids->items[index].doc_id < doc_table->count) {
-      key = decoded_keys[docids->items[index].doc_id];
-    }
     key_owned = 0;
-    if (key == NULL) {
+    key = NULL;
+    if (doc_cache != NULL &&
+        docids->items[index].doc_id < doc_cache->decoded_key_count) {
+      rc = lc_pouch_query_index_doc_table_cache_decoded_key_get(
+          pouch, doc_cache, docids->items[index].doc_id, doc->key_hex, &key,
+          error);
+    } else {
       key = lc_pouch_query_index_hex_decode(allocator, doc->key_hex, error);
       if (key == NULL) {
         rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
-        break;
-      }
-      if (decoded_keys != NULL &&
-          docids->items[index].doc_id < doc_table->count) {
-        decoded_keys[docids->items[index].doc_id] = key;
       } else {
         key_owned = 1;
       }
+    }
+    if (rc != LC_OK) {
+      break;
     }
     rc = lc_pouch_query_index_result_row_list_add_view(
         allocator, rows, key, (char *)doc->key_hex, key_owned, 0,
@@ -18044,10 +18092,9 @@ static int lc_pouch_query_index_segmented_collect(
       }
     }
     if (rc == LC_OK) {
-      rc = lc_pouch_query_index_docid_rows_build(
-          &pouch->allocator, &docids, doc_table,
-          doc_cache != NULL ? doc_cache->decoded_keys : NULL, &segment_rows,
-          error);
+      rc = lc_pouch_query_index_docid_rows_build(pouch, &pouch->allocator,
+                                                 &docids, doc_table, doc_cache,
+                                                 &segment_rows, error);
     }
     if (rc == LC_OK) {
       rc = lc_pouch_query_index_segmented_rows_move_visible(

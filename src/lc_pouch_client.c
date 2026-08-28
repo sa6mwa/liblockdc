@@ -6851,6 +6851,35 @@ static int lc_pouch_txn_participant_compare(const void *left,
   return rc;
 }
 
+/* Transaction records keep votes positionally aligned with participants.
+ * Reorder the two arrays as pairs whenever enrollment canonicalizes the
+ * participant order, including after a participant has already voted. */
+static void lc_pouch_txn_record_sort_participants(lc_pouch_txn_record *record) {
+  size_t index;
+
+  if (record == NULL || record->participants == NULL || record->votes == NULL) {
+    return;
+  }
+  for (index = 1U; index < record->participant_count; ++index) {
+    lc_txn_participant participant;
+    unsigned char vote;
+    size_t cursor;
+
+    participant = record->participants[index];
+    vote = record->votes[index];
+    cursor = index;
+    while (cursor > 0U &&
+           lc_pouch_txn_participant_compare(&record->participants[cursor - 1U],
+                                            &participant) > 0) {
+      record->participants[cursor] = record->participants[cursor - 1U];
+      record->votes[cursor] = record->votes[cursor - 1U];
+      --cursor;
+    }
+    record->participants[cursor] = participant;
+    record->votes[cursor] = vote;
+  }
+}
+
 static int lc_pouch_txn_record_merge_request(lc_pouch_txn_record *record,
                                              const lc_txn_decision_req *request,
                                              const char *requested_state,
@@ -6959,8 +6988,7 @@ static int lc_pouch_txn_record_merge_request(lc_pouch_txn_record *record,
     }
   }
   if (rc == LC_OK && record->participant_count > 1U) {
-    qsort(record->participants, record->participant_count,
-          sizeof(record->participants[0]), lc_pouch_txn_participant_compare);
+    lc_pouch_txn_record_sort_participants(record);
   }
   if (rc == LC_OK) {
     *write_record = 1;

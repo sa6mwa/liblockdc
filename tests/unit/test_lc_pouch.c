@@ -5940,6 +5940,60 @@ typedef struct pouch_doc_table_cache_borrow_overlap {
   lc_error query_error;
 } pouch_doc_table_cache_borrow_overlap;
 
+typedef struct pouch_doc_table_decoded_key_query {
+  lc_pouch *pouch;
+  int query_rc;
+  size_t rows;
+  lc_pouch_generation index_seq;
+  lc_error query_error;
+} pouch_doc_table_decoded_key_query;
+
+typedef struct pouch_doc_table_decoded_key_overlap {
+  pthread_barrier_t borrow_barrier;
+  pthread_mutex_t mutex;
+  size_t population_count;
+} pouch_doc_table_decoded_key_overlap;
+
+static int pouch_doc_table_decoded_key_borrow_barrier(void *context,
+                                                      lc_error *error) {
+  pouch_doc_table_decoded_key_overlap *overlap;
+  int pthread_rc;
+
+  (void)error;
+  overlap = (pouch_doc_table_decoded_key_overlap *)context;
+  pthread_rc = pthread_barrier_wait(&overlap->borrow_barrier);
+  return pthread_rc == 0 || pthread_rc == PTHREAD_BARRIER_SERIAL_THREAD
+             ? LC_OK
+             : LC_ERR_TRANSPORT;
+}
+
+static int pouch_doc_table_decoded_key_population_count(void *context,
+                                                        lc_error *error) {
+  pouch_doc_table_decoded_key_overlap *overlap;
+
+  (void)error;
+  overlap = (pouch_doc_table_decoded_key_overlap *)context;
+  if (pthread_mutex_lock(&overlap->mutex) != 0) {
+    return LC_ERR_TRANSPORT;
+  }
+  ++overlap->population_count;
+  (void)pthread_mutex_unlock(&overlap->mutex);
+  return LC_OK;
+}
+
+static void *pouch_doc_table_decoded_key_query_run(void *context) {
+  pouch_doc_table_decoded_key_query *query;
+
+  query = (pouch_doc_table_decoded_key_query *)context;
+  lc_error_init(&query->query_error);
+  query->rows = 0U;
+  query->index_seq = 0UL;
+  query->query_rc = lc_pouch_query_index_visit(
+      query->pouch, "default", pouch_query_index_count_row, &query->rows,
+      &query->index_seq, &query->query_error);
+  return NULL;
+}
+
 static int pouch_doc_table_cache_borrow_hold(void *context, lc_error *error) {
   pouch_doc_table_cache_borrow_overlap *overlap;
   int pthread_rc;
@@ -6069,6 +6123,77 @@ test_query_doc_table_cache_borrow_survives_publication(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(query_index_seq, state_index_seq);
   assert_int_equal(row_count, 2U);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_query_doc_table_cache_serializes_decoded_key_population(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_query_index_flush_result flush_result;
+  pouch_doc_table_decoded_key_query queries[2];
+  pouch_doc_table_decoded_key_overlap overlap;
+  pthread_t threads[2];
+  lc_pouch_generation state_index_seq;
+  lc_error error;
+  char root[512];
+  size_t index;
+
+  (void)state;
+  pouch = NULL;
+  memset(&flush_result, 0, sizeof(flush_result));
+  memset(queries, 0, sizeof(queries));
+  memset(&overlap, 0, sizeof(overlap));
+  lc_error_init(&error);
+  make_root("query-doc-cache-decoded-key", root, sizeof(root));
+  cleanup_root(root);
+  assert_int_equal(lc_pouch_open(root, NULL, NULL, &pouch, &error), LC_OK);
+  pouch_write_json_state(pouch, "default", "doc/decoded-key",
+                         "{\"kind\":\"cached\"}", NULL, &error);
+  state_index_seq = 0UL;
+  assert_int_equal(
+      lc_pouch_state_index_seq(pouch, "default", &state_index_seq, &error),
+      LC_OK);
+  assert_int_equal(lc_pouch_query_index_flush(pouch, "default", state_index_seq,
+                                              &flush_result, &error),
+                   LC_OK);
+
+  assert_int_equal(pthread_barrier_init(&overlap.borrow_barrier, NULL, 2U), 0);
+  assert_int_equal(pthread_mutex_init(&overlap.mutex, NULL), 0);
+  lc_pouch_test_after_doc_table_cache_borrow_context = &overlap;
+  lc_pouch_test_after_doc_table_cache_borrow_hook =
+      pouch_doc_table_decoded_key_borrow_barrier;
+  lc_pouch_test_before_doc_table_decoded_key_populate_context = &overlap;
+  lc_pouch_test_before_doc_table_decoded_key_populate_hook =
+      pouch_doc_table_decoded_key_population_count;
+  for (index = 0U; index < 2U; ++index) {
+    queries[index].pouch = pouch;
+    assert_int_equal(pthread_create(&threads[index], NULL,
+                                    pouch_doc_table_decoded_key_query_run,
+                                    &queries[index]),
+                     0);
+  }
+  for (index = 0U; index < 2U; ++index) {
+    assert_int_equal(pthread_join(threads[index], NULL), 0);
+  }
+  lc_pouch_test_before_doc_table_decoded_key_populate_hook = NULL;
+  lc_pouch_test_before_doc_table_decoded_key_populate_context = NULL;
+  lc_pouch_test_after_doc_table_cache_borrow_hook = NULL;
+  lc_pouch_test_after_doc_table_cache_borrow_context = NULL;
+
+  assert_int_equal(pthread_mutex_lock(&overlap.mutex), 0);
+  assert_int_equal(overlap.population_count, 1U);
+  assert_int_equal(pthread_mutex_unlock(&overlap.mutex), 0);
+  for (index = 0U; index < 2U; ++index) {
+    assert_int_equal(queries[index].query_rc, LC_OK);
+    assert_int_equal(queries[index].rows, 1U);
+    assert_int_equal(queries[index].index_seq, state_index_seq);
+    lc_error_cleanup(&queries[index].query_error);
+  }
+  assert_int_equal(pthread_mutex_destroy(&overlap.mutex), 0);
+  assert_int_equal(pthread_barrier_destroy(&overlap.borrow_barrier), 0);
+
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -24589,6 +24714,147 @@ static void test_minted_xid_enrolls_cross_namespace_participant_before_publish(
   lc_error_cleanup(&error);
 }
 
+/* A minted XID starts as a single-lease transaction. Once a second lease
+ * enrolls, the first lease may vote while the transaction is still prepared.
+ * A later enrollment that sorts before that first participant must carry the
+ * vote with its participant, or the final release leaves the transaction
+ * prepared until expiry. */
+static void
+test_minted_xid_vote_survives_incremental_sorted_enrollment(void **state) {
+  lc_client *client;
+  lc_lease *first;
+  lc_lease *second;
+  lc_lease *third;
+  lc_source *source;
+  lc_acquire_req acquire_first;
+  lc_acquire_req acquire_second;
+  lc_acquire_req acquire_third;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char body[16];
+  char root[512];
+  char first_key[96];
+  char second_key[96];
+  char third_key[96];
+  char transaction_id[LC_XID_STRING_SIZE];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  first = NULL;
+  second = NULL;
+  third = NULL;
+  source = NULL;
+  lc_acquire_req_init(&acquire_first);
+  lc_acquire_req_init(&acquire_second);
+  lc_acquire_req_init(&acquire_third);
+  memset(&read_result, 0, sizeof(read_result));
+  transaction_id[0] = '\0';
+  lc_error_init(&error);
+  make_root("minted-xid-vote-order", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(first_key, sizeof(first_key), "state/implicit-vote/z/%ld",
+           (long)getpid());
+  snprintf(second_key, sizeof(second_key), "state/implicit-vote/y/%ld",
+           (long)getpid());
+  snprintf(third_key, sizeof(third_key), "state/implicit-vote/a/%ld",
+           (long)getpid());
+
+  open_pouch_client_shared(root, &client, &error);
+  acquire_first.namespace_name = "implicit-vote-z";
+  acquire_first.key = first_key;
+  acquire_first.owner = "implicit-vote-owner";
+  acquire_first.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_first, &first, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(snprintf(transaction_id, sizeof(transaction_id), "%s",
+                       first->txn_id) > 0);
+
+  rc = lc_source_from_memory("first", strlen("first"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = first->update(first, source, NULL, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  acquire_second.namespace_name = "implicit-vote-y";
+  acquire_second.key = second_key;
+  acquire_second.owner = "implicit-vote-owner";
+  acquire_second.ttl_seconds = 30L;
+  acquire_second.txn_id = transaction_id;
+  rc = client->acquire(client, &acquire_second, &second, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("second", strlen("second"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = second->update(second, source, NULL, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  rc = first->release(first, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  first = NULL;
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch,
+                           "implicit-vote-z", first_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+
+  /* This participant sorts before the already-voted first participant. */
+  acquire_third.namespace_name = "implicit-vote-a";
+  acquire_third.key = third_key;
+  acquire_third.owner = "implicit-vote-owner";
+  acquire_third.ttl_seconds = 30L;
+  acquire_third.txn_id = transaction_id;
+  rc = client->acquire(client, &acquire_third, &third, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("third", strlen("third"), &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = third->update(third, source, NULL, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  rc = second->release(second, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  second = NULL;
+  rc = third->release(third, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+  third = NULL;
+
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch,
+                           "implicit-vote-z", first_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_int_equal(read_source_to_bytes(read_result.body, body, sizeof(body)),
+                   strlen("first"));
+  assert_memory_equal(body, "first", strlen("first"));
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch,
+                           "implicit-vote-y", second_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_int_equal(read_source_to_bytes(read_result.body, body, sizeof(body)),
+                   strlen("second"));
+  assert_memory_equal(body, "second", strlen("second"));
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+  rc = lc_pouch_state_read(((lc_client_handle *)client)->pouch,
+                           "implicit-vote-a", third_key, &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_int_equal(read_source_to_bytes(read_result.body, body, sizeof(body)),
+                   strlen("third"));
+  assert_memory_equal(body, "third", strlen("third"));
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_pouch_transaction_ids_match_lockd_xid_contract(void **state) {
   lc_client *client;
   lc_lease *lease;
@@ -33122,6 +33388,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_parallel_state_writes_keep_query_projection_consistent),
       cmocka_unit_test(test_query_doc_table_cache_borrow_survives_publication),
+      cmocka_unit_test(
+          test_query_doc_table_cache_serializes_decoded_key_population),
       cmocka_unit_test(test_shared_query_index_flush_catches_up_durable_state),
       cmocka_unit_test(test_shared_query_index_flush_catches_up_peer_state),
       cmocka_unit_test(test_parallel_query_flush_preserves_later_write),
@@ -33181,6 +33449,8 @@ int main(int argc, char **argv) {
           test_minted_xid_single_lease_releases_without_xa_barrier),
       cmocka_unit_test(
           test_minted_xid_enrolls_cross_namespace_participant_before_publish),
+      cmocka_unit_test(
+          test_minted_xid_vote_survives_incremental_sorted_enrollment),
       cmocka_unit_test(test_pouch_transaction_ids_match_lockd_xid_contract),
       cmocka_unit_test(
           test_pouch_queue_dequeue_rejects_invalid_xid_without_leasing),

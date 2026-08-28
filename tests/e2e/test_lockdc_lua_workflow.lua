@@ -91,7 +91,7 @@ end
 
 local txn = append_effect("first", { sequence = 1 })
 local participant, participant_err = txn:acquire({
-  namespace_name = "lua-workflow-domain",
+  namespace = "lua-workflow-domain",
   key = "order-1",
   owner = "lua-workflow-worker",
   ttl_seconds = 30,
