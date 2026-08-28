@@ -191,6 +191,30 @@ static void lcdc_set_uinteger_field(lua_State *L, const char *name,
   lua_setfield(L, -2, name);
 }
 
+static int lcdc_set_size_field(lua_State *L, const char *name, size_t value,
+                               lc_error *error) {
+  if ((uintmax_t)value > (uintmax_t)LUA_MAXINTEGER) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow statistic exceeds Lua integer range", name,
+                        NULL, NULL);
+  }
+  lua_pushinteger(L, (lua_Integer)value);
+  lua_setfield(L, -2, name);
+  return LC_OK;
+}
+
+static int lcdc_set_uint64_field(lua_State *L, const char *name, uint64_t value,
+                                 lc_error *error) {
+  if (value > (uint64_t)LUA_MAXINTEGER) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow statistic exceeds Lua integer range", name,
+                        NULL, NULL);
+  }
+  lua_pushinteger(L, (lua_Integer)value);
+  lua_setfield(L, -2, name);
+  return LC_OK;
+}
+
 static void lcdc_set_bool_field(lua_State *L, const char *name, int value) {
   lua_pushboolean(L, value);
   lua_setfield(L, -2, name);
@@ -2818,23 +2842,31 @@ static void lcdc_push_outbox_job_info(lua_State *L, const lc_outbox_job *job) {
                          job->lease_expires_at_unix);
 }
 
-static void lcdc_push_workflow_stats(lua_State *L,
-                                     const lc_workflow_stats *stats) {
+static int lcdc_push_workflow_stats(lua_State *L,
+                                    const lc_workflow_stats *stats,
+                                    lc_error *error) {
   lua_newtable(L);
   lcdc_set_bool_field(L, "running", stats->running);
-  lcdc_set_integer_field(L, "pending_notifications",
-                         (long)stats->pending_notifications);
-  lcdc_set_integer_field(L, "ready_jobs", (long)stats->ready_jobs);
-  lcdc_set_integer_field(L, "direct_notifications",
-                         (long)stats->direct_notifications);
-  lcdc_set_integer_field(L, "notification_overflows",
-                         (long)stats->notification_overflows);
-  lcdc_set_integer_field(L, "recovery_queries", (long)stats->recovery_queries);
-  lcdc_set_integer_field(L, "recovered_claims", (long)stats->recovered_claims);
-  lcdc_set_integer_field(L, "claim_losses", (long)stats->claim_losses);
-  lcdc_set_integer_field(L, "payload_open_failures",
-                         (long)stats->payload_open_failures);
+  if (lcdc_set_size_field(L, "pending_notifications",
+                          stats->pending_notifications, error) != LC_OK ||
+      lcdc_set_size_field(L, "ready_jobs", stats->ready_jobs, error) != LC_OK ||
+      lcdc_set_uint64_field(L, "direct_notifications",
+                            stats->direct_notifications, error) != LC_OK ||
+      lcdc_set_uint64_field(L, "notification_overflows",
+                            stats->notification_overflows, error) != LC_OK ||
+      lcdc_set_uint64_field(L, "recovery_queries", stats->recovery_queries,
+                            error) != LC_OK ||
+      lcdc_set_uint64_field(L, "recovered_claims", stats->recovered_claims,
+                            error) != LC_OK ||
+      lcdc_set_uint64_field(L, "claim_losses", stats->claim_losses, error) !=
+          LC_OK ||
+      lcdc_set_uint64_field(L, "payload_open_failures",
+                            stats->payload_open_failures, error) != LC_OK) {
+    lua_pop(L, 1);
+    return LC_ERR_INVALID;
+  }
   lcdc_set_string_field(L, "last_error", stats->last_error);
+  return LC_OK;
 }
 
 static int lcdc_client_new_workflow(lua_State *L) {
@@ -3100,7 +3132,13 @@ static int lcdc_workflow_stats(lua_State *L) {
     lc_error_cleanup(&error);
     return 3;
   }
-  lcdc_push_workflow_stats(L, &stats);
+  rc = lcdc_push_workflow_stats(L, &stats, &error);
+  if (rc != LC_OK) {
+    lc_workflow_stats_cleanup(&stats);
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
   lc_workflow_stats_cleanup(&stats);
   lc_error_cleanup(&error);
   return 1;

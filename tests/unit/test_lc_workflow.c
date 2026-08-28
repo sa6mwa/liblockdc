@@ -94,6 +94,8 @@ static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_before_notification_copy_context = NULL;
   lc_workflow_test_before_claim_outbox_hook = NULL;
   lc_workflow_test_before_claim_outbox_context = NULL;
+  lc_workflow_test_before_periodic_recovery_schedule_hook = NULL;
+  lc_workflow_test_before_periodic_recovery_schedule_context = NULL;
 }
 
 static int workflow_bytes_contains(const void *bytes, size_t length,
@@ -223,6 +225,7 @@ static long workflow_elapsed_milliseconds(const struct timespec *started,
 typedef struct workflow_shutdown_race {
   pthread_mutex_t mutex;
   pthread_cond_t condition;
+  int periodic_schedule_entered;
   int close_requested;
   int allow_close;
   int ready_detach_entered;
@@ -311,6 +314,19 @@ static void *workflow_shutdown_race_close_thread(void *context) {
   (void)pthread_cond_broadcast(&race->condition);
   (void)pthread_mutex_unlock(&race->mutex);
   return NULL;
+}
+
+static int workflow_periodic_recovery_schedule_failure(void *context,
+                                                       lc_error *error) {
+  workflow_shutdown_race *race = (workflow_shutdown_race *)context;
+
+  (void)pthread_mutex_lock(&race->mutex);
+  race->periodic_schedule_entered = 1;
+  (void)pthread_cond_broadcast(&race->condition);
+  (void)pthread_mutex_unlock(&race->mutex);
+  return lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "forced periodic recovery scheduling failure", NULL, NULL,
+                      NULL);
 }
 
 static void *workflow_shutdown_race_next_thread(void *context) {
@@ -2550,6 +2566,76 @@ static void test_pouch_workflow_rejects_overflowing_deadlines(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void
+test_pouch_workflow_retry_uses_wide_timestamp_comparison(void **state) {
+  lc_unix_seconds now;
+
+  (void)state;
+  if ((uintmax_t)LONG_MAX >= (uintmax_t)LC_I64_MAX)
+    return;
+  now = (lc_unix_seconds)LONG_MAX;
+  now += 1;
+  assert_false(lc_workflow_test_retry_is_not_eligible(now, now));
+  assert_true(lc_workflow_test_retry_is_not_eligible(now + 1, now));
+}
+
+static void
+test_pouch_workflow_periodic_schedule_failure_does_not_deadlock(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  workflow_shutdown_race race;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_error error;
+  pthread_t close_thread;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX
+                       "periodic-schedule-race-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  memset(&race, 0, sizeof(race));
+  assert_int_equal(pthread_mutex_init(&race.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&race.condition, NULL), 0);
+  workflow_reset_allocation_failures();
+  lc_workflow_test_before_periodic_recovery_schedule_hook =
+      workflow_periodic_recovery_schedule_failure;
+  lc_workflow_test_before_periodic_recovery_schedule_context = &race;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "periodic-schedule-race";
+  workflow_config.recovery_interval_seconds = 1L;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  race.workflow = workflow;
+  assert_true(
+      workflow_shutdown_race_wait(&race, &race.periodic_schedule_entered));
+  assert_int_equal(pthread_create(&close_thread, NULL,
+                                  workflow_shutdown_race_close_thread, &race),
+                   0);
+  assert_true(workflow_shutdown_race_wait(&race, &race.close_finished));
+  assert_int_equal(pthread_join(close_thread, NULL), 0);
+  workflow = NULL;
+  workflow_reset_allocation_failures();
+  assert_int_equal(pthread_cond_destroy(&race.condition), 0);
+  assert_int_equal(pthread_mutex_destroy(&race.mutex), 0);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void test_pouch_shared_command_resume_is_durable(void **state) {
   char root[256], template_path[256], endpoint[320];
   const char *endpoints[1];
@@ -4460,6 +4546,10 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_command_attachment_failure_aborts_transaction),
       cmocka_unit_test(test_pouch_workflow_rejects_overflowing_deadlines),
+      cmocka_unit_test(
+          test_pouch_workflow_retry_uses_wide_timestamp_comparison),
+      cmocka_unit_test(
+          test_pouch_workflow_periodic_schedule_failure_does_not_deadlock),
       cmocka_unit_test(test_pouch_shared_command_resume_is_durable),
       cmocka_unit_test(test_pouch_multikey_terminal_failure_publishes_nothing),
       cmocka_unit_test(test_pouch_reconciliation_retains_overflow_request),

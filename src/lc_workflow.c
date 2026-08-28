@@ -60,6 +60,9 @@ void *lc_workflow_test_before_notification_copy_context = NULL;
 lc_workflow_test_failure_hook_fn lc_workflow_test_before_claim_outbox_hook =
     NULL;
 void *lc_workflow_test_before_claim_outbox_context = NULL;
+lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_periodic_recovery_schedule_hook = NULL;
+void *lc_workflow_test_before_periodic_recovery_schedule_context = NULL;
 #endif
 
 typedef struct lc_workflow_outbox_record {
@@ -977,6 +980,19 @@ static int lc_workflow_timestamp_add(lc_unix_seconds base, long delta,
   *out = base + (lc_unix_seconds)delta;
   return LC_OK;
 }
+
+static int lc_workflow_retry_is_not_eligible(lonejson_int64 not_before_unix,
+                                             lc_unix_seconds now) {
+  return not_before_unix > (lonejson_int64)now;
+}
+
+#ifdef LOCKDC_TEST_BUILD
+int lc_workflow_test_retry_is_not_eligible(lc_unix_seconds not_before_unix,
+                                           lc_unix_seconds now) {
+  return lc_workflow_retry_is_not_eligible((lonejson_int64)not_before_unix,
+                                           now);
+}
+#endif
 
 static int lc_workflow_command_receipt_from_record(
     const lc_workflow_command_record *record, lc_command_receipt *receipt,
@@ -1981,7 +1997,8 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
                         "outbox candidate is not currently dispatchable", NULL,
                         NULL, NULL);
     } else if (strcmp(record.dispatch_state, "retry_wait") == 0 &&
-               record.not_before_unix > (long)now) {
+               lc_workflow_retry_is_not_eligible(record.not_before_unix,
+                                                 (lc_unix_seconds)now)) {
       lc_workflow_schedule_retry(workflow, key,
                                  (lc_unix_seconds)record.not_before_unix);
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -2358,11 +2375,44 @@ static void *lc_workflow_dispatcher_main(void *context) {
 
     if (reconcile) {
       int recovery_rc;
+      int schedule_rc;
+      lc_error schedule_error;
+      lc_unix_seconds now;
+      lc_unix_seconds periodic;
+
+      schedule_rc = LC_OK;
+      now = 0;
+      periodic = 0;
+      lc_error_init(&schedule_error);
       lc_error_init(&error);
       recovery_rc = lc_workflow_reconcile_pending(workflow, &error);
       if (recovery_rc != LC_OK)
         lc_workflow_record_error(workflow, &error);
       lc_error_cleanup(&error);
+      if (recovery_rc == LC_OK) {
+        now = (lc_unix_seconds)time(NULL);
+        if (workflow->recovery_interval_seconds > 0L) {
+#ifdef LOCKDC_TEST_BUILD
+          if (lc_workflow_test_before_periodic_recovery_schedule_hook != NULL) {
+            schedule_rc =
+                lc_workflow_test_before_periodic_recovery_schedule_hook(
+                    lc_workflow_test_before_periodic_recovery_schedule_context,
+                    &schedule_error);
+          } else
+#endif
+          {
+            schedule_rc = lc_workflow_timestamp_add(
+                now, workflow->recovery_interval_seconds, "recovery interval",
+                &periodic, &schedule_error);
+          }
+          if (schedule_rc != LC_OK) {
+            /* A clock jump beyond the representable range must not invoke
+             * signed overflow or silently create a bogus timer. The initial
+             * configuration path already rejects ordinary invalid intervals. */
+            periodic = 0;
+          }
+        }
+      }
       pthread_mutex_lock(&workflow->notification_mutex);
       if (recovery_rc != LC_OK) {
         lc_unix_seconds retry_at = 0;
@@ -2385,25 +2435,6 @@ static void *lc_workflow_dispatcher_main(void *context) {
           workflow->next_recovery_unix = 0;
         }
       } else {
-        lc_unix_seconds now = (lc_unix_seconds)time(NULL);
-        lc_unix_seconds periodic = 0;
-
-        if (workflow->recovery_interval_seconds > 0L) {
-          lc_error schedule_error;
-
-          lc_error_init(&schedule_error);
-          if (lc_workflow_timestamp_add(
-                  now, workflow->recovery_interval_seconds, "recovery interval",
-                  &periodic, &schedule_error) != LC_OK) {
-            /* A clock jump beyond the representable range must not invoke
-             * signed overflow or silently create a bogus timer. The initial
-             * configuration path already rejects ordinary invalid intervals. */
-            lc_workflow_record_error(workflow, &schedule_error);
-            periodic = 0;
-          }
-          lc_error_cleanup(&schedule_error);
-        }
-
         /* A retry whose delayed-key allocation failed has no in-memory entry,
          * so retain its durable-recovery deadline across this eager sweep. */
         if (workflow->next_recovery_unix <= now ||
@@ -2413,6 +2444,9 @@ static void *lc_workflow_dispatcher_main(void *context) {
         }
       }
       pthread_mutex_unlock(&workflow->notification_mutex);
+      if (schedule_rc != LC_OK)
+        lc_workflow_record_error(workflow, &schedule_error);
+      lc_error_cleanup(&schedule_error);
       continue;
     }
 
