@@ -2444,9 +2444,23 @@ static void *lc_workflow_dispatcher_main(void *context) {
          * normal bounded delay; if that key allocation fails, the scheduler's
          * durable-recovery fallback retains the deadline. */
         if (now != (time_t)-1) {
-          lc_workflow_schedule_retry(workflow, key,
-                                     (lc_unix_seconds)now +
-                                         workflow->retry_initial_delay_seconds);
+          lc_unix_seconds retry_at = 0;
+          lc_error retry_error;
+
+          lc_error_init(&retry_error);
+          if (lc_workflow_timestamp_add(
+                  (lc_unix_seconds)now, workflow->retry_initial_delay_seconds,
+                  "retry initial delay", &retry_at, &retry_error) == LC_OK) {
+            lc_workflow_schedule_retry(workflow, key, retry_at);
+          } else {
+            /* The direct notification has been consumed, while the durable
+             * record remains pending. Do not let an unrepresentable retry
+             * deadline strand it: immediately request the durable recovery
+             * scan instead. */
+            lc_workflow_record_error(workflow, &retry_error);
+            lc_workflow_request_recovery(workflow, 0);
+          }
+          lc_error_cleanup(&retry_error);
         } else {
           lc_workflow_request_recovery(workflow, 0);
         }
