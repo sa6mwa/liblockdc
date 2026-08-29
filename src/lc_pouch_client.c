@@ -12889,6 +12889,14 @@ int lc_pouch_client_load_in_namespace(lc_client *self,
                         NULL, NULL, NULL);
   }
   client = (lc_client_handle *)self;
+  {
+    int rc;
+
+    rc = lc_pouch_client_validate_public_key(key, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
   return lc_pouch_client_load_namespace(client, namespace_name, key, map, dst,
                                         opts, out, error);
 }

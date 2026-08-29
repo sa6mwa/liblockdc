@@ -2204,6 +2204,49 @@ static void test_state_transport_paths_use_mtls(void **state) {
 }
 
 static void
+test_public_client_namespaced_load_rejects_empty_namespace(void **state) {
+  static const char *endpoints[] = {"https://127.0.0.1:1"};
+  lc_client_config config;
+  lc_client *client;
+  lc_get_res get_res;
+  lc_error error;
+  test_value_doc value_doc;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&get_res, 0, sizeof(get_res));
+  memset(&value_doc, 0, sizeof(value_doc));
+  lc_error_init(&error);
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.disable_mtls = 1;
+  config.prefer_http_2 = 0;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(client);
+
+  rc = client->load_in_namespace(client, NULL, "resource/1", &test_value_map,
+                                 &value_doc, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "namespaced load requires a non-empty namespace");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = client->load_in_namespace(client, "", "resource/1", &test_value_map,
+                                 &value_doc, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "namespaced load requires a non-empty namespace");
+
+  lc_get_res_cleanup(&get_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_state_transport_parses_buffered_typed_json_response(void **state) {
   static const char *response_headers[] = {"X-Correlation-Id: corr-describe",
                                            "Content-Type: application/json"};
@@ -7740,6 +7783,10 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
 #elif defined(LC_HTTPS_CASE_PUBLIC_CLIENT_EMITS_PSLOG_MESSAGES)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_client_emits_pslog_messages)
+#elif defined(                                                                 \
+    LC_HTTPS_CASE_PUBLIC_CLIENT_NAMESPACED_LOAD_REJECTS_EMPTY_NAMESPACE)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_public_client_namespaced_load_rejects_empty_namespace)
 #elif defined(LC_HTTPS_CASE_PUBLIC_CLIENT_CAN_DISABLE_SDK_SYS_FIELD)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_client_can_disable_sdk_sys_field)
@@ -7917,6 +7964,8 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
       cmocka_unit_test(                                                           \
           test_public_client_open_accepts_chunked_callback_bundle_source),        \
       cmocka_unit_test(test_state_transport_paths_use_mtls),                      \
+      cmocka_unit_test(                                                           \
+          test_public_client_namespaced_load_rejects_empty_namespace),            \
       cmocka_unit_test(test_state_transport_honors_client_cancel),                \
       cmocka_unit_test(                                                           \
           test_state_transport_parses_buffered_typed_json_response),              \

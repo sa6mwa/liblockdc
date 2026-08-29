@@ -237,6 +237,10 @@ lc_add_https_unit_test_case(
   LC_HTTPS_CASE_PUBLIC_CLIENT_OPEN_ACCEPTS_CHUNKED_CALLBACK_BUNDLE_SOURCE
 )
 lc_add_cross_runtime_https_unit_test_case(
+  lc_unit_transport_https_public_client_namespaced_load_rejects_empty_namespace
+  LC_HTTPS_CASE_PUBLIC_CLIENT_NAMESPACED_LOAD_REJECTS_EMPTY_NAMESPACE
+)
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_state_paths_use_mtls
   LC_HTTPS_CASE_STATE_PATHS_USE_MTLS
 )

@@ -13473,7 +13473,9 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   lc_query_key_handler handler;
   lc_namespace_config_req ns_req;
   lc_namespace_config_res ns_res;
+  lc_get_res get_res;
   pouch_query_key_capture capture;
+  pouch_value_doc loaded;
   lc_lease *lease;
   lc_source *source;
   lc_error error;
@@ -13489,7 +13491,9 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   memset(&query_res, 0, sizeof(query_res));
   memset(&handler, 0, sizeof(handler));
   memset(&ns_res, 0, sizeof(ns_res));
+  memset(&get_res, 0, sizeof(get_res));
   memset(&capture, 0, sizeof(capture));
+  memset(&loaded, 0, sizeof(loaded));
   lc_update_req_init(&update_req);
   lc_enqueue_req_init(&enqueue_req);
   lc_query_req_init(&query_req);
@@ -13501,6 +13505,35 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   make_root("reserved-namespace-public-api", root, sizeof(root));
   cleanup_root(root);
   open_pouch_client(root, &client, &error);
+
+  rc = client->load_in_namespace(client, "component", "config/private",
+                                 &pouch_value_map, &loaded, NULL, &get_res,
+                                 &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message, "pouch internal keys are reserved");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_get_res_cleanup(&get_res);
+
+  rc = client->load_in_namespace(
+      client, "component", "state/doc/.staging/transaction", &pouch_value_map,
+      &loaded, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch staging keys are reserved for internal state");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_get_res_cleanup(&get_res);
+
+  rc = client->load_in_namespace(
+      client, "component", "state/doc/attachments/private", &pouch_value_map,
+      &loaded, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(
+      error.message, "pouch attachment keys are reserved for internal objects");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_get_res_cleanup(&get_res);
 
   update_req.lease.namespace_name = ".lockd/leases";
   update_req.lease.key = "doc/a";
@@ -13548,6 +13581,7 @@ test_pouch_public_api_rejects_reserved_lockd_namespaces(void **state) {
   lc_error_cleanup(&error);
   lc_error_init(&error);
   lc_namespace_config_res_cleanup(&ns_res);
+  lc_get_res_cleanup(&get_res);
 
   update_req.lease.namespace_name = "default";
   update_req.lease.key = "q/jobs/state/message-1";

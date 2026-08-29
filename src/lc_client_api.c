@@ -571,11 +571,10 @@ int lc_client_get_method(lc_client *self, const char *key,
   return LC_OK;
 }
 
-int lc_client_load_in_namespace_method(lc_client *self,
-                                       const char *namespace_name,
-                                       const char *key, const lonejson_map *map,
-                                       void *dst, const lc_get_opts *opts,
-                                       lc_get_res *out, lc_error *error) {
+static int lc_client_load_with_namespace_method(
+    lc_client *self, const char *namespace_name, const char *key,
+    const lonejson_map *map, void *dst, const lc_get_opts *opts,
+    lc_get_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_engine_get_request engine_req;
   lc_engine_get_stream_response engine_res;
@@ -702,8 +701,22 @@ int lc_client_load_method(lc_client *self, const char *key,
                           const lonejson_map *map, void *dst,
                           const lc_get_opts *opts, lc_get_res *out,
                           lc_error *error) {
-  return lc_client_load_in_namespace_method(self, NULL, key, map, dst, opts,
-                                            out, error);
+  return lc_client_load_with_namespace_method(self, NULL, key, map, dst, opts,
+                                              out, error);
+}
+
+int lc_client_load_in_namespace_method(lc_client *self,
+                                       const char *namespace_name,
+                                       const char *key, const lonejson_map *map,
+                                       void *dst, const lc_get_opts *opts,
+                                       lc_get_res *out, lc_error *error) {
+  if (namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "namespaced load requires a non-empty namespace", NULL,
+                        NULL, NULL);
+  }
+  return lc_client_load_with_namespace_method(self, namespace_name, key, map,
+                                              dst, opts, out, error);
 }
 
 int lc_client_update_method(lc_client *self, const lc_update_req *req,
