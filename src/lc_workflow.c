@@ -1019,6 +1019,21 @@ static int lc_workflow_timestamp_add(lc_unix_seconds base, long delta,
   return LC_OK;
 }
 
+static long lc_workflow_timestamp_max_delay(lc_unix_seconds base) {
+  lc_unix_seconds remaining;
+
+  /* A negative clock is still safely advanceable by every supported long
+   * duration. Avoid subtracting it from LC_I64_MAX, which could overflow. */
+  if (base < 0)
+    return LONG_MAX;
+  if (base >= LC_I64_MAX)
+    return 0L;
+  remaining = LC_I64_MAX - base;
+  if ((uintmax_t)remaining > (uintmax_t)LONG_MAX)
+    return LONG_MAX;
+  return (long)remaining;
+}
+
 static int lc_workflow_retry_is_not_eligible(lonejson_int64 not_before_unix,
                                              lc_unix_seconds now) {
   return not_before_unix > (lonejson_int64)now;
@@ -1814,13 +1829,18 @@ static int lc_outbox_job_complete_method(lc_outbox_job *self,
   return lc_outbox_job_terminal(self, "completed", 0L, NULL, completion, error);
 }
 
-static long lc_outbox_job_auto_retry_delay(const lc_outbox_job_handle *job) {
+static long lc_outbox_job_auto_retry_delay(const lc_outbox_job_handle *job,
+                                           long timestamp_maximum) {
   long cap = job->workflow->retry_initial_delay_seconds;
   long maximum = job->workflow->retry_max_delay_seconds;
   long attempt = job->record.attempt_count;
   unsigned long random_value = 0UL;
   unsigned char random_bytes[sizeof(random_value)];
 
+  if (maximum > timestamp_maximum)
+    maximum = timestamp_maximum;
+  if (cap > maximum)
+    cap = maximum;
   while (attempt > 1L && cap < maximum) {
     if (cap > maximum / 2L) {
       cap = maximum;
@@ -1837,7 +1857,13 @@ static long lc_outbox_job_auto_retry_delay(const lc_outbox_job_handle *job) {
   } else {
     random_value = (unsigned long)time(NULL) ^ (unsigned long)(uintptr_t)job;
   }
-  return cap == 0L ? 0L : (long)(random_value % ((unsigned long)cap + 1UL));
+  if (cap == 0L)
+    return 0L;
+  /* LONG_MAX + 1 is not a valid signed long. Keep the full range available
+   * without deriving a zero divisor through an unsigned-width assumption. */
+  if (cap == LONG_MAX)
+    return (long)(random_value & (unsigned long)LONG_MAX);
+  return (long)(random_value % ((unsigned long)cap + 1UL));
 }
 
 static int lc_outbox_job_retry_method(lc_outbox_job *self,
@@ -1855,14 +1881,16 @@ static int lc_outbox_job_retry_method(lc_outbox_job *self,
                         "retry delay exceeds the configured host maximum", NULL,
                         NULL, NULL);
   }
-  delay = request->delay_seconds == 0L ? lc_outbox_job_auto_retry_delay(job)
-                                       : request->delay_seconds;
   now = time(NULL);
   if (now == (time_t)-1) {
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "failed to read workflow retry clock", NULL, NULL,
                         NULL);
   }
+  delay = request->delay_seconds == 0L
+              ? lc_outbox_job_auto_retry_delay(
+                    job, lc_workflow_timestamp_max_delay((lc_unix_seconds)now))
+              : request->delay_seconds;
   rc = lc_workflow_timestamp_add((lc_unix_seconds)now, delay, "retry delay",
                                  &deadline, error);
   if (rc != LC_OK)

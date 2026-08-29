@@ -2322,6 +2322,78 @@ static void test_pouch_overflowing_foreground_retry_reconciles(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void test_pouch_auto_retry_long_max_cap_is_safe(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_outbox_retry retry;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "retry-long-max-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  job = NULL;
+  payload = NULL;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "retry-long-max";
+  workflow_config.owner = "retry-long-max-test";
+  workflow_config.retry_initial_delay_seconds = LONG_MAX;
+  workflow_config.retry_max_delay_seconds = LONG_MAX;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "retry-long-max-operation";
+  entry.effect_id = "retry-long-max-effect";
+  entry.effect_key = "retry-long-max-key";
+  entry.payload_digest = "sha256:retry-long-max-payload";
+  entry.kind = "test";
+  entry.destination = "test://retry-long-max";
+  entry.content_type = "text/plain";
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  lc_outbox_retry_init(&retry);
+  assert_int_equal(lc_outbox_job_retry(job, &retry, &error), LC_OK);
+  lc_outbox_job_close(job);
+  lc_source_close(payload);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void
 test_pouch_claim_recovery_allocation_failure_recovers_at_expiry(void **state) {
   char root[256], template_path[256], endpoint[320];
@@ -5106,6 +5178,7 @@ int main(void) {
           test_pouch_retry_notification_allocation_failure_recovers_at_deadline),
       cmocka_unit_test(test_pouch_transient_claim_failure_is_rescheduled),
       cmocka_unit_test(test_pouch_overflowing_foreground_retry_reconciles),
+      cmocka_unit_test(test_pouch_auto_retry_long_max_cap_is_safe),
       cmocka_unit_test(
           test_pouch_claim_recovery_allocation_failure_recovers_at_expiry),
       cmocka_unit_test(
