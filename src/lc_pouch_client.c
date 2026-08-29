@@ -13364,18 +13364,27 @@ int lc_pouch_client_keepalive_method(lc_client *self,
                              &staged_state, error);
   }
   if (rc == LC_OK && staged_state.found) {
-    rc = lc_pouch_generation_to_version(staged_state.version, &out->version,
-                                        error);
-    if (rc == LC_OK && staged_state.etag != NULL) {
-      char *staged_etag = lc_strdup_local(staged_state.etag);
+    if (lc_pouch_state_result_is_delete_marker(&staged_state)) {
+      /* A staged delete is the transaction-local absent-state view. Do not
+       * leak its private generation into the lease: the public lease helpers
+       * would turn it into a conditional update against the committed body. */
+      lc_free_with_allocator(NULL, state_etag);
+      state_etag = NULL;
+      out->version = 0L;
+    } else {
+      rc = lc_pouch_generation_to_version(staged_state.version, &out->version,
+                                          error);
+      if (rc == LC_OK && staged_state.etag != NULL) {
+        char *staged_etag = lc_strdup_local(staged_state.etag);
 
-      if (staged_etag == NULL) {
-        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch staged state etag", NULL,
-                          NULL, NULL);
-      } else {
-        lc_free_with_allocator(NULL, state_etag);
-        state_etag = staged_etag;
+        if (staged_etag == NULL) {
+          rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "failed to allocate pouch staged state etag", NULL,
+                            NULL, NULL);
+        } else {
+          lc_free_with_allocator(NULL, state_etag);
+          state_etag = staged_etag;
+        }
       }
     }
   }

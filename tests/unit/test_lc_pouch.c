@@ -26410,6 +26410,105 @@ static void test_transaction_bound_remove_then_mutate_recreates_logical_value(
   lc_error_cleanup(&error);
 }
 
+static void
+test_transaction_bound_remove_renew_then_update_recreates_logical_value(
+    void **state) {
+  lc_client *client;
+  lc_lease *lease;
+  lc_source *source;
+  lc_sink *sink;
+  lc_acquire_req acquire_req;
+  lc_keepalive_req keepalive_req;
+  lc_txn_participant participant;
+  lc_txn_decision_req decision_req;
+  lc_txn_decision_res decision_res;
+  lc_update_res update_res;
+  lc_get_res get_res;
+  const void *bytes;
+  size_t length;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lease = NULL;
+  source = NULL;
+  sink = NULL;
+  bytes = NULL;
+  length = 0U;
+  lc_acquire_req_init(&acquire_req);
+  lc_keepalive_req_init(&keepalive_req);
+  memset(&participant, 0, sizeof(participant));
+  lc_txn_decision_req_init(&decision_req);
+  memset(&decision_res, 0, sizeof(decision_res));
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&get_res, 0, sizeof(get_res));
+  lc_error_init(&error);
+  make_root("txn-remove-renew-update", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/txn-remove-renew-update/%ld",
+           (long)getpid());
+
+  open_pouch_client(root, &client, &error);
+  write_client_state(client, key, "before-renew", NULL, 0L, 0, &update_res,
+                     &error);
+  lc_update_res_cleanup(&update_res);
+  memset(&update_res, 0, sizeof(update_res));
+
+  acquire_req.key = key;
+  acquire_req.owner = "txn-remove-renew-update-owner";
+  acquire_req.ttl_seconds = 30L;
+  acquire_req.txn_id = test_xid_for_label("txn-remove-renew-update");
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lease->remove(lease, NULL, &error);
+  assert_int_equal(rc, LC_OK);
+
+  keepalive_req.ttl_seconds = 45L;
+  rc = lease->keepalive(lease, &keepalive_req, &error);
+  assert_int_equal(rc, LC_OK);
+  /* A transaction-local delete is absent state. The public lease must not
+   * inject its private staged version into the default update precondition. */
+  assert_int_equal(lease->version, 0L);
+  assert_null(lease->state_etag);
+
+  rc = lc_source_from_memory("after-renew", strlen("after-renew"), &source,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, source, NULL, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+
+  participant.namespace_name = "default";
+  participant.key = key;
+  decision_req.txn_id = acquire_req.txn_id;
+  decision_req.participants = &participant;
+  decision_req.participant_count = 1U;
+  rc = client->txn_commit(client, &decision_req, &decision_res, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_txn_decision_res_cleanup(&decision_res);
+  lc_lease_close(lease);
+  lease = NULL;
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->get(client, key, NULL, sink, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(bytes, length, "after-renew"));
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_txn_decision_skips_newer_state_lease(void **state) {
   lc_client *client;
   lc_lease *old_lease;
@@ -33678,6 +33777,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_transaction_bound_remove_stages_until_decision),
       cmocka_unit_test(
           test_transaction_bound_remove_then_mutate_recreates_logical_value),
+      cmocka_unit_test(
+          test_transaction_bound_remove_renew_then_update_recreates_logical_value),
       cmocka_unit_test(test_txn_decision_skips_newer_state_lease),
       cmocka_unit_test(test_lease_metadata_persists_query_hidden),
       cmocka_unit_test(
