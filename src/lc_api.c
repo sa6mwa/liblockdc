@@ -32,20 +32,18 @@ int lc_load_in_namespace(lc_client *client, const char *namespace_name,
                          const char *key, const lonejson_map *map, void *dst,
                          const lc_get_opts *opts, lc_get_res *out,
                          lc_error *error) {
-  lc_client_handle *handle;
-
   if (client == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "namespaced load requires client and namespace", NULL,
                         NULL, NULL);
   }
-  handle = (lc_client_handle *)client;
-  if (handle->is_pouch) {
-    return lc_pouch_client_load_in_namespace(client, namespace_name, key, map,
-                                             dst, opts, out, error);
+  if (client->load_in_namespace == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "client does not implement namespaced load", NULL, NULL,
+                        NULL);
   }
-  return lc_client_load_in_namespace_method(client, namespace_name, key, map,
-                                            dst, opts, out, error);
+  return client->load_in_namespace(client, namespace_name, key, map, dst, opts,
+                                   out, error);
 }
 
 int lc_update(lc_client *client, const lc_update_req *req, lc_source *src,

@@ -2377,6 +2377,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->pub.describe = lc_client_describe_method;
   client->pub.get = lc_client_get_method;
   client->pub.load = lc_client_load_method;
+  client->pub.load_in_namespace = lc_client_load_in_namespace_method;
   client->pub.update = lc_client_update_method;
   client->pub.mutate = lc_client_mutate_method;
   client->pub.metadata = lc_client_metadata_method;
@@ -2428,6 +2429,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->pub.describe = lc_pouch_client_describe_method;
     client->pub.get = lc_pouch_client_get_method;
     client->pub.load = lc_pouch_client_load_method;
+    client->pub.load_in_namespace = lc_pouch_client_load_in_namespace;
     client->pub.update = lc_pouch_client_update_method;
     client->pub.mutate = lc_pouch_client_mutate_method;
     client->pub.metadata = lc_pouch_client_metadata_method;

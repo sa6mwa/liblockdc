@@ -191,6 +191,13 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_ptr_equal(client.load_call.arg2, "key-2");
 
+  rc = lc_load_in_namespace(&client.pub, "component", "key-3", NULL, NULL,
+                            &get_opts, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(client.load_in_namespace_call.count, 1);
+  assert_ptr_equal(client.load_in_namespace_call.arg2, "component");
+  assert_ptr_equal(client.load_in_namespace_call.arg3, "key-3");
+
   rc = lc_update(&client.pub, &update_req, &source_for_update, &update_res,
                  &error);
   assert_int_equal(rc, LC_OK);
@@ -301,6 +308,7 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(client.describe_call.count, 1);
   assert_int_equal(client.get_call.count, 1);
   assert_int_equal(client.load_call.count, 1);
+  assert_int_equal(client.load_in_namespace_call.count, 1);
   assert_int_equal(client.update_call.count, 1);
   assert_int_equal(client.mutate_call.count, 1);
   assert_int_equal(client.metadata_call.count, 1);

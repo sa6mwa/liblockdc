@@ -93,6 +93,7 @@ typedef struct lc_public_mock_client {
   lc_public_mock_call describe_call;
   lc_public_mock_call get_call;
   lc_public_mock_call load_call;
+  lc_public_mock_call load_in_namespace_call;
   lc_public_mock_call update_call;
   lc_public_mock_call mutate_call;
   lc_public_mock_call metadata_call;

@@ -2550,6 +2550,18 @@ struct lc_client {
   int (*load)(lc_client *self, const char *key, const lonejson_map *map,
               void *dst, const lc_get_opts *opts, lc_get_res *out,
               lc_error *error);
+  /**
+   * Convenience variant of `load()` for a component record in an explicit
+   * namespace rather than this client's default namespace.
+   *
+   * The namespace must be nonempty. Implementations that expose an
+   * `lc_client` receiver shell must provide this method when they support
+   * `lc_load_in_namespace()`.
+   */
+  int (*load_in_namespace)(lc_client *self, const char *namespace_name,
+                           const char *key, const lonejson_map *map, void *dst,
+                           const lc_get_opts *opts, lc_get_res *out,
+                           lc_error *error);
   /** Updates an existing, credentialed lease reference from a streamed JSON
    * source. */
   int (*update)(lc_client *self, const lc_update_req *req, lc_source *src,
