@@ -58,7 +58,7 @@ size_t lc_pouch_test_doc_table_cache_capacity = 0U;
 #define LC_POUCH_QUERY_INDEX_PACKED_TEMPORAL 6U
 #define LC_POUCH_QUERY_INDEX_PACKED_DELETE 7U
 #define LC_POUCH_QUERY_INDEX_MANIFEST_FORMAT "pouch-query-index-manifest"
-#define LC_POUCH_QUERY_INDEX_MANIFEST_VERSION 2UL
+#define LC_POUCH_QUERY_INDEX_MANIFEST_VERSION 3UL
 #define LC_POUCH_QUERY_INDEX_MANIFEST_LEAF "query.manifest"
 #define LC_POUCH_QUERY_INDEX_CRYPTO_DESC_SUFFIX ".lcpcrypto"
 #define LC_POUCH_QUERY_INDEX_CRYPTO_FOOTER_MAGIC "LPQICRF1"
@@ -67,25 +67,21 @@ size_t lc_pouch_test_doc_table_cache_capacity = 0U;
 #define LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX "2f2e2e2e"
 #define LC_POUCH_QUERY_INDEX_MAX_CONTAINS_TRIGRAMS 8U
 #define LC_POUCH_QUERY_INDEX_MAX_SEGMENTS 8U
-#define LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_COUNT 9U
-#define LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER 0U
-#define LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_DOC_TABLE 1U
-#define LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_EXACT 2U
-#define LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_PRESENCE 3U
-#define LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_RANGE 4U
-#define LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_TEXT 5U
-#define LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_TRIGRAM 6U
-#define LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_TEMPORAL 7U
-#define LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_DELETE 8U
+#define LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_COUNT 1U
+#define LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_PACKED 0U
 #define LC_POUCH_QUERY_INDEX_HASH_OFFSET 2166136261UL
 #define LC_POUCH_QUERY_INDEX_HASH_PRIME 16777619UL
 #define LC_POUCH_QUERY_INDEX_HASH_MASK 0xffffffffUL
 #define LC_POUCH_QUERY_INDEX_EXACT_LONG_STRING_BYTES 256U
 #define LC_POUCH_QUERY_INDEX_EXACT_HASH_TYPE 'h'
 #define LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE 'p'
-/* Derived artifacts created before per-field all-text cutover remain readable.
- */
-#define LC_POUCH_QUERY_INDEX_LEGACY_TEXT_TOKEN_TYPE 'w'
+/* All-text word postings are a bounded positive accelerator for icontains.
+ * They never decide a negative: non-word and partial-word searches retain the
+ * trigram-plus-verifier path below. */
+#define LC_POUCH_QUERY_INDEX_TEXT_TOKEN_TYPE 'w'
+#define LC_POUCH_QUERY_INDEX_TEXT_TOKEN_SOURCE_BYTES_MAX 1024U
+#define LC_POUCH_QUERY_INDEX_TEXT_TOKEN_BYTES_MAX 96U
+#define LC_POUCH_QUERY_INDEX_TEXT_TOKEN_COUNT_MAX 64U
 #define LC_POUCH_QUERY_INDEX_TRIGRAM_SEEN_THRESHOLD 4096U
 #define LC_POUCH_QUERY_INDEX_TRIGRAM_SEEN_BYTES 2097152U
 /* Lucene-style bounded text indexing: exact hashes and a retained prefix keep
@@ -224,6 +220,15 @@ typedef struct lc_pouch_query_index_direct_posting_append {
   size_t value_index;
 } lc_pouch_query_index_direct_posting_append;
 
+typedef struct lc_pouch_query_index_direct_unique_posting_append {
+  const lc_allocator *allocator;
+  const lc_pouch_index_result_docid_list *filter;
+  lc_pouch_query_index_docid_bitmap *seen;
+  lc_pouch_index_result_docid_list *docids;
+  size_t value_index;
+  size_t *pending;
+} lc_pouch_query_index_direct_unique_posting_append;
+
 static int
 lc_pouch_query_index_text_append_cstr(lc_pouch_query_index_text *text,
                                       const char *bytes, unsigned long *hash,
@@ -268,6 +273,8 @@ typedef struct lc_pouch_query_index_manifest_segment {
   unsigned long row_hash;
   unsigned long delete_count;
   unsigned long delete_hash;
+  int term_index_complete;
+  int presence_index_complete;
   lc_pouch_query_index_manifest_artifact_signature
       artifact_signatures[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_COUNT];
 } lc_pouch_query_index_manifest_segment;
@@ -564,21 +571,18 @@ static int lc_pouch_query_index_memtable_tail_compatible(
     const lc_pouch_query_index_incremental_context *incremental);
 static int lc_pouch_query_index_memtable_encode(
     lc_pouch_query_index_memtable *memtable, lc_pouch_generation index_seq,
-    lc_pouch_query_index_summary *summary, lc_pouch_query_index_text *out,
-    unsigned long *row_hash_out, unsigned long *term_count_out,
-    unsigned long *term_hash_out, unsigned long *term_field_count_out,
-    unsigned long *term_value_count_out, unsigned long *presence_count_out,
-    unsigned long *presence_hash_out, char **doc_table_generation_out,
-    size_t *doc_table_generation_length_out, char **exact_term_generation_out,
-    size_t *exact_term_generation_length_out,
+    lc_pouch_query_index_summary *summary, unsigned long *row_hash_out,
+    unsigned long *term_count_out, unsigned long *term_hash_out,
+    unsigned long *term_field_count_out, unsigned long *term_value_count_out,
+    unsigned long *presence_count_out, unsigned long *presence_hash_out,
+    char **doc_table_generation_out, size_t *doc_table_generation_length_out,
+    char **exact_term_generation_out, size_t *exact_term_generation_length_out,
     char **presence_term_generation_out,
     size_t *presence_term_generation_length_out,
     char **range_term_generation_out, size_t *range_term_generation_length_out,
     char **text_term_generation_out, size_t *text_term_generation_length_out,
-    lc_pouch_index_term_generation *text_cache_generation_out,
     char **trigram_term_generation_out,
     size_t *trigram_term_generation_length_out,
-    lc_pouch_index_term_generation *trigram_cache_generation_out,
     char **temporal_term_generation_out,
     size_t *temporal_term_generation_length_out, lc_error *error);
 
@@ -812,16 +816,6 @@ typedef struct lc_pouch_query_index_file_signature {
   int present;
 } lc_pouch_query_index_file_signature;
 
-struct lc_pouch_query_index_artifact_cache_entry {
-  char *path;
-  int kind;
-  lc_pouch_generation expected_a;
-  unsigned long expected_b;
-  unsigned long expected_c;
-  lc_pouch_query_index_file_signature signature;
-  struct lc_pouch_query_index_artifact_cache_entry *next;
-};
-
 struct lc_pouch_query_index_packed_cache_entry {
   char *path;
   char *bytes;
@@ -839,14 +833,10 @@ struct lc_pouch_query_index_manifest_trust_entry {
   struct lc_pouch_query_index_manifest_trust_entry *next;
 };
 
-#define LC_POUCH_QUERY_INDEX_ARTIFACT_HEADER 1
-#define LC_POUCH_QUERY_INDEX_ARTIFACT_DOC_TABLE 2
-#define LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION 3
-#define LC_POUCH_QUERY_INDEX_ARTIFACT_DELETE 4
-#define LC_POUCH_QUERY_INDEX_ARTIFACT_CACHE_MAX 768U
 #define LC_POUCH_QUERY_INDEX_PACKED_CACHE_MAX 128U
 
 static int lc_pouch_query_index_field_hex_is_any_text(const char *field_hex);
+static int lc_pouch_query_index_key_is_attachment(const char *key);
 static char *
 lc_pouch_query_index_exact_hash_value(const lc_allocator *allocator,
                                       const char *value, size_t value_len,
@@ -871,6 +861,7 @@ static int lc_pouch_query_index_segmented_collect(
     const lc_pouch_index_parsed_date_bounds *temporal_bounds,
     lc_pouch_index_result_row_list *rows,
     lc_pouch_query_index_doc_table_cache_borrow_list *doc_table_cache_borrows,
+    const lc_pouch_generation *state_index_seq_snapshot,
     lc_pouch_generation *index_seq, int *text_complete_out, lc_error *error);
 static int
 lc_pouch_query_index_result_rows_reserve(const lc_allocator *allocator,
@@ -886,19 +877,6 @@ static int lc_pouch_query_index_parse_header_u64(const char *line,
                                                  uint64_t *out);
 static int lc_pouch_query_index_artifact_signature(
     const char *path, lc_pouch_query_index_file_signature *out);
-static int lc_pouch_query_index_artifact_signature_equal(
-    const lc_pouch_query_index_file_signature *left,
-    const lc_pouch_query_index_file_signature *right);
-static int lc_pouch_query_index_artifact_cache_valid(
-    lc_pouch *pouch, const char *path, int kind, lc_pouch_generation expected_a,
-    unsigned long expected_b, unsigned long expected_c);
-static void lc_pouch_query_index_artifact_cache_remember(
-    lc_pouch *pouch, const char *path, int kind, lc_pouch_generation expected_a,
-    unsigned long expected_b, unsigned long expected_c);
-static void lc_pouch_query_index_artifact_cache_remember_signature(
-    lc_pouch *pouch, const char *path, int kind, lc_pouch_generation expected_a,
-    unsigned long expected_b, unsigned long expected_c,
-    const lc_pouch_query_index_file_signature *signature);
 static int
 lc_pouch_query_index_manifest_trust_valid(const lc_pouch *pouch,
                                           const char *namespace_name,
@@ -922,18 +900,11 @@ static int lc_pouch_query_index_append_generation_posting(
     const unsigned char *payload, size_t value_index,
     const lc_pouch_index_result_docid_list *docid_filter_sorted,
     lc_pouch_index_result_docid_list *docids, lc_error *error);
+static int lc_pouch_query_index_read_sparse_posting_varint(
+    const unsigned char *bytes, size_t length, size_t *offset,
+    unsigned long *out, lc_error *error);
 static int lc_pouch_query_index_docid_list_contains_sorted(
     const lc_pouch_index_result_docid_list *list, unsigned long doc_id);
-static int lc_pouch_query_index_generation_cache_adopt_trigrams(
-    lc_pouch *pouch, const char *path,
-    lc_pouch_index_term_generation *generation);
-static int lc_pouch_query_index_generation_cache_adopt_text(
-    lc_pouch *pouch, const char *path,
-    lc_pouch_index_term_generation *generation);
-static int lc_pouch_query_index_doc_table_cache_adopt(
-    lc_pouch *pouch, const char *path, lc_pouch_generation index_seq,
-    unsigned long row_count, unsigned long row_hash,
-    lc_pouch_index_doc_table *table);
 static int lc_pouch_query_index_segmented_paths(
     lc_pouch *pouch, const char *namespace_name, const char *segment_id,
     char **header_path, char **doc_table_path, char **exact_term_path,
@@ -941,19 +912,10 @@ static int lc_pouch_query_index_segmented_paths(
     char **trigram_term_path, char **temporal_term_path, char **delete_path,
     lc_error *error);
 static void lc_pouch_query_index_manifest_segment_capture_artifacts(
-    lc_pouch_query_index_manifest_segment *segment, const char *header_path,
-    const char *doc_table_path, const char *exact_term_path,
-    const char *presence_term_path, const char *range_term_path,
-    const char *text_term_path, const char *trigram_term_path,
-    const char *temporal_term_path, const char *delete_path,
-    const char *packed_path);
+    lc_pouch_query_index_manifest_segment *segment, const char *packed_path);
 static int lc_pouch_query_index_manifest_segment_artifacts_match(
     const lc_pouch_query_index_manifest_segment *segment,
-    const char *header_path, const char *doc_table_path,
-    const char *exact_term_path, const char *presence_term_path,
-    const char *range_term_path, const char *text_term_path,
-    const char *trigram_term_path, const char *temporal_term_path,
-    const char *delete_path, const char *packed_path,
+    const char *packed_path,
     lc_pouch_query_index_file_signature *actual_signatures);
 static void lc_pouch_query_index_segmented_paths_cleanup(
     lc_pouch *pouch, char **header_path, char **doc_table_path,
@@ -2216,7 +2178,8 @@ lc_pouch_query_index_summary_visit(const lc_pouch_state_visit_entry *entry,
 
   summary = (lc_pouch_query_index_summary *)context;
   if (entry == NULL || entry->key == NULL || !entry->has_payload ||
-      entry->object_record) {
+      entry->object_record ||
+      lc_pouch_query_index_key_is_attachment(entry->key)) {
     return LC_OK;
   }
   if (strncmp(entry->key, ".staging/", sizeof(".staging/") - 1U) == 0 ||
@@ -2406,6 +2369,14 @@ static int lc_pouch_query_index_key_is_staged(const char *key) {
           strstr(key, "/.staging/") != NULL);
 }
 
+/* Attachments share Pouch's physical state tree but are private binary objects,
+ * not public documents. This matches the reserved-key boundary in the client
+ * layer and keeps arbitrary attachment bytes out of JSON selector indexing. */
+static int lc_pouch_query_index_key_is_attachment(const char *key) {
+  return key != NULL && strncmp(key, "state/", sizeof("state/") - 1U) == 0 &&
+         strstr(key, "/attachments/") != NULL;
+}
+
 static void lc_pouch_query_index_pending_note_write(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const char *content_type, lc_source *body,
@@ -2419,7 +2390,8 @@ void lc_pouch_query_index_note_state_write(
     const char *content_type, lc_source *body,
     const lc_pouch_state_write_result *result, int operation_active) {
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '.' ||
-      lc_pouch_query_index_key_is_staged(key)) {
+      lc_pouch_query_index_key_is_staged(key) ||
+      lc_pouch_query_index_key_is_attachment(key)) {
     return;
   }
   lc_pouch_query_index_pending_note_write(
@@ -2431,7 +2403,8 @@ void lc_pouch_query_index_note_state_delete(
     lc_pouch *pouch, const char *namespace_name, const char *key,
     const lc_pouch_state_write_result *result, int operation_active) {
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '.' ||
-      lc_pouch_query_index_key_is_staged(key)) {
+      lc_pouch_query_index_key_is_staged(key) ||
+      lc_pouch_query_index_key_is_attachment(key)) {
     return;
   }
   lc_pouch_query_index_pending_note_delete(pouch, namespace_name, key, result,
@@ -2731,7 +2704,8 @@ static int lc_pouch_query_index_incremental_context_add_change(
   int rc;
 
   if (context == NULL || context->summary == NULL || entry == NULL ||
-      entry->key == NULL || entry->object_record) {
+      entry->key == NULL || entry->object_record ||
+      lc_pouch_query_index_key_is_attachment(entry->key)) {
     return LC_OK;
   }
   rc = lc_pouch_query_index_incremental_context_reserve_changes(
@@ -5051,6 +5025,15 @@ static void lc_pouch_query_index_packed_cache_entry_cleanup(
   memset(entry, 0, sizeof(*entry));
 }
 
+static int lc_pouch_query_index_artifact_signature_equal(
+    const lc_pouch_query_index_file_signature *left,
+    const lc_pouch_query_index_file_signature *right) {
+  return left != NULL && right != NULL && left->present && right->present &&
+         left->size == right->size && left->mtime == right->mtime &&
+         left->mtime_nsec == right->mtime_nsec && left->ctime == right->ctime &&
+         left->ctime_nsec == right->ctime_nsec && left->inode == right->inode;
+}
+
 static int lc_pouch_query_index_packed_cache_get(
     lc_pouch *pouch, const char *namespace_name, const char *packed_path,
     lc_pouch_query_index_packed_cache_entry **out, int *present, int *valid,
@@ -5202,61 +5185,6 @@ static void lc_pouch_query_index_packed_cache_forget(lc_pouch *pouch,
  * following warm instead of decrypting and decompressing the same artifact
  * from disk.  The normal signature check remains in the cache lookup, so a
  * later replacement or a peer writer cannot observe stale bytes. */
-static void lc_pouch_query_index_packed_cache_adopt(lc_pouch *pouch,
-                                                    const char *packed_path,
-                                                    char **bytes,
-                                                    size_t *length) {
-  lc_pouch_query_index_packed_cache_entry *entry;
-  lc_pouch_query_index_file_signature signature;
-
-  if (pouch == NULL || packed_path == NULL || bytes == NULL || *bytes == NULL ||
-      length == NULL ||
-      !lc_pouch_query_index_artifact_signature(packed_path, &signature)) {
-    return;
-  }
-  entry = (lc_pouch_query_index_packed_cache_entry *)lc_calloc_with_allocator(
-      &pouch->allocator, 1U, sizeof(*entry));
-  if (entry == NULL) {
-    return;
-  }
-  entry->path = lc_strdup_with_allocator(&pouch->allocator, packed_path);
-  if (entry->path == NULL) {
-    lc_free_with_allocator(&pouch->allocator, entry);
-    return;
-  }
-  entry->bytes = *bytes;
-  entry->length = *length;
-  entry->signature = signature;
-  *bytes = NULL;
-  *length = 0U;
-  entry->next = pouch->query_packed_cache;
-  pouch->query_packed_cache = entry;
-  ++pouch->query_packed_cache_count;
-  while (pouch->query_packed_cache_count >
-         LC_POUCH_QUERY_INDEX_PACKED_CACHE_MAX) {
-    lc_pouch_query_index_packed_cache_entry *victim_previous;
-    lc_pouch_query_index_packed_cache_entry *victim;
-
-    victim_previous = NULL;
-    victim = pouch->query_packed_cache;
-    while (victim != NULL && victim->next != NULL) {
-      victim_previous = victim;
-      victim = victim->next;
-    }
-    if (victim == NULL) {
-      break;
-    }
-    if (victim_previous != NULL) {
-      victim_previous->next = NULL;
-    } else {
-      pouch->query_packed_cache = NULL;
-    }
-    lc_pouch_query_index_packed_cache_entry_cleanup(&pouch->allocator, victim);
-    lc_free_with_allocator(&pouch->allocator, victim);
-    --pouch->query_packed_cache_count;
-  }
-}
-
 static int lc_pouch_query_index_read_packed_component_bytes(
     lc_pouch *pouch, const char *namespace_name, const char *component_path,
     size_t component, char **out_bytes, size_t *out_length, int *present,
@@ -5627,7 +5555,8 @@ static int lc_pouch_query_index_manifest_add_front(
     const char *segment_id, lc_pouch_generation base_index_seq,
     lc_pouch_generation index_seq, unsigned long row_count,
     unsigned long row_hash, unsigned long delete_count,
-    unsigned long delete_hash, lc_error *error) {
+    unsigned long delete_hash, int term_index_complete,
+    int presence_index_complete, lc_error *error) {
   lc_pouch_query_index_manifest_segment *segment;
   char *segment_id_copy;
   int rc;
@@ -5663,6 +5592,8 @@ static int lc_pouch_query_index_manifest_add_front(
   segment->row_hash = row_hash;
   segment->delete_count = delete_count;
   segment->delete_hash = delete_hash;
+  segment->term_index_complete = term_index_complete != 0 ? 1 : 0;
+  segment->presence_index_complete = presence_index_complete != 0 ? 1 : 0;
   ++manifest->segment_count;
   manifest->index_seq = index_seq;
   manifest->present = 1;
@@ -5837,6 +5768,8 @@ lc_pouch_query_index_manifest_read(lc_pouch *pouch, const char *path,
     unsigned long row_hash;
     unsigned long delete_count;
     unsigned long delete_hash;
+    unsigned long term_index_complete;
+    unsigned long presence_index_complete;
 
     if (line[0] == '\0') {
       continue;
@@ -5907,6 +5840,11 @@ lc_pouch_query_index_manifest_read(lc_pouch *pouch, const char *path,
                                                      &delete_count) ||
           !lc_pouch_query_index_manifest_parse_ulong(&segment_cursor,
                                                      &delete_hash) ||
+          !lc_pouch_query_index_manifest_parse_ulong(&segment_cursor,
+                                                     &term_index_complete) ||
+          !lc_pouch_query_index_manifest_parse_ulong(
+              &segment_cursor, &presence_index_complete) ||
+          term_index_complete > 1UL || presence_index_complete > 1UL ||
           lc_pouch_query_index_manifest_next_token(&segment_cursor) != NULL) {
         goto done;
       }
@@ -5932,6 +5870,10 @@ lc_pouch_query_index_manifest_read(lc_pouch *pouch, const char *path,
     manifest->segments[manifest->segment_count].row_hash = row_hash;
     manifest->segments[manifest->segment_count].delete_count = delete_count;
     manifest->segments[manifest->segment_count].delete_hash = delete_hash;
+    manifest->segments[manifest->segment_count].term_index_complete =
+        term_index_complete != 0UL;
+    manifest->segments[manifest->segment_count].presence_index_complete =
+        presence_index_complete != 0UL;
     ++manifest->segment_count;
   }
   manifest->valid = lc_pouch_query_index_manifest_coherent(manifest);
@@ -6096,15 +6038,6 @@ static void lc_pouch_query_index_manifest_unlink_segments(
   }
   for (segment_index = 0U; segment_index < manifest->segment_count;
        ++segment_index) {
-    char *header_path;
-    char *doc_table_path;
-    char *exact_term_path;
-    char *presence_term_path;
-    char *range_term_path;
-    char *text_term_path;
-    char *trigram_term_path;
-    char *temporal_term_path;
-    char *delete_path;
     char *packed_path;
     lc_error ignored;
     int keep;
@@ -6114,43 +6047,16 @@ static void lc_pouch_query_index_manifest_unlink_segments(
     if (keep) {
       continue;
     }
-    header_path = NULL;
-    doc_table_path = NULL;
-    exact_term_path = NULL;
-    presence_term_path = NULL;
-    range_term_path = NULL;
-    text_term_path = NULL;
-    trigram_term_path = NULL;
-    temporal_term_path = NULL;
-    delete_path = NULL;
     packed_path = NULL;
     lc_error_init(&ignored);
-    if (lc_pouch_query_index_segmented_paths(
-            pouch, namespace_name, manifest->segments[segment_index].id,
-            &header_path, &doc_table_path, &exact_term_path,
-            &presence_term_path, &range_term_path, &text_term_path,
-            &trigram_term_path, &temporal_term_path, &delete_path,
-            &ignored) == LC_OK) {
-      lc_pouch_query_index_unlink_artifact(pouch, header_path);
-      lc_pouch_query_index_unlink_artifact(pouch, doc_table_path);
-      lc_pouch_query_index_unlink_artifact(pouch, exact_term_path);
-      lc_pouch_query_index_unlink_artifact(pouch, presence_term_path);
-      lc_pouch_query_index_unlink_artifact(pouch, range_term_path);
-      lc_pouch_query_index_unlink_artifact(pouch, text_term_path);
-      lc_pouch_query_index_unlink_artifact(pouch, trigram_term_path);
-      lc_pouch_query_index_unlink_artifact(pouch, temporal_term_path);
-      lc_pouch_query_index_unlink_artifact(pouch, delete_path);
-      packed_path = lc_pouch_query_index_packed_path_from_component(
-          &pouch->allocator, doc_table_path,
-          LC_POUCH_QUERY_INDEX_PACKED_DOC_TABLE, &ignored);
+    packed_path = lc_pouch_query_index_segment_artifact_path(
+        pouch, namespace_name, manifest->segments[segment_index].id,
+        LC_POUCH_QUERY_INDEX_PACKED_LEAF, &ignored);
+    if (packed_path != NULL) {
       lc_pouch_query_index_unlink_artifact(pouch, packed_path);
     }
     lc_error_cleanup(&ignored);
     lc_free_with_allocator(&pouch->allocator, packed_path);
-    lc_pouch_query_index_segmented_paths_cleanup(
-        pouch, &header_path, &doc_table_path, &exact_term_path,
-        &presence_term_path, &range_term_path, &text_term_path,
-        &trigram_term_path, &temporal_term_path, &delete_path);
   }
 }
 
@@ -6197,12 +6103,14 @@ static int lc_pouch_query_index_manifest_write(
                         NULL, NULL, NULL);
       break;
     }
-    written = snprintf(line, sizeof(line), "segment %s %s %s %lu %lu %lu %lu\n",
-                       manifest->segments[index].id, base_index_seq_text,
-                       index_seq_text, manifest->segments[index].row_count,
-                       manifest->segments[index].row_hash,
-                       manifest->segments[index].delete_count,
-                       manifest->segments[index].delete_hash);
+    written = snprintf(
+        line, sizeof(line), "segment %s %s %s %lu %lu %lu %lu %d %d\n",
+        manifest->segments[index].id, base_index_seq_text, index_seq_text,
+        manifest->segments[index].row_count, manifest->segments[index].row_hash,
+        manifest->segments[index].delete_count,
+        manifest->segments[index].delete_hash,
+        manifest->segments[index].term_index_complete ? 1 : 0,
+        manifest->segments[index].presence_index_complete ? 1 : 0);
     if (written < 0 || (size_t)written >= sizeof(line)) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index manifest segment exceeds local "
@@ -7281,6 +7189,11 @@ static void lc_pouch_query_index_pending_note_delete(
     return;
   }
   lc_error_init(&error);
+  /* A concurrent flush may consume the pending capture between either lookup
+   * and creation. The fresh-capture defaults are conservative until seeding
+   * establishes a durable projection watermark. */
+  base_index_seq = 0UL;
+  covers_namespace = 0;
   pthread_mutex_lock(&pouch->indexer_mutex);
   previous = NULL;
   pending = lc_pouch_query_index_pending_find(pouch, namespace_name, &previous);
@@ -7617,82 +7530,6 @@ static int lc_pouch_query_index_doc_table_generation_load_artifact(
     *valid = artifact_valid;
   }
   lc_free_with_allocator(&pouch->allocator, bytes);
-  return rc;
-}
-
-static int lc_pouch_query_index_doc_table_generation_validate_artifact(
-    lc_pouch *pouch, const char *namespace_name, const char *path,
-    lc_pouch_generation expected_index_seq, unsigned long expected_row_count,
-    unsigned long expected_row_hash, int *present, int *valid,
-    lc_error *error) {
-  lc_pouch_index_doc_table table;
-  int rc;
-
-  memset(&table, 0, sizeof(table));
-  rc = lc_pouch_query_index_doc_table_generation_load_artifact(
-      pouch, namespace_name, path, expected_index_seq, expected_row_count,
-      expected_row_hash, &table, present, valid, error);
-  lc_pouch_index_doc_table_cleanup(&pouch->allocator, &table);
-  return rc;
-}
-
-static int lc_pouch_query_index_term_generation_load_artifact(
-    lc_pouch *pouch, const char *namespace_name, const char *path,
-    lc_pouch_generation expected_index_seq, unsigned long expected_row_count,
-    unsigned long expected_row_hash, lc_pouch_index_term_generation *generation,
-    int *present, int *valid, lc_error *error) {
-  char *bytes;
-  size_t length;
-  size_t component;
-  int artifact_valid;
-  int rc;
-
-  if (pouch == NULL || generation == NULL || present == NULL || valid == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch term generation load requires inputs", NULL,
-                        NULL, NULL);
-  }
-  memset(generation, 0, sizeof(*generation));
-  *present = 0;
-  *valid = 0;
-  component = lc_pouch_query_index_packed_component_for_path(path);
-  if (component == LC_POUCH_QUERY_INDEX_PACKED_COMPONENT_COUNT ||
-      component == LC_POUCH_QUERY_INDEX_PACKED_DOC_TABLE ||
-      component == LC_POUCH_QUERY_INDEX_PACKED_DELETE) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch term generation path has unexpected component",
-                        NULL, NULL, "pouch");
-  }
-  bytes = NULL;
-  length = 0U;
-  artifact_valid = 0;
-  rc = lc_pouch_query_index_read_packed_component_bytes(
-      pouch, namespace_name, path, component, &bytes, &length, present,
-      &artifact_valid, error);
-  if (rc == LC_OK && *present && artifact_valid) {
-    rc = lc_pouch_index_term_generation_load_bytes(
-        &pouch->allocator, bytes, length, expected_index_seq,
-        expected_row_count, expected_row_hash, generation, valid, error);
-  } else {
-    *valid = artifact_valid;
-  }
-  lc_free_with_allocator(&pouch->allocator, bytes);
-  return rc;
-}
-
-static int lc_pouch_query_index_term_generation_validate_artifact(
-    lc_pouch *pouch, const char *namespace_name, const char *path,
-    lc_pouch_generation expected_index_seq, unsigned long expected_row_count,
-    unsigned long expected_row_hash, int *present, int *valid,
-    lc_error *error) {
-  lc_pouch_index_term_generation generation;
-  int rc;
-
-  memset(&generation, 0, sizeof(generation));
-  rc = lc_pouch_query_index_term_generation_load_artifact(
-      pouch, namespace_name, path, expected_index_seq, expected_row_count,
-      expected_row_hash, &generation, present, valid, error);
-  lc_pouch_index_term_generation_cleanup(&pouch->allocator, &generation);
   return rc;
 }
 
@@ -8661,164 +8498,6 @@ static int lc_pouch_query_index_read_with_reader(
   }
   lc_free_with_allocator(&pouch->allocator, bytes);
   return rc;
-}
-
-static int lc_pouch_query_index_read_header_fp(
-    FILE *fp, lc_pouch_query_index_read_result *out, lc_error *error) {
-  char format[64];
-  char line[256];
-  unsigned long version;
-  lc_pouch_generation parsed_seq;
-  unsigned long row_count;
-  unsigned long row_hash;
-  unsigned long term_count;
-  unsigned long term_hash;
-  unsigned long term_index_complete;
-  unsigned long term_field_count;
-  unsigned long term_value_count;
-  unsigned long presence_count;
-  unsigned long presence_hash;
-  unsigned long presence_index_complete;
-  int matched;
-  int rc;
-
-  if (fp == NULL || out == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index header read requires a stream and "
-                        "output",
-                        NULL, NULL, NULL);
-  }
-  memset(out, 0, sizeof(*out));
-  memset(format, 0, sizeof(format));
-  version = 0UL;
-  parsed_seq = 0UL;
-  row_count = 0UL;
-  row_hash = 0UL;
-  term_count = 0UL;
-  term_hash = 0UL;
-  term_index_complete = 0UL;
-  term_field_count = 0UL;
-  term_value_count = 0UL;
-  presence_count = 0UL;
-  presence_hash = 0UL;
-  presence_index_complete = 0UL;
-  matched = 0;
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      sscanf(line, "format=%63s\n", format) == 1) {
-    ++matched;
-  }
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      lc_pouch_query_index_parse_header_line(line, "version", &version)) {
-    ++matched;
-  }
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      lc_pouch_query_index_parse_header_u64(line, "state_index_seq",
-                                            &parsed_seq)) {
-    ++matched;
-  }
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      lc_pouch_query_index_parse_header_line(line, "row_count", &row_count)) {
-    ++matched;
-  }
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      lc_pouch_query_index_parse_header_line(line, "summary_hash", &row_hash)) {
-    ++matched;
-  }
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      lc_pouch_query_index_parse_header_line(line, "term_count", &term_count)) {
-    ++matched;
-  }
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      lc_pouch_query_index_parse_header_line(line, "term_hash", &term_hash)) {
-    ++matched;
-  }
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      lc_pouch_query_index_parse_header_line(line, "term_index_complete",
-                                             &term_index_complete) &&
-      term_index_complete <= 1UL) {
-    ++matched;
-  }
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      lc_pouch_query_index_parse_header_line(line, "presence_count",
-                                             &presence_count)) {
-    ++matched;
-  }
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      lc_pouch_query_index_parse_header_line(line, "presence_hash",
-                                             &presence_hash)) {
-    ++matched;
-  }
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      lc_pouch_query_index_parse_header_line(line, "presence_index_complete",
-                                             &presence_index_complete) &&
-      presence_index_complete <= 1UL) {
-    ++matched;
-  }
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      lc_pouch_query_index_parse_header_line(line, "term_field_count",
-                                             &term_field_count)) {
-    ++matched;
-  }
-  if (fgets(line, sizeof(line), fp) != NULL &&
-      lc_pouch_query_index_parse_header_line(line, "term_value_count",
-                                             &term_value_count)) {
-    ++matched;
-  }
-  out->present = 1;
-  rc = LC_OK;
-  if (matched == 13 && strcmp(format, LC_POUCH_QUERY_INDEX_FORMAT) == 0 &&
-      version == LC_POUCH_QUERY_INDEX_VERSION) {
-    out->index_seq = parsed_seq;
-    out->row_count = row_count;
-    out->row_hash = row_hash;
-    out->term_count = term_count;
-    out->term_hash = term_hash;
-    out->term_field_count = term_field_count;
-    out->term_value_count = term_value_count;
-    out->presence_count = presence_count;
-    out->presence_hash = presence_hash;
-    out->term_index_complete = term_index_complete != 0UL;
-    out->presence_index_complete = presence_index_complete != 0UL;
-    out->valid = 1;
-  }
-  return rc;
-}
-
-static int lc_pouch_query_index_read_header_file(
-    const char *path, lc_pouch_query_index_read_result *out, lc_error *error) {
-  FILE *fp;
-  int rc;
-
-  if (out == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index header read requires an output",
-                        NULL, NULL, NULL);
-  }
-  memset(out, 0, sizeof(*out));
-  fp = fopen(path, "rb");
-  if (fp == NULL) {
-    if (errno == ENOENT) {
-      return LC_OK;
-    }
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to open pouch query-index header artifact",
-                        strerror(errno), NULL, NULL);
-  }
-  rc = lc_pouch_query_index_read_header_fp(fp, out, error);
-  if (fclose(fp) != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to close pouch query-index header artifact",
-                        strerror(errno), NULL, NULL);
-  }
-  return rc;
-}
-
-static int lc_pouch_query_index_read_header(
-    lc_pouch *pouch, const char *namespace_name, const char *path,
-    lc_pouch_query_index_read_result *out, lc_error *error) {
-  (void)pouch;
-  (void)namespace_name;
-  return lc_pouch_query_index_read_header_file(path, out, error);
 }
 
 static int lc_pouch_query_index_exact_generation_flush_posting(
@@ -10004,6 +9683,140 @@ static int lc_pouch_query_index_text_generation_add_term(
   return rc;
 }
 
+static int lc_pouch_query_index_text_token_byte(unsigned char value) {
+  return (value >= 'a' && value <= 'z') ||
+         (value >= 'A' && value <= 'Z') ||
+         (value >= '0' && value <= '9');
+}
+
+/* Add a small, durable all-text token directory. A token posting proves a
+ * positive ASCII case-insensitive contains match, but omitted tokens must
+ * never affect correctness: callers fall back to the raw text verifier when
+ * this directory cannot cover every trigram candidate. */
+static int lc_pouch_query_index_text_generation_add_all_text_tokens(
+    const lc_allocator *allocator, lc_pouch_index_term_generation *generation,
+    lc_pouch_query_index_exact_generation_accumulator *accumulator,
+    lc_pouch_query_index_term_cache *term_cache, const char *value_hex,
+    unsigned long doc_id, lc_error *error) {
+  char token[LC_POUCH_QUERY_INDEX_TEXT_TOKEN_BYTES_MAX + 1U];
+  size_t value_hex_length;
+  size_t index;
+  size_t token_count;
+  size_t token_length;
+  int token_overlong;
+  int rc;
+
+  if (allocator == NULL || generation == NULL || accumulator == NULL ||
+      term_cache == NULL || value_hex == NULL || strcmp(value_hex, "-") == 0) {
+    return LC_OK;
+  }
+  value_hex_length = strlen(value_hex);
+  if ((value_hex_length & 1U) != 0U ||
+      (value_hex_length / 2U) >
+          LC_POUCH_QUERY_INDEX_TEXT_TOKEN_SOURCE_BYTES_MAX) {
+    return LC_OK;
+  }
+  token_count = 0U;
+  token_length = 0U;
+  token_overlong = 0;
+  rc = LC_OK;
+  for (index = 0U; rc == LC_OK && index <= value_hex_length; index += 2U) {
+    unsigned char value;
+    int word;
+
+    value = 0U;
+    word = 0;
+    if (index < value_hex_length) {
+      int high;
+      int low;
+
+      high = lc_pouch_query_index_hex_value((unsigned char)value_hex[index]);
+      low = lc_pouch_query_index_hex_value(
+          (unsigned char)value_hex[index + 1U]);
+      if (high < 0 || low < 0) {
+        return lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch text token source has invalid hex", NULL,
+                            NULL, "pouch");
+      }
+      value = (unsigned char)(((unsigned int)high << 4) | (unsigned int)low);
+      word = lc_pouch_query_index_text_token_byte(value);
+    }
+    if (word) {
+      if (!token_overlong) {
+        if (token_length < LC_POUCH_QUERY_INDEX_TEXT_TOKEN_BYTES_MAX) {
+          token[token_length++] =
+              (char)lc_pouch_query_index_ascii_lower(value);
+        } else {
+          token_overlong = 1;
+        }
+      }
+      continue;
+    }
+    if (token_length > 0U && !token_overlong) {
+      char *token_hex;
+
+      token[token_length] = '\0';
+      token_hex = lc_pouch_query_index_hex_encode_bytes(allocator, token,
+                                                         token_length);
+      if (token_hex == NULL) {
+        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch text token", NULL, NULL,
+                          NULL);
+      } else {
+        rc = lc_pouch_query_index_text_generation_add_term(
+            allocator, generation, accumulator, term_cache,
+            LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX, token_hex,
+            LC_POUCH_QUERY_INDEX_TEXT_TOKEN_TYPE, doc_id, error);
+      }
+      lc_free_with_allocator(allocator, token_hex);
+      ++token_count;
+      if (token_count == LC_POUCH_QUERY_INDEX_TEXT_TOKEN_COUNT_MAX) {
+        break;
+      }
+    }
+    token_length = 0U;
+    token_overlong = 0;
+  }
+  return rc;
+}
+
+static int lc_pouch_query_index_all_text_token_hex_from_needle(
+    const lc_allocator *allocator, const char *needle, char **token_hex,
+    int *eligible, lc_error *error) {
+  size_t length;
+  size_t index;
+
+  if (token_hex == NULL || eligible == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch text token lookup requires outputs", NULL, NULL,
+                        NULL);
+  }
+  *token_hex = NULL;
+  *eligible = 0;
+  if (needle == NULL || needle[0] == '\0') {
+    return LC_OK;
+  }
+  length = strlen(needle);
+  if (length > LC_POUCH_QUERY_INDEX_TEXT_TOKEN_BYTES_MAX) {
+    return LC_OK;
+  }
+  for (index = 0U; index < length; ++index) {
+    if (!lc_pouch_query_index_text_token_byte((unsigned char)needle[index])) {
+      return LC_OK;
+    }
+  }
+  *token_hex =
+      lc_pouch_query_index_hex_encode_folded_ascii_bytes(allocator, needle,
+                                                          length);
+  if (*token_hex == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch text lookup token", NULL,
+                        NULL, NULL);
+  }
+  *eligible = 1;
+  return LC_OK;
+}
+
 static int lc_pouch_query_index_text_generation_add_value(
     const lc_allocator *allocator, lc_pouch_index_term_generation *generation,
     lc_pouch_query_index_exact_generation_accumulator *accumulator,
@@ -10595,22 +10408,20 @@ static int lc_pouch_query_index_trigram_generation_build_sorted(
 
 static int lc_pouch_query_index_build_text(
     lc_pouch_generation index_seq, lc_pouch_query_index_summary *summary,
-    lc_pouch_query_index_text *out, unsigned long *row_hash_out,
-    unsigned long *term_count_out, unsigned long *term_hash_out,
-    unsigned long *term_field_count_out, unsigned long *term_value_count_out,
-    unsigned long *presence_count_out, unsigned long *presence_hash_out,
-    char **doc_table_generation_out, size_t *doc_table_generation_length_out,
-    char **exact_term_generation_out, size_t *exact_term_generation_length_out,
+    unsigned long *row_hash_out, unsigned long *term_count_out,
+    unsigned long *term_hash_out, unsigned long *term_field_count_out,
+    unsigned long *term_value_count_out, unsigned long *presence_count_out,
+    unsigned long *presence_hash_out, char **doc_table_generation_out,
+    size_t *doc_table_generation_length_out, char **exact_term_generation_out,
+    size_t *exact_term_generation_length_out,
     char **presence_term_generation_out,
     size_t *presence_term_generation_length_out,
     char **range_term_generation_out, size_t *range_term_generation_length_out,
     char **text_term_generation_out, size_t *text_term_generation_length_out,
     char **trigram_term_generation_out,
     size_t *trigram_term_generation_length_out,
-    lc_pouch_index_term_generation *trigram_cache_generation_out,
     char **temporal_term_generation_out,
     size_t *temporal_term_generation_length_out, lc_error *error) {
-  lc_pouch_query_index_text header;
   lc_pouch_index_doc_table doc_table;
   lc_pouch_index_term_generation exact_generation;
   lc_pouch_index_term_generation presence_generation;
@@ -10648,11 +10459,10 @@ static int lc_pouch_query_index_build_text(
   int use_sorted_trigrams;
   int rc;
 
-  if (summary == NULL || out == NULL || row_hash_out == NULL ||
-      term_count_out == NULL || term_hash_out == NULL ||
-      term_field_count_out == NULL || term_value_count_out == NULL ||
-      presence_count_out == NULL || presence_hash_out == NULL ||
-      doc_table_generation_out == NULL ||
+  if (summary == NULL || row_hash_out == NULL || term_count_out == NULL ||
+      term_hash_out == NULL || term_field_count_out == NULL ||
+      term_value_count_out == NULL || presence_count_out == NULL ||
+      presence_hash_out == NULL || doc_table_generation_out == NULL ||
       doc_table_generation_length_out == NULL ||
       exact_term_generation_out == NULL ||
       exact_term_generation_length_out == NULL ||
@@ -10664,15 +10474,12 @@ static int lc_pouch_query_index_build_text(
       text_term_generation_length_out == NULL ||
       trigram_term_generation_out == NULL ||
       trigram_term_generation_length_out == NULL ||
-      trigram_cache_generation_out == NULL ||
       temporal_term_generation_out == NULL ||
       temporal_term_generation_length_out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch query-index build requires summary outputs",
                         NULL, NULL, NULL);
   }
-  memset(out, 0, sizeof(*out));
-  out->allocator = summary->allocator;
   *doc_table_generation_out = NULL;
   *doc_table_generation_length_out = 0U;
   *exact_term_generation_out = NULL;
@@ -10685,8 +10492,6 @@ static int lc_pouch_query_index_build_text(
   *text_term_generation_length_out = 0U;
   *trigram_term_generation_out = NULL;
   *trigram_term_generation_length_out = 0U;
-  memset(trigram_cache_generation_out, 0,
-         sizeof(*trigram_cache_generation_out));
   *temporal_term_generation_out = NULL;
   *temporal_term_generation_length_out = 0U;
   *row_hash_out = lc_pouch_query_index_hash_init();
@@ -10700,7 +10505,6 @@ static int lc_pouch_query_index_build_text(
     qsort(summary->rows, summary->count, sizeof(summary->rows[0]),
           lc_pouch_query_index_row_compare);
   }
-  memset(&header, 0, sizeof(header));
   memset(&doc_table, 0, sizeof(doc_table));
   memset(&exact_generation, 0, sizeof(exact_generation));
   memset(&presence_generation, 0, sizeof(presence_generation));
@@ -10721,7 +10525,6 @@ static int lc_pouch_query_index_build_text(
   memset(&range_term_cache, 0, sizeof(range_term_cache));
   memset(&text_term_cache, 0, sizeof(text_term_cache));
   memset(&temporal_term_cache, 0, sizeof(temporal_term_cache));
-  header.allocator = summary->allocator;
   row_hash = lc_pouch_query_index_hash_init();
   term_hash = lc_pouch_query_index_hash_init();
   term_line_count = 0UL;
@@ -10935,12 +10738,14 @@ static int lc_pouch_query_index_build_text(
       }
       if (rc == LC_OK && term->value_type == 's') {
         char *date_text;
+        const char *token_source_hex;
         const char *trigram_field_hex;
         lc_pouch_index_instant ignored_instant;
         unsigned long trigram_field_hash;
         unsigned long trigram_field_id;
 
         date_text = NULL;
+        token_source_hex = NULL;
         trigram_field_hex = NULL;
         trigram_field_hash = 0UL;
         trigram_field_id = 0UL;
@@ -11012,6 +10817,18 @@ static int lc_pouch_query_index_build_text(
                 summary->allocator, &trigram_generation, &trigram_accumulator,
                 &trigram_field_cache, &trigram_term_cache, term->field_hex,
                 exact_value_hex, term->doc_id, error);
+          }
+        }
+        if (rc == LC_OK) {
+          token_source_hex = term->text_prefix_hex != NULL
+                                 ? term->text_prefix_hex
+                                 : exact_value_hex;
+          if (token_source_hex != NULL &&
+              !lc_pouch_query_index_exact_string_is_long_hex(
+                  token_source_hex)) {
+            rc = lc_pouch_query_index_text_generation_add_all_text_tokens(
+                summary->allocator, &text_generation, &text_accumulator,
+                &text_term_cache, token_source_hex, term->doc_id, error);
           }
         }
         if (rc == LC_OK && !term->derived_terms_ready &&
@@ -11133,60 +10950,6 @@ static int lc_pouch_query_index_build_text(
         summary->allocator, &temporal_accumulator, &temporal_generation, error);
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_cstr(
-        &header, "format=" LC_POUCH_QUERY_INDEX_FORMAT "\n", NULL, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "version", LC_POUCH_QUERY_INDEX_VERSION, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_u64_line(&header, "state_index_seq",
-                                                   index_seq, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "row_count", (unsigned long)summary->count, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(&header, "summary_hash",
-                                                     row_hash, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(&header, "term_count",
-                                                     term_line_count, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(&header, "term_hash",
-                                                     term_hash, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "term_index_complete",
-        summary->term_index_complete ? 1UL : 0UL, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "presence_count", presence_line_count, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(&header, "presence_hash",
-                                                     presence_hash, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "presence_index_complete",
-        summary->presence_index_complete ? 1UL : 0UL, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "term_field_count", term_field_line_count, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "term_value_count", term_value_line_count, error);
-  }
-  if (rc == LC_OK) {
     rc = lc_pouch_index_doc_table_generation_encode(
         &doc_table, index_seq, row_hash, summary->allocator,
         doc_table_generation_out, doc_table_generation_length_out, error);
@@ -11240,10 +11003,6 @@ static int lc_pouch_query_index_build_text(
         temporal_term_generation_length_out, error);
   }
   if (rc == LC_OK) {
-    *trigram_cache_generation_out = trigram_generation;
-    memset(&trigram_generation, 0, sizeof(trigram_generation));
-    *out = header;
-    memset(&header, 0, sizeof(header));
     *row_hash_out = row_hash;
     *term_count_out = term_line_count;
     *term_hash_out = term_hash;
@@ -11252,7 +11011,6 @@ static int lc_pouch_query_index_build_text(
     *presence_count_out = presence_line_count;
     *presence_hash_out = presence_hash;
   }
-  lc_free_with_allocator(summary->allocator, header.bytes);
   if (rc != LC_OK) {
     lc_free_with_allocator(summary->allocator, *doc_table_generation_out);
     *doc_table_generation_out = NULL;
@@ -12058,30 +11816,26 @@ lc_pouch_query_index_memtable_trigram_term_compare(const void *left,
 
 static int lc_pouch_query_index_memtable_encode(
     lc_pouch_query_index_memtable *memtable, lc_pouch_generation index_seq,
-    lc_pouch_query_index_summary *summary, lc_pouch_query_index_text *out,
-    unsigned long *row_hash_out, unsigned long *term_count_out,
-    unsigned long *term_hash_out, unsigned long *term_field_count_out,
-    unsigned long *term_value_count_out, unsigned long *presence_count_out,
-    unsigned long *presence_hash_out, char **doc_table_generation_out,
-    size_t *doc_table_generation_length_out, char **exact_term_generation_out,
-    size_t *exact_term_generation_length_out,
+    lc_pouch_query_index_summary *summary, unsigned long *row_hash_out,
+    unsigned long *term_count_out, unsigned long *term_hash_out,
+    unsigned long *term_field_count_out, unsigned long *term_value_count_out,
+    unsigned long *presence_count_out, unsigned long *presence_hash_out,
+    char **doc_table_generation_out, size_t *doc_table_generation_length_out,
+    char **exact_term_generation_out, size_t *exact_term_generation_length_out,
     char **presence_term_generation_out,
     size_t *presence_term_generation_length_out,
     char **range_term_generation_out, size_t *range_term_generation_length_out,
     char **text_term_generation_out, size_t *text_term_generation_length_out,
-    lc_pouch_index_term_generation *text_cache_generation_out,
     char **trigram_term_generation_out,
     size_t *trigram_term_generation_length_out,
-    lc_pouch_index_term_generation *trigram_cache_generation_out,
     char **temporal_term_generation_out,
     size_t *temporal_term_generation_length_out, lc_error *error) {
-  lc_pouch_query_index_text header;
   unsigned long row_hash;
   unsigned long row_count;
   int rc;
 
-  if (memtable == NULL || summary == NULL || out == NULL ||
-      row_hash_out == NULL || term_count_out == NULL || term_hash_out == NULL ||
+  if (memtable == NULL || summary == NULL || row_hash_out == NULL ||
+      term_count_out == NULL || term_hash_out == NULL ||
       term_field_count_out == NULL || term_value_count_out == NULL ||
       presence_count_out == NULL || presence_hash_out == NULL ||
       doc_table_generation_out == NULL ||
@@ -12094,10 +11848,8 @@ static int lc_pouch_query_index_memtable_encode(
       range_term_generation_length_out == NULL ||
       text_term_generation_out == NULL ||
       text_term_generation_length_out == NULL ||
-      text_cache_generation_out == NULL ||
       trigram_term_generation_out == NULL ||
       trigram_term_generation_length_out == NULL ||
-      trigram_cache_generation_out == NULL ||
       temporal_term_generation_out == NULL ||
       temporal_term_generation_length_out == NULL ||
       memtable->doc_table.count != summary->count ||
@@ -12108,8 +11860,6 @@ static int lc_pouch_query_index_memtable_encode(
                         "projection",
                         NULL, NULL, "pouch");
   }
-  memset(&header, 0, sizeof(header));
-  header.allocator = summary->allocator;
   *doc_table_generation_out = NULL;
   *doc_table_generation_length_out = 0U;
   *exact_term_generation_out = NULL;
@@ -12120,13 +11870,10 @@ static int lc_pouch_query_index_memtable_encode(
   *range_term_generation_length_out = 0U;
   *text_term_generation_out = NULL;
   *text_term_generation_length_out = 0U;
-  memset(text_cache_generation_out, 0, sizeof(*text_cache_generation_out));
   *trigram_term_generation_out = NULL;
   *trigram_term_generation_length_out = 0U;
   *temporal_term_generation_out = NULL;
   *temporal_term_generation_length_out = 0U;
-  memset(trigram_cache_generation_out, 0,
-         sizeof(*trigram_cache_generation_out));
   row_hash = lc_pouch_query_index_hash_init();
   row_count = (unsigned long)summary->count;
   rc = lc_pouch_query_index_memtable_hash_rows(summary, &row_hash, error);
@@ -12166,7 +11913,7 @@ static int lc_pouch_query_index_memtable_encode(
             sizeof(memtable->trigram_generation.terms.items[0]),
             lc_pouch_query_index_memtable_trigram_term_compare);
     }
-    /* The adopted direct query cache requires lexical field/trigram order. */
+    /* The packed generation encoder requires lexical field/trigram order. */
     memtable->trigram_generation.terms_sorted = 1;
   }
   if (rc == LC_OK) {
@@ -12176,61 +11923,6 @@ static int lc_pouch_query_index_memtable_encode(
   }
   if (rc == LC_OK) {
     lc_pouch_index_term_generation_sort_terms(&memtable->temporal_generation);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_cstr(
-        &header, "format=" LC_POUCH_QUERY_INDEX_FORMAT "\n", NULL, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "version", LC_POUCH_QUERY_INDEX_VERSION, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_u64_line(&header, "state_index_seq",
-                                                   index_seq, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(&header, "row_count",
-                                                     row_count, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(&header, "summary_hash",
-                                                     row_hash, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "term_count", (unsigned long)summary->term_count, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "term_hash", lc_pouch_query_index_hash_init(), error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "term_index_complete",
-        summary->term_index_complete ? 1UL : 0UL, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "presence_count", (unsigned long)summary->presence_count,
-        error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "presence_hash", lc_pouch_query_index_hash_init(), error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "presence_index_complete",
-        summary->presence_index_complete ? 1UL : 0UL, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "term_field_count", 0UL, error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_text_append_ulong_line(
-        &header, "term_value_count", 0UL, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_index_doc_table_generation_encode(
@@ -12274,13 +11966,6 @@ static int lc_pouch_query_index_memtable_encode(
         temporal_term_generation_length_out, error);
   }
   if (rc == LC_OK) {
-    *text_cache_generation_out = memtable->text_generation;
-    memset(&memtable->text_generation, 0, sizeof(memtable->text_generation));
-    *trigram_cache_generation_out = memtable->trigram_generation;
-    memset(&memtable->trigram_generation, 0,
-           sizeof(memtable->trigram_generation));
-    *out = header;
-    memset(&header, 0, sizeof(header));
     *row_hash_out = row_hash;
     *term_count_out = (unsigned long)summary->term_count;
     *term_hash_out = lc_pouch_query_index_hash_init();
@@ -12289,7 +11974,6 @@ static int lc_pouch_query_index_memtable_encode(
     *presence_count_out = (unsigned long)summary->presence_count;
     *presence_hash_out = lc_pouch_query_index_hash_init();
   }
-  lc_free_with_allocator(summary->allocator, header.bytes);
   if (rc != LC_OK) {
     lc_free_with_allocator(summary->allocator, *doc_table_generation_out);
     *doc_table_generation_out = NULL;
@@ -12314,26 +11998,6 @@ static int lc_pouch_query_index_memtable_encode(
     *temporal_term_generation_length_out = 0U;
   }
   return rc;
-}
-
-static int
-lc_pouch_query_index_write_header_text(lc_pouch *pouch, const char *path,
-                                       lc_pouch_query_index_text *text,
-                                       int unpublished_path, lc_error *error) {
-  if (pouch == NULL || path == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index header write requires pouch and "
-                        "path",
-                        NULL, NULL, NULL);
-  }
-  if (unpublished_path) {
-    return lc_pouch_query_index_write_unpublished_bytes_relaxed(
-        path, text != NULL && text->bytes != NULL ? text->bytes : "",
-        text != NULL ? text->length : 0U, error);
-  }
-  return lc_pouch_query_index_write_bytes_direct_relaxed(
-      path, text != NULL && text->bytes != NULL ? text->bytes : "",
-      text != NULL ? text->length : 0U, error);
 }
 
 static int lc_pouch_query_index_segmented_paths(
@@ -12455,304 +12119,20 @@ static int lc_pouch_query_index_manifest_segments_validate(
        rc == LC_OK && segment_index < manifest->segment_count;
        ++segment_index) {
     const lc_pouch_query_index_manifest_segment *segment;
-    lc_pouch_query_index_read_result header_artifact;
-    lc_pouch_query_index_key_hex_set deletes;
-    char *header_path;
-    char *doc_table_path;
-    char *exact_term_path;
-    char *presence_term_path;
-    char *range_term_path;
-    char *text_term_path;
-    char *trigram_term_path;
-    char *temporal_term_path;
-    char *delete_path;
     char *packed_path;
-    unsigned long delete_count;
-    unsigned long delete_hash;
-    lc_pouch_query_index_file_signature
-        artifact_signatures[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_COUNT];
-    int present;
-    int valid;
 
     segment = &manifest->segments[segment_index];
-    memset(&header_artifact, 0, sizeof(header_artifact));
-    memset(&deletes, 0, sizeof(deletes));
-    header_path = NULL;
-    doc_table_path = NULL;
-    exact_term_path = NULL;
-    presence_term_path = NULL;
-    range_term_path = NULL;
-    text_term_path = NULL;
-    trigram_term_path = NULL;
-    temporal_term_path = NULL;
-    delete_path = NULL;
-    packed_path = NULL;
-    delete_count = 0UL;
-    delete_hash = lc_pouch_query_index_hash_init();
-    rc = lc_pouch_query_index_segmented_paths(
-        pouch, namespace_name, segment->id, &header_path, &doc_table_path,
-        &exact_term_path, &presence_term_path, &range_term_path,
-        &text_term_path, &trigram_term_path, &temporal_term_path, &delete_path,
+    packed_path = lc_pouch_query_index_segment_artifact_path(
+        pouch, namespace_name, segment->id, LC_POUCH_QUERY_INDEX_PACKED_LEAF,
         error);
-    if (rc == LC_OK) {
-      packed_path = lc_pouch_query_index_packed_path_from_component(
-          &pouch->allocator, doc_table_path,
-          LC_POUCH_QUERY_INDEX_PACKED_DOC_TABLE, error);
-      if (packed_path == NULL) {
-        rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
-      }
+    if (packed_path == NULL) {
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    } else if (!segment->term_index_complete ||
+               !segment->presence_index_complete ||
+               !lc_pouch_query_index_manifest_segment_artifacts_match(
+                   segment, packed_path, NULL)) {
+      *valid_out = 0;
     }
-    if (rc == LC_OK &&
-        lc_pouch_query_index_manifest_segment_artifacts_match(
-            segment, header_path, doc_table_path, exact_term_path,
-            presence_term_path, range_term_path, text_term_path,
-            trigram_term_path, temporal_term_path, delete_path, packed_path,
-            artifact_signatures)) {
-      lc_pouch_query_index_artifact_cache_remember_signature(
-          pouch, header_path, LC_POUCH_QUERY_INDEX_ARTIFACT_HEADER,
-          segment->index_seq, segment->row_count, segment->row_hash,
-          &artifact_signatures[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER]);
-      lc_pouch_query_index_artifact_cache_remember_signature(
-          pouch, doc_table_path, LC_POUCH_QUERY_INDEX_ARTIFACT_DOC_TABLE,
-          segment->index_seq, segment->row_count, segment->row_hash,
-          &artifact_signatures
-              [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_DOC_TABLE]);
-      lc_pouch_query_index_artifact_cache_remember_signature(
-          pouch, exact_term_path, LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION,
-          segment->index_seq, segment->row_count, segment->row_hash,
-          &artifact_signatures[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_EXACT]);
-      lc_pouch_query_index_artifact_cache_remember_signature(
-          pouch, presence_term_path,
-          LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-          segment->row_count, segment->row_hash,
-          &artifact_signatures
-              [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_PRESENCE]);
-      lc_pouch_query_index_artifact_cache_remember_signature(
-          pouch, range_term_path, LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION,
-          segment->index_seq, segment->row_count, segment->row_hash,
-          &artifact_signatures[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_RANGE]);
-      lc_pouch_query_index_artifact_cache_remember_signature(
-          pouch, text_term_path, LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION,
-          segment->index_seq, segment->row_count, segment->row_hash,
-          &artifact_signatures[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_TEXT]);
-      lc_pouch_query_index_artifact_cache_remember_signature(
-          pouch, trigram_term_path,
-          LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-          segment->row_count, segment->row_hash,
-          &artifact_signatures[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_TRIGRAM]);
-      lc_pouch_query_index_artifact_cache_remember_signature(
-          pouch, temporal_term_path,
-          LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-          segment->row_count, segment->row_hash,
-          &artifact_signatures
-              [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_TEMPORAL]);
-      lc_pouch_query_index_artifact_cache_remember_signature(
-          pouch, delete_path, LC_POUCH_QUERY_INDEX_ARTIFACT_DELETE,
-          segment->index_seq, segment->delete_count, segment->delete_hash,
-          &artifact_signatures[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_DELETE]);
-      lc_pouch_query_index_segmented_paths_cleanup(
-          pouch, &header_path, &doc_table_path, &exact_term_path,
-          &presence_term_path, &range_term_path, &text_term_path,
-          &trigram_term_path, &temporal_term_path, &delete_path);
-      lc_free_with_allocator(&pouch->allocator, packed_path);
-      continue;
-    }
-    if (rc == LC_OK &&
-        !lc_pouch_query_index_artifact_cache_valid(
-            pouch, header_path, LC_POUCH_QUERY_INDEX_ARTIFACT_HEADER,
-            segment->index_seq, segment->row_count, segment->row_hash)) {
-      rc = lc_pouch_query_index_read_header(pouch, namespace_name, header_path,
-                                            &header_artifact, error);
-      if (rc == LC_OK && (!header_artifact.present || !header_artifact.valid ||
-                          header_artifact.index_seq != segment->index_seq ||
-                          header_artifact.row_count != segment->row_count ||
-                          header_artifact.row_hash != segment->row_hash ||
-                          !header_artifact.term_index_complete ||
-                          !header_artifact.presence_index_complete)) {
-        *valid_out = 0;
-      }
-      if (rc == LC_OK && *valid_out) {
-        lc_pouch_query_index_artifact_cache_remember(
-            pouch, header_path, LC_POUCH_QUERY_INDEX_ARTIFACT_HEADER,
-            segment->index_seq, segment->row_count, segment->row_hash);
-      }
-    }
-    if (rc == LC_OK && *valid_out) {
-      present = 0;
-      valid = 0;
-      if (!lc_pouch_query_index_artifact_cache_valid(
-              pouch, doc_table_path, LC_POUCH_QUERY_INDEX_ARTIFACT_DOC_TABLE,
-              segment->index_seq, segment->row_count, segment->row_hash)) {
-        rc = lc_pouch_query_index_doc_table_generation_validate_artifact(
-            pouch, namespace_name, doc_table_path, segment->index_seq,
-            segment->row_count, segment->row_hash, &present, &valid, error);
-        if (rc == LC_OK && (!present || !valid)) {
-          *valid_out = 0;
-        }
-        if (rc == LC_OK && *valid_out) {
-          lc_pouch_query_index_artifact_cache_remember(
-              pouch, doc_table_path, LC_POUCH_QUERY_INDEX_ARTIFACT_DOC_TABLE,
-              segment->index_seq, segment->row_count, segment->row_hash);
-        }
-      }
-    }
-    if (rc == LC_OK && *valid_out) {
-      present = 0;
-      valid = 0;
-      if (!lc_pouch_query_index_artifact_cache_valid(
-              pouch, exact_term_path,
-              LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-              segment->row_count, segment->row_hash)) {
-        rc = lc_pouch_query_index_term_generation_validate_artifact(
-            pouch, namespace_name, exact_term_path, segment->index_seq,
-            segment->row_count, segment->row_hash, &present, &valid, error);
-        if (rc == LC_OK && (!present || !valid)) {
-          *valid_out = 0;
-        }
-        if (rc == LC_OK && *valid_out) {
-          lc_pouch_query_index_artifact_cache_remember(
-              pouch, exact_term_path,
-              LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-              segment->row_count, segment->row_hash);
-        }
-      }
-    }
-    if (rc == LC_OK && *valid_out) {
-      present = 0;
-      valid = 0;
-      if (!lc_pouch_query_index_artifact_cache_valid(
-              pouch, presence_term_path,
-              LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-              segment->row_count, segment->row_hash)) {
-        rc = lc_pouch_query_index_term_generation_validate_artifact(
-            pouch, namespace_name, presence_term_path, segment->index_seq,
-            segment->row_count, segment->row_hash, &present, &valid, error);
-        if (rc == LC_OK && (!present || !valid)) {
-          *valid_out = 0;
-        }
-        if (rc == LC_OK && *valid_out) {
-          lc_pouch_query_index_artifact_cache_remember(
-              pouch, presence_term_path,
-              LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-              segment->row_count, segment->row_hash);
-        }
-      }
-    }
-    if (rc == LC_OK && *valid_out) {
-      present = 0;
-      valid = 0;
-      if (!lc_pouch_query_index_artifact_cache_valid(
-              pouch, range_term_path,
-              LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-              segment->row_count, segment->row_hash)) {
-        rc = lc_pouch_query_index_term_generation_validate_artifact(
-            pouch, namespace_name, range_term_path, segment->index_seq,
-            segment->row_count, segment->row_hash, &present, &valid, error);
-        if (rc == LC_OK && (!present || !valid)) {
-          *valid_out = 0;
-        }
-        if (rc == LC_OK && *valid_out) {
-          lc_pouch_query_index_artifact_cache_remember(
-              pouch, range_term_path,
-              LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-              segment->row_count, segment->row_hash);
-        }
-      }
-    }
-    if (rc == LC_OK && *valid_out) {
-      present = 0;
-      valid = 0;
-      if (!lc_pouch_query_index_artifact_cache_valid(
-              pouch, text_term_path,
-              LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-              segment->row_count, segment->row_hash)) {
-        rc = lc_pouch_query_index_term_generation_validate_artifact(
-            pouch, namespace_name, text_term_path, segment->index_seq,
-            segment->row_count, segment->row_hash, &present, &valid, error);
-        if (rc == LC_OK && (!present || !valid)) {
-          *valid_out = 0;
-        }
-        if (rc == LC_OK && *valid_out) {
-          lc_pouch_query_index_artifact_cache_remember(
-              pouch, text_term_path,
-              LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-              segment->row_count, segment->row_hash);
-        }
-      }
-    }
-    if (rc == LC_OK && *valid_out) {
-      present = 0;
-      valid = 0;
-      if (!lc_pouch_query_index_artifact_cache_valid(
-              pouch, trigram_term_path,
-              LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-              segment->row_count, segment->row_hash)) {
-        rc = lc_pouch_query_index_term_generation_validate_artifact(
-            pouch, namespace_name, trigram_term_path, segment->index_seq,
-            segment->row_count, segment->row_hash, &present, &valid, error);
-        if (rc == LC_OK && (!present || !valid)) {
-          *valid_out = 0;
-        }
-        if (rc == LC_OK && *valid_out) {
-          lc_pouch_query_index_artifact_cache_remember(
-              pouch, trigram_term_path,
-              LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-              segment->row_count, segment->row_hash);
-        }
-      }
-    }
-    if (rc == LC_OK && *valid_out) {
-      present = 0;
-      valid = 0;
-      if (!lc_pouch_query_index_artifact_cache_valid(
-              pouch, temporal_term_path,
-              LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-              segment->row_count, segment->row_hash)) {
-        rc = lc_pouch_query_index_term_generation_validate_artifact(
-            pouch, namespace_name, temporal_term_path, segment->index_seq,
-            segment->row_count, segment->row_hash, &present, &valid, error);
-        if (rc == LC_OK && (!present || !valid)) {
-          *valid_out = 0;
-        }
-        if (rc == LC_OK && *valid_out) {
-          lc_pouch_query_index_artifact_cache_remember(
-              pouch, temporal_term_path,
-              LC_POUCH_QUERY_INDEX_ARTIFACT_TERM_GENERATION, segment->index_seq,
-              segment->row_count, segment->row_hash);
-        }
-      }
-    }
-    if (rc == LC_OK && *valid_out) {
-      if (!lc_pouch_query_index_artifact_cache_valid(
-              pouch, delete_path, LC_POUCH_QUERY_INDEX_ARTIFACT_DELETE,
-              segment->index_seq, segment->delete_count,
-              segment->delete_hash)) {
-        rc = lc_pouch_query_index_load_delete_keys(
-            pouch, namespace_name, delete_path, &deletes, &delete_count,
-            &delete_hash, error);
-        if (rc == LC_ERR_INVALID) {
-          if (error != NULL) {
-            lc_error_cleanup(error);
-          }
-          *valid_out = 0;
-          rc = LC_OK;
-        }
-        if (rc == LC_OK && (delete_count != segment->delete_count ||
-                            delete_hash != segment->delete_hash)) {
-          *valid_out = 0;
-        }
-        if (rc == LC_OK && *valid_out) {
-          lc_pouch_query_index_artifact_cache_remember(
-              pouch, delete_path, LC_POUCH_QUERY_INDEX_ARTIFACT_DELETE,
-              segment->index_seq, segment->delete_count, segment->delete_hash);
-        }
-      }
-    }
-    lc_pouch_query_index_key_hex_set_cleanup(&pouch->allocator, &deletes);
-    lc_pouch_query_index_segmented_paths_cleanup(
-        pouch, &header_path, &doc_table_path, &exact_term_path,
-        &presence_term_path, &range_term_path, &text_term_path,
-        &trigram_term_path, &temporal_term_path, &delete_path);
     lc_free_with_allocator(&pouch->allocator, packed_path);
   }
   return rc;
@@ -12768,22 +12148,12 @@ static int lc_pouch_query_index_flush_segmented(
   lc_pouch_query_index_summary summary;
   lc_pouch_query_index_extract_batch extract_batch;
   lc_pouch_query_index_incremental_context incremental;
-  lc_pouch_query_index_text text;
   lc_pouch_query_index_text deletes;
   lc_pouch_query_index_key_hex_set pending_deletes;
   const char **extract_keys;
   size_t *extract_row_indices;
   char segment_id[32];
   char *manifest_path;
-  char *header_path;
-  char *doc_table_path;
-  char *exact_term_path;
-  char *presence_term_path;
-  char *range_term_path;
-  char *text_term_path;
-  char *trigram_term_path;
-  char *temporal_term_path;
-  char *delete_path;
   char *doc_table_generation;
   char *exact_term_generation;
   char *presence_term_generation;
@@ -12791,8 +12161,6 @@ static int lc_pouch_query_index_flush_segmented(
   char *text_term_generation;
   char *trigram_term_generation;
   char *temporal_term_generation;
-  lc_pouch_index_term_generation text_cache_generation;
-  lc_pouch_index_term_generation trigram_cache_generation;
   lc_pouch_query_index_memtable *memtable;
   char *packed_path;
   char *packed_generation;
@@ -12853,21 +12221,11 @@ static int lc_pouch_query_index_flush_segmented(
   memset(&summary, 0, sizeof(summary));
   memset(&extract_batch, 0, sizeof(extract_batch));
   memset(&incremental, 0, sizeof(incremental));
-  memset(&text, 0, sizeof(text));
   memset(&deletes, 0, sizeof(deletes));
   memset(&pending_deletes, 0, sizeof(pending_deletes));
   extract_keys = NULL;
   extract_row_indices = NULL;
   manifest_path = NULL;
-  header_path = NULL;
-  doc_table_path = NULL;
-  exact_term_path = NULL;
-  presence_term_path = NULL;
-  range_term_path = NULL;
-  text_term_path = NULL;
-  trigram_term_path = NULL;
-  temporal_term_path = NULL;
-  delete_path = NULL;
   doc_table_generation = NULL;
   exact_term_generation = NULL;
   presence_term_generation = NULL;
@@ -12875,8 +12233,6 @@ static int lc_pouch_query_index_flush_segmented(
   text_term_generation = NULL;
   trigram_term_generation = NULL;
   temporal_term_generation = NULL;
-  memset(&text_cache_generation, 0, sizeof(text_cache_generation));
-  memset(&trigram_cache_generation, 0, sizeof(trigram_cache_generation));
   memtable = NULL;
   packed_path = NULL;
   packed_generation = NULL;
@@ -12908,7 +12264,6 @@ static int lc_pouch_query_index_flush_segmented(
   summary.namespace_name = namespace_name;
   summary.term_index_complete = 1;
   summary.presence_index_complete = 1;
-  text.allocator = &pouch->allocator;
   deletes.allocator = &pouch->allocator;
 
   rc = lc_pouch_query_index_flush_lock(pouch, error);
@@ -13123,19 +12478,7 @@ extracted:
   }
   if (memtable_usable) {
     rc = lc_pouch_query_index_memtable_encode(
-        memtable, state_index_seq, &summary, &text, &row_hash, &term_count,
-        &term_hash, &term_field_count, &term_value_count, &presence_count,
-        &presence_hash, &doc_table_generation, &doc_table_generation_length,
-        &exact_term_generation, &exact_term_generation_length,
-        &presence_term_generation, &presence_term_generation_length,
-        &range_term_generation, &range_term_generation_length,
-        &text_term_generation, &text_term_generation_length,
-        &text_cache_generation, &trigram_term_generation,
-        &trigram_term_generation_length, &trigram_cache_generation,
-        &temporal_term_generation, &temporal_term_generation_length, error);
-  } else {
-    rc = lc_pouch_query_index_build_text(
-        state_index_seq, &summary, &text, &row_hash, &term_count, &term_hash,
+        memtable, state_index_seq, &summary, &row_hash, &term_count, &term_hash,
         &term_field_count, &term_value_count, &presence_count, &presence_hash,
         &doc_table_generation, &doc_table_generation_length,
         &exact_term_generation, &exact_term_generation_length,
@@ -13143,8 +12486,18 @@ extracted:
         &range_term_generation, &range_term_generation_length,
         &text_term_generation, &text_term_generation_length,
         &trigram_term_generation, &trigram_term_generation_length,
-        &trigram_cache_generation, &temporal_term_generation,
-        &temporal_term_generation_length, error);
+        &temporal_term_generation, &temporal_term_generation_length, error);
+  } else {
+    rc = lc_pouch_query_index_build_text(
+        state_index_seq, &summary, &row_hash, &term_count, &term_hash,
+        &term_field_count, &term_value_count, &presence_count, &presence_hash,
+        &doc_table_generation, &doc_table_generation_length,
+        &exact_term_generation, &exact_term_generation_length,
+        &presence_term_generation, &presence_term_generation_length,
+        &range_term_generation, &range_term_generation_length,
+        &text_term_generation, &text_term_generation_length,
+        &trigram_term_generation, &trigram_term_generation_length,
+        &temporal_term_generation, &temporal_term_generation_length, error);
   }
   segment_row_count = (unsigned long)summary.count;
   (void)term_count;
@@ -13159,15 +12512,12 @@ extracted:
   rc = lc_pouch_query_index_segment_id(state_index_seq, segment_id,
                                        sizeof(segment_id), error);
   if (rc == LC_OK) {
-    rc = lc_pouch_query_index_segmented_paths(
-        pouch, namespace_name, segment_id, &header_path, &doc_table_path,
-        &exact_term_path, &presence_term_path, &range_term_path,
-        &text_term_path, &trigram_term_path, &temporal_term_path, &delete_path,
+    packed_path = lc_pouch_query_index_segment_artifact_path(
+        pouch, namespace_name, segment_id, LC_POUCH_QUERY_INDEX_PACKED_LEAF,
         error);
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_query_index_write_header_text(pouch, header_path, &text,
-                                                packed_path_unpublished, error);
+    if (packed_path == NULL) {
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
   }
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_pack_components(
@@ -13190,35 +12540,20 @@ extracted:
         &packed_generation, &packed_generation_length, error);
   }
   if (rc == LC_OK) {
-    packed_path = lc_pouch_query_index_packed_path_from_component(
-        &pouch->allocator, doc_table_path,
-        LC_POUCH_QUERY_INDEX_PACKED_DOC_TABLE, error);
-    if (packed_path == NULL) {
-      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
-    }
-  }
-  if (rc == LC_OK) {
     rc = lc_pouch_query_index_write_artifact_bytes(
         pouch, namespace_name, packed_path,
         packed_generation != NULL ? packed_generation : "",
         packed_generation_length, packed_path_unpublished, error);
   }
   if (rc == LC_OK) {
-    lc_pouch_query_index_artifact_cache_remember(
-        pouch, header_path, LC_POUCH_QUERY_INDEX_ARTIFACT_HEADER,
-        state_index_seq, segment_row_count, row_hash);
-  }
-  if (rc == LC_OK) {
     rc = lc_pouch_query_index_manifest_add_front(
         &pouch->allocator, &manifest, segment_id, segment_base_index_seq,
         state_index_seq, segment_row_count, row_hash, delete_count, delete_hash,
-        error);
+        summary.term_index_complete, summary.presence_index_complete, error);
   }
   if (rc == LC_OK && manifest.segment_count > 0U) {
     lc_pouch_query_index_manifest_segment_capture_artifacts(
-        &manifest.segments[0], header_path, doc_table_path, exact_term_path,
-        presence_term_path, range_term_path, text_term_path, trigram_term_path,
-        temporal_term_path, delete_path, packed_path);
+        &manifest.segments[0], packed_path);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_manifest_write(pouch, manifest_path, &manifest,
@@ -13232,21 +12567,6 @@ extracted:
   if (rc == LC_OK && cleanup_unreferenced) {
     rc = lc_pouch_query_index_unlink_unreferenced_artifacts(
         pouch, namespace_name, &manifest, error);
-  }
-  if (rc == LC_OK) {
-    lc_pouch_query_index_packed_cache_adopt(
-        pouch, packed_path, &packed_generation, &packed_generation_length);
-    if (lc_pouch_single_writer_enabled(pouch)) {
-      if (memtable_usable && memtable != NULL) {
-        (void)lc_pouch_query_index_doc_table_cache_adopt(
-            pouch, doc_table_path, state_index_seq, segment_row_count, row_hash,
-            &memtable->doc_table);
-      }
-      (void)lc_pouch_query_index_generation_cache_adopt_text(
-          pouch, text_term_path, &text_cache_generation);
-      (void)lc_pouch_query_index_generation_cache_adopt_trigrams(
-          pouch, trigram_term_path, &trigram_cache_generation);
-    }
   }
   if (rc == LC_OK) {
     lc_pouch_query_index_manifest_trust_remember(pouch, namespace_name,
@@ -13281,17 +12601,12 @@ cleanup:
   lc_free_with_allocator(&pouch->allocator, memtable);
   lc_free_with_allocator(&pouch->allocator, temporal_term_generation);
   lc_free_with_allocator(&pouch->allocator, trigram_term_generation);
-  lc_pouch_index_term_generation_cleanup(&pouch->allocator,
-                                         &text_cache_generation);
-  lc_pouch_index_term_generation_cleanup(&pouch->allocator,
-                                         &trigram_cache_generation);
   lc_free_with_allocator(&pouch->allocator, text_term_generation);
   lc_free_with_allocator(&pouch->allocator, range_term_generation);
   lc_free_with_allocator(&pouch->allocator, presence_term_generation);
   lc_free_with_allocator(&pouch->allocator, exact_term_generation);
   lc_free_with_allocator(&pouch->allocator, doc_table_generation);
   lc_free_with_allocator(&pouch->allocator, deletes.bytes);
-  lc_free_with_allocator(&pouch->allocator, text.bytes);
   lc_free_with_allocator(&pouch->allocator, extract_row_indices);
   lc_free_with_allocator(&pouch->allocator, extract_keys);
   lc_pouch_query_index_key_hex_set_cleanup(&pouch->allocator, &pending_deletes);
@@ -13299,10 +12614,6 @@ cleanup:
   lc_pouch_query_index_summary_cleanup(&summary);
   lc_pouch_query_index_manifest_cleanup(&pouch->allocator, &retired_manifest);
   lc_pouch_query_index_manifest_cleanup(&pouch->allocator, &manifest);
-  lc_pouch_query_index_segmented_paths_cleanup(
-      pouch, &header_path, &doc_table_path, &exact_term_path,
-      &presence_term_path, &range_term_path, &text_term_path,
-      &trigram_term_path, &temporal_term_path, &delete_path);
   lc_free_with_allocator(&pouch->allocator, packed_path);
   lc_free_with_allocator(&pouch->allocator, manifest_path);
   if (query_flush_locked) {
@@ -13528,7 +12839,7 @@ int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_ALL, NULL, 0U, NULL,
       NULL, NULL, 0, 0, 0, NULL, NULL, &rows, &doc_table_cache_borrows,
-      index_seq, NULL, error);
+      NULL, index_seq, NULL, error);
   if (rc == LC_OK) {
     for (row_index = 0U; rc == LC_OK && row_index < rows.count; ++row_index) {
       lc_pouch_index_result_row *row;
@@ -14023,16 +13334,6 @@ static void lc_pouch_query_index_doc_table_cache_borrow_list_cleanup(
   memset(list, 0, sizeof(*list));
 }
 
-static void lc_pouch_query_index_artifact_cache_entry_cleanup(
-    const lc_allocator *allocator,
-    lc_pouch_query_index_artifact_cache_entry *entry) {
-  if (entry == NULL) {
-    return;
-  }
-  lc_free_with_allocator(allocator, entry->path);
-  memset(entry, 0, sizeof(*entry));
-}
-
 static int lc_pouch_query_index_artifact_signature(
     const char *path, lc_pouch_query_index_file_signature *out) {
   struct stat st;
@@ -14069,15 +13370,6 @@ static int lc_pouch_query_index_artifact_signature(
   return 1;
 }
 
-static int lc_pouch_query_index_artifact_signature_equal(
-    const lc_pouch_query_index_file_signature *left,
-    const lc_pouch_query_index_file_signature *right) {
-  return left != NULL && right != NULL && left->present && right->present &&
-         left->size == right->size && left->mtime == right->mtime &&
-         left->mtime_nsec == right->mtime_nsec && left->ctime == right->ctime &&
-         left->ctime_nsec == right->ctime_nsec && left->inode == right->inode;
-}
-
 static void lc_pouch_query_index_manifest_signature_from_file(
     lc_pouch_query_index_manifest_artifact_signature *out,
     const lc_pouch_query_index_file_signature *signature) {
@@ -14098,294 +13390,52 @@ static void lc_pouch_query_index_manifest_signature_from_file(
 }
 
 static void lc_pouch_query_index_manifest_segment_capture_artifacts(
-    lc_pouch_query_index_manifest_segment *segment, const char *header_path,
-    const char *doc_table_path, const char *exact_term_path,
-    const char *presence_term_path, const char *range_term_path,
-    const char *text_term_path, const char *trigram_term_path,
-    const char *temporal_term_path, const char *delete_path,
-    const char *packed_path) {
-  const char *paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_COUNT];
+    lc_pouch_query_index_manifest_segment *segment, const char *packed_path) {
   lc_pouch_query_index_file_signature packed_signature;
-  size_t index;
 
   if (segment == NULL) {
     return;
   }
+  memset(segment->artifact_signatures, 0, sizeof(segment->artifact_signatures));
   if (packed_path != NULL &&
       lc_pouch_query_index_artifact_signature(packed_path, &packed_signature)) {
-    lc_pouch_query_index_file_signature header_signature;
-
-    if (lc_pouch_query_index_artifact_signature(header_path,
-                                                &header_signature)) {
-      lc_pouch_query_index_manifest_signature_from_file(
-          &segment->artifact_signatures
-               [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER],
-          &header_signature);
-    } else {
-      memset(&segment->artifact_signatures
-                  [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER],
-             0,
-             sizeof(segment->artifact_signatures
-                        [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER]));
-    }
-    for (index = LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_DOC_TABLE;
-         index < LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_COUNT; ++index) {
-      lc_pouch_query_index_manifest_signature_from_file(
-          &segment->artifact_signatures[index], &packed_signature);
-    }
-    return;
-  }
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER] = header_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_DOC_TABLE] = doc_table_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_EXACT] = exact_term_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_PRESENCE] = presence_term_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_RANGE] = range_term_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_TEXT] = text_term_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_TRIGRAM] = trigram_term_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_TEMPORAL] = temporal_term_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_DELETE] = delete_path;
-  for (index = 0U; index < LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_COUNT;
-       ++index) {
-    lc_pouch_query_index_file_signature signature;
-
-    memset(&segment->artifact_signatures[index], 0,
-           sizeof(segment->artifact_signatures[index]));
-    if (lc_pouch_query_index_artifact_signature(paths[index], &signature)) {
-      lc_pouch_query_index_manifest_signature_from_file(
-          &segment->artifact_signatures[index], &signature);
-    }
+    lc_pouch_query_index_manifest_signature_from_file(
+        &segment->artifact_signatures
+             [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_PACKED],
+        &packed_signature);
   }
 }
 
 static int lc_pouch_query_index_manifest_segment_artifacts_match(
     const lc_pouch_query_index_manifest_segment *segment,
-    const char *header_path, const char *doc_table_path,
-    const char *exact_term_path, const char *presence_term_path,
-    const char *range_term_path, const char *text_term_path,
-    const char *trigram_term_path, const char *temporal_term_path,
-    const char *delete_path, const char *packed_path,
+    const char *packed_path,
     lc_pouch_query_index_file_signature *actual_signatures) {
-  const char *paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_COUNT];
   lc_pouch_query_index_file_signature packed_signature;
-  size_t index;
+  const lc_pouch_query_index_manifest_artifact_signature *expected;
 
-  if (segment == NULL) {
+  if (segment == NULL || packed_path == NULL) {
     return 0;
   }
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER] = header_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_DOC_TABLE] = doc_table_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_EXACT] = exact_term_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_PRESENCE] = presence_term_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_RANGE] = range_term_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_TEXT] = text_term_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_TRIGRAM] = trigram_term_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_TEMPORAL] = temporal_term_path;
-  paths[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_DELETE] = delete_path;
-  if (packed_path != NULL &&
-      lc_pouch_query_index_artifact_signature(packed_path, &packed_signature)) {
-    lc_pouch_query_index_file_signature header_signature;
-
-    if (segment->artifact_signatures
-                [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER]
-                    .present == 0 ||
-        !lc_pouch_query_index_artifact_signature(header_path,
-                                                 &header_signature) ||
-        segment->artifact_signatures
-                [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER]
-                    .size != header_signature.size ||
-        segment->artifact_signatures
-                [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER]
-                    .mtime != header_signature.mtime ||
-        segment->artifact_signatures
-                [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER]
-                    .mtime_nsec != header_signature.mtime_nsec ||
-        segment->artifact_signatures
-                [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER]
-                    .ctime != header_signature.ctime ||
-        segment->artifact_signatures
-                [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER]
-                    .ctime_nsec != header_signature.ctime_nsec ||
-        segment->artifact_signatures
-                [LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER]
-                    .inode != header_signature.inode) {
-      return 0;
-    }
-    for (index = LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_DOC_TABLE;
-         index < LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_COUNT; ++index) {
-      lc_pouch_query_index_file_signature obsolete_signature;
-
-      if (lc_pouch_query_index_artifact_signature(paths[index],
-                                                  &obsolete_signature)) {
-        return 0;
-      }
-    }
-    for (index = 0U; index < LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_COUNT;
-         ++index) {
-      if (actual_signatures != NULL) {
-        memset(&actual_signatures[index], 0, sizeof(actual_signatures[index]));
-      }
-      if (index == LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_HEADER) {
-        if (actual_signatures != NULL) {
-          actual_signatures[index] = header_signature;
-        }
-        continue;
-      }
-      if (segment->artifact_signatures[index].present == 0 ||
-          segment->artifact_signatures[index].size != packed_signature.size ||
-          segment->artifact_signatures[index].mtime != packed_signature.mtime ||
-          segment->artifact_signatures[index].mtime_nsec !=
-              packed_signature.mtime_nsec ||
-          segment->artifact_signatures[index].ctime != packed_signature.ctime ||
-          segment->artifact_signatures[index].ctime_nsec !=
-              packed_signature.ctime_nsec ||
-          segment->artifact_signatures[index].inode != packed_signature.inode) {
-        return 0;
-      }
-      if (actual_signatures != NULL) {
-        actual_signatures[index] = packed_signature;
-      }
-    }
-    return 1;
+  if (!lc_pouch_query_index_artifact_signature(packed_path,
+                                               &packed_signature)) {
+    return 0;
   }
-  for (index = 0U; index < LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_COUNT;
-       ++index) {
-    lc_pouch_query_index_file_signature actual;
-
-    if (actual_signatures != NULL) {
-      memset(&actual_signatures[index], 0, sizeof(actual_signatures[index]));
-    }
-    if (segment->artifact_signatures[index].present == 0 ||
-        !lc_pouch_query_index_artifact_signature(paths[index], &actual) ||
-        segment->artifact_signatures[index].size != actual.size ||
-        segment->artifact_signatures[index].mtime != actual.mtime ||
-        segment->artifact_signatures[index].mtime_nsec != actual.mtime_nsec ||
-        segment->artifact_signatures[index].ctime != actual.ctime ||
-        segment->artifact_signatures[index].ctime_nsec != actual.ctime_nsec ||
-        segment->artifact_signatures[index].inode != actual.inode) {
-      return 0;
-    }
-    if (actual_signatures != NULL) {
-      actual_signatures[index] = actual;
-    }
+  expected =
+      &segment
+           ->artifact_signatures[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_PACKED];
+  if (!expected->present || expected->size != packed_signature.size ||
+      expected->mtime != packed_signature.mtime ||
+      expected->mtime_nsec != packed_signature.mtime_nsec ||
+      expected->ctime != packed_signature.ctime ||
+      expected->ctime_nsec != packed_signature.ctime_nsec ||
+      expected->inode != packed_signature.inode) {
+    return 0;
+  }
+  if (actual_signatures != NULL) {
+    actual_signatures[LC_POUCH_QUERY_INDEX_MANIFEST_ARTIFACT_PACKED] =
+        packed_signature;
   }
   return 1;
-}
-
-static int lc_pouch_query_index_artifact_cache_valid(
-    lc_pouch *pouch, const char *path, int kind, lc_pouch_generation expected_a,
-    unsigned long expected_b, unsigned long expected_c) {
-  lc_pouch_query_index_artifact_cache_entry *entry;
-  lc_pouch_query_index_artifact_cache_entry *previous;
-  lc_pouch_query_index_file_signature signature;
-
-  if (pouch == NULL || path == NULL ||
-      !lc_pouch_query_index_artifact_signature(path, &signature)) {
-    return 0;
-  }
-  previous = NULL;
-  entry = pouch->query_artifact_cache;
-  while (entry != NULL) {
-    if (entry->kind == kind && entry->expected_a == expected_a &&
-        entry->expected_b == expected_b && entry->expected_c == expected_c &&
-        strcmp(entry->path, path) == 0 &&
-        lc_pouch_query_index_artifact_signature_equal(&entry->signature,
-                                                      &signature)) {
-      if (previous != NULL) {
-        previous->next = entry->next;
-        entry->next = pouch->query_artifact_cache;
-        pouch->query_artifact_cache = entry;
-      }
-      return 1;
-    }
-    previous = entry;
-    entry = entry->next;
-  }
-  return 0;
-}
-
-static void lc_pouch_query_index_artifact_cache_remember(
-    lc_pouch *pouch, const char *path, int kind, lc_pouch_generation expected_a,
-    unsigned long expected_b, unsigned long expected_c) {
-  lc_pouch_query_index_file_signature signature;
-
-  if (pouch == NULL || path == NULL ||
-      !lc_pouch_query_index_artifact_signature(path, &signature)) {
-    return;
-  }
-  lc_pouch_query_index_artifact_cache_remember_signature(
-      pouch, path, kind, expected_a, expected_b, expected_c, &signature);
-}
-
-static void lc_pouch_query_index_artifact_cache_remember_signature(
-    lc_pouch *pouch, const char *path, int kind, lc_pouch_generation expected_a,
-    unsigned long expected_b, unsigned long expected_c,
-    const lc_pouch_query_index_file_signature *signature) {
-  lc_pouch_query_index_artifact_cache_entry *entry;
-  lc_pouch_query_index_artifact_cache_entry *previous;
-
-  if (pouch == NULL || path == NULL || signature == NULL ||
-      !signature->present) {
-    return;
-  }
-  previous = NULL;
-  entry = pouch->query_artifact_cache;
-  while (entry != NULL) {
-    if (entry->kind == kind && entry->expected_a == expected_a &&
-        entry->expected_b == expected_b && entry->expected_c == expected_c &&
-        strcmp(entry->path, path) == 0) {
-      entry->signature = *signature;
-      if (previous != NULL) {
-        previous->next = entry->next;
-        entry->next = pouch->query_artifact_cache;
-        pouch->query_artifact_cache = entry;
-      }
-      return;
-    }
-    previous = entry;
-    entry = entry->next;
-  }
-  entry = (lc_pouch_query_index_artifact_cache_entry *)lc_calloc_with_allocator(
-      &pouch->allocator, 1U, sizeof(*entry));
-  if (entry == NULL) {
-    return;
-  }
-  entry->path = lc_strdup_with_allocator(&pouch->allocator, path);
-  if (entry->path == NULL) {
-    lc_free_with_allocator(&pouch->allocator, entry);
-    return;
-  }
-  entry->kind = kind;
-  entry->expected_a = expected_a;
-  entry->expected_b = expected_b;
-  entry->expected_c = expected_c;
-  entry->signature = *signature;
-  entry->next = pouch->query_artifact_cache;
-  pouch->query_artifact_cache = entry;
-  ++pouch->query_artifact_cache_count;
-  while (pouch->query_artifact_cache_count >
-         LC_POUCH_QUERY_INDEX_ARTIFACT_CACHE_MAX) {
-    lc_pouch_query_index_artifact_cache_entry *victim_prev;
-    lc_pouch_query_index_artifact_cache_entry *victim;
-
-    victim_prev = NULL;
-    victim = pouch->query_artifact_cache;
-    while (victim != NULL && victim->next != NULL) {
-      victim_prev = victim;
-      victim = victim->next;
-    }
-    if (victim == NULL) {
-      break;
-    }
-    if (victim_prev != NULL) {
-      victim_prev->next = NULL;
-    } else {
-      pouch->query_artifact_cache = NULL;
-    }
-    lc_pouch_query_index_artifact_cache_entry_cleanup(&pouch->allocator,
-                                                      victim);
-    lc_free_with_allocator(&pouch->allocator, victim);
-    --pouch->query_artifact_cache_count;
-  }
 }
 
 static void lc_pouch_query_index_manifest_trust_entry_cleanup(
@@ -14557,7 +13607,6 @@ static int lc_pouch_query_index_manifest_trust_snapshot(
 void lc_pouch_query_index_cache_cleanup(lc_pouch *pouch) {
   lc_pouch_query_index_generation_cache_entry *entry;
   lc_pouch_query_index_doc_table_cache_entry *doc_entry;
-  lc_pouch_query_index_artifact_cache_entry *artifact_entry;
   lc_pouch_query_index_packed_cache_entry *packed_entry;
   lc_pouch_query_index_manifest_trust_entry *trust_entry;
   lc_pouch_query_index_pending_entry *pending_entry;
@@ -14593,18 +13642,6 @@ void lc_pouch_query_index_cache_cleanup(lc_pouch *pouch) {
     }
     (void)pthread_mutex_unlock(&pouch->query_doc_table_cache_mutex);
   }
-  artifact_entry = pouch->query_artifact_cache;
-  while (artifact_entry != NULL) {
-    lc_pouch_query_index_artifact_cache_entry *next;
-
-    next = artifact_entry->next;
-    lc_pouch_query_index_artifact_cache_entry_cleanup(&pouch->allocator,
-                                                      artifact_entry);
-    lc_free_with_allocator(&pouch->allocator, artifact_entry);
-    artifact_entry = next;
-  }
-  pouch->query_artifact_cache = NULL;
-  pouch->query_artifact_cache_count = 0U;
   packed_entry = pouch->query_packed_cache;
   while (packed_entry != NULL) {
     lc_pouch_query_index_packed_cache_entry *next;
@@ -14914,518 +13951,6 @@ static void lc_pouch_query_index_trigram_hex(unsigned long key, char out[7]) {
   out[6] = '\0';
 }
 
-static int
-lc_pouch_query_index_generation_cache_term_compare(const void *left,
-                                                   const void *right) {
-  const lc_pouch_query_index_generation_cache_term *a;
-  const lc_pouch_query_index_generation_cache_term *b;
-
-  a = (const lc_pouch_query_index_generation_cache_term *)left;
-  b = (const lc_pouch_query_index_generation_cache_term *)right;
-  return lc_pouch_query_index_generation_cache_term_compare_parts(
-      a->field_hex, a->value_hex_inline, a->value_type, b->field_hex,
-      b->value_hex_inline, b->value_type);
-}
-
-static int lc_pouch_query_index_direct_generation_retain_fields(
-    const lc_allocator *allocator, lc_pouch_index_term_generation *generation) {
-  const char *previous_field;
-  size_t index;
-
-  if (generation == NULL || !generation->terms_sorted) {
-    return 0;
-  }
-  previous_field = NULL;
-  for (index = 0U; index < generation->terms.count; ++index) {
-    lc_pouch_index_term_entry *term;
-
-    term = &generation->terms.items[index];
-    if (term->field_hex == NULL || term->owns_field_hex ||
-        !term->value_is_trigram_key || term->trigram_key > 0xffffffUL ||
-        term->value_type != 's' || term->term_id == 0UL) {
-      return 0;
-    }
-    if (previous_field == NULL ||
-        strcmp(previous_field, term->field_hex) != 0) {
-      char *field_hex;
-
-      field_hex = lc_strdup_with_allocator(allocator, term->field_hex);
-      if (field_hex == NULL) {
-        return 0;
-      }
-      term->field_hex = field_hex;
-      term->owns_field_hex = 1;
-      previous_field = field_hex;
-    } else {
-      term->field_hex = (char *)previous_field;
-    }
-  }
-  return 1;
-}
-
-/* The direct cache is adopted at immutable-generation publication time. Keep
- * its distinct-field directory beside the sorted term table so `/...` queries
- * do not rescan every trigram just to enumerate fields. The pointers borrow
- * the names retained by `generation`; ownership transfers with the generation
- * only after this helper succeeds. */
-static int lc_pouch_query_index_direct_generation_cache_fields(
-    const lc_allocator *allocator,
-    const lc_pouch_index_term_generation *generation,
-    lc_pouch_query_index_generation_cache_entry *entry) {
-  size_t field_count;
-  size_t index;
-
-  if (generation == NULL || entry == NULL ||
-      (generation->terms.count > 0U && generation->terms.items == NULL)) {
-    return 0;
-  }
-  if (generation->terms.count == 0U) {
-    entry->fields_borrow_direct_generation = 1;
-    return 1;
-  }
-  if (generation->terms.count > (size_t)-1 / sizeof(entry->fields[0])) {
-    return 0;
-  }
-  entry->fields =
-      (lc_pouch_query_index_generation_cache_field *)lc_alloc_with_allocator(
-          allocator, generation->terms.count * sizeof(entry->fields[0]));
-  if (entry->fields == NULL) {
-    return 0;
-  }
-  memset(entry->fields, 0, generation->terms.count * sizeof(entry->fields[0]));
-  field_count = 0U;
-  for (index = 0U; index < generation->terms.count; ++index) {
-    const char *field_hex;
-
-    field_hex = generation->terms.items[index].field_hex;
-    if (field_hex == NULL) {
-      lc_free_with_allocator(allocator, entry->fields);
-      entry->fields = NULL;
-      return 0;
-    }
-    if (field_count == 0U ||
-        strcmp(entry->fields[field_count - 1U].field_hex, field_hex) != 0) {
-      entry->fields[field_count].field_hex = field_hex;
-      ++field_count;
-    }
-  }
-  entry->field_count = field_count;
-  entry->fields_borrow_direct_generation = 1;
-  return 1;
-}
-
-static int lc_pouch_query_index_direct_generation_cache_text_prefixes(
-    const lc_allocator *allocator,
-    const lc_pouch_index_term_generation *generation,
-    lc_pouch_query_index_generation_cache_entry *entry) {
-  size_t count;
-  size_t index;
-
-  if (allocator == NULL || generation == NULL || entry == NULL) {
-    return 0;
-  }
-  count = 0U;
-  for (index = 0U; index < generation->terms.count; ++index) {
-    if (!generation->terms.items[index].value_is_trigram_key &&
-        generation->terms.items[index].value_type ==
-            LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE) {
-      ++count;
-    }
-  }
-  if (count == 0U) {
-    return 1;
-  }
-  if (count > (size_t)-1 / sizeof(entry->direct_text_prefix_indices[0])) {
-    return 0;
-  }
-  entry->direct_text_prefix_indices = (size_t *)lc_alloc_with_allocator(
-      allocator, count * sizeof(entry->direct_text_prefix_indices[0]));
-  if (entry->direct_text_prefix_indices == NULL) {
-    return 0;
-  }
-  entry->direct_text_prefix_count = 0U;
-  for (index = 0U; index < generation->terms.count; ++index) {
-    if (!generation->terms.items[index].value_is_trigram_key &&
-        generation->terms.items[index].value_type ==
-            LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE) {
-      entry->direct_text_prefix_indices[entry->direct_text_prefix_count++] =
-          index;
-    }
-  }
-  return 1;
-}
-
-/* An exclusive writer has just built this text generation from the durable
- * tail it is publishing. Keep that body-free structure for its first text
- * query instead of immediately parsing the identical packed component. */
-static int lc_pouch_query_index_generation_cache_adopt_text(
-    lc_pouch *pouch, const char *path,
-    lc_pouch_index_term_generation *generation) {
-  lc_pouch_query_index_generation_cache_entry *entry;
-  lc_pouch_query_index_generation_cache_entry *existing;
-  lc_pouch_query_index_generation_cache_entry *previous;
-
-  if (pouch == NULL || path == NULL || generation == NULL ||
-      generation->namespace_name == NULL) {
-    return 0;
-  }
-  entry =
-      (lc_pouch_query_index_generation_cache_entry *)lc_calloc_with_allocator(
-          &pouch->allocator, 1U, sizeof(*entry));
-  if (entry == NULL) {
-    return 0;
-  }
-  entry->path = lc_strdup_with_allocator(&pouch->allocator, path);
-  if (entry->path == NULL) {
-    lc_free_with_allocator(&pouch->allocator, entry);
-    return 0;
-  }
-  entry->index_seq = generation->index_seq;
-  entry->row_count = generation->row_count;
-  entry->row_hash = generation->row_hash;
-  /* New text generations retain concrete JSON fields for `/...` queries;
-   * unlike trigram lookups they do not need a field directory to enumerate
-   * that logical selector. Avoid allocating one at publication time. Parsed
-   * on-disk generations (including historical layouts) retain their existing
-   * validated lookup path. */
-  if (!lc_pouch_query_index_direct_generation_cache_text_prefixes(
-          &pouch->allocator, generation, entry)) {
-    lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                        entry);
-    lc_free_with_allocator(&pouch->allocator, entry);
-    return 0;
-  }
-  entry->direct_generation = *generation;
-  memset(generation, 0, sizeof(*generation));
-  entry->has_direct_generation = 1;
-  entry->direct_generation_is_text = 1;
-
-  previous = NULL;
-  existing = pouch->query_generation_cache;
-  while (existing != NULL) {
-    lc_pouch_query_index_generation_cache_entry *next;
-
-    next = existing->next;
-    if (strcmp(existing->path, path) == 0) {
-      if (previous != NULL) {
-        previous->next = next;
-      } else {
-        pouch->query_generation_cache = next;
-      }
-      lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                          existing);
-      lc_free_with_allocator(&pouch->allocator, existing);
-      --pouch->query_generation_cache_count;
-      existing = next;
-      continue;
-    }
-    previous = existing;
-    existing = next;
-  }
-  entry->next = pouch->query_generation_cache;
-  pouch->query_generation_cache = entry;
-  ++pouch->query_generation_cache_count;
-  while (pouch->query_generation_cache_count > 512U) {
-    lc_pouch_query_index_generation_cache_entry *victim_previous;
-    lc_pouch_query_index_generation_cache_entry *victim;
-
-    victim_previous = NULL;
-    victim = pouch->query_generation_cache;
-    while (victim != NULL && victim->next != NULL) {
-      victim_previous = victim;
-      victim = victim->next;
-    }
-    if (victim == NULL || victim_previous == NULL) {
-      break;
-    }
-    victim_previous->next = NULL;
-    lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                        victim);
-    lc_free_with_allocator(&pouch->allocator, victim);
-    --pouch->query_generation_cache_count;
-  }
-  return 1;
-}
-
-static int lc_pouch_query_index_generation_cache_adopt_trigrams(
-    lc_pouch *pouch, const char *path,
-    lc_pouch_index_term_generation *generation) {
-  lc_pouch_query_index_generation_cache_entry *entry;
-  lc_pouch_query_index_generation_cache_entry *existing;
-  lc_pouch_query_index_generation_cache_entry *previous;
-  size_t index;
-  size_t field_count;
-
-  if (pouch == NULL || path == NULL || generation == NULL ||
-      generation->namespace_name == NULL) {
-    return 0;
-  }
-  if (lc_pouch_query_index_direct_generation_retain_fields(&pouch->allocator,
-                                                           generation)) {
-    entry =
-        (lc_pouch_query_index_generation_cache_entry *)lc_calloc_with_allocator(
-            &pouch->allocator, 1U, sizeof(*entry));
-    if (entry != NULL) {
-      entry->path = lc_strdup_with_allocator(&pouch->allocator, path);
-    }
-    if (entry != NULL && entry->path != NULL &&
-        lc_pouch_query_index_direct_generation_cache_fields(
-            &pouch->allocator, generation, entry)) {
-      entry->index_seq = generation->index_seq;
-      entry->row_count = generation->row_count;
-      entry->row_hash = generation->row_hash;
-      entry->direct_generation = *generation;
-      memset(generation, 0, sizeof(*generation));
-      entry->has_direct_generation = 1;
-      previous = NULL;
-      existing = pouch->query_generation_cache;
-      while (existing != NULL) {
-        lc_pouch_query_index_generation_cache_entry *next;
-
-        next = existing->next;
-        if (strcmp(existing->path, path) == 0) {
-          if (previous != NULL) {
-            previous->next = next;
-          } else {
-            pouch->query_generation_cache = next;
-          }
-          lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                              existing);
-          lc_free_with_allocator(&pouch->allocator, existing);
-          --pouch->query_generation_cache_count;
-          existing = next;
-          continue;
-        }
-        previous = existing;
-        existing = next;
-      }
-      entry->next = pouch->query_generation_cache;
-      pouch->query_generation_cache = entry;
-      ++pouch->query_generation_cache_count;
-      while (pouch->query_generation_cache_count > 512U) {
-        lc_pouch_query_index_generation_cache_entry *victim_previous;
-        lc_pouch_query_index_generation_cache_entry *victim;
-
-        victim_previous = NULL;
-        victim = pouch->query_generation_cache;
-        while (victim != NULL && victim->next != NULL) {
-          victim_previous = victim;
-          victim = victim->next;
-        }
-        if (victim == NULL || victim_previous == NULL) {
-          break;
-        }
-        victim_previous->next = NULL;
-        lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                            victim);
-        lc_free_with_allocator(&pouch->allocator, victim);
-        --pouch->query_generation_cache_count;
-      }
-      return 1;
-    }
-    if (entry != NULL) {
-      lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                          entry);
-      lc_free_with_allocator(&pouch->allocator, entry);
-    }
-  }
-  entry =
-      (lc_pouch_query_index_generation_cache_entry *)lc_calloc_with_allocator(
-          &pouch->allocator, 1U, sizeof(*entry));
-  if (entry == NULL) {
-    return 0;
-  }
-  entry->path = lc_strdup_with_allocator(&pouch->allocator, path);
-  if (entry->path == NULL) {
-    lc_free_with_allocator(&pouch->allocator, entry);
-    return 0;
-  }
-  entry->index_seq = generation->index_seq;
-  entry->row_count = generation->row_count;
-  entry->row_hash = generation->row_hash;
-  /* Direct cache fields outlive the builder summary; retain their own names. */
-  entry->has_direct_generation = 1;
-  entry->term_count = generation->terms.count;
-  entry->posting_count = generation->postings.count;
-  if (entry->term_count > 0U) {
-    if (entry->term_count > (size_t)-1 / sizeof(entry->terms[0])) {
-      lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                          entry);
-      lc_free_with_allocator(&pouch->allocator, entry);
-      return 0;
-    }
-    entry->terms =
-        (lc_pouch_query_index_generation_cache_term *)lc_alloc_with_allocator(
-            &pouch->allocator, entry->term_count * sizeof(entry->terms[0]));
-    entry->fields =
-        (lc_pouch_query_index_generation_cache_field *)lc_alloc_with_allocator(
-            &pouch->allocator, entry->term_count * sizeof(entry->fields[0]));
-    if (entry->terms == NULL || entry->fields == NULL) {
-      lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                          entry);
-      lc_free_with_allocator(&pouch->allocator, entry);
-      return 0;
-    }
-    memset(entry->terms, 0, entry->term_count * sizeof(entry->terms[0]));
-    memset(entry->fields, 0, entry->term_count * sizeof(entry->fields[0]));
-  }
-  if (entry->posting_count > 0U) {
-    if (entry->posting_count > (size_t)-1 / sizeof(entry->postings[0])) {
-      lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                          entry);
-      lc_free_with_allocator(&pouch->allocator, entry);
-      return 0;
-    }
-    entry->postings = (lc_pouch_query_index_generation_cache_posting *)
-        lc_alloc_with_allocator(&pouch->allocator,
-                                entry->posting_count *
-                                    sizeof(entry->postings[0]));
-    if (entry->postings == NULL) {
-      lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                          entry);
-      lc_free_with_allocator(&pouch->allocator, entry);
-      return 0;
-    }
-    memset(entry->postings, 0,
-           entry->posting_count * sizeof(entry->postings[0]));
-  }
-  for (index = 0U; index < entry->term_count; ++index) {
-    const lc_pouch_index_term_entry *term;
-
-    term = &generation->terms.items[index];
-    if (term->field_hex == NULL || !term->value_is_trigram_key ||
-        term->trigram_key > 0xffffffUL || term->value_type != 's' ||
-        term->term_id == 0UL) {
-      lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                          entry);
-      lc_free_with_allocator(&pouch->allocator, entry);
-      return 0;
-    }
-    entry->terms[index].field_hex = term->field_hex;
-    entry->terms[index].value_type = term->value_type;
-    entry->terms[index].term_id = term->term_id;
-    entry->terms[index].ordinal = (unsigned long)index;
-    lc_pouch_query_index_trigram_hex(term->trigram_key,
-                                     entry->terms[index].value_hex_inline);
-    entry->terms[index].value_hex = entry->terms[index].value_hex_inline;
-  }
-  if (entry->term_count > 1U) {
-    qsort(entry->terms, entry->term_count, sizeof(entry->terms[0]),
-          lc_pouch_query_index_generation_cache_term_compare);
-  }
-  field_count = 0U;
-  for (index = 0U; index < entry->term_count; ++index) {
-    char *field_hex;
-
-    /* qsort moves the inline text with its term, so rebind the pointer. */
-    entry->terms[index].value_hex = entry->terms[index].value_hex_inline;
-    if (field_count == 0U || strcmp(entry->fields[field_count - 1U].field_hex,
-                                    entry->terms[index].field_hex) != 0) {
-      field_hex = lc_strdup_with_allocator(&pouch->allocator,
-                                           entry->terms[index].field_hex);
-      if (field_hex == NULL) {
-        lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                            entry);
-        lc_free_with_allocator(&pouch->allocator, entry);
-        return 0;
-      }
-      entry->fields[field_count].field_hex = field_hex;
-      ++field_count;
-      entry->field_count = field_count;
-    }
-    entry->terms[index].field_hex =
-        (char *)entry->fields[field_count - 1U].field_hex;
-  }
-  for (index = 0U; index < entry->posting_count; ++index) {
-    const lc_pouch_index_term_posting_entry *posting;
-    lc_pouch_index_adaptive_posting_kind kind;
-
-    posting = &generation->postings.items[index];
-    kind = lc_pouch_index_adaptive_posting_selected_kind(&posting->posting);
-    if (posting->term_id == 0UL ||
-        (kind == LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE &&
-         (posting->posting.dense.length > (size_t)ULONG_MAX ||
-          posting->posting.dense.count > (size_t)ULONG_MAX)) ||
-        (kind != LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE &&
-         (posting->posting.sparse.length > (size_t)ULONG_MAX ||
-          posting->posting.sparse.count > (size_t)ULONG_MAX))) {
-      lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                          entry);
-      lc_free_with_allocator(&pouch->allocator, entry);
-      return 0;
-    }
-    entry->postings[index].term_id = posting->term_id;
-    if (kind == LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE) {
-      entry->postings[index].kind = 'd';
-      entry->postings[index].count =
-          (unsigned long)posting->posting.dense.count;
-      entry->postings[index].max_doc_id = posting->posting.dense.max_doc_id;
-      entry->postings[index].payload_length =
-          (unsigned long)posting->posting.dense.length;
-      entry->postings[index].payload = posting->posting.dense.bits;
-    } else {
-      entry->postings[index].kind = 's';
-      entry->postings[index].count =
-          (unsigned long)posting->posting.sparse.count;
-      entry->postings[index].max_doc_id =
-          posting->posting.sparse.has_last_doc_id
-              ? posting->posting.sparse.last_doc_id
-              : 0UL;
-      entry->postings[index].payload_length =
-          (unsigned long)posting->posting.sparse.length;
-      entry->postings[index].payload = posting->posting.sparse.bytes;
-    }
-  }
-  entry->direct_generation = *generation;
-  memset(generation, 0, sizeof(*generation));
-
-  previous = NULL;
-  existing = pouch->query_generation_cache;
-  while (existing != NULL) {
-    lc_pouch_query_index_generation_cache_entry *next;
-
-    next = existing->next;
-    if (strcmp(existing->path, path) == 0) {
-      if (previous != NULL) {
-        previous->next = next;
-      } else {
-        pouch->query_generation_cache = next;
-      }
-      lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                          existing);
-      lc_free_with_allocator(&pouch->allocator, existing);
-      --pouch->query_generation_cache_count;
-      existing = next;
-      continue;
-    }
-    previous = existing;
-    existing = next;
-  }
-  entry->next = pouch->query_generation_cache;
-  pouch->query_generation_cache = entry;
-  ++pouch->query_generation_cache_count;
-  while (pouch->query_generation_cache_count > 512U) {
-    lc_pouch_query_index_generation_cache_entry *victim_previous;
-    lc_pouch_query_index_generation_cache_entry *victim;
-
-    victim_previous = NULL;
-    victim = pouch->query_generation_cache;
-    while (victim != NULL && victim->next != NULL) {
-      victim_previous = victim;
-      victim = victim->next;
-    }
-    if (victim == NULL || victim_previous == NULL) {
-      break;
-    }
-    victim_previous->next = NULL;
-    lc_pouch_query_index_generation_cache_entry_cleanup(&pouch->allocator,
-                                                        victim);
-    lc_free_with_allocator(&pouch->allocator, victim);
-    --pouch->query_generation_cache_count;
-  }
-  return 1;
-}
-
 static int lc_pouch_query_index_generation_cache_parse(
     const lc_allocator *allocator,
     lc_pouch_query_index_generation_cache_entry *entry, lc_error *error) {
@@ -15636,7 +14161,7 @@ static int lc_pouch_query_index_generation_cache_parse(
          value_type != (unsigned char)LC_POUCH_QUERY_INDEX_EXACT_HASH_TYPE &&
          value_type != (unsigned char)LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE &&
          value_type !=
-             (unsigned char)LC_POUCH_QUERY_INDEX_LEGACY_TEXT_TOKEN_TYPE) ||
+             (unsigned char)LC_POUCH_QUERY_INDEX_TEXT_TOKEN_TYPE) ||
         !lc_pouch_query_index_hex_token_valid(field_hex) ||
         !lc_pouch_query_index_hex_token_valid(value_hex)) {
       rc = LC_ERR_INVALID;
@@ -15938,84 +14463,6 @@ static int lc_pouch_query_index_doc_table_cache_get(
   return LC_OK;
 }
 
-/* A single writer has just encoded this table and published the manifest that
- * references it. Retain that exact in-memory table for the first query rather
- * than immediately reparsing the packed artifact. Reopen and shared-writer
- * paths still validate and load from durable storage. */
-static int lc_pouch_query_index_doc_table_cache_adopt(
-    lc_pouch *pouch, const char *path, lc_pouch_generation index_seq,
-    unsigned long row_count, unsigned long row_hash,
-    lc_pouch_index_doc_table *table) {
-  lc_pouch_query_index_doc_table_cache_entry *entry;
-  lc_pouch_query_index_doc_table_cache_entry *previous;
-  lc_pouch_query_index_doc_table_cache_entry *existing;
-
-  if (pouch == NULL || path == NULL || table == NULL ||
-      table->count != (size_t)row_count) {
-    return 0;
-  }
-  entry =
-      (lc_pouch_query_index_doc_table_cache_entry *)lc_calloc_with_allocator(
-          &pouch->allocator, 1U, sizeof(*entry));
-  if (entry == NULL) {
-    return 0;
-  }
-  entry->path = lc_strdup_with_allocator(&pouch->allocator, path);
-  if (entry->path == NULL) {
-    lc_free_with_allocator(&pouch->allocator, entry);
-    return 0;
-  }
-  if (table->count > 0U) {
-    entry->decoded_keys = (char **)lc_calloc_with_allocator(
-        &pouch->allocator, table->count, sizeof(entry->decoded_keys[0]));
-    if (entry->decoded_keys == NULL) {
-      lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
-                                                         entry);
-      lc_free_with_allocator(&pouch->allocator, entry);
-      return 0;
-    }
-    entry->decoded_key_count = table->count;
-  }
-  entry->index_seq = index_seq;
-  entry->row_count = row_count;
-  entry->row_hash = row_hash;
-  entry->table = *table;
-  memset(table, 0, sizeof(*table));
-
-  if (lc_pouch_query_index_doc_table_cache_lock(pouch, NULL) != LC_OK) {
-    lc_pouch_query_index_doc_table_cache_entry_cleanup(&pouch->allocator,
-                                                       entry);
-    lc_free_with_allocator(&pouch->allocator, entry);
-    return 0;
-  }
-  previous = NULL;
-  existing = pouch->query_doc_table_cache;
-  while (existing != NULL) {
-    lc_pouch_query_index_doc_table_cache_entry *next;
-
-    next = existing->next;
-    if (strcmp(existing->path, path) == 0) {
-      if (previous != NULL) {
-        previous->next = next;
-      } else {
-        pouch->query_doc_table_cache = next;
-      }
-      --pouch->query_doc_table_cache_count;
-      lc_pouch_query_index_doc_table_cache_retire(pouch, existing);
-      existing = next;
-      continue;
-    }
-    previous = existing;
-    existing = next;
-  }
-  entry->next = pouch->query_doc_table_cache;
-  pouch->query_doc_table_cache = entry;
-  ++pouch->query_doc_table_cache_count;
-  lc_pouch_query_index_doc_table_cache_trim(pouch);
-  lc_pouch_query_index_doc_table_cache_unlock(pouch);
-  return 1;
-}
-
 static int lc_pouch_query_index_warm_generation_artifact(
     lc_pouch *pouch, const char *namespace_name, const char *path,
     lc_pouch_generation index_seq, unsigned long row_count,
@@ -16077,7 +14524,6 @@ int lc_pouch_query_index_warm_namespace(lc_pouch *pouch,
        rc == LC_OK && segment_index < manifest.segment_count; ++segment_index) {
     const lc_pouch_query_index_manifest_segment *segment;
     lc_pouch_query_index_doc_table_cache_entry *doc_entry;
-    lc_pouch_query_index_read_result header;
     char *header_path;
     char *doc_table_path;
     char *exact_term_path;
@@ -16095,7 +14541,6 @@ int lc_pouch_query_index_warm_namespace(lc_pouch *pouch,
 
     segment = &manifest.segments[segment_index];
     doc_entry = NULL;
-    memset(&header, 0, sizeof(header));
     header_path = NULL;
     doc_table_path = NULL;
     exact_term_path = NULL;
@@ -16113,22 +14558,12 @@ int lc_pouch_query_index_warm_namespace(lc_pouch *pouch,
         &exact_term_path, &presence_term_path, &range_term_path,
         &text_term_path, &trigram_term_path, &temporal_term_path, &delete_path,
         error);
-    if (rc == LC_OK) {
-      rc = lc_pouch_query_index_read_header(pouch, namespace_name, header_path,
-                                            &header, error);
-    }
-    if (rc == LC_OK && (!header.present || !header.valid ||
-                        header.index_seq != segment->index_seq ||
-                        header.row_count != segment->row_count ||
-                        header.row_hash != segment->row_hash)) {
+    if (rc == LC_OK &&
+        (!segment->term_index_complete || !segment->presence_index_complete)) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index segment header is not readable",
+                        "pouch query-index segment completeness metadata is "
+                        "not readable",
                         NULL, NULL, "pouch");
-    }
-    if (rc == LC_OK) {
-      lc_pouch_query_index_artifact_cache_remember(
-          pouch, header_path, LC_POUCH_QUERY_INDEX_ARTIFACT_HEADER,
-          segment->index_seq, segment->row_count, segment->row_hash);
     }
     present = 0;
     valid = 0;
@@ -16218,6 +14653,43 @@ static int lc_pouch_query_index_generation_cache_append_posting(
       allocator, posting->kind, posting->count, posting->max_doc_id,
       posting->payload_length, posting->payload, value_index,
       docid_filter_sorted, docids, error);
+}
+
+static int lc_pouch_query_index_collect_all_text_token_docids(
+    lc_pouch *pouch, const char *namespace_name, const char *path,
+    lc_pouch_generation expected_index_seq, unsigned long expected_row_count,
+    unsigned long expected_row_hash, const char *token_hex,
+    const lc_pouch_index_result_docid_list *docid_filter_sorted,
+    lc_pouch_index_result_docid_list *docids, int *present, int *valid,
+    lc_error *error) {
+  lc_pouch_query_index_generation_cache_entry *entry;
+  const lc_pouch_query_index_generation_cache_term *term;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || path == NULL ||
+      token_hex == NULL || docids == NULL || present == NULL || valid == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch all-text token lookup requires inputs", NULL,
+                        NULL, "pouch");
+  }
+  *present = 0;
+  *valid = 0;
+  entry = NULL;
+  rc = lc_pouch_query_index_generation_cache_get(
+      pouch, namespace_name, path, expected_index_seq, expected_row_count,
+      expected_row_hash, &entry, present, valid, error);
+  if (rc != LC_OK || !*present || !*valid) {
+    return rc;
+  }
+  term = NULL;
+  if (lc_pouch_query_index_generation_cache_find_term(
+          entry, LC_POUCH_QUERY_INDEX_ANY_TEXT_FIELD_HEX, token_hex,
+          LC_POUCH_QUERY_INDEX_TEXT_TOKEN_TYPE, &term)) {
+    rc = lc_pouch_query_index_generation_cache_append_posting(
+        &pouch->allocator, entry, term->term_id, 0U, docid_filter_sorted,
+        docids, error);
+  }
+  return rc;
 }
 
 static int lc_pouch_query_index_direct_trigram_key(const char *hex,
@@ -16378,6 +14850,123 @@ static int lc_pouch_query_index_docid_bitmap_has(
   byte_index = (size_t)(doc_id / (unsigned long)CHAR_BIT);
   return (bitmap->bits[byte_index] &
           (unsigned char)(1U << (doc_id % CHAR_BIT))) != 0U;
+}
+
+/* Mark one durable posting directly into a request-local bitmap. This keeps
+ * `/...` as a logical union of concrete fields without materializing and
+ * sorting a temporary result list for every field. */
+static int lc_pouch_query_index_generation_cache_mark_posting(
+    const lc_pouch_query_index_generation_cache_entry *entry,
+    unsigned long term_id, lc_pouch_query_index_docid_bitmap *bitmap,
+    lc_error *error) {
+  const lc_pouch_query_index_generation_cache_posting *posting;
+  size_t index;
+  size_t offset;
+  size_t seen;
+  unsigned long delta;
+  unsigned long doc_id;
+  int rc;
+
+  if (entry == NULL || bitmap == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch posting bitmap requires generation and bitmap",
+                        NULL, NULL, NULL);
+  }
+  if (!lc_pouch_query_index_generation_cache_find_posting(entry, term_id,
+                                                          &posting)) {
+    return LC_OK;
+  }
+  if ((posting->payload == NULL && posting->payload_length > 0UL) ||
+      (posting->count == 0UL && posting->payload_length != 0UL) ||
+      (posting->count > 0UL && posting->payload_length == 0UL) ||
+      posting->payload_length > (unsigned long)((size_t)-1)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch posting count and payload mismatch", NULL, NULL,
+                        "pouch");
+  }
+  rc = LC_OK;
+  if (posting->kind == 's') {
+    doc_id = 0UL;
+    delta = 0UL;
+    offset = 0U;
+    for (index = 0U; rc == LC_OK && index < (size_t)posting->count; ++index) {
+      rc = lc_pouch_query_index_read_sparse_posting_varint(
+          posting->payload, (size_t)posting->payload_length, &offset, &delta,
+          error);
+      if (rc != LC_OK) {
+        break;
+      }
+      if (index > 0U && delta > ULONG_MAX - doc_id) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch posting docID delta overflows", NULL, NULL,
+                          "pouch");
+        break;
+      }
+      doc_id = index == 0U ? delta : doc_id + delta;
+      rc = lc_pouch_query_index_docid_bitmap_mark(bitmap, doc_id, error);
+    }
+    if (rc == LC_OK && offset != (size_t)posting->payload_length) {
+      rc =
+          lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch posting has trailing bytes", NULL, NULL, "pouch");
+    }
+    if (rc == LC_OK && posting->count > 0UL && doc_id != posting->max_doc_id) {
+      rc =
+          lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch posting max docID mismatch", NULL, NULL, "pouch");
+    }
+  } else if (posting->kind == 'd') {
+    seen = 0U;
+    for (index = 0U; rc == LC_OK && index < (size_t)posting->payload_length;
+         ++index) {
+      unsigned int bit_index;
+
+      for (bit_index = 0U; bit_index < (unsigned int)CHAR_BIT; ++bit_index) {
+        if ((posting->payload[index] & (unsigned char)(1U << bit_index)) ==
+            0U) {
+          continue;
+        }
+        doc_id = ((unsigned long)index * (unsigned long)CHAR_BIT) +
+                 (unsigned long)bit_index;
+        if (doc_id > posting->max_doc_id) {
+          rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch posting dense bit exceeds max docID", NULL,
+                            NULL, "pouch");
+          break;
+        }
+        rc = lc_pouch_query_index_docid_bitmap_mark(bitmap, doc_id, error);
+        if (rc != LC_OK) {
+          break;
+        }
+        ++seen;
+      }
+    }
+    if (rc == LC_OK && seen != (size_t)posting->count) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch posting count mismatch", NULL, NULL, "pouch");
+    }
+  } else {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch posting has invalid kind", NULL, NULL, "pouch");
+  }
+  return rc;
+}
+
+static int lc_pouch_query_index_docid_bitmap_covers_list(
+    const lc_pouch_query_index_docid_bitmap *bitmap,
+    const lc_pouch_index_result_docid_list *docids) {
+  size_t index;
+
+  if (bitmap == NULL || docids == NULL) {
+    return 0;
+  }
+  for (index = 0U; index < docids->count; ++index) {
+    if (!lc_pouch_query_index_docid_bitmap_has(bitmap,
+                                               docids->items[index].doc_id)) {
+      return 0;
+    }
+  }
+  return 1;
 }
 
 static int lc_pouch_query_index_docid_bitmap_append(
@@ -16599,6 +15188,66 @@ static int lc_pouch_query_index_direct_posting_append_docid(
       append->allocator, append->docids, doc_id, append->value_index, error);
 }
 
+/* The direct full-text path sees the same docID through every matching
+ * indexed value. Keep the first value-index selected by term order, which is
+ * the same value that the later docID sort/compact phase would retain. */
+static int lc_pouch_query_index_direct_unique_posting_append_docid(
+    void *context, unsigned long doc_id, lc_error *error) {
+  lc_pouch_query_index_direct_unique_posting_append *append;
+  int rc;
+
+  append = (lc_pouch_query_index_direct_unique_posting_append *)context;
+  if (append == NULL || append->seen == NULL || append->docids == NULL ||
+      append->pending == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch direct unique posting requires context", NULL,
+                        NULL, "pouch");
+  }
+  if (!lc_pouch_query_index_docid_list_contains_sorted(append->filter,
+                                                       doc_id) ||
+      lc_pouch_query_index_docid_bitmap_has(append->seen, doc_id)) {
+    return LC_OK;
+  }
+  rc = lc_pouch_query_index_docid_bitmap_mark(append->seen, doc_id, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  rc = lc_pouch_index_result_docid_list_add(append->allocator, append->docids,
+                                            doc_id, append->value_index, error);
+  if (rc == LC_OK && *append->pending > 0U) {
+    --*append->pending;
+  }
+  return rc;
+}
+
+static int lc_pouch_query_index_direct_append_unique_posting(
+    const lc_allocator *allocator,
+    const lc_pouch_index_term_generation *generation, unsigned long term_id,
+    size_t value_index,
+    const lc_pouch_index_result_docid_list *docid_filter_sorted,
+    lc_pouch_query_index_docid_bitmap *seen,
+    lc_pouch_index_result_docid_list *docids, size_t *pending,
+    lc_error *error) {
+  lc_pouch_query_index_direct_unique_posting_append append;
+
+  if (allocator == NULL || generation == NULL || seen == NULL ||
+      docids == NULL || pending == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch direct unique posting requires inputs", NULL,
+                        NULL, "pouch");
+  }
+  memset(&append, 0, sizeof(append));
+  append.allocator = allocator;
+  append.filter = docid_filter_sorted;
+  append.seen = seen;
+  append.docids = docids;
+  append.value_index = value_index;
+  append.pending = pending;
+  return lc_pouch_index_term_posting_table_visit(
+      &generation->postings, term_id,
+      lc_pouch_query_index_direct_unique_posting_append_docid, &append, error);
+}
+
 static int lc_pouch_query_index_docid_list_intersect_sorted(
     const lc_allocator *allocator, const lc_pouch_index_result_docid_list *left,
     const lc_pouch_index_result_docid_list *right,
@@ -16759,15 +15408,15 @@ static int lc_pouch_query_index_direct_collect_all_text_trigram_intersection(
         &pouch->allocator, generation->row_count, &matches, error);
     for (field_index = 0U; rc == LC_OK && field_index < entry->field_count;
          ++field_index) {
-      const char *candidate_field;
+      const lc_pouch_query_index_generation_cache_field *field;
       unsigned long term_id;
 
-      candidate_field = entry->fields[field_index].field_hex;
-      if (lc_pouch_query_index_field_hex_is_any_text(candidate_field)) {
+      field = &entry->fields[field_index];
+      if (lc_pouch_query_index_field_hex_is_any_text(field->field_hex)) {
         continue;
       }
       term_id = 0UL;
-      if (lc_pouch_query_index_direct_find_trigram(generation, candidate_field,
+      if (lc_pouch_query_index_direct_find_trigram(generation, field->field_hex,
                                                    trigram_key, &term_id)) {
         rc = lc_pouch_query_index_direct_mark_posting(generation, term_id,
                                                       &matches, error);
@@ -16795,18 +15444,109 @@ static int lc_pouch_query_index_direct_collect_all_text_trigram_intersection(
   }
   for (field_index = 0U; rc == LC_OK && field_index < entry->field_count;
        ++field_index) {
-    const char *candidate_field;
+    const lc_pouch_query_index_generation_cache_field *field;
     unsigned long term_id;
 
-    candidate_field = entry->fields[field_index].field_hex;
-    if (lc_pouch_query_index_field_hex_is_any_text(candidate_field)) {
+    field = &entry->fields[field_index];
+    if (lc_pouch_query_index_field_hex_is_any_text(field->field_hex)) {
       continue;
     }
     term_id = 0UL;
-    if (lc_pouch_query_index_direct_find_trigram(generation, candidate_field,
+    if (lc_pouch_query_index_direct_find_trigram(generation, field->field_hex,
                                                  trigram_key, &term_id)) {
       rc = lc_pouch_query_index_direct_mark_posting(generation, term_id,
                                                     &matches, error);
+    }
+  }
+  for (byte_index = 0U; rc == LC_OK && byte_index < intersection.length;
+       ++byte_index) {
+    intersection.bits[byte_index] =
+        (unsigned char)(intersection.bits[byte_index] |
+                        matches.bits[byte_index]);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_docid_bitmap_append(&pouch->allocator,
+                                                  &intersection, docids, error);
+  }
+  lc_pouch_query_index_docid_bitmap_cleanup(&matches);
+  lc_pouch_query_index_docid_bitmap_cleanup(&intersection);
+  return rc;
+}
+
+/* `/...` has no persisted synthetic field. Fold each durable field posting
+ * into a bounded request-local bitmap, intersect the requested trigrams, and
+ * then include the fallback postings for truncated values. */
+static int lc_pouch_query_index_collect_all_text_trigram_intersection(
+    lc_pouch *pouch, const lc_pouch_query_index_generation_cache_entry *entry,
+    const char trigrams[][7], size_t trigram_count,
+    lc_pouch_index_result_docid_list *docids, lc_error *error) {
+  lc_pouch_query_index_docid_bitmap intersection;
+  lc_pouch_query_index_docid_bitmap matches;
+  size_t byte_index;
+  size_t field_index;
+  size_t trigram_index;
+  int rc;
+
+  if (pouch == NULL || entry == NULL || trigrams == NULL ||
+      trigram_count == 0U || docids == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch all-text trigram intersection requires inputs",
+                        NULL, NULL, "pouch");
+  }
+  memset(&intersection, 0, sizeof(intersection));
+  memset(&matches, 0, sizeof(matches));
+  rc = lc_pouch_query_index_docid_bitmap_init(
+      &pouch->allocator, entry->row_count, &intersection, error);
+  if (rc == LC_OK && intersection.length > 0U) {
+    memset(intersection.bits, UCHAR_MAX, intersection.length);
+  }
+  for (trigram_index = 0U; rc == LC_OK && trigram_index < trigram_count;
+       ++trigram_index) {
+    rc = lc_pouch_query_index_docid_bitmap_init(
+        &pouch->allocator, entry->row_count, &matches, error);
+    for (field_index = 0U; rc == LC_OK && field_index < entry->field_count;
+         ++field_index) {
+      const lc_pouch_query_index_generation_cache_field *field;
+      const lc_pouch_query_index_generation_cache_term *term;
+
+      field = &entry->fields[field_index];
+      if (lc_pouch_query_index_field_hex_is_any_text(field->field_hex)) {
+        continue;
+      }
+      term = NULL;
+      if (lc_pouch_query_index_generation_cache_find_term(
+              entry, field->field_hex, trigrams[trigram_index], 's', &term)) {
+        rc = lc_pouch_query_index_generation_cache_mark_posting(
+            entry, term->term_id, &matches, error);
+      }
+    }
+    for (byte_index = 0U; rc == LC_OK && byte_index < intersection.length;
+         ++byte_index) {
+      intersection.bits[byte_index] =
+          (unsigned char)(intersection.bits[byte_index] &
+                          matches.bits[byte_index]);
+    }
+    lc_pouch_query_index_docid_bitmap_cleanup(&matches);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_query_index_docid_bitmap_init(
+        &pouch->allocator, entry->row_count, &matches, error);
+  }
+  for (field_index = 0U; rc == LC_OK && field_index < entry->field_count;
+       ++field_index) {
+    const lc_pouch_query_index_generation_cache_field *field;
+    const lc_pouch_query_index_generation_cache_term *term;
+
+    field = &entry->fields[field_index];
+    if (lc_pouch_query_index_field_hex_is_any_text(field->field_hex)) {
+      continue;
+    }
+    term = NULL;
+    if (lc_pouch_query_index_generation_cache_find_term(
+            entry, field->field_hex, LC_POUCH_QUERY_INDEX_TRIGRAM_FALLBACK_HEX,
+            's', &term)) {
+      rc = lc_pouch_query_index_generation_cache_mark_posting(
+          entry, term->term_id, &matches, error);
     }
   }
   for (byte_index = 0U; rc == LC_OK && byte_index < intersection.length;
@@ -16853,10 +15593,12 @@ static int lc_pouch_query_index_collect_trigram_intersection_docids(
   if (rc != LC_OK || !*present || !*valid) {
     return rc;
   }
-  if (entry->has_direct_generation &&
-      lc_pouch_query_index_field_hex_is_any_text(field_hex) &&
-      !lc_pouch_query_index_generation_cache_has_field(entry, field_hex)) {
-    return lc_pouch_query_index_direct_collect_all_text_trigram_intersection(
+  if (lc_pouch_query_index_field_hex_is_any_text(field_hex)) {
+    if (entry->has_direct_generation) {
+      return lc_pouch_query_index_direct_collect_all_text_trigram_intersection(
+          pouch, entry, trigrams, trigram_count, docids, error);
+    }
+    return lc_pouch_query_index_collect_all_text_trigram_intersection(
         pouch, entry, trigrams, trigram_count, docids, error);
   }
 
@@ -17212,6 +15954,11 @@ static int lc_pouch_query_index_direct_collect_text_prefix_docids(
     if (matched) {
       rc = lc_pouch_query_index_direct_mark_posting(generation, term->term_id,
                                                     &bitmap, error);
+      if (rc == LC_OK && lc_pouch_query_index_docid_bitmap_covers_list(
+                             &bitmap, docid_filter_sorted)) {
+        *all_candidates_matched = 1;
+        break;
+      }
     }
   }
   if (rc == LC_OK) {
@@ -17247,12 +15994,15 @@ static int lc_pouch_query_index_direct_collect_text_docids(
     const lc_pouch_index_result_docid_list *docid_filter_sorted,
     lc_pouch_index_result_docid_list *docids, int *text_prefix_seen,
     lc_error *error) {
+  lc_pouch_query_index_docid_bitmap seen;
   const lc_pouch_index_term_generation *generation;
   size_t index;
+  size_t pending;
   uint64_t needle_bloom;
   int any_text_direct;
   int any_text_lookup;
   int all_candidates_matched;
+  int dedupe_candidates;
   int prefix_prepass;
   const lc_pouch_index_result_docid_list *posting_filter;
   int rc;
@@ -17264,6 +16014,8 @@ static int lc_pouch_query_index_direct_collect_text_docids(
                         "pouch");
   }
   generation = &entry->direct_generation;
+  memset(&seen, 0, sizeof(seen));
+  pending = 0U;
   needle_bloom = ignore_case && contains_match
                      ? lc_pouch_query_index_text_trigram_bloom_hex(needle_hex)
                      : 0U;
@@ -17287,18 +16039,46 @@ static int lc_pouch_query_index_direct_collect_text_docids(
                        docid_filter_sorted, generation->row_count)
                        ? NULL
                        : docid_filter_sorted;
+  dedupe_candidates = docid_filter_sorted != NULL;
   rc = LC_OK;
+  if (dedupe_candidates) {
+    pending = docid_filter_sorted->count;
+    rc = lc_pouch_query_index_docid_bitmap_init(
+        &pouch->allocator, generation->row_count, &seen, error);
+    for (index = 0U; rc == LC_OK && index < docids->count; ++index) {
+      unsigned long doc_id;
+
+      doc_id = docids->items[index].doc_id;
+      if (!lc_pouch_query_index_docid_list_contains_sorted(posting_filter,
+                                                           doc_id)) {
+        rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch direct text prefix escaped candidates", NULL,
+                          NULL, "pouch");
+        break;
+      }
+      if (!lc_pouch_query_index_docid_bitmap_has(&seen, doc_id)) {
+        rc = lc_pouch_query_index_docid_bitmap_mark(&seen, doc_id, error);
+        if (rc == LC_OK && pending > 0U) {
+          --pending;
+        }
+      }
+    }
+  }
   for (index = 0U; rc == LC_OK && index < generation->terms.count; ++index) {
     const lc_pouch_index_term_entry *term;
     size_t value_index;
     int matched;
 
+    if (dedupe_candidates && pending == 0U) {
+      break;
+    }
     term = &generation->terms.items[index];
     if (term->field_hex == NULL || term->value_hex == NULL ||
         term->value_is_trigram_key) {
-      return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "pouch direct text generation is invalid", NULL, NULL,
-                          "pouch");
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch direct text generation is invalid", NULL, NULL,
+                        "pouch");
+      break;
     }
     if ((any_text_direct || !any_text_lookup) &&
         strcmp(term->field_hex, field_hex) != 0) {
@@ -17326,11 +16106,18 @@ static int lc_pouch_query_index_direct_collect_text_docids(
         ignore_case, NULL, NULL, (unsigned long)index, term->field_hex,
         term->value_hex, term->value_type, &matched, &value_index, error);
     if (rc == LC_OK && matched) {
-      rc = lc_pouch_query_index_direct_append_posting(
-          &pouch->allocator, generation, term->term_id, value_index,
-          posting_filter, docids, error);
+      if (dedupe_candidates) {
+        rc = lc_pouch_query_index_direct_append_unique_posting(
+            &pouch->allocator, generation, term->term_id, value_index,
+            posting_filter, &seen, docids, &pending, error);
+      } else {
+        rc = lc_pouch_query_index_direct_append_posting(
+            &pouch->allocator, generation, term->term_id, value_index,
+            posting_filter, docids, error);
+      }
     }
   }
+  lc_pouch_query_index_docid_bitmap_cleanup(&seen);
   return rc;
 }
 
@@ -17406,15 +16193,7 @@ static int lc_pouch_query_index_collect_generation_artifact_docids(
                      kind == LC_POUCH_QUERY_INDEX_SEGMENTED_TRIGRAM) &&
                     lc_pouch_query_index_field_hex_is_any_text(field_hex);
   any_text_direct = 0;
-  if (any_text_lookup && kind == LC_POUCH_QUERY_INDEX_SEGMENTED_TEXT) {
-    start = lc_pouch_query_index_generation_cache_field_lower_bound(entry,
-                                                                    field_hex);
-    any_text_direct = start < entry->term_count &&
-                      strcmp(entry->terms[start].field_hex, field_hex) == 0;
-    if (!any_text_direct) {
-      start = 0U;
-    }
-  } else if (any_text_lookup) {
+  if (any_text_lookup) {
     start = 0U;
   } else {
     start = lc_pouch_query_index_generation_cache_field_lower_bound(entry,
@@ -17487,8 +16266,11 @@ static int lc_pouch_query_index_result_row_list_add_view(
 
 /* A document-table entry stays alive for the caller's borrow, but its lazily
  * decoded keys are shared by concurrent readers. The cache ownership mutex
- * covers both the lookup and the one-time publication of each decoded key. */
-static int lc_pouch_query_index_doc_table_cache_decoded_key_get(
+ * covers both the lookup and the one-time publication of each decoded key.
+ * The caller holds query_doc_table_cache_mutex for the whole row batch: a
+ * result can contain hundreds of keys, and publishing them one at a time
+ * would otherwise take the uncontended mutex once per result row. */
+static int lc_pouch_query_index_doc_table_cache_decoded_key_get_locked(
     lc_pouch *pouch, lc_pouch_query_index_doc_table_cache_entry *entry,
     unsigned long doc_id, const char *key_hex, char **out, lc_error *error) {
   char *key;
@@ -17501,10 +16283,7 @@ static int lc_pouch_query_index_doc_table_cache_decoded_key_get(
                         NULL, NULL, "pouch");
   }
   *out = NULL;
-  rc = lc_pouch_query_index_doc_table_cache_lock(pouch, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
+  rc = LC_OK;
   key = entry->decoded_keys[doc_id];
   if (key == NULL) {
 #ifdef LOCKDC_TEST_BUILD
@@ -17525,7 +16304,6 @@ static int lc_pouch_query_index_doc_table_cache_decoded_key_get(
   if (rc == LC_OK) {
     *out = key;
   }
-  lc_pouch_query_index_doc_table_cache_unlock(pouch);
   return rc;
 }
 
@@ -17538,6 +16316,7 @@ static int lc_pouch_query_index_docid_rows_build(
   const lc_pouch_index_doc *doc;
   char *key;
   size_t index;
+  int doc_cache_locked;
   int rc;
 
   if (docids == NULL || doc_table == NULL || rows == NULL) {
@@ -17564,6 +16343,14 @@ static int lc_pouch_query_index_docid_rows_build(
     memset(rows->items, 0, docids->count * sizeof(rows->items[0]));
     rows->capacity = docids->count;
   }
+  doc_cache_locked = 0;
+  if (doc_cache != NULL && doc_cache->decoded_key_count > 0U) {
+    rc = lc_pouch_query_index_doc_table_cache_lock(pouch, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    doc_cache_locked = 1;
+  }
   for (index = 0U; rc == LC_OK && index < docids->count; ++index) {
     int key_owned;
 
@@ -17577,7 +16364,7 @@ static int lc_pouch_query_index_docid_rows_build(
     key = NULL;
     if (doc_cache != NULL &&
         docids->items[index].doc_id < doc_cache->decoded_key_count) {
-      rc = lc_pouch_query_index_doc_table_cache_decoded_key_get(
+      rc = lc_pouch_query_index_doc_table_cache_decoded_key_get_locked(
           pouch, doc_cache, docids->items[index].doc_id, doc->key_hex, &key,
           error);
     } else {
@@ -17599,6 +16386,9 @@ static int lc_pouch_query_index_docid_rows_build(
     if (rc != LC_OK && key_owned) {
       lc_free_with_allocator(allocator, key);
     }
+  }
+  if (doc_cache_locked) {
+    lc_pouch_query_index_doc_table_cache_unlock(pouch);
   }
   return rc;
 }
@@ -17807,6 +16597,27 @@ static int lc_pouch_query_index_segmented_mark_changed(
   return rc;
 }
 
+static const char *lc_pouch_query_index_segment_term_leaf(
+    lc_pouch_query_index_segmented_collect_kind kind) {
+  switch (kind) {
+  case LC_POUCH_QUERY_INDEX_SEGMENTED_EXACT:
+    return LC_POUCH_QUERY_INDEX_EXACT_TERM_LEAF;
+  case LC_POUCH_QUERY_INDEX_SEGMENTED_PRESENCE:
+    return LC_POUCH_QUERY_INDEX_PRESENCE_TERM_LEAF;
+  case LC_POUCH_QUERY_INDEX_SEGMENTED_RANGE:
+    return LC_POUCH_QUERY_INDEX_RANGE_TERM_LEAF;
+  case LC_POUCH_QUERY_INDEX_SEGMENTED_TEXT:
+    return LC_POUCH_QUERY_INDEX_TEXT_TERM_LEAF;
+  case LC_POUCH_QUERY_INDEX_SEGMENTED_TRIGRAM:
+    return LC_POUCH_QUERY_INDEX_TRIGRAM_TERM_LEAF;
+  case LC_POUCH_QUERY_INDEX_SEGMENTED_TEMPORAL:
+    return LC_POUCH_QUERY_INDEX_TEMPORAL_TERM_LEAF;
+  case LC_POUCH_QUERY_INDEX_SEGMENTED_ALL:
+  default:
+    return NULL;
+  }
+}
+
 static int lc_pouch_query_index_segmented_collect(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_query_index_segmented_collect_kind kind,
@@ -17817,16 +16628,20 @@ static int lc_pouch_query_index_segmented_collect(
     const lc_pouch_index_parsed_date_bounds *temporal_bounds,
     lc_pouch_index_result_row_list *rows,
     lc_pouch_query_index_doc_table_cache_borrow_list *doc_table_cache_borrows,
+    const lc_pouch_generation *state_index_seq_snapshot,
     lc_pouch_generation *index_seq, int *text_complete_out, lc_error *error) {
   lc_pouch_query_index_manifest manifest;
   lc_pouch_query_index_key_hex_set hidden;
   lc_pouch_query_index_segmented_collect_kind collect_kind;
+  char *contains_token_hex;
   char *manifest_path;
+  const char *term_leaf;
   const char *collect_needle_hex;
   lc_pouch_generation state_index_seq;
   char trigram_needles[LC_POUCH_QUERY_INDEX_MAX_CONTAINS_TRIGRAMS][7];
   size_t trigram_count;
   size_t segment_index;
+  int contains_token_eligible;
   int trigram_prefilter;
   int rc;
 
@@ -17872,12 +16687,15 @@ static int lc_pouch_query_index_segmented_collect(
 
   memset(&manifest, 0, sizeof(manifest));
   memset(&hidden, 0, sizeof(hidden));
+  contains_token_hex = NULL;
   state_index_seq = 0UL;
   collect_kind = kind;
   collect_needle_hex = needle_hex;
   memset(trigram_needles, 0, sizeof(trigram_needles));
   trigram_count = 0U;
+  contains_token_eligible = 0;
   trigram_prefilter = 0;
+  rc = LC_OK;
   if (text_complete_out != NULL) {
     *text_complete_out = 1;
   }
@@ -17927,11 +16745,27 @@ static int lc_pouch_query_index_segmented_collect(
       trigram_prefilter = trigram_count > 0U;
     }
   }
+  if (rc == LC_OK && kind == LC_POUCH_QUERY_INDEX_SEGMENTED_TEXT &&
+      contains_match && ignore_case &&
+      lc_pouch_query_index_field_hex_is_any_text(field_hex)) {
+    rc = lc_pouch_query_index_all_text_token_hex_from_needle(
+        &pouch->allocator, needle_text, &contains_token_hex,
+        &contains_token_eligible, error);
+  }
+  term_leaf = lc_pouch_query_index_segment_term_leaf(collect_kind);
+  if (kind != LC_POUCH_QUERY_INDEX_SEGMENTED_ALL && term_leaf == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch segmented query has unsupported term kind", NULL,
+                        NULL, NULL);
+  }
   *index_seq = 0UL;
-  rc = LC_OK;
   if (lc_pouch_single_writer_enabled(pouch)) {
-    rc = lc_pouch_state_query_index_seq(pouch, namespace_name, &state_index_seq,
-                                        error);
+    if (state_index_seq_snapshot != NULL) {
+      state_index_seq = *state_index_seq_snapshot;
+    } else {
+      rc = lc_pouch_state_query_index_seq(pouch, namespace_name,
+                                          &state_index_seq, error);
+    }
     if (rc == LC_OK) {
       (void)lc_pouch_query_index_manifest_trust_snapshot(
           pouch, namespace_name, state_index_seq, &manifest);
@@ -17962,21 +16796,14 @@ static int lc_pouch_query_index_segmented_collect(
   for (segment_index = 0U;
        rc == LC_OK && segment_index < manifest.segment_count; ++segment_index) {
     const lc_pouch_query_index_manifest_segment *segment;
-    lc_pouch_query_index_read_result header_artifact;
     lc_pouch_query_index_doc_table_cache_entry *doc_cache;
     const lc_pouch_index_doc_table *doc_table;
     lc_pouch_index_result_docid_list docids;
     lc_pouch_index_result_row_list segment_rows;
-    char *header_path;
     char *doc_table_path;
-    char *exact_term_path;
-    char *presence_term_path;
-    char *range_term_path;
-    char *text_term_path;
+    char *term_path;
     char *trigram_term_path;
-    char *temporal_term_path;
     char *delete_path;
-    const char *term_path;
     unsigned long delete_count;
     unsigned long delete_hash;
     size_t doc_index;
@@ -17986,59 +16813,46 @@ static int lc_pouch_query_index_segmented_collect(
     int text_prefix_seen;
 
     segment = &manifest.segments[segment_index];
-    memset(&header_artifact, 0, sizeof(header_artifact));
     doc_cache = NULL;
     doc_table = NULL;
     memset(&docids, 0, sizeof(docids));
     memset(&segment_rows, 0, sizeof(segment_rows));
-    header_path = NULL;
     doc_table_path = NULL;
-    exact_term_path = NULL;
-    presence_term_path = NULL;
-    range_term_path = NULL;
-    text_term_path = NULL;
+    term_path = NULL;
     trigram_term_path = NULL;
-    temporal_term_path = NULL;
     delete_path = NULL;
     delete_count = 0UL;
     delete_hash = lc_pouch_query_index_hash_init();
     segment_fully_hidden = 0;
     text_prefix_seen = 0;
-    rc = lc_pouch_query_index_segmented_paths(
-        pouch, namespace_name, segment->id, &header_path, &doc_table_path,
-        &exact_term_path, &presence_term_path, &range_term_path,
-        &text_term_path, &trigram_term_path, &temporal_term_path, &delete_path,
+    doc_table_path = lc_pouch_query_index_segment_artifact_path(
+        pouch, namespace_name, segment->id, LC_POUCH_QUERY_INDEX_DOC_TABLE_LEAF,
         error);
-    if (rc == LC_OK &&
-        lc_pouch_query_index_artifact_cache_valid(
-            pouch, header_path, LC_POUCH_QUERY_INDEX_ARTIFACT_HEADER,
-            segment->index_seq, segment->row_count, segment->row_hash)) {
-      header_artifact.present = 1;
-      header_artifact.valid = 1;
-      header_artifact.index_seq = segment->index_seq;
-      header_artifact.row_count = segment->row_count;
-      header_artifact.row_hash = segment->row_hash;
-      header_artifact.term_index_complete = 1;
-      header_artifact.presence_index_complete = 1;
-    } else if (rc == LC_OK) {
-      rc = lc_pouch_query_index_read_header(pouch, namespace_name, header_path,
-                                            &header_artifact, error);
-      if (rc == LC_OK && header_artifact.present && header_artifact.valid &&
-          header_artifact.index_seq == segment->index_seq &&
-          header_artifact.row_count == segment->row_count &&
-          header_artifact.row_hash == segment->row_hash) {
-        lc_pouch_query_index_artifact_cache_remember(
-            pouch, header_path, LC_POUCH_QUERY_INDEX_ARTIFACT_HEADER,
-            segment->index_seq, segment->row_count, segment->row_hash);
+    if (doc_table_path == NULL) {
+      rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+    }
+    if (rc == LC_OK && term_leaf != NULL) {
+      term_path = lc_pouch_query_index_segment_artifact_path(
+          pouch, namespace_name, segment->id, term_leaf, error);
+      if (term_path == NULL) {
+        rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
       }
     }
-    if (rc == LC_OK && (!header_artifact.present || !header_artifact.valid ||
-                        header_artifact.index_seq != segment->index_seq ||
-                        header_artifact.row_count != segment->row_count ||
-                        header_artifact.row_hash != segment->row_hash)) {
-      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch query-index segment header is not readable",
-                        NULL, NULL, "pouch");
+    if (rc == LC_OK && trigram_prefilter) {
+      trigram_term_path = lc_pouch_query_index_segment_artifact_path(
+          pouch, namespace_name, segment->id,
+          LC_POUCH_QUERY_INDEX_TRIGRAM_TERM_LEAF, error);
+      if (trigram_term_path == NULL) {
+        rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+      }
+    }
+    if (rc == LC_OK) {
+      delete_path = lc_pouch_query_index_segment_artifact_path(
+          pouch, namespace_name, segment->id, LC_POUCH_QUERY_INDEX_DELETE_LEAF,
+          error);
+      if (delete_path == NULL) {
+        rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+      }
     }
     if (rc == LC_OK) {
       present = 0;
@@ -18089,7 +16903,7 @@ static int lc_pouch_query_index_segmented_collect(
       case LC_POUCH_QUERY_INDEX_SEGMENTED_TRIGRAM:
       case LC_POUCH_QUERY_INDEX_SEGMENTED_TEMPORAL:
         if (kind == LC_POUCH_QUERY_INDEX_SEGMENTED_PRESENCE &&
-            !header_artifact.presence_index_complete) {
+            !segment->presence_index_complete) {
           rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                             "pouch query-index segment presence postings are "
                             "incomplete",
@@ -18097,33 +16911,25 @@ static int lc_pouch_query_index_segmented_collect(
           break;
         }
         if (kind != LC_POUCH_QUERY_INDEX_SEGMENTED_PRESENCE &&
-            !header_artifact.term_index_complete) {
+            !segment->term_index_complete) {
           rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                             "pouch query-index segment scalar postings are "
                             "incomplete",
                             NULL, NULL, "pouch");
           break;
         }
-        term_path = exact_term_path;
-        if (collect_kind == LC_POUCH_QUERY_INDEX_SEGMENTED_PRESENCE) {
-          term_path = presence_term_path;
-        } else if (collect_kind == LC_POUCH_QUERY_INDEX_SEGMENTED_RANGE) {
-          term_path = range_term_path;
-        } else if (collect_kind == LC_POUCH_QUERY_INDEX_SEGMENTED_TEXT) {
-          term_path = text_term_path;
-        } else if (collect_kind == LC_POUCH_QUERY_INDEX_SEGMENTED_TRIGRAM) {
-          term_path = trigram_term_path;
-        } else if (collect_kind == LC_POUCH_QUERY_INDEX_SEGMENTED_TEMPORAL) {
-          term_path = temporal_term_path;
-        }
         present = 0;
         valid = 0;
         if (trigram_prefilter) {
           lc_pouch_index_result_docid_list trigram_docids;
           lc_pouch_index_result_docid_list exact_docids;
+          lc_pouch_index_result_docid_list token_docids;
+          int token_covers_candidates;
 
           memset(&trigram_docids, 0, sizeof(trigram_docids));
           memset(&exact_docids, 0, sizeof(exact_docids));
+          memset(&token_docids, 0, sizeof(token_docids));
+          token_covers_candidates = 0;
           text_prefix_seen = 0;
           rc = lc_pouch_query_index_collect_trigram_intersection_docids(
               pouch, namespace_name, trigram_term_path, segment->index_seq,
@@ -18140,9 +16946,28 @@ static int lc_pouch_query_index_segmented_collect(
             rc = lc_pouch_index_result_docid_list_sort_compact(
                 &pouch->allocator, &trigram_docids, error);
           }
-          if (rc == LC_OK && trigram_docids.count > 0U) {
+          if (rc == LC_OK && trigram_docids.count > 0U &&
+              contains_token_eligible) {
+            rc = lc_pouch_query_index_collect_all_text_token_docids(
+                pouch, namespace_name, term_path, segment->index_seq,
+                segment->row_count, segment->row_hash, contains_token_hex,
+                &trigram_docids, &token_docids, &present, &valid, error);
+          }
+          if (rc == LC_OK && token_docids.count > 0U) {
+            rc = lc_pouch_index_result_docid_list_sort_compact(
+                &pouch->allocator, &token_docids, error);
+          }
+          if (rc == LC_OK && trigram_docids.count > 0U &&
+              lc_pouch_query_index_docid_list_is_subset_sorted(
+                  &trigram_docids, &token_docids)) {
+            exact_docids = token_docids;
+            memset(&token_docids, 0, sizeof(token_docids));
+            token_covers_candidates = 1;
+          }
+          if (rc == LC_OK && trigram_docids.count > 0U &&
+              !token_covers_candidates) {
             rc = lc_pouch_query_index_collect_generation_artifact_docids(
-                pouch, namespace_name, text_term_path, segment->index_seq,
+                pouch, namespace_name, term_path, segment->index_seq,
                 segment->row_count, segment->row_hash,
                 LC_POUCH_QUERY_INDEX_SEGMENTED_TEXT, exact_terms,
                 exact_term_count, field_hex, needle_hex, needle_text,
@@ -18176,6 +17001,8 @@ static int lc_pouch_query_index_segmented_collect(
           }
           lc_pouch_index_result_docid_list_cleanup(&pouch->allocator,
                                                    &exact_docids);
+          lc_pouch_index_result_docid_list_cleanup(&pouch->allocator,
+                                                   &token_docids);
           lc_pouch_index_result_docid_list_cleanup(&pouch->allocator,
                                                    &trigram_docids);
         } else if (collect_kind == LC_POUCH_QUERY_INDEX_SEGMENTED_TRIGRAM &&
@@ -18249,16 +17076,17 @@ static int lc_pouch_query_index_segmented_collect(
           lc_pouch_test_after_doc_table_cache_rows_attached_context, error);
     }
 #endif
-    lc_pouch_query_index_segmented_paths_cleanup(
-        pouch, &header_path, &doc_table_path, &exact_term_path,
-        &presence_term_path, &range_term_path, &text_term_path,
-        &trigram_term_path, &temporal_term_path, &delete_path);
+    lc_free_with_allocator(&pouch->allocator, delete_path);
+    lc_free_with_allocator(&pouch->allocator, trigram_term_path);
+    lc_free_with_allocator(&pouch->allocator, term_path);
+    lc_free_with_allocator(&pouch->allocator, doc_table_path);
   }
   if (rc == LC_OK) {
     lc_pouch_query_index_result_rows_sort(&pouch->allocator, rows);
   }
 
 cleanup:
+  lc_free_with_allocator(&pouch->allocator, contains_token_hex);
   lc_pouch_query_index_key_hex_set_cleanup(&pouch->allocator, &hidden);
   lc_pouch_query_index_manifest_cleanup(&pouch->allocator, &manifest);
   return rc;
@@ -18268,6 +17096,7 @@ static int lc_pouch_query_index_visit_text_generation(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const char *needle, int prefix_match, int contains_match, int ignore_case,
     lc_pouch_query_index_key_visit_fn visit, void *context,
+    const lc_pouch_generation *state_index_seq_snapshot,
     lc_pouch_generation *index_seq, int *text_complete_out, lc_error *error) {
   lc_pouch_index_result_row_list rows;
   lc_pouch_query_index_doc_table_cache_borrow_list doc_table_cache_borrows;
@@ -18301,8 +17130,8 @@ static int lc_pouch_query_index_visit_text_generation(
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_TEXT, NULL, 0U,
       field_hex, needle_hex, needle, prefix_match, contains_match, ignore_case,
-      NULL, NULL, &rows, &doc_table_cache_borrows, index_seq, text_complete_out,
-      error);
+      NULL, NULL, &rows, &doc_table_cache_borrows, state_index_seq_snapshot,
+      index_seq, text_complete_out, error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_rows_emit(&rows, visit, context, error);
   }
@@ -18337,7 +17166,7 @@ static int lc_pouch_query_index_visit_exact_generation(
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_EXACT, exact_terms,
       exact_term_count, NULL, NULL, NULL, 0, 0, 0, NULL, NULL, &rows,
-      &doc_table_cache_borrows, index_seq, NULL, error);
+      &doc_table_cache_borrows, NULL, index_seq, NULL, error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_rows_emit(&rows, visit, context, error);
   }
@@ -18629,7 +17458,7 @@ int lc_pouch_query_index_visit_prefix(
   }
   return lc_pouch_query_index_visit_text_generation(
       pouch, namespace_name, field, prefix, 1, 0, ignore_case, visit, context,
-      index_seq, NULL, error);
+      NULL, index_seq, NULL, error);
 }
 
 int lc_pouch_query_index_prefix_candidates_exact(const char *prefix) {
@@ -18675,7 +17504,7 @@ int lc_pouch_query_index_visit_prefix_candidates(
   candidate_prefix[candidate_len] = '\0';
   rc = lc_pouch_query_index_visit_text_generation(
       pouch, namespace_name, field, candidate_prefix, 1, 0, ignore_case, visit,
-      context, index_seq, NULL, error);
+      context, NULL, index_seq, NULL, error);
   lc_free_with_allocator(&pouch->allocator, candidate_prefix);
   return rc;
 }
@@ -18693,13 +17522,14 @@ int lc_pouch_query_index_visit_contains(
   }
   return lc_pouch_query_index_visit_text_generation(
       pouch, namespace_name, field, needle, 0, 1, ignore_case, visit, context,
-      index_seq, NULL, error);
+      NULL, index_seq, NULL, error);
 }
 
-int lc_pouch_query_index_visit_contains_complete(
+static int lc_pouch_query_index_visit_contains_complete_with_snapshot(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const char *needle, int ignore_case,
     lc_pouch_query_index_key_visit_fn visit, void *context,
+    const lc_pouch_generation *state_index_seq_snapshot,
     lc_pouch_generation *index_seq, int *complete, lc_error *error) {
   if (complete == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -18716,7 +17546,34 @@ int lc_pouch_query_index_visit_contains_complete(
   }
   return lc_pouch_query_index_visit_text_generation(
       pouch, namespace_name, field, needle, 0, 1, ignore_case, visit, context,
+      state_index_seq_snapshot, index_seq, complete, error);
+}
+
+int lc_pouch_query_index_visit_contains_complete(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const char *needle, int ignore_case,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    lc_pouch_generation *index_seq, int *complete, lc_error *error) {
+  return lc_pouch_query_index_visit_contains_complete_with_snapshot(
+      pouch, namespace_name, field, needle, ignore_case, visit, context, NULL,
       index_seq, complete, error);
+}
+
+int lc_pouch_query_index_visit_contains_complete_at_snapshot(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const char *needle, int ignore_case,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    const lc_pouch_generation *state_index_seq_snapshot,
+    lc_pouch_generation *index_seq, int *complete, lc_error *error) {
+  if (state_index_seq_snapshot == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index snapshot lookup requires query "
+                        "watermark",
+                        NULL, NULL, NULL);
+  }
+  return lc_pouch_query_index_visit_contains_complete_with_snapshot(
+      pouch, namespace_name, field, needle, ignore_case, visit, context,
+      state_index_seq_snapshot, index_seq, complete, error);
 }
 
 int lc_pouch_query_index_visit_contains_candidates(
@@ -18755,7 +17612,7 @@ int lc_pouch_query_index_visit_contains_candidates(
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_TRIGRAM, NULL, 0U,
       field_hex, needle_hex, needle, 0, 1, ignore_case, NULL, NULL, &rows,
-      &doc_table_cache_borrows, index_seq, NULL, error);
+      &doc_table_cache_borrows, NULL, index_seq, NULL, error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_rows_emit(&rows, visit, context, error);
   }
@@ -18803,7 +17660,7 @@ int lc_pouch_query_index_visit_range(
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_RANGE, NULL, 0U,
       field_hex, NULL, NULL, 0, 0, 0, bounds, NULL, &rows,
-      &doc_table_cache_borrows, index_seq, NULL, error);
+      &doc_table_cache_borrows, NULL, index_seq, NULL, error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_rows_emit(&rows, visit, context, error);
   }
@@ -18855,7 +17712,7 @@ int lc_pouch_query_index_visit_date(
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_TEMPORAL, NULL, 0U,
       field_hex, NULL, NULL, 0, 0, 0, NULL, &parsed_bounds, &rows,
-      &doc_table_cache_borrows, index_seq, NULL, error);
+      &doc_table_cache_borrows, NULL, index_seq, NULL, error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_rows_emit(&rows, visit, context, error);
   }
@@ -18894,7 +17751,7 @@ int lc_pouch_query_index_visit_exists(
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_PRESENCE, NULL, 0U,
       field_hex, NULL, NULL, 0, 0, 0, NULL, NULL, &rows,
-      &doc_table_cache_borrows, index_seq, NULL, error);
+      &doc_table_cache_borrows, NULL, index_seq, NULL, error);
   if (rc == LC_OK) {
     rc = lc_pouch_query_index_rows_emit(&rows, visit, context, error);
   }

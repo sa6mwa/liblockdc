@@ -571,13 +571,17 @@ static int lockdc_bench_key_end(void *context, lc_error *error) {
   return 1;
 }
 
+static int lockdc_bench_update_lease(lc_lease *lease, const char *json,
+                                     size_t json_len, const char *if_etag,
+                                     lc_error *error);
+
 static int lockdc_bench_seed(lc_client *client, long rows, lc_error *error) {
   long i;
 
   for (i = 0; i < rows; ++i) {
-    lc_update_req req;
-    lc_update_res res;
-    lc_source *source;
+    lc_acquire_req acquire_req;
+    lc_release_req release_req;
+    lc_lease *lease;
     char key[64];
     char *json;
     size_t json_len;
@@ -588,19 +592,27 @@ static int lockdc_bench_seed(lc_client *client, long rows, lc_error *error) {
       return LC_ERR_NOMEM;
     }
     snprintf(key, sizeof(key), "doc/%08ld", i);
-    lc_update_req_init(&req);
-    memset(&res, 0, sizeof(res));
-    req.lease.key = key;
-    req.content_type = "application/json";
-    source = NULL;
-    rc = lc_source_from_memory(json, json_len, &source, error);
+    lease = NULL;
+    lc_acquire_req_init(&acquire_req);
+    acquire_req.namespace_name = "bench";
+    acquire_req.key = key;
+    acquire_req.owner = "pouch-query-bench";
+    acquire_req.ttl_seconds = 60L;
+    rc = client->acquire(client, &acquire_req, &lease, error);
     if (rc == LC_OK) {
-      rc = client->update(client, &req, source, &res, error);
+      rc = lockdc_bench_update_lease(lease, json, json_len, NULL, error);
     }
-    if (source != NULL) {
-      lc_source_close(source);
+    if (rc == LC_OK) {
+      lc_release_req_init(&release_req);
+      rc = lease->release(lease, &release_req, error);
+      if (rc == LC_OK) {
+        /* release() closes a successful public lease. */
+        lease = NULL;
+      }
     }
-    lc_update_res_cleanup(&res);
+    if (lease != NULL) {
+      lease->close(lease);
+    }
     free(json);
     if (rc != LC_OK) {
       return rc;

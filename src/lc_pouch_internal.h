@@ -13,8 +13,6 @@ typedef struct lc_pouch_query_index_generation_cache_entry
     lc_pouch_query_index_generation_cache_entry;
 typedef struct lc_pouch_query_index_doc_table_cache_entry
     lc_pouch_query_index_doc_table_cache_entry;
-typedef struct lc_pouch_query_index_artifact_cache_entry
-    lc_pouch_query_index_artifact_cache_entry;
 typedef struct lc_pouch_query_index_packed_cache_entry
     lc_pouch_query_index_packed_cache_entry;
 typedef struct lc_pouch_query_index_manifest_trust_entry
@@ -237,8 +235,6 @@ struct lc_pouch {
   size_t query_generation_cache_count;
   lc_pouch_query_index_doc_table_cache_entry *query_doc_table_cache;
   size_t query_doc_table_cache_count;
-  lc_pouch_query_index_artifact_cache_entry *query_artifact_cache;
-  size_t query_artifact_cache_count;
   lc_pouch_query_index_packed_cache_entry *query_packed_cache;
   size_t query_packed_cache_count;
   lc_pouch_query_index_manifest_trust_entry *query_manifest_trust;

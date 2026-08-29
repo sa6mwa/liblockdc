@@ -943,6 +943,34 @@ static int lc_workflow_validate_headers_json(const char *headers_json,
   return LC_OK;
 }
 
+/* Mapped records are owned by the parser runtime that decoded them. Remote
+ * clients decode through their engine runtime, whereas Pouch uses the caller
+ * thread runtime. Keeping that distinction here both preserves allocator
+ * ownership and lets workflow entry points report a Pouch runtime allocation
+ * failure before they acquire or decode durable state. */
+static lonejson *lc_workflow_json_runtime(lc_client_handle *client) {
+  if (client != NULL && !client->is_pouch) {
+    return lc_engine_lonejson_runtime(client->engine);
+  }
+  return lc_thread_lonejson_runtime();
+}
+
+static int lc_workflow_require_json_runtime(lc_client_handle *client,
+                                            lonejson **out, lc_error *error) {
+  if (out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow JSON runtime output is required", NULL, NULL,
+                        NULL);
+  }
+  *out = lc_workflow_json_runtime(client);
+  if (*out == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to initialize workflow JSON runtime", NULL,
+                        NULL, NULL);
+  }
+  return LC_OK;
+}
+
 static int lc_workflow_validate_diagnostic(const char *diagnostic,
                                            lc_error *error) {
   size_t length;
@@ -1116,7 +1144,9 @@ static int lc_workflow_existing_outbox(lc_workflow_handle *workflow,
   options.public_read = 1;
   content_type = entry->content_type != NULL ? entry->content_type
                                              : "application/octet-stream";
-  runtime = lc_thread_lonejson_runtime();
+  rc = lc_workflow_require_json_runtime(workflow->client, &runtime, error);
+  if (rc != LC_OK)
+    return rc;
   if (lease != NULL) {
     rc = lc_lease_load(lease, &lc_workflow_outbox_record_map, &record, NULL,
                        &result, error);
@@ -1181,7 +1211,9 @@ static int lc_workflow_existing_inbox(lc_workflow_handle *workflow,
   memset(&load_result, 0, sizeof(load_result));
   lc_get_opts_init(&options);
   options.public_read = 1;
-  runtime = lc_thread_lonejson_runtime();
+  rc = lc_workflow_require_json_runtime(workflow->client, &runtime, error);
+  if (rc != LC_OK)
+    return rc;
   if (lease != NULL) {
     rc = lc_lease_load(lease, &lc_workflow_inbox_record_map, &record, NULL,
                        &load_result, error);
@@ -1230,7 +1262,9 @@ static int lc_workflow_existing_command(lc_workflow_handle *workflow,
   memset(&load_result, 0, sizeof(load_result));
   lc_get_opts_init(&options);
   options.public_read = 1;
-  runtime = lc_thread_lonejson_runtime();
+  rc = lc_workflow_require_json_runtime(workflow->client, &runtime, error);
+  if (rc != LC_OK)
+    return rc;
   if (lease != NULL) {
     rc = lc_lease_load(lease, &lc_workflow_command_record_map, &record, NULL,
                        &load_result, error);
@@ -1357,6 +1391,7 @@ lc_workflow_stage_command_terminal(lc_workflow_transaction_handle *transaction,
   lc_get_res load_result;
   lc_attach_req attach;
   lc_attach_res attach_result;
+  lonejson *runtime;
   time_t now;
   int rc;
 
@@ -1383,14 +1418,17 @@ lc_workflow_stage_command_terminal(lc_workflow_transaction_handle *transaction,
   }
   memset(&record, 0, sizeof(record));
   memset(&load_result, 0, sizeof(load_result));
+  rc = lc_workflow_require_json_runtime(transaction->workflow->client, &runtime,
+                                        error);
+  if (rc != LC_OK)
+    return rc;
   rc =
       lc_lease_load(transaction->command_lease, &lc_workflow_command_record_map,
                     &record, NULL, &load_result, error);
   if (rc != LC_OK)
     return rc;
   if (record.state == NULL || strcmp(record.state, "pending") != 0) {
-    lc_thread_lonejson_runtime()->cleanup(
-        lc_thread_lonejson_runtime(), &lc_workflow_command_record_map, &record);
+    runtime->cleanup(runtime, &lc_workflow_command_record_map, &record);
     lc_get_res_cleanup(&load_result);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "command receipt is already terminal", NULL, NULL,
@@ -1398,8 +1436,7 @@ lc_workflow_stage_command_terminal(lc_workflow_transaction_handle *transaction,
   }
   now = time(NULL);
   if (now == (time_t)-1) {
-    lc_thread_lonejson_runtime()->cleanup(
-        lc_thread_lonejson_runtime(), &lc_workflow_command_record_map, &record);
+    runtime->cleanup(runtime, &lc_workflow_command_record_map, &record);
     lc_get_res_cleanup(&load_result);
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "failed to read command terminal clock", NULL, NULL,
@@ -1437,8 +1474,7 @@ lc_workflow_stage_command_terminal(lc_workflow_transaction_handle *transaction,
                                                    transaction->command_lease);
     }
   }
-  lc_thread_lonejson_runtime()->cleanup(
-      lc_thread_lonejson_runtime(), &lc_workflow_command_record_map, &record);
+  runtime->cleanup(runtime, &lc_workflow_command_record_map, &record);
   lc_get_res_cleanup(&load_result);
   if (rc == LC_OK)
     transaction->command_terminal = 1;
@@ -1528,13 +1564,14 @@ static void lc_workflow_outbox_record_clear(lc_client_handle *client,
 }
 
 static void
-lc_workflow_outbox_record_loaded_clear(lc_workflow_outbox_record *record) {
+lc_workflow_outbox_record_loaded_clear(lc_client_handle *client,
+                                       lc_workflow_outbox_record *record) {
   lonejson *runtime;
 
   if (record == NULL)
     return;
-  runtime = lc_thread_lonejson_runtime();
-  runtime->cleanup(runtime, &lc_workflow_outbox_record_map, record);
+  runtime = lc_workflow_json_runtime(client);
+  lc_lonejson_cleanup_value(runtime, &lc_workflow_outbox_record_map, record);
 }
 
 static int lc_workflow_outbox_record_copy(lc_client_handle *client,
@@ -1870,7 +1907,11 @@ static int lc_workflow_pouch_shared_live_claim(lc_workflow_handle *workflow,
   lc_get_opts_init(&options);
   options.public_read = 1;
   lc_error_init(&load_error);
-  runtime = lc_thread_lonejson_runtime();
+  runtime = lc_workflow_json_runtime(client);
+  if (runtime == NULL) {
+    lc_error_cleanup(&load_error);
+    return 0;
+  }
   rc = lc_load_in_namespace(&client->pub, workflow->namespace_name, key,
                             &lc_workflow_outbox_record_map, &record, &options,
                             &result, &load_error);
@@ -1984,7 +2025,11 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   memset(&verified, 0, sizeof(verified));
   memset(&result, 0, sizeof(result));
   memset(&verify_result, 0, sizeof(verify_result));
-  runtime = lc_thread_lonejson_runtime();
+  rc = lc_workflow_require_json_runtime(client, &runtime, error);
+  if (rc != LC_OK) {
+    lc_workflow_rollback_lease(lease);
+    return rc;
+  }
   job = NULL;
   recovered_to_pending = 0;
   rc = lc_lease_load(lease, &lc_workflow_outbox_record_map, &record, NULL,
@@ -3157,7 +3202,10 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
   lc_workflow_transaction_handle *transaction =
       (lc_workflow_transaction_handle *)self;
   lc_release_req request;
+  lc_txn_replay_req replay_request;
+  lc_txn_replay_res replay_result;
   char **notification_keys;
+  char *pouch_txn_id;
   size_t i;
   int rc;
   if (transaction == NULL || transaction->terminal)
@@ -3165,11 +3213,34 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
                         "workflow transaction is closed", NULL, NULL, NULL);
   rc = LC_OK;
   notification_keys = NULL;
+  pouch_txn_id = NULL;
+  /* A Pouch transaction reports each individual release as successful after it
+   * casts its vote. For a multi-participant commit, replay the durable record
+   * after every vote so the workflow never reports success or wakes an outbox
+   * dispatcher when expiry or another participant caused XA rollback. */
+  if (!rollback && transaction->workflow->client->is_pouch &&
+      transaction->lease_count > 1U) {
+    const char *txn_id =
+        transaction->leases[0] == NULL ? NULL : transaction->leases[0]->txn_id;
+
+    if (txn_id == NULL || txn_id[0] == '\0') {
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "Pouch workflow transaction is missing its xid", NULL,
+                          NULL, NULL);
+    }
+    pouch_txn_id = lc_client_strdup(transaction->workflow->client, txn_id);
+    if (pouch_txn_id == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to preserve Pouch workflow xid", NULL, NULL,
+                          NULL);
+    }
+  }
   if (!rollback) {
     notification_keys = (char **)lc_client_calloc(transaction->workflow->client,
                                                   transaction->lease_count,
                                                   sizeof(*notification_keys));
     if (notification_keys == NULL) {
+      lc_client_free(transaction->workflow->client, pouch_txn_id);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to prepare workflow dispatch signals", NULL,
                           NULL, NULL);
@@ -3184,6 +3255,7 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
             lc_client_free(transaction->workflow->client, notification_keys[i]);
           }
           lc_client_free(transaction->workflow->client, notification_keys);
+          lc_client_free(transaction->workflow->client, pouch_txn_id);
           return lc_error_set(error, LC_ERR_NOMEM, 0L,
                               "failed to prepare workflow dispatch signals",
                               NULL, NULL, NULL);
@@ -3204,6 +3276,7 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
                        notification_keys == NULL ? NULL : notification_keys[j]);
       }
       lc_client_free(transaction->workflow->client, notification_keys);
+      lc_client_free(transaction->workflow->client, pouch_txn_id);
       return rc;
     }
     lc_workflow_transaction_invalidate_lease_participant(
@@ -3211,6 +3284,32 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
     transaction->leases[i] = NULL;
   }
   transaction->terminal = 1;
+  if (pouch_txn_id != NULL) {
+    lc_txn_replay_req_init(&replay_request);
+    memset(&replay_result, 0, sizeof(replay_result));
+    replay_request.txn_id = pouch_txn_id;
+    rc = lc_txn_replay(&transaction->workflow->client->pub, &replay_request,
+                       &replay_result, error);
+    if (rc == LC_OK && (replay_result.state == NULL ||
+                        strcmp(replay_result.state, "commit") != 0)) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow transaction was rolled back before commit",
+                        replay_result.state == NULL
+                            ? "Pouch transaction has no terminal state"
+                            : replay_result.state,
+                        NULL, NULL);
+    }
+    lc_txn_replay_res_cleanup(&replay_result);
+    lc_client_free(transaction->workflow->client, pouch_txn_id);
+    if (rc != LC_OK) {
+      for (i = 0U; i < transaction->lease_count; ++i) {
+        lc_client_free(transaction->workflow->client,
+                       notification_keys == NULL ? NULL : notification_keys[i]);
+      }
+      lc_client_free(transaction->workflow->client, notification_keys);
+      return rc;
+    }
+  }
   for (i = 0U; i < transaction->lease_count; ++i) {
     if (lc_workflow_is_outbox_key(
             notification_keys == NULL ? NULL : notification_keys[i])) {
@@ -3610,7 +3709,12 @@ static int lc_workflow_resume_command_method(
   }
   memset(&record, 0, sizeof(record));
   memset(&load_result, 0, sizeof(load_result));
-  runtime = lc_thread_lonejson_runtime();
+  rc = lc_workflow_require_json_runtime(workflow->client, &runtime, error);
+  if (rc != LC_OK) {
+    lc_workflow_rollback_lease(lease);
+    free(key);
+    return rc;
+  }
   rc = lc_lease_load(lease, &lc_workflow_command_record_map, &record, NULL,
                      &load_result, error);
   if (rc == LC_OK &&
@@ -3747,7 +3851,12 @@ static int lc_workflow_open_dead_letter(lc_workflow_handle *workflow,
   rc = lc_acquire(&workflow->client->pub, &acquire, lease_out, error);
   if (rc != LC_OK)
     return rc;
-  runtime = lc_thread_lonejson_runtime();
+  rc = lc_workflow_require_json_runtime(workflow->client, &runtime, error);
+  if (rc != LC_OK) {
+    lc_workflow_rollback_lease(*lease_out);
+    *lease_out = NULL;
+    return rc;
+  }
   rc = lc_lease_load(*lease_out, &lc_workflow_outbox_record_map, record, NULL,
                      &result, error);
   lc_get_res_cleanup(&result);
@@ -3786,7 +3895,7 @@ static int lc_workflow_replay_dead_letter_method(lc_workflow *self,
     return rc;
   now = time(NULL);
   if (now == (time_t)-1) {
-    lc_workflow_outbox_record_loaded_clear(&record);
+    lc_workflow_outbox_record_loaded_clear(workflow->client, &record);
     lc_workflow_rollback_lease(lease);
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "failed to read workflow replay clock", NULL, NULL,
@@ -3810,7 +3919,7 @@ static int lc_workflow_replay_dead_letter_method(lc_workflow *self,
   record.dispatch_state = original_dispatch_state;
   record.last_error = original_last_error;
   record.prior_dead_letter_error = original_prior_dead_letter_error;
-  lc_workflow_outbox_record_loaded_clear(&record);
+  lc_workflow_outbox_record_loaded_clear(workflow->client, &record);
   if (rc != LC_OK) {
     lc_workflow_rollback_lease(lease);
     return rc;
@@ -3974,7 +4083,7 @@ static int lc_workflow_delete_dead_letter_method(lc_workflow *self,
     lc_release_req_init(&release);
     rc = lc_lease_release(lease, &release, error);
   }
-  lc_workflow_outbox_record_loaded_clear(&record);
+  lc_workflow_outbox_record_loaded_clear(workflow->client, &record);
   if (rc != LC_OK)
     lc_workflow_rollback_lease(lease);
   return rc;
@@ -4028,7 +4137,7 @@ static int lc_workflow_export_dead_letter_key(
   release.rollback = 1;
   if (lc_lease_release(lease, &release, NULL) != LC_OK)
     lc_lease_close(lease);
-  lc_workflow_outbox_record_loaded_clear(&record);
+  lc_workflow_outbox_record_loaded_clear(capture->workflow->client, &record);
   if (rc == LC_OK) {
     capture->first = 0;
     ++capture->result->exported;

@@ -75,6 +75,7 @@ extern lc_workflow_test_failure_hook_fn
 extern void *lc_workflow_test_before_periodic_recovery_schedule_context;
 int lc_workflow_test_retry_is_not_eligible(lc_unix_seconds not_before_unix,
                                            lc_unix_seconds now);
+void lc_lonejson_test_fail_thread_runtime_once(void);
 #endif
 
 struct lc_client_handle {

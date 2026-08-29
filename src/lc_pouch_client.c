@@ -4865,7 +4865,7 @@ lc_pouch_query_index_process_keys(lc_pouch_query_scan_context *context,
       rc = lc_pouch_query_index_process_exact_key(context, &keys->keys[index],
                                                   error);
       if (rc != LC_OK || context->page_full) {
-        return rc;
+        return rc == LC_POUCH_STATE_READ_MANY_STOP ? LC_OK : rc;
       }
     }
     return LC_OK;
@@ -5147,11 +5147,11 @@ run_index_query:
         collect_context.candidate_exact = 1;
         needle_len = strlen(plan.values[value_index]);
         exact_seq = 0UL;
-        rc = lc_pouch_query_index_visit_contains_complete(
+        rc = lc_pouch_query_index_visit_contains_complete_at_snapshot(
             scan->client->pouch, scan->namespace_name, plan.field,
             plan.values[value_index], plan.ignore_case,
             lc_pouch_query_index_key_collect_marked, &collect_context,
-            &exact_seq, &text_complete, error);
+            &flushed_seq, &exact_seq, &text_complete, error);
         if (rc == LC_OK && exact_seq > value_seq) {
           value_seq = exact_seq;
         }

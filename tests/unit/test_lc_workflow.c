@@ -39,6 +39,15 @@ typedef struct workflow_fail_once {
   unsigned int calls;
 } workflow_fail_once;
 
+typedef struct workflow_inbox_runtime_failure {
+  lc_workflow *workflow;
+  lc_inbox_message message;
+  lc_workflow_transaction *transaction;
+  lc_inbox_accept_result result;
+  int rc;
+  int error_code;
+} workflow_inbox_runtime_failure;
+
 typedef struct workflow_delete_outbox_hook {
   lc_client *client;
   const char *namespace_name;
@@ -58,6 +67,23 @@ static int workflow_fail_first_call(void *context, lc_error *error) {
                         NULL);
   }
   return LC_OK;
+}
+
+static void *workflow_duplicate_inbox_without_json_runtime(void *context) {
+  workflow_inbox_runtime_failure *attempt =
+      (workflow_inbox_runtime_failure *)context;
+  lc_error error;
+
+  lc_error_init(&error);
+  attempt->transaction = NULL;
+  memset(&attempt->result, 0, sizeof(attempt->result));
+  lc_lonejson_test_fail_thread_runtime_once();
+  attempt->rc =
+      lc_workflow_accept_inbox(attempt->workflow, &attempt->message,
+                               &attempt->transaction, &attempt->result, &error);
+  attempt->error_code = error.code;
+  lc_error_cleanup(&error);
+  return NULL;
 }
 
 static void workflow_delete_outbox_hook_init(workflow_delete_outbox_hook *hook,
@@ -1382,6 +1408,91 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
 }
 
 static void
+test_pouch_duplicate_inbox_handles_json_runtime_failure(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  workflow_inbox_runtime_failure attempt;
+  lc_inbox_message message;
+  lc_inbox_accept_result result;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_error error;
+  pthread_t thread;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "json-runtime-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  memset(&attempt, 0, sizeof(attempt));
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-json-runtime";
+  workflow_config.owner = "workflow-json-runtime-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_inbox_message_init(&message);
+  message.consumer_id = "json-runtime-consumer";
+  message.source_kind = "http";
+  message.source_id = "json-runtime-gateway";
+  message.message_id = "json-runtime-message";
+  message.payload_digest = "json-runtime-digest";
+  message.operation_id = "json-runtime-operation";
+  memset(&result, 0, sizeof(result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &message, &transaction,
+                                            &result, &error),
+                   LC_OK);
+  assert_true(result.accepted);
+  assert_non_null(transaction);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+
+  /* A duplicate on a fresh host thread must report the Pouch JSON-runtime
+   * allocation failure safely. Previously the duplicate path could dereference
+   * that missing runtime while decoding and cleaning its leased record. */
+  attempt.workflow = workflow;
+  attempt.message = message;
+  assert_int_equal(pthread_create(&thread, NULL,
+                                  workflow_duplicate_inbox_without_json_runtime,
+                                  &attempt),
+                   0);
+  assert_int_equal(pthread_join(thread, NULL), 0);
+  assert_int_equal(attempt.rc, LC_ERR_NOMEM);
+  assert_int_equal(attempt.error_code, LC_ERR_NOMEM);
+  assert_null(attempt.transaction);
+  assert_false(attempt.result.accepted);
+  assert_false(attempt.result.duplicate);
+
+  /* The one-shot failure does not change the durable duplicate barrier. */
+  memset(&result, 0, sizeof(result));
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &message, &transaction,
+                                            &result, &error),
+                   LC_OK);
+  assert_null(transaction);
+  assert_true(result.duplicate);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
 test_pouch_participant_cleanup_after_transaction_close(void **state) {
   char root[256];
   char template_path[256];
@@ -2004,12 +2115,12 @@ static void test_pouch_transient_claim_failure_is_rescheduled(void **state) {
   lc_workflow_config workflow_config;
   lc_outbox_entry entry;
   lc_outbox_receipt receipt;
-  lc_workflow_stats stats;
   lc_client *client;
   lc_workflow *workflow;
   lc_workflow_transaction *transaction;
   lc_outbox_job *job;
   lc_source *payload;
+  lc_workflow_stats stats;
   lc_error error;
   workflow_fail_once failure;
 
@@ -2910,6 +3021,109 @@ test_pouch_multikey_terminal_failure_publishes_nothing(void **state) {
   transaction = NULL;
   workflow_assert_public_state_absent(client, receipt.outbox_key, &error);
   workflow_assert_public_state_absent(client, "domain-atomic", &error);
+
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_expired_multikey_commit_reports_rollback_without_signal(
+    void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_workflow_participant_request participant_request;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_workflow_participant *participant;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_source *domain_state;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "expired-terminal-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  participant = NULL;
+  job = NULL;
+  payload = NULL;
+  domain_state = NULL;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client_config.default_namespace = "workflow-expired-terminal";
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-expired-terminal";
+  workflow_config.owner = "workflow-expired-terminal-test";
+  workflow_config.transaction_ttl_seconds = 1L;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "expired-terminal-operation";
+  entry.effect_id = "expired-terminal-effect";
+  entry.effect_key = "expired-terminal-effect-key";
+  entry.kind = "test";
+  entry.destination = "atomic://expired-terminal";
+  entry.content_type = "text/plain";
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_source_from_memory("atomic", 6U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  lc_workflow_participant_request_init(&participant_request);
+  participant_request.acquire.namespace_name = "workflow-expired-terminal";
+  participant_request.acquire.key = "domain-expired-terminal";
+  participant_request.acquire.owner = "workflow-expired-terminal-test";
+  participant_request.acquire.ttl_seconds = 30L;
+  assert_int_equal(lc_workflow_transaction_acquire(
+                       transaction, &participant_request, &participant, &error),
+                   LC_OK);
+  assert_int_equal(
+      lc_source_from_memory("{\"committed\":true}", 18U, &domain_state, &error),
+      LC_OK);
+  assert_int_equal(participant->update(participant, domain_state, NULL, &error),
+                   LC_OK);
+  lc_source_close(domain_state);
+  domain_state = NULL;
+  lc_workflow_participant_close(participant);
+  participant = NULL;
+
+  /* The outbox lease expires while the domain participant remains live. Pouch
+   * correctly decides the shared XA record as rollback; the workflow surface
+   * must expose that outcome and must not publish a false dispatch signal. */
+  sleep(workflow_claim_expiry_wait_seconds());
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  workflow_assert_public_state_absent(client, receipt.outbox_key, &error);
+  workflow_assert_public_state_absent(client, "domain-expired-terminal",
+                                      &error);
+  assert_int_equal(lc_workflow_next(workflow, 250L, &job, &error), LC_OK);
+  assert_null(job);
 
   lc_outbox_receipt_cleanup(&receipt);
   lc_source_close(payload);
@@ -4797,6 +5011,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts),
       cmocka_unit_test(test_pouch_outbox_transaction_and_duplicate),
+      cmocka_unit_test(test_pouch_duplicate_inbox_handles_json_runtime_failure),
       cmocka_unit_test(test_pouch_participant_cleanup_after_transaction_close),
       cmocka_unit_test(
           test_pouch_participant_allocation_failure_rolls_back_enrollment),
@@ -4823,6 +5038,8 @@ int main(void) {
           test_pouch_workflow_periodic_schedule_failure_does_not_deadlock),
       cmocka_unit_test(test_pouch_shared_command_resume_is_durable),
       cmocka_unit_test(test_pouch_multikey_terminal_failure_publishes_nothing),
+      cmocka_unit_test(
+          test_pouch_expired_multikey_commit_reports_rollback_without_signal),
       cmocka_unit_test(test_pouch_reconciliation_retains_overflow_request),
       cmocka_unit_test(test_pouch_reconciliation_skips_disappeared_outbox),
       cmocka_unit_test(test_pouch_handoff_skips_disappeared_outbox),

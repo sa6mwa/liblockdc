@@ -1438,16 +1438,14 @@ published; it does not reopen derived artifacts merely to validate a no-op.
 operations and rebuild damaged artifacts from durable state.
 
 `flush_index(mode=wait)` publishes all state accepted by the indexer but does
-not deserialize every just-written derived artifact solely to populate a
-handle-local cache. This matches Go disk's flush boundary and keeps durable
-publication out of the query-cache hot path. The exclusive writer transfers
-newly built, body-free concrete-field text and trigram generations directly
-into its full-text cache; logical whole-document text queries union those
-fields. Other query representations load lazily on first use, while open-time
-cache warming remains best effort. The packed binary artifact remains the sole
-durable source: reopened handles, shared roots, and cache-allocation failure
-use the normal validated packed-artifact decoder. No cache retains source JSON
-or full document bodies.
+not retain or adopt a just-written derived artifact in a handle-local query
+cache. This matches Go disk's flush boundary and keeps durable publication out
+of the query-cache hot path. Query representations load lazily from the
+validated packed artifact on first use, while open-time cache warming remains
+best effort. The packed binary artifact remains the sole durable source:
+reopened handles, shared roots, and cache-allocation failure use the normal
+validated packed-artifact decoder. No cache retains source JSON or full
+document bodies.
 
 Exclusive roots serialize derived artifact publication with a root-local flush
 mutex. Shared roots instead hold the root durable-mutation guard from the
@@ -1633,13 +1631,15 @@ Indexed query requirements:
   semantics;
 - query-index artifacts are derived from logstore projections and are
   rebuildable after corruption or loss;
-- query-index segment headers are plaintext metadata. They contain format,
-  sequence, row counts, and hashes only;
-- every non-header query-index segment component is stored in one packed binary
+- query-index manifests carry each segment's sequence, row count, row hash,
+  delete summary, posting-completeness flags, and exactly one signature for
+  that segment's packed artifact;
+- every query-index segment component is stored in one packed binary
   artifact named `query.<segment>.query.index.lcpseg`. The packed artifact
   contains the document table, exact/presence/range/text/trigram/temporal term
-  generations, and the delete set. The logical component paths remain
-  in-memory identifiers for manifest signatures and parser routing only;
+  generations, and the delete set. The manifest has one `artifact` record per
+  segment (artifact index `0`) for this file; logical component paths are
+  in-memory decoder identifiers only;
 - encrypted packed query-index artifacts store ciphertext followed by
   descriptor bytes and a fixed binary footer. Pouch reads the footer, bounds
   decryption to the ciphertext span, and does not create separate descriptor
@@ -1648,14 +1648,13 @@ Indexed query requirements:
   the packed artifact. The manifest's `delete_count=0` and empty-set hash are
   the authoritative empty value; non-empty delete components must match the
   manifest count and hash;
-- query-index manifests and any artifact that could be referenced by the
-  current manifest are installed by same-directory temporary-file rename
-  without fsync because they are derived files. A new segment/header whose
-  path is proven newer than a valid current manifest may be written directly:
-  an interrupted write leaves only an unreachable artifact, and the manifest
-  switch still remains the atomic publication point. Recovery validates the
-  manifest, header, and packed artifact signatures and rebuilds from the
-  logstore if any derived write was interrupted or torn;
+- query-index manifests and packed segments are installed by same-directory
+  temporary-file rename without fsync because they are derived files. A new
+  packed segment whose path is proven newer than a valid current manifest may
+  be written directly: an interrupted write leaves only an unreachable
+  artifact, and the manifest switch remains the atomic publication point.
+  Recovery validates the manifest metadata and packed artifact signature, and
+  rebuilds from the logstore if any derived write was interrupted or torn;
 - normal append flushes do not sweep the index directory for orphaned derived
   artifacts. Initial manifest bootstrap also skips a sweep because no artifact
   can be referenced before that manifest is published; an interrupted
@@ -1664,10 +1663,9 @@ Indexed query requirements:
   existing manifest, repair/validated flushes, and retired-segment cleanup
   paths perform orphan cleanup, so foreground append flush latency is not tied
   to directory size;
-- indexed queries may reuse per-client artifact-cache trust for segment headers
-  after the current manifest has validated the same path, signature, sequence,
-  row count, and row hash. If the signature changes, pouch rereads the header
-  and validates it normally;
+- indexed queries validate segment completeness from the durable manifest and
+  validate the packed artifact against its recorded signature; they do not
+  depend on a standalone segment-header file;
 - a successful manifest sequence read records per-client manifest trust for
   that namespace/index sequence. A later non-validating ensure-current call may
   skip rereading the manifest when the state index sequence is unchanged;
@@ -1699,11 +1697,16 @@ Indexed query requirements:
   posting lists;
 - `/...` is a logical whole-document text selector, not a public state field.
   Pouch resolves it by unioning the concrete string fields, matching Go disk's
-  index contract. It never duplicates each text or trigram posting into a
+  index contract. It never duplicates each raw-text or trigram posting into a
   synthetic all-text field, so index publication remains bounded by the real
-  document projections. Trigrams remain a candidate filter and text terms
-  reject false positives. Older segments carrying the former private all-text
-  projection remain readable, but newly published segments omit it.
+  document projections. It may additionally emit a bounded private posting for
+  each ASCII letter-or-digit token from a short retained text value. These
+  postings prove positive case-insensitive whole-token `icontains` matches and
+  let an all-text query bypass raw-term verification when they cover every
+  trigram candidate. They never prove a negative: punctuation, non-ASCII and
+  partial-token needles, unindexed long values, and partially covered
+  candidates retain the normal trigram-plus-verifier path. Trigrams remain a
+  candidate filter and text terms reject false positives.
 
 ## Staged State
 

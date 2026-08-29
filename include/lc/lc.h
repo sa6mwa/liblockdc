@@ -2297,7 +2297,8 @@ struct lc_workflow_transaction {
   /** Fails this transaction's owned pending command with a safe result. */
   int (*fail_command)(lc_workflow_transaction *self,
                       const lc_command_result *result, lc_error *error);
-  /** Commits every enrolled participant and consumes their lease handles. */
+  /** Commits every enrolled participant and consumes their lease handles.
+   * Returns an error when the endpoint durably rolls the transaction back. */
   int (*commit)(lc_workflow_transaction *self, lc_error *error);
   /** Rolls back every enrolled participant and consumes their lease handles. */
   int (*rollback)(lc_workflow_transaction *self, lc_error *error);
@@ -3616,7 +3617,8 @@ int lc_workflow_transaction_complete_command(
 int lc_workflow_transaction_fail_command(lc_workflow_transaction *transaction,
                                          const lc_command_result *result,
                                          lc_error *error);
-/** Commits all enrolled participants and consumes their lease handles. */
+/** Commits all enrolled participants and consumes their lease handles.
+ * Returns an error when the endpoint durably rolls the transaction back. */
 int lc_workflow_transaction_commit(lc_workflow_transaction *transaction,
                                    lc_error *error);
 /** Rolls back all enrolled participants and consumes their lease handles. */

@@ -185,6 +185,15 @@ int lc_pouch_query_index_visit_contains_complete(
     const char *needle, int ignore_case,
     lc_pouch_query_index_key_visit_fn visit, void *context,
     lc_pouch_generation *index_seq, int *complete, lc_error *error);
+/* Uses a caller-held exclusive-Pouch query snapshot. The snapshot must come
+ * from lc_pouch_state_query_index_seq() and have been made current before this
+ * call. Shared-writer Pouch retains its ordinary durable-read behavior. */
+int lc_pouch_query_index_visit_contains_complete_at_snapshot(
+    lc_pouch *pouch, const char *namespace_name, const char *field,
+    const char *needle, int ignore_case,
+    lc_pouch_query_index_key_visit_fn visit, void *context,
+    const lc_pouch_generation *state_index_seq_snapshot,
+    lc_pouch_generation *index_seq, int *complete, lc_error *error);
 int lc_pouch_query_index_visit_contains_candidates(
     lc_pouch *pouch, const char *namespace_name, const char *field,
     const char *needle, int ignore_case,
