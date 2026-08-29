@@ -9684,8 +9684,7 @@ static int lc_pouch_query_index_text_generation_add_term(
 }
 
 static int lc_pouch_query_index_text_token_byte(unsigned char value) {
-  return (value >= 'a' && value <= 'z') ||
-         (value >= 'A' && value <= 'Z') ||
+  return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') ||
          (value >= '0' && value <= '9');
 }
 
@@ -9731,8 +9730,8 @@ static int lc_pouch_query_index_text_generation_add_all_text_tokens(
       int low;
 
       high = lc_pouch_query_index_hex_value((unsigned char)value_hex[index]);
-      low = lc_pouch_query_index_hex_value(
-          (unsigned char)value_hex[index + 1U]);
+      low =
+          lc_pouch_query_index_hex_value((unsigned char)value_hex[index + 1U]);
       if (high < 0 || low < 0) {
         return lc_error_set(error, LC_ERR_INVALID, 0L,
                             "pouch text token source has invalid hex", NULL,
@@ -9744,8 +9743,7 @@ static int lc_pouch_query_index_text_generation_add_all_text_tokens(
     if (word) {
       if (!token_overlong) {
         if (token_length < LC_POUCH_QUERY_INDEX_TEXT_TOKEN_BYTES_MAX) {
-          token[token_length++] =
-              (char)lc_pouch_query_index_ascii_lower(value);
+          token[token_length++] = (char)lc_pouch_query_index_ascii_lower(value);
         } else {
           token_overlong = 1;
         }
@@ -9756,8 +9754,8 @@ static int lc_pouch_query_index_text_generation_add_all_text_tokens(
       char *token_hex;
 
       token[token_length] = '\0';
-      token_hex = lc_pouch_query_index_hex_encode_bytes(allocator, token,
-                                                         token_length);
+      token_hex =
+          lc_pouch_query_index_hex_encode_bytes(allocator, token, token_length);
       if (token_hex == NULL) {
         rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate pouch text token", NULL, NULL,
@@ -9805,9 +9803,8 @@ static int lc_pouch_query_index_all_text_token_hex_from_needle(
       return LC_OK;
     }
   }
-  *token_hex =
-      lc_pouch_query_index_hex_encode_folded_ascii_bytes(allocator, needle,
-                                                          length);
+  *token_hex = lc_pouch_query_index_hex_encode_folded_ascii_bytes(
+      allocator, needle, length);
   if (*token_hex == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to allocate pouch text lookup token", NULL,
@@ -12838,8 +12835,8 @@ int lc_pouch_query_index_visit(lc_pouch *pouch, const char *namespace_name,
   memset(&doc_table_cache_borrows, 0, sizeof(doc_table_cache_borrows));
   rc = lc_pouch_query_index_segmented_collect(
       pouch, namespace_name, LC_POUCH_QUERY_INDEX_SEGMENTED_ALL, NULL, 0U, NULL,
-      NULL, NULL, 0, 0, 0, NULL, NULL, &rows, &doc_table_cache_borrows,
-      NULL, index_seq, NULL, error);
+      NULL, NULL, 0, 0, 0, NULL, NULL, &rows, &doc_table_cache_borrows, NULL,
+      index_seq, NULL, error);
   if (rc == LC_OK) {
     for (row_index = 0U; rc == LC_OK && row_index < rows.count; ++row_index) {
       lc_pouch_index_result_row *row;
@@ -14160,8 +14157,7 @@ static int lc_pouch_query_index_generation_cache_parse(
          value_type != (unsigned char)'b' && value_type != (unsigned char)'z' &&
          value_type != (unsigned char)LC_POUCH_QUERY_INDEX_EXACT_HASH_TYPE &&
          value_type != (unsigned char)LC_POUCH_QUERY_INDEX_TEXT_PREFIX_TYPE &&
-         value_type !=
-             (unsigned char)LC_POUCH_QUERY_INDEX_TEXT_TOKEN_TYPE) ||
+         value_type != (unsigned char)LC_POUCH_QUERY_INDEX_TEXT_TOKEN_TYPE) ||
         !lc_pouch_query_index_hex_token_valid(field_hex) ||
         !lc_pouch_query_index_hex_token_valid(value_hex)) {
       rc = LC_ERR_INVALID;
@@ -16958,8 +16954,8 @@ static int lc_pouch_query_index_segmented_collect(
                 &pouch->allocator, &token_docids, error);
           }
           if (rc == LC_OK && trigram_docids.count > 0U &&
-              lc_pouch_query_index_docid_list_is_subset_sorted(
-                  &trigram_docids, &token_docids)) {
+              lc_pouch_query_index_docid_list_is_subset_sorted(&trigram_docids,
+                                                               &token_docids)) {
             exact_docids = token_docids;
             memset(&token_docids, 0, sizeof(token_docids));
             token_covers_candidates = 1;

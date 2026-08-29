@@ -28610,8 +28610,8 @@ test_query_keys_index_all_text_compacts_candidate_matches(void **state) {
 /* All-text tokens only prove positives. A whole-word match may use the
  * durable token posting, while a partial-word match must still reach the raw
  * verifier; both cases must survive a fresh client opening the same Pouch. */
-static void
-test_query_keys_index_all_text_token_postings_preserve_substrings(void **state) {
+static void test_query_keys_index_all_text_token_postings_preserve_substrings(
+    void **state) {
   static const char namespace_name[] = "docs/query-index-all-text-tokens";
   static const char audit_selector[] =
       "{\"icontains\":{\"field\":\"/...\",\"value\":\"audit\"}}";

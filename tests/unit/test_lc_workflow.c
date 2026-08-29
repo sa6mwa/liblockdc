@@ -1167,9 +1167,9 @@ test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts(void **state) {
 
   entry.trace_context = "trace-first";
   entry.payload_digest = "sha256:immutable-envelope-changed-payload";
-  assert_int_equal(lc_source_from_memory("changed", 7U, &conflicting_payload,
-                                         &error),
-                   LC_OK);
+  assert_int_equal(
+      lc_source_from_memory("changed", 7U, &conflicting_payload, &error),
+      LC_OK);
   assert_int_equal(lc_workflow_append_outbox(workflow, &entry,
                                              conflicting_payload, &transaction,
                                              &receipt, &error),

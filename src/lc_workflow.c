@@ -715,10 +715,10 @@ static int lc_workflow_outbox_key(lc_workflow_handle *workflow,
   if (entry == NULL || entry->operation_id == NULL ||
       entry->effect_id == NULL || entry->effect_key == NULL ||
       entry->payload_digest == NULL || entry->kind == NULL ||
-      entry->destination == NULL ||
-      entry->operation_id[0] == '\0' || entry->effect_id[0] == '\0' ||
-      entry->effect_key[0] == '\0' || entry->payload_digest[0] == '\0' ||
-      entry->kind[0] == '\0' || entry->destination[0] == '\0') {
+      entry->destination == NULL || entry->operation_id[0] == '\0' ||
+      entry->effect_id[0] == '\0' || entry->effect_key[0] == '\0' ||
+      entry->payload_digest[0] == '\0' || entry->kind[0] == '\0' ||
+      entry->destination[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "outbox operation, effect, effect key, payload digest, "
                         "kind, and destination are required",
@@ -1159,29 +1159,28 @@ static int lc_workflow_existing_outbox(lc_workflow_handle *workflow,
                               key, &lc_workflow_outbox_record_map, &record,
                               &options, &result, error);
   }
-  if (rc == LC_OK && (result.no_content || record.record_type == NULL ||
-                      record.operation_id == NULL || record.effect_id == NULL ||
-                      record.effect_key == NULL ||
-                      record.payload_digest == NULL || record.message_id == NULL ||
-                      record.kind == NULL || record.destination == NULL ||
-                      record.content_type == NULL ||
-                      strcmp(record.record_type, "lockdc.outbox.v1") != 0 ||
-                      strcmp(record.operation_id, entry->operation_id) != 0 ||
-                      strcmp(record.effect_id, entry->effect_id) != 0 ||
-                      strcmp(record.effect_key, entry->effect_key) != 0 ||
-                      strcmp(record.payload_digest, entry->payload_digest) !=
-                          0 ||
-                      !lc_workflow_nullable_string_equal(record.causation_id,
-                                                         entry->causation_id) ||
-                      strcmp(record.kind, entry->kind) != 0 ||
-                      !lc_workflow_nullable_string_equal(
-                          record.schema_version, entry->schema_version) ||
-                      strcmp(record.destination, entry->destination) != 0 ||
-                      strcmp(record.content_type, content_type) != 0 ||
-                      !lc_workflow_nullable_string_equal(record.headers_json,
-                                                         entry->headers_json) ||
-                      !lc_workflow_nullable_string_equal(
-                          record.trace_context, entry->trace_context))) {
+  if (rc == LC_OK &&
+      (result.no_content || record.record_type == NULL ||
+       record.operation_id == NULL || record.effect_id == NULL ||
+       record.effect_key == NULL || record.payload_digest == NULL ||
+       record.message_id == NULL || record.kind == NULL ||
+       record.destination == NULL || record.content_type == NULL ||
+       strcmp(record.record_type, "lockdc.outbox.v1") != 0 ||
+       strcmp(record.operation_id, entry->operation_id) != 0 ||
+       strcmp(record.effect_id, entry->effect_id) != 0 ||
+       strcmp(record.effect_key, entry->effect_key) != 0 ||
+       strcmp(record.payload_digest, entry->payload_digest) != 0 ||
+       !lc_workflow_nullable_string_equal(record.causation_id,
+                                          entry->causation_id) ||
+       strcmp(record.kind, entry->kind) != 0 ||
+       !lc_workflow_nullable_string_equal(record.schema_version,
+                                          entry->schema_version) ||
+       strcmp(record.destination, entry->destination) != 0 ||
+       strcmp(record.content_type, content_type) != 0 ||
+       !lc_workflow_nullable_string_equal(record.headers_json,
+                                          entry->headers_json) ||
+       !lc_workflow_nullable_string_equal(record.trace_context,
+                                          entry->trace_context))) {
     rc =
         lc_error_set(error, LC_ERR_SERVER, 0L,
                      "outbox immutable fields conflict with an existing record",
