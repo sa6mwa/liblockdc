@@ -34,6 +34,11 @@ typedef void (*lc_workflow_test_after_reconcile_query_hook_fn)(void *context);
 extern lc_workflow_test_after_reconcile_query_hook_fn
     lc_workflow_test_after_reconcile_query_hook;
 extern void *lc_workflow_test_after_reconcile_query_context;
+typedef void (*lc_workflow_test_dead_letter_replay_client_hook_fn)(
+    lc_client *client, lc_client *dispatcher_client, void *context);
+extern lc_workflow_test_dead_letter_replay_client_hook_fn
+    lc_workflow_test_dead_letter_replay_client_hook;
+extern void *lc_workflow_test_dead_letter_replay_client_context;
 typedef void (*lc_workflow_test_hook_fn)(void *context);
 extern lc_workflow_test_hook_fn lc_workflow_test_after_close_requested_hook;
 extern void *lc_workflow_test_after_close_requested_context;

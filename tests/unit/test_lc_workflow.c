@@ -189,6 +189,8 @@ static int workflow_duration_overflows_unix_range(long duration) {
 static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_after_close_requested_hook = NULL;
   lc_workflow_test_after_close_requested_context = NULL;
+  lc_workflow_test_dead_letter_replay_client_hook = NULL;
+  lc_workflow_test_dead_letter_replay_client_context = NULL;
   lc_workflow_test_before_ready_job_detach_hook = NULL;
   lc_workflow_test_before_ready_job_detach_context = NULL;
   lc_workflow_test_before_ready_job_teardown_hook = NULL;
@@ -232,6 +234,25 @@ static int workflow_bytes_contains(const void *bytes, size_t length,
       return 1;
   }
   return 0;
+}
+
+typedef struct workflow_dead_letter_replay_client_capture {
+  pthread_mutex_t mutex;
+  unsigned int calls;
+  int used_dispatcher_client;
+} workflow_dead_letter_replay_client_capture;
+
+static void workflow_capture_dead_letter_replay_client(lc_client *client,
+                                                       lc_client *dispatcher,
+                                                       void *context) {
+  workflow_dead_letter_replay_client_capture *capture =
+      (workflow_dead_letter_replay_client_capture *)context;
+
+  assert_non_null(capture);
+  assert_int_equal(pthread_mutex_lock(&capture->mutex), 0);
+  ++capture->calls;
+  capture->used_dispatcher_client = client == dispatcher;
+  assert_int_equal(pthread_mutex_unlock(&capture->mutex), 0);
 }
 
 static int workflow_slow_test_runtime(void) {
@@ -3452,6 +3473,7 @@ static void test_pouch_dead_letter_operations(void **state) {
   const char *endpoints[1];
   lc_client_config client_config;
   lc_workflow_config workflow_config;
+  workflow_dead_letter_replay_client_capture replay_capture;
   lc_outbox_entry entry;
   lc_client *client;
   lc_workflow *workflow;
@@ -3471,6 +3493,8 @@ static void test_pouch_dead_letter_operations(void **state) {
   lc_error error;
 
   (void)state;
+  memset(&replay_capture, 0, sizeof(replay_capture));
+  assert_int_equal(pthread_mutex_init(&replay_capture.mutex, NULL), 0);
   assert_true(snprintf(template_path, sizeof(template_path),
                        WORKFLOW_TMP_PREFIX "dead-letter-XXXXXX") > 0);
   assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
@@ -3630,6 +3654,9 @@ static void test_pouch_dead_letter_operations(void **state) {
   lc_workflow_close(workflow);
   workflow = NULL;
   workflow_config.replay_dead_letters_on_startup = 1;
+  lc_workflow_test_dead_letter_replay_client_hook =
+      workflow_capture_dead_letter_replay_client;
+  lc_workflow_test_dead_letter_replay_client_context = &replay_capture;
   assert_int_equal(
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
       LC_OK);
@@ -3639,10 +3666,17 @@ static void test_pouch_dead_letter_operations(void **state) {
   assert_int_equal(job->attempt, 1);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
   lc_outbox_job_close(job);
+  assert_int_equal(pthread_mutex_lock(&replay_capture.mutex), 0);
+  assert_int_equal(replay_capture.calls, 1U);
+  assert_true(replay_capture.used_dispatcher_client);
+  assert_int_equal(pthread_mutex_unlock(&replay_capture.mutex), 0);
+  lc_workflow_test_dead_letter_replay_client_hook = NULL;
+  lc_workflow_test_dead_letter_replay_client_context = NULL;
   lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
   lc_client_close(client);
   lc_error_cleanup(&error);
+  assert_int_equal(pthread_mutex_destroy(&replay_capture.mutex), 0);
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 

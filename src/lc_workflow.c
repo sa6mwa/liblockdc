@@ -30,6 +30,9 @@ static void lc_workflow_transaction_abort_enrolled_lease(
 lc_workflow_test_after_reconcile_query_hook_fn
     lc_workflow_test_after_reconcile_query_hook = NULL;
 void *lc_workflow_test_after_reconcile_query_context = NULL;
+lc_workflow_test_dead_letter_replay_client_hook_fn
+    lc_workflow_test_dead_letter_replay_client_hook = NULL;
+void *lc_workflow_test_dead_letter_replay_client_context = NULL;
 lc_workflow_test_hook_fn lc_workflow_test_after_close_requested_hook = NULL;
 void *lc_workflow_test_after_close_requested_context = NULL;
 lc_workflow_test_hook_fn lc_workflow_test_before_ready_job_detach_hook = NULL;
@@ -3836,6 +3839,7 @@ static int lc_workflow_reconcile_method(lc_workflow *self, lc_error *error) {
 }
 
 static int lc_workflow_open_dead_letter(lc_workflow_handle *workflow,
+                                        lc_client_handle *client,
                                         const char *outbox_key,
                                         lc_lease **lease_out,
                                         lc_workflow_outbox_record *record,
@@ -3845,8 +3849,8 @@ static int lc_workflow_open_dead_letter(lc_workflow_handle *workflow,
   lonejson *runtime;
   int rc;
 
-  if (workflow == NULL || outbox_key == NULL || outbox_key[0] == '\0' ||
-      lease_out == NULL || record == NULL) {
+  if (workflow == NULL || client == NULL || outbox_key == NULL ||
+      outbox_key[0] == '\0' || lease_out == NULL || record == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "workflow dead-letter key and outputs are required",
                         NULL, NULL, NULL);
@@ -3859,10 +3863,10 @@ static int lc_workflow_open_dead_letter(lc_workflow_handle *workflow,
   acquire.key = outbox_key;
   acquire.owner = workflow->owner;
   acquire.ttl_seconds = workflow->transaction_ttl_seconds;
-  rc = lc_acquire(&workflow->client->pub, &acquire, lease_out, error);
+  rc = lc_acquire(&client->pub, &acquire, lease_out, error);
   if (rc != LC_OK)
     return rc;
-  rc = lc_workflow_require_json_runtime(workflow->client, &runtime, error);
+  rc = lc_workflow_require_json_runtime(client, &runtime, error);
   if (rc != LC_OK) {
     lc_workflow_rollback_lease(*lease_out);
     *lease_out = NULL;
@@ -3886,10 +3890,9 @@ static int lc_workflow_open_dead_letter(lc_workflow_handle *workflow,
   return rc;
 }
 
-static int lc_workflow_replay_dead_letter_method(lc_workflow *self,
-                                                 const char *outbox_key,
-                                                 lc_error *error) {
-  lc_workflow_handle *workflow = (lc_workflow_handle *)self;
+static int lc_workflow_replay_dead_letter_on_client(
+    lc_workflow_handle *workflow, lc_client_handle *client,
+    const char *outbox_key, lc_error *error) {
   lc_workflow_outbox_record record;
   lc_lease *lease;
   lc_release_req release;
@@ -3899,14 +3902,28 @@ static int lc_workflow_replay_dead_letter_method(lc_workflow *self,
   time_t now;
   int rc;
 
+  if (workflow == NULL || client == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dead-letter replay requires a client", NULL,
+                        NULL, NULL);
+  }
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_dead_letter_replay_client_hook != NULL) {
+    lc_workflow_test_dead_letter_replay_client_hook(
+        &client->pub,
+        workflow->dispatcher_client == NULL ? NULL
+                                            : &workflow->dispatcher_client->pub,
+        lc_workflow_test_dead_letter_replay_client_context);
+  }
+#endif
   lease = NULL;
-  rc = lc_workflow_open_dead_letter(workflow, outbox_key, &lease, &record,
-                                    error);
+  rc = lc_workflow_open_dead_letter(workflow, client, outbox_key, &lease,
+                                    &record, error);
   if (rc != LC_OK)
     return rc;
   now = time(NULL);
   if (now == (time_t)-1) {
-    lc_workflow_outbox_record_loaded_clear(workflow->client, &record);
+    lc_workflow_outbox_record_loaded_clear(client, &record);
     lc_workflow_rollback_lease(lease);
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "failed to read workflow replay clock", NULL, NULL,
@@ -3930,13 +3947,22 @@ static int lc_workflow_replay_dead_letter_method(lc_workflow *self,
   record.dispatch_state = original_dispatch_state;
   record.last_error = original_last_error;
   record.prior_dead_letter_error = original_prior_dead_letter_error;
-  lc_workflow_outbox_record_loaded_clear(workflow->client, &record);
+  lc_workflow_outbox_record_loaded_clear(client, &record);
   if (rc != LC_OK) {
     lc_workflow_rollback_lease(lease);
     return rc;
   }
   lc_workflow_notify(workflow, outbox_key);
   return LC_OK;
+}
+
+static int lc_workflow_replay_dead_letter_method(lc_workflow *self,
+                                                 const char *outbox_key,
+                                                 lc_error *error) {
+  lc_workflow_handle *workflow = (lc_workflow_handle *)self;
+
+  return lc_workflow_replay_dead_letter_on_client(
+      workflow, workflow == NULL ? NULL : workflow->client, outbox_key, error);
 }
 
 typedef struct lc_workflow_dead_letter_replay_capture {
@@ -4049,8 +4075,8 @@ lc_workflow_replay_dead_letters_on_startup(lc_workflow_handle *workflow,
                      &capture, &result, error);
   lc_query_res_cleanup(&result);
   for (index = 0U; rc == LC_OK && index < capture.count; ++index) {
-    rc = lc_workflow_replay_dead_letter_method(&workflow->pub,
-                                               capture.keys[index], error);
+    rc = lc_workflow_replay_dead_letter_on_client(
+        workflow, workflow->dispatcher_client, capture.keys[index], error);
   }
   for (index = 0U; index < capture.count; ++index)
     lc_client_free(workflow->client, capture.keys[index]);
@@ -4080,8 +4106,8 @@ static int lc_workflow_delete_dead_letter_method(lc_workflow *self,
   int rc;
 
   lease = NULL;
-  rc = lc_workflow_open_dead_letter(workflow, outbox_key, &lease, &record,
-                                    error);
+  rc = lc_workflow_open_dead_letter(workflow, workflow->client, outbox_key,
+                                    &lease, &record, error);
   if (rc != LC_OK)
     return rc;
   deleted = 0;
@@ -4119,8 +4145,9 @@ static int lc_workflow_export_dead_letter_key(
   int rc;
 
   lease = NULL;
-  rc = lc_workflow_open_dead_letter(capture->workflow, capture->key, &lease,
-                                    &record, error);
+  rc =
+      lc_workflow_open_dead_letter(capture->workflow, capture->workflow->client,
+                                   capture->key, &lease, &record, error);
   if (rc != LC_OK) {
     /* Index selection and the direct read are separate operations. A record
      * replayed or deleted between them is no longer exportable, not an export
