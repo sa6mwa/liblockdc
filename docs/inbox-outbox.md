@@ -592,6 +592,7 @@ record_type          "lockdc.outbox.v1"
 operation_id
 effect_id
 effect_key           caller-supplied immutable foreign-effect idempotency key
+payload_digest       caller-supplied immutable digest binding the payload bytes
 message_id           component-generated immutable transport-message identity
 causation_id         optional command or message that caused this message
 kind                 caller-defined bounded routing label
@@ -624,6 +625,14 @@ transactionally with the record. `lc_outbox_job_write_payload()` streams that
 attachment directly into a caller-owned `lc_sink`; it must preserve real
 bounded-buffer streaming for both backends and must not materialize the full
 payload behind a source-looking facade.
+
+`payload_digest` is required. The host calculates it over the exact payload
+bytes before append and chooses its durable representation (for example,
+`sha256:<base64url>`). liblockdc persists and compares the value as opaque
+immutable envelope metadata; it does not pre-read, buffer, or spool a payload
+source merely to derive a digest. A retry with the same outbox identity must
+therefore supply the same digest as the original payload, or it fails visibly
+instead of silently delivering the retained attachment.
 
 `message_id` is generated from the immutable durable outbox identity and is
 stable across retries, claim expiry, dead-letter replay, and process restart.
@@ -768,8 +777,9 @@ uses an inbox receipt exactly as for any other message.
    dispatcher with the returned outbox key.
 
 Submitting the same `(operation_id, effect_id)` again is idempotent only when
-all immutable fields, including `effect_key`, `causation_id`, routing metadata,
-and schema version, match. A conflicting repeat fails visibly. A matching
+all immutable fields, including `effect_key`, `payload_digest`, `causation_id`,
+routing metadata, and schema version, match. A conflicting repeat fails
+visibly. A matching
 committed repeat returns the existing outbox receipt with `duplicate` set and
 no transaction; it does not create or stage any new domain or outbox
 participant.

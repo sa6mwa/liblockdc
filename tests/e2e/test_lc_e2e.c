@@ -4649,6 +4649,7 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   entry.operation_id = domain_key;
   entry.effect_id = "notify";
   entry.effect_key = domain_key;
+  entry.payload_digest = "sha256:workflow-e2e-payload";
   entry.kind = "test";
   entry.destination = "https://example.invalid/workflow";
   entry.content_type = "text/plain";
@@ -4791,6 +4792,7 @@ test_disk_workflow_dispatcher_uses_internal_json_limit(void **state) {
   entry.operation_id = effect_key;
   entry.effect_id = "notify";
   entry.effect_key = effect_key;
+  entry.payload_digest = "sha256:workflow-response-limit-payload";
   entry.kind = "test";
   entry.destination = "https://example.invalid/workflow-response-limit";
   entry.content_type = "text/plain";
@@ -4867,6 +4869,7 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   entry.operation_id = effect_key;
   entry.effect_id = "retry";
   entry.effect_key = effect_key;
+  entry.payload_digest = "sha256:workflow-retry-payload";
   entry.kind = "test";
   entry.destination = "retry://target";
   rc = lc_source_from_memory("retry-payload", 13U, &payload, &error);
@@ -4951,6 +4954,7 @@ static void test_disk_workflow_startup_recovery(void **state) {
   static const char state_json[] =
       "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"recovery-op\","
       "\"effect_id\":\"recovery-effect\",\"effect_key\":\"recovery-key\","
+      "\"payload_digest\":\"recovery-payload-digest\","
       "\"message_id\":\"msg_recovery\","
       "\"kind\":\"test\",\"destination\":\"recovery://target\","
       "\"content_type\":\"text/plain\",\"dispatch_state\":\"pending\","

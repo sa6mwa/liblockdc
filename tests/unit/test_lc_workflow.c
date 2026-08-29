@@ -702,6 +702,7 @@ static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
   static const char state[] =
       "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"recovery-op\","
       "\"effect_id\":\"recovery-effect\",\"effect_key\":\"recovery-key\","
+      "\"payload_digest\":\"recovery-payload-digest\","
       "\"message_id\":\"msg_recovery\","
       "\"kind\":\"test\",\"destination\":\"recovery://target\","
       "\"content_type\":\"text/plain\",\"dispatch_state\":\"pending\","
@@ -749,6 +750,7 @@ static void seed_terminal_workflow_outbox(lc_client *client,
   static const char state[] =
       "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"terminal-op\","
       "\"effect_id\":\"terminal-effect\",\"effect_key\":\"terminal-key\","
+      "\"payload_digest\":\"terminal-payload-digest\","
       "\"message_id\":\"msg_terminal\","
       "\"kind\":\"test\",\"destination\":\"recovery://target\","
       "\"content_type\":\"text/plain\",\"dispatch_state\":\"completed\","
@@ -1023,6 +1025,7 @@ static void workflow_reconcile_overflow_commit_hook(void *context) {
   entry.operation_id = "reconcile-overflow-operation";
   entry.effect_id = "reconcile-overflow-effect";
   entry.effect_key = "reconcile-overflow-effect-key";
+  entry.payload_digest = "reconcile-overflow-payload-digest";
   entry.kind = "test";
   entry.destination = "reconcile://overflow";
   entry.content_type = "text/plain";
@@ -1060,6 +1063,7 @@ test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts(void **state) {
   lc_outbox_job *job;
   lc_outbox_receipt receipt;
   lc_source *payload;
+  lc_source *conflicting_payload;
   lc_error error;
 
   (void)state;
@@ -1086,6 +1090,7 @@ test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts(void **state) {
   entry.operation_id = "immutable-envelope-operation";
   entry.effect_id = "immutable-envelope-effect";
   entry.effect_key = "immutable-envelope-effect-key";
+  entry.payload_digest = "sha256:immutable-envelope-payload";
   entry.causation_id = "command-immutable-1";
   entry.kind = "http";
   entry.schema_version = "v1";
@@ -1094,6 +1099,7 @@ test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts(void **state) {
   entry.headers_json = "{\"x-request-id\":\"first\"}";
   entry.trace_context = "trace-first";
   payload = NULL;
+  conflicting_payload = NULL;
   assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
                    LC_OK);
   lc_outbox_receipt_init(&receipt);
@@ -1158,6 +1164,21 @@ test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts(void **state) {
   assert_null(transaction);
   assert_null(receipt.outbox_key);
   assert_false(receipt.duplicate);
+
+  entry.trace_context = "trace-first";
+  entry.payload_digest = "sha256:immutable-envelope-changed-payload";
+  assert_int_equal(lc_source_from_memory("changed", 7U, &conflicting_payload,
+                                         &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry,
+                                             conflicting_payload, &transaction,
+                                             &receipt, &error),
+                   LC_ERR_SERVER);
+  assert_null(transaction);
+  assert_null(receipt.outbox_key);
+  assert_false(receipt.duplicate);
+  lc_source_close(conflicting_payload);
+  conflicting_payload = NULL;
 
   lc_outbox_receipt_cleanup(&receipt);
   lc_source_close(payload);
@@ -1225,6 +1246,7 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   entry.operation_id = "operation-1";
   entry.effect_id = "effect-1";
   entry.effect_key = "foreign-idempotency-\"1\\stable";
+  entry.payload_digest = "sha256:workflow-payload";
   entry.kind = "http";
   entry.destination = "https://example.invalid/effect?target=\"primary\"";
   entry.content_type = "text/plain";
@@ -1328,6 +1350,7 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_outbox_receipt_init(&receipt);
   entry.effect_id = "effect-retry";
   entry.effect_key = "foreign-idempotency-retry";
+  entry.payload_digest = "sha256:workflow-retry-payload";
   assert_int_equal(
       lc_source_from_memory("retry-payload", 13U, &payload, &error), LC_OK);
   transaction = NULL;
@@ -1362,6 +1385,7 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   payload = NULL;
   entry.effect_id = "effect-1";
   entry.effect_key = "foreign-idempotency-\"1\\stable";
+  entry.payload_digest = "sha256:workflow-payload";
   lc_outbox_receipt_cleanup(&duplicate_receipt);
   lc_inbox_message_init(&inbox);
   inbox.consumer_id = long_consumer_id;
@@ -1848,6 +1872,7 @@ test_pouch_outbox_allocation_failures_roll_back_enrollment(void **state) {
   entry.operation_id = "outbox-oom-operation";
   entry.effect_id = "outbox-oom-ledger";
   entry.effect_key = "outbox-oom-ledger-effect";
+  entry.payload_digest = "sha256:outbox-oom-payload";
   entry.kind = "test";
   entry.destination = "outbox://oom-ledger";
   entry.content_type = "text/plain";
@@ -1988,6 +2013,7 @@ test_pouch_notification_allocation_failure_reconciles_committed_outbox(
   entry.operation_id = "notify-oom-operation";
   entry.effect_id = "notify-oom-effect";
   entry.effect_key = "notify-oom-key";
+  entry.payload_digest = "sha256:notify-oom-payload";
   entry.kind = "test";
   entry.destination = "test://notify-oom";
   entry.content_type = "text/plain";
@@ -2066,6 +2092,7 @@ test_pouch_retry_notification_allocation_failure_recovers_at_deadline(
   entry.operation_id = "retry-oom-operation";
   entry.effect_id = "retry-oom-effect";
   entry.effect_key = "retry-oom-key";
+  entry.payload_digest = "sha256:retry-oom-payload";
   entry.kind = "test";
   entry.destination = "test://retry-oom";
   entry.content_type = "text/plain";
@@ -2152,6 +2179,7 @@ static void test_pouch_transient_claim_failure_is_rescheduled(void **state) {
   entry.operation_id = "claim-retry-operation";
   entry.effect_id = "claim-retry-effect";
   entry.effect_key = "claim-retry-key";
+  entry.payload_digest = "sha256:claim-retry-payload";
   entry.kind = "test";
   entry.destination = "test://claim-retry";
   entry.content_type = "text/plain";
@@ -2234,6 +2262,7 @@ static void test_pouch_overflowing_foreground_retry_reconciles(void **state) {
   entry.operation_id = "claim-retry-overflow-operation";
   entry.effect_id = "claim-retry-overflow-effect";
   entry.effect_key = "claim-retry-overflow-key";
+  entry.payload_digest = "sha256:claim-retry-overflow-payload";
   entry.kind = "test";
   entry.destination = "test://claim-retry-overflow";
   entry.content_type = "text/plain";
@@ -2316,6 +2345,7 @@ test_pouch_claim_recovery_allocation_failure_recovers_at_expiry(void **state) {
   entry.operation_id = "claim-recovery-oom-operation";
   entry.effect_id = "claim-recovery-oom-effect";
   entry.effect_key = "claim-recovery-oom-key";
+  entry.payload_digest = "sha256:claim-recovery-oom-payload";
   entry.kind = "test";
   entry.destination = "test://claim-recovery-oom";
   entry.content_type = "text/plain";
@@ -2444,6 +2474,7 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   entry.operation_id = "order-operation-1";
   entry.effect_id = "order-created";
   entry.effect_key = "foreign-order-created-1";
+  entry.payload_digest = "sha256:order-created-payload";
   entry.kind = "http";
   entry.schema_version = "v1";
   entry.destination = "https://example.invalid/orders";
@@ -2741,6 +2772,7 @@ static void test_pouch_workflow_rejects_overflowing_deadlines(void **state) {
   entry.operation_id = "deadline-overflow-operation";
   entry.effect_id = "deadline-overflow-effect";
   entry.effect_key = "deadline-overflow-key";
+  entry.payload_digest = "sha256:deadline-overflow-payload";
   entry.kind = "http";
   entry.destination = "https://example.invalid/deadline-overflow";
   entry.content_type = "text/plain";
@@ -2976,6 +3008,7 @@ test_pouch_multikey_terminal_failure_publishes_nothing(void **state) {
   entry.operation_id = "atomic-operation";
   entry.effect_id = "atomic-effect";
   entry.effect_key = "atomic-effect-key";
+  entry.payload_digest = "sha256:atomic-payload";
   entry.kind = "test";
   entry.destination = "atomic://effect";
   entry.content_type = "text/plain";
@@ -3073,7 +3106,9 @@ static void test_pouch_expired_multikey_commit_reports_rollback_without_signal(
   lc_workflow_config_init(&workflow_config);
   workflow_config.namespace_name = "workflow-expired-terminal";
   workflow_config.owner = "workflow-expired-terminal-test";
-  workflow_config.transaction_ttl_seconds = 1L;
+  /* Leave enough setup headroom for the staged outbox and participant under
+   * sanitizer or emulated execution; expiry is asserted explicitly below. */
+  workflow_config.transaction_ttl_seconds = 3L;
   assert_int_equal(
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
       LC_OK);
@@ -3081,6 +3116,7 @@ static void test_pouch_expired_multikey_commit_reports_rollback_without_signal(
   entry.operation_id = "expired-terminal-operation";
   entry.effect_id = "expired-terminal-effect";
   entry.effect_key = "expired-terminal-effect-key";
+  entry.payload_digest = "sha256:expired-terminal-payload";
   entry.kind = "test";
   entry.destination = "atomic://expired-terminal";
   entry.content_type = "text/plain";
@@ -3112,7 +3148,7 @@ static void test_pouch_expired_multikey_commit_reports_rollback_without_signal(
   /* The outbox lease expires while the domain participant remains live. Pouch
    * correctly decides the shared XA record as rollback; the workflow surface
    * must expose that outcome and must not publish a false dispatch signal. */
-  sleep(workflow_claim_expiry_wait_seconds());
+  sleep(4U);
   assert_int_equal(lc_workflow_transaction_commit(transaction, &error),
                    LC_ERR_INVALID);
   lc_error_cleanup(&error);
@@ -3368,6 +3404,7 @@ static void test_pouch_handoff_skips_disappeared_outbox(void **state) {
   entry.operation_id = "handoff-disappeared-operation";
   entry.effect_id = "handoff-disappeared-effect";
   entry.effect_key = "handoff-disappeared-key";
+  entry.payload_digest = "sha256:handoff-disappeared-payload";
   entry.kind = "test";
   entry.destination = "test://handoff-disappeared";
   entry.content_type = "text/plain";
@@ -3480,6 +3517,7 @@ static void test_pouch_dead_letter_operations(void **state) {
   entry.operation_id = "dead-letter-operation";
   entry.effect_id = "dead-letter-effect";
   entry.effect_key = "foreign-dead-letter-idempotency-key";
+  entry.payload_digest = "sha256:dead-letter-payload";
   entry.kind = "http";
   entry.destination = "https://example.invalid/dead-letter";
   entry.content_type = "text/plain";
@@ -3957,6 +3995,7 @@ test_pouch_dispatcher_wakeup_isolated_from_next_waiters(void **state) {
   entry.operation_id = "dispatcher-wakeup-operation";
   entry.effect_id = "dispatcher-wakeup-effect";
   entry.effect_key = "dispatcher-wakeup-key";
+  entry.payload_digest = "sha256:dispatcher-wakeup-payload";
   entry.kind = "http";
   entry.destination = "https://example.invalid/dispatcher-wakeup";
   assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
@@ -4698,6 +4737,14 @@ test_pouch_workflow_validates_durable_input_contracts(void **state) {
   lc_error_init(&error);
 
   entry.headers_json = "{\"x-request-id\":\"contract\"}";
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_ERR_INVALID);
+  assert_null(transaction);
+  assert_null(receipt.outbox_key);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  entry.payload_digest = "sha256:input-contract-payload";
   assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
                                              &transaction, &receipt, &error),
                    LC_OK);

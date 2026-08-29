@@ -2751,6 +2751,8 @@ static void lcdc_parse_outbox_entry(lua_State *L, int index,
   lcdc_require_string_field(L, index, "operation_id", &entry->operation_id);
   lcdc_require_string_field(L, index, "effect_id", &entry->effect_id);
   lcdc_require_string_field(L, index, "effect_key", &entry->effect_key);
+  lcdc_require_string_field(L, index, "payload_digest",
+                            &entry->payload_digest);
   entry->causation_id = lcdc_opt_string_field(L, index, "causation_id");
   lcdc_require_string_field(L, index, "kind", &entry->kind);
   entry->schema_version = lcdc_opt_string_field(L, index, "schema_version");

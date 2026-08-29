@@ -70,6 +70,7 @@ local function append_effect(effect_id, payload)
     operation_id = "lua-order-1",
     effect_id = effect_id,
     effect_key = "lua-effect:" .. effect_id,
+    payload_digest = "sha256:lua-effect:" .. effect_id,
     kind = "http",
     destination = "https://example.test/effects/" .. effect_id,
     content_type = "application/json",
@@ -182,6 +183,7 @@ assert_ok(inbound_txn:append_outbox({
   operation_id = "lua-order-1",
   effect_id = "inbound-effect",
   effect_key = "lua-effect:inbound",
+  payload_digest = "sha256:lua-inbound-payload",
   kind = "http",
   destination = "https://example.test/effects/inbound",
 }, "inbound-payload"), nil, "Lua inbox transaction outbox append")

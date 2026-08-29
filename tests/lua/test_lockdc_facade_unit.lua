@@ -718,6 +718,7 @@ local function test_workflow_facade_lifecycle()
     operation_id = 'op-1',
     effect_id = 'charge',
     effect_key = 'charge:order-1',
+    payload_digest = 'sha256:payload',
     kind = 'http',
     destination = 'https://billing.test/charge',
     headers = 'header-json',
@@ -730,6 +731,8 @@ local function test_workflow_facade_lifecycle()
       'workflow startup replay option should pass through')
   assert_eq(captured.first_entry.headers_json, 'header-json', 'workflow should encode headers into headers_json')
   assert_eq(captured.first_entry.headers, nil, 'workflow should not pass façade-only headers')
+  assert_eq(captured.first_entry.payload_digest, 'sha256:payload',
+      'workflow should preserve the immutable payload digest')
   assert_eq(captured.first_payload, 'payload', 'workflow should preserve arbitrary payload source')
   assert_eq(receipt.outbox_key, 'first-key', 'workflow should return the durable receipt')
 

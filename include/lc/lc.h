@@ -1652,6 +1652,12 @@ typedef struct lc_outbox_entry {
   const char *effect_id;
   /** Required idempotency key sent unchanged to the foreign effect system. */
   const char *effect_key;
+  /**
+   * Required immutable caller-generated digest that binds this entry to its
+   * exact payload bytes. The format is application-defined. Retries with the
+   * same outbox identity must provide the same digest.
+   */
+  const char *payload_digest;
   /** Optional immediate durable cause (command or source message identity). */
   const char *causation_id;
   /** Required caller-defined routing kind. */
@@ -2287,7 +2293,11 @@ struct lc_workflow_transaction {
   int (*acquire)(lc_workflow_transaction *self,
                  const lc_workflow_participant_request *request,
                  lc_workflow_participant **out, lc_error *error);
-  /** Stages an immutable outbox effect and its streamed payload. */
+  /**
+   * Stages an immutable outbox effect and its streamed payload.
+   * `entry->payload_digest` binds duplicate identity without pre-reading the
+   * payload source.
+   */
   int (*append_outbox)(lc_workflow_transaction *self,
                        const lc_outbox_entry *entry, lc_source *payload,
                        lc_outbox_receipt *out, lc_error *error);
@@ -2467,7 +2477,8 @@ struct lc_workflow {
   /**
    * Creates one durable outbox effect and starts its transaction.
    *
-   * A matching effect returns no transaction and sets `receipt->duplicate`.
+   * A matching effect, including its immutable `payload_digest`, returns no
+   * transaction and sets `receipt->duplicate`.
    */
   int (*append_outbox)(lc_workflow *self, const lc_outbox_entry *entry,
                        lc_source *payload, lc_workflow_transaction **out_txn,
@@ -3503,9 +3514,9 @@ void lc_consumer_service_close(lc_consumer_service *service);
 /**
  * Creates one durable outbox effect and its transaction.
  *
- * On a matching existing effect, succeeds with `*out_txn == NULL` and
- * `receipt->duplicate` set. The caller owns and must close a returned
- * transaction.
+ * On a matching existing effect, including `entry->payload_digest`, succeeds
+ * with `*out_txn == NULL` and `receipt->duplicate` set. The caller owns and
+ * must close a returned transaction.
  */
 int lc_workflow_append_outbox(lc_workflow *workflow,
                               const lc_outbox_entry *entry, lc_source *payload,
@@ -3598,7 +3609,11 @@ int lc_workflow_transaction_acquire(
     lc_workflow_transaction *transaction,
     const lc_workflow_participant_request *request,
     lc_workflow_participant **out, lc_error *error);
-/** Stages one immutable outbox effect and its payload in a transaction. */
+/**
+ * Stages one immutable outbox effect and its payload in a transaction.
+ * `entry->payload_digest` must bind the exact payload bytes without requiring
+ * liblockdc to pre-read the source.
+ */
 int lc_workflow_transaction_append_outbox(lc_workflow_transaction *transaction,
                                           const lc_outbox_entry *entry,
                                           lc_source *payload,

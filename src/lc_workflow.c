@@ -73,6 +73,7 @@ typedef struct lc_workflow_outbox_record {
   char *operation_id;
   char *effect_id;
   char *effect_key;
+  char *payload_digest;
   char *message_id;
   char *causation_id;
   char *kind;
@@ -135,6 +136,8 @@ static const lonejson_field lc_workflow_outbox_record_fields[] = {
                                     "effect_id"),
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, effect_key,
                                     "effect_key"),
+    LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, payload_digest,
+                                    "payload_digest"),
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_workflow_outbox_record, message_id,
                                     "message_id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_workflow_outbox_record, causation_id,
@@ -711,13 +714,14 @@ static int lc_workflow_outbox_key(lc_workflow_handle *workflow,
 
   if (entry == NULL || entry->operation_id == NULL ||
       entry->effect_id == NULL || entry->effect_key == NULL ||
-      entry->kind == NULL || entry->destination == NULL ||
+      entry->payload_digest == NULL || entry->kind == NULL ||
+      entry->destination == NULL ||
       entry->operation_id[0] == '\0' || entry->effect_id[0] == '\0' ||
-      entry->effect_key[0] == '\0' || entry->kind[0] == '\0' ||
-      entry->destination[0] == '\0') {
+      entry->effect_key[0] == '\0' || entry->payload_digest[0] == '\0' ||
+      entry->kind[0] == '\0' || entry->destination[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "outbox operation, effect, effect key, kind, and "
-                        "destination are required",
+                        "outbox operation, effect, effect key, payload digest, "
+                        "kind, and destination are required",
                         NULL, NULL, NULL);
   }
   rc = lc_workflow_digest(entry->operation_id, operation, error);
@@ -1157,13 +1161,16 @@ static int lc_workflow_existing_outbox(lc_workflow_handle *workflow,
   }
   if (rc == LC_OK && (result.no_content || record.record_type == NULL ||
                       record.operation_id == NULL || record.effect_id == NULL ||
-                      record.effect_key == NULL || record.message_id == NULL ||
+                      record.effect_key == NULL ||
+                      record.payload_digest == NULL || record.message_id == NULL ||
                       record.kind == NULL || record.destination == NULL ||
                       record.content_type == NULL ||
                       strcmp(record.record_type, "lockdc.outbox.v1") != 0 ||
                       strcmp(record.operation_id, entry->operation_id) != 0 ||
                       strcmp(record.effect_id, entry->effect_id) != 0 ||
                       strcmp(record.effect_key, entry->effect_key) != 0 ||
+                      strcmp(record.payload_digest, entry->payload_digest) !=
+                          0 ||
                       !lc_workflow_nullable_string_equal(record.causation_id,
                                                          entry->causation_id) ||
                       strcmp(record.kind, entry->kind) != 0 ||
@@ -1503,6 +1510,7 @@ static int lc_workflow_stage_outbox(lc_lease *lease,
   record.operation_id = (char *)entry->operation_id;
   record.effect_id = (char *)entry->effect_id;
   record.effect_key = (char *)entry->effect_key;
+  record.payload_digest = (char *)entry->payload_digest;
   rc = lc_workflow_digest(lease->key, message_digest, error);
   if (rc != LC_OK)
     return rc;
@@ -1547,6 +1555,7 @@ static void lc_workflow_outbox_record_clear(lc_client_handle *client,
   lc_client_free(client, record->operation_id);
   lc_client_free(client, record->effect_id);
   lc_client_free(client, record->effect_key);
+  lc_client_free(client, record->payload_digest);
   lc_client_free(client, record->message_id);
   lc_client_free(client, record->causation_id);
   lc_client_free(client, record->kind);
@@ -1587,6 +1596,9 @@ static int lc_workflow_outbox_record_copy(lc_client_handle *client,
        (dst->effect_id = lc_client_strdup(client, src->effect_id)) == NULL) ||
       (src->effect_key != NULL &&
        (dst->effect_key = lc_client_strdup(client, src->effect_key)) == NULL) ||
+      (src->payload_digest != NULL &&
+       (dst->payload_digest = lc_client_strdup(client, src->payload_digest)) ==
+           NULL) ||
       (src->message_id != NULL &&
        (dst->message_id = lc_client_strdup(client, src->message_id)) == NULL) ||
       (src->causation_id != NULL && (dst->causation_id = lc_client_strdup(

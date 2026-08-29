@@ -217,6 +217,7 @@ local txn, receipt = assert(workflow:append_outbox({
   operation_id = order_id,
   effect_id = "charge-card",
   effect_key = "charge:" .. order_id,
+  payload_digest = payload_digest,
   kind = "http",
   destination = "https://payments.example/charges",
   headers = { ["idempotency-key"] = "charge:" .. order_id },
@@ -242,6 +243,12 @@ serialized; supplying both is an error. `workflow:accept_inbox(message)`
 returns `nil, result` on an accepted duplicate, where `result.duplicate` is
 true. Otherwise it returns a `WorkflowTransaction` and `result.accepted` is
 true.
+
+Outbox `payload_digest` is required immutable metadata binding the supplied
+payload bytes. It is host-generated and opaque to liblockdc: use the same value
+for an identical retry and a different value for changed bytes. This preserves
+one-pass streaming, because the binding does not require the façade to consume
+or buffer the payload before it stages the attachment.
 
 `max_attempts` must fit the C API's signed 32-bit integer range; values outside
 that range are rejected instead of being narrowed or defaulted.

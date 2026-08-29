@@ -23974,7 +23974,10 @@ static void test_lease_private_reads_reject_stale_handle(void **state) {
   open_pouch_client(root, &client, &error);
   acquire_req.key = key;
   acquire_req.owner = "stale-owner";
-  acquire_req.ttl_seconds = 1L;
+  /* A one-second lease can expire while the initial update is executing under
+   * QEMU. Keep enough headroom for that setup, then wait beyond this explicit
+   * lease lifetime before proving that private reads fence the stale handle. */
+  acquire_req.ttl_seconds = 3L;
   rc = client->acquire(client, &acquire_req, &stale_lease, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("{\"value\":9}", strlen("{\"value\":9}"), &source,
@@ -23985,7 +23988,7 @@ static void test_lease_private_reads_reject_stale_handle(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
-  sleep(2U);
+  sleep(4U);
   lc_acquire_req_init(&acquire_req);
   acquire_req.key = key;
   acquire_req.owner = "fresh-owner";
