@@ -18746,8 +18746,16 @@ static int lc_pouch_lease_read_private_state_metadata(
     rc = lc_pouch_state_read_metadata(
         lease->client->pouch, lease->namespace_name, staged_key, out, error);
     lc_free_with_allocator(NULL, staged_key);
-    if (rc != LC_OK || out->found) {
+    if (rc != LC_OK) {
       return rc;
+    }
+    if (lc_pouch_state_result_is_delete_marker(out)) {
+      lc_pouch_state_read_result_cleanup(&lease->client->allocator, out);
+      memset(out, 0, sizeof(*out));
+      return LC_OK;
+    }
+    if (out->found) {
+      return LC_OK;
     }
     lc_pouch_state_read_result_cleanup(&lease->client->allocator, out);
     memset(out, 0, sizeof(*out));
@@ -18779,8 +18787,16 @@ static int lc_pouch_lease_read_private_state(lc_lease_handle *lease,
     rc = lc_pouch_state_read(lease->client->pouch, lease->namespace_name,
                              staged_key, out, error);
     lc_free_with_allocator(NULL, staged_key);
-    if (rc != LC_OK || out->found) {
+    if (rc != LC_OK) {
       return rc;
+    }
+    if (lc_pouch_state_result_is_delete_marker(out)) {
+      lc_pouch_state_read_result_cleanup(&lease->client->allocator, out);
+      memset(out, 0, sizeof(*out));
+      return LC_OK;
+    }
+    if (out->found) {
+      return LC_OK;
     }
     lc_pouch_state_read_result_cleanup(&lease->client->allocator, out);
     memset(out, 0, sizeof(*out));

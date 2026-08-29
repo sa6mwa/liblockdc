@@ -26352,6 +26352,7 @@ static void test_transaction_bound_remove_stages_until_decision(void **state) {
   lc_update_res update_res;
   lc_get_res get_res;
   lc_error error;
+  pouch_value_doc loaded;
   const void *bytes;
   size_t length;
   char root[512];
@@ -26370,13 +26371,14 @@ static void test_transaction_bound_remove_stages_until_decision(void **state) {
   memset(&decision_res, 0, sizeof(decision_res));
   memset(&update_res, 0, sizeof(update_res));
   memset(&get_res, 0, sizeof(get_res));
+  memset(&loaded, 0, sizeof(loaded));
   lc_error_init(&error);
   make_root("lease-txn-remove", root, sizeof(root));
   cleanup_root(root);
   snprintf(key, sizeof(key), "state/lease-txn-remove/%ld", (long)getpid());
 
   open_pouch_client(root, &client, &error);
-  write_client_state(client, key, "before-remove", NULL, 0L, 0, &update_res,
+  write_client_state(client, key, "{\"value\":42}", NULL, 0L, 0, &update_res,
                      &error);
   lc_update_res_cleanup(&update_res);
 
@@ -26391,13 +26393,35 @@ static void test_transaction_bound_remove_stages_until_decision(void **state) {
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
+  rc = lease->get(lease, sink, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(length, 0U);
+  lc_get_res_cleanup(&get_res);
+  sink->close(sink);
+  sink = NULL;
+
+  rc = lease->load(lease, &pouch_value_map, &loaded, NULL, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(get_res.no_content);
+  lc_get_res_cleanup(&get_res);
+
+  rc = lease->describe(lease, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lease->version, 0L);
+  assert_null(lease->state_etag);
+
+  rc = lc_sink_to_memory(&sink, &error);
+  assert_int_equal(rc, LC_OK);
   rc = client->get(client, key, NULL, sink, &get_res, &error);
   assert_int_equal(rc, LC_OK);
   assert_false(get_res.no_content);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
-  assert_int_equal(length, strlen("before-remove"));
-  assert_memory_equal(bytes, "before-remove", length);
+  assert_int_equal(length, strlen("{\"value\":42}"));
+  assert_memory_equal(bytes, "{\"value\":42}", length);
   lc_get_res_cleanup(&get_res);
   sink->close(sink);
   sink = NULL;
@@ -26420,7 +26444,7 @@ static void test_transaction_bound_remove_stages_until_decision(void **state) {
   assert_false(get_res.no_content);
   rc = lc_sink_memory_bytes(sink, &bytes, &length, &error);
   assert_int_equal(rc, LC_OK);
-  assert_memory_equal(bytes, "before-remove", length);
+  assert_memory_equal(bytes, "{\"value\":42}", length);
   lc_get_res_cleanup(&get_res);
   sink->close(sink);
   sink = NULL;
