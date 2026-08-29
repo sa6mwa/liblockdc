@@ -39,6 +39,16 @@ typedef struct workflow_fail_once {
   unsigned int calls;
 } workflow_fail_once;
 
+typedef struct workflow_delete_outbox_hook {
+  lc_client *client;
+  const char *namespace_name;
+  const char *key;
+  pthread_mutex_t mutex;
+  unsigned int calls;
+  int rc;
+  int mutex_initialized;
+} workflow_delete_outbox_hook;
+
 static int workflow_fail_first_call(void *context, lc_error *error) {
   workflow_fail_once *failure = (workflow_fail_once *)context;
 
@@ -48,6 +58,87 @@ static int workflow_fail_first_call(void *context, lc_error *error) {
                         NULL);
   }
   return LC_OK;
+}
+
+static void workflow_delete_outbox_hook_init(workflow_delete_outbox_hook *hook,
+                                             lc_client *client,
+                                             const char *namespace_name,
+                                             const char *key) {
+  memset(hook, 0, sizeof(*hook));
+  hook->client = client;
+  hook->namespace_name = namespace_name;
+  hook->key = key;
+  hook->rc = LC_ERR_INVALID;
+  assert_int_equal(pthread_mutex_init(&hook->mutex, NULL), 0);
+  hook->mutex_initialized = 1;
+}
+
+static void
+workflow_delete_outbox_hook_cleanup(workflow_delete_outbox_hook *hook) {
+  if (hook != NULL && hook->mutex_initialized) {
+    assert_int_equal(pthread_mutex_destroy(&hook->mutex), 0);
+    hook->mutex_initialized = 0;
+  }
+}
+
+static int workflow_delete_outbox_once(void *context, lc_error *error) {
+  workflow_delete_outbox_hook *hook = (workflow_delete_outbox_hook *)context;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  int rc;
+
+  if (hook == NULL || hook->client == NULL || hook->namespace_name == NULL ||
+      hook->key == NULL || !hook->mutex_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow delete hook requires an outbox target", NULL,
+                        NULL, NULL);
+  }
+  assert_int_equal(pthread_mutex_lock(&hook->mutex), 0);
+  if (hook->calls != 0U) {
+    assert_int_equal(pthread_mutex_unlock(&hook->mutex), 0);
+    return LC_OK;
+  }
+  ++hook->calls;
+  assert_int_equal(pthread_mutex_unlock(&hook->mutex), 0);
+
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = hook->namespace_name;
+  acquire.key = hook->key;
+  acquire.owner = "workflow-race-delete";
+  acquire.ttl_seconds = 30L;
+  lease = NULL;
+  rc = lc_acquire(hook->client, &acquire, &lease, error);
+  if (rc == LC_OK) {
+    rc = lc_lease_remove(lease, NULL, error);
+  }
+  lc_lease_close(lease);
+
+  assert_int_equal(pthread_mutex_lock(&hook->mutex), 0);
+  hook->rc = rc;
+  assert_int_equal(pthread_mutex_unlock(&hook->mutex), 0);
+  return rc;
+}
+
+static void workflow_delete_outbox_after_reconcile(void *context) {
+  lc_error error;
+
+  lc_error_init(&error);
+  (void)workflow_delete_outbox_once(context, &error);
+  lc_error_cleanup(&error);
+}
+
+static void
+workflow_delete_outbox_hook_assert(workflow_delete_outbox_hook *hook) {
+  unsigned int calls;
+  int rc;
+
+  assert_non_null(hook);
+  assert_int_equal(pthread_mutex_lock(&hook->mutex), 0);
+  calls = hook->calls;
+  rc = hook->rc;
+  assert_int_equal(pthread_mutex_unlock(&hook->mutex), 0);
+  assert_int_equal(calls, 1U);
+  assert_int_equal(rc, LC_OK);
 }
 
 static size_t workflow_failing_source_read(void *context, void *buffer,
@@ -94,6 +185,8 @@ static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_before_notification_copy_context = NULL;
   lc_workflow_test_before_claim_outbox_hook = NULL;
   lc_workflow_test_before_claim_outbox_context = NULL;
+  lc_workflow_test_before_outbox_handoff_reacquire_hook = NULL;
+  lc_workflow_test_before_outbox_handoff_reacquire_context = NULL;
   lc_workflow_test_before_periodic_recovery_schedule_hook = NULL;
   lc_workflow_test_before_periodic_recovery_schedule_context = NULL;
 }
@@ -2923,6 +3016,184 @@ static void test_pouch_reconciliation_retains_overflow_request(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void test_pouch_reconciliation_skips_disappeared_outbox(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  const char *namespace_name = "workflow-reconcile-disappeared";
+  const char *outbox_key = "__lockdc_io/v1/outbox/disappeared";
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  workflow_delete_outbox_hook hook;
+  lc_workflow_stats stats;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  lc_error error;
+  size_t attempt;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "reconcile-disappeared-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  job = NULL;
+  memset(&hook, 0, sizeof(hook));
+  memset(&stats, 0, sizeof(stats));
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client_config.default_namespace = namespace_name;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = namespace_name;
+  workflow_config.owner = "workflow-reconcile-disappeared-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+
+  /* Let the initial claimed and dispatchable sweeps finish before installing
+   * the race hook. The following explicit reconciliation must therefore emit
+   * the key before the hook removes its durable record. */
+  for (attempt = 0U; attempt < 100U; ++attempt) {
+    assert_int_equal(lc_workflow_get_stats(workflow, &stats, &error), LC_OK);
+    if (stats.recovery_queries >= 2U)
+      break;
+    lc_workflow_stats_cleanup(&stats);
+    memset(&stats, 0, sizeof(stats));
+    {
+      struct timespec delay;
+      delay.tv_sec = 0;
+      delay.tv_nsec = 10000000L;
+      (void)nanosleep(&delay, NULL);
+    }
+  }
+  assert_true(stats.recovery_queries >= 2U);
+  lc_workflow_stats_cleanup(&stats);
+  memset(&stats, 0, sizeof(stats));
+
+  seed_recovery_outbox(client, namespace_name, outbox_key, &error);
+  workflow_delete_outbox_hook_init(&hook, client, namespace_name, outbox_key);
+  lc_workflow_test_after_reconcile_query_hook =
+      workflow_delete_outbox_after_reconcile;
+  lc_workflow_test_after_reconcile_query_context = &hook;
+  assert_int_equal(lc_workflow_reconcile(workflow, &error), LC_OK);
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &job, &error),
+                   LC_OK);
+  assert_null(job);
+  lc_workflow_test_after_reconcile_query_hook = NULL;
+  lc_workflow_test_after_reconcile_query_context = NULL;
+  workflow_delete_outbox_hook_assert(&hook);
+
+  assert_int_equal(lc_workflow_get_stats(workflow, &stats, &error), LC_OK);
+  assert_true(stats.claim_losses >= 1U);
+  assert_non_null(stats.last_error);
+  lc_workflow_stats_cleanup(&stats);
+
+  workflow_reset_allocation_failures();
+  workflow_delete_outbox_hook_cleanup(&hook);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_handoff_skips_disappeared_outbox(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  const char *namespace_name = "workflow-handoff-disappeared";
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  workflow_delete_outbox_hook hook;
+  lc_workflow_stats stats;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "handoff-disappeared-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  job = NULL;
+  payload = NULL;
+  memset(&hook, 0, sizeof(hook));
+  memset(&stats, 0, sizeof(stats));
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client_config.default_namespace = namespace_name;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = namespace_name;
+  workflow_config.owner = "workflow-handoff-disappeared-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "handoff-disappeared-operation";
+  entry.effect_id = "handoff-disappeared-effect";
+  entry.effect_key = "handoff-disappeared-key";
+  entry.kind = "test";
+  entry.destination = "test://handoff-disappeared";
+  entry.content_type = "text/plain";
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  workflow_delete_outbox_hook_init(&hook, client, namespace_name,
+                                   receipt.outbox_key);
+  lc_workflow_test_before_outbox_handoff_reacquire_hook =
+      workflow_delete_outbox_once;
+  lc_workflow_test_before_outbox_handoff_reacquire_context = &hook;
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &job, &error),
+                   LC_OK);
+  assert_null(job);
+  lc_workflow_test_before_outbox_handoff_reacquire_hook = NULL;
+  lc_workflow_test_before_outbox_handoff_reacquire_context = NULL;
+  workflow_delete_outbox_hook_assert(&hook);
+
+  assert_int_equal(lc_workflow_get_stats(workflow, &stats, &error), LC_OK);
+  assert_true(stats.claim_losses >= 1U);
+  assert_non_null(stats.last_error);
+  lc_workflow_stats_cleanup(&stats);
+
+  workflow_reset_allocation_failures();
+  workflow_delete_outbox_hook_cleanup(&hook);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void test_pouch_dead_letter_operations(void **state) {
   char root[256];
   char template_path[256];
@@ -4553,6 +4824,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_shared_command_resume_is_durable),
       cmocka_unit_test(test_pouch_multikey_terminal_failure_publishes_nothing),
       cmocka_unit_test(test_pouch_reconciliation_retains_overflow_request),
+      cmocka_unit_test(test_pouch_reconciliation_skips_disappeared_outbox),
+      cmocka_unit_test(test_pouch_handoff_skips_disappeared_outbox),
       cmocka_unit_test(test_pouch_dead_letter_operations),
       cmocka_unit_test(test_pouch_startup_recovery_claims_seeded_outbox),
       cmocka_unit_test(test_pouch_clean_reopen_reconciles_durable_index),

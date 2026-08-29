@@ -61,6 +61,9 @@ lc_workflow_test_failure_hook_fn lc_workflow_test_before_claim_outbox_hook =
     NULL;
 void *lc_workflow_test_before_claim_outbox_context = NULL;
 lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_outbox_handoff_reacquire_hook = NULL;
+void *lc_workflow_test_before_outbox_handoff_reacquire_context = NULL;
+lc_workflow_test_failure_hook_fn
     lc_workflow_test_before_periodic_recovery_schedule_hook = NULL;
 void *lc_workflow_test_before_periodic_recovery_schedule_context = NULL;
 #endif
@@ -1986,9 +1989,15 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   recovered_to_pending = 0;
   rc = lc_lease_load(lease, &lc_workflow_outbox_record_map, &record, NULL,
                      &result, error);
+  if (rc == LC_OK && result.no_content) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "outbox candidate disappeared before claim", NULL, NULL,
+                      NULL);
+  }
   if (rc == LC_OK) {
     now = time(NULL);
-    if (now == (time_t)-1 ||
+    if (now == (time_t)-1 || record.record_type == NULL ||
+        record.dispatch_state == NULL ||
         strcmp(record.record_type, "lockdc.outbox.v1") != 0 ||
         (strcmp(record.dispatch_state, "pending") != 0 &&
          strcmp(record.dispatch_state, "retry_wait") != 0 &&
@@ -2106,6 +2115,19 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   /* The durable claim is now visible and has spent its attempt. A fresh lease
    * fences the host's terminal action; a crash in this hand-off recovers at
    * the durable claim deadline. */
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_workflow_test_before_outbox_handoff_reacquire_hook != NULL) {
+    rc = lc_workflow_test_before_outbox_handoff_reacquire_hook(
+        lc_workflow_test_before_outbox_handoff_reacquire_context, error);
+    if (rc != LC_OK) {
+      lc_workflow_schedule_claim_recovery(workflow, key, claim_expires_at_unix);
+      lc_workflow_outbox_record_clear(client, &job->record);
+      lc_client_free(client, job->outbox_key);
+      lc_client_free(client, job);
+      return rc;
+    }
+  }
+#endif
   rc = lc_workflow_reacquire_durable_claim(workflow, &acquire, &lease, error);
   if (rc != LC_OK) {
     lc_workflow_schedule_claim_recovery(workflow, key, claim_expires_at_unix);
@@ -2116,8 +2138,15 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   }
   rc = lc_lease_load(lease, &lc_workflow_outbox_record_map, &verified, NULL,
                      &verify_result, error);
+  if (rc == LC_OK && verify_result.no_content) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "durable outbox candidate disappeared before hand-off",
+                      NULL, NULL, NULL);
+  }
   if (rc == LC_OK &&
-      (strcmp(verified.dispatch_state, "claimed") != 0 ||
+      (verified.record_type == NULL || verified.dispatch_state == NULL ||
+       strcmp(verified.record_type, "lockdc.outbox.v1") != 0 ||
+       strcmp(verified.dispatch_state, "claimed") != 0 ||
        verified.attempt_count != job->record.attempt_count ||
        verified.claim_expires_at_unix != job->record.claim_expires_at_unix)) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,

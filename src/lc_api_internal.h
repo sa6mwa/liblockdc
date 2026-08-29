@@ -68,6 +68,9 @@ extern lc_workflow_test_failure_hook_fn
     lc_workflow_test_before_claim_outbox_hook;
 extern void *lc_workflow_test_before_claim_outbox_context;
 extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_outbox_handoff_reacquire_hook;
+extern void *lc_workflow_test_before_outbox_handoff_reacquire_context;
+extern lc_workflow_test_failure_hook_fn
     lc_workflow_test_before_periodic_recovery_schedule_hook;
 extern void *lc_workflow_test_before_periodic_recovery_schedule_context;
 int lc_workflow_test_retry_is_not_eligible(lc_unix_seconds not_before_unix,
