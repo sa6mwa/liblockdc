@@ -4,6 +4,7 @@
 #include "lc_pouch.h"
 
 #include <errno.h>
+#include <openssl/evp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -73,6 +74,28 @@ static double bench_now_seconds(void) {
     return 0.0;
   }
   return (double)ts.tv_sec + ((double)ts.tv_nsec / 1000000000.0);
+}
+
+static int bench_payload_digest(const char *payload, size_t payload_length,
+                                char output[72]) {
+  static const char hex[] = "0123456789abcdef";
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int digest_length;
+  size_t index;
+
+  if ((payload == NULL && payload_length != 0U) ||
+      EVP_Digest(payload == NULL ? "" : payload, payload_length, digest,
+                 &digest_length, EVP_sha256(), NULL) != 1 ||
+      digest_length != 32U) {
+    return 1;
+  }
+  memcpy(output, "sha256:", sizeof("sha256:") - 1U);
+  for (index = 0U; index < digest_length; ++index) {
+    output[sizeof("sha256:") - 1U + index * 2U] = hex[digest[index] >> 4U];
+    output[sizeof("sha256:") + index * 2U] = hex[digest[index] & 0x0fU];
+  }
+  output[71] = '\0';
+  return 0;
 }
 
 static int bench_stream_copy(long iterations) {
@@ -562,6 +585,7 @@ static int bench_workflow_seed_record(lc_client *client,
                                       long generation, const char *payload,
                                       size_t payload_length, lc_error *error) {
   char state[512];
+  char payload_digest[72];
   lc_acquire_req acquire;
   lc_attach_req attach;
   lc_attach_res attach_result;
@@ -570,11 +594,13 @@ static int bench_workflow_seed_record(lc_client *client,
   lc_source *payload_source;
   int rc;
 
-  if (snprintf(state, sizeof(state),
+  if (bench_payload_digest(payload, payload_length, payload_digest) != 0 ||
+      snprintf(state, sizeof(state),
                "{\"record_type\":\"lockdc.outbox.v1\","
                "\"operation_id\":\"workflow-bench-%s-%ld\","
                "\"effect_id\":\"workflow-bench-effect-%s-%ld\","
                "\"effect_key\":\"workflow-bench-key-%s-%ld\","
+               "\"payload_digest\":\"%s\","
                "\"message_id\":\"workflow-bench-message-%s-%ld\","
                "\"kind\":\"benchmark\","
                "\"destination\":\"benchmark://reconcile\","
@@ -582,8 +608,8 @@ static int bench_workflow_seed_record(lc_client *client,
                "\"dispatch_state\":\"%s\",\"attempt_count\":0,"
                "\"not_before_unix\":0,\"benchmark_generation\":%ld}",
                dispatch_state, generation, dispatch_state, generation,
-               dispatch_state, generation, dispatch_state, generation,
-               dispatch_state, generation) < 0) {
+               dispatch_state, generation, payload_digest, dispatch_state,
+               generation, dispatch_state, generation) < 0) {
     return 1;
   }
   lease = NULL;
@@ -791,8 +817,12 @@ static int bench_workflow_reconcile_case(long iterations, int index_mode) {
                     job->outbox_key == NULL ? "" : job->outbox_key, rc,
                     error.message == NULL ? "" : error.message,
                     error.detail == NULL ? "" : error.detail);
+    } else {
+      job = NULL;
     }
-    job->close(job);
+    if (job != NULL) {
+      job->close(job);
+    }
   }
   drain_seconds =
       bench_now_seconds() -
@@ -950,7 +980,12 @@ static int bench_workflow_dispatcher_child(
                     job->outbox_key == NULL ? "" : job->outbox_key);
     }
     rc = job->complete(job, NULL, &error);
-    job->close(job);
+    if (rc == LC_OK) {
+      job = NULL;
+    }
+    if (job != NULL) {
+      job->close(job);
+    }
     if (rc == LC_OK) {
       ++result.delivered;
       result.last_delivery_seconds = bench_now_seconds();
