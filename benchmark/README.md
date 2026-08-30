@@ -56,7 +56,7 @@ attributed to intermediate write-churn flushes, final flush, no-op flush, and
 post-reopen flush.
 
 `make benchmark-pouch-go-parity-gate` uses the median from
-`POUCH_GO_PARITY_COUNT=3` same-run production samples for each engine. Its
+`POUCH_GO_PARITY_COUNT=5` same-run production samples for each engine. Its
 exclusive release budget is `POUCH_GO_PARITY_MIN_SPEEDUP=1.25`: Pouch must be
 no slower than 80% of the matching Go disk latency on every comparable core
 metric. Set the variable only to make an intentional release-policy change;
@@ -65,7 +65,7 @@ matching Go disk transform, so the release gate runs only the four comparable
 variants selected by the full-name `POUCH_GO_PARITY_BENCH` expression;
 compression remains reported evidence in the complete six-mode production
 matrix rather than a synthetic cross-engine ratio. `POUCH_GO_PARITY_TIMEOUT=15m`
-is the finite budget for the three-sample, three-scenario release comparison.
+is the finite budget for the five-sample, three-scenario release comparison.
 The contract is per operation: acquire, update, stale-precondition rejection,
 release, public and leased reads, attachment write/read, queue delivery,
 intermediate/final/no-op/
@@ -80,7 +80,7 @@ The command measures plaintext and storage-crypto configurations across the
 same production operation metrics. Its default 12-row, two-update, 128 KiB,
 16 KiB-segment profile is bounded at 90 seconds and retains rollover. Set the
 `POUCH_GO_DURABLE_*` variables for another profile. `make
-benchmark-pouch-go-durable-gate` uses the same three-sample and 1.25x policy
+benchmark-pouch-go-durable-gate` uses the same five-sample and 1.25x policy
 when that opt-in durability mode must meet the release performance budget.
 Strict sync is not Go disk's default disk policy, but it is a first-class Pouch
 mode: `make perf-gate` runs the default and durable comparison gates
