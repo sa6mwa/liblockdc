@@ -1942,9 +1942,6 @@ benchmark-pouch-go-parity-gate` enforces this with
 insufficient. Pouch compression variants retain their own reported performance
 evidence in the complete production matrix, but are excluded from the release
 gate because Go disk has no transform-equivalent compression mode. The release
-samples each and a finite `POUCH_GO_PARITY_TIMEOUT=15m` budget. Shared root has
-separate correctness, contention, handoff, and bounded-performance coverage
-and does not dilute the exclusive release target.
 gate runs only plaintext and crypto Pouch/Go pairs, with five production
 samples each and a finite `POUCH_GO_PARITY_TIMEOUT=15m` budget. Shared root has
 separate correctness, contention, handoff, and bounded-performance coverage and
