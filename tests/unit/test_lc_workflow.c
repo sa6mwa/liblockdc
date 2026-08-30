@@ -4192,6 +4192,66 @@ static void test_pouch_next_timeout_uses_one_deadline(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void test_pouch_next_long_max_timeout_waits_until_closed(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_error error;
+  workflow_next_wait_race race;
+  pthread_t next_thread;
+  struct timespec delay;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "next-long-max-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  memset(&race, 0, sizeof(race));
+  assert_int_equal(pthread_mutex_init(&race.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&race.condition, NULL), 0);
+  workflow_reset_allocation_failures();
+  lc_workflow_test_before_next_wait_hook = workflow_next_wait_observed_hook;
+  lc_workflow_test_before_next_wait_context = &race;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "next-long-max";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  race.workflow = workflow;
+  race.timeout_ms = LONG_MAX;
+  assert_int_equal(
+      pthread_create(&next_thread, NULL, workflow_next_wait_thread, &race), 0);
+  assert_true(workflow_next_wait_race_wait(&race, &race.next_wait_entered));
+  delay.tv_sec = 0;
+  delay.tv_nsec = 100000000L;
+  assert_int_equal(nanosleep(&delay, NULL), 0);
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  assert_false(race.next_finished);
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+  lc_workflow_close(workflow);
+  assert_int_equal(pthread_join(next_thread, NULL), 0);
+  assert_int_equal(race.next_rc, LC_OK);
+  assert_null(race.job);
+  workflow_reset_allocation_failures();
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  assert_int_equal(pthread_cond_destroy(&race.condition), 0);
+  assert_int_equal(pthread_mutex_destroy(&race.mutex), 0);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void test_pouch_reconciliation_pages_large_outbox(void **state) {
   char root[256];
   char template_path[256];
@@ -5202,6 +5262,7 @@ int main(void) {
       cmocka_unit_test(test_pouch_compacted_reopen_reconciles_released_outbox),
       cmocka_unit_test(test_pouch_dispatcher_wakeup_isolated_from_next_waiters),
       cmocka_unit_test(test_pouch_next_timeout_uses_one_deadline),
+      cmocka_unit_test(test_pouch_next_long_max_timeout_waits_until_closed),
       cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
       cmocka_unit_test(test_pouch_reconciliation_preserves_allocator_domains),
       cmocka_unit_test(test_pouch_recovery_prefetch_is_bounded),

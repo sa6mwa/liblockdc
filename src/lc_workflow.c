@@ -1034,6 +1034,53 @@ static long lc_workflow_timestamp_max_delay(lc_unix_seconds base) {
   return (long)remaining;
 }
 
+static time_t lc_workflow_time_t_maximum(void) {
+  uintmax_t maximum;
+  size_t bits;
+
+  bits = sizeof(time_t) * CHAR_BIT;
+  if (bits >= sizeof(uintmax_t) * CHAR_BIT)
+    maximum = (uintmax_t)-1;
+  else
+    maximum = ((uintmax_t)1U << bits) - 1U;
+  if ((time_t)-1 < (time_t)0)
+    maximum >>= 1U;
+  return (time_t)maximum;
+}
+
+static void
+lc_workflow_timespec_add_milliseconds_saturating(struct timespec *deadline,
+                                                 long timeout_ms) {
+  time_t maximum;
+  uintmax_t seconds;
+  uintmax_t remaining;
+  long nanoseconds;
+  int carry;
+
+  maximum = lc_workflow_time_t_maximum();
+  seconds = (uintmax_t)timeout_ms / 1000U;
+  nanoseconds = deadline->tv_nsec + (timeout_ms % 1000L) * 1000000L;
+  carry = nanoseconds >= 1000000000L;
+
+  if (deadline->tv_sec >= maximum) {
+    deadline->tv_sec = maximum;
+    deadline->tv_nsec = 999999999L;
+    return;
+  }
+  remaining = (uintmax_t)(maximum - deadline->tv_sec);
+  if (seconds > remaining || (seconds == remaining && carry)) {
+    deadline->tv_sec = maximum;
+    deadline->tv_nsec = 999999999L;
+    return;
+  }
+  deadline->tv_sec += (time_t)seconds;
+  if (carry) {
+    ++deadline->tv_sec;
+    nanoseconds -= 1000000000L;
+  }
+  deadline->tv_nsec = nanoseconds;
+}
+
 static int lc_workflow_retry_is_not_eligible(lonejson_int64 not_before_unix,
                                              lc_unix_seconds now) {
   return not_before_unix > (lonejson_int64)now;
@@ -2648,12 +2695,7 @@ static int lc_workflow_wait_for_ready(lc_workflow_handle *workflow,
                           "failed to construct workflow wait deadline", NULL,
                           NULL, NULL);
     }
-    deadline.tv_sec += timeout_ms / 1000L;
-    deadline.tv_nsec += (timeout_ms % 1000L) * 1000000L;
-    if (deadline.tv_nsec >= 1000000000L) {
-      ++deadline.tv_sec;
-      deadline.tv_nsec -= 1000000000L;
-    }
+    lc_workflow_timespec_add_milliseconds_saturating(&deadline, timeout_ms);
   }
   pthread_mutex_lock(&workflow->notification_mutex);
   while (!workflow->closed && workflow->ready_head == NULL) {
