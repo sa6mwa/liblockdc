@@ -861,6 +861,7 @@ function OutboxJob:complete(completion)
 
   if ok ~= nil then
     self._terminal = true
+    self._closed = true
   end
   return ok, err
 end
@@ -870,6 +871,7 @@ function OutboxJob:retry(req)
 
   if ok ~= nil then
     self._terminal = true
+    self._closed = true
   end
   return ok, err
 end
@@ -879,6 +881,7 @@ function OutboxJob:dead_letter(diagnostic)
 
   if ok ~= nil then
     self._terminal = true
+    self._closed = true
   end
   return ok, err
 end

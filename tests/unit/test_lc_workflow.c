@@ -878,8 +878,10 @@ workflow_shared_process_claim(const char *root, const char *namespace_name,
   if (result.rc == LC_OK && job != NULL) {
     result.got_job = 1;
     result.rc = lc_outbox_job_complete(job, NULL, &error);
-    if (result.rc == LC_OK)
+    if (result.rc == LC_OK) {
       result.delivered = 1UL;
+      job = NULL;
+    }
   }
   if (job != NULL)
     lc_outbox_job_close(job);
@@ -958,9 +960,12 @@ workflow_shared_process_drain(const char *root, const char *namespace_name,
     idle_count = 0U;
     result.got_job = 1;
     result.rc = lc_outbox_job_complete(job, NULL, &error);
-    lc_outbox_job_close(job);
-    if (result.rc == LC_OK)
+    if (result.rc == LC_OK) {
       ++result.delivered;
+      job = NULL;
+    }
+    if (job != NULL)
+      lc_outbox_job_close(job);
   }
   if (workflow != NULL)
     lc_workflow_close(workflow);
@@ -1136,7 +1141,7 @@ test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts(void **state) {
   assert_int_equal(lc_workflow_next(workflow, 3000L, &job, &error), LC_OK);
   assert_non_null(job);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-  lc_outbox_job_close(job);
+  job = NULL;
 
   entry.content_type = "application/json";
   assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
@@ -1325,7 +1330,6 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   assert_memory_equal(payload_bytes, "payload", 7U);
   lc_sink_close(payload_sink);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-  lc_outbox_job_close(job);
   job = NULL;
   lc_source_close(payload);
   payload = NULL;
@@ -1394,14 +1398,13 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
     retry.delay_seconds = 1L;
     assert_int_equal(lc_outbox_job_retry(job, &retry, &error), LC_OK);
   }
-  lc_outbox_job_close(job);
   job = NULL;
   assert_int_equal(lc_workflow_next(workflow, 3000L, &job, &error), LC_OK);
   assert_non_null(job);
   assert_string_equal(job->effect_key, "foreign-idempotency-retry");
   assert_int_equal(job->attempt, 2);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-  lc_outbox_job_close(job);
+  job = NULL;
   lc_source_close(payload);
   payload = NULL;
   entry.effect_id = "effect-1";
@@ -2059,7 +2062,7 @@ test_pouch_notification_allocation_failure_reconciles_committed_outbox(
   assert_non_null(job);
   assert_string_equal(job->effect_key, entry.effect_key);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-  lc_outbox_job_close(job);
+  job = NULL;
   lc_source_close(payload);
   lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
@@ -2138,7 +2141,6 @@ test_pouch_retry_notification_allocation_failure_recovers_at_deadline(
   lc_workflow_test_before_notification_copy_hook = workflow_fail_allocation;
   assert_int_equal(lc_outbox_job_retry(job, &retry, &error), LC_OK);
   lc_workflow_test_before_notification_copy_hook = NULL;
-  lc_outbox_job_close(job);
   job = NULL;
   assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
                                     &job, &error),
@@ -2146,7 +2148,7 @@ test_pouch_retry_notification_allocation_failure_recovers_at_deadline(
   assert_non_null(job);
   assert_int_equal(job->attempt, 2);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-  lc_outbox_job_close(job);
+  job = NULL;
   lc_source_close(payload);
   lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
@@ -2225,7 +2227,7 @@ static void test_pouch_transient_claim_failure_is_rescheduled(void **state) {
   assert_true(stats.claim_losses >= 1U);
   lc_workflow_stats_cleanup(&stats);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-  lc_outbox_job_close(job);
+  job = NULL;
   lc_source_close(payload);
   lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
@@ -2312,7 +2314,7 @@ static void test_pouch_overflowing_foreground_retry_reconciles(void **state) {
              "retry initial delay exceeds supported timestamp range"));
   lc_workflow_stats_cleanup(&stats);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-  lc_outbox_job_close(job);
+  job = NULL;
   lc_source_close(payload);
   lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
@@ -2385,7 +2387,7 @@ static void test_pouch_auto_retry_long_max_cap_is_safe(void **state) {
   assert_non_null(job);
   lc_outbox_retry_init(&retry);
   assert_int_equal(lc_outbox_job_retry(job, &retry, &error), LC_OK);
-  lc_outbox_job_close(job);
+  job = NULL;
   lc_source_close(payload);
   lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
@@ -2465,7 +2467,7 @@ test_pouch_claim_recovery_allocation_failure_recovers_at_expiry(void **state) {
   assert_non_null(replacement);
   assert_int_equal(replacement->attempt, 2);
   assert_int_equal(lc_outbox_job_complete(replacement, NULL, &error), LC_OK);
-  lc_outbox_job_close(replacement);
+  replacement = NULL;
   lc_source_close(payload);
   lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_close(workflow);
@@ -2679,7 +2681,6 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   completion.delivery_reference = "provider-delivery-1";
   completion.response_digest = "provider-response-digest";
   assert_int_equal(lc_outbox_job_complete(job, &completion, &error), LC_OK);
-  lc_outbox_job_close(job);
   job = NULL;
   duplicate_transaction = (lc_workflow_transaction *)1;
   assert_int_equal(lc_workflow_resume_command(workflow, &command.identity,
@@ -2886,7 +2887,7 @@ static void test_pouch_workflow_rejects_overflowing_deadlines(void **state) {
   lc_error_init(&error);
   assert_int_equal(
       lc_outbox_job_dead_letter(job, "overflow regression", &error), LC_OK);
-  lc_outbox_job_close(job);
+  job = NULL;
   lc_outbox_receipt_cleanup(&receipt);
   lc_source_close(payload);
   lc_workflow_close(workflow);
@@ -3344,7 +3345,7 @@ static void test_pouch_reconciliation_retains_overflow_request(void **state) {
     else
       fail_msg("unexpected reconciled outbox job");
     assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-    lc_outbox_job_close(job);
+    job = NULL;
   }
   lc_workflow_test_after_reconcile_query_hook = NULL;
   lc_workflow_test_after_reconcile_query_context = NULL;
@@ -3632,7 +3633,6 @@ static void test_pouch_dead_letter_operations(void **state) {
   assert_non_null(job);
   assert_int_equal(lc_outbox_job_dead_letter(job, "permanent failure", &error),
                    LC_OK);
-  lc_outbox_job_close(job);
   job = NULL;
   seed_foreign_workflow_state(client, workflow_config.namespace_name,
                               "foreign-dead-letter", "dead_letter", &error);
@@ -3668,7 +3668,6 @@ static void test_pouch_dead_letter_operations(void **state) {
   assert_int_equal(job->attempt, 1);
   assert_int_equal(lc_outbox_job_dead_letter(job, "second failure", &error),
                    LC_OK);
-  lc_outbox_job_close(job);
   job = NULL;
 
   lc_dead_letter_export_opts_init(&export_options);
@@ -3721,7 +3720,6 @@ static void test_pouch_dead_letter_operations(void **state) {
   assert_non_null(job);
   assert_int_equal(lc_outbox_job_dead_letter(job, "startup replay", &error),
                    LC_OK);
-  lc_outbox_job_close(job);
   job = NULL;
   lc_workflow_close(workflow);
   workflow = NULL;
@@ -3737,7 +3735,7 @@ static void test_pouch_dead_letter_operations(void **state) {
   assert_string_equal(job->effect_key, entry.effect_key);
   assert_int_equal(job->attempt, 1);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-  lc_outbox_job_close(job);
+  job = NULL;
   assert_int_equal(pthread_mutex_lock(&replay_capture.mutex), 0);
   assert_int_equal(replay_capture.calls, 1U);
   assert_true(replay_capture.used_dispatcher_client);
@@ -3802,7 +3800,6 @@ static void test_pouch_startup_recovery_claims_seeded_outbox(void **state) {
     retry.delay_seconds = 1L;
     assert_int_equal(lc_outbox_job_retry(job, &retry, &error), LC_OK);
   }
-  lc_outbox_job_close(job);
   job = NULL;
   assert_int_equal(
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
@@ -3812,7 +3809,7 @@ static void test_pouch_startup_recovery_claims_seeded_outbox(void **state) {
   assert_string_equal(job->effect_key, "recovery-key");
   assert_int_equal(job->attempt, 2);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-  lc_outbox_job_close(job);
+  job = NULL;
   lc_workflow_close(workflow);
   lc_client_close(client);
   lc_error_cleanup(&error);
@@ -3919,7 +3916,7 @@ static void test_pouch_reopen_reconciles_durable_index_mode(int shared) {
   assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &finished), 0);
   assert_true(workflow_elapsed_milliseconds(&started, &finished) < 5000L);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-  lc_outbox_job_close(job);
+  job = NULL;
   lc_workflow_close(workflow);
   lc_client_close(client);
   lc_error_cleanup(&error);
@@ -4018,7 +4015,7 @@ test_pouch_compacted_reopen_reconciles_released_outbox(void **state) {
     assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
     assert_non_null(job);
     assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-    lc_outbox_job_close(job);
+    job = NULL;
   }
 
   lc_workflow_close(workflow);
@@ -4116,7 +4113,7 @@ test_pouch_dispatcher_wakeup_isolated_from_next_waiters(void **state) {
   assert_int_equal(race.next_rc, LC_OK);
   assert_non_null(race.job);
   assert_int_equal(lc_outbox_job_complete(race.job, NULL, &error), LC_OK);
-  lc_outbox_job_close(race.job);
+  race.job = NULL;
   lc_outbox_receipt_cleanup(&receipt);
   lc_source_close(payload);
   workflow_reset_allocation_failures();
@@ -4244,7 +4241,7 @@ static void test_pouch_reconciliation_pages_large_outbox(void **state) {
     assert_int_equal(lc_workflow_next(workflow, 30000L, &job, &error), LC_OK);
     assert_non_null(job);
     assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-    lc_outbox_job_close(job);
+    job = NULL;
   }
   assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &finished), 0);
   assert_true(workflow_elapsed_milliseconds(&started, &finished) < 30000L);
@@ -4312,8 +4309,11 @@ test_pouch_reconciliation_preserves_allocator_domains(void **state) {
     job = NULL;
     assert_int_equal(lc_workflow_next(workflow, 30000L, &job, &error), LC_OK);
     assert_non_null(job);
+    /* A successful terminal operation consumes the job.  The tracking
+     * allocator below proves that it also releases retained client/workflow
+     * resources without an explicit close from the caller. */
     assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-    lc_outbox_job_close(job);
+    job = NULL;
   }
   lc_workflow_close(workflow);
   lc_client_close(client);
@@ -4482,7 +4482,7 @@ static void test_pouch_shared_process_dispatches_once(void **state) {
   if (job != NULL) {
     parent_got_job = 1;
     assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-    lc_outbox_job_close(job);
+    job = NULL;
   }
   assert_int_equal(read(result_pipe[0], &child_result, sizeof(child_result)),
                    (ssize_t)sizeof(child_result));
@@ -4667,7 +4667,7 @@ static void test_pouch_expired_claim_rejects_stale_terminal(void **state) {
   lc_error_cleanup(&error);
   lc_error_init(&error);
   assert_int_equal(lc_outbox_job_complete(replacement, NULL, &error), LC_OK);
-  lc_outbox_job_close(replacement);
+  replacement = NULL;
   lc_outbox_job_close(stale);
   lc_workflow_close(second);
   lc_client_close(client);
@@ -4889,7 +4889,6 @@ test_pouch_workflow_validates_durable_input_contracts(void **state) {
   lc_error_cleanup(&error);
   lc_error_init(&error);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-  lc_outbox_job_close(job);
   job = NULL;
   free(oversized_diagnostic);
   oversized_diagnostic = NULL;
@@ -4918,7 +4917,6 @@ test_pouch_workflow_validates_durable_input_contracts(void **state) {
   assert_int_equal(lc_workflow_next(workflow, 3000L, &job, &error), LC_OK);
   assert_non_null(job);
   assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
-  lc_outbox_job_close(job);
   job = NULL;
   lc_source_close(second_payload);
   second_payload = NULL;

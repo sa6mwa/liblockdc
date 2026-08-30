@@ -2393,7 +2393,8 @@ struct lc_workflow_participant {
  * The methods never invoke host callbacks. `write_payload()` streams the
  * immutable payload attachment into the caller's sink without materializing it
  * in liblockdc. A terminal method consumes the job on success. All string
- * fields are borrowed and valid until `close()`.
+ * fields are borrowed and valid until `close()` or a successful terminal
+ * method.
  */
 struct lc_outbox_job {
   /** Streams the immutable payload attachment into `dst`. */

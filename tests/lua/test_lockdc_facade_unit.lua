@@ -808,8 +808,8 @@ local function test_workflow_facade_lifecycle()
   assert_eq(captured.delivery_completion.delivery_reference, 'provider-1',
       'job completion evidence should pass through')
   job:close()
-  assert_truthy(job_core.closed,
-      'job close must release the native job after completion')
+  assert_eq(job_core.closed, nil,
+      'terminal completion must consume the native job before close')
 
   local stats = assert(workflow:stats())
   assert_eq(stats.recovery_queries, 3, 'workflow stats should delegate')

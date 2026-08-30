@@ -4712,7 +4712,6 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   payload_sink = NULL;
   rc = lc_outbox_job_complete(job, NULL, &error);
   assert_lc_ok(rc, &error);
-  lc_outbox_job_close(job);
   job = NULL;
   rc = lc_source_from_memory("workflow-payload", 16U, &duplicate_payload,
                              &error);
@@ -4814,7 +4813,7 @@ test_disk_workflow_dispatcher_uses_internal_json_limit(void **state) {
   assert_string_equal(job->effect_key, effect_key);
   rc = lc_outbox_job_complete(job, NULL, &error);
   assert_lc_ok(rc, &error);
-  lc_outbox_job_close(job);
+  job = NULL;
   lc_outbox_receipt_cleanup(&receipt);
   lc_source_close(payload);
   lc_workflow_close(workflow);
@@ -4891,7 +4890,6 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   retry.diagnostic = "temporary";
   rc = lc_outbox_job_retry(job, &retry, &error);
   assert_lc_ok(rc, &error);
-  lc_outbox_job_close(job);
   job = NULL;
   rc = lc_workflow_next(workflow, 5000L, &job, &error);
   assert_lc_ok(rc, &error);
@@ -4900,7 +4898,6 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   assert_int_equal(job->attempt, 2);
   rc = lc_outbox_job_dead_letter(job, "permanent", &error);
   assert_lc_ok(rc, &error);
-  lc_outbox_job_close(job);
   job = NULL;
   lc_workflow_stats_init(&workflow_stats);
   rc = lc_workflow_get_stats(workflow, &workflow_stats, &error);
@@ -4933,7 +4930,7 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   assert_int_equal(job->attempt, 1);
   rc = lc_outbox_job_complete(job, NULL, &error);
   assert_lc_ok(rc, &error);
-  lc_outbox_job_close(job);
+  job = NULL;
   lc_dead_letter_export_res_init(&export_result);
   rc = lc_sink_to_memory(&export_sink, &error);
   assert_lc_ok(rc, &error);
@@ -5038,7 +5035,7 @@ static void test_disk_workflow_startup_recovery(void **state) {
   assert_string_equal(job->effect_key, "recovery-key");
   rc = lc_outbox_job_complete(job, NULL, &error);
   assert_lc_ok(rc, &error);
-  lc_outbox_job_close(job);
+  job = NULL;
   lc_workflow_close(workflow);
   lc_client_close(client);
   lc_error_cleanup(&error);

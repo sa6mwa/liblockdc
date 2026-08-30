@@ -3890,6 +3890,14 @@ static int lcdc_outbox_job_terminal(lua_State *L, int operation) {
     lc_error_cleanup(&error);
     return 3;
   }
+  /* The C terminal methods consume successful jobs.  Retain the userdata for
+   * Lua identity and GC safety, but release its native owner reference now so
+   * neither an explicit close nor collection can touch the consumed handle. */
+  ud->job = NULL;
+  if (ud->owner_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
+    ud->owner_ref = LUA_NOREF;
+  }
   lua_pushboolean(L, 1);
   lc_error_cleanup(&error);
   return 1;

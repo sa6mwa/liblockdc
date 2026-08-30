@@ -1820,6 +1820,10 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
     lc_workflow_schedule_retry(job->workflow, job->outbox_key,
                                (lc_unix_seconds)not_before_unix);
   }
+  /* A successful terminal transition transfers no remaining ownership to the
+   * caller.  Release the local job and its retained workflow/client references
+   * now; the public contract deliberately makes a terminal method consuming. */
+  lc_outbox_job_close_method(&job->pub);
   return LC_OK;
 }
 

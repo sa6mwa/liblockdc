@@ -164,7 +164,6 @@ if payload == nil or payload.sequence ~= 1 or type(written_or_err) ~= "number" t
   error("Lua workflow outbox payload did not stream through the façade")
 end
 assert_ok(job:complete(), nil, "Lua workflow first job completion")
-job:close()
 
 local inbound_txn, accepted_or_err = workflow:accept_inbox({
   consumer_id = "lua-workflow-consumer",
@@ -211,7 +210,6 @@ if job:info().effect_key ~= "lua-effect:inbound" then
   error("Lua workflow returned the wrong inbox-triggered job")
 end
 assert_ok(job:complete(), nil, "Lua workflow inbound job completion")
-job:close()
 
 txn = append_effect("retry", { sequence = 2 })
 assert_ok(txn:commit(), nil, "Lua workflow retry transaction commit")
@@ -219,7 +217,6 @@ txn:close()
 job = assert_ok(workflow:next(3000), nil, "Lua workflow retry first job")
 assert_ok(job:retry({ delay_seconds = 1, diagnostic = "temporary" }), nil,
           "Lua workflow retry scheduling")
-job:close()
 job = assert_ok(workflow:next(3000), nil, "Lua workflow retry redelivery")
 if job:info().attempt ~= 2 then
   job:close()
@@ -229,7 +226,6 @@ if job:info().attempt ~= 2 then
 end
 local dead_letter_key = job:info().outbox_key
 assert_ok(job:dead_letter("permanent"), nil, "Lua workflow dead letter")
-job:close()
 
 local stats = assert_ok(workflow:stats(), nil, "Lua workflow stats")
 if not stats.running then
@@ -255,7 +251,6 @@ if job:info().effect_key ~= "lua-effect:retry" or job:info().attempt ~= 1 then
   error("Lua workflow dead-letter replay did not reset the delivery attempt")
 end
 assert_ok(job:complete(), nil, "Lua workflow replayed completion")
-job:close()
 assert_ok(workflow:reconcile(), nil, "Lua workflow reconciliation signal")
 
 workflow:close()
