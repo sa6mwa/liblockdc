@@ -1934,17 +1934,21 @@ Acceptance target: exclusive Pouch must materially outperform the matching Go
 lockd disk plaintext or crypto configuration on every gated core metric. The
 numeric release budget is a minimum `1.25x` Pouch speedup: every Pouch latency
 must be at most 80% of the matching Go disk median. The stable baseline is the
-median of three same-run production samples for each engine, preventing host
-variance from redefining a release threshold. `make
+median of five same-run production samples for each engine, preventing isolated
+sub-millisecond filesystem and scheduler outliers from redefining a release
+threshold. `make
 benchmark-pouch-go-parity-gate` enforces this with
 `POUCH_GO_PARITY_MIN_SPEEDUP=1.25`; strict-but-undefined "faster" is
 insufficient. Pouch compression variants retain their own reported performance
 evidence in the complete production matrix, but are excluded from the release
 gate because Go disk has no transform-equivalent compression mode. The release
-gate runs only plaintext and crypto Pouch/Go pairs, with three production
 samples each and a finite `POUCH_GO_PARITY_TIMEOUT=15m` budget. Shared root has
 separate correctness, contention, handoff, and bounded-performance coverage
 and does not dilute the exclusive release target.
+gate runs only plaintext and crypto Pouch/Go pairs, with five production
+samples each and a finite `POUCH_GO_PARITY_TIMEOUT=15m` budget. Shared root has
+separate correctness, contention, handoff, and bounded-performance coverage and
+does not dilute the exclusive release target.
 
 Strict durable sync uses the same complete core-metric contract in `make
 benchmark-pouch-go-durable-gate`; it is part of `make perf-gate` rather than an

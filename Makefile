@@ -58,7 +58,9 @@ POUCH_GO_PRODUCTION_BENCHTIME ?= 1x
 # transform-equivalent release comparison.
 POUCH_GO_PARITY_BENCH ?= ^BenchmarkProduction(PouchPT|PouchCrypto|LockdDiskNoCrypto|LockdDiskCrypto)$$$$$$$$/.*
 POUCH_GO_PARITY_BENCHTIME ?= 1x
-POUCH_GO_PARITY_COUNT ?= 3
+# Five independent samples retain an odd median while absorbing isolated
+# sub-millisecond filesystem and scheduler outliers in the release comparison.
+POUCH_GO_PARITY_COUNT ?= 5
 POUCH_GO_PARITY_MIN_SPEEDUP ?= 1.25
 POUCH_GO_PARITY_TIMEOUT ?= 15m
 POUCH_GO_DURABLE_BENCH ?= Production(PouchDurablePT|PouchDurableCrypto|LockdDiskDurableNoCrypto|LockdDiskDurableCrypto)
