@@ -718,16 +718,13 @@ static int workflow_query_count_end(void *context, lc_error *error) {
   return 1;
 }
 
-static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
-                                 const char *key, lc_error *error) {
-  static const char state[] =
-      "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"recovery-op\","
-      "\"effect_id\":\"recovery-effect\",\"effect_key\":\"recovery-key\","
-      "\"payload_digest\":\"recovery-payload-digest\","
-      "\"message_id\":\"msg_recovery\","
-      "\"kind\":\"test\",\"destination\":\"recovery://target\","
-      "\"content_type\":\"text/plain\",\"dispatch_state\":\"pending\","
-      "\"attempt_count\":0,\"not_before_unix\":0}";
+static void seed_recovery_outbox_with_attempt_count(lc_client *client,
+                                                    const char *namespace_name,
+                                                    const char *key,
+                                                    const char *attempt_count,
+                                                    lc_error *error) {
+  char state[512];
+  int state_length;
   lc_acquire_req acquire;
   lc_lease *lease;
   lc_source *state_source;
@@ -735,6 +732,18 @@ static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
   lc_attach_req attach;
   lc_attach_res attach_result;
 
+  assert_non_null(attempt_count);
+  state_length = snprintf(
+      state, sizeof(state),
+      "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"recovery-op\","
+      "\"effect_id\":\"recovery-effect\",\"effect_key\":\"recovery-key\","
+      "\"payload_digest\":\"recovery-payload-digest\","
+      "\"message_id\":\"msg_recovery\","
+      "\"kind\":\"test\",\"destination\":\"recovery://target\","
+      "\"content_type\":\"text/plain\",\"dispatch_state\":\"pending\","
+      "\"attempt_count\":%s,\"not_before_unix\":0}",
+      attempt_count);
+  assert_true(state_length > 0 && (size_t)state_length < sizeof(state));
   lc_acquire_req_init(&acquire);
   acquire.namespace_name = namespace_name;
   acquire.key = key;
@@ -744,7 +753,7 @@ static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
   assert_int_equal(lc_acquire(client, &acquire, &lease, error), LC_OK);
   state_source = NULL;
   assert_int_equal(
-      lc_source_from_memory(state, sizeof(state) - 1U, &state_source, error),
+      lc_source_from_memory(state, (size_t)state_length, &state_source, error),
       LC_OK);
   assert_int_equal(lc_lease_update(lease, state_source, NULL, error), LC_OK);
   lc_source_close(state_source);
@@ -763,6 +772,12 @@ static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
   lc_attach_res_cleanup(&attach_result);
   lc_source_close(payload_source);
   assert_int_equal(lc_lease_release(lease, NULL, error), LC_OK);
+}
+
+static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
+                                 const char *key, lc_error *error) {
+  seed_recovery_outbox_with_attempt_count(client, namespace_name, key, "0",
+                                          error);
 }
 
 static void seed_terminal_workflow_outbox(lc_client *client,
@@ -4829,6 +4844,91 @@ test_pouch_expired_claim_recovers_and_preserves_attempt_budget(void **state) {
 }
 
 static void
+test_pouch_workflow_rejects_out_of_range_durable_attempt_counts(void **state) {
+  static const char *const keys[] = {
+      "__lockdc_io/v1/outbox/attempt-int64-max",
+      "__lockdc_io/v1/outbox/attempt-negative",
+  };
+  static const char *const attempt_counts[] = {
+      "9223372036854775807",
+      "-1",
+  };
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_sink *sink;
+  lc_get_res get_result;
+  const void *bytes;
+  size_t length;
+  size_t index;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "attempt-range-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  for (index = 0U; index < sizeof(keys) / sizeof(keys[0]); ++index) {
+    seed_recovery_outbox_with_attempt_count(client, "workflow-attempt-range",
+                                            keys[index], attempt_counts[index],
+                                            &error);
+  }
+  lc_workflow_config_init(&config);
+  config.namespace_name = "workflow-attempt-range";
+  config.owner = "workflow-attempt-range";
+  workflow = NULL;
+  assert_int_equal(lc_client_new_workflow(client, &config, &workflow, &error),
+                   LC_OK);
+
+  job = (lc_outbox_job *)1;
+  assert_int_equal(lc_workflow_next(workflow, 1000L, &job, &error), LC_OK);
+  assert_null(job);
+
+  for (index = 0U; index < sizeof(keys) / sizeof(keys[0]); ++index) {
+    lc_acquire_req_init(&acquire);
+    acquire.namespace_name = config.namespace_name;
+    acquire.key = keys[index];
+    acquire.owner = "workflow-attempt-range-inspect";
+    acquire.ttl_seconds = 30L;
+    lease = NULL;
+    assert_int_equal(lc_acquire(client, &acquire, &lease, &error), LC_OK);
+    sink = NULL;
+    memset(&get_result, 0, sizeof(get_result));
+    assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+    assert_int_equal(lc_lease_get(lease, sink, NULL, &get_result, &error),
+                     LC_OK);
+    bytes = NULL;
+    length = 0U;
+    assert_int_equal(lc_sink_memory_bytes(sink, &bytes, &length, &error),
+                     LC_OK);
+    assert_true(workflow_bytes_contains(bytes, length,
+                                        "\"dispatch_state\":\"pending\""));
+    assert_true(workflow_bytes_contains(bytes, length, attempt_counts[index]));
+    lc_get_res_cleanup(&get_result);
+    lc_sink_close(sink);
+    assert_int_equal(lc_lease_release(lease, NULL, &error), LC_OK);
+  }
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
 test_pouch_workflow_validates_durable_input_contracts(void **state) {
   char root[256], template_path[256], endpoint[320];
   const char *endpoints[1];
@@ -5271,6 +5371,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_expired_claim_rejects_stale_terminal),
       cmocka_unit_test(
           test_pouch_expired_claim_recovers_and_preserves_attempt_budget),
+      cmocka_unit_test(
+          test_pouch_workflow_rejects_out_of_range_durable_attempt_counts),
       cmocka_unit_test(test_pouch_workflow_validates_durable_input_contracts),
       cmocka_unit_test(test_pouch_workflow_close_serializes_ready_job_detach),
       cmocka_unit_test(test_pouch_workflow_close_retains_blocked_next),

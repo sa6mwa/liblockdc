@@ -2143,6 +2143,13 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "outbox candidate is not currently dispatchable", NULL,
                         NULL, NULL);
+    } else if (record.attempt_count < 0 ||
+               record.attempt_count >= (lonejson_int64)INT_MAX) {
+      rc = lc_error_set(
+          error, LC_ERR_INVALID, 0L,
+          "outbox candidate attempt count is outside the supported "
+          "range",
+          NULL, NULL, NULL);
     } else if (strcmp(record.dispatch_state, "retry_wait") == 0 &&
                lc_workflow_retry_is_not_eligible(record.not_before_unix,
                                                  (lc_unix_seconds)now)) {

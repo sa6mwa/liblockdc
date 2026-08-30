@@ -939,6 +939,11 @@ worker renews its active lease and moves its local recovery signal forward;
 recovery always reacquires and validates the real lease before changing the
 durable record.
 
+`attempt_count` is a non-negative durable counter whose next value must fit the
+public one-based `int` job attempt field. A malformed negative or out-of-range
+counter is rejected as an invalid candidate before any claim transition; it is
+never incremented, narrowed, or handed to a receiver.
+
 If a worker disappears, expiry recovery turns the durable claim back to
 `pending`; if the durable attempt budget was consumed, it instead transitions
 the record to `dead_letter`. This retains attempts across process loss and
