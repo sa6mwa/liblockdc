@@ -4002,6 +4002,15 @@ static int lc_workflow_replay_dead_letter_on_client(
                                     &record, error);
   if (rc != LC_OK)
     return rc;
+  if (record.replay_count < 0 ||
+      record.replay_count >= (lonejson_int64)LC_I64_MAX) {
+    lc_workflow_outbox_record_loaded_clear(client, &record);
+    lc_workflow_rollback_lease(lease);
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "outbox dead-letter replay count is outside the supported range", NULL,
+        NULL, NULL);
+  }
   now = time(NULL);
   if (now == (time_t)-1) {
     lc_workflow_outbox_record_loaded_clear(client, &record);

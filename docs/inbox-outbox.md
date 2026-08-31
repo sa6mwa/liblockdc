@@ -978,7 +978,10 @@ a current dead-letter envelope. It atomically restores `pending`, resets the
 delivery attempt count to zero, retains the immutable `effect_key`, increments
 `replay_count`, writes `replayed_at_unix`, and preserves the previous terminal
 diagnostic in `prior_dead_letter_error`. The normal dispatcher then receives
-the exact key as an internal notification.
+the exact key as an internal notification. `replay_count` is a non-negative
+durable signed-64-bit counter; malformed negative or maximum values are
+rejected before replay, so the counter is never incremented past its
+representable range.
 
 `delete_dead_letter(outbox_key)` is also restricted to a current dead letter.
 It deletes the envelope and its fixed `payload` attachment under one workflow

@@ -718,11 +718,10 @@ static int workflow_query_count_end(void *context, lc_error *error) {
   return 1;
 }
 
-static void seed_recovery_outbox_with_attempt_count(lc_client *client,
-                                                    const char *namespace_name,
-                                                    const char *key,
-                                                    const char *attempt_count,
-                                                    lc_error *error) {
+static void seed_workflow_outbox_with_counters(
+    lc_client *client, const char *namespace_name, const char *key,
+    const char *dispatch_state, const char *attempt_count,
+    const char *replay_count, lc_error *error) {
   char state[512];
   int state_length;
   lc_acquire_req acquire;
@@ -732,7 +731,9 @@ static void seed_recovery_outbox_with_attempt_count(lc_client *client,
   lc_attach_req attach;
   lc_attach_res attach_result;
 
+  assert_non_null(dispatch_state);
   assert_non_null(attempt_count);
+  assert_non_null(replay_count);
   state_length = snprintf(
       state, sizeof(state),
       "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"recovery-op\","
@@ -740,9 +741,9 @@ static void seed_recovery_outbox_with_attempt_count(lc_client *client,
       "\"payload_digest\":\"recovery-payload-digest\","
       "\"message_id\":\"msg_recovery\","
       "\"kind\":\"test\",\"destination\":\"recovery://target\","
-      "\"content_type\":\"text/plain\",\"dispatch_state\":\"pending\","
-      "\"attempt_count\":%s,\"not_before_unix\":0}",
-      attempt_count);
+      "\"content_type\":\"text/plain\",\"dispatch_state\":\"%s\","
+      "\"attempt_count\":%s,\"not_before_unix\":0,\"replay_count\":%s}",
+      dispatch_state, attempt_count, replay_count);
   assert_true(state_length > 0 && (size_t)state_length < sizeof(state));
   lc_acquire_req_init(&acquire);
   acquire.namespace_name = namespace_name;
@@ -772,6 +773,22 @@ static void seed_recovery_outbox_with_attempt_count(lc_client *client,
   lc_attach_res_cleanup(&attach_result);
   lc_source_close(payload_source);
   assert_int_equal(lc_lease_release(lease, NULL, error), LC_OK);
+}
+
+static void seed_recovery_outbox_with_attempt_count(lc_client *client,
+                                                    const char *namespace_name,
+                                                    const char *key,
+                                                    const char *attempt_count,
+                                                    lc_error *error) {
+  seed_workflow_outbox_with_counters(client, namespace_name, key, "pending",
+                                     attempt_count, "0", error);
+}
+
+static void seed_dead_letter_outbox_with_replay_count(
+    lc_client *client, const char *namespace_name, const char *key,
+    const char *replay_count, lc_error *error) {
+  seed_workflow_outbox_with_counters(client, namespace_name, key, "dead_letter",
+                                     "1", replay_count, error);
 }
 
 static void seed_recovery_outbox(lc_client *client, const char *namespace_name,
@@ -4929,6 +4946,92 @@ test_pouch_workflow_rejects_out_of_range_durable_attempt_counts(void **state) {
 }
 
 static void
+test_pouch_workflow_rejects_out_of_range_durable_replay_counts(void **state) {
+  static const char *const keys[] = {
+      "__lockdc_io/v1/outbox/replay-int64-max",
+      "__lockdc_io/v1/outbox/replay-negative",
+  };
+  static const char *const replay_counts[] = {
+      "9223372036854775807",
+      "-1",
+  };
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_sink *sink;
+  lc_get_res get_result;
+  const void *bytes;
+  size_t length;
+  size_t index;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "replay-range-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  for (index = 0U; index < sizeof(keys) / sizeof(keys[0]); ++index) {
+    seed_dead_letter_outbox_with_replay_count(client, "workflow-replay-range",
+                                              keys[index], replay_counts[index],
+                                              &error);
+  }
+  lc_workflow_config_init(&config);
+  config.namespace_name = "workflow-replay-range";
+  config.owner = "workflow-replay-range";
+  workflow = NULL;
+  assert_int_equal(lc_client_new_workflow(client, &config, &workflow, &error),
+                   LC_OK);
+
+  for (index = 0U; index < sizeof(keys) / sizeof(keys[0]); ++index) {
+    assert_int_equal(
+        lc_workflow_replay_dead_letter(workflow, keys[index], &error),
+        LC_ERR_INVALID);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+
+    lc_acquire_req_init(&acquire);
+    acquire.namespace_name = config.namespace_name;
+    acquire.key = keys[index];
+    acquire.owner = "workflow-replay-range-inspect";
+    acquire.ttl_seconds = 30L;
+    lease = NULL;
+    assert_int_equal(lc_acquire(client, &acquire, &lease, &error), LC_OK);
+    sink = NULL;
+    memset(&get_result, 0, sizeof(get_result));
+    assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+    assert_int_equal(lc_lease_get(lease, sink, NULL, &get_result, &error),
+                     LC_OK);
+    bytes = NULL;
+    length = 0U;
+    assert_int_equal(lc_sink_memory_bytes(sink, &bytes, &length, &error),
+                     LC_OK);
+    assert_true(workflow_bytes_contains(bytes, length,
+                                        "\"dispatch_state\":\"dead_letter\""));
+    assert_true(workflow_bytes_contains(bytes, length, replay_counts[index]));
+    lc_get_res_cleanup(&get_result);
+    lc_sink_close(sink);
+    assert_int_equal(lc_lease_release(lease, NULL, &error), LC_OK);
+  }
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
 test_pouch_workflow_validates_durable_input_contracts(void **state) {
   char root[256], template_path[256], endpoint[320];
   const char *endpoints[1];
@@ -5373,6 +5476,8 @@ int main(void) {
           test_pouch_expired_claim_recovers_and_preserves_attempt_budget),
       cmocka_unit_test(
           test_pouch_workflow_rejects_out_of_range_durable_attempt_counts),
+      cmocka_unit_test(
+          test_pouch_workflow_rejects_out_of_range_durable_replay_counts),
       cmocka_unit_test(test_pouch_workflow_validates_durable_input_contracts),
       cmocka_unit_test(test_pouch_workflow_close_serializes_ready_job_detach),
       cmocka_unit_test(test_pouch_workflow_close_retains_blocked_next),
