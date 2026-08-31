@@ -291,8 +291,10 @@ or deciding a transaction invalidates its participants, so close each view when
 finished. A workflow job is the only handoff to host effect execution; keep its
 claim alive with `job:renew()` for longer foreign operations, then select
 exactly one terminal operation. A successful `complete`, `retry`, or
-`dead_letter` consumes the job. Use `job:close()` only when abandoning a
-non-terminal local handle; it does not retry or complete the durable job.
+`dead_letter` consumes the job. If a terminal operation returns an error, the
+job remains active and the same terminal operation may be retried until its
+claim expires. Use `job:close()` only when abandoning a non-terminal local
+handle; it does not retry or complete the durable job.
 
 `client:acquire_for_update(req, handler)` wraps the common acquire, snapshot,
 update, release workflow. The handler receives a context table with:

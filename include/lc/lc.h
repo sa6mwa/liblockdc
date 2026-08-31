@@ -3593,14 +3593,26 @@ int lc_outbox_job_write_payload(lc_outbox_job *job, lc_sink *dst,
                                 size_t *written, lc_error *error);
 /** Extends a claimed outbox job before a longer foreign operation. */
 int lc_outbox_job_renew(lc_outbox_job *job, long ttl_seconds, lc_error *error);
-/** Marks a claimed outbox job complete and consumes it on success. */
+/**
+ * Marks a claimed outbox job complete and consumes it on success.
+ * On error the job remains active and may be retried with the same terminal
+ * operation until its claim expires.
+ */
 int lc_outbox_job_complete(lc_outbox_job *job,
                            const lc_outbox_completion *completion,
                            lc_error *error);
-/** Returns a claimed outbox job to `retry_wait` and consumes it on success. */
+/**
+ * Returns a claimed outbox job to `retry_wait` and consumes it on success.
+ * On error the job remains active and may be retried with the same terminal
+ * operation until its claim expires.
+ */
 int lc_outbox_job_retry(lc_outbox_job *job, const lc_outbox_retry *request,
                         lc_error *error);
-/** Marks a claimed outbox job dead-lettered and consumes it on success. */
+/**
+ * Marks a claimed outbox job dead-lettered and consumes it on success.
+ * On error the job remains active and may be retried with the same terminal
+ * operation until its claim expires.
+ */
 int lc_outbox_job_dead_letter(lc_outbox_job *job, const char *diagnostic,
                               lc_error *error);
 /** Releases a local outbox-job handle without a terminal transition. */

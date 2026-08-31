@@ -333,6 +333,8 @@ struct lc_outbox_job_handle {
   lc_lease *lease;
   char *outbox_key;
   lc_workflow_outbox_record record;
+  const char *staged_terminal_state;
+  lc_unix_seconds staged_terminal_not_before_unix;
   int terminal;
   lc_outbox_job_handle *next;
 };
@@ -1819,42 +1821,53 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
     return lc_error_set(error, LC_ERR_INVALID, 0L, "outbox job is closed", NULL,
                         NULL, NULL);
   }
-  rc = lc_workflow_validate_diagnostic(diagnostic, error);
-  if (rc != LC_OK)
-    return rc;
-  record = job->record;
-  record.dispatch_state = (char *)state;
-  record.claim_expires_at_unix = 0;
-  record.not_before_unix = not_before_unix;
-  record.last_error = (char *)diagnostic;
-  if (strcmp(state, "completed") == 0) {
-    time_t now = time(NULL);
-
-    if (now == (time_t)-1) {
-      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                          "failed to read workflow completion clock", NULL,
-                          NULL, NULL);
+  if (job->staged_terminal_state != NULL) {
+    if (strcmp(job->staged_terminal_state, state) != 0) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "a different outbox terminal transition is already "
+                          "staged; retry the original transition",
+                          NULL, NULL, NULL);
     }
-    record.delivery_reference =
-        (char *)(completion == NULL ? NULL : completion->delivery_reference);
-    record.response_digest =
-        (char *)(completion == NULL ? NULL : completion->response_digest);
-    record.completed_at_unix = (lonejson_int64)now;
-  }
-  if (strcmp(state, "dead_letter") == 0) {
-    time_t now = time(NULL);
+  } else {
+    rc = lc_workflow_validate_diagnostic(diagnostic, error);
+    if (rc != LC_OK)
+      return rc;
+    record = job->record;
+    record.dispatch_state = (char *)state;
+    record.claim_expires_at_unix = 0;
+    record.not_before_unix = not_before_unix;
+    record.last_error = (char *)diagnostic;
+    if (strcmp(state, "completed") == 0) {
+      time_t now = time(NULL);
 
-    if (now == (time_t)-1) {
-      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                          "failed to read workflow dead-letter clock", NULL,
-                          NULL, NULL);
+      if (now == (time_t)-1) {
+        return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                            "failed to read workflow completion clock", NULL,
+                            NULL, NULL);
+      }
+      record.delivery_reference =
+          (char *)(completion == NULL ? NULL : completion->delivery_reference);
+      record.response_digest =
+          (char *)(completion == NULL ? NULL : completion->response_digest);
+      record.completed_at_unix = (lonejson_int64)now;
     }
-    record.dead_lettered_at_unix = (lonejson_int64)now;
+    if (strcmp(state, "dead_letter") == 0) {
+      time_t now = time(NULL);
+
+      if (now == (time_t)-1) {
+        return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                            "failed to read workflow dead-letter clock", NULL,
+                            NULL, NULL);
+      }
+      record.dead_lettered_at_unix = (lonejson_int64)now;
+    }
+    rc = lc_lease_save(job->lease, &lc_workflow_outbox_record_map, &record,
+                       error);
+    if (rc != LC_OK)
+      return rc;
+    job->staged_terminal_state = state;
+    job->staged_terminal_not_before_unix = not_before_unix;
   }
-  rc =
-      lc_lease_save(job->lease, &lc_workflow_outbox_record_map, &record, error);
-  if (rc != LC_OK)
-    return rc;
   lc_release_req_init(&release);
   rc = lc_lease_release(job->lease, &release, error);
   if (rc != LC_OK)
@@ -1865,7 +1878,7 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
   lc_workflow_cancel_delayed_notification(job->workflow, job->outbox_key);
   if (strcmp(state, "retry_wait") == 0) {
     lc_workflow_schedule_retry(job->workflow, job->outbox_key,
-                               (lc_unix_seconds)not_before_unix);
+                               job->staged_terminal_not_before_unix);
   }
   /* A successful terminal transition transfers no remaining ownership to the
    * caller.  Release the local job and its retained workflow/client references

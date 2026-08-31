@@ -963,6 +963,13 @@ same `effect_key` when the provider supports idempotency, or retain/dead-letter
 the job for explicit provider reconciliation. It must not call completion based
 on an assumed success.
 
+A successful terminal job operation consumes its local job handle. A terminal
+operation that returns an error leaves the handle active until its claim expires,
+so the host may retry the same terminal operation after a transient local
+persistence failure. This does not make an uncertain foreign effect safe to
+repeat: resolve that outcome with the same `effect_key` before retrying its
+terminal transition.
+
 Each successful claim atomically increments `attempt_count`. Retry records a
 diagnostic of at most `LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES` (4096) bytes and sets
 `not_before_unix`; oversized diagnostics are rejected without changing the

@@ -8592,9 +8592,15 @@ static int lc_pouch_client_stage_transaction_write(
     lc_source *source, lc_pouch_state_write_options *options,
     lc_pouch_state_write_result *out, int *removed, lc_error *error) {
   lc_pouch_txn_stage_write_context context;
+  lc_error discard_error;
+  int discard_rc;
+  int discarded;
   int rc;
 
   memset(&context, 0, sizeof(context));
+  lc_error_init(&discard_error);
+  discard_rc = LC_OK;
+  discarded = 0;
   context.client = client;
   context.lease = lease;
   context.namespace_name = namespace_name;
@@ -8617,8 +8623,51 @@ static int lc_pouch_client_stage_transaction_write(
           context.projected_version, &lease_write_result, error);
       lc_pouch_state_write_result_cleanup(&client->allocator,
                                           &lease_write_result);
+      if (rc != LC_OK) {
+        lc_pouch_state_write_result rollback_lease_write_result;
+
+        /* The private staged record is not usable until the active lease
+         * durably advertises its projected version. Do not return an error
+         * while retaining an unacknowledged stage: a caller retry would then
+         * precondition against the old lease view and fail permanently. */
+        discard_rc =
+            lc_pouch_state_discard_staged(client->pouch, namespace_name, key,
+                                          txn_id, &discarded, &discard_error);
+        memset(&rollback_lease_write_result, 0,
+               sizeof(rollback_lease_write_result));
+        if (discard_rc == LC_OK && discarded) {
+          if (context.projected_version > LC_U64_MAX - 2UL) {
+            discard_rc =
+                lc_error_set(&discard_error, LC_ERR_INVALID, 0L,
+                             "pouch staged rollback state version is exhausted",
+                             NULL, NULL, "pouch");
+          } else {
+            /* Discard appends a decision and a tombstone after the staged
+             * record. Advance the durable lease cursor past both records so
+             * a subsequent retry cannot be hidden by that tombstone. */
+            discard_rc = lc_pouch_replace_lease_record(
+                client, lease, namespace_name, lease->key, 0L, 0, 1, 1,
+                context.projected_version + 2UL, &rollback_lease_write_result,
+                &discard_error);
+          }
+        }
+        lc_pouch_state_write_result_cleanup(&client->allocator,
+                                            &rollback_lease_write_result);
+        if (out->query_index_operation_guard_started) {
+          lc_pouch_query_index_operation_cancel(client->pouch, namespace_name,
+                                                key, txn_id);
+          out->query_index_operation_guard_started = 0;
+        }
+        if (discard_rc != LC_OK && error != NULL) {
+          lc_error_cleanup(error);
+          *error = discard_error;
+          lc_error_init(&discard_error);
+          rc = discard_rc;
+        }
+      }
     }
   }
+  lc_error_cleanup(&discard_error);
   return rc;
 }
 

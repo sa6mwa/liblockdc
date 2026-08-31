@@ -39,6 +39,11 @@ typedef struct workflow_fail_once {
   unsigned int calls;
 } workflow_fail_once;
 
+typedef struct workflow_metadata_append_failure {
+  unsigned int calls;
+  unsigned int failure_call;
+} workflow_metadata_append_failure;
+
 typedef struct workflow_inbox_runtime_failure {
   lc_workflow *workflow;
   lc_inbox_message message;
@@ -65,6 +70,19 @@ static int workflow_fail_first_call(void *context, lc_error *error) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "forced workflow transient claim failure", NULL, NULL,
                         NULL);
+  }
+  return LC_OK;
+}
+
+static int workflow_fail_metadata_append_at_call(void *context,
+                                                 lc_error *error) {
+  workflow_metadata_append_failure *failure =
+      (workflow_metadata_append_failure *)context;
+
+  if (failure != NULL && failure->calls++ == failure->failure_call) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "forced workflow terminal metadata append failure",
+                        NULL, NULL, "pouch");
   }
   return LC_OK;
 }
@@ -4362,6 +4380,156 @@ static void test_pouch_reconciliation_pages_large_outbox(void **state) {
 }
 
 static void
+test_pouch_reconciled_terminal_transport_failure_is_retryable(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  const char *outbox_key = "__lockdc_io/v1/outbox/reconcile-terminal-retry";
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  workflow_metadata_append_failure failure;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX
+                       "reconcile-terminal-retry-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client_config.default_namespace = "workflow-reconcile-terminal-retry";
+  client = NULL;
+  workflow = NULL;
+  job = NULL;
+  memset(&failure, 0, sizeof(failure));
+  failure.failure_call = 0U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  seed_recovery_outbox(client, "workflow-reconcile-terminal-retry", outbox_key,
+                       &error);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-reconcile-terminal-retry";
+  workflow_config.owner = "workflow-reconcile-terminal-retry-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
+  assert_non_null(job);
+
+  /* Model the uncertain I/O result that previously escaped from a reconciled
+   * completion. Pouch rolls the unconfirmed append back, so a terminal error
+   * must leave the existing claim valid for an explicit retry. */
+  lc_pouch_test_after_metadata_batch_append_context = &failure;
+  lc_pouch_test_after_metadata_batch_append_hook =
+      workflow_fail_metadata_append_at_call;
+  rc = lc_outbox_job_complete(job, NULL, &error);
+  lc_pouch_test_after_metadata_batch_append_hook = NULL;
+  lc_pouch_test_after_metadata_batch_append_context = NULL;
+  assert_true(failure.calls >= 1U);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+  workflow_assert_outbox_completed(client, outbox_key, &error);
+  assert_int_equal(lc_workflow_next(workflow, 250L, &job, &error), LC_OK);
+  assert_null(job);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_reconciled_terminal_release_failure_is_retryable(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  const char *outbox_key =
+      "__lockdc_io/v1/outbox/reconcile-terminal-release-retry";
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  workflow_metadata_append_failure failure;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  lc_error error;
+  int rc;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX
+                       "reconcile-terminal-release-retry-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client_config.default_namespace = "workflow-reconcile-terminal-release-retry";
+  client = NULL;
+  workflow = NULL;
+  job = NULL;
+  memset(&failure, 0, sizeof(failure));
+  /* The first append advances the lease's staged-version cursor; fail the
+   * second append, which is the terminal release/commit batch. */
+  failure.failure_call = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  seed_recovery_outbox(client, "workflow-reconcile-terminal-release-retry",
+                       outbox_key, &error);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-reconcile-terminal-release-retry";
+  workflow_config.owner = "workflow-reconcile-terminal-release-retry-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  assert_int_equal(lc_workflow_next(workflow, 5000L, &job, &error), LC_OK);
+  assert_non_null(job);
+
+  lc_pouch_test_after_metadata_batch_append_context = &failure;
+  lc_pouch_test_after_metadata_batch_append_hook =
+      workflow_fail_metadata_append_at_call;
+  rc = lc_outbox_job_complete(job, NULL, &error);
+  lc_pouch_test_after_metadata_batch_append_hook = NULL;
+  lc_pouch_test_after_metadata_batch_append_context = NULL;
+  assert_true(failure.calls >= 2U);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  assert_int_equal(lc_outbox_job_dead_letter(job,
+                                             "must not replace staged "
+                                             "completion",
+                                             &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+  workflow_assert_outbox_completed(client, outbox_key, &error);
+  assert_int_equal(lc_workflow_next(workflow, 250L, &job, &error), LC_OK);
+  assert_null(job);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
 test_pouch_reconciliation_preserves_allocator_domains(void **state) {
   char root[256];
   char template_path[256];
@@ -5482,6 +5650,10 @@ int main(void) {
       cmocka_unit_test(test_pouch_next_timeout_uses_one_deadline),
       cmocka_unit_test(test_pouch_next_long_max_timeout_waits_until_closed),
       cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
+      cmocka_unit_test(
+          test_pouch_reconciled_terminal_transport_failure_is_retryable),
+      cmocka_unit_test(
+          test_pouch_reconciled_terminal_release_failure_is_retryable),
       cmocka_unit_test(test_pouch_reconciliation_preserves_allocator_domains),
       cmocka_unit_test(test_pouch_recovery_prefetch_is_bounded),
       cmocka_unit_test(test_pouch_shared_process_dispatches_once),
