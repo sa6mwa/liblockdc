@@ -2535,6 +2535,7 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   size_t length, written;
   lc_outbox_job *job;
   lc_error error;
+  int rc;
 
   (void)state;
   assert_true(snprintf(template_path, sizeof(template_path),
@@ -2646,10 +2647,14 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   assert_memory_equal(bytes, "created", 7U);
   lc_sink_close(sink);
   duplicate_transaction = (lc_workflow_transaction *)1;
-  assert_int_equal(lc_workflow_accept_command(workflow, &command,
-                                              &duplicate_transaction,
-                                              &duplicate_receipt, &error),
-                   LC_OK);
+  rc = lc_workflow_accept_command(workflow, &command, &duplicate_transaction,
+                                  &duplicate_receipt, &error);
+  if (rc != LC_OK) {
+    fail_msg("committed command duplicate failed: rc=%d message=%s detail=%s",
+             rc, error.message != NULL ? error.message : "(none)",
+             error.detail != NULL ? error.detail : "(none)");
+  }
+  assert_int_equal(rc, LC_OK);
   assert_null(duplicate_transaction);
   assert_true(duplicate_receipt.duplicate);
   assert_int_equal(duplicate_receipt.state, LC_COMMAND_COMPLETED);
