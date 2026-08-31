@@ -4303,6 +4303,7 @@ static void test_pouch_reconciliation_pages_large_outbox(void **state) {
   struct timespec started;
   struct timespec finished;
   size_t index;
+  int rc;
 
   (void)state;
   assert_true(snprintf(template_path, sizeof(template_path),
@@ -4337,7 +4338,16 @@ static void test_pouch_reconciliation_pages_large_outbox(void **state) {
     job = NULL;
     assert_int_equal(lc_workflow_next(workflow, 30000L, &job, &error), LC_OK);
     assert_non_null(job);
-    assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+    rc = lc_outbox_job_complete(job, NULL, &error);
+    if (rc != LC_OK) {
+      fail_msg("reconciled outbox completion failed: index=%lu key=%s rc=%d "
+               "message=%s detail=%s",
+               (unsigned long)index,
+               job->outbox_key != NULL ? job->outbox_key : "(none)", rc,
+               error.message != NULL ? error.message : "(none)",
+               error.detail != NULL ? error.detail : "(none)");
+    }
+    assert_int_equal(rc, LC_OK);
     job = NULL;
   }
   assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &finished), 0);
