@@ -225,6 +225,8 @@ static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_before_participant_allocation_context = NULL;
   lc_workflow_test_before_command_receipt_copy_hook = NULL;
   lc_workflow_test_before_command_receipt_copy_context = NULL;
+  lc_workflow_test_after_command_terminal_load_hook = NULL;
+  lc_workflow_test_after_command_terminal_load_context = NULL;
   lc_workflow_test_before_outbox_receipt_copy_hook = NULL;
   lc_workflow_test_before_outbox_receipt_copy_context = NULL;
   lc_workflow_test_before_notification_copy_hook = NULL;
@@ -1866,6 +1868,69 @@ static void test_pouch_command_receipt_allocation_failure_rolls_back_enrollment(
   lc_workflow_close(workflow);
   lc_client_close(client);
   workflow_reset_allocation_failures();
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_command_terminal_load_failure_cleans_record(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_command_request command;
+  lc_command_receipt receipt;
+  lc_command_result result;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "command-terminal-load-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  lc_command_receipt_init(&receipt);
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "command-terminal-load";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_command_request_init(&command);
+  command.identity.scope = "command-terminal-load-scope";
+  command.identity.command_type = "command-terminal-load-type";
+  command.identity.idempotency_key = "command-terminal-load-key";
+  command.request_digest = "command-terminal-load-digest";
+  assert_int_equal(lc_workflow_accept_command(workflow, &command, &transaction,
+                                              &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  lc_command_result_init(&result);
+  result.result_code = "created";
+  lc_workflow_test_after_command_terminal_load_hook = workflow_fail_allocation;
+  assert_int_equal(
+      lc_workflow_transaction_complete_command(transaction, &result, &error),
+      LC_ERR_NOMEM);
+  workflow_reset_allocation_failures();
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_workflow_transaction_rollback(transaction, &error),
+                   LC_OK);
+  lc_workflow_transaction_close(transaction);
+  lc_command_receipt_cleanup(&receipt);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
   lc_error_cleanup(&error);
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
@@ -5614,6 +5679,7 @@ int main(void) {
           test_pouch_participant_allocation_failure_rolls_back_enrollment),
       cmocka_unit_test(
           test_pouch_command_receipt_allocation_failure_rolls_back_enrollment),
+      cmocka_unit_test(test_pouch_command_terminal_load_failure_cleans_record),
       cmocka_unit_test(
           test_pouch_outbox_allocation_failures_roll_back_enrollment),
       cmocka_unit_test(

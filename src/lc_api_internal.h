@@ -64,6 +64,9 @@ extern lc_workflow_test_failure_hook_fn
     lc_workflow_test_before_command_receipt_copy_hook;
 extern void *lc_workflow_test_before_command_receipt_copy_context;
 extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_after_command_terminal_load_hook;
+extern void *lc_workflow_test_after_command_terminal_load_context;
+extern lc_workflow_test_failure_hook_fn
     lc_workflow_test_before_outbox_receipt_copy_hook;
 extern void *lc_workflow_test_before_outbox_receipt_copy_context;
 extern lc_workflow_test_failure_hook_fn

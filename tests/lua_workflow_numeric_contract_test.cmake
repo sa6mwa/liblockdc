@@ -11,9 +11,15 @@ foreach(required_snippet
     "long ttl_seconds = lcdc_check_long(L, 2, \"outbox renewal ttl\")"
     "static int lcdc_set_size_field(lua_State *L, const char *name, size_t value,"
     "static int lcdc_set_uint64_field(lua_State *L, const char *name,"
+    "static int lcdc_set_int64_field(lua_State *L, const char *name, lc_i64 value,"
     "workflow statistic exceeds Lua integer range"
+    "workflow value exceeds Lua integer range"
     "lcdc_set_uint64_field(L, \"direct_notifications\","
-    "stats->direct_notifications, error)")
+    "stats->direct_notifications, error)"
+    "lcdc_set_int64_field(L, \"version\", participant->version, error)"
+    "lcdc_set_int64_field(L, \"version\", result.version, &error)"
+    "lcdc_set_int64_field(L, \"lease_expires_at_unix\","
+    "job->lease_expires_at_unix, error)")
     string(FIND "${lua_binding}" "${required_snippet}" snippet_index)
     if(snippet_index EQUAL -1)
         message(FATAL_ERROR
@@ -29,10 +35,32 @@ foreach(forbidden_snippet
     "(long)stats->recovery_queries"
     "(long)stats->recovered_claims"
     "(long)stats->claim_losses"
-    "(long)stats->payload_open_failures")
+    "(long)stats->payload_open_failures"
+    "lcdc_set_integer_field(L, \"version\", participant->version)"
+    "lcdc_set_integer_field(L, \"lease_expires_at_unix\",
+                         job->lease_expires_at_unix)")
     string(FIND "${lua_binding}" "${forbidden_snippet}" snippet_index)
     if(NOT snippet_index EQUAL -1)
         message(FATAL_ERROR
             "Lua workflow statistics must not narrow through C long: ${forbidden_snippet}")
     endif()
 endforeach()
+
+string(FIND "${lua_binding}"
+    "static int lcdc_workflow_participant_get(lua_State *L)" participant_get_start)
+string(FIND "${lua_binding}"
+    "static int lcdc_workflow_participant_update(lua_State *L)" participant_get_end)
+if(participant_get_start EQUAL -1 OR participant_get_end EQUAL -1 OR
+   participant_get_end LESS participant_get_start)
+    message(FATAL_ERROR "Lua workflow participant get binding is missing")
+endif()
+math(EXPR participant_get_length "${participant_get_end} - ${participant_get_start}")
+string(SUBSTRING "${lua_binding}" ${participant_get_start}
+    ${participant_get_length} participant_get_binding)
+string(FIND "${participant_get_binding}"
+    "lcdc_set_integer_field(L, \"version\", result.version)"
+    participant_get_narrowing_index)
+if(NOT participant_get_narrowing_index EQUAL -1)
+    message(FATAL_ERROR
+        "Lua workflow participant get must not narrow version through C long")
+endif()

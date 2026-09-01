@@ -55,6 +55,9 @@ lc_workflow_test_failure_hook_fn
     lc_workflow_test_before_command_receipt_copy_hook = NULL;
 void *lc_workflow_test_before_command_receipt_copy_context = NULL;
 lc_workflow_test_failure_hook_fn
+    lc_workflow_test_after_command_terminal_load_hook = NULL;
+void *lc_workflow_test_after_command_terminal_load_context = NULL;
+lc_workflow_test_failure_hook_fn
     lc_workflow_test_before_outbox_receipt_copy_hook = NULL;
 void *lc_workflow_test_before_outbox_receipt_copy_context = NULL;
 lc_workflow_test_failure_hook_fn
@@ -1498,8 +1501,18 @@ lc_workflow_stage_command_terminal(lc_workflow_transaction_handle *transaction,
   rc =
       lc_lease_load(transaction->command_lease, &lc_workflow_command_record_map,
                     &record, NULL, &load_result, error);
-  if (rc != LC_OK)
+#ifdef LOCKDC_TEST_BUILD
+  if (rc == LC_OK &&
+      lc_workflow_test_after_command_terminal_load_hook != NULL) {
+    rc = lc_workflow_test_after_command_terminal_load_hook(
+        lc_workflow_test_after_command_terminal_load_context, error);
+  }
+#endif
+  if (rc != LC_OK) {
+    runtime->cleanup(runtime, &lc_workflow_command_record_map, &record);
+    lc_get_res_cleanup(&load_result);
     return rc;
+  }
   if (record.state == NULL || strcmp(record.state, "pending") != 0) {
     runtime->cleanup(runtime, &lc_workflow_command_record_map, &record);
     lc_get_res_cleanup(&load_result);
