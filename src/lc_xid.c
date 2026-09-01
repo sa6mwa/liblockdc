@@ -185,8 +185,11 @@ static void lc_xid_initialize(void) {
                           (uint32_t)random_counter[2];
   lc_xid_global.process_pid = (uint32_t)getpid();
   lc_xid_global.pid = lc_xid_process_identifier(lc_xid_global.process_pid);
-  (void)pthread_atfork(lc_xid_atfork_prepare, lc_xid_atfork_parent,
-                       lc_xid_atfork_child);
+  if (pthread_atfork(lc_xid_atfork_prepare, lc_xid_atfork_parent,
+                     lc_xid_atfork_child) != 0) {
+    lc_xid_global.init_status = LC_ERR_TRANSPORT;
+    return;
+  }
   lc_xid_global.initialized = 1;
 }
 

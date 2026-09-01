@@ -157,6 +157,10 @@ set_tests_properties(lc_unit_tmp_cleanup_unmarked_global_prefix PROPERTIES
 )
 lc_add_unit_test(lc_unit_engine_allocator test_lc_engine_allocator.c)
 lc_add_unit_test(lc_unit_contracts test_lc_contracts.c mock_lc_public.c)
+lc_add_unit_test(lc_unit_xid_atfork test_lc_xid_atfork.c)
+target_link_options(lc_unit_xid_atfork PRIVATE
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=pthread_atfork>
+)
 lc_add_unit_test(lc_unit_public_mock_usage test_lc_public_mock_usage.c mock_lc_public.c)
 lc_add_unit_test(lc_unit_consumer_service test_lc_consumer_service.c)
 lc_add_unit_test(lc_unit_workflow test_lc_workflow.c
