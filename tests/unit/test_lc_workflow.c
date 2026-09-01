@@ -5109,6 +5109,163 @@ test_pouch_expired_claim_recovers_and_preserves_attempt_budget(void **state) {
 }
 
 static void
+test_pouch_workflow_dead_letters_persisted_exhausted_attempts(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_outbox_job *job;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_sink *sink;
+  lc_get_res get_result;
+  const void *bytes;
+  size_t length;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "persisted-budget-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  seed_recovery_outbox_with_attempt_count(
+      client, "workflow-persisted-budget",
+      "__lockdc_io/v1/outbox/persisted-budget", "2", &error);
+  lc_workflow_config_init(&config);
+  config.namespace_name = "workflow-persisted-budget";
+  config.owner = "workflow-persisted-budget";
+  config.max_attempts = 2;
+  workflow = NULL;
+  assert_int_equal(lc_client_new_workflow(client, &config, &workflow, &error),
+                   LC_OK);
+
+  /* This simulates reopening a durable namespace with a lower attempt policy.
+   * The record must become terminal without a third delivery. */
+  job = (lc_outbox_job *)1;
+  assert_int_equal(lc_workflow_next(workflow, 1000L, &job, &error), LC_OK);
+  assert_null(job);
+
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = config.namespace_name;
+  acquire.key = "__lockdc_io/v1/outbox/persisted-budget";
+  acquire.owner = "workflow-persisted-budget-inspect";
+  acquire.ttl_seconds = 30L;
+  lease = NULL;
+  assert_int_equal(lc_acquire(client, &acquire, &lease, &error), LC_OK);
+  sink = NULL;
+  memset(&get_result, 0, sizeof(get_result));
+  assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+  assert_int_equal(lc_lease_get(lease, sink, NULL, &get_result, &error), LC_OK);
+  bytes = NULL;
+  length = 0U;
+  assert_int_equal(lc_sink_memory_bytes(sink, &bytes, &length, &error), LC_OK);
+  assert_true(workflow_bytes_contains(bytes, length,
+                                      "\"dispatch_state\":\"dead_letter\""));
+  assert_true(workflow_bytes_contains(bytes, length, "\"attempt_count\":2"));
+  lc_get_res_cleanup(&get_result);
+  lc_sink_close(sink);
+  assert_int_equal(lc_lease_release(lease, NULL, &error), LC_OK);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_participant_attach_refreshes_version(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_inbox_message inbox;
+  lc_inbox_accept_result inbox_result;
+  lc_workflow_participant_request participant_request;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_workflow_participant *participant;
+  lc_attach_req attach;
+  lc_attach_res attach_result;
+  lc_source *payload;
+  lc_version version_before_attach;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "participant-attach-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "participant-attach";
+  workflow_config.owner = "participant-attach-test";
+  workflow = NULL;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_inbox_message_init(&inbox);
+  inbox.consumer_id = "participant-attach-consumer";
+  inbox.source_kind = "http";
+  inbox.source_id = "participant-attach-source";
+  inbox.message_id = "participant-attach-message";
+  inbox.payload_digest = "participant-attach-digest";
+  inbox.operation_id = "participant-attach-operation";
+  memset(&inbox_result, 0, sizeof(inbox_result));
+  transaction = NULL;
+  assert_int_equal(lc_workflow_accept_inbox(workflow, &inbox, &transaction,
+                                            &inbox_result, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  lc_workflow_participant_request_init(&participant_request);
+  participant_request.acquire.namespace_name = "participant-attach-domain";
+  participant_request.acquire.key = "participant-attach-key";
+  participant_request.acquire.owner = "participant-attach-test";
+  participant_request.acquire.ttl_seconds = 30L;
+  participant = NULL;
+  assert_int_equal(lc_workflow_transaction_acquire(
+                       transaction, &participant_request, &participant, &error),
+                   LC_OK);
+  version_before_attach = participant->version;
+  lc_attach_req_init(&attach);
+  attach.name = "receipt.txt";
+  attach.content_type = "text/plain";
+  payload = NULL;
+  assert_int_equal(lc_source_from_memory("receipt", 7U, &payload, &error),
+                   LC_OK);
+  memset(&attach_result, 0, sizeof(attach_result));
+  assert_int_equal(participant->attach(participant, &attach, payload,
+                                       &attach_result, &error),
+                   LC_OK);
+  assert_true(attach_result.version > version_before_attach);
+  assert_true(participant->version == attach_result.version);
+  lc_attach_res_cleanup(&attach_result);
+  lc_source_close(payload);
+  lc_workflow_participant_close(participant);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
 test_pouch_workflow_rejects_out_of_range_durable_attempt_counts(void **state) {
   static const char *const keys[] = {
       "__lockdc_io/v1/outbox/attempt-int64-max",
@@ -5727,6 +5884,9 @@ int main(void) {
       cmocka_unit_test(test_pouch_expired_claim_rejects_stale_terminal),
       cmocka_unit_test(
           test_pouch_expired_claim_recovers_and_preserves_attempt_budget),
+      cmocka_unit_test(
+          test_pouch_workflow_dead_letters_persisted_exhausted_attempts),
+      cmocka_unit_test(test_pouch_participant_attach_refreshes_version),
       cmocka_unit_test(
           test_pouch_workflow_rejects_out_of_range_durable_attempt_counts),
       cmocka_unit_test(

@@ -2176,6 +2176,34 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
           "outbox candidate attempt count is outside the supported "
           "range",
           NULL, NULL, NULL);
+    } else if (strcmp(record.dispatch_state, "claimed") != 0 &&
+               record.attempt_count >= workflow->max_attempts) {
+      original_dispatch_state = record.dispatch_state;
+      original_last_error = record.last_error;
+      original_claim_expires_at_unix = record.claim_expires_at_unix;
+      record.dispatch_state = "dead_letter";
+      record.claim_expires_at_unix = 0;
+      record.not_before_unix = 0;
+      record.last_error = "delivery attempt budget exhausted before claim";
+      record.dead_lettered_at_unix = (lonejson_int64)now;
+      rc = lc_lease_save(lease, &lc_workflow_outbox_record_map, &record, error);
+      if (rc == LC_OK) {
+        lc_release_req release;
+
+        lc_release_req_init(&release);
+        rc = lc_lease_release(lease, &release, error);
+        if (rc == LC_OK)
+          lease = NULL;
+      }
+      record.dispatch_state = original_dispatch_state;
+      record.last_error = original_last_error;
+      record.claim_expires_at_unix = original_claim_expires_at_unix;
+      if (rc == LC_OK) {
+        rc = lc_error_set(
+            error, LC_ERR_INVALID, 0L,
+            "outbox candidate delivery attempt budget is exhausted", NULL, NULL,
+            NULL);
+      }
     } else if (strcmp(record.dispatch_state, "retry_wait") == 0 &&
                lc_workflow_retry_is_not_eligible(record.not_before_unix,
                                                  (lc_unix_seconds)now)) {
@@ -2975,10 +3003,17 @@ static int lc_workflow_participant_attach(lc_workflow_participant *self,
                                           lc_source *src, lc_attach_res *out,
                                           lc_error *error) {
   lc_workflow_participant_handle *p = (lc_workflow_participant_handle *)self;
+  int rc;
+
   if (p == NULL || p->lease == NULL)
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "workflow participant is closed", NULL, NULL, NULL);
-  return lc_lease_attach(p->lease, req, src, out, error);
+  rc = lc_lease_attach(p->lease, req, src, out, error);
+  if (rc == LC_OK) {
+    p->lease->version = out->version;
+    lc_workflow_participant_refresh(p);
+  }
+  return rc;
 }
 static int lc_workflow_participant_list_attachments(
     lc_workflow_participant *self, lc_attachment_list *out, lc_error *error) {
