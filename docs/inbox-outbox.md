@@ -959,8 +959,9 @@ enrollment defect is fixed.
 The outbox envelope is also the external-delivery receipt for its one
 `effect_key`; a separate generic external-delivery table is unnecessary.
 `job->complete(job, completion, error)` accepts optional completion evidence
-that persists a bounded provider/broker delivery reference and response digest
-with the `completed` transition. This is evidence for diagnosis and provider
+that persists a provider/broker delivery reference and response digest of at
+most `LC_WORKFLOW_MAX_COMPLETION_EVIDENCE_BYTES` bytes each with the
+`completed` transition. This is evidence for diagnosis and provider
 reconciliation, not proof that an uncooperative provider performed exactly one
 effect. On an uncertain provider outcome, the host must either retry with the
 same `effect_key` when the provider supports idempotency, or retain/dead-letter

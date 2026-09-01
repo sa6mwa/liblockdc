@@ -1776,9 +1776,15 @@ typedef struct lc_command_receipt {
 
 /** Optional durable evidence retained when an outbox delivery completes. */
 typedef struct lc_outbox_completion {
-  /** Optional provider or broker delivery reference. */
+  /**
+   * Optional provider or broker delivery reference. At most
+   * `LC_WORKFLOW_MAX_COMPLETION_EVIDENCE_BYTES` bytes are accepted.
+   */
   const char *delivery_reference;
-  /** Optional opaque digest of the provider response or acknowledgement. */
+  /**
+   * Optional opaque digest of the provider response or acknowledgement. At
+   * most `LC_WORKFLOW_MAX_COMPLETION_EVIDENCE_BYTES` bytes are accepted.
+   */
   const char *response_digest;
 } lc_outbox_completion;
 
@@ -1806,6 +1812,12 @@ typedef struct lc_inbox_accept_result {
 
 /** Maximum retained byte length of an outbox failure diagnostic. */
 #define LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES 4096U
+
+/**
+ * Maximum retained byte length of either optional provider completion-evidence
+ * field. Both fields are durable outbox metadata, not payload attachments.
+ */
+#define LC_WORKFLOW_MAX_COMPLETION_EVIDENCE_BYTES 4096U
 
 /** Durable outcome requested for a claimed outbox job. */
 typedef struct lc_outbox_retry {

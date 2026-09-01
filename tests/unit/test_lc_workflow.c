@@ -6376,6 +6376,214 @@ static void test_pouch_workflow_close_retains_blocked_next(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void
+test_pouch_command_receipt_rejects_malformed_terminal_records(void **state) {
+  static const char *const malformed_records[] = {
+      "{\"record_type\":\"lockdc.command.v1\",\"command_id\":\"%s\","
+      "\"scope\":\"tenant\",\"command_type\":\"orders.test\","
+      "\"idempotency_key\":\"idempotency\",\"request_digest\":\"digest\","
+      "\"accepted_at_unix\":1,\"state\":\"completed\","
+      "\"completed_at_unix\":1,\"has_result_body\":0}",
+      "{\"record_type\":\"lockdc.command.v1\",\"command_id\":\"%s\","
+      "\"scope\":\"tenant\",\"command_type\":\"orders.test\","
+      "\"idempotency_key\":\"idempotency\",\"request_digest\":\"digest\","
+      "\"accepted_at_unix\":1,\"state\":\"failed\","
+      "\"failed_at_unix\":1,\"has_result_body\":0}",
+      "{\"record_type\":\"lockdc.command.v1\",\"command_id\":\"%s\","
+      "\"scope\":\"tenant\",\"command_type\":\"orders.test\","
+      "\"idempotency_key\":\"idempotency\",\"request_digest\":\"digest\","
+      "\"accepted_at_unix\":1,\"state\":\"completed\",\"result_code\":\"ok\","
+      "\"completed_at_unix\":1,\"has_result_body\":2}",
+      "{\"record_type\":\"lockdc.command.v1\",\"command_id\":\"%s\","
+      "\"scope\":\"tenant\",\"command_type\":\"orders.test\","
+      "\"idempotency_key\":\"idempotency\",\"request_digest\":\"digest\","
+      "\"accepted_at_unix\":1,\"state\":\"completed\",\"result_code\":\"ok\","
+      "\"failure_code\":\"contradiction\",\"failed_at_unix\":1,"
+      "\"completed_at_unix\":1,\"has_result_body\":0}"};
+  char root[256], template_path[256], endpoint[320], command_id[64], key[128],
+      record[1024];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_command_request command;
+  lc_command_receipt receipt;
+  lc_workflow_transaction *transaction;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_source *source;
+  lc_error error;
+  size_t index;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "command-malformed-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  lease = NULL;
+  source = NULL;
+  lc_command_receipt_init(&receipt);
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "command-malformed";
+  workflow_config.owner = "command-malformed-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_command_request_init(&command);
+  command.identity.scope = "tenant";
+  command.identity.command_type = "orders.test";
+  command.identity.idempotency_key = "idempotency";
+  command.request_digest = "digest";
+  assert_int_equal(lc_workflow_accept_command(workflow, &command, &transaction,
+                                              &receipt, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  assert_true(
+      snprintf(command_id, sizeof(command_id), "%s", receipt.command_id) > 0);
+  assert_true(snprintf(key, sizeof(key), "__lockdc_io/v1/command/%s",
+                       command_id + 4U) > 0);
+
+  for (index = 0U;
+       index < sizeof(malformed_records) / sizeof(malformed_records[0]);
+       ++index) {
+    assert_true(snprintf(record, sizeof(record), malformed_records[index],
+                         command_id) > 0);
+    lc_acquire_req_init(&acquire);
+    acquire.namespace_name = workflow_config.namespace_name;
+    acquire.key = key;
+    acquire.owner = "command-malformed-seed";
+    acquire.ttl_seconds = 30L;
+    assert_int_equal(lc_acquire(client, &acquire, &lease, &error), LC_OK);
+    assert_int_equal(
+        lc_source_from_memory(record, strlen(record), &source, &error), LC_OK);
+    assert_int_equal(lc_lease_update(lease, source, NULL, &error), LC_OK);
+    lc_source_close(source);
+    source = NULL;
+    assert_int_equal(lc_lease_release(lease, NULL, &error), LC_OK);
+    lease = NULL;
+
+    lc_command_receipt_cleanup(&receipt);
+    lc_command_receipt_init(&receipt);
+    assert_int_equal(lc_workflow_get_command_receipt(
+                         workflow, &command.identity, &receipt, &error),
+                     LC_ERR_PROTOCOL);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+    transaction = (lc_workflow_transaction *)1;
+    assert_int_equal(lc_workflow_resume_command(workflow, &command.identity,
+                                                &transaction, &receipt, &error),
+                     LC_ERR_PROTOCOL);
+    assert_null(transaction);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+  }
+
+  lc_command_receipt_cleanup(&receipt);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_outbox_completion_evidence_is_bounded(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  char oversized[LC_WORKFLOW_MAX_COMPLETION_EVIDENCE_BYTES + 2U];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_outbox_completion completion;
+  lc_workflow_transaction *transaction;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "completion-evidence-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  memset(oversized, 'x', sizeof(oversized) - 1U);
+  oversized[sizeof(oversized) - 1U] = '\0';
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  job = NULL;
+  payload = NULL;
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "completion-evidence";
+  workflow_config.owner = "completion-evidence-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "completion-evidence-operation";
+  entry.effect_id = "completion-evidence-effect";
+  entry.effect_key = "completion-evidence-key";
+  entry.payload_digest = "sha256:completion-evidence";
+  entry.kind = "test";
+  entry.destination = "test://completion-evidence";
+  entry.content_type = "text/plain";
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  lc_source_close(payload);
+  payload = NULL;
+  assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
+                                    &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  lc_outbox_completion_init(&completion);
+  completion.delivery_reference = oversized;
+  assert_int_equal(lc_outbox_job_complete(job, &completion, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  completion.delivery_reference = NULL;
+  completion.response_digest = oversized;
+  assert_int_equal(lc_outbox_job_complete(job, &completion, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  completion.response_digest = NULL;
+  assert_int_equal(lc_outbox_job_complete(job, &completion, &error), LC_OK);
+  job = NULL;
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(
@@ -6402,7 +6610,10 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_command_receipt_commits_with_outbox_and_result),
       cmocka_unit_test(
+          test_pouch_command_receipt_rejects_malformed_terminal_records),
+      cmocka_unit_test(
           test_pouch_command_attachment_failure_aborts_transaction),
+      cmocka_unit_test(test_pouch_outbox_completion_evidence_is_bounded),
       cmocka_unit_test(test_pouch_workflow_rejects_overflowing_deadlines),
       cmocka_unit_test(
           test_pouch_workflow_retry_uses_wide_timestamp_comparison),

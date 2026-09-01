@@ -1115,6 +1115,39 @@ static int lc_workflow_validate_diagnostic(const char *diagnostic,
                       NULL, NULL);
 }
 
+static int
+lc_workflow_validate_completion_evidence(const lc_outbox_completion *completion,
+                                         lc_error *error) {
+  const char *values[2];
+  const char *names[2];
+  size_t index;
+  size_t length;
+
+  if (completion == NULL)
+    return LC_OK;
+  values[0] = completion->delivery_reference;
+  values[1] = completion->response_digest;
+  names[0] = "delivery reference";
+  names[1] = "response digest";
+  for (index = 0U; index < 2U; ++index) {
+    if (values[index] == NULL)
+      continue;
+    for (length = 0U; length <= LC_WORKFLOW_MAX_COMPLETION_EVIDENCE_BYTES;
+         ++length) {
+      if (values[index][length] == '\0')
+        break;
+    }
+    if (length > LC_WORKFLOW_MAX_COMPLETION_EVIDENCE_BYTES) {
+      return lc_error_set(
+          error, LC_ERR_INVALID, 0L,
+          "outbox completion evidence exceeds the retained size "
+          "limit",
+          names[index], NULL, NULL);
+    }
+  }
+  return LC_OK;
+}
+
 static time_t lc_workflow_time_t_maximum(void);
 
 static int lc_workflow_timestamp_add(lc_unix_seconds base, long delta,
@@ -1230,11 +1263,49 @@ static int lc_workflow_command_receipt_from_record(
   if (record == NULL || receipt == NULL || record->record_type == NULL ||
       record->command_id == NULL || record->scope == NULL ||
       record->command_type == NULL || record->idempotency_key == NULL ||
-      record->state == NULL ||
+      record->request_digest == NULL || record->state == NULL ||
+      record->command_id[0] == '\0' || record->scope[0] == '\0' ||
+      record->command_type[0] == '\0' || record->idempotency_key[0] == '\0' ||
+      record->request_digest[0] == '\0' || record->accepted_at_unix <= 0 ||
       strcmp(record->record_type, "lockdc.command.v1") != 0) {
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "command receipt record is malformed", NULL, NULL,
                         NULL);
+  }
+  if (strcmp(record->state, "pending") == 0) {
+    if (record->result_code != NULL || record->result_reference != NULL ||
+        record->result_content_type != NULL || record->completed_at_unix != 0 ||
+        record->failure_code != NULL || record->failure_message != NULL ||
+        record->failed_at_unix != 0 || record->has_result_body != 0) {
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "pending command receipt contains terminal outcome",
+                          NULL, NULL, NULL);
+    }
+  } else if (strcmp(record->state, "completed") == 0) {
+    if (record->result_code == NULL || record->result_code[0] == '\0' ||
+        record->completed_at_unix <= 0 || record->failure_code != NULL ||
+        record->failure_message != NULL || record->failed_at_unix != 0 ||
+        (record->has_result_body != 0 && record->has_result_body != 1) ||
+        (record->has_result_body != 0 &&
+         (record->result_content_type == NULL ||
+          record->result_content_type[0] == '\0'))) {
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "completed command receipt is malformed", NULL, NULL,
+                          NULL);
+    }
+  } else if (strcmp(record->state, "failed") == 0) {
+    if (record->failure_code == NULL || record->failure_code[0] == '\0' ||
+        record->failed_at_unix <= 0 || record->result_code != NULL ||
+        record->result_reference != NULL ||
+        record->result_content_type != NULL || record->completed_at_unix != 0 ||
+        record->has_result_body != 0) {
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "failed command receipt is malformed", NULL, NULL,
+                          NULL);
+    }
+  } else {
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "command receipt state is invalid", NULL, NULL, NULL);
   }
   lc_command_receipt_cleanup(receipt);
   if ((receipt->command_id = lc_strdup_local(record->command_id)) == NULL ||
@@ -1264,11 +1335,6 @@ static int lc_workflow_command_receipt_from_record(
     receipt->state = LC_COMMAND_COMPLETED;
   else if (strcmp(record->state, "failed") == 0)
     receipt->state = LC_COMMAND_FAILED;
-  else {
-    lc_command_receipt_cleanup(receipt);
-    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                        "command receipt state is invalid", NULL, NULL, NULL);
-  }
   receipt->has_result_body = record->has_result_body != 0;
   return LC_OK;
 }
@@ -1978,6 +2044,9 @@ static int lc_outbox_job_terminal(lc_outbox_job *self, const char *state,
     if (strcmp(state, "completed") == 0) {
       time_t now = time(NULL);
 
+      rc = lc_workflow_validate_completion_evidence(completion, error);
+      if (rc != LC_OK)
+        return rc;
       if (now == (time_t)-1) {
         return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                             "failed to read workflow completion clock", NULL,
@@ -3384,6 +3453,8 @@ static int lc_workflow_transaction_accept_command_method(
   record.scope = (char *)request->identity.scope;
   record.command_type = (char *)request->identity.command_type;
   record.idempotency_key = (char *)request->identity.idempotency_key;
+  record.request_digest = (char *)request->request_digest;
+  record.accepted_at_unix = 1;
   record.state = "pending";
   record.operation_id = (char *)request->operation_id;
 #ifdef LOCKDC_TEST_BUILD
@@ -3946,6 +4017,8 @@ static int lc_workflow_accept_command_method(lc_workflow *self,
   record.scope = (char *)request->identity.scope;
   record.command_type = (char *)request->identity.command_type;
   record.idempotency_key = (char *)request->identity.idempotency_key;
+  record.request_digest = (char *)request->request_digest;
+  record.accepted_at_unix = 1;
   record.operation_id = (char *)request->operation_id;
   record.state = "pending";
   rc = lc_workflow_command_receipt_from_record(&record, receipt, error);
