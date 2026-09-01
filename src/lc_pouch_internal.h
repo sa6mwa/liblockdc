@@ -297,6 +297,10 @@ extern void *lc_pouch_test_after_queue_batch_message_build_context;
  * before its multi-key terminal decision exists. */
 extern lc_pouch_test_hook lc_pouch_test_before_txn_decision_hook;
 extern void *lc_pouch_test_before_txn_decision_context;
+/* Invoked immediately before Pouch reads a durable transaction replay record.
+ * Tests use this to exercise indeterminate post-vote replay failures. */
+extern lc_pouch_test_hook lc_pouch_test_before_txn_replay_hook;
+extern void *lc_pouch_test_before_txn_replay_context;
 typedef void (*lc_pouch_test_metadata_append_hook_fn)(
     void *context, const char *namespace_name);
 extern lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook;

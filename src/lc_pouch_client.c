@@ -88,6 +88,8 @@ lc_pouch_test_hook lc_pouch_test_after_queue_batch_message_build_hook = NULL;
 void *lc_pouch_test_after_queue_batch_message_build_context = NULL;
 lc_pouch_test_hook lc_pouch_test_before_txn_decision_hook = NULL;
 void *lc_pouch_test_before_txn_decision_context = NULL;
+lc_pouch_test_hook lc_pouch_test_before_txn_replay_hook = NULL;
+void *lc_pouch_test_before_txn_replay_context = NULL;
 #endif
 
 typedef struct lc_pouch_acquire_for_update_file {
@@ -16803,6 +16805,15 @@ int lc_pouch_client_txn_replay_method(lc_client *self,
   }
   memset(out, 0, sizeof(*out));
   client = (lc_client_handle *)self;
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_pouch_test_before_txn_replay_hook != NULL) {
+    rc = lc_pouch_test_before_txn_replay_hook(
+        lc_pouch_test_before_txn_replay_context, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+#endif
   memset(&read_result, 0, sizeof(read_result));
   memset(&txn_record, 0, sizeof(txn_record));
   lc_txn_decision_req_init(&decision_req);

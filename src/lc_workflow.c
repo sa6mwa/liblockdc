@@ -3614,8 +3614,22 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
     replay_request.txn_id = pouch_txn_id;
     rc = lc_txn_replay(&transaction->workflow->client->pub, &replay_request,
                        &replay_result, error);
-    if (rc == LC_OK && (replay_result.state == NULL ||
-                        strcmp(replay_result.state, "commit") != 0)) {
+    if (rc != LC_OK) {
+      /* Every lease has already cast its terminal vote. A failed replay is
+       * therefore indeterminate, not proof of rollback: retain the direct
+       * outbox handoff so a locally committed Pouch transaction cannot wait
+       * for restart or an opt-in reconciliation interval. `notify()` falls
+       * back to durable recovery if its bounded handoff cannot retain a key. */
+      for (i = 0U; i < transaction->notification_count; ++i)
+        lc_workflow_notify(transaction->workflow,
+                           transaction->notification_keys[i]);
+      lc_txn_replay_res_cleanup(&replay_result);
+      lc_client_free(transaction->workflow->client, pouch_txn_id);
+      lc_workflow_transaction_clear_notification_keys(transaction);
+      return rc;
+    }
+    if (replay_result.state == NULL ||
+        strcmp(replay_result.state, "commit") != 0) {
       rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                         "workflow transaction was rolled back before commit",
                         replay_result.state == NULL

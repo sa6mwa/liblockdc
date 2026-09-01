@@ -39,6 +39,11 @@ typedef struct workflow_fail_once {
   unsigned int calls;
 } workflow_fail_once;
 
+typedef struct workflow_fail_on_call {
+  unsigned int calls;
+  unsigned int failure_call;
+} workflow_fail_on_call;
+
 typedef struct workflow_metadata_append_failure {
   unsigned int calls;
   unsigned int failure_call;
@@ -70,6 +75,18 @@ static int workflow_fail_first_call(void *context, lc_error *error) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "forced workflow transient claim failure", NULL, NULL,
                         NULL);
+  }
+  return LC_OK;
+}
+
+static int workflow_fail_on_configured_call(void *context, lc_error *error) {
+  workflow_fail_on_call *failure = (workflow_fail_on_call *)context;
+
+  assert_non_null(failure);
+  ++failure->calls;
+  if (failure->calls == failure->failure_call) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "forced workflow replay failure", NULL, NULL, "pouch");
   }
   return LC_OK;
 }
@@ -237,6 +254,8 @@ static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_before_outbox_handoff_reacquire_context = NULL;
   lc_workflow_test_before_periodic_recovery_schedule_hook = NULL;
   lc_workflow_test_before_periodic_recovery_schedule_context = NULL;
+  lc_pouch_test_before_txn_replay_hook = NULL;
+  lc_pouch_test_before_txn_replay_context = NULL;
 }
 
 static int workflow_bytes_contains(const void *bytes, size_t length,
@@ -3410,6 +3429,104 @@ test_pouch_multikey_commit_retry_retains_outbox_notification(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void test_pouch_indeterminate_commit_replay_retains_outbox_notification(
+    void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_workflow_participant_request participant_request;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_workflow_participant *participant;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_error error;
+  workflow_fail_on_call replay_failure;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "indeterminate-replay-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  participant = NULL;
+  payload = NULL;
+  memset(&replay_failure, 0, sizeof(replay_failure));
+  replay_failure.failure_call = 2U;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-indeterminate-replay";
+  workflow_config.owner = "workflow-indeterminate-replay-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "indeterminate-replay-operation";
+  entry.effect_id = "indeterminate-replay-effect";
+  entry.effect_key = "indeterminate-replay-effect-key";
+  entry.payload_digest = "sha256:indeterminate-replay-payload";
+  entry.kind = "test";
+  entry.destination = "atomic://indeterminate-replay";
+  entry.content_type = "text/plain";
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(
+      lc_source_from_memory("indeterminate", 13U, &payload, &error), LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  lc_workflow_participant_request_init(&participant_request);
+  participant_request.acquire.namespace_name = "workflow-indeterminate-replay";
+  participant_request.acquire.key = "domain-indeterminate-replay";
+  participant_request.acquire.owner = "workflow-indeterminate-replay-test";
+  participant_request.acquire.ttl_seconds = 30L;
+  assert_int_equal(lc_workflow_transaction_acquire(
+                       transaction, &participant_request, &participant, &error),
+                   LC_OK);
+  lc_workflow_participant_close(participant);
+  participant = NULL;
+
+  /* Both releases have made their XA votes durable before this replay failure.
+   * The caller receives an indeterminate terminal error, but the committed
+   * outbox must still reach the local dispatcher without a restart or scan. */
+  lc_pouch_test_before_txn_replay_context = &replay_failure;
+  lc_pouch_test_before_txn_replay_hook = workflow_fail_on_configured_call;
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error),
+                   LC_ERR_TRANSPORT);
+  assert_int_equal(replay_failure.calls, 2U);
+  lc_pouch_test_before_txn_replay_hook = NULL;
+  lc_pouch_test_before_txn_replay_context = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+
+  job = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 1000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, entry.effect_key);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void test_pouch_expired_multikey_commit_reports_rollback_without_signal(
     void **state) {
   char root[256];
@@ -6131,6 +6248,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_multikey_terminal_failure_publishes_nothing),
       cmocka_unit_test(
           test_pouch_multikey_commit_retry_retains_outbox_notification),
+      cmocka_unit_test(
+          test_pouch_indeterminate_commit_replay_retains_outbox_notification),
       cmocka_unit_test(
           test_pouch_expired_multikey_commit_reports_rollback_without_signal),
       cmocka_unit_test(test_pouch_reconciliation_retains_overflow_request),
