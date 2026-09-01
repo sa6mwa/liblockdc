@@ -4181,6 +4181,11 @@ static int lc_workflow_open_dead_letter(lc_workflow_handle *workflow,
                         "workflow dead-letter key and outputs are required",
                         NULL, NULL, NULL);
   }
+  if (!lc_workflow_is_outbox_key(outbox_key)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dead-letter key is not an outbox key", NULL,
+                        NULL, NULL);
+  }
   *lease_out = NULL;
   memset(record, 0, sizeof(*record));
   memset(&result, 0, sizeof(result));
@@ -4247,6 +4252,12 @@ static int lc_workflow_replay_dead_letter_on_client(
                                     &record, error);
   if (rc != LC_OK)
     return rc;
+  rc = lc_workflow_validate_durable_outbox_record(&record, error);
+  if (rc != LC_OK) {
+    lc_workflow_outbox_record_loaded_clear(client, &record);
+    lc_workflow_rollback_lease(lease);
+    return rc;
+  }
   if (record.replay_count < 0 ||
       record.replay_count >= (lonejson_int64)LC_I64_MAX) {
     lc_workflow_outbox_record_loaded_clear(client, &record);

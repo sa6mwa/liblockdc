@@ -870,6 +870,41 @@ static void seed_malformed_recovery_outbox(lc_client *client,
   assert_int_equal(lc_lease_release(lease, NULL, error), LC_OK);
 }
 
+static void seed_malformed_dead_letter_outbox(lc_client *client,
+                                              const char *namespace_name,
+                                              const char *key,
+                                              lc_error *error) {
+  static const char state[] =
+      "{\"record_type\":\"lockdc.outbox.v1\","
+      "\"operation_id\":\"malformed-op\","
+      "\"effect_id\":\"malformed-effect\","
+      "\"effect_key\":\"malformed-key\","
+      "\"payload_digest\":\"malformed-payload-digest\","
+      "\"message_id\":\"msg_malformed\","
+      "\"kind\":\"test\",\"destination\":\"recovery://target\","
+      "\"content_type\":\"text/plain\",\"headers_json\":\"{\","
+      "\"dispatch_state\":\"dead_letter\",\"attempt_count\":1,"
+      "\"not_before_unix\":0,\"replay_count\":0}";
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_source *state_source;
+
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = namespace_name;
+  acquire.key = key;
+  acquire.owner = "workflow-malformed-dead-letter-seed";
+  acquire.ttl_seconds = 30L;
+  lease = NULL;
+  assert_int_equal(lc_acquire(client, &acquire, &lease, error), LC_OK);
+  state_source = NULL;
+  assert_int_equal(
+      lc_source_from_memory(state, sizeof(state) - 1U, &state_source, error),
+      LC_OK);
+  assert_int_equal(lc_lease_update(lease, state_source, NULL, error), LC_OK);
+  lc_source_close(state_source);
+  assert_int_equal(lc_lease_release(lease, NULL, error), LC_OK);
+}
+
 static void seed_terminal_workflow_outbox(lc_client *client,
                                           const char *namespace_name,
                                           const char *key, lc_error *error) {
@@ -4120,6 +4155,117 @@ static void test_pouch_dead_letter_operations(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void
+test_pouch_dead_letter_management_rejects_invalid_candidates(void **state) {
+  static const char unreserved_key[] = "ordinary-dead-letter";
+  static const char malformed_key[] =
+      "__lockdc_io/v1/outbox/malformed-dead-letter";
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_acquire_req acquire;
+  lc_lease *lease;
+  lc_attachment_list attachments;
+  lc_sink *sink;
+  lc_get_res get_result;
+  const void *bytes;
+  size_t length;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "dead-letter-boundary-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  lease = NULL;
+  sink = NULL;
+  memset(&attachments, 0, sizeof(attachments));
+  memset(&get_result, 0, sizeof(get_result));
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  seed_dead_letter_outbox_with_replay_count(
+      client, "workflow-dead-letter-boundary", unreserved_key, "0", &error);
+  seed_malformed_dead_letter_outbox(client, "workflow-dead-letter-boundary",
+                                    malformed_key, &error);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-dead-letter-boundary";
+  workflow_config.owner = "workflow-dead-letter-boundary-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+
+  assert_int_equal(
+      lc_workflow_replay_dead_letter(workflow, unreserved_key, &error),
+      LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(
+      lc_workflow_delete_dead_letter(workflow, unreserved_key, &error),
+      LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = workflow_config.namespace_name;
+  acquire.key = unreserved_key;
+  acquire.owner = "workflow-dead-letter-boundary-inspect";
+  acquire.ttl_seconds = 30L;
+  assert_int_equal(lc_acquire(client, &acquire, &lease, &error), LC_OK);
+  assert_int_equal(lc_lease_list_attachments(lease, &attachments, &error),
+                   LC_OK);
+  assert_int_equal(attachments.count, 1U);
+  lc_attachment_list_cleanup(&attachments);
+  assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+  assert_int_equal(lc_lease_get(lease, sink, NULL, &get_result, &error), LC_OK);
+  bytes = NULL;
+  length = 0U;
+  assert_int_equal(lc_sink_memory_bytes(sink, &bytes, &length, &error), LC_OK);
+  assert_true(workflow_bytes_contains(bytes, length,
+                                      "\"dispatch_state\":\"dead_letter\""));
+  lc_get_res_cleanup(&get_result);
+  lc_sink_close(sink);
+  sink = NULL;
+  assert_int_equal(lc_lease_release(lease, NULL, &error), LC_OK);
+  lease = NULL;
+
+  assert_int_equal(
+      lc_workflow_replay_dead_letter(workflow, malformed_key, &error),
+      LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = workflow_config.namespace_name;
+  acquire.key = malformed_key;
+  acquire.owner = "workflow-malformed-dead-letter-inspect";
+  acquire.ttl_seconds = 30L;
+  assert_int_equal(lc_acquire(client, &acquire, &lease, &error), LC_OK);
+  assert_int_equal(lc_sink_to_memory(&sink, &error), LC_OK);
+  memset(&get_result, 0, sizeof(get_result));
+  assert_int_equal(lc_lease_get(lease, sink, NULL, &get_result, &error), LC_OK);
+  bytes = NULL;
+  length = 0U;
+  assert_int_equal(lc_sink_memory_bytes(sink, &bytes, &length, &error), LC_OK);
+  assert_true(workflow_bytes_contains(bytes, length,
+                                      "\"dispatch_state\":\"dead_letter\""));
+  lc_get_res_cleanup(&get_result);
+  lc_sink_close(sink);
+  assert_int_equal(lc_lease_release(lease, NULL, &error), LC_OK);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void test_pouch_startup_recovery_claims_seeded_outbox(void **state) {
   char root[256];
   char template_path[256];
@@ -6256,6 +6402,8 @@ int main(void) {
       cmocka_unit_test(test_pouch_reconciliation_skips_disappeared_outbox),
       cmocka_unit_test(test_pouch_handoff_skips_disappeared_outbox),
       cmocka_unit_test(test_pouch_dead_letter_operations),
+      cmocka_unit_test(
+          test_pouch_dead_letter_management_rejects_invalid_candidates),
       cmocka_unit_test(test_pouch_startup_recovery_claims_seeded_outbox),
       cmocka_unit_test(test_pouch_clean_reopen_reconciles_durable_index),
       cmocka_unit_test(test_pouch_shared_reopen_reconciles_durable_index),
