@@ -1115,6 +1115,8 @@ static int lc_workflow_validate_diagnostic(const char *diagnostic,
                       NULL, NULL);
 }
 
+static time_t lc_workflow_time_t_maximum(void);
+
 static int lc_workflow_timestamp_add(lc_unix_seconds base, long delta,
                                      const char *field, lc_unix_seconds *out,
                                      lc_error *error) {
@@ -1138,6 +1140,12 @@ static int lc_workflow_timestamp_add(lc_unix_seconds base, long delta,
     return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
   }
   *out = base + (lc_unix_seconds)delta;
+  if (*out > (lc_unix_seconds)lc_workflow_time_t_maximum()) {
+    snprintf(message, sizeof(message),
+             "workflow %s exceeds supported wait deadline range",
+             field != NULL ? field : "duration");
+    return lc_error_set(error, LC_ERR_INVALID, 0L, message, NULL, NULL, NULL);
+  }
   return LC_OK;
 }
 

@@ -221,6 +221,22 @@ static int workflow_duration_overflows_unix_range(long duration) {
          (uintmax_t)duration > (uintmax_t)LC_I64_MAX - (uintmax_t)now;
 }
 
+static int workflow_duration_overflows_wait_range(long duration) {
+  time_t now = time(NULL);
+  uintmax_t maximum;
+  size_t bits;
+
+  if (duration <= 0L || now == (time_t)-1 || now < (time_t)0)
+    return 0;
+  bits = sizeof(time_t) * CHAR_BIT;
+  maximum = bits >= sizeof(uintmax_t) * CHAR_BIT ? (uintmax_t)-1
+                                                 : ((uintmax_t)1U << bits) - 1U;
+  if ((time_t)-1 < (time_t)0)
+    maximum >>= 1U;
+  return (uintmax_t)now <= maximum &&
+         (uintmax_t)duration > maximum - (uintmax_t)now;
+}
+
 static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_after_close_requested_hook = NULL;
   lc_workflow_test_after_close_requested_context = NULL;
@@ -2457,7 +2473,8 @@ static void test_pouch_overflowing_foreground_retry_reconciles(void **state) {
   workflow_fail_once failure;
 
   (void)state;
-  if (!workflow_duration_overflows_unix_range(LONG_MAX))
+  if (!workflow_duration_overflows_unix_range(LONG_MAX) &&
+      !workflow_duration_overflows_wait_range(LONG_MAX))
     return;
   assert_true(snprintf(template_path, sizeof(template_path),
                        WORKFLOW_TMP_PREFIX "claim-retry-overflow-XXXXXX") > 0);
@@ -3023,7 +3040,8 @@ static void test_pouch_workflow_rejects_overflowing_deadlines(void **state) {
   lc_error error;
 
   (void)state;
-  if (!workflow_duration_overflows_unix_range(LONG_MAX))
+  if (!workflow_duration_overflows_unix_range(LONG_MAX) &&
+      !workflow_duration_overflows_wait_range(LONG_MAX))
     return;
   assert_true(snprintf(template_path, sizeof(template_path),
                        WORKFLOW_TMP_PREFIX "deadline-overflow-XXXXXX") > 0);
