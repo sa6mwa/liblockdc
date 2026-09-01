@@ -1036,6 +1036,42 @@ static int lc_workflow_validate_outbox_envelope(const lc_outbox_entry *entry,
   return lc_workflow_validate_headers_json(entry->headers_json, error);
 }
 
+/* Durable recovery must enforce the same host-facing envelope boundary as a
+ * new append. The mapper establishes field presence, but an external write or
+ * storage corruption can still leave required strings empty or make the
+ * embedded headers value invalid. */
+static int lc_workflow_validate_durable_outbox_record(
+    const lc_workflow_outbox_record *record, lc_error *error) {
+  lc_outbox_entry entry;
+
+  if (record == NULL || record->operation_id == NULL ||
+      record->effect_id == NULL || record->effect_key == NULL ||
+      record->payload_digest == NULL || record->message_id == NULL ||
+      record->kind == NULL || record->destination == NULL ||
+      record->content_type == NULL || record->operation_id[0] == '\0' ||
+      record->effect_id[0] == '\0' || record->effect_key[0] == '\0' ||
+      record->payload_digest[0] == '\0' || record->message_id[0] == '\0' ||
+      record->kind[0] == '\0' || record->destination[0] == '\0' ||
+      record->content_type[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "durable outbox envelope is missing required fields",
+                        NULL, NULL, NULL);
+  }
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = record->operation_id;
+  entry.effect_id = record->effect_id;
+  entry.effect_key = record->effect_key;
+  entry.payload_digest = record->payload_digest;
+  entry.causation_id = record->causation_id;
+  entry.kind = record->kind;
+  entry.schema_version = record->schema_version;
+  entry.destination = record->destination;
+  entry.content_type = record->content_type;
+  entry.headers_json = record->headers_json;
+  entry.trace_context = record->trace_context;
+  return lc_workflow_validate_outbox_envelope(&entry, error);
+}
+
 /* Mapped records are owned by the parser runtime that decoded them. Remote
  * clients decode through their engine runtime, whereas Pouch uses the caller
  * thread runtime. Keeping that distinction here both preserves allocator
@@ -2239,6 +2275,9 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "outbox candidate disappeared before claim", NULL, NULL,
                       NULL);
+  }
+  if (rc == LC_OK) {
+    rc = lc_workflow_validate_durable_outbox_record(&record, error);
   }
   if (rc == LC_OK) {
     now = time(NULL);
