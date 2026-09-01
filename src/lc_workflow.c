@@ -313,6 +313,9 @@ struct lc_workflow_transaction_handle {
   lc_lease **leases;
   size_t lease_count;
   size_t lease_capacity;
+  char **notification_keys;
+  size_t notification_count;
+  size_t notification_capacity;
   lc_workflow_participant_handle *participants;
   lc_lease *command_lease;
   int command_causation_owned;
@@ -668,6 +671,48 @@ static void lc_workflow_transaction_remove_lease(
       return;
     }
   }
+}
+
+static int lc_workflow_transaction_reserve_notification_keys(
+    lc_workflow_transaction_handle *transaction, size_t additional,
+    lc_error *error) {
+  char **grown;
+  size_t required;
+
+  if (additional > (size_t)-1 - transaction->notification_count) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dispatch signal count is too large", NULL,
+                        NULL, NULL);
+  }
+  required = transaction->notification_count + additional;
+  if (required <= transaction->notification_capacity)
+    return LC_OK;
+  grown = (char **)lc_client_realloc(transaction->workflow->client,
+                                     transaction->notification_keys,
+                                     required * sizeof(*grown));
+  if (grown == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to retain workflow dispatch signals", NULL,
+                        NULL, NULL);
+  }
+  transaction->notification_keys = grown;
+  transaction->notification_capacity = required;
+  return LC_OK;
+}
+
+static void lc_workflow_transaction_clear_notification_keys(
+    lc_workflow_transaction_handle *transaction) {
+  size_t index;
+
+  if (transaction == NULL)
+    return;
+  for (index = 0U; index < transaction->notification_count; ++index)
+    lc_client_free(transaction->workflow->client,
+                   transaction->notification_keys[index]);
+  lc_client_free(transaction->workflow->client, transaction->notification_keys);
+  transaction->notification_keys = NULL;
+  transaction->notification_count = 0U;
+  transaction->notification_capacity = 0U;
 }
 
 static int lc_workflow_digest(const char *value, char out[44],
@@ -3083,6 +3128,7 @@ static void lc_workflow_transaction_abort_enrolled_lease(
     lc_workflow_rollback_lease(transaction->leases[index]);
     transaction->leases[index] = NULL;
   }
+  lc_workflow_transaction_clear_notification_keys(transaction);
   transaction->terminal = 1;
 }
 
@@ -3360,7 +3406,7 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
   lc_release_req request;
   lc_txn_replay_req replay_request;
   lc_txn_replay_res replay_result;
-  char **notification_keys;
+  char **prepared_notification_keys;
   char *pouch_txn_id;
   size_t i;
   int rc;
@@ -3368,7 +3414,7 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "workflow transaction is closed", NULL, NULL, NULL);
   rc = LC_OK;
-  notification_keys = NULL;
+  prepared_notification_keys = NULL;
   pouch_txn_id = NULL;
   /* A Pouch transaction reports each individual release as successful after it
    * casts its vote. For a multi-participant commit, replay the durable record
@@ -3376,8 +3422,14 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
    * dispatcher when expiry or another participant caused XA rollback. */
   if (!rollback && transaction->workflow->client->is_pouch &&
       transaction->lease_count > 1U) {
-    const char *txn_id =
-        transaction->leases[0] == NULL ? NULL : transaction->leases[0]->txn_id;
+    const char *txn_id = NULL;
+
+    for (i = 0U; i < transaction->lease_count; ++i) {
+      if (transaction->leases[i] != NULL) {
+        txn_id = transaction->leases[i]->txn_id;
+        break;
+      }
+    }
 
     if (txn_id == NULL || txn_id[0] == '\0') {
       return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
@@ -3392,25 +3444,35 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
     }
   }
   if (!rollback) {
-    notification_keys = (char **)lc_client_calloc(transaction->workflow->client,
-                                                  transaction->lease_count,
-                                                  sizeof(*notification_keys));
-    if (notification_keys == NULL) {
+    prepared_notification_keys = (char **)lc_client_calloc(
+        transaction->workflow->client, transaction->lease_count,
+        sizeof(*prepared_notification_keys));
+    if (prepared_notification_keys == NULL) {
       lc_client_free(transaction->workflow->client, pouch_txn_id);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to prepare workflow dispatch signals", NULL,
                           NULL, NULL);
     }
+    rc = lc_workflow_transaction_reserve_notification_keys(
+        transaction, transaction->lease_count, error);
+    if (rc != LC_OK) {
+      lc_client_free(transaction->workflow->client, prepared_notification_keys);
+      lc_client_free(transaction->workflow->client, pouch_txn_id);
+      return rc;
+    }
     for (i = 0U; i < transaction->lease_count; ++i) {
-      if (transaction->leases[i] != NULL) {
-        notification_keys[i] = lc_client_strdup(transaction->workflow->client,
-                                                transaction->leases[i]->key);
-        if (notification_keys[i] == NULL) {
+      if (transaction->leases[i] != NULL &&
+          lc_workflow_is_outbox_key(transaction->leases[i]->key)) {
+        prepared_notification_keys[i] = lc_client_strdup(
+            transaction->workflow->client, transaction->leases[i]->key);
+        if (prepared_notification_keys[i] == NULL) {
           while (i > 0U) {
             --i;
-            lc_client_free(transaction->workflow->client, notification_keys[i]);
+            lc_client_free(transaction->workflow->client,
+                           prepared_notification_keys[i]);
           }
-          lc_client_free(transaction->workflow->client, notification_keys);
+          lc_client_free(transaction->workflow->client,
+                         prepared_notification_keys);
           lc_client_free(transaction->workflow->client, pouch_txn_id);
           return lc_error_set(error, LC_ERR_NOMEM, 0L,
                               "failed to prepare workflow dispatch signals",
@@ -3429,16 +3491,25 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
       size_t j;
       for (j = 0U; j < transaction->lease_count; ++j) {
         lc_client_free(transaction->workflow->client,
-                       notification_keys == NULL ? NULL : notification_keys[j]);
+                       prepared_notification_keys == NULL
+                           ? NULL
+                           : prepared_notification_keys[j]);
       }
-      lc_client_free(transaction->workflow->client, notification_keys);
+      lc_client_free(transaction->workflow->client, prepared_notification_keys);
       lc_client_free(transaction->workflow->client, pouch_txn_id);
       return rc;
+    }
+    if (prepared_notification_keys != NULL &&
+        prepared_notification_keys[i] != NULL) {
+      transaction->notification_keys[transaction->notification_count++] =
+          prepared_notification_keys[i];
+      prepared_notification_keys[i] = NULL;
     }
     lc_workflow_transaction_invalidate_lease_participant(
         transaction, transaction->leases[i]);
     transaction->leases[i] = NULL;
   }
+  lc_client_free(transaction->workflow->client, prepared_notification_keys);
   transaction->terminal = 1;
   if (pouch_txn_id != NULL) {
     lc_txn_replay_req_init(&replay_request);
@@ -3458,23 +3529,25 @@ static int lc_workflow_transaction_terminal(lc_workflow_transaction *self,
     lc_txn_replay_res_cleanup(&replay_result);
     lc_client_free(transaction->workflow->client, pouch_txn_id);
     if (rc != LC_OK) {
-      for (i = 0U; i < transaction->lease_count; ++i) {
-        lc_client_free(transaction->workflow->client,
-                       notification_keys == NULL ? NULL : notification_keys[i]);
-      }
-      lc_client_free(transaction->workflow->client, notification_keys);
+      lc_workflow_transaction_clear_notification_keys(transaction);
       return rc;
     }
   }
-  for (i = 0U; i < transaction->lease_count; ++i) {
-    if (lc_workflow_is_outbox_key(
-            notification_keys == NULL ? NULL : notification_keys[i])) {
-      lc_workflow_notify(transaction->workflow, notification_keys[i]);
+  if (!rollback) {
+    for (i = 0U; i < transaction->notification_count; ++i) {
+      lc_workflow_notify(transaction->workflow,
+                         transaction->notification_keys[i]);
+      lc_client_free(transaction->workflow->client,
+                     transaction->notification_keys[i]);
     }
     lc_client_free(transaction->workflow->client,
-                   notification_keys == NULL ? NULL : notification_keys[i]);
+                   transaction->notification_keys);
+    transaction->notification_keys = NULL;
+    transaction->notification_count = 0U;
+    transaction->notification_capacity = 0U;
+  } else {
+    lc_workflow_transaction_clear_notification_keys(transaction);
   }
-  lc_client_free(transaction->workflow->client, notification_keys);
   return LC_OK;
 }
 static int lc_workflow_transaction_commit_method(lc_workflow_transaction *self,
@@ -3500,6 +3573,7 @@ lc_workflow_transaction_close_method(lc_workflow_transaction *self) {
   lc_workflow_transaction_invalidate_participants(transaction);
   for (i = 0U; i < transaction->lease_count; ++i)
     lc_lease_close(transaction->leases[i]);
+  lc_workflow_transaction_clear_notification_keys(transaction);
   lc_client_free(workflow->client, transaction->leases);
   lc_client_free(workflow->client, transaction->causation_id);
   lc_client_free(workflow->client, transaction);

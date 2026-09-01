@@ -3277,6 +3277,105 @@ test_pouch_multikey_terminal_failure_publishes_nothing(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void
+test_pouch_multikey_commit_retry_retains_outbox_notification(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_workflow_participant_request participant_request;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_workflow_participant *participant;
+  lc_outbox_job *job;
+  lc_source *payload;
+  lc_error error;
+  int decision_calls;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "atomic-retry-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  transaction = NULL;
+  participant = NULL;
+  payload = NULL;
+  decision_calls = 0;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-atomic-retry";
+  workflow_config.owner = "workflow-atomic-retry-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "atomic-retry-operation";
+  entry.effect_id = "atomic-retry-effect";
+  entry.effect_key = "atomic-retry-effect-key";
+  entry.payload_digest = "sha256:atomic-retry-payload";
+  entry.kind = "test";
+  entry.destination = "atomic://retry";
+  entry.content_type = "text/plain";
+  lc_outbox_receipt_init(&receipt);
+  assert_int_equal(lc_source_from_memory("atomic", 6U, &payload, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_OK);
+  lc_workflow_participant_request_init(&participant_request);
+  participant_request.acquire.namespace_name = "workflow-atomic-retry";
+  participant_request.acquire.key = "domain-atomic-retry";
+  participant_request.acquire.owner = "workflow-atomic-retry-test";
+  participant_request.acquire.ttl_seconds = 30L;
+  assert_int_equal(lc_workflow_transaction_acquire(
+                       transaction, &participant_request, &participant, &error),
+                   LC_OK);
+  lc_workflow_participant_close(participant);
+  participant = NULL;
+
+  /* The first outbox release votes successfully. Force the final participant
+   * release to fail, then retry the same transaction after the transport fault
+   * clears. The committed outbox must still wake this local dispatcher. */
+  lc_pouch_test_before_txn_decision_context = &decision_calls;
+  lc_pouch_test_before_txn_decision_hook =
+      workflow_force_pouch_txn_decision_failure;
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error),
+                   LC_ERR_TRANSPORT);
+  assert_int_equal(decision_calls, 1);
+  lc_pouch_test_before_txn_decision_hook = NULL;
+  lc_pouch_test_before_txn_decision_context = NULL;
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+
+  job = NULL;
+  assert_int_equal(lc_workflow_next(workflow, 1000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, entry.effect_key);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void test_pouch_expired_multikey_commit_reports_rollback_without_signal(
     void **state) {
   char root[256];
@@ -5859,6 +5958,8 @@ int main(void) {
           test_pouch_workflow_periodic_schedule_failure_does_not_deadlock),
       cmocka_unit_test(test_pouch_shared_command_resume_is_durable),
       cmocka_unit_test(test_pouch_multikey_terminal_failure_publishes_nothing),
+      cmocka_unit_test(
+          test_pouch_multikey_commit_retry_retains_outbox_notification),
       cmocka_unit_test(
           test_pouch_expired_multikey_commit_reports_rollback_without_signal),
       cmocka_unit_test(test_pouch_reconciliation_retains_overflow_request),
