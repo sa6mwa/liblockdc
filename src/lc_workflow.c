@@ -1000,6 +1000,42 @@ static int lc_workflow_validate_headers_json(const char *headers_json,
   return LC_OK;
 }
 
+static int lc_workflow_validate_outbox_envelope(const lc_outbox_entry *entry,
+                                                lc_error *error) {
+  const char *fields[11];
+  size_t total;
+  size_t index;
+
+  if (entry == NULL)
+    return LC_OK;
+  fields[0] = entry->operation_id;
+  fields[1] = entry->effect_id;
+  fields[2] = entry->effect_key;
+  fields[3] = entry->payload_digest;
+  fields[4] = entry->causation_id;
+  fields[5] = entry->kind;
+  fields[6] = entry->schema_version;
+  fields[7] = entry->destination;
+  fields[8] = entry->content_type;
+  fields[9] = entry->headers_json;
+  fields[10] = entry->trace_context;
+  total = 0U;
+  for (index = 0U; index < sizeof(fields) / sizeof(fields[0]); ++index) {
+    size_t length;
+
+    if (fields[index] == NULL)
+      continue;
+    length = strlen(fields[index]);
+    if (length > (size_t)LC_WORKFLOW_MAX_ENVELOPE_BYTES - total) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "outbox envelope exceeds the retained size limit",
+                          NULL, NULL, NULL);
+    }
+    total += length;
+  }
+  return lc_workflow_validate_headers_json(entry->headers_json, error);
+}
+
 /* Mapped records are owned by the parser runtime that decoded them. Remote
  * clients decode through their engine runtime, whereas Pouch uses the caller
  * thread runtime. Keeping that distinction here both preserves allocator
@@ -1626,7 +1662,7 @@ static int lc_workflow_stage_outbox(lc_lease *lease,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "outbox payload source is required", NULL, NULL, NULL);
   }
-  rc = lc_workflow_validate_headers_json(entry->headers_json, error);
+  rc = lc_workflow_validate_outbox_envelope(entry, error);
   if (rc != LC_OK)
     return rc;
   memset(&record, 0, sizeof(record));
@@ -2099,12 +2135,11 @@ static int lc_workflow_pouch_shared_live_claim(lc_workflow_handle *workflow,
 /* A preflight read eliminates the normal shared-writer hand-off race. Keep a
  * small bounded backoff for the remaining read/commit race without using the
  * Pouch acquire API's one-second polling contract. */
-static int lc_workflow_reacquire_durable_claim(lc_workflow_handle *workflow,
+static int lc_workflow_reacquire_durable_claim(lc_client_handle *client,
                                                const lc_acquire_req *acquire,
                                                lc_lease **lease,
                                                lc_error *error) {
   enum { LC_WORKFLOW_SHARED_HANDOFF_RETRIES = 20 };
-  lc_client_handle *client = workflow->dispatcher_client;
   int shared_pouch =
       client->is_pouch && !lc_pouch_single_writer_enabled(client->pouch);
   unsigned int attempt;
@@ -2140,6 +2175,7 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   lc_get_res verify_result;
   lonejson *runtime;
   lc_outbox_job_handle *job;
+  lc_client_handle *job_client;
   time_t now;
   lc_unix_seconds claim_expires_at_unix = 0;
   char *original_dispatch_state;
@@ -2164,6 +2200,7 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   acquire.owner = workflow->owner;
   acquire.ttl_seconds = workflow->claim_ttl_seconds;
   lease = NULL;
+  job_client = NULL;
   now = time(NULL);
   if (now == (time_t)-1) {
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
@@ -2372,9 +2409,29 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
     }
   }
 #endif
-  rc = lc_workflow_reacquire_durable_claim(workflow, &acquire, &lease, error);
+  /* A host-owned job must not share the dispatcher clone's cancellation hook:
+   * close() cancels only in-flight dispatcher work, while a handed-off host
+   * job remains usable through its normal terminal decision. */
+  if (client->is_pouch) {
+    lc_client_handle_retain(client);
+    job_client = client;
+  } else {
+    lc_client *job_client_public = NULL;
+
+    rc = lc_client_clone_remote_for_workflow(workflow->client,
+                                             workflow->shutdown_timeout_ms,
+                                             &job_client_public, error);
+    if (rc == LC_OK)
+      job_client = (lc_client_handle *)job_client_public;
+  }
+  if (rc == LC_OK) {
+    rc = lc_workflow_reacquire_durable_claim(job_client, &acquire, &lease,
+                                             error);
+  }
   if (rc != LC_OK) {
     lc_workflow_schedule_claim_recovery(workflow, key, claim_expires_at_unix);
+    if (job_client != NULL)
+      lc_client_close(&job_client->pub);
     lc_workflow_outbox_record_clear(client, &job->record);
     lc_client_free(client, job->outbox_key);
     lc_client_free(client, job);
@@ -2402,13 +2459,14 @@ static int lc_workflow_claim_outbox(lc_workflow_handle *workflow,
   if (rc != LC_OK) {
     lc_workflow_rollback_lease(lease);
     lc_workflow_schedule_claim_recovery(workflow, key, claim_expires_at_unix);
+    if (job_client != NULL)
+      lc_client_close(&job_client->pub);
     lc_workflow_outbox_record_clear(client, &job->record);
     lc_client_free(client, job->outbox_key);
     lc_client_free(client, job);
     return rc;
   }
-  lc_client_handle_retain(client);
-  job->client = client;
+  job->client = job_client;
   job->workflow = workflow;
   lc_workflow_retain(workflow);
   job->lease = lease;
@@ -3334,7 +3392,7 @@ static int lc_workflow_transaction_append_outbox_method(
   effective_entry = *entry;
   if (effective_entry.causation_id == NULL)
     effective_entry.causation_id = transaction->causation_id;
-  rc = lc_workflow_validate_headers_json(effective_entry.headers_json, error);
+  rc = lc_workflow_validate_outbox_envelope(&effective_entry, error);
   if (rc != LC_OK)
     return rc;
   key = NULL;
@@ -3630,8 +3688,7 @@ static int lc_workflow_append_outbox_method(lc_workflow *self,
         NULL);
   *out_txn = NULL;
   lc_outbox_receipt_cleanup(receipt);
-  rc = lc_workflow_validate_headers_json(
-      entry != NULL ? entry->headers_json : NULL, error);
+  rc = lc_workflow_validate_outbox_envelope(entry, error);
   if (rc != LC_OK)
     return rc;
   key = NULL;

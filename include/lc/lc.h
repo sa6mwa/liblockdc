@@ -40,6 +40,10 @@
 /** Default maximum bytes accepted while parsing a typed JSON HTTP response. */
 #define LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT (100UL * 1024UL * 1024UL)
 
+/** Maximum combined byte length of durable outbox envelope fields. Payloads are
+ * streamed attachments and are not included in this bound. */
+#define LC_WORKFLOW_MAX_ENVELOPE_BYTES (1024UL * 1024UL)
+
 /** Opaque client handle. */
 typedef struct lc_client lc_client;
 /** Opaque lease/state handle returned from acquire and message state flows. */
@@ -259,8 +263,9 @@ typedef struct lc_client_config {
   /** Maximum typed JSON response bytes parsed through lonejson for operations
    * issued through this client. Zero uses
    * `LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT`. A remote workflow owns a separate
-   * dispatcher client with the standard bounded limit so a lower
-   * application-facing limit cannot strand its library-owned durable envelopes.
+   * dispatcher client with the standard bounded limit and rejects envelopes
+   * above `LC_WORKFLOW_MAX_ENVELOPE_BYTES`, so a lower application-facing
+   * limit cannot strand its library-owned durable envelopes.
    */
   size_t http_json_response_limit_bytes;
   /** Borrowed client logger used for SDK diagnostics. Defaults to a no-op
@@ -1644,7 +1649,9 @@ typedef struct lc_workflow_stats {
   char *last_error;
 } lc_workflow_stats;
 
-/** Immutable envelope and routing data for one durable outbox effect. */
+/** Immutable envelope and routing data for one durable outbox effect. The
+ * combined byte length of its string fields must not exceed
+ * `LC_WORKFLOW_MAX_ENVELOPE_BYTES`. */
 typedef struct lc_outbox_entry {
   /** Required stable business-operation identity. */
   const char *operation_id;

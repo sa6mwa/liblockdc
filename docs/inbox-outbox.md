@@ -893,8 +893,10 @@ host-runtime execution context. A job returned from `workflow->next()` is the
 explicit owned boundary for a host worker.
 
 For a remote endpoint, the private dispatcher clone uses
-`LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT` for its library-owned record reads. This
-is intentionally independent of a lower
+`LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT` for its library-owned record reads. The
+workflow rejects an outbox envelope whose combined routing and metadata fields
+exceed `LC_WORKFLOW_MAX_ENVELOPE_BYTES`; payload attachments remain outside
+that bound and stream normally. This is intentionally independent of a lower
 `lc_client_config.http_json_response_limit_bytes` chosen for application-facing
 typed JSON calls: otherwise a caller could durably commit an outbox envelope
 that the dispatcher itself could never load. Payload attachments retain their
@@ -902,9 +904,11 @@ streaming boundary and are not materialized by this policy.
 
 `workflow->close()` prevents new claims and notifications, wakes blocked
 `next()` callers, cancels a remote dispatcher request, and joins the private
-dispatcher. `shutdown_timeout_ms` bounds each remote dispatcher request; zero
-inherits an explicit root-client timeout or defaults to 30 seconds. Close never
-abandons a live thread. It does not
+dispatcher. A handed-off job owns a separate uncancelled remote client, so it
+remains usable for payload streaming, renewal, and terminal completion after
+the workflow closes. `shutdown_timeout_ms` bounds each remote dispatcher
+request; zero inherits an explicit root-client timeout or defaults to 30
+seconds. Close never abandons a live thread. It does not
 manufacture completion, retry, or dead-letter transitions for jobs already
 handed to host workers, run host work, or forcibly terminate it. The
 application gives its workers a bounded shutdown grace period. A job that

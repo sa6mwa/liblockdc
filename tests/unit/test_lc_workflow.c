@@ -5280,6 +5280,76 @@ test_pouch_workflow_dead_letters_persisted_exhausted_attempts(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void test_workflow_rejects_oversized_outbox_envelope(void **state) {
+  char root[256], template_path[256], endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_transaction *transaction;
+  lc_outbox_job *job;
+  lc_source *payload;
+  char *destination;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "envelope-limit-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-envelope-limit";
+  workflow_config.owner = "workflow-envelope-limit-test";
+  workflow = NULL;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  destination = (char *)malloc((size_t)LC_WORKFLOW_MAX_ENVELOPE_BYTES + 1U);
+  assert_non_null(destination);
+  memset(destination, 'd', (size_t)LC_WORKFLOW_MAX_ENVELOPE_BYTES);
+  destination[LC_WORKFLOW_MAX_ENVELOPE_BYTES] = '\0';
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "envelope-limit-operation";
+  entry.effect_id = "envelope-limit-effect";
+  entry.effect_key = "envelope-limit-effect-key";
+  entry.payload_digest = "sha256:envelope-limit-payload";
+  entry.kind = "test";
+  entry.destination = destination;
+  payload = NULL;
+  assert_int_equal(lc_source_from_memory("payload", 7U, &payload, &error),
+                   LC_OK);
+  lc_outbox_receipt_init(&receipt);
+  transaction = (lc_workflow_transaction *)1;
+  assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
+                                             &transaction, &receipt, &error),
+                   LC_ERR_INVALID);
+  assert_null(transaction);
+  assert_null(receipt.outbox_key);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  job = (lc_outbox_job *)1;
+  assert_int_equal(lc_workflow_next(workflow, 0L, &job, &error), LC_OK);
+  assert_null(job);
+  lc_outbox_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  free(destination);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void test_pouch_participant_attach_refreshes_version(void **state) {
   char root[256], template_path[256], endpoint[320];
   const char *endpoints[1];
@@ -5987,6 +6057,7 @@ int main(void) {
           test_pouch_expired_claim_recovers_and_preserves_attempt_budget),
       cmocka_unit_test(
           test_pouch_workflow_dead_letters_persisted_exhausted_attempts),
+      cmocka_unit_test(test_workflow_rejects_oversized_outbox_envelope),
       cmocka_unit_test(test_pouch_participant_attach_refreshes_version),
       cmocka_unit_test(
           test_pouch_workflow_rejects_out_of_range_durable_attempt_counts),
