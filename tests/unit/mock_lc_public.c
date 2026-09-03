@@ -400,6 +400,22 @@ static int mock_client_load(lc_client *self, const char *key,
   return mock->rc;
 }
 
+static int mock_client_load_in_namespace(lc_client *self,
+                                         const char *namespace_name,
+                                         const char *key,
+                                         const lonejson_map *map, void *dst,
+                                         const lc_get_opts *opts,
+                                         lc_get_res *out, lc_error *error) {
+  lc_public_mock_client *mock;
+
+  mock = (lc_public_mock_client *)self;
+  lc_public_mock_record(&mock->load_in_namespace_call, self, namespace_name,
+                        key, map, dst, opts);
+  mock->load_in_namespace_call.arg6 = out;
+  (void)error;
+  return mock->rc;
+}
+
 static int mock_client_update(lc_client *self, const lc_update_req *req,
                               lc_source *src, lc_update_res *out,
                               lc_error *error) {
@@ -894,6 +910,7 @@ void lc_public_mock_client_init(lc_public_mock_client *mock) {
   mock->pub.describe = mock_client_describe;
   mock->pub.get = mock_client_get;
   mock->pub.load = mock_client_load;
+  mock->pub.load_in_namespace = mock_client_load_in_namespace;
   mock->pub.update = mock_client_update;
   mock->pub.mutate = mock_client_mutate;
   mock->pub.metadata = mock_client_metadata;

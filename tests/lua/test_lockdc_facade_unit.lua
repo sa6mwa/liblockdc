@@ -212,7 +212,7 @@ local function test_subscribe_ack_and_error_paths()
   end
 
   local function open_client_for_messages(messages)
-    local client_core = {
+local client_core = {
       close = function() end,
     }
 
@@ -539,6 +539,310 @@ local function test_json_null_roundtrip_helpers()
   assert_eq(written, 4, 'message:payload_json should preserve byte count')
 end
 
+local function test_workflow_facade_lifecycle()
+  local captured = {}
+  local participant_core = {
+    info = function()
+      return { key = 'order-1', txn_id = 'endpoint-minted-xid' }
+    end,
+    update = function(_, body, opts)
+      captured.update_body = body
+      captured.update_opts = opts
+      return { version = 2 }
+    end,
+    get = function()
+      return 'null', { no_content = false }
+    end,
+    metadata = function(_, req)
+      captured.metadata_req = req
+      return { version = 2 }
+    end,
+    mutate = function(_, req)
+      captured.mutate_req = req
+      return { version = 3 }
+    end,
+    mutate_local = function(_, req)
+      captured.mutate_local_req = req
+      return { version = 4 }
+    end,
+    remove = function() return true end,
+    keepalive = function() return true end,
+    attach = function() return { attachment = { name = 'body' } } end,
+    list_attachments = function()
+      return { items = { { name = 'body' } } }
+    end,
+    get_attachment = function() return 'attachment', {} end,
+    delete_attachment = function(_, selector)
+      captured.delete_attachment_selector = selector
+      return true
+    end,
+    delete_all_attachments = function()
+      return 1
+    end,
+    describe = function() return { version = 2 } end,
+    close = function(self) self.closed = true end,
+  }
+  local transaction_core = {
+    acquire = function(_, req)
+      captured.acquire_req = req
+      return participant_core
+    end,
+    append_outbox = function(_, entry, payload)
+      captured.later_entry = entry
+      captured.later_payload = payload
+      return { outbox_key = 'later-key', duplicate = false }
+    end,
+    accept_command = function(_, request)
+      captured.txn_command_request = request
+      return { command_id = 'cmd-1', state = 1, duplicate = false }
+    end,
+    complete_command = function(_, result)
+      captured.command_result = result
+      return true
+    end,
+    fail_command = function(_, result)
+      captured.command_failure = result
+      return true
+    end,
+    commit = function(self)
+      self.committed = true
+      return true
+    end,
+    rollback = function(self)
+      self.rolled_back = true
+      return true
+    end,
+    close = function(self) self.closed = true end,
+  }
+  local job_core = {
+    info = function()
+      return { effect_key = 'charge:order-1', attempt = 1 }
+    end,
+    write_payload = function(_, dest)
+      captured.payload_dest = dest
+      return 'null', 4
+    end,
+    renew = function(_, ttl)
+      captured.renew_ttl = ttl
+      return { lease_expires_at_unix = 99 }
+    end,
+    complete = function(self, completion)
+      self.completed = true
+      captured.delivery_completion = completion
+      return true
+    end,
+    retry = function(self, req)
+      self.retry_req = req
+      return true
+    end,
+    dead_letter = function(self, diagnostic)
+      self.diagnostic = diagnostic
+      return true
+    end,
+    close = function(self) self.closed = true end,
+  }
+  local workflow_core = {
+    accept_command = function(_, request)
+      captured.command_request = request
+      return transaction_core, { command_id = 'cmd-1', state = 1, duplicate = false }
+    end,
+    get_command_receipt = function(_, identity)
+      captured.command_identity = identity
+      return { command_id = 'cmd-1', state = 2, result_code = 'created' }
+    end,
+    write_command_result = function(_, identity, destination)
+      captured.command_result_identity = identity
+      captured.command_result_destination = destination
+      return 'result-bytes', 12
+    end,
+    resume_command = function(_, identity)
+      captured.resume_identity = identity
+      return nil, { command_id = 'cmd-1', state = 2, duplicate = true }
+    end,
+    append_outbox = function(_, entry, payload)
+      captured.first_entry = entry
+      captured.first_payload = payload
+      return transaction_core, { outbox_key = 'first-key', duplicate = false }
+    end,
+    accept_inbox = function(_, message)
+      captured.inbox_message = message
+      return nil, { accepted = false, duplicate = true }
+    end,
+    next = function(_, timeout)
+      captured.next_timeout = timeout
+      return job_core
+    end,
+    stats = function()
+      return { running = true, recovery_queries = 3 }
+    end,
+    reconcile = function(self)
+      self.reconciled = true
+      return true
+    end,
+    replay_dead_letter = function(self, key)
+      self.replayed_key = key
+      return true
+    end,
+    delete_dead_letter = function(self, key)
+      self.deleted_key = key
+      return true
+    end,
+    export_dead_letters = function(_, options, dest)
+      captured.export_options = options
+      captured.export_dest = dest
+      return '[{"dispatch_state":"dead_letter"}]', { exported = 1 }
+    end,
+    close = function(self) self.closed = true end,
+  }
+  local client_core = {
+    new_workflow = function(_, config)
+      captured.workflow_config = config
+      return workflow_core
+    end,
+    close = function() end,
+  }
+
+  core_stub.open = function()
+    return client_core
+  end
+
+  local client = assert(lockdc.open({}))
+  local workflow = assert(client:new_workflow({
+    namespace = 'workflow-ns',
+    owner = 'lua-worker',
+    recovery_interval_seconds = 7,
+    shutdown_timeout_ms = 1234,
+    replay_dead_letters_on_startup = true,
+  }))
+  local txn, receipt = assert(workflow:append_outbox({
+    operation_id = 'op-1',
+    effect_id = 'charge',
+    effect_key = 'charge:order-1',
+    payload_digest = 'sha256:payload',
+    kind = 'http',
+    destination = 'https://billing.test/charge',
+    headers = 'header-json',
+  }, 'payload'))
+
+  assert_eq(captured.workflow_config.namespace, 'workflow-ns', 'new_workflow should pass config through')
+  assert_eq(captured.workflow_config.shutdown_timeout_ms, 1234,
+      'workflow shutdown timeout should pass through')
+  assert_eq(captured.workflow_config.replay_dead_letters_on_startup, true,
+      'workflow startup replay option should pass through')
+  assert_eq(captured.first_entry.headers_json, 'header-json', 'workflow should encode headers into headers_json')
+  assert_eq(captured.first_entry.headers, nil, 'workflow should not pass façade-only headers')
+  assert_eq(captured.first_entry.payload_digest, 'sha256:payload',
+      'workflow should preserve the immutable payload digest')
+  assert_eq(captured.first_payload, 'payload', 'workflow should preserve arbitrary payload source')
+  assert_eq(receipt.outbox_key, 'first-key', 'workflow should return the durable receipt')
+
+  local participant = assert(txn:acquire({ namespace_name = 'orders', key = 'order-1' }))
+  participant:update_json(nil, { if_version = 1 })
+  assert_eq(captured.acquire_req.key, 'order-1', 'transaction acquire should pass request through')
+  assert_eq(captured.update_body, 'null', 'participant update_json should encode nil as JSON null')
+  assert_eq(captured.update_opts.content_type, 'application/json', 'participant update_json should default content type')
+  assert_eq(participant:get_json(), lockdc.json_null, 'participant get_json should decode JSON null')
+  participant:metadata({ query_hidden = true })
+  assert_eq(captured.metadata_req.query_hidden, true, 'participant metadata should delegate')
+  participant:mutate({ mutations = { '/revision++' } })
+  assert_eq(captured.mutate_req.mutations[1], '/revision++', 'participant mutate should delegate')
+  participant:mutate_local({ mutations = { '/label="local"' } })
+  assert_eq(captured.mutate_local_req.mutations[1], '/label="local"', 'participant mutate_local should delegate')
+  assert_eq(participant:list_attachments().items[1].name, 'body', 'participant attachment list should delegate')
+  assert_truthy(participant:delete_attachment({ name = 'body' }), 'participant attachment delete should delegate')
+  assert_eq(captured.delete_attachment_selector.name, 'body', 'participant attachment selector should pass through')
+  assert_eq(participant:delete_all_attachments(), 1, 'participant attachment delete-all should delegate')
+  participant:close()
+  assert_truthy(txn:commit(), 'transaction commit should delegate')
+  assert_truthy(transaction_core.committed, 'transaction core should observe commit')
+  txn:close()
+  assert_truthy(transaction_core.closed,
+      'transaction close must release the native transaction after commit')
+
+  local duplicate_txn, duplicate = workflow:accept_inbox({
+    consumer_id = 'billing',
+    source_kind = 'http',
+    source_id = 'orders',
+    message_id = 'message-1',
+  })
+  assert_eq(duplicate_txn, nil, 'duplicate inbox should not expose a transaction')
+  assert_eq(duplicate.duplicate, true, 'duplicate inbox should retain the result')
+  assert_eq(captured.inbox_message.message_id, 'message-1', 'inbox identity should pass through')
+
+  local command_txn, command_receipt = assert(workflow:accept_command({
+    scope = 'tenant-a', command_type = 'orders.create.v1',
+    idempotency_key = 'request-1', request_digest = 'digest-1',
+  }))
+  assert_eq(captured.command_request.request_digest, 'digest-1',
+      'command request should preserve durable digest')
+  assert_eq(command_receipt.command_id, 'cmd-1', 'command receipt should pass through')
+  assert_truthy(command_txn:complete_command({ result_code = 'created' }),
+      'command completion should delegate')
+  assert_eq(captured.command_result.result_code, 'created',
+      'command result should pass through')
+  assert_truthy(command_txn:fail_command({ failure_code = 'declined' }),
+      'command failure should delegate')
+  local status = assert(workflow:command_receipt({
+    scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
+  }))
+  assert_eq(status.result_code, 'created', 'command status should delegate')
+  local result_bytes, result_written = assert(workflow:write_command_result({
+    scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
+  }, { path = '/tmp/command-result' }))
+  assert_eq(result_bytes, 'result-bytes', 'command result should preserve streamed output')
+  assert_eq(result_written, 12, 'command result should preserve byte count')
+  local resumed_txn, resumed = workflow:resume_command({
+    scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
+  })
+  assert_eq(resumed_txn, nil, 'terminal command resume should not expose a transaction')
+  assert_eq(resumed.duplicate, true, 'terminal command resume should return receipt')
+
+  local job = assert(workflow:next(123))
+  assert_eq(captured.next_timeout, 123, 'workflow next should pass its timeout')
+  assert_eq(job:payload_json(), lockdc.json_null, 'job payload_json should decode JSON null')
+  assert_truthy(job:renew(90), 'job renewal should delegate')
+  assert_eq(captured.renew_ttl, 90, 'job renewal should preserve TTL')
+  assert_truthy(job:complete({ delivery_reference = 'provider-1' }),
+      'job completion should delegate')
+  assert_truthy(job_core.completed, 'job core should observe completion')
+  assert_eq(captured.delivery_completion.delivery_reference, 'provider-1',
+      'job completion evidence should pass through')
+  job:close()
+  assert_eq(job_core.closed, nil,
+      'terminal completion must consume the native job before close')
+
+  local stats = assert(workflow:stats())
+  assert_eq(stats.recovery_queries, 3, 'workflow stats should delegate')
+  assert_truthy(workflow:reconcile(), 'workflow reconciliation should delegate')
+  assert_truthy(workflow_core.reconciled, 'workflow core should reconcile')
+  assert_truthy(workflow:replay_dead_letter('dead-key'),
+      'dead-letter replay should delegate')
+  assert_eq(workflow_core.replayed_key, 'dead-key',
+      'dead-letter replay key should pass through')
+  assert_truthy(workflow:delete_dead_letter('dead-key'),
+      'dead-letter delete should delegate')
+  assert_eq(workflow_core.deleted_key, 'dead-key',
+      'dead-letter delete key should pass through')
+  local exported, export_result = assert(workflow:export_dead_letters(
+      { format = 'jsonl', limit = 10 }, { path = '/tmp/dead-letter.jsonl' }))
+  assert_eq(export_result.exported, 1, 'dead-letter export result should delegate')
+  assert_eq(captured.export_options.format, 'jsonl',
+      'dead-letter export options should pass through')
+  assert_eq(captured.export_dest.path, '/tmp/dead-letter.jsonl',
+      'dead-letter export destination should pass through')
+  assert_truthy(exported:find('dead_letter', 1, true),
+      'dead-letter export should return the core output')
+  assert(workflow:export_dead_letters('/tmp/dead-letter.json'))
+  assert_eq(captured.export_options, nil,
+      'dead-letter export should allow a destination without options')
+  assert_eq(captured.export_dest, '/tmp/dead-letter.json',
+      'dead-letter export destination shorthand should pass through')
+
+  workflow:close()
+  assert_truthy(workflow_core.closed, 'workflow close should close the core receiver')
+  client:close()
+end
+
 test_json_helpers()
 test_request_flattening_and_default_content_type()
 test_pouch_open_config_passthrough()
@@ -547,3 +851,4 @@ test_acquire_for_update_propagates_sdk_failure_shape()
 test_subscribe_with_state_and_service_lifecycle()
 test_watch_queue_change_detection()
 test_json_null_roundtrip_helpers()
+test_workflow_facade_lifecycle()

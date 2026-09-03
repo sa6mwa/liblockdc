@@ -81,6 +81,7 @@ endif()
 find_program(LOCKDC_BASH_BIN NAMES bash)
 find_program(LOCKDC_LUA_BIN NAMES lua5.5)
 find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks)
+find_program(LOCKDC_HOST_C_COMPILER NAMES cc gcc clang)
 
 if(NOT LOCKDC_RUN_LUAROCKS_VALIDATION)
     message(STATUS "Skipping LuaRocks validation for ${LOCKDC_TEST_NAME}: target ${LOCKDC_TARGET_ID} is not buildable/loadable with the host Lua VM")
@@ -95,6 +96,9 @@ if(NOT LOCKDC_LUA_BIN)
 endif()
 if(NOT LOCKDC_LUAROCKS_BIN)
     message(FATAL_ERROR "luarocks is required for LuaRocks validation")
+endif()
+if(NOT LOCKDC_HOST_C_COMPILER)
+    message(FATAL_ERROR "a host C compiler is required for LuaRocks validation")
 endif()
 
 if(NOT DEFINED LOCKDC_SDK_PREFIX OR LOCKDC_SDK_PREFIX STREQUAL "")
@@ -169,7 +173,7 @@ endif()
 set(lockdc_asan_runtime "")
 if(lockdc_sanitizer_flags MATCHES "(^|[ 	])-fsanitize=([^ 	,]+,)*address([, ][^ 	,]+)*($|[ 	])")
     execute_process(
-        COMMAND "${CMAKE_C_COMPILER}" -print-file-name=libasan.so
+        COMMAND "${LOCKDC_HOST_C_COMPILER}" -print-file-name=libasan.so
         OUTPUT_VARIABLE lockdc_asan_runtime_raw
         RESULT_VARIABLE lockdc_asan_runtime_result
         OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -184,7 +188,7 @@ endif()
 set(lua_build_root "${lua_rock_workdir}/.luarocks-build")
 
 set(test_env
-    "CC=${CMAKE_C_COMPILER}"
+    "CC=${LOCKDC_HOST_C_COMPILER}"
     "LOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}"
     "LOCKDC_LUAROCKS_BIN=${LOCKDC_LUAROCKS_BIN}"
     "LOCKDC_LUA_VERSION=5.5"

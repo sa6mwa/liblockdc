@@ -13,8 +13,6 @@ typedef struct lc_pouch_query_index_generation_cache_entry
     lc_pouch_query_index_generation_cache_entry;
 typedef struct lc_pouch_query_index_doc_table_cache_entry
     lc_pouch_query_index_doc_table_cache_entry;
-typedef struct lc_pouch_query_index_artifact_cache_entry
-    lc_pouch_query_index_artifact_cache_entry;
 typedef struct lc_pouch_query_index_packed_cache_entry
     lc_pouch_query_index_packed_cache_entry;
 typedef struct lc_pouch_query_index_manifest_trust_entry
@@ -50,6 +48,9 @@ typedef struct lc_pouch_state_change_visit_entry {
   lc_pouch_unix_seconds updated_at_unix;
   int has_query_hidden;
   int query_hidden;
+  /* A found record can still be lease metadata or a tombstone without a
+   * readable public state payload. */
+  int has_payload;
   int object_record;
   int found;
 } lc_pouch_state_change_visit_entry;
@@ -188,6 +189,9 @@ struct lc_pouch {
   /* Serializes query artifact publication without stalling pending writers. */
   pthread_mutex_t query_flush_mutex;
   int query_flush_mutex_initialized;
+  /* Owns doc-table cache lookup, publication, eviction, and query borrows. */
+  pthread_mutex_t query_doc_table_cache_mutex;
+  int query_doc_table_cache_mutex_initialized;
   pthread_mutex_t exclusive_key_mutexes[LC_POUCH_EXCLUSIVE_KEY_STRIPE_COUNT];
   size_t exclusive_key_mutex_count;
   lc_pouch_fsync_batcher *fsync_batcher;
@@ -231,8 +235,6 @@ struct lc_pouch {
   size_t query_generation_cache_count;
   lc_pouch_query_index_doc_table_cache_entry *query_doc_table_cache;
   size_t query_doc_table_cache_count;
-  lc_pouch_query_index_artifact_cache_entry *query_artifact_cache;
-  size_t query_artifact_cache_count;
   lc_pouch_query_index_packed_cache_entry *query_packed_cache;
   size_t query_packed_cache_count;
   lc_pouch_query_index_manifest_trust_entry *query_manifest_trust;
@@ -249,10 +251,32 @@ struct lc_pouch {
 typedef int (*lc_pouch_test_hook)(void *context, lc_error *error);
 extern lc_pouch_test_hook lc_pouch_test_after_snapshot_write_hook;
 extern void *lc_pouch_test_after_snapshot_write_context;
+/* Invoked after an indexed query borrows a document-table cache entry and
+ * before it dereferences that borrowed table. */
+extern lc_pouch_test_hook lc_pouch_test_after_doc_table_cache_borrow_hook;
+extern void *lc_pouch_test_after_doc_table_cache_borrow_context;
+/* Invoked after an indexed query has retained cache borrows for result rows,
+ * before it sorts or emits those rows. */
+extern lc_pouch_test_hook
+    lc_pouch_test_after_doc_table_cache_rows_attached_hook;
+extern void *lc_pouch_test_after_doc_table_cache_rows_attached_context;
+/* A nonzero test override shortens the resident doc-table cache for eviction
+ * interleavings. Production always uses its fixed cache capacity. */
+extern size_t lc_pouch_test_doc_table_cache_capacity;
+/* Invoked while holding the doc-table cache mutex immediately before a
+ * borrowed entry lazily initializes one decoded key. */
+extern lc_pouch_test_hook
+    lc_pouch_test_before_doc_table_decoded_key_populate_hook;
+extern void *lc_pouch_test_before_doc_table_decoded_key_populate_context;
 typedef void (*lc_pouch_test_after_acquire_claim_hook_fn)(void *context);
 extern lc_pouch_test_after_acquire_claim_hook_fn
     lc_pouch_test_after_acquire_claim_hook;
 extern void *lc_pouch_test_after_acquire_claim_context;
+/* Invoked after a held lease makes acquire enter its bounded retry path. */
+typedef void (*lc_pouch_test_before_acquire_poll_hook_fn)(void *context);
+extern lc_pouch_test_before_acquire_poll_hook_fn
+    lc_pouch_test_before_acquire_poll_hook;
+extern void *lc_pouch_test_before_acquire_poll_context;
 /* Invoked after dequeue-with-state persists its state lease, before it builds
  * the returned message handle. */
 typedef void (*lc_pouch_test_after_dequeue_state_lease_hook_fn)(void *context);
@@ -273,6 +297,15 @@ extern void *lc_pouch_test_before_queue_message_build_context;
  * into the batch result. */
 extern lc_pouch_test_hook lc_pouch_test_after_queue_batch_message_build_hook;
 extern void *lc_pouch_test_after_queue_batch_message_build_context;
+/* Invoked immediately before a Pouch transaction decision is made durable.
+ * Tests use this to prove that a workflow does not publish one participant
+ * before its multi-key terminal decision exists. */
+extern lc_pouch_test_hook lc_pouch_test_before_txn_decision_hook;
+extern void *lc_pouch_test_before_txn_decision_context;
+/* Invoked immediately before Pouch reads a durable transaction replay record.
+ * Tests use this to exercise indeterminate post-vote replay failures. */
+extern lc_pouch_test_hook lc_pouch_test_before_txn_replay_hook;
+extern void *lc_pouch_test_before_txn_replay_context;
 typedef void (*lc_pouch_test_metadata_append_hook_fn)(
     void *context, const char *namespace_name);
 extern lc_pouch_test_metadata_append_hook_fn lc_pouch_test_metadata_append_hook;
@@ -306,6 +339,18 @@ char *lc_pouch_state_test_crypto_context(const lc_allocator *allocator,
 #endif
 
 void lc_pouch_state_cache_cleanup(lc_pouch *pouch);
+typedef struct lc_pouch_state_shared_mutation_guard
+    lc_pouch_state_shared_mutation_guard;
+/**
+ * Enters the shared-root durable mutation authority. Transaction coordinators
+ * use this before their own per-transaction guard so nested state operations
+ * retain one global lock order. It is a no-op in exclusive mode.
+ */
+int lc_pouch_state_shared_mutation_enter(
+    lc_pouch *pouch, lc_pouch_state_shared_mutation_guard **out,
+    lc_error *error);
+void lc_pouch_state_shared_mutation_leave(
+    lc_pouch_state_shared_mutation_guard **guard);
 /** Writes best-effort exclusive-root clean checkpoints after all append fsyncs.
  * Missing or invalid checkpoints only require a cold replay; they never alter
  * durable record ordering. */

@@ -137,19 +137,7 @@ static int lc_pouch_crypto_random_bytes(unsigned char *out, size_t len) {
     return 1;
   }
 #endif
-#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
-  size_t i;
-
-  if (out == NULL) {
-    return 0;
-  }
-  for (i = 0U; i < len; ++i) {
-    out[i] = (unsigned char)((i * 131U + len * 17U + 23U) & 0xFFU);
-  }
-  return 1;
-#else
   return RAND_bytes(out, (int)len) == 1;
-#endif
 }
 
 static char *lc_pouch_crypto_strdup(const lc_allocator *allocator,

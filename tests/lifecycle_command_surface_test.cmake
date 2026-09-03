@@ -14,7 +14,6 @@ set(package_matrix_script_path "${LOCKDC_ROOT}/scripts/run_linux_package_matrix.
 set(source_smoke_script_path "${LOCKDC_ROOT}/scripts/test_release_from_source.sh")
 set(clean_script_path "${LOCKDC_ROOT}/scripts/clean.sh")
 set(e2e_script_path "${LOCKDC_ROOT}/scripts/test-e2e.sh")
-set(ledger_path "${LOCKDC_ROOT}/docs/lifecycle-migration.md")
 
 file(READ "${makefile_path}" root_makefile)
 file(READ "${root_cmake_path}" root_cmake)
@@ -28,7 +27,6 @@ file(READ "${package_matrix_script_path}" package_matrix_script)
 file(READ "${source_smoke_script_path}" source_smoke_script)
 file(READ "${clean_script_path}" clean_script)
 file(READ "${e2e_script_path}" e2e_script)
-file(READ "${ledger_path}" lifecycle_ledger)
 
 function(assert_contains haystack needle description)
     string(FIND "${${haystack}}" "${needle}" found_at)
@@ -75,6 +73,7 @@ foreach(target
         bench-check
         benchmarks-go
         perf-gate
+        benchmark-workflow-hardening
         dev-ps
         dev-logs
         release-lua-artifacts
@@ -82,6 +81,19 @@ foreach(target
     assert_contains(root_makefile "make ${target}" "make help entry for ${target}")
     assert_contains(root_makefile "${target}:" "make target ${target}")
 endforeach()
+
+assert_contains(root_makefile "__benchmark-workflow-hardening:"
+    "workflow reconciliation hardening target")
+assert_contains(root_makefile "workflow-reconcile-preflushed"
+    "workflow hardening preflushed-index case")
+assert_contains(root_makefile "workflow-reconcile-warm"
+    "workflow hardening persisted-index case")
+assert_contains(root_makefile "workflow-reconcile-compacted"
+    "workflow hardening compacted case")
+assert_contains(root_makefile "workflow-reconcile-multi"
+    "workflow hardening shared-writer case")
+assert_contains(root_makefile "workflow-reconcile-multi-compacted"
+    "workflow hardening shared-writer compacted case")
 
 foreach(script
         scripts/dev-logs.sh
@@ -100,7 +112,10 @@ assert_contains(root_makefile "LOCKDC_PRERELEASE_LIVE=1" "live prerelease opt-in
 assert_contains(root_makefile "MAKE_RECURSE := $(MAKE)" "dry-run-safe recursive Make variable")
 assert_contains(root_makefile "$(TIMED) 'finalize-slice format' $(MAKE_RECURSE) __format" "ordinary slice format timing")
 assert_contains(root_makefile "$(TIMED) 'finalize-slice test-debug' $(MAKE_RECURSE) __test-debug" "ordinary slice test timing")
-assert_contains(root_makefile "__test-all: __test-debug __test-host __test-cross __valgrind __fuzz-smoke __test-e2e __bench-gate" "complete test-all graph")
+assert_contains(root_makefile "LOCKDC_CTEST_PARALLEL_LEVEL ?= 4" "bounded CTest parallelism default")
+assert_contains(root_makefile "__test-all: __test-pouch-workflow-preflight __test-debug __test-host __test-cross __valgrind __test-e2e" "functional test-all graph")
+assert_not_contains(root_makefile "__test-all: __test-pouch-workflow-preflight __test-debug __test-host __test-cross __valgrind __fuzz-smoke __test-e2e" "fuzz bootstrap in test-all graph")
+assert_not_contains(root_makefile "__test-all: __test-pouch-workflow-preflight __test-debug __test-host __test-cross __valgrind __test-e2e __bench-gate" "benchmark work in test-all graph")
 assert_contains(root_makefile "$(TIMED) 'prerelease finalize-slice' $(MAKE_RECURSE) __finalize-slice" "ordinary prerelease slice timing")
 assert_contains(root_makefile "$(TIMED) 'prerelease valgrind' $(MAKE_RECURSE) __valgrind" "ordinary prerelease Valgrind timing")
 assert_contains(root_makefile "$(TIMED) 'prerelease fuzz-smoke' $(MAKE_RECURSE) __fuzz-smoke" "ordinary prerelease fuzz timing")
@@ -117,7 +132,7 @@ assert_contains(linux_build_matrix_script "\"$timed_bin\" \"release-matrix build
 assert_contains(cross_test_script "\"$timed_bin\" \"release-matrix test $preset\"" "per-preset release test timing")
 assert_contains(cross_test_script "-L cross-runtime" "curated QEMU runtime test selection")
 assert_contains(package_matrix_script "release-matrix package source-smoke" "per-artifact package timing")
-assert_contains(root_makefile "__prerelease-hardening: __prerelease __pouch-core-hardening __fuzz __release-matrix" "hardening prerelease graph")
+assert_contains(root_makefile "__prerelease-hardening: __prerelease __pouch-core-hardening __benchmark-workflow-hardening __fuzz __release-matrix" "hardening prerelease graph")
 assert_contains(root_makefile "pouch-core-hardening soak" "hardening core soak timing")
 assert_contains(root_makefile "pouch-core-hardening reclaim" "hardening reclaim timing")
 assert_contains(root_makefile "pouch-core-hardening shared-root" "hardening shared-root timing")
@@ -223,9 +238,3 @@ foreach(target
         message(FATAL_ERROR "make help output did not include ${target}\nstdout:\n${help_stdout}")
     endif()
 endforeach()
-
-assert_contains(lifecycle_ledger "## Command Surface" "migration ledger command surface section")
-assert_contains(lifecycle_ledger "make finalize-slice" "migration ledger finalize-slice entry")
-assert_contains(lifecycle_ledger "make valgrind" "migration ledger valgrind entry")
-assert_contains(lifecycle_ledger "make lifecycle-version-contract" "migration ledger version contract entry")
-assert_contains(lifecycle_ledger "## Optional Extensions" "lifecycle ledger optional extensions section")

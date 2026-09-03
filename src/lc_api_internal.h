@@ -29,6 +29,109 @@ typedef struct lc_lease_handle lc_lease_handle;
 typedef struct lc_message_handle lc_message_handle;
 typedef struct lc_consumer_service_handle lc_consumer_service_handle;
 
+#ifdef LOCKDC_TEST_BUILD
+typedef void (*lc_workflow_test_after_reconcile_query_hook_fn)(void *context);
+extern lc_workflow_test_after_reconcile_query_hook_fn
+    lc_workflow_test_after_reconcile_query_hook;
+extern void *lc_workflow_test_after_reconcile_query_context;
+typedef void (*lc_workflow_test_dead_letter_replay_client_hook_fn)(
+    lc_client *client, lc_client *dispatcher_client, void *context);
+extern lc_workflow_test_dead_letter_replay_client_hook_fn
+    lc_workflow_test_dead_letter_replay_client_hook;
+extern void *lc_workflow_test_dead_letter_replay_client_context;
+typedef void (*lc_workflow_test_hook_fn)(void *context);
+extern lc_workflow_test_hook_fn lc_workflow_test_after_close_requested_hook;
+extern void *lc_workflow_test_after_close_requested_context;
+extern lc_workflow_test_hook_fn lc_workflow_test_before_ready_job_detach_hook;
+extern void *lc_workflow_test_before_ready_job_detach_context;
+extern lc_workflow_test_hook_fn lc_workflow_test_before_ready_job_teardown_hook;
+extern void *lc_workflow_test_before_ready_job_teardown_context;
+extern lc_workflow_test_hook_fn lc_workflow_test_before_dispatcher_wait_hook;
+extern void *lc_workflow_test_before_dispatcher_wait_context;
+extern lc_workflow_test_hook_fn lc_workflow_test_before_next_wait_hook;
+extern void *lc_workflow_test_before_next_wait_context;
+extern lc_workflow_test_hook_fn lc_workflow_test_before_next_release_hook;
+extern void *lc_workflow_test_before_next_release_context;
+extern lc_workflow_test_hook_fn
+    lc_workflow_test_before_dead_letter_export_open_hook;
+extern void *lc_workflow_test_before_dead_letter_export_open_context;
+void lc_workflow_test_wake_next_waiters(lc_workflow *workflow);
+typedef int (*lc_workflow_test_failure_hook_fn)(void *context, lc_error *error);
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_ledger_append_hook;
+extern void *lc_workflow_test_before_ledger_append_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_participant_allocation_hook;
+extern void *lc_workflow_test_before_participant_allocation_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_command_receipt_copy_hook;
+extern void *lc_workflow_test_before_command_receipt_copy_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_after_command_terminal_load_hook;
+extern void *lc_workflow_test_after_command_terminal_load_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_outbox_receipt_copy_hook;
+extern void *lc_workflow_test_before_outbox_receipt_copy_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_transaction_terminal_release_hook;
+extern void *lc_workflow_test_before_transaction_terminal_release_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_after_transaction_terminal_decision_hook;
+extern void *lc_workflow_test_after_transaction_terminal_decision_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_notification_copy_hook;
+extern void *lc_workflow_test_before_notification_copy_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_claim_outbox_hook;
+extern void *lc_workflow_test_before_claim_outbox_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_outbox_handoff_reacquire_hook;
+extern void *lc_workflow_test_before_outbox_handoff_reacquire_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_periodic_recovery_schedule_hook;
+extern void *lc_workflow_test_before_periodic_recovery_schedule_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_dead_letter_claim_cleanup_hook;
+extern void *lc_workflow_test_before_dead_letter_claim_cleanup_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_outbox_renew_keepalive_hook;
+extern void *lc_workflow_test_before_outbox_renew_keepalive_context;
+extern lc_workflow_test_failure_hook_fn
+    lc_workflow_test_before_outbox_renew_deadline_publish_hook;
+extern void *lc_workflow_test_before_outbox_renew_deadline_publish_context;
+int lc_workflow_test_retry_is_not_eligible(lc_unix_seconds not_before_unix,
+                                           lc_unix_seconds now);
+int lc_workflow_test_claim_failure_is_retryable(const lc_error *error);
+int lc_workflow_test_recovery_is_due(int recovery_needed,
+                                     int recovery_immediate,
+                                     lc_unix_seconds next_recovery_unix,
+                                     lc_unix_seconds now);
+size_t lc_workflow_test_receipt_input_limit(int is_pouch,
+                                            size_t response_limit_bytes);
+long lc_workflow_test_host_job_timeout(long root_timeout_ms,
+                                       long shutdown_timeout_ms);
+int lc_workflow_test_claim_deadline_matches(lc_i64 deadline_attempt,
+                                            lc_i64 deadline_replay,
+                                            lc_i64 outbox_attempt,
+                                            lc_i64 outbox_replay);
+lc_i64 lc_workflow_test_select_claim_deadline(lc_i64 deadline_expires_at_unix,
+                                              lc_i64 deadline_attempt,
+                                              lc_i64 deadline_replay,
+                                              lc_i64 outbox_attempt,
+                                              lc_i64 outbox_replay,
+                                              lc_i64 fallback);
+int lc_workflow_test_conflicted_recovery_deadline(lc_i64 now,
+                                                  lc_i64 durable_deadline,
+                                                  long retry_delay_seconds,
+                                                  lc_i64 *out_deadline);
+int lc_workflow_test_renew_claim_lease(lc_lease *lease, long ttl_seconds,
+                                       lc_error *error);
+int lc_workflow_test_delayed_recovery_deadline(lc_workflow *workflow,
+                                               const char *key,
+                                               lc_i64 *out_deadline);
+void lc_lonejson_test_fail_thread_runtime_once(void);
+#endif
+
 struct lc_client_handle {
   lc_client pub;
   lc_engine_client *engine;
@@ -75,7 +178,6 @@ struct lc_lease_handle {
   char *state_etag;
   char *queue_state_etag;
   char *pouch_state_key;
-  int pouch_txn_explicit;
   int pouch_stage_active;
   int pouch_stage_dirty;
   char *pouch_stage_etag;
@@ -228,6 +330,11 @@ int lc_pouch_client_load_method(lc_client *self, const char *key,
                                 const lonejson_map *map, void *dst,
                                 const lc_get_opts *opts, lc_get_res *out,
                                 lc_error *error);
+int lc_pouch_client_load_in_namespace(lc_client *self,
+                                      const char *namespace_name,
+                                      const char *key, const lonejson_map *map,
+                                      void *dst, const lc_get_opts *opts,
+                                      lc_get_res *out, lc_error *error);
 int lc_pouch_client_update_method(lc_client *self, const lc_update_req *req,
                                   lc_source *src, lc_update_res *out,
                                   lc_error *error);
@@ -408,6 +515,11 @@ int lc_client_load_method(lc_client *self, const char *key,
                           const lonejson_map *map, void *dst,
                           const lc_get_opts *opts, lc_get_res *out,
                           lc_error *error);
+int lc_client_load_in_namespace_method(lc_client *self,
+                                       const char *namespace_name,
+                                       const char *key, const lonejson_map *map,
+                                       void *dst, const lc_get_opts *opts,
+                                       lc_get_res *out, lc_error *error);
 int lc_client_update_method(lc_client *self, const lc_update_req *req,
                             lc_source *src, lc_update_res *out,
                             lc_error *error);
@@ -520,6 +632,12 @@ int lc_client_subscribe_with_state_method(lc_client *self,
 int lc_client_new_consumer_service_method(
     lc_client *self, const lc_consumer_service_config *config,
     lc_consumer_service **out, lc_error *error);
+int lc_client_new_workflow_method(lc_client *self,
+                                  const lc_workflow_config *config,
+                                  lc_workflow **out, lc_error *error);
+int lc_client_clone_remote_for_workflow(lc_client_handle *source,
+                                        long timeout_ms, lc_client **out,
+                                        lc_error *error);
 int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
                                  const lc_watch_handler *handler,
                                  lc_error *error);
@@ -607,5 +725,7 @@ int lc_consumer_service_start_method(lc_consumer_service *self,
 int lc_consumer_service_stop_method(lc_consumer_service *self);
 int lc_consumer_service_wait_method(lc_consumer_service *self, lc_error *error);
 void lc_consumer_service_close_method(lc_consumer_service *self);
+
+int lc_xid_is_valid(const char *value);
 
 #endif

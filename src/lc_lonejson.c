@@ -11,6 +11,10 @@
 
 static pthread_once_t lc_lonejson_thread_runtime_once = PTHREAD_ONCE_INIT;
 static pthread_key_t lc_lonejson_thread_runtime_key;
+#ifdef LOCKDC_TEST_BUILD
+static pthread_key_t lc_lonejson_test_fail_thread_runtime_key;
+static const char lc_lonejson_test_fail_thread_runtime_marker;
+#endif
 
 static const char *lc_lonejson_detail_message(const lonejson_error *error,
                                               const char *fallback) {
@@ -72,6 +76,9 @@ static void lc_lonejson_thread_runtime_destroy(void *ptr) {
 static void lc_lonejson_thread_runtime_key_init(void) {
   (void)pthread_key_create(&lc_lonejson_thread_runtime_key,
                            lc_lonejson_thread_runtime_destroy);
+#ifdef LOCKDC_TEST_BUILD
+  (void)pthread_key_create(&lc_lonejson_test_fail_thread_runtime_key, NULL);
+#endif
 }
 
 size_t lc_lonejson_runtime_limit(size_t configured_limit) {
@@ -95,6 +102,12 @@ lonejson *lc_thread_lonejson_runtime(void) {
   if (runtime != NULL) {
     return runtime;
   }
+#ifdef LOCKDC_TEST_BUILD
+  if (pthread_getspecific(lc_lonejson_test_fail_thread_runtime_key) != NULL) {
+    (void)pthread_setspecific(lc_lonejson_test_fail_thread_runtime_key, NULL);
+    return NULL;
+  }
+#endif
   limit = lc_lonejson_runtime_limit(0U);
   lc_lonejson_config_init(&config, limit);
   lonejson_error_init(&error);
@@ -105,6 +118,15 @@ lonejson *lc_thread_lonejson_runtime(void) {
   (void)pthread_setspecific(lc_lonejson_thread_runtime_key, runtime);
   return runtime;
 }
+
+#ifdef LOCKDC_TEST_BUILD
+void lc_lonejson_test_fail_thread_runtime_once(void) {
+  (void)pthread_once(&lc_lonejson_thread_runtime_once,
+                     lc_lonejson_thread_runtime_key_init);
+  (void)pthread_setspecific(lc_lonejson_test_fail_thread_runtime_key,
+                            &lc_lonejson_test_fail_thread_runtime_marker);
+}
+#endif
 
 void lc_lonejson_cleanup_value(lonejson *runtime, const lonejson_map *map,
                                void *value) {

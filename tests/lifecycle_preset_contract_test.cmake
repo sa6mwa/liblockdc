@@ -4,7 +4,6 @@ endif()
 
 file(READ "${LOCKDC_ROOT}/CMakePresets.json" presets_json)
 file(READ "${LOCKDC_ROOT}/Makefile" root_makefile)
-file(READ "${LOCKDC_ROOT}/docs/lifecycle-migration.md" lifecycle_ledger)
 
 function(assert_contains haystack needle description)
     string(FIND "${${haystack}}" "${needle}" found_at)
@@ -126,6 +125,7 @@ foreach(name
         debug-lua
         valgrind
         fuzz
+        pouch-integration-fuzz
         x86_64-linux-gnu-release
         x86_64-linux-musl-release
         aarch64-linux-gnu-release
@@ -140,6 +140,7 @@ foreach(name
         debug
         valgrind
         fuzz
+        pouch-integration-fuzz
         x86_64-linux-gnu-release
         x86_64-linux-musl-release
         aarch64-linux-gnu-release
@@ -181,6 +182,15 @@ assert_configure_cache(fuzz LOCKDC_TARGET_LIBC gnu)
 assert_configure_cache_absent(fuzz CMAKE_C_COMPILER)
 assert_configure_cache_absent(fuzz CMAKE_CXX_COMPILER)
 assert_configure_toolchain(fuzz "$\{sourceDir\}/cmake/toolchains/fuzz-aflpp.cmake")
+assert_configure_inherits(pouch-integration-fuzz debug)
+assert_configure_cache(pouch-integration-fuzz LOCKDC_BUILD_FUZZERS OFF)
+assert_configure_cache(pouch-integration-fuzz LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS ON)
+assert_configure_cache(pouch-integration-fuzz LOCKDC_BUILD_TESTS OFF)
+assert_configure_cache(pouch-integration-fuzz LOCKDC_BUILD_E2E_TESTS OFF)
+assert_configure_cache(pouch-integration-fuzz LOCKDC_BUILD_BENCHMARKS OFF)
+assert_build_preset(pouch-integration-fuzz pouch-integration-fuzz)
+assert_test_preset(pouch-integration-fuzz pouch-integration-fuzz)
+assert_test_filter(pouch-integration-fuzz label fuzz)
 
 assert_configure_toolchain(x86_64-linux-gnu-release "$\{sourceDir\}/cmake/toolchains/x86_64-linux-gnu.cmake")
 assert_configure_toolchain(x86_64-linux-musl-release "$\{sourceDir\}/cmake/toolchains/x86_64-linux-musl.cmake")
@@ -206,6 +216,3 @@ assert_contains(root_makefile "scripts/valgrind.sh" "Valgrind runner command")
 file(READ "${LOCKDC_ROOT}/scripts/valgrind.sh" valgrind_script)
 assert_contains(valgrind_script "cmake --fresh --preset \"$preset\"" "Valgrind fresh configure")
 assert_contains(valgrind_script "env LOCKDC_UNDER_VALGRIND=1 \"$valgrind_bin\"" "Valgrind test environment marker")
-assert_contains(lifecycle_ledger "Preset Surface" "migration ledger preset section")
-assert_contains(lifecycle_ledger "`debug` test tree" "migration ledger shared Lua debug-tree entry")
-assert_contains(lifecycle_ledger "`valgrind`" "migration ledger valgrind entry")

@@ -30,20 +30,20 @@ implementation.
 
 Relevant Go disk files:
 
-- `../lockd/internal/storage/disk/logstore_record.go`
-- `../lockd/internal/storage/disk/logstore.go`
-- `../lockd/internal/storage/disk/logstore_support.go`
-- `../lockd/internal/storage/disk/logstore_compaction.go`
-- `../lockd/internal/storage/disk/staging.go`
-- `../lockd/internal/storage/disk/disk.go`
-- `../lockd/internal/storage/storage.go`
-- `../lockd/internal/storage/attachments.go`
-- `../lockd/internal/queue/service.go`
-- `../lockd/internal/queue/keys.go`
-- `../lockd/internal/core/locks.go`
-- `../lockd/internal/core/update.go`
-- `../lockd/internal/core/txn_marker_apply.go`
-- `../lockd/namespaces/config_store.go`
+- `internal/storage/disk/logstore_record.go`
+- `internal/storage/disk/logstore.go`
+- `internal/storage/disk/logstore_support.go`
+- `internal/storage/disk/logstore_compaction.go`
+- `internal/storage/disk/staging.go`
+- `internal/storage/disk/disk.go`
+- `internal/storage/storage.go`
+- `internal/storage/attachments.go`
+- `internal/queue/service.go`
+- `internal/queue/keys.go`
+- `internal/core/locks.go`
+- `internal/core/update.go`
+- `internal/core/txn_marker_apply.go`
+- `namespaces/config_store.go`
 
 ### Alignment Record
 
@@ -791,24 +791,21 @@ the public API or durable format.
 - Shared-root capability is an explicit post-cutover contract:
   callers that intentionally place two or more active Pouch instances on one
   root will select shared-writer mode. Each process retains its local
-  projection and serializes normal mutations through a short cross-process
-  append authority. At each acquired authority window it tails only the
-  committed delta after its cursor, appends and publishes the record family,
-  performs the requested durability work, advances its cursor, and releases
-  authority. A healthy writer does not
+  projection, but every cache refresh and durable mutation acquires one
+  root-scoped mutation guard before recovery, delta tail, append, publication,
+  and requested durability. It covers every participating namespace, including
+  `.txns`. A healthy writer does not
   reread or revalidate bytes at or before that verified cursor on each normal
   mutation; recovery, manifest lifecycle invalidation, or a new projection
-  performs that historical validation. Exact-key locking, namespace sequence
-  allocation, the local mode epoch, and maintenance fencing remain required. The
-  current implementation coalesces independent metadata-only mutations and
-  bounded SDK-memory body mutations from one local shared writer into append
-  batches while every request retains its exact key lock and commit group. The
-  body worker holds one physical append authority window for its batch, then
-  invokes the normal finalized-record path for each request; it neither copies
-  nor materializes a source. Callback, file, fd, and oversized-memory bodies
-  keep one authority window per operation. Compound staged decisions already
-  encode their 3-record promotion or 2-record discard group through one binary
-  append batch; they are never mixed with unrelated mutations. A shared handle
+  performs that historical validation. Shared mode deliberately combines no
+  independent namespace, key, or append file locks beneath the root guard:
+  that removes cross-process lock-order cycles. It is a correctness-first
+  serialization mode; default exclusive mode keeps its concurrent hot path.
+  Namespace sequence allocation, the local mode epoch, and maintenance fencing
+  remain required. Compound staged decisions retain their atomic 3-record
+  promotion or 2-record discard group while holding the same guard. Transaction
+  coordination acquires that guard before its per-XID linearization guard. A
+  shared handle
   retains a root-wide process read lock for its lifetime; exclusive mode
   requires the conflicting write lock. A live shared writer therefore cannot
   be overtaken, and a crashed writer loses its kernel lock before
@@ -816,7 +813,7 @@ the public API or durable format.
   epoch as data authority. This is a supported Pouch extension, not the
   default Go-disk-aligned performance path.
   Direct callers set `single_writer_set=1` and `single_writer=0`; endpoint
-  callers use `?single_writer=false` (or `?pouch_single_writer=false`).
+  callers use `?single_writer=false`.
 
 - Mode transitions are lifecycle transitions. Pouch takes a writer-mode
   transition barrier that stops new append-capable operations and waits for
@@ -886,7 +883,7 @@ the public API or durable format.
   state mutation.
   Deployments that tune Go disk's index writer may set comparable bounds on
   Pouch, for example
-  `pouch://...?pouch_indexer_flush_docs=64&pouch_indexer_flush_interval_seconds=1`.
+  `pouch://...?indexer_flush_docs=64&indexer_flush_interval_seconds=1`.
 
 - Filesystem capability policy and queue wake-up:
   Pouch detects NFS on Linux and BSD-family targets and exposes both detection
@@ -1090,8 +1087,8 @@ root/
         seg-<20-digit-u64-id>.log          # rolling active or sealed
       snapshots/
         snapshot-<20-digit-u64-id>.log
-      sequence                              # shared-root advisory allocator
-      sequence.lock                         # shared-root allocator fence
+      sequence                              # durable advisory allocator
+      sequence.lock                         # exclusive cold allocator fence
       write.lock
       locks/
       index/
@@ -1276,7 +1273,8 @@ Required behavior:
   headers are written. Default exclusive mode reserves from its resident
   projection high-water mark and does not read, write, or lock the advisory
   `sequence` file on healthy mutations. Explicit shared-root mode reserves
-  under `sequence.lock` so independent processes cannot reuse a sequence. A
+  under the root durable-mutation guard, so independent processes cannot reuse
+  a sequence. A
   normal exclusive close writes a durable per-namespace clean checkpoint after
   pending append syncs. A later cold index read may use that checkpoint instead
   of replaying the namespace. The first subsequent mutation atomically marks
@@ -1292,18 +1290,17 @@ Required behavior:
   headers, keys, and metadata total at most 256 KiB may use one bounded
   contiguous append buffer; it never contains document, queue-payload, or
   attachment bytes. Larger metadata batches retain the vectored append path;
-- in explicit shared-root mode, acquire physical append authority once for a
-  bounded batch, replay only the committed delta after the writer cursor, then
-  append/publish the batch and release authority. Discovery of the first
-  physical file for the already-selected active leaf is a cursor-preserving
-  transition, not a historic replay. A changed writer epoch, active segment,
-  manifest lifecycle state, invalid cursor, or any other segment topology
-  change triggers bounded refresh or recovery rather than a stale append;
-- shared bounded-memory body writes retain the caller's exact-key lock and
-  commit group while a namespace worker owns one physical append-authority
-  window for the bounded queue. The worker calls the normal complete-record
-  path for every request, so finalization, index reservation, cache
-  publication, and source consumption remain the direct-write behavior;
+- in explicit shared-root mode, take one root-scoped durable-mutation guard
+  before reading a projection or mutating any namespace. That guard serializes
+  the complete recovery/read-or-write/append/publication window across
+  processes, including `.txns`; shared mode must not combine independent
+  namespace, key, or append file locks with that root guard because they have
+  no global acquisition order. This is deliberately a correctness-first
+  deployment mode, while the default single-writer mode retains per-key and
+  append concurrency;
+- shared bounded-memory body writes retain the caller's commit group under the
+  root guard and use the normal complete-record path for finalization, index
+  reservation, cache publication, and source consumption;
 - staged promotion and discard encode their complete decision group into one
   binary append batch. They retain one authority window and are not coalesced
   with unrelated body or metadata requests, preserving transaction order;
@@ -1367,7 +1364,8 @@ Required behavior:
 - treat an active pending or incomplete tail, including a truncated encrypted
   payload frame, as an unpublished crash tail: readers stop before it and a
   later appender repairs only the unseen suffix after its verified cursor while
-  holding the physical append gate. Sealed segments and snapshots do not
+  holding the shared root mutation guard (or the exclusive append gate). Sealed
+  segments and snapshots do not
   receive this recovery treatment and reject truncation or authentication
   failure;
 - make refs visible in projections after finalized-record publication and, when
@@ -1440,20 +1438,18 @@ published; it does not reopen derived artifacts merely to validate a no-op.
 operations and rebuild damaged artifacts from durable state.
 
 `flush_index(mode=wait)` publishes all state accepted by the indexer but does
-not deserialize every just-written derived artifact solely to populate a
-handle-local cache. This matches Go disk's flush boundary and keeps durable
-publication out of the query-cache hot path. The exclusive writer transfers
-newly built, body-free concrete-field text and trigram generations directly
-into its full-text cache; logical whole-document text queries union those
-fields. Other query representations load lazily on first use, while open-time
-cache warming remains best effort. The packed binary artifact remains the sole
-durable source: reopened handles, shared roots, and cache-allocation failure
-use the normal validated packed-artifact decoder. No cache retains source JSON
-or full document bodies.
+not retain or adopt a just-written derived artifact in a handle-local query
+cache. This matches Go disk's flush boundary and keeps durable publication out
+of the query-cache hot path. Query representations load lazily from the
+validated packed artifact on first use, while open-time cache warming remains
+best effort. The packed binary artifact remains the sole durable source:
+reopened handles, shared roots, and cache-allocation failure use the normal
+validated packed-artifact decoder. No cache retains source JSON or full
+document bodies.
 
 Exclusive roots serialize derived artifact publication with a root-local flush
-mutex. Shared roots instead hold the namespace's durable cross-process write
-authority from the high-water sequence sample through artifact and manifest
+mutex. Shared roots instead hold the root durable-mutation guard from the
+high-water sequence sample through artifact and manifest
 publication. This serializes competing Pouch handles and processes, so their
 read-modify-write manifest updates and derived artifact writes cannot race.
 The indexer's queue is local scheduling state only and never participates in
@@ -1522,10 +1518,10 @@ Required behavior:
   before an ordinary exclusive operation;
 - exclusive mode reuses its projection and verified active append offset until
   rotation, maintenance, handoff, close/abort, or I/O failure;
-- shared-root mode validates its writer epoch/cursor under append authority and
-  replays only bytes beyond its verified committed tail offset. The initial
-  directory discovery of that known active leaf is treated as such a tail
-  transition; it does not revalidate the pre-cursor history;
+- shared-root mode validates and refreshes its projection under the root
+  durable-mutation guard. It replays only bytes beyond its verified committed
+  tail offset; the initial directory discovery of that known active leaf is a
+  cursor-preserving tail transition rather than a historic replay;
 - order installed snapshot first, then live non-obsolete segments;
 - apply state/object records by public generation so stale payload writes
   cannot resurrect older state; use the durable namespace index sequence as
@@ -1536,7 +1532,8 @@ Required behavior:
   staged-link, delete, and decision record;
 - stop at an incomplete, pending, or truncated tail in the manifest's active
   rolling segment, then repair it once during writer acquisition/recovery
-  while holding append authority; reject the same condition in a sealed
+  while holding the root mutation guard in shared mode or append authority in
+  exclusive mode; reject the same condition in a sealed
   non-active segment or installed snapshot as corruption;
 - never apply a partial record or bad-CRC payload;
 - validate link targets against manifested segment/snapshot state before
@@ -1634,13 +1631,15 @@ Indexed query requirements:
   semantics;
 - query-index artifacts are derived from logstore projections and are
   rebuildable after corruption or loss;
-- query-index segment headers are plaintext metadata. They contain format,
-  sequence, row counts, and hashes only;
-- every non-header query-index segment component is stored in one packed binary
+- query-index manifests carry each segment's sequence, row count, row hash,
+  delete summary, posting-completeness flags, and exactly one signature for
+  that segment's packed artifact;
+- every query-index segment component is stored in one packed binary
   artifact named `query.<segment>.query.index.lcpseg`. The packed artifact
   contains the document table, exact/presence/range/text/trigram/temporal term
-  generations, and the delete set. The logical component paths remain
-  in-memory identifiers for manifest signatures and parser routing only;
+  generations, and the delete set. The manifest has one `artifact` record per
+  segment (artifact index `0`) for this file; logical component paths are
+  in-memory decoder identifiers only;
 - encrypted packed query-index artifacts store ciphertext followed by
   descriptor bytes and a fixed binary footer. Pouch reads the footer, bounds
   decryption to the ciphertext span, and does not create separate descriptor
@@ -1649,14 +1648,13 @@ Indexed query requirements:
   the packed artifact. The manifest's `delete_count=0` and empty-set hash are
   the authoritative empty value; non-empty delete components must match the
   manifest count and hash;
-- query-index manifests and any artifact that could be referenced by the
-  current manifest are installed by same-directory temporary-file rename
-  without fsync because they are derived files. A new segment/header whose
-  path is proven newer than a valid current manifest may be written directly:
-  an interrupted write leaves only an unreachable artifact, and the manifest
-  switch still remains the atomic publication point. Recovery validates the
-  manifest, header, and packed artifact signatures and rebuilds from the
-  logstore if any derived write was interrupted or torn;
+- query-index manifests and packed segments are installed by same-directory
+  temporary-file rename without fsync because they are derived files. A new
+  packed segment whose path is proven newer than a valid current manifest may
+  be written directly: an interrupted write leaves only an unreachable
+  artifact, and the manifest switch remains the atomic publication point.
+  Recovery validates the manifest metadata and packed artifact signature, and
+  rebuilds from the logstore if any derived write was interrupted or torn;
 - normal append flushes do not sweep the index directory for orphaned derived
   artifacts. Initial manifest bootstrap also skips a sweep because no artifact
   can be referenced before that manifest is published; an interrupted
@@ -1665,10 +1663,9 @@ Indexed query requirements:
   existing manifest, repair/validated flushes, and retired-segment cleanup
   paths perform orphan cleanup, so foreground append flush latency is not tied
   to directory size;
-- indexed queries may reuse per-client artifact-cache trust for segment headers
-  after the current manifest has validated the same path, signature, sequence,
-  row count, and row hash. If the signature changes, pouch rereads the header
-  and validates it normally;
+- indexed queries validate segment completeness from the durable manifest and
+  validate the packed artifact against its recorded signature; they do not
+  depend on a standalone segment-header file;
 - a successful manifest sequence read records per-client manifest trust for
   that namespace/index sequence. A later non-validating ensure-current call may
   skip rereading the manifest when the state index sequence is unchanged;
@@ -1700,11 +1697,16 @@ Indexed query requirements:
   posting lists;
 - `/...` is a logical whole-document text selector, not a public state field.
   Pouch resolves it by unioning the concrete string fields, matching Go disk's
-  index contract. It never duplicates each text or trigram posting into a
+  index contract. It never duplicates each raw-text or trigram posting into a
   synthetic all-text field, so index publication remains bounded by the real
-  document projections. Trigrams remain a candidate filter and text terms
-  reject false positives. Older segments carrying the former private all-text
-  projection remain readable, but newly published segments omit it.
+  document projections. It may additionally emit a bounded private posting for
+  each ASCII letter-or-digit token from a short retained text value. These
+  postings prove positive case-insensitive whole-token `icontains` matches and
+  let an all-text query bypass raw-term verification when they cover every
+  trigram candidate. They never prove a negative: punctuation, non-ASCII and
+  partial-token needles, unindexed long values, and partially covered
+  candidates retain the normal trigram-plus-verifier path. Trigrams remain a
+  candidate filter and text terms reject false positives.
 
 ## Staged State
 
@@ -1812,6 +1814,24 @@ selection, drift validation, live-link protection, and obsolete cleanup timing.
 Validation drift must abandon the snapshot without installing it. Cleanup must
 be retryable and idempotent.
 
+## Pouch Endpoint Construction
+
+Applications must not assemble `pouch://` strings by concatenating a root and
+query text. `lc_pouch_endpoint_build()` takes an absolute, decoded root plus an
+array of decoded `lc_pouch_endpoint_option` values and returns an owned,
+percent-encoded endpoint. It preserves `/` in the root, encodes query names and
+values, and represents a `NULL` option value as a bare option. Release the
+result with `lc_pouch_endpoint_free()`.
+
+`lc_pouch_endpoint_has_option()` is the complementary inspection API for
+configuration layering. It compares decoded query names only, never returns
+values, and treats duplicate or bare options as present. It uses the same
+percent-decoding as Pouch open; query processing ends before a URL fragment,
+and `+` remains a literal plus rather than being form-decoded. Consumers can
+therefore decide whether to apply a local default such as
+`crypto_key_file` without reimplementing Pouch URL parsing or accidentally
+overriding an encoded explicit option.
+
 ## Public API Coverage
 
 Every Pouch behavior is exercised through the public Pouch API or public
@@ -1823,7 +1843,7 @@ The installed C header is part of this public contract. Doxygen comments for
 public Pouch-facing configuration and APIs must document the same behavior
 described here: `pouch://` uses one absolute local root, exclusive single-writer
 mode is the default, explicit shared-root writing requires
-`single_writer=false` or `pouch_single_writer=false`, endpoint option values are
+`single_writer=false`, endpoint option values are
 copied at open, public `long` fields are range-checked before narrowing on
 32-bit targets, and state bodies, queue payloads, attachments, scan output,
 query-document output, crypto, and compression remain real streaming paths
@@ -1914,17 +1934,18 @@ Acceptance target: exclusive Pouch must materially outperform the matching Go
 lockd disk plaintext or crypto configuration on every gated core metric. The
 numeric release budget is a minimum `1.25x` Pouch speedup: every Pouch latency
 must be at most 80% of the matching Go disk median. The stable baseline is the
-median of three same-run production samples for each engine, preventing host
-variance from redefining a release threshold. `make
+median of five same-run production samples for each engine, preventing isolated
+sub-millisecond filesystem and scheduler outliers from redefining a release
+threshold. `make
 benchmark-pouch-go-parity-gate` enforces this with
 `POUCH_GO_PARITY_MIN_SPEEDUP=1.25`; strict-but-undefined "faster" is
 insufficient. Pouch compression variants retain their own reported performance
 evidence in the complete production matrix, but are excluded from the release
 gate because Go disk has no transform-equivalent compression mode. The release
-gate runs only plaintext and crypto Pouch/Go pairs, with three production
+gate runs only plaintext and crypto Pouch/Go pairs, with five production
 samples each and a finite `POUCH_GO_PARITY_TIMEOUT=15m` budget. Shared root has
-separate correctness, contention, handoff, and bounded-performance coverage
-and does not dilute the exclusive release target.
+separate correctness, contention, handoff, and bounded-performance coverage and
+does not dilute the exclusive release target.
 
 Strict durable sync uses the same complete core-metric contract in `make
 benchmark-pouch-go-durable-gate`; it is part of `make perf-gate` rather than an
@@ -1941,6 +1962,12 @@ reclaim on rolling segments and exercises same-key and independent-key
 shared-root contention. The soak has fixed workload and timeout controls in
 the root Makefile; it is deliberate release hardening, not an unbounded burn-in
 or a normal release prerequisite.
+
+The same lane also runs the bounded workflow reconciliation hardening suite:
+preflushed and persisted indexes, a forced-compaction reopen, and shared-root
+dispatchers before and after compaction. Its cases are serial and use two
+shared-root dispatchers by default, so it exercises recovery correctness
+without turning release hardening into an unbounded host load.
 
 ## Fuzzing And Failure Modes
 

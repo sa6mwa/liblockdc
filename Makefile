@@ -9,6 +9,8 @@ CTEST := ctest
 CLANG_FORMAT := clang-format
 GO := go
 TIMED := bash ./scripts/run_timed.sh
+LOCKDC_CTEST_PARALLEL_LEVEL ?= 4
+export LOCKDC_CTEST_PARALLEL_LEVEL
 # Keep recursive calls print-only under `make -n`. GNU Make executes recipe
 # lines that directly reference $(MAKE), even in dry-run mode.
 MAKE_RECURSE := $(MAKE)
@@ -56,7 +58,9 @@ POUCH_GO_PRODUCTION_BENCHTIME ?= 1x
 # transform-equivalent release comparison.
 POUCH_GO_PARITY_BENCH ?= ^BenchmarkProduction(PouchPT|PouchCrypto|LockdDiskNoCrypto|LockdDiskCrypto)$$$$$$$$/.*
 POUCH_GO_PARITY_BENCHTIME ?= 1x
-POUCH_GO_PARITY_COUNT ?= 3
+# Five independent samples retain an odd median while absorbing isolated
+# sub-millisecond filesystem and scheduler outliers in the release comparison.
+POUCH_GO_PARITY_COUNT ?= 5
 POUCH_GO_PARITY_MIN_SPEEDUP ?= 1.25
 POUCH_GO_PARITY_TIMEOUT ?= 15m
 POUCH_GO_DURABLE_BENCH ?= Production(PouchDurablePT|PouchDurableCrypto|LockdDiskDurableNoCrypto|LockdDiskDurableCrypto)
@@ -120,6 +124,16 @@ POUCH_PERF_CRYPTO ?= 0
 POUCH_PERF_TIMEOUT ?= 60s
 POUCH_PERF_ROUTINE_ROWS ?= 12
 POUCH_PERF_ROUTINE_PAYLOAD_BYTES ?= 131072
+WORKFLOW_BENCH_ROWS ?= 256
+WORKFLOW_BENCH_TERMINAL_ROWS ?= 1024
+WORKFLOW_BENCH_CHURN_UPDATES ?= 4
+WORKFLOW_BENCH_PAYLOAD_BYTES ?= 4096
+WORKFLOW_BENCH_PAGE_CAPACITY ?= 16
+WORKFLOW_BENCH_TIMEOUT ?= 10m
+WORKFLOW_BENCH_HARDENING_DISPATCHERS ?= 2
+WORKFLOW_BENCH_REMOTE_ENDPOINT ?= https://localhost:19441
+WORKFLOW_BENCH_REMOTE_FAILOVER_ENDPOINT ?= https://localhost:19442
+WORKFLOW_BENCH_REMOTE_BUNDLE ?= $(ROOT)/devenv/volumes/lockd-disk-a-config/client.pem
 FUZZ_TIME ?= 30
 FUZZ_LONG_TIME ?= 300
 POUCH_GO_BENCH_CFLAGS := \
@@ -153,18 +167,18 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	help \
 	__deps-debug __deps-release __deps-cross \
 	__build-debug __build-host __build-x86_64-linux-gnu-release __build-release __build-e2e __build-coverage __build-fuzz \
-	__test-debug __test-host __test-cross __test-e2e __test-install-tree __example-smoke-local __test-all __test-coverage \
+	__test-debug __test-pouch-workflow-preflight __test-host __test-cross __test-e2e __test-install-tree __example-smoke-local __test-all __test-coverage \
 	__format \
-	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate __benchmark-pouch-go-core-soak __pouch-core-hardening \
+	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __pouch-integration-fuzz __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-workflow-prepare __benchmark-workflow-pouch __benchmark-workflow-hardening __benchmark-workflow-remote __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate __benchmark-pouch-go-core-soak __pouch-core-hardening \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __verify-release-privacy __clean-dist \
 	__lua-rock __lua-test __lua-env __release-lua-artifacts \
 	__dev-up __dev-down __dev-reset __dev-ps __dev-logs __cross-build __cross-preset-test __cross-test \
 	__prerelease __prerelease-ordinary __prerelease-live __prerelease-hardening __lifecycle-version-contract __release __release-pipeline __release-matrix __clean \
 	deps-debug deps-release deps-cross \
 	build build-debug build-host build-release build-e2e build-coverage build-fuzz \
-	test test-debug test-host test-cross test-e2e test-install-tree example-smoke-local test-all test-coverage \
+	test test-debug test-pouch-workflow-preflight test-host test-cross test-e2e test-install-tree example-smoke-local test-all test-coverage \
 	format \
-	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-scan-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate benchmark-pouch-go-core-soak \
+	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long pouch-integration-fuzz bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-workflow-pouch benchmark-workflow-hardening benchmark-workflow-remote benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate benchmark-pouch-go-core-soak \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives verify-release-privacy clean-dist \
 	lua-rock lua-test lua-env release-lua-artifacts \
 	dev-up dev-down dev-reset dev-ps dev-logs cross-build cross-preset-test cross-test \
@@ -183,13 +197,14 @@ help:
 		'make deps-release       Provision the shipped x86_64 GNU/musl release dependency trees.' \
 		'make deps-cross         Provision all non-host cross release dependency trees.' \
 		'make test-debug         Run the ASan/UBSan debug preset test suite.' \
+		'make test-pouch-workflow-preflight Run fast clean-restart and shared-dispatcher Pouch regressions.' \
 		'make test               Run the pinned Bootlin host-executable GNU and musl release suites.' \
 		'make test-host          Run the pinned Bootlin host-executable GNU and musl release suites.' \
 		'make test-cross         Run the non-host cross release suites.' \
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
 		'make test-install-tree  Validate CMake and pkg-config consumers against the installed native SDK.' \
 		'make example-smoke-local Run local-service example smoke tests.' \
-		'make test-all           Run debug, host and QEMU cross tests, Valgrind, fuzz smoke, local e2e, and Pouch-vs-disk performance gates.' \
+		'make test-all           Run the parallel debug, host and QEMU cross functional matrix plus local e2e.' \
 		'make test-coverage      Run the coverage preset test suite and build the coverage report.' \
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
@@ -200,9 +215,10 @@ help:
 		'make finalize-slice     Run formatting plus the narrow debug test gate for an ordinary implementation slice.' \
 		'make valgrind           Build the valgrind preset and run the native Valgrind Memcheck subset.' \
 		'make coverage           Run the coverage preset and generate coverage-report.' \
-		'make fuzz               Build fuzz targets and run bounded corpus passes.' \
-		'make fuzz-smoke         Build fuzz targets and run short bounded corpus passes (FUZZ_TIME=5).' \
-		'make fuzz-long          Build fuzz targets and run longer bounded corpus passes (FUZZ_LONG_TIME=$(FUZZ_LONG_TIME)).' \
+		'make fuzz               Run AFL unit fuzzing and production-code Pouch integration mutation fuzzing.' \
+		'make fuzz-smoke         Run short AFL unit and Pouch integration mutation fuzzing (5 mutations each).' \
+		'make fuzz-long          Run longer AFL unit and Pouch integration mutation fuzzing (FUZZ_LONG_TIME=$(FUZZ_LONG_TIME)).' \
+		'make pouch-integration-fuzz Run production-code Pouch integration mutation fuzzing (FUZZ_TIME=$(FUZZ_TIME)).' \
 		'make bench              Standard short name for benchmarks.' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
 		'make bench-check        Run native benchmarks and enforce Pouch-vs-disk parity.' \
@@ -210,6 +226,9 @@ help:
 		'make benchmarks-go      Run Go parity benchmarks through the standard lifecycle name.' \
 		'make perf-gate          Enforce Pouch-vs-disk core-operation parity for default and strict-durable I/O.' \
 		'make benchmark-pouch-perf Prepare native artifacts, then run one sub-minute pouch perf case (POUCH_PERF_CASE=$(POUCH_PERF_CASE), POUCH_PERF_ROWS=$(POUCH_PERF_ROWS), POUCH_PERF_CRYPTO=$(POUCH_PERF_CRYPTO)).' \
+		'make benchmark-workflow-pouch Run the large-outbox indexed-reconciliation benchmark against a fresh, un-compacted Pouch root.' \
+		'make benchmark-workflow-hardening Run persisted-index, compacted, and shared-writer Pouch workflow reconciliation hardening cases serially.' \
+		'make benchmark-workflow-remote Start the compose devenv, then run the same workflow reconciliation workload through the disk lockd endpoint.' \
 		'make benchmark-pouch-routine Prepare benchmark artifacts, then run all bounded native phase probes plus production and shared-root concurrency comparison in at most $(POUCH_GO_ROUTINE_TIMEOUT).' \
 		'make benchmark-pouch-perf-index-docs Run the isolated public-API indexed narrative document query perf case.' \
 		'make benchmark-pouch-perf-full-text-keys Run the isolated public-API full-text key query perf case.' \
@@ -246,7 +265,7 @@ help:
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
 		'make prerelease         Run deterministic pre-release confidence without an initial clean.' \
 		'make prerelease-live    Refuse without LOCKDC_PRERELEASE_LIVE=1; no live-provider checks are currently defined.' \
-		'make prerelease-hardening  Run prerelease plus full fuzzing and the release matrix.' \
+		'make prerelease-hardening  Run prerelease, Pouch workflow hardening, full fuzzing, and the release matrix.' \
 		'make lifecycle-version-contract  Verify exact release tag semantics before clean release work.' \
 		'make print-release-version  Print the release version resolved by the Make-owned release surface.' \
 		'make release            Run the clean-slate final release workflow: version contract, clean, then the shared release proof graph.' \
@@ -328,7 +347,21 @@ test-debug:
 	$(TIMED) test-debug $(MAKE_RECURSE) __test-debug
 
 __test-debug: __build-debug
-	$(CTEST) --preset $(DEBUG_PRESET)
+	$(CTEST) --preset $(DEBUG_PRESET) --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL)
+
+test-pouch-workflow-preflight:
+	$(TIMED) test-pouch-workflow-preflight $(MAKE_RECURSE) __test-pouch-workflow-preflight
+
+__test-pouch-workflow-preflight: __build-debug
+	CMOCKA_TEST_FILTER=test_pouch_multikey_terminal_failure_publishes_nothing $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_expired_multikey_commit_reports_rollback_without_signal $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_duplicate_inbox_handles_json_runtime_failure $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_reconciliation_retains_overflow_request $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_clean_reopen_reconciles_durable_index $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_shared_reopen_reconciles_durable_index $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_shared_process_reconciles_each_outbox_once $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_workflow_rejects_out_of_range_durable_replay_counts $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_workflow_close_retains_blocked_next $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
 
 test-host:
 	$(TIMED) test-host $(MAKE_RECURSE) __test-host
@@ -353,7 +386,7 @@ test-install-tree:
 
 __test-install-tree: __build-x86_64-linux-gnu-release
 	$(CTEST) --preset $(X86_64_GNU_RELEASE_PRESET) --output-on-failure \
-		--progress --stop-on-failure -R '^install_tree_sdk_test$$'
+		--progress --stop-on-failure --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL) -R '^install_tree_sdk_test$$'
 
 example-smoke-local:
 	$(TIMED) example-smoke-local $(MAKE_RECURSE) __example-smoke-local
@@ -364,7 +397,11 @@ __example-smoke-local:
 test-all:
 	$(TIMED) test-all $(MAKE_RECURSE) __test-all
 
-__test-all: __test-debug __test-host __test-cross __valgrind __fuzz-smoke __test-e2e __bench-gate
+# Fuzzing provisions an external compiler toolchain and is a hardening gate,
+# not a fast functional invariant. Keep it in `make prerelease` and invoke it
+# explicitly with `make fuzz-smoke`; do not make everyday confidence depend on
+# a cold bootstrap. Benchmark work is likewise deliberate and explicit.
+__test-all: __test-pouch-workflow-preflight __test-debug __test-host __test-cross __valgrind __test-e2e
 
 dev-up:
 	$(TIMED) dev-up $(MAKE_RECURSE) __dev-up
@@ -419,7 +456,7 @@ test-coverage:
 	$(TIMED) test-coverage $(MAKE_RECURSE) __test-coverage
 
 __test-coverage: __build-coverage
-	$(CTEST) --preset $(COVERAGE_PRESET)
+	$(CTEST) --preset $(COVERAGE_PRESET) --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL)
 	$(CMAKE) --build --preset coverage-report
 
 coverage:
@@ -432,18 +469,27 @@ fuzz:
 
 __fuzz:
 	bash ./scripts/fuzz.sh $(FUZZ_TIME)
+	bash ./scripts/pouch_integration_fuzz.sh $(FUZZ_TIME)
 
 fuzz-smoke:
 	$(TIMED) fuzz-smoke $(MAKE_RECURSE) __fuzz-smoke
 
 __fuzz-smoke:
 	bash ./scripts/fuzz.sh 5
+	bash ./scripts/pouch_integration_fuzz.sh 5
 
 fuzz-long:
 	$(TIMED) fuzz-long $(MAKE_RECURSE) __fuzz-long
 
 __fuzz-long:
 	bash ./scripts/fuzz.sh $(FUZZ_LONG_TIME)
+	bash ./scripts/pouch_integration_fuzz.sh $(FUZZ_LONG_TIME)
+
+pouch-integration-fuzz:
+	$(TIMED) pouch-integration-fuzz $(MAKE_RECURSE) __pouch-integration-fuzz
+
+__pouch-integration-fuzz:
+	bash ./scripts/pouch_integration_fuzz.sh $(FUZZ_TIME)
 
 bench:
 	$(TIMED) bench $(MAKE_RECURSE) __bench
@@ -494,6 +540,77 @@ __benchmark-pouch-perf:
 	  LOCKDC_POUCH_PERF_CRYPTO='$(POUCH_PERF_CRYPTO)' \
 	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
 	    $(POUCH_PERF_ROWS) $(POUCH_PERF_CASE)
+
+benchmark-workflow-pouch: __benchmark-workflow-prepare
+	$(TIMED) benchmark-workflow-pouch timeout --kill-after=5s \
+	  '$(WORKFLOW_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-workflow-pouch
+
+__benchmark-workflow-prepare:
+	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)
+	$(CMAKE) --build --preset $(X86_64_GNU_RELEASE_PRESET) --target lockdc_bench
+
+__benchmark-workflow-pouch:
+	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
+	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile
+
+benchmark-workflow-hardening: __benchmark-workflow-prepare
+	$(TIMED) benchmark-workflow-hardening timeout --kill-after=5s \
+	  '$(WORKFLOW_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-workflow-hardening
+
+__benchmark-workflow-hardening:
+	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
+	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile-preflushed
+	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
+	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile-warm
+	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
+	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile-compacted
+	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+	  LOCKDC_WORKFLOW_BENCH_DISPATCHERS='$(WORKFLOW_BENCH_HARDENING_DISPATCHERS)' \
+	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
+	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile-multi
+	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+	  LOCKDC_WORKFLOW_BENCH_DISPATCHERS='$(WORKFLOW_BENCH_HARDENING_DISPATCHERS)' \
+	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
+	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile-multi-compacted
+
+benchmark-workflow-remote: __benchmark-workflow-prepare
+	$(MAKE_RECURSE) __dev-reset
+	$(MAKE_RECURSE) __dev-up
+	$(TIMED) benchmark-workflow-remote timeout --kill-after=5s \
+	  '$(WORKFLOW_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-workflow-remote
+
+__benchmark-workflow-remote:
+	LOCKDC_WORKFLOW_BENCH_ENDPOINT='$(WORKFLOW_BENCH_REMOTE_ENDPOINT)' \
+	  LOCKDC_WORKFLOW_BENCH_FAILOVER_ENDPOINT='$(WORKFLOW_BENCH_REMOTE_FAILOVER_ENDPOINT)' \
+	  LOCKDC_WORKFLOW_BENCH_CLIENT_BUNDLE='$(WORKFLOW_BENCH_REMOTE_BUNDLE)' \
+	  LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
+	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile
 
 benchmark-pouch-perf-index-docs:
 	$(MAKE_RECURSE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-index-docs
@@ -783,7 +900,7 @@ lua-test:
 	$(TIMED) lua-test $(MAKE_RECURSE) __lua-test
 
 __lua-test: __build-debug
-	$(CTEST) --preset debug-lua
+	$(CTEST) --preset debug-lua --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL)
 
 lua-env:
 	$(TIMED) lua-env $(MAKE_RECURSE) __lua-env
@@ -864,7 +981,7 @@ __prerelease-live:
 prerelease-hardening:
 	$(TIMED) prerelease-hardening $(MAKE_RECURSE) __prerelease-hardening
 
-__prerelease-hardening: __prerelease __pouch-core-hardening __fuzz __release-matrix
+__prerelease-hardening: __prerelease __pouch-core-hardening __benchmark-workflow-hardening __fuzz __release-matrix
 
 lifecycle-version-contract:
 	$(TIMED) lifecycle-version-contract $(MAKE_RECURSE) __lifecycle-version-contract

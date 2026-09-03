@@ -2,6 +2,9 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <cmocka.h>
 
@@ -188,6 +191,13 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_ptr_equal(client.load_call.arg2, "key-2");
 
+  rc = lc_load_in_namespace(&client.pub, "component", "key-3", NULL, NULL,
+                            &get_opts, &get_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(client.load_in_namespace_call.count, 1);
+  assert_ptr_equal(client.load_in_namespace_call.arg2, "component");
+  assert_ptr_equal(client.load_in_namespace_call.arg3, "key-3");
+
   rc = lc_update(&client.pub, &update_req, &source_for_update, &update_res,
                  &error);
   assert_int_equal(rc, LC_OK);
@@ -298,6 +308,7 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(client.describe_call.count, 1);
   assert_int_equal(client.get_call.count, 1);
   assert_int_equal(client.load_call.count, 1);
+  assert_int_equal(client.load_in_namespace_call.count, 1);
   assert_int_equal(client.update_call.count, 1);
   assert_int_equal(client.mutate_call.count, 1);
   assert_int_equal(client.metadata_call.count, 1);
@@ -593,6 +604,109 @@ static void test_stream_close_wrappers_delegate(void **state) {
   assert_int_equal(sink.close_calls, 1);
 }
 
+static void test_xid_new_mints_canonical_unique_identifiers(void **state) {
+  char first[LC_XID_STRING_SIZE];
+  char second[LC_XID_STRING_SIZE];
+  lc_error error;
+  size_t i;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  rc = lc_xid_new(first, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_xid_new(second, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(strlen(first), LC_XID_STRING_LENGTH);
+  assert_int_equal(strlen(second), LC_XID_STRING_LENGTH);
+  assert_string_not_equal(first, second);
+  for (i = 0U; i < LC_XID_STRING_LENGTH; ++i) {
+    assert_true((first[i] >= '0' && first[i] <= '9') ||
+                (first[i] >= 'a' && first[i] <= 'v'));
+    assert_true((second[i] >= '0' && second[i] <= '9') ||
+                (second[i] >= 'a' && second[i] <= 'v'));
+  }
+  lc_error_cleanup(&error);
+}
+
+static unsigned char xid_decode_character(char character) {
+  assert_true((character >= '0' && character <= '9') ||
+              (character >= 'a' && character <= 'v'));
+  return (unsigned char)(character <= '9' ? character - '0'
+                                          : character - 'a' + 10);
+}
+
+static void xid_decode(const char encoded[LC_XID_STRING_SIZE],
+                       unsigned char raw[12]) {
+  unsigned int accumulator;
+  unsigned int bit_count;
+  size_t encoded_index;
+  size_t raw_index;
+
+  accumulator = 0U;
+  bit_count = 0U;
+  raw_index = 0U;
+  for (encoded_index = 0U; encoded_index < LC_XID_STRING_LENGTH;
+       ++encoded_index) {
+    accumulator =
+        (accumulator << 5) | xid_decode_character(encoded[encoded_index]);
+    bit_count += 5U;
+    while (bit_count >= 8U && raw_index < 12U) {
+      bit_count -= 8U;
+      raw[raw_index++] = (unsigned char)(accumulator >> bit_count);
+      accumulator &= (1U << bit_count) - 1U;
+    }
+  }
+  assert_int_equal(raw_index, 12U);
+}
+
+static void test_xid_new_refreshes_state_after_fork(void **state) {
+  char initialized[LC_XID_STRING_SIZE];
+  char parent_id[LC_XID_STRING_SIZE];
+  char child_id[LC_XID_STRING_SIZE];
+  unsigned char parent_raw[12];
+  unsigned char child_raw[12];
+  lc_error error;
+  pid_t child;
+  int descriptors[2];
+  int status;
+  int rc;
+  ssize_t read_count;
+
+  (void)state;
+  lc_error_init(&error);
+  rc = lc_xid_new(initialized, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(pipe(descriptors), 0);
+  child = fork();
+  assert_true(child >= 0);
+  if (child == 0) {
+    close(descriptors[0]);
+    rc = lc_xid_new(child_id, &error);
+    if (rc == LC_OK && write(descriptors[1], child_id, sizeof(child_id)) ==
+                           (ssize_t)sizeof(child_id)) {
+      close(descriptors[1]);
+      _exit(0);
+    }
+    close(descriptors[1]);
+    _exit(1);
+  }
+  close(descriptors[1]);
+  rc = lc_xid_new(parent_id, &error);
+  assert_int_equal(rc, LC_OK);
+  read_count = read(descriptors[0], child_id, sizeof(child_id));
+  assert_int_equal(read_count, (ssize_t)sizeof(child_id));
+  close(descriptors[0]);
+  assert_int_equal(waitpid(child, &status, 0), child);
+  assert_true(WIFEXITED(status));
+  assert_int_equal(WEXITSTATUS(status), 0);
+  assert_string_not_equal(parent_id, child_id);
+  xid_decode(parent_id, parent_raw);
+  xid_decode(child_id, child_raw);
+  assert_true(parent_raw[7] != child_raw[7] || parent_raw[8] != child_raw[8]);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(test_client_wrappers_delegate_full_public_surface),
@@ -601,6 +715,8 @@ int main(void) {
       cmocka_unit_test(
           test_message_and_service_wrappers_delegate_full_public_surface),
       cmocka_unit_test(test_stream_close_wrappers_delegate),
+      cmocka_unit_test(test_xid_new_mints_canonical_unique_identifiers),
+      cmocka_unit_test(test_xid_new_refreshes_state_after_fork),
   };
 
   return cmocka_run_group_tests(tests, NULL, NULL);

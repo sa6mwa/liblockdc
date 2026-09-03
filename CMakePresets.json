@@ -190,6 +190,18 @@
         "LOCKDC_BUILD_BENCHMARKS": "OFF",
         "LOCKDC_BUILD_FUZZERS": "ON"
       }
+    },
+    {
+      "name": "pouch-integration-fuzz",
+      "inherits": "debug",
+      "cacheVariables": {
+        "LOCKDC_BUILD_EXAMPLES": "OFF",
+        "LOCKDC_BUILD_TESTS": "OFF",
+        "LOCKDC_BUILD_E2E_TESTS": "OFF",
+        "LOCKDC_BUILD_BENCHMARKS": "OFF",
+        "LOCKDC_BUILD_FUZZERS": "OFF",
+        "LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -259,6 +271,10 @@
     {
       "name": "fuzz",
       "configurePreset": "fuzz"
+    },
+    {
+      "name": "pouch-integration-fuzz",
+      "configurePreset": "pouch-integration-fuzz"
     }
   ],
   "testPresets": [
@@ -373,6 +389,18 @@
     {
       "name": "fuzz",
       "configurePreset": "fuzz",
+      "filter": {
+        "include": {
+          "label": "fuzz"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "pouch-integration-fuzz",
+      "configurePreset": "pouch-integration-fuzz",
       "filter": {
         "include": {
           "label": "fuzz"

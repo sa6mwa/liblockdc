@@ -28,6 +28,24 @@ int lc_load(lc_client *client, const char *key, const lonejson_map *map,
   return client->load(client, key, map, dst, opts, out, error);
 }
 
+int lc_load_in_namespace(lc_client *client, const char *namespace_name,
+                         const char *key, const lonejson_map *map, void *dst,
+                         const lc_get_opts *opts, lc_get_res *out,
+                         lc_error *error) {
+  if (client == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "namespaced load requires client and namespace", NULL,
+                        NULL, NULL);
+  }
+  if (client->load_in_namespace == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "client does not implement namespaced load", NULL, NULL,
+                        NULL);
+  }
+  return client->load_in_namespace(client, namespace_name, key, map, dst, opts,
+                                   out, error);
+}
+
 int lc_update(lc_client *client, const lc_update_req *req, lc_source *src,
               lc_update_res *out, lc_error *error) {
   return client->update(client, req, src, out, error);
@@ -236,6 +254,148 @@ int lc_client_new_consumer_service(lc_client *client,
                                    const lc_consumer_service_config *config,
                                    lc_consumer_service **out, lc_error *error) {
   return client->new_consumer_service(client, config, out, error);
+}
+
+int lc_client_new_workflow(lc_client *client, const lc_workflow_config *config,
+                           lc_workflow **out, lc_error *error) {
+  return client->new_workflow(client, config, out, error);
+}
+
+int lc_workflow_append_outbox(lc_workflow *workflow,
+                              const lc_outbox_entry *entry, lc_source *payload,
+                              lc_workflow_transaction **out_txn,
+                              lc_outbox_receipt *receipt, lc_error *error) {
+  return workflow->append_outbox(workflow, entry, payload, out_txn, receipt,
+                                 error);
+}
+int lc_workflow_accept_inbox(lc_workflow *workflow,
+                             const lc_inbox_message *message,
+                             lc_workflow_transaction **out_txn,
+                             lc_inbox_accept_result *result, lc_error *error) {
+  return workflow->accept_inbox(workflow, message, out_txn, result, error);
+}
+int lc_workflow_accept_command(lc_workflow *workflow,
+                               const lc_command_request *request,
+                               lc_workflow_transaction **out_txn,
+                               lc_command_receipt *receipt, lc_error *error) {
+  return workflow->accept_command(workflow, request, out_txn, receipt, error);
+}
+int lc_workflow_get_command_receipt(lc_workflow *workflow,
+                                    const lc_command_identity *identity,
+                                    lc_command_receipt *out, lc_error *error) {
+  return workflow->get_command_receipt(workflow, identity, out, error);
+}
+int lc_workflow_write_command_result(lc_workflow *workflow,
+                                     const lc_command_identity *identity,
+                                     lc_sink *dst, size_t *written,
+                                     lc_error *error) {
+  return workflow->write_command_result(workflow, identity, dst, written,
+                                        error);
+}
+int lc_workflow_resume_command(lc_workflow *workflow,
+                               const lc_command_identity *identity,
+                               lc_workflow_transaction **out_txn,
+                               lc_command_receipt *receipt, lc_error *error) {
+  return workflow->resume_command(workflow, identity, out_txn, receipt, error);
+}
+int lc_workflow_next(lc_workflow *workflow, long timeout_ms,
+                     lc_outbox_job **out, lc_error *error) {
+  return workflow->next(workflow, timeout_ms, out, error);
+}
+int lc_workflow_get_stats(lc_workflow *workflow, lc_workflow_stats *out,
+                          lc_error *error) {
+  return workflow->get_stats(workflow, out, error);
+}
+int lc_workflow_reconcile(lc_workflow *workflow, lc_error *error) {
+  return workflow->reconcile(workflow, error);
+}
+int lc_workflow_replay_dead_letter(lc_workflow *workflow,
+                                   const char *outbox_key, lc_error *error) {
+  return workflow->replay_dead_letter(workflow, outbox_key, error);
+}
+int lc_workflow_delete_dead_letter(lc_workflow *workflow,
+                                   const char *outbox_key, lc_error *error) {
+  return workflow->delete_dead_letter(workflow, outbox_key, error);
+}
+int lc_workflow_export_dead_letters(lc_workflow *workflow,
+                                    const lc_dead_letter_export_opts *options,
+                                    lc_sink *dst,
+                                    lc_dead_letter_export_res *out,
+                                    lc_error *error) {
+  return workflow->export_dead_letters(workflow, options, dst, out, error);
+}
+void lc_workflow_close(lc_workflow *workflow) {
+  if (workflow != NULL)
+    workflow->close(workflow);
+}
+int lc_outbox_job_write_payload(lc_outbox_job *job, lc_sink *dst,
+                                size_t *written, lc_error *error) {
+  return job->write_payload(job, dst, written, error);
+}
+int lc_outbox_job_renew(lc_outbox_job *job, long ttl_seconds, lc_error *error) {
+  return job->renew(job, ttl_seconds, error);
+}
+int lc_outbox_job_complete(lc_outbox_job *job,
+                           const lc_outbox_completion *completion,
+                           lc_error *error) {
+  return job->complete(job, completion, error);
+}
+int lc_outbox_job_retry(lc_outbox_job *job, const lc_outbox_retry *request,
+                        lc_error *error) {
+  return job->retry(job, request, error);
+}
+int lc_outbox_job_dead_letter(lc_outbox_job *job, const char *diagnostic,
+                              lc_error *error) {
+  return job->dead_letter(job, diagnostic, error);
+}
+void lc_outbox_job_close(lc_outbox_job *job) {
+  if (job != NULL)
+    job->close(job);
+}
+int lc_workflow_transaction_acquire(
+    lc_workflow_transaction *transaction,
+    const lc_workflow_participant_request *request,
+    lc_workflow_participant **out, lc_error *error) {
+  return transaction->acquire(transaction, request, out, error);
+}
+int lc_workflow_transaction_append_outbox(lc_workflow_transaction *transaction,
+                                          const lc_outbox_entry *entry,
+                                          lc_source *payload,
+                                          lc_outbox_receipt *out,
+                                          lc_error *error) {
+  return transaction->append_outbox(transaction, entry, payload, out, error);
+}
+int lc_workflow_transaction_accept_command(lc_workflow_transaction *transaction,
+                                           const lc_command_request *request,
+                                           lc_command_receipt *receipt,
+                                           lc_error *error) {
+  return transaction->accept_command(transaction, request, receipt, error);
+}
+int lc_workflow_transaction_complete_command(
+    lc_workflow_transaction *transaction, const lc_command_result *result,
+    lc_error *error) {
+  return transaction->complete_command(transaction, result, error);
+}
+int lc_workflow_transaction_fail_command(lc_workflow_transaction *transaction,
+                                         const lc_command_result *result,
+                                         lc_error *error) {
+  return transaction->fail_command(transaction, result, error);
+}
+int lc_workflow_transaction_commit(lc_workflow_transaction *transaction,
+                                   lc_error *error) {
+  return transaction->commit(transaction, error);
+}
+int lc_workflow_transaction_rollback(lc_workflow_transaction *transaction,
+                                     lc_error *error) {
+  return transaction->rollback(transaction, error);
+}
+void lc_workflow_transaction_close(lc_workflow_transaction *transaction) {
+  if (transaction != NULL)
+    transaction->close(transaction);
+}
+void lc_workflow_participant_close(lc_workflow_participant *participant) {
+  if (participant != NULL)
+    participant->close(participant);
 }
 
 int lc_watch_queue(lc_client *client, const lc_watch_queue_req *req,

@@ -46,7 +46,7 @@ production workload for six
 explicit variants by default: `ProductionPouchPT`, `ProductionPouchCrypto`,
 `ProductionPouchCompression`, `ProductionPouchCryptoCompression`, and
 `ProductionLockdDiskNoCrypto`, plus `ProductionLockdDiskCrypto`. Pouch crypto
-is enabled through the public `pouch_crypto_key` endpoint option; the Go disk
+is enabled through the public `crypto_key` endpoint option; the Go disk
 variants run with storage encryption disabled and enabled respectively. The
 parity gate compares plaintext and crypto runs only to their matching Go disk
 configuration. Go disk has no matching compression mode, so compression runs
@@ -56,7 +56,7 @@ attributed to intermediate write-churn flushes, final flush, no-op flush, and
 post-reopen flush.
 
 `make benchmark-pouch-go-parity-gate` uses the median from
-`POUCH_GO_PARITY_COUNT=3` same-run production samples for each engine. Its
+`POUCH_GO_PARITY_COUNT=5` same-run production samples for each engine. Its
 exclusive release budget is `POUCH_GO_PARITY_MIN_SPEEDUP=1.25`: Pouch must be
 no slower than 80% of the matching Go disk latency on every comparable core
 metric. Set the variable only to make an intentional release-policy change;
@@ -65,7 +65,7 @@ matching Go disk transform, so the release gate runs only the four comparable
 variants selected by the full-name `POUCH_GO_PARITY_BENCH` expression;
 compression remains reported evidence in the complete six-mode production
 matrix rather than a synthetic cross-engine ratio. `POUCH_GO_PARITY_TIMEOUT=15m`
-is the finite budget for the three-sample, three-scenario release comparison.
+is the finite budget for the five-sample, three-scenario release comparison.
 The contract is per operation: acquire, update, stale-precondition rejection,
 release, public and leased reads, attachment write/read, queue delivery,
 intermediate/final/no-op/
@@ -80,7 +80,7 @@ The command measures plaintext and storage-crypto configurations across the
 same production operation metrics. Its default 12-row, two-update, 128 KiB,
 16 KiB-segment profile is bounded at 90 seconds and retains rollover. Set the
 `POUCH_GO_DURABLE_*` variables for another profile. `make
-benchmark-pouch-go-durable-gate` uses the same three-sample and 1.25x policy
+benchmark-pouch-go-durable-gate` uses the same five-sample and 1.25x policy
 when that opt-in durability mode must meet the release performance budget.
 Strict sync is not Go disk's default disk policy, but it is a first-class Pouch
 mode: `make perf-gate` runs the default and durable comparison gates
@@ -125,7 +125,7 @@ resident query path.
 `make benchmark-pouch-go-concurrency` is the bounded lock and shared-root
 comparison matrix. It runs Pouch and Go lockd disk with crypto disabled and
 enabled, over a contended single key and independent keys. Pouch opens the
-requested number of distinct liblockdc clients with `pouch_single_writer=false`
+requested number of distinct liblockdc clients with `single_writer=false`
 against one root. The same-key case uses public acquire/update/release calls and
 asserts the final version equals every completed write; the independent-key case
 reads back every key at version one. This confirms both key-lock serialization
@@ -152,7 +152,7 @@ default Go failover numbers.
 
 Crypto mode measures the operational overhead of each engine's enabled
 at-rest-encryption configuration, not a byte-for-byte cryptographic-format
-comparison: Pouch uses one generated `pouch_crypto_key` across its clients, and
+comparison: Pouch uses one generated `crypto_key` across its clients, and
 the bootstrapped Go lockd disk server enables its storage encryption.
 
 `make benchmark-pouch-go-medium` mirrors the Go lockd disk comparison shape over

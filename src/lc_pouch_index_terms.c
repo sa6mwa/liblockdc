@@ -1266,6 +1266,59 @@ int lc_pouch_index_term_posting_table_append_to_set(
       &table->items[position].posting, set, allocator, error);
 }
 
+int lc_pouch_index_term_posting_table_visit(
+    const lc_pouch_index_term_posting_table *table, unsigned long term_id,
+    lc_pouch_index_docid_visit_fn visit, void *context, lc_error *error) {
+  size_t position;
+
+  if (visit == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index term posting visit requires visitor", NULL,
+                        NULL, NULL);
+  }
+  if (!lc_pouch_index_term_posting_table_find_position(table, term_id,
+                                                       &position)) {
+    return LC_OK;
+  }
+  return lc_pouch_index_adaptive_posting_visit(&table->items[position].posting,
+                                               visit, context, error);
+}
+
+int lc_pouch_index_term_posting_table_or_dense_bits(
+    const lc_pouch_index_term_posting_table *table, unsigned long term_id,
+    unsigned char *bits, size_t length, int *applied, lc_error *error) {
+  const lc_pouch_index_dense_posting *dense;
+  size_t index;
+  size_t position;
+
+  if (applied != NULL) {
+    *applied = 0;
+  }
+  if (table == NULL || bits == NULL || applied == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dense posting bitmap requires inputs", NULL,
+                        NULL, NULL);
+  }
+  if (!lc_pouch_index_term_posting_table_find_position(table, term_id,
+                                                       &position) ||
+      lc_pouch_index_adaptive_posting_selected_kind(
+          &table->items[position].posting) !=
+          LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE) {
+    return LC_OK;
+  }
+  dense = &table->items[position].posting.dense;
+  if (dense->length > length || (dense->length > 0U && dense->bits == NULL)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch dense posting bitmap is invalid", NULL, NULL,
+                        "pouch");
+  }
+  for (index = 0U; index < dense->length; ++index) {
+    bits[index] = (unsigned char)(bits[index] | dense->bits[index]);
+  }
+  *applied = 1;
+  return LC_OK;
+}
+
 typedef struct lc_pouch_index_term_generation_buffer {
   char *bytes;
   size_t length;

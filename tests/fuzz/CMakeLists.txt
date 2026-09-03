@@ -2,7 +2,7 @@ if(NOT TARGET lc_static)
   message(FATAL_ERROR "Fuzz targets require lc_static.")
 endif()
 
-function(lc_add_fuzz_target target_name)
+function(lc_add_afl_fuzz_target target_name)
   add_executable(${target_name}
     afl_fuzzer_main.c
     ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
@@ -11,72 +11,105 @@ function(lc_add_fuzz_target target_name)
   target_link_libraries(${target_name} PRIVATE lc_static)
   target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
   lc_configure_c_test_target(${target_name})
-  target_compile_definitions(${target_name} PRIVATE FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1)
 endfunction()
 
-lc_add_fuzz_target(lc_fuzz_streams fuzz_lc_streams.c)
-lc_add_fuzz_target(lc_fuzz_bundle_open fuzz_lc_bundle_open.c)
-lc_add_fuzz_target(lc_fuzz_attachment_decode fuzz_lc_attachment_decode.c)
-lc_add_fuzz_target(lc_fuzz_queue_meta fuzz_lc_queue_meta.c)
-lc_add_fuzz_target(lc_fuzz_query_keys_stream fuzz_lc_query_keys_stream.c)
-lc_add_fuzz_target(lc_fuzz_mutate_parse fuzz_lc_mutate_parse.c)
-lc_add_fuzz_target(lc_fuzz_mutate_apply fuzz_lc_mutate_apply.c)
-lc_add_fuzz_target(lc_fuzz_pouch_record_header fuzz_lc_pouch_record_header.c)
-lc_add_fuzz_target(lc_fuzz_pouch_index_primitives fuzz_lc_pouch_index_primitives.c)
-lc_add_fuzz_target(lc_fuzz_pouch_lql_plan fuzz_lc_pouch_lql_plan.c)
-lc_add_fuzz_target(lc_fuzz_pouch_lifecycle fuzz_lc_pouch_lifecycle.c)
+function(lc_add_pouch_integration_target target_name)
+  add_executable(${target_name}
+    pouch_integration_driver_main.c
+    ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c
+    ${ARGN}
+  )
+  target_link_libraries(${target_name} PRIVATE lc_static)
+  target_include_directories(${target_name} PRIVATE ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/src)
+  lc_configure_c_test_target(${target_name})
+endfunction()
 
-set(LC_FUZZ_BINARY_CORPUS_DIR "${CMAKE_CURRENT_BINARY_DIR}/corpus")
-file(REMOVE_RECURSE "${LC_FUZZ_BINARY_CORPUS_DIR}")
-file(MAKE_DIRECTORY "${LC_FUZZ_BINARY_CORPUS_DIR}")
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/streams" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/bundle_open" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/attachment_decode" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/queue_meta" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/query_keys_stream" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/mutate_parse" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/mutate_apply" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/pouch_record_header" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/pouch_index_primitives" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/pouch_lql_plan" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/pouch_lifecycle" DESTINATION "${LC_FUZZ_BINARY_CORPUS_DIR}")
+function(lc_add_afl_fuzz_smoke target_name corpus_name corpus_seed)
+  add_test(NAME ${target_name}_smoke
+    COMMAND ${target_name}
+      "${LC_AFL_FUZZ_CORPUS_DIR}/${corpus_name}/${corpus_seed}")
+  set_tests_properties(${target_name}_smoke PROPERTIES LABELS fuzz)
+endfunction()
 
-add_test(NAME lc_fuzz_streams_smoke COMMAND lc_fuzz_streams ${LC_FUZZ_BINARY_CORPUS_DIR}/streams/seed.json)
-set_tests_properties(lc_fuzz_streams_smoke PROPERTIES LABELS fuzz)
+if(LOCKDC_BUILD_FUZZERS)
+  # AFL++ is reserved for deterministic parser, stream, and primitive targets.
+  lc_add_afl_fuzz_target(lc_fuzz_streams fuzz_lc_streams.c)
+  lc_add_afl_fuzz_target(lc_fuzz_bundle_open fuzz_lc_bundle_open.c)
+  lc_add_afl_fuzz_target(lc_fuzz_attachment_decode fuzz_lc_attachment_decode.c)
+  lc_add_afl_fuzz_target(lc_fuzz_queue_meta fuzz_lc_queue_meta.c)
+  lc_add_afl_fuzz_target(lc_fuzz_query_keys_stream fuzz_lc_query_keys_stream.c)
+  lc_add_afl_fuzz_target(lc_fuzz_mutate_parse fuzz_lc_mutate_parse.c)
+  lc_add_afl_fuzz_target(lc_fuzz_mutate_apply fuzz_lc_mutate_apply.c)
+  lc_add_afl_fuzz_target(lc_fuzz_pouch_record_header fuzz_lc_pouch_record_header.c)
+  lc_add_afl_fuzz_target(lc_fuzz_pouch_index_primitives fuzz_lc_pouch_index_primitives.c)
 
-add_test(NAME lc_fuzz_bundle_open_smoke COMMAND lc_fuzz_bundle_open ${LC_FUZZ_BINARY_CORPUS_DIR}/bundle_open/seed.pem)
-set_tests_properties(lc_fuzz_bundle_open_smoke PROPERTIES LABELS fuzz)
+  set(LC_AFL_FUZZ_CORPUS_DIR "${CMAKE_CURRENT_BINARY_DIR}/corpus")
+  file(REMOVE_RECURSE "${LC_AFL_FUZZ_CORPUS_DIR}")
+  file(MAKE_DIRECTORY "${LC_AFL_FUZZ_CORPUS_DIR}")
+  foreach(corpus_name
+      streams bundle_open attachment_decode queue_meta query_keys_stream
+      mutate_parse mutate_apply pouch_record_header pouch_index_primitives)
+    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/corpus/${corpus_name}"
+      DESTINATION "${LC_AFL_FUZZ_CORPUS_DIR}")
+  endforeach()
 
-add_test(NAME lc_fuzz_attachment_decode_smoke COMMAND lc_fuzz_attachment_decode ${LC_FUZZ_BINARY_CORPUS_DIR}/attachment_decode/attach.json)
-set_tests_properties(lc_fuzz_attachment_decode_smoke PROPERTIES LABELS fuzz)
+  lc_add_afl_fuzz_smoke(lc_fuzz_streams streams seed.json)
+  lc_add_afl_fuzz_smoke(lc_fuzz_bundle_open bundle_open seed.pem)
+  lc_add_afl_fuzz_smoke(lc_fuzz_attachment_decode attachment_decode attach.json)
+  lc_add_afl_fuzz_smoke(lc_fuzz_queue_meta queue_meta meta.json)
+  lc_add_afl_fuzz_smoke(lc_fuzz_query_keys_stream query_keys_stream two_keys)
+  lc_add_afl_fuzz_smoke(lc_fuzz_mutate_parse mutate_parse
+    02d6b5dc5e0c4b854ad463736de6ba15229e10fa)
+  lc_add_afl_fuzz_smoke(lc_fuzz_mutate_apply mutate_apply
+    105064699aa30295ea0a31a6c95d2a7775a230cb)
+  lc_add_afl_fuzz_smoke(lc_fuzz_pouch_record_header pouch_record_header
+    ascii-invalid.bin)
+  lc_add_afl_fuzz_smoke(lc_fuzz_pouch_index_primitives pouch_index_primitives
+    term-generation.txt)
+endif()
 
-add_test(NAME lc_fuzz_queue_meta_smoke COMMAND lc_fuzz_queue_meta ${LC_FUZZ_BINARY_CORPUS_DIR}/queue_meta/meta.json)
-set_tests_properties(lc_fuzz_queue_meta_smoke PROPERTIES LABELS fuzz)
+if(LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)
+  # These execute the unmodified production implementation in a fresh process
+  # per mutation. They intentionally do not use AFL++ instrumentation or
+  # coverage feedback because Pouch owns concurrent background work.
+  lc_add_pouch_integration_target(lc_pouch_integration_lql_plan
+    fuzz_lc_pouch_lql_plan.c)
+  lc_add_pouch_integration_target(lc_pouch_integration_lifecycle
+    fuzz_lc_pouch_lifecycle.c)
 
-add_test(NAME lc_fuzz_query_keys_stream_smoke COMMAND lc_fuzz_query_keys_stream ${LC_FUZZ_BINARY_CORPUS_DIR}/query_keys_stream/two_keys)
-set_tests_properties(lc_fuzz_query_keys_stream_smoke PROPERTIES LABELS fuzz)
+  add_executable(lc_pouch_integration_mutation_runner
+    pouch_integration_mutation_runner.c)
+  lc_configure_c_test_target(lc_pouch_integration_mutation_runner)
 
-add_test(NAME lc_fuzz_mutate_parse_smoke COMMAND lc_fuzz_mutate_parse ${LC_FUZZ_BINARY_CORPUS_DIR}/mutate_parse/02d6b5dc5e0c4b854ad463736de6ba15229e10fa)
-set_tests_properties(lc_fuzz_mutate_parse_smoke PROPERTIES LABELS fuzz)
+  add_executable(lc_pouch_integration_hang_probe
+    pouch_integration_hang_probe.c)
+  lc_configure_c_test_target(lc_pouch_integration_hang_probe)
 
-add_test(NAME lc_fuzz_mutate_apply_smoke COMMAND lc_fuzz_mutate_apply ${LC_FUZZ_BINARY_CORPUS_DIR}/mutate_apply/105064699aa30295ea0a31a6c95d2a7775a230cb)
-set_tests_properties(lc_fuzz_mutate_apply_smoke PROPERTIES LABELS fuzz)
+  add_executable(lc_pouch_integration_success_probe
+    pouch_integration_success_probe.c)
+  lc_configure_c_test_target(lc_pouch_integration_success_probe)
 
-add_test(NAME lc_fuzz_pouch_record_header_smoke COMMAND lc_fuzz_pouch_record_header ${LC_FUZZ_BINARY_CORPUS_DIR}/pouch_record_header/ascii-invalid.bin)
-set_tests_properties(lc_fuzz_pouch_record_header_smoke PROPERTIES LABELS fuzz)
+  add_test(NAME lc_pouch_integration_lql_plan_mutation_smoke
+    COMMAND lc_pouch_integration_mutation_runner
+      $<TARGET_FILE:lc_pouch_integration_lql_plan>
+      "${CMAKE_CURRENT_SOURCE_DIR}/corpus/pouch_lql_plan" 8)
+  add_test(NAME lc_pouch_integration_lifecycle_mutation_smoke
+    COMMAND lc_pouch_integration_mutation_runner
+      $<TARGET_FILE:lc_pouch_integration_lifecycle>
+      "${CMAKE_CURRENT_SOURCE_DIR}/corpus/pouch_lifecycle" 8)
+  add_test(NAME lc_pouch_integration_mutation_runner_regression
+    COMMAND ${CMAKE_COMMAND}
+      -DRUNNER=$<TARGET_FILE:lc_pouch_integration_mutation_runner>
+      -DHANG_PROBE=$<TARGET_FILE:lc_pouch_integration_hang_probe>
+      -DSUCCESS_PROBE=$<TARGET_FILE:lc_pouch_integration_success_probe>
+      -DCORPUS=${CMAKE_CURRENT_SOURCE_DIR}/corpus/pouch_lifecycle
+      -DTEST_ROOT=${CMAKE_CURRENT_BINARY_DIR}/pouch-integration-runner-regression
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/pouch_integration_mutation_runner_test.cmake)
+  set_tests_properties(
+    lc_pouch_integration_lql_plan_mutation_smoke
+    lc_pouch_integration_lifecycle_mutation_smoke
+    lc_pouch_integration_mutation_runner_regression
+    PROPERTIES LABELS "fuzz;integration;offline" TIMEOUT 120 RUN_SERIAL TRUE)
+endif()
 
-add_test(NAME lc_fuzz_pouch_index_primitives_smoke COMMAND lc_fuzz_pouch_index_primitives ${LC_FUZZ_BINARY_CORPUS_DIR}/pouch_index_primitives/term-generation.txt)
-set_tests_properties(lc_fuzz_pouch_index_primitives_smoke PROPERTIES LABELS fuzz)
-
-add_test(NAME lc_fuzz_pouch_lql_plan_smoke COMMAND lc_fuzz_pouch_lql_plan ${LC_FUZZ_BINARY_CORPUS_DIR}/pouch_lql_plan/compound.json)
-set_tests_properties(lc_fuzz_pouch_lql_plan_smoke PROPERTIES LABELS fuzz)
-
-add_test(NAME lc_fuzz_pouch_lifecycle_smoke COMMAND lc_fuzz_pouch_lifecycle ${LC_FUZZ_BINARY_CORPUS_DIR}/pouch_lifecycle/maintenance.bin)
-set_tests_properties(lc_fuzz_pouch_lifecycle_smoke PROPERTIES LABELS fuzz)
-
-add_test(NAME lc_fuzz_pouch_lifecycle_damage_smoke COMMAND lc_fuzz_pouch_lifecycle ${LC_FUZZ_BINARY_CORPUS_DIR}/pouch_lifecycle/damage-query-index.bin)
-set_tests_properties(lc_fuzz_pouch_lifecycle_damage_smoke PROPERTIES LABELS fuzz)
-
-add_test(NAME lc_fuzz_pouch_lifecycle_crypto_smoke COMMAND lc_fuzz_pouch_lifecycle ${LC_FUZZ_BINARY_CORPUS_DIR}/pouch_lifecycle/crypto-surface.bin)
-set_tests_properties(lc_fuzz_pouch_lifecycle_crypto_smoke PROPERTIES LABELS fuzz)
 lc_apply_default_test_timeouts()

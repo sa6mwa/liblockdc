@@ -12,6 +12,18 @@ Lease.__index = Lease
 local Message = {}
 Message.__index = Message
 
+local Workflow = {}
+Workflow.__index = Workflow
+
+local WorkflowTransaction = {}
+WorkflowTransaction.__index = WorkflowTransaction
+
+local WorkflowParticipant = {}
+WorkflowParticipant.__index = WorkflowParticipant
+
+local OutboxJob = {}
+OutboxJob.__index = OutboxJob
+
 local Service = {}
 Service.__index = Service
 
@@ -27,6 +39,30 @@ end
 
 local function wrap_message(core_message)
   return setmetatable({ _core = core_message, _closed = false }, Message)
+end
+
+local function wrap_workflow(core_workflow)
+  return setmetatable({ _core = core_workflow, _closed = false }, Workflow)
+end
+
+local function wrap_workflow_transaction(core_transaction)
+  return setmetatable({
+    _core = core_transaction,
+    _closed = false,
+    _terminal = false,
+  }, WorkflowTransaction)
+end
+
+local function wrap_workflow_participant(core_participant)
+  return setmetatable({ _core = core_participant, _closed = false }, WorkflowParticipant)
+end
+
+local function wrap_outbox_job(core_job)
+  return setmetatable({
+    _core = core_job,
+    _closed = false,
+    _terminal = false,
+  }, OutboxJob)
 end
 
 local function normalize_result(a, b)
@@ -57,6 +93,24 @@ local function with_json_content_type(req)
     next_req.content_type = "application/json"
   end
   return next_req
+end
+
+local function normalize_outbox_entry(entry)
+  local next_entry = {}
+  local k, v
+
+  entry = entry or {}
+  for k, v in pairs(entry) do
+    next_entry[k] = v
+  end
+  if next_entry.headers ~= nil then
+    if next_entry.headers_json ~= nil then
+      error("outbox entry accepts either headers or headers_json, not both")
+    end
+    next_entry.headers_json = encode_json(next_entry.headers)
+    next_entry.headers = nil
+  end
+  return next_entry
 end
 
 local function unwrap_lease_ref(value)
@@ -163,6 +217,15 @@ function Client:close()
     self._core:close()
     self._core = nil
   end
+end
+
+function Client:new_workflow(config)
+  local workflow, err = self._core:new_workflow(config)
+
+  if workflow == nil then
+    return nil, err
+  end
+  return wrap_workflow(workflow)
 end
 
 function Client:acquire(req)
@@ -520,6 +583,307 @@ function Message:payload_json()
     return nil, written_or_err
   end
   return decode_json(payload), written_or_err
+end
+
+function Workflow:close()
+  if self._core ~= nil and not self._closed then
+    self._core:close()
+    self._closed = true
+  end
+end
+
+function Workflow:append_outbox(entry, payload)
+  local transaction, receipt_or_err = self._core:append_outbox(
+    normalize_outbox_entry(entry), payload)
+
+  if transaction == nil and receipt_or_err == nil then
+    return nil
+  end
+  if transaction == nil and type(receipt_or_err) ~= "table" then
+    return nil, receipt_or_err
+  end
+  if transaction == nil then
+    return nil, receipt_or_err
+  end
+  return wrap_workflow_transaction(transaction), receipt_or_err
+end
+
+function Workflow:accept_inbox(message)
+  local transaction, result_or_err = self._core:accept_inbox(message)
+
+  if transaction == nil and result_or_err == nil then
+    return nil
+  end
+  if transaction == nil and type(result_or_err) ~= "table" then
+    return nil, result_or_err
+  end
+  if transaction == nil then
+    return nil, result_or_err
+  end
+  return wrap_workflow_transaction(transaction), result_or_err
+end
+
+function Workflow:accept_command(request)
+  local transaction, receipt_or_err = self._core:accept_command(request)
+
+  if transaction == nil and receipt_or_err == nil then
+    return nil
+  end
+  if transaction == nil and type(receipt_or_err) ~= "table" then
+    return nil, receipt_or_err
+  end
+  if transaction == nil then
+    return nil, receipt_or_err
+  end
+  return wrap_workflow_transaction(transaction), receipt_or_err
+end
+
+function Workflow:command_receipt(identity)
+  return self._core:get_command_receipt(identity)
+end
+
+function Workflow:write_command_result(identity, dest)
+  return self._core:write_command_result(identity, dest)
+end
+
+function Workflow:resume_command(identity)
+  local transaction, receipt_or_err = self._core:resume_command(identity)
+
+  if transaction == nil and receipt_or_err == nil then
+    return nil
+  end
+  if transaction == nil and type(receipt_or_err) ~= "table" then
+    return nil, receipt_or_err
+  end
+  if transaction == nil then
+    return nil, receipt_or_err
+  end
+  return wrap_workflow_transaction(transaction), receipt_or_err
+end
+
+function Workflow:next(timeout_ms)
+  local job, err = self._core:next(timeout_ms)
+
+  if job == nil then
+    return nil, err
+  end
+  return wrap_outbox_job(job)
+end
+
+function Workflow:stats()
+  return self._core:stats()
+end
+
+function Workflow:reconcile()
+  return self._core:reconcile()
+end
+
+function Workflow:replay_dead_letter(outbox_key)
+  return self._core:replay_dead_letter(outbox_key)
+end
+
+function Workflow:delete_dead_letter(outbox_key)
+  return self._core:delete_dead_letter(outbox_key)
+end
+
+function Workflow:export_dead_letters(options, dest)
+  if dest == nil and (type(options) == "string" or type(options) == "number" or
+      (type(options) == "table" and
+       (options.path ~= nil or options.fd ~= nil))) then
+    return self._core:export_dead_letters(nil, options)
+  end
+  return self._core:export_dead_letters(options, dest)
+end
+
+function WorkflowTransaction:close()
+  if self._core ~= nil and not self._closed then
+    self._core:close()
+    self._closed = true
+  end
+end
+
+function WorkflowTransaction:acquire(req)
+  local participant, err = self._core:acquire(req)
+
+  if participant == nil then
+    return nil, err
+  end
+  return wrap_workflow_participant(participant)
+end
+
+function WorkflowTransaction:append_outbox(entry, payload)
+  return self._core:append_outbox(normalize_outbox_entry(entry), payload)
+end
+
+function WorkflowTransaction:accept_command(request)
+  return self._core:accept_command(request)
+end
+
+function WorkflowTransaction:complete_command(result)
+  return self._core:complete_command(result)
+end
+
+function WorkflowTransaction:fail_command(result)
+  return self._core:fail_command(result)
+end
+
+function WorkflowTransaction:commit()
+  local ok, err = normalize_result(self._core:commit())
+
+  if ok ~= nil then
+    self._terminal = true
+  end
+  return ok, err
+end
+
+function WorkflowTransaction:rollback()
+  local ok, err = normalize_result(self._core:rollback())
+
+  if ok ~= nil then
+    self._terminal = true
+  end
+  return ok, err
+end
+
+function WorkflowParticipant:info()
+  return self._core:info()
+end
+
+function WorkflowParticipant:close()
+  if self._core ~= nil and not self._closed then
+    self._core:close()
+    self._closed = true
+  end
+end
+
+function WorkflowParticipant:describe()
+  return self._core:describe()
+end
+
+function WorkflowParticipant:get_raw(opts, dest)
+  return self._core:get(opts, dest)
+end
+
+function WorkflowParticipant:get_json(opts)
+  local payload, meta_or_err = self._core:get(opts)
+
+  if payload == nil then
+    return nil, meta_or_err
+  end
+  if meta_or_err ~= nil and meta_or_err.no_content then
+    return nil, meta_or_err
+  end
+  return decode_json(payload), meta_or_err
+end
+
+function WorkflowParticipant:update_raw(body, opts)
+  return self._core:update(body, opts)
+end
+
+function WorkflowParticipant:update_json(value, opts)
+  return self:update_raw(encode_json(value), with_json_content_type(opts))
+end
+
+function WorkflowParticipant:mutate(req)
+  return self._core:mutate(req)
+end
+
+function WorkflowParticipant:mutate_local(req)
+  return self._core:mutate_local(req)
+end
+
+function WorkflowParticipant:metadata(req)
+  return self._core:metadata(req)
+end
+
+function WorkflowParticipant:remove(req)
+  return self._core:remove(req)
+end
+
+function WorkflowParticipant:keepalive(req)
+  return self._core:keepalive(req)
+end
+
+function WorkflowParticipant:attach(req, body)
+  return self._core:attach(req, body)
+end
+
+function WorkflowParticipant:list_attachments()
+  return self._core:list_attachments()
+end
+
+function WorkflowParticipant:get_attachment(req, dest)
+  return self._core:get_attachment(req, dest)
+end
+
+function WorkflowParticipant:delete_attachment(selector)
+  return self._core:delete_attachment(selector)
+end
+
+function WorkflowParticipant:delete_all_attachments()
+  return self._core:delete_all_attachments()
+end
+
+function OutboxJob:info()
+  return self._core:info()
+end
+
+function OutboxJob:close()
+  if self._core ~= nil and not self._closed then
+    self._core:close()
+    self._closed = true
+  end
+end
+
+function OutboxJob:write_payload(dest)
+  return self._core:write_payload(dest)
+end
+
+function OutboxJob:payload(dest)
+  return self:write_payload(dest)
+end
+
+function OutboxJob:payload_json()
+  local payload, written_or_err = self:write_payload()
+
+  if payload == nil then
+    return nil, written_or_err
+  end
+  return decode_json(payload), written_or_err
+end
+
+function OutboxJob:renew(ttl_seconds)
+  return self._core:renew(ttl_seconds)
+end
+
+function OutboxJob:complete(completion)
+  local ok, err = normalize_result(self._core:complete(completion))
+
+  if ok ~= nil then
+    self._terminal = true
+    self._closed = true
+  end
+  return ok, err
+end
+
+function OutboxJob:retry(req)
+  local ok, err = normalize_result(self._core:retry(req))
+
+  if ok ~= nil then
+    self._terminal = true
+    self._closed = true
+  end
+  return ok, err
+end
+
+function OutboxJob:dead_letter(diagnostic)
+  local ok, err = normalize_result(self._core:dead_letter(diagnostic))
+
+  if ok ~= nil then
+    self._terminal = true
+    self._closed = true
+  end
+  return ok, err
 end
 
 local function should_continue(err_handler, err)

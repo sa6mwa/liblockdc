@@ -76,6 +76,23 @@ assert_output_has_werror(
     TRUE
 )
 assert_output_has_werror(
+    "CMakeFiles/lc_static.dir/src/lc_workflow.c.o"
+    "workflow implementation"
+    TRUE
+    TRUE
+)
+if(LOCKDC_BUILD_TYPE STREQUAL "Release")
+    string(REGEX MATCH
+        "\"command\": [^\n]*-O3[^\n]*\n  \"file\": [^\n]*\n  \"output\": \"[^\"]*CMakeFiles/lc_static.dir/src/lc_workflow.c.o\""
+        workflow_release_entry
+        "${compile_commands_json}"
+    )
+    if(workflow_release_entry STREQUAL "")
+        message(FATAL_ERROR
+            "Expected optimized release compile command for workflow implementation")
+    endif()
+endif()
+assert_output_has_werror(
     "tests/unit/CMakeFiles/lc_unit_pouch.dir/test_lc_pouch.c.o"
     "release unit tests"
     TRUE

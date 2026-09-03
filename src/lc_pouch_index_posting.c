@@ -233,6 +233,52 @@ int lc_pouch_index_posting_append_to_set(const lc_pouch_index_posting *posting,
   return rc;
 }
 
+int lc_pouch_index_posting_visit(const lc_pouch_index_posting *posting,
+                                 lc_pouch_index_docid_visit_fn visit,
+                                 void *context, lc_error *error) {
+  unsigned long doc_id;
+  unsigned long delta;
+  size_t offset;
+  size_t index;
+  int rc;
+
+  if (posting == NULL || visit == NULL) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "pouch index posting visit requires posting and visitor", NULL, NULL,
+        NULL);
+  }
+  if (posting->length > 0U && posting->bytes == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index posting is missing byte storage", NULL,
+                        NULL, "pouch");
+  }
+  doc_id = 0UL;
+  delta = 0UL;
+  offset = 0U;
+  rc = LC_OK;
+  for (index = 0U; rc == LC_OK && index < posting->count; ++index) {
+    rc = lc_pouch_index_posting_read_varint(posting, &offset, &delta, error);
+    if (rc != LC_OK) {
+      break;
+    }
+    if (index > 0U && delta > ULONG_MAX - doc_id) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index posting docID delta overflows", NULL, NULL,
+                        "pouch");
+      break;
+    }
+    doc_id = index == 0U ? delta : doc_id + delta;
+    rc = visit(context, doc_id, error);
+  }
+  if (rc == LC_OK && offset != posting->length) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch index posting has trailing bytes", NULL, NULL,
+                      "pouch");
+  }
+  return rc;
+}
+
 void lc_pouch_index_dense_posting_cleanup(
     const lc_allocator *allocator, lc_pouch_index_dense_posting *posting) {
   if (posting == NULL) {
@@ -375,6 +421,57 @@ int lc_pouch_index_dense_posting_append_to_set(
       }
       rc = lc_pouch_index_docid_set_append_sorted_unique(set, doc_id, &added,
                                                          allocator, error);
+      if (rc != LC_OK) {
+        break;
+      }
+      ++seen;
+    }
+  }
+  if (rc == LC_OK && seen != posting->count) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "pouch index dense posting count mismatch", NULL, NULL,
+                      "pouch");
+  }
+  return rc;
+}
+
+int lc_pouch_index_dense_posting_visit(
+    const lc_pouch_index_dense_posting *posting,
+    lc_pouch_index_docid_visit_fn visit, void *context, lc_error *error) {
+  size_t byte_index;
+  unsigned int bit_index;
+  size_t seen;
+  unsigned long doc_id;
+  int rc;
+
+  if (posting == NULL || visit == NULL) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "pouch index dense posting visit requires posting and visitor", NULL,
+        NULL, NULL);
+  }
+  if (posting->length > 0U && posting->bits == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index dense posting is missing bit storage",
+                        NULL, NULL, "pouch");
+  }
+  seen = 0U;
+  rc = LC_OK;
+  for (byte_index = 0U; rc == LC_OK && byte_index < posting->length;
+       ++byte_index) {
+    for (bit_index = 0U; bit_index < (unsigned int)CHAR_BIT; ++bit_index) {
+      if ((posting->bits[byte_index] & (unsigned char)(1U << bit_index)) ==
+          0U) {
+        continue;
+      }
+      doc_id = ((unsigned long)byte_index * (unsigned long)CHAR_BIT) +
+               (unsigned long)bit_index;
+      if (!posting->has_last_doc_id || doc_id > posting->max_doc_id) {
+        return lc_error_set(error, LC_ERR_INVALID, 0L,
+                            "pouch index dense posting bit exceeds max docID",
+                            NULL, NULL, "pouch");
+      }
+      rc = visit(context, doc_id, error);
       if (rc != LC_OK) {
         break;
       }
@@ -636,4 +733,20 @@ int lc_pouch_index_adaptive_posting_append_to_set(
   }
   return lc_pouch_index_posting_append_to_set(&posting->sparse, set, allocator,
                                               error);
+}
+
+int lc_pouch_index_adaptive_posting_visit(
+    const lc_pouch_index_adaptive_posting *posting,
+    lc_pouch_index_docid_visit_fn visit, void *context, lc_error *error) {
+  if (posting == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch index adaptive posting visit requires posting",
+                        NULL, NULL, NULL);
+  }
+  if (lc_pouch_index_adaptive_posting_selected_kind(posting) ==
+      LC_POUCH_INDEX_ADAPTIVE_POSTING_DENSE) {
+    return lc_pouch_index_dense_posting_visit(&posting->dense, visit, context,
+                                              error);
+  }
+  return lc_pouch_index_posting_visit(&posting->sparse, visit, context, error);
 }

@@ -7,10 +7,10 @@ preset=${1:-debug}
 unset LD_LIBRARY_PATH
 
 case "$preset" in
-  debug|e2e|release|x86_64-linux-gnu-release|x86_64-linux-musl-release|aarch64-linux-gnu-release|aarch64-linux-musl-release|armhf-linux-gnu-release|armhf-linux-musl-release|arm64-apple-darwin-release|coverage|fuzz)
+  debug|e2e|release|x86_64-linux-gnu-release|x86_64-linux-musl-release|aarch64-linux-gnu-release|aarch64-linux-musl-release|armhf-linux-gnu-release|armhf-linux-musl-release|arm64-apple-darwin-release|coverage|fuzz|pouch-integration-fuzz)
     ;;
   *)
-    echo "usage: scripts/build.sh [debug|e2e|release|x86_64-linux-gnu-release|x86_64-linux-musl-release|aarch64-linux-gnu-release|aarch64-linux-musl-release|armhf-linux-gnu-release|armhf-linux-musl-release|arm64-apple-darwin-release|coverage|fuzz]" >&2
+    echo "usage: scripts/build.sh [debug|e2e|release|x86_64-linux-gnu-release|x86_64-linux-musl-release|aarch64-linux-gnu-release|aarch64-linux-musl-release|armhf-linux-gnu-release|armhf-linux-musl-release|arm64-apple-darwin-release|coverage|fuzz|pouch-integration-fuzz]" >&2
     exit 2
     ;;
 esac

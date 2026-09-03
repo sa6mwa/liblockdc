@@ -74,6 +74,56 @@ static const char *lc_pouch_endpoint_path(const char *endpoint) {
   return endpoint != NULL ? endpoint + 8 : NULL;
 }
 
+static void lc_pouch_endpoint_split(const char *endpoint, const char **path,
+                                    size_t *path_len, const char **query,
+                                    size_t *query_len, const char **fragment) {
+  const char *base;
+  const char *query_marker;
+  const char *fragment_marker;
+  const char *end;
+
+  base = lc_pouch_endpoint_path(endpoint);
+  if (base == NULL) {
+    if (path != NULL) {
+      *path = NULL;
+    }
+    if (path_len != NULL) {
+      *path_len = 0U;
+    }
+    if (query != NULL) {
+      *query = NULL;
+    }
+    if (query_len != NULL) {
+      *query_len = 0U;
+    }
+    if (fragment != NULL) {
+      *fragment = NULL;
+    }
+    return;
+  }
+  fragment_marker = base != NULL ? strchr(base, '#') : NULL;
+  end = fragment_marker != NULL ? fragment_marker : base + strlen(base);
+  query_marker = base != NULL ? strchr(base, '?') : NULL;
+  if (query_marker != NULL && query_marker >= end) {
+    query_marker = NULL;
+  }
+  if (path != NULL) {
+    *path = base;
+  }
+  if (path_len != NULL) {
+    *path_len = (size_t)((query_marker != NULL ? query_marker : end) - base);
+  }
+  if (query != NULL) {
+    *query = query_marker != NULL ? query_marker + 1 : NULL;
+  }
+  if (query_len != NULL) {
+    *query_len = query_marker != NULL ? (size_t)(end - query_marker - 1U) : 0U;
+  }
+  if (fragment != NULL) {
+    *fragment = fragment_marker;
+  }
+}
+
 typedef struct lc_fd_sink {
   lc_sink_impl base;
   int fd;
@@ -1162,6 +1212,62 @@ static char *lc_pouch_endpoint_decode_component(const lc_allocator *allocator,
   return decoded;
 }
 
+static int lc_pouch_endpoint_encoded_size(const char *value, int preserve_slash,
+                                          size_t *size_out, lc_error *error) {
+  const unsigned char *cursor;
+  size_t size;
+
+  if (value == NULL || size_out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch endpoint component and size are required", NULL,
+                        NULL, "pouch");
+  }
+  size = 0U;
+  for (cursor = (const unsigned char *)value; *cursor != '\0'; ++cursor) {
+    int unreserved;
+    size_t add;
+
+    unreserved = (*cursor >= 'A' && *cursor <= 'Z') ||
+                 (*cursor >= 'a' && *cursor <= 'z') ||
+                 (*cursor >= '0' && *cursor <= '9') || *cursor == '-' ||
+                 *cursor == '.' || *cursor == '_' || *cursor == '~';
+    add = (unreserved || (preserve_slash && *cursor == '/')) ? 1U : 3U;
+    if (size > SIZE_MAX - add) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch endpoint is too large", NULL, NULL, "pouch");
+    }
+    size += add;
+  }
+  *size_out = size;
+  return LC_OK;
+}
+
+static void lc_pouch_endpoint_encode_component(char *dst, size_t *offset,
+                                               const char *value,
+                                               int preserve_slash) {
+  static const char hex[] = "0123456789ABCDEF";
+  const unsigned char *cursor;
+  size_t out;
+
+  out = *offset;
+  for (cursor = (const unsigned char *)value; *cursor != '\0'; ++cursor) {
+    int unreserved;
+
+    unreserved = (*cursor >= 'A' && *cursor <= 'Z') ||
+                 (*cursor >= 'a' && *cursor <= 'z') ||
+                 (*cursor >= '0' && *cursor <= '9') || *cursor == '-' ||
+                 *cursor == '.' || *cursor == '_' || *cursor == '~';
+    if (unreserved || (preserve_slash && *cursor == '/')) {
+      dst[out++] = (char)*cursor;
+    } else {
+      dst[out++] = '%';
+      dst[out++] = hex[*cursor >> 4U];
+      dst[out++] = hex[*cursor & 0x0fU];
+    }
+  }
+  *offset = out;
+}
+
 static int lc_pouch_endpoint_parse_boolean(const lc_allocator *allocator,
                                            const char *value, size_t value_len,
                                            const char *option, int *out,
@@ -1239,9 +1345,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
   if (decoded_key == NULL) {
     return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
   }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "single_writer") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_single_writer")) {
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "single_writer")) {
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
                                               "single_writer", error);
     if (copy == NULL) {
@@ -1264,9 +1368,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "queue_watch") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_queue_watch")) {
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "queue_watch")) {
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
                                               "queue_watch", error);
     if (copy == NULL) {
@@ -1289,9 +1391,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return LC_OK;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "fsync_batch_max_ops") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_fsync_batch_max_ops")) {
+                          "fsync_batch_max_ops")) {
     lc_u64 parsed;
 
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
@@ -1312,9 +1412,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "durable_sync") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_durable_sync")) {
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "durable_sync")) {
     rc = lc_pouch_endpoint_parse_boolean(allocator, value, value_len,
                                          "durable_sync", &options->durable_sync,
                                          error);
@@ -1322,9 +1420,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "segment_target_bytes") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_segment_target_bytes")) {
+                          "segment_target_bytes")) {
     rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
                                      "segment_target_bytes",
                                      &options->segment_target_bytes, error);
@@ -1332,9 +1428,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "indexer_flush_docs") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_indexer_flush_docs")) {
+                          "indexer_flush_docs")) {
     rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
                                      "indexer_flush_docs",
                                      &options->indexer_flush_docs, error);
@@ -1342,9 +1436,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "indexer_flush_interval_seconds") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_indexer_flush_interval_seconds")) {
+                          "indexer_flush_interval_seconds")) {
     rc = lc_pouch_endpoint_parse_u64(
         allocator, value, value_len, "indexer_flush_interval_seconds",
         &options->indexer_flush_interval_seconds, error);
@@ -1352,9 +1444,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "background_compaction") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_background_compaction")) {
+                          "background_compaction")) {
     rc = lc_pouch_endpoint_parse_boolean(
         allocator, value, value_len, "background_compaction",
         &options->background_compaction_enabled, error);
@@ -1365,9 +1455,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "disable_compaction_throttling") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_disable_compaction_throttling")) {
+                          "disable_compaction_throttling")) {
     rc = lc_pouch_endpoint_parse_boolean(
         allocator, value, value_len, "disable_compaction_throttling",
         &options->compaction_throttling_disabled, error);
@@ -1375,9 +1463,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "retention_seconds") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_retention_seconds")) {
+                          "retention_seconds")) {
     rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
                                      "retention_seconds",
                                      &options->retention_seconds, error);
@@ -1385,9 +1471,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "janitor_interval_seconds") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_janitor_interval_seconds")) {
+                          "janitor_interval_seconds")) {
     rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
                                      "janitor_interval_seconds",
                                      &options->janitor_interval_seconds, error);
@@ -1396,11 +1480,7 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key), "query_engine") ||
       lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_query_engine") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "query_fallback_engine") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_query_fallback_engine")) {
+                          "query_fallback_engine")) {
     int fallback;
 
     fallback = strstr(decoded_key, "fallback") != NULL ? 1 : 0;
@@ -1431,10 +1511,9 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_crypto_key")) {
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "crypto_key")) {
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
-                                              "pouch_crypto_key", error);
+                                              "crypto_key", error);
     if (copy == NULL) {
       lc_free_with_allocator(allocator, decoded_key);
       return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -1445,9 +1524,9 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return LC_OK;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_crypto_key_file")) {
+                          "crypto_key_file")) {
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
-                                              "pouch_crypto_key_file", error);
+                                              "crypto_key_file", error);
     if (copy == NULL) {
       lc_free_with_allocator(allocator, decoded_key);
       return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -1458,9 +1537,9 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return LC_OK;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_crypto_generate_key_file")) {
+                          "crypto_generate_key_file")) {
     copy = lc_pouch_endpoint_decode_component(
-        allocator, value, value_len, "pouch_crypto_generate_key_file", error);
+        allocator, value, value_len, "crypto_generate_key_file", error);
     if (copy == NULL) {
       lc_free_with_allocator(allocator, decoded_key);
       return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -1481,11 +1560,9 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     lc_free_with_allocator(allocator, decoded_key);
     return LC_OK;
   }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "compression") ||
-      lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "pouch_compression")) {
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "compression")) {
     copy = lc_pouch_endpoint_decode_component(allocator, value, value_len,
-                                              "pouch_compression", error);
+                                              "compression", error);
     if (copy == NULL) {
       lc_free_with_allocator(allocator, decoded_key);
       return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
@@ -1515,13 +1592,13 @@ static int lc_pouch_endpoint_options_parse(const lc_allocator *allocator,
   const char *path;
   const char *query;
   const char *cursor;
+  const char *query_end;
   size_t path_len;
+  size_t query_len;
   int rc;
 
   memset(options, 0, sizeof(*options));
-  path = lc_pouch_endpoint_path(endpoint);
-  query = path != NULL ? strchr(path, '?') : NULL;
-  path_len = query != NULL ? (size_t)(query - path) : strlen(path);
+  lc_pouch_endpoint_split(endpoint, &path, &path_len, &query, &query_len, NULL);
   options->root_path = lc_pouch_endpoint_decode_component(
       allocator, path, path_len, "path", error);
   if (options->root_path == NULL) {
@@ -1537,8 +1614,9 @@ static int lc_pouch_endpoint_options_parse(const lc_allocator *allocator,
     return LC_OK;
   }
 
-  cursor = query + 1;
-  while (*cursor != '\0') {
+  query_end = query + query_len;
+  cursor = query;
+  while (cursor < query_end) {
     const char *part;
     const char *equals;
     const char *next;
@@ -1546,9 +1624,9 @@ static int lc_pouch_endpoint_options_parse(const lc_allocator *allocator,
     size_t value_len;
 
     part = cursor;
-    next = strchr(part, '&');
+    next = (const char *)memchr(part, '&', (size_t)(query_end - part));
     if (next == NULL) {
-      next = part + strlen(part);
+      next = query_end;
     }
     equals = part;
     while (equals < next && *equals != '=') {
@@ -1563,7 +1641,7 @@ static int lc_pouch_endpoint_options_parse(const lc_allocator *allocator,
       lc_pouch_endpoint_options_cleanup(allocator, options);
       return rc;
     }
-    cursor = *next == '&' ? next + 1 : next;
+    cursor = next < query_end ? next + 1 : next;
   }
   return LC_OK;
 }
@@ -1571,9 +1649,10 @@ static int lc_pouch_endpoint_options_parse(const lc_allocator *allocator,
 static int lc_pouch_endpoint_redacted_copy(const lc_allocator *allocator,
                                            const char *endpoint, char **out,
                                            lc_error *error) {
-  const char *path;
   const char *query;
   const char *cursor;
+  const char *query_end;
+  const char *fragment;
   char *copy;
   size_t prefix_len;
   size_t dst;
@@ -1593,8 +1672,7 @@ static int lc_pouch_endpoint_redacted_copy(const lc_allocator *allocator,
     return LC_OK;
   }
 
-  path = lc_pouch_endpoint_path(endpoint);
-  query = path != NULL ? strchr(path, '?') : NULL;
+  lc_pouch_endpoint_split(endpoint, NULL, NULL, &query, NULL, &fragment);
   if (query == NULL) {
     *out = lc_strdup_with_allocator(allocator, endpoint);
     if (*out == NULL && endpoint != NULL) {
@@ -1609,11 +1687,12 @@ static int lc_pouch_endpoint_redacted_copy(const lc_allocator *allocator,
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to copy client endpoint", NULL, NULL, NULL);
   }
-  prefix_len = (size_t)(query - endpoint);
+  prefix_len = (size_t)(query - endpoint - 1);
   memcpy(copy, endpoint, prefix_len);
   dst = prefix_len;
-  cursor = query + 1;
-  while (*cursor != '\0') {
+  query_end = fragment != NULL ? fragment : endpoint + strlen(endpoint);
+  cursor = query;
+  while (cursor < query_end) {
     const char *part;
     const char *equals;
     const char *next;
@@ -1623,9 +1702,9 @@ static int lc_pouch_endpoint_redacted_copy(const lc_allocator *allocator,
     int is_secret;
 
     part = cursor;
-    next = strchr(part, '&');
+    next = (const char *)memchr(part, '&', (size_t)(query_end - part));
     if (next == NULL) {
-      next = part + strlen(part);
+      next = query_end;
     }
     equals = part;
     while (equals < next && *equals != '=') {
@@ -1639,7 +1718,7 @@ static int lc_pouch_endpoint_redacted_copy(const lc_allocator *allocator,
       lc_free_with_allocator(allocator, copy);
       return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
     }
-    is_secret = strcmp(decoded_key, "pouch_crypto_key") == 0 ? 1 : 0;
+    is_secret = strcmp(decoded_key, "crypto_key") == 0 ? 1 : 0;
     lc_free_with_allocator(allocator, decoded_key);
     if (!is_secret) {
       copy[dst] = dst == prefix_len ? '?' : '&';
@@ -1649,11 +1728,179 @@ static int lc_pouch_endpoint_redacted_copy(const lc_allocator *allocator,
         dst += part_len;
       }
     }
-    cursor = *next == '&' ? next + 1 : next;
+    cursor = next < query_end ? next + 1 : next;
+  }
+  if (fragment != NULL) {
+    size_t fragment_len;
+
+    fragment_len = strlen(fragment);
+    memcpy(copy + dst, fragment, fragment_len);
+    dst += fragment_len;
   }
   copy[dst] = '\0';
   *out = copy;
   return LC_OK;
+}
+
+int lc_pouch_endpoint_build(const char *root_path,
+                            const lc_pouch_endpoint_option *options,
+                            size_t option_count, char **out, lc_error *error) {
+  static const char prefix[] = "pouch://";
+  size_t total;
+  size_t encoded_size;
+  size_t offset;
+  size_t i;
+  char *endpoint;
+  int rc;
+
+  if (root_path == NULL || out == NULL ||
+      (option_count != 0U && options == NULL)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "lc_pouch_endpoint_build requires root_path, options, "
+                        "and out",
+                        NULL, NULL, "pouch");
+  }
+  *out = NULL;
+  if (root_path[0] != '/') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch endpoint path must be absolute", NULL, NULL,
+                        "pouch");
+  }
+  rc = lc_pouch_endpoint_encoded_size(root_path, 1, &encoded_size, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (encoded_size > SIZE_MAX - (sizeof(prefix) - 1U) - 1U) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L, "pouch endpoint is too large",
+                        NULL, NULL, "pouch");
+  }
+  total = sizeof(prefix) - 1U + encoded_size;
+  for (i = 0U; i < option_count; ++i) {
+    if (options[i].name == NULL || options[i].name[0] == '\0') {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch endpoint option name is required", NULL, NULL,
+                          "pouch");
+    }
+    rc = lc_pouch_endpoint_encoded_size(options[i].name, 0, &encoded_size,
+                                        error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    if (total > SIZE_MAX - 1U - encoded_size) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "pouch endpoint is too large", NULL, NULL, "pouch");
+    }
+    total += 1U + encoded_size;
+    if (options[i].value != NULL) {
+      rc = lc_pouch_endpoint_encoded_size(options[i].value, 0, &encoded_size,
+                                          error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+      if (total > SIZE_MAX - 1U - encoded_size) {
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "pouch endpoint is too large", NULL, NULL, "pouch");
+      }
+      total += 1U + encoded_size;
+    }
+  }
+  endpoint = (char *)lc_alloc_with_allocator(NULL, total + 1U);
+  if (endpoint == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch endpoint", NULL, NULL,
+                        "pouch");
+  }
+  memcpy(endpoint, prefix, sizeof(prefix) - 1U);
+  offset = sizeof(prefix) - 1U;
+  lc_pouch_endpoint_encode_component(endpoint, &offset, root_path, 1);
+  for (i = 0U; i < option_count; ++i) {
+    endpoint[offset++] = i == 0U ? '?' : '&';
+    lc_pouch_endpoint_encode_component(endpoint, &offset, options[i].name, 0);
+    if (options[i].value != NULL) {
+      endpoint[offset++] = '=';
+      lc_pouch_endpoint_encode_component(endpoint, &offset, options[i].value,
+                                         0);
+    }
+  }
+  endpoint[offset] = '\0';
+  *out = endpoint;
+  return LC_OK;
+}
+
+int lc_pouch_endpoint_has_option(const char *endpoint, const char *name,
+                                 int *present, lc_error *error) {
+  const char *path;
+  const char *query;
+  const char *cursor;
+  const char *query_end;
+  char *decoded_path;
+  size_t path_len;
+  size_t query_len;
+
+  if (endpoint == NULL || name == NULL || name[0] == '\0' || present == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "lc_pouch_endpoint_has_option requires endpoint, name, "
+                        "and present",
+                        NULL, NULL, "pouch");
+  }
+  *present = 0;
+  if (!lc_endpoint_is_pouch(endpoint)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L, "pouch endpoint is required",
+                        NULL, NULL, "pouch");
+  }
+  lc_pouch_endpoint_split(endpoint, &path, &path_len, &query, &query_len, NULL);
+  decoded_path =
+      lc_pouch_endpoint_decode_component(NULL, path, path_len, "path", error);
+  if (decoded_path == NULL) {
+    return error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  }
+  if (decoded_path[0] != '/') {
+    lc_free_with_allocator(NULL, decoded_path);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch endpoint path must be absolute", NULL, NULL,
+                        "pouch");
+  }
+  lc_free_with_allocator(NULL, decoded_path);
+  if (query == NULL) {
+    return LC_OK;
+  }
+
+  query_end = query + query_len;
+  cursor = query;
+  while (cursor < query_end) {
+    const char *equals;
+    const char *next;
+    char *decoded_name;
+    size_t name_len;
+
+    next = (const char *)memchr(cursor, '&', (size_t)(query_end - cursor));
+    if (next == NULL) {
+      next = query_end;
+    }
+    equals = cursor;
+    while (equals < next && *equals != '=') {
+      ++equals;
+    }
+    name_len = (size_t)(equals - cursor);
+    if (name_len != 0U) {
+      decoded_name = lc_pouch_endpoint_decode_component(NULL, cursor, name_len,
+                                                        "query option", error);
+      if (decoded_name == NULL) {
+        return error != NULL && error->code != LC_OK ? error->code
+                                                     : LC_ERR_NOMEM;
+      }
+      if (strcmp(decoded_name, name) == 0) {
+        *present = 1;
+      }
+      lc_free_with_allocator(NULL, decoded_name);
+    }
+    cursor = next < query_end ? next + 1 : next;
+  }
+  return LC_OK;
+}
+
+void lc_pouch_endpoint_free(char *endpoint) {
+  lc_secret_free_string_with_allocator(NULL, endpoint);
 }
 
 void lc_client_config_init(lc_client_config *config) {
@@ -1713,6 +1960,26 @@ LC_INIT_STRUCT_FUNC(lc_watch_queue_req, lc_watch_queue_req_init)
 LC_INIT_STRUCT_FUNC(lc_watch_handler, lc_watch_handler_init)
 LC_INIT_STRUCT_FUNC(lc_consumer, lc_consumer_init)
 LC_INIT_STRUCT_FUNC(lc_consumer_service_config, lc_consumer_service_config_init)
+LC_INIT_STRUCT_FUNC(lc_workflow_config, lc_workflow_config_init)
+void lc_dead_letter_export_opts_init(lc_dead_letter_export_opts *options) {
+  if (options == NULL)
+    return;
+  memset(options, 0, sizeof(*options));
+  options->format = LC_DEAD_LETTER_EXPORT_JSON;
+}
+LC_INIT_STRUCT_FUNC(lc_dead_letter_export_res, lc_dead_letter_export_res_init)
+LC_INIT_STRUCT_FUNC(lc_workflow_stats, lc_workflow_stats_init)
+LC_INIT_STRUCT_FUNC(lc_outbox_entry, lc_outbox_entry_init)
+LC_INIT_STRUCT_FUNC(lc_inbox_message, lc_inbox_message_init)
+LC_INIT_STRUCT_FUNC(lc_command_identity, lc_command_identity_init)
+LC_INIT_STRUCT_FUNC(lc_command_request, lc_command_request_init)
+LC_INIT_STRUCT_FUNC(lc_command_result, lc_command_result_init)
+LC_INIT_STRUCT_FUNC(lc_command_receipt, lc_command_receipt_init)
+LC_INIT_STRUCT_FUNC(lc_outbox_completion, lc_outbox_completion_init)
+LC_INIT_STRUCT_FUNC(lc_outbox_retry, lc_outbox_retry_init)
+LC_INIT_STRUCT_FUNC(lc_workflow_participant_request,
+                    lc_workflow_participant_request_init)
+LC_INIT_STRUCT_FUNC(lc_outbox_receipt, lc_outbox_receipt_init)
 LC_INIT_STRUCT_FUNC(lc_attachment_selector, lc_attachment_selector_init)
 LC_INIT_STRUCT_FUNC(lc_attach_req, lc_attach_req_init)
 LC_INIT_STRUCT_FUNC(lc_attach_op, lc_attach_op_init)
@@ -1724,6 +1991,39 @@ LC_INIT_STRUCT_FUNC(lc_attachment_delete_all_op,
                     lc_attachment_delete_all_op_init)
 
 #undef LC_INIT_STRUCT_FUNC
+
+void lc_outbox_receipt_cleanup(lc_outbox_receipt *receipt) {
+  if (receipt == NULL) {
+    return;
+  }
+  free(receipt->outbox_key);
+  free(receipt->effect_key);
+  memset(receipt, 0, sizeof(*receipt));
+}
+
+void lc_command_receipt_cleanup(lc_command_receipt *receipt) {
+  if (receipt == NULL) {
+    return;
+  }
+  free(receipt->command_id);
+  free(receipt->scope);
+  free(receipt->command_type);
+  free(receipt->idempotency_key);
+  free(receipt->operation_id);
+  free(receipt->result_code);
+  free(receipt->result_reference);
+  free(receipt->failure_code);
+  free(receipt->failure_message);
+  memset(receipt, 0, sizeof(*receipt));
+}
+
+void lc_workflow_stats_cleanup(lc_workflow_stats *stats) {
+  if (stats == NULL) {
+    return;
+  }
+  free(stats->last_error);
+  memset(stats, 0, sizeof(*stats));
+}
 
 const char *lc_nack_intent_to_string(lc_nack_intent intent) {
   switch (intent) {
@@ -2077,6 +2377,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->pub.describe = lc_client_describe_method;
   client->pub.get = lc_client_get_method;
   client->pub.load = lc_client_load_method;
+  client->pub.load_in_namespace = lc_client_load_in_namespace_method;
   client->pub.update = lc_client_update_method;
   client->pub.mutate = lc_client_mutate_method;
   client->pub.metadata = lc_client_metadata_method;
@@ -2119,6 +2420,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->pub.subscribe = lc_client_subscribe_method;
   client->pub.subscribe_with_state = lc_client_subscribe_with_state_method;
   client->pub.new_consumer_service = lc_client_new_consumer_service_method;
+  client->pub.new_workflow = lc_client_new_workflow_method;
   client->pub.watch_queue = lc_client_watch_queue_method;
   client->pub.close = lc_client_close_method;
   if (client->is_pouch) {
@@ -2127,6 +2429,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->pub.describe = lc_pouch_client_describe_method;
     client->pub.get = lc_pouch_client_get_method;
     client->pub.load = lc_pouch_client_load_method;
+    client->pub.load_in_namespace = lc_pouch_client_load_in_namespace;
     client->pub.update = lc_pouch_client_update_method;
     client->pub.mutate = lc_pouch_client_mutate_method;
     client->pub.metadata = lc_pouch_client_metadata_method;

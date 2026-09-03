@@ -72,6 +72,21 @@ LONEJSON_MAP_DEFINE(lc_engine_query_keys_response_map,
                     lc_engine_query_keys_response_json,
                     lc_engine_query_keys_response_fields);
 
+static int lc_engine_stream_cancel_requested(lc_engine_client *client) {
+  return client != NULL && client->cancel_check != NULL &&
+         client->cancel_check(client->cancel_context);
+}
+
+static int lc_engine_stream_progress(void *client_ptr, curl_off_t dltotal,
+                                     curl_off_t dlnow, curl_off_t ultotal,
+                                     curl_off_t ulnow) {
+  (void)dltotal;
+  (void)dlnow;
+  (void)ultotal;
+  (void)ulnow;
+  return lc_engine_stream_cancel_requested((lc_engine_client *)client_ptr);
+}
+
 static CURLcode lc_engine_stream_ssl_ctx(CURL *curl, void *ssl_ctx,
                                          void *userptr) {
   lc_engine_client *client;
@@ -491,6 +506,9 @@ lc_engine_stream_perform_query(lc_engine_client *client, const char *url,
                    lc_engine_stream_header_callback);
   curl_easy_setopt(curl, CURLOPT_HEADERDATA, state);
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+  curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+  curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, lc_engine_stream_progress);
+  curl_easy_setopt(curl, CURLOPT_XFERINFODATA, client);
   if (client->timeout_ms > 0L) {
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, client->timeout_ms);
   }
@@ -526,6 +544,10 @@ lc_engine_stream_perform_query(lc_engine_client *client, const char *url,
   if (curl_rc != CURLE_OK) {
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
+    if (curl_rc == CURLE_ABORTED_BY_CALLBACK &&
+        lc_engine_stream_cancel_requested(client)) {
+      return lc_engine_set_transport_error(state->error, "request cancelled");
+    }
     return lc_engine_set_transport_error(state->error,
                                          curl_easy_strerror(curl_rc));
   }

@@ -137,6 +137,15 @@ set_tests_properties(lc_unit_tmp_cleanup_orphan_owner_marker PROPERTIES
   LABELS "unit;local"
   TIMEOUT 15
 )
+add_test(NAME lc_unit_tmp_cleanup_partial_owner_marker
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "LOCKDC_TMP_CLEANUP_MODE=partial-owner-marker"
+    ${lc_unit_tmp_cleanup_probe_command}
+)
+set_tests_properties(lc_unit_tmp_cleanup_partial_owner_marker PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 15
+)
 add_test(NAME lc_unit_tmp_cleanup_unmarked_global_prefix
   COMMAND "${CMAKE_COMMAND}" -E env
     "LOCKDC_TMP_CLEANUP_MODE=unmarked-global-prefix"
@@ -148,8 +157,19 @@ set_tests_properties(lc_unit_tmp_cleanup_unmarked_global_prefix PROPERTIES
 )
 lc_add_unit_test(lc_unit_engine_allocator test_lc_engine_allocator.c)
 lc_add_unit_test(lc_unit_contracts test_lc_contracts.c mock_lc_public.c)
+lc_add_unit_test(lc_unit_xid_atfork test_lc_xid_atfork.c)
+target_link_options(lc_unit_xid_atfork PRIVATE
+  $<$<LINK_LANGUAGE:C>:-Wl,--wrap=pthread_atfork>
+)
 lc_add_unit_test(lc_unit_public_mock_usage test_lc_public_mock_usage.c mock_lc_public.c)
 lc_add_unit_test(lc_unit_consumer_service test_lc_consumer_service.c)
+lc_add_unit_test(lc_unit_workflow test_lc_workflow.c
+  ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
+target_compile_definitions(lc_unit_workflow PRIVATE LOCKDC_TEST_BUILD=1)
+# The workflow suite intentionally exercises durable expiry/recovery paths.
+# Its bounded waits can exceed the generic 60-second unit cap; use the
+# project-wide 120-second default rather than a 90-second near-boundary cutoff.
+set_tests_properties(lc_unit_workflow PROPERTIES TIMEOUT 120)
 target_link_options(lc_unit_consumer_service PRIVATE
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_client_open>
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_engine_client_subscribe>
@@ -222,8 +242,16 @@ lc_add_https_unit_test_case(
   LC_HTTPS_CASE_PUBLIC_CLIENT_OPEN_ACCEPTS_CHUNKED_CALLBACK_BUNDLE_SOURCE
 )
 lc_add_cross_runtime_https_unit_test_case(
+  lc_unit_transport_https_public_client_namespaced_load_rejects_empty_namespace
+  LC_HTTPS_CASE_PUBLIC_CLIENT_NAMESPACED_LOAD_REJECTS_EMPTY_NAMESPACE
+)
+lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_state_paths_use_mtls
   LC_HTTPS_CASE_STATE_PATHS_USE_MTLS
+)
+lc_add_https_unit_test_case(
+  lc_unit_transport_https_state_transport_honors_client_cancel
+  LC_HTTPS_CASE_STATE_TRANSPORT_HONORS_CLIENT_CANCEL
 )
 lc_add_cross_runtime_https_unit_test_case(
   lc_unit_transport_https_state_parses_buffered_typed_json_response

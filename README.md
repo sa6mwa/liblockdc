@@ -29,7 +29,13 @@ The library itself is delivered as:
 - mapped JSON state load/save through `lonejson`
 - streamed query-key callbacks and streaming queue subscribe/watch flows
 - managed consumer support with blocking and explicit start/stop/wait service modes
+- durable command-receipt, inbox, outbox, dispatcher, retry, reconciliation,
+  and dead-letter workflow receivers
 - integrated SDK logging through `libpslog`
+
+The transactional messaging model, endpoint constraints, and C receiver
+surface are specified in [the workflow design](docs/inbox-outbox.md). The Lua
+workflow facade is documented in [the Lua SDK guide](docs/lua.md).
 
 ## Pouch storage
 
@@ -47,16 +53,16 @@ acquire, update, release, queue, attachment, and query operations use the
 resident logstore fast path. Opening a second default writer for the same root
 fails instead of silently downgrading. Explicit shared-root writing remains
 available for callers that need multiple active local writers by adding
-`?single_writer=false` or `?pouch_single_writer=false`; that mode preserves
+`?single_writer=false`; that mode preserves
 correctness and process fencing but is not the primary performance target.
 
 Pouch endpoint options mirror the public C config and direct Pouch storage
 options. Common options are:
 
-- `compression=zlib` or `pouch_compression=zlib` for streaming at-rest zlib
+- `compression=zlib` for streaming at-rest zlib
   compression
-- `pouch_crypto_key_file=/path/to/pouch.key` with
-  `pouch_crypto_generate_key_file=true` for encrypted local roots
+- `crypto_key_file=/path/to/pouch.key` with
+  `crypto_generate_key_file=true` for encrypted local roots
 - `durable_sync=true` and `fsync_batch_max_ops=<u64>` for root-scoped durable
   group commit
 - `segment_target_bytes=<u64>` for rolling segment sizing
@@ -146,10 +152,17 @@ make test-all
 ```
 
 `make test-all` runs the sanitizer-instrumented debug suite, both
-host-executable Bootlin release suites, QEMU cross suites, Valgrind, fuzz
-smoke, deterministic local e2e, native benchmarks, and the Pouch-versus-disk
-performance parity gate. The complete artifact rehearsal remains
-`make release-matrix`.
+host-executable Bootlin release suites, QEMU cross suites, Valgrind, and
+deterministic local e2e. Its CTest suites use a bounded four-job default
+(`LOCKDC_CTEST_PARALLEL_LEVEL` overrides it), while tests marked serial remain
+serial. Fuzz smoke stays explicit (`make fuzz-smoke`) and in `make prerelease`:
+it runs AFL++ only for deterministic unit-level parsers, streams, and Pouch
+primitives, then runs the full Pouch LQL and lifecycle scenarios in isolated
+normal processes with deterministic input mutation. The AFL++ compiler
+bootstrap is hardening work, not an everyday functional invariant. Performance
+workloads likewise belong to the explicit
+`make bench-gate` command. The complete artifact rehearsal remains `make
+release-matrix`.
 
 `make prerelease-hardening` is the longer pre-release layer. It keeps the
 normal release gate bounded, then adds the finite multi-mode Pouch core churn
@@ -166,8 +179,13 @@ make test-e2e
 make test-debug
 make coverage
 make fuzz
+make pouch-integration-fuzz
 make benchmarks
 ```
+
+`make pouch-integration-fuzz` runs the production-code Pouch LQL and lifecycle
+mutation runners without AFL++ instrumentation. Each corpus seed and mutation
+executes in a fresh process; failures retain the reproducing input artifact.
 
 `make benchmarks` uses tuned per-case defaults; set `BENCH_ITERS=<n>` to force
 the same iteration count across all benchmark cases.
@@ -521,7 +539,8 @@ The examples in the repository at <https://github.com/sa6mwa/liblockdc/tree/main
 - `tests/e2e/`
   - e2e tests against the local `lockd` environment
 - `tests/fuzz/`
-  - fuzz harnesses
+  - AFL++ unit harnesses and isolated-process Pouch integration mutation
+    harnesses
 - `scripts/`
   - workflow and environment scripts
 - `devenv/`

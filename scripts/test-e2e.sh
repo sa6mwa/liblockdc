@@ -21,6 +21,7 @@ export LOCKDC_E2E_S3_BUNDLE=${LOCKDC_E2E_S3_BUNDLE:-$repo_root/devenv/volumes/lo
 export LOCKDC_E2E_MEM_SOCKET=${LOCKDC_E2E_MEM_SOCKET:-$repo_root/devenv/volumes/lockd-mem-run/lockd.sock}
 
 ctest_timeout=${LOCKDC_CTEST_TIMEOUT:-300}
+ctest_parallel_level=${LOCKDC_CTEST_PARALLEL_LEVEL:-4}
 
 # E2E links and loads against the configured lifecycle dependency roots only.
 unset LD_LIBRARY_PATH
@@ -162,8 +163,8 @@ wait_for_lockd_probe \
 
 if [ "$mode" = "examples" ]; then
   ctest --preset e2e --output-on-failure --progress --stop-on-failure \
-    --timeout "$ctest_timeout" -L examples
+    --timeout "$ctest_timeout" --parallel "$ctest_parallel_level" -L examples
 else
   ctest --preset e2e --output-on-failure --progress --stop-on-failure \
-    --timeout "$ctest_timeout"
+    --timeout "$ctest_timeout" --parallel "$ctest_parallel_level"
 fi

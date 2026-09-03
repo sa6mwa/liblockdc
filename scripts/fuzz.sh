@@ -58,5 +58,3 @@ run_fuzzer mutate_parse lc_fuzz_mutate_parse
 run_fuzzer mutate_apply lc_fuzz_mutate_apply
 run_fuzzer pouch_record_header lc_fuzz_pouch_record_header
 run_fuzzer pouch_index_primitives lc_fuzz_pouch_index_primitives
-run_fuzzer pouch_lql_plan lc_fuzz_pouch_lql_plan
-run_fuzzer pouch_lifecycle lc_fuzz_pouch_lifecycle

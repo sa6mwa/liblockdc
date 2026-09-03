@@ -61,7 +61,9 @@ cmake_dependent_option(LOCKDC_BUILD_E2E_TESTS
     OFF
 )
 option(LOCKDC_BUILD_BENCHMARKS "Build local benchmark targets." ON)
-option(LOCKDC_BUILD_FUZZERS "Build AFL++ targets for parser and stream hardening." OFF)
+option(LOCKDC_BUILD_FUZZERS "Build AFL++ deterministic unit fuzz targets." OFF)
+option(LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS
+    "Build production-code Pouch integration mutation targets." OFF)
 option(LOCKDC_ENABLE_COVERAGE "Build test targets with gcov coverage instrumentation." OFF)
 option(LOCKDC_INSTALL "Enable install rules." ON)
 
@@ -77,7 +79,7 @@ set(LOCKDC_LIBLQL_ABI_VERSION "0" CACHE STRING "Pinned liblql shared-library ABI
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
 set(LOCKDC_PSLOG_VERSION "0.9.0" CACHE STRING "Pinned libpslog release used for SDK logging." FORCE)
 set(LOCKDC_CPKT_VERSION "0.9.0" CACHE STRING "Pinned c.pkt.systems dependency bundle version." FORCE)
-set(LOCKDC_MIN_ABI_VERSION "2")
+set(LOCKDC_MIN_ABI_VERSION "3")
 set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc.")
 if(LOCKDC_ABI_VERSION MATCHES "^[0-9]+$" AND LOCKDC_ABI_VERSION LESS LOCKDC_MIN_ABI_VERSION)
     set(LOCKDC_ABI_VERSION "${LOCKDC_MIN_ABI_VERSION}" CACHE STRING "Shared-library ABI/SOVERSION for liblockdc." FORCE)
@@ -288,12 +290,6 @@ function(lc_enable_coverage_if_requested target)
     endif()
 endfunction()
 
-function(lc_enable_fuzz_instrumentation_if_requested target)
-    if(LOCKDC_BUILD_FUZZERS)
-        target_compile_definitions(${target} PRIVATE FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1)
-    endif()
-endfunction()
-
 function(lc_assert_fuzz_toolchain_supported)
     if(NOT DEFINED LOCKDC_AFLPP_ROOT OR LOCKDC_AFLPP_ROOT STREQUAL "")
         message(FATAL_ERROR "LOCKDC_BUILD_FUZZERS=ON requires the pinned AFL++ lifecycle toolchain")
@@ -388,10 +384,12 @@ set(lc_sources
     src/lc_pouch_state.c
     src/lc_queue_api.c
     src/lc_queue_stream_api.c
+    src/lc_workflow.c
     src/lc_log.c
     src/lc_state_api.c
     src/lc_streaming.c
     src/lc_transport.c
+    src/lc_xid.c
 )
 
 set(LOCKDC_PSLOG_STATIC_INCLUDE_DIR "${LOCKDC_EXTERNAL_ROOT}/pslog/install/include")
@@ -475,7 +473,6 @@ function(lc_configure_library_target target)
     target_link_libraries(${target} PUBLIC ${LOCKDC_SYSTEM_LIBRARIES})
     lc_configure_c_target(${target})
     lc_enable_coverage_if_requested(${target})
-    lc_enable_fuzz_instrumentation_if_requested(${target})
 endfunction()
 
 function(lc_add_release_privacy_scan target)
@@ -757,7 +754,8 @@ if(LOCKDC_BUILD_BENCHMARKS)
     add_subdirectory(bench)
 endif()
 
-if(LOCKDC_BUILD_TESTS OR LOCKDC_BUILD_FUZZERS)
+if(LOCKDC_BUILD_TESTS OR LOCKDC_BUILD_FUZZERS OR
+   LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)
     enable_testing()
 endif()
 
@@ -1097,6 +1095,9 @@ endif()
 
 if(LOCKDC_BUILD_FUZZERS)
     lc_assert_fuzz_toolchain_supported()
+endif()
+
+if(LOCKDC_BUILD_FUZZERS OR LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)
     add_subdirectory(tests/fuzz)
     lc_apply_default_test_timeouts()
 endif()
