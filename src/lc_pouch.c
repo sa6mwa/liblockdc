@@ -127,6 +127,7 @@ static lc_pouch_fsync_batcher *lc_pouch_fsync_batchers;
 
 #ifdef LOCKDC_TEST_BUILD
 long lc_pouch_test_fsync_batch_delay_ns;
+int (*lc_pouch_test_sync_fd)(int fd);
 #endif
 
 static int lc_pouch_mutex_init_recursive(pthread_mutex_t *mutex) {
@@ -146,6 +147,11 @@ static int lc_pouch_mutex_init_recursive(pthread_mutex_t *mutex) {
 }
 
 static int lc_pouch_sync_fd(int fd) {
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_pouch_test_sync_fd != NULL) {
+    return lc_pouch_test_sync_fd(fd);
+  }
+#endif
 #ifdef __linux__
   return fdatasync(fd);
 #else
@@ -461,7 +467,7 @@ static void *lc_pouch_fsync_worker(void *arg) {
   }
 }
 
-static int lc_pouch_fsync_batcher_init(lc_pouch *pouch, lc_error *error) {
+int lc_pouch_fsync_batcher_init(lc_pouch *pouch, lc_error *error) {
   struct stat st;
   lc_pouch_fsync_batcher *batcher;
   lc_pouch_fsync_batcher *created;
@@ -556,7 +562,7 @@ static int lc_pouch_fsync_batcher_init(lc_pouch *pouch, lc_error *error) {
   return LC_OK;
 }
 
-static void lc_pouch_fsync_batcher_close(lc_pouch *pouch) {
+void lc_pouch_fsync_batcher_close(lc_pouch *pouch) {
   lc_pouch_fsync_batcher *batcher;
   lc_pouch_fsync_batcher **cursor;
 
@@ -3350,6 +3356,11 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     }
   }
   rc = lc_pouch_state_metadata_append_worker_init(pouch, error);
+  if (rc != LC_OK) {
+    lc_pouch_close(pouch);
+    return rc;
+  }
+  rc = lc_pouch_control_migration_run(pouch, error);
   if (rc != LC_OK) {
     lc_pouch_close(pouch);
     return rc;

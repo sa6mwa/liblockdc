@@ -165,12 +165,13 @@ workloads likewise belong to the explicit
 release-matrix`.
 
 `make prerelease-hardening` is the longer pre-release layer. It keeps the
-normal release gate bounded, then adds the finite multi-mode Pouch core churn
-soak, reclaim proof, shared-root contention coverage, full fuzzing, and the
-release matrix. The Pouch comparison gates every core storage invariant
-separately: acquire, update and stale-precondition rejection, release, public
-and leased reads, attachment write/read, queue delivery, all index-publication
-phases, indexed/scan/full-text queries, and restart recovery.
+normal release gate bounded, then adds native benchmarks, the Pouch-vs-lockd
+performance thresholds, the finite multi-mode Pouch core churn soak, reclaim
+proof, shared-root contention coverage, full fuzzing, and the release matrix.
+The Pouch-vs-lockd performance comparison measures every core storage
+operation separately: acquire, update and stale-precondition rejection,
+release, public and leased reads, attachment write/read, queue delivery, all
+index-publication phases, indexed/scan/full-text queries, and restart recovery.
 
 Run focused verification layers:
 

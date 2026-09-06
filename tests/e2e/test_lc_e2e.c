@@ -514,6 +514,91 @@ static void cleanup_all_pouch_roots(void) {
                             POUCH_E2E_TMP_PREFIX);
 }
 
+static void pouch_e2e_legacy_append_u16(unsigned char *bytes, size_t *offset,
+                                        size_t capacity, size_t value) {
+  assert_true(value <= 65535U);
+  assert_true(*offset <= capacity - 2U);
+  bytes[(*offset)++] = (unsigned char)(value & 0xffU);
+  bytes[(*offset)++] = (unsigned char)((value >> 8U) & 0xffU);
+}
+
+static void pouch_e2e_legacy_append_i64(unsigned char *bytes, size_t *offset,
+                                        size_t capacity, int64_t value) {
+  uint64_t raw;
+  size_t i;
+
+  assert_true(*offset <= capacity - 8U);
+  raw = (uint64_t)value;
+  for (i = 0U; i < 8U; ++i) {
+    bytes[(*offset)++] = (unsigned char)((raw >> (i * 8U)) & 0xffU);
+  }
+}
+
+static void pouch_e2e_legacy_append_string(unsigned char *bytes, size_t *offset,
+                                           size_t capacity, const char *value) {
+  size_t length;
+
+  length = strlen(value);
+  pouch_e2e_legacy_append_u16(bytes, offset, capacity, length);
+  assert_true(*offset <= capacity - length);
+  memcpy(bytes + *offset, value, length);
+  *offset += length;
+}
+
+static void pouch_e2e_write_legacy_lease(lc_pouch *pouch, const char *key,
+                                         int extended, lc_error *error) {
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result result;
+  unsigned char metadata[512];
+  lc_source *source;
+  size_t offset;
+  int rc;
+
+  memset(&options, 0, sizeof(options));
+  memset(&result, 0, sizeof(result));
+  memset(metadata, 0, sizeof(metadata));
+  source = NULL;
+  offset = 0U;
+  memcpy(metadata + offset, "LPL1", 4U);
+  offset += 4U;
+  pouch_e2e_legacy_append_string(metadata, &offset, sizeof(metadata),
+                                 "default");
+  pouch_e2e_legacy_append_string(metadata, &offset, sizeof(metadata), key);
+  pouch_e2e_legacy_append_string(metadata, &offset, sizeof(metadata),
+                                 "legacy-owner");
+  pouch_e2e_legacy_append_string(metadata, &offset, sizeof(metadata),
+                                 "legacy-lease");
+  pouch_e2e_legacy_append_string(metadata, &offset, sizeof(metadata), "");
+  pouch_e2e_legacy_append_i64(metadata, &offset, sizeof(metadata), 4L);
+  pouch_e2e_legacy_append_i64(metadata, &offset, sizeof(metadata),
+                              extended ? (lc_i64)time(NULL) + 300L : 0L);
+  if (extended) {
+    pouch_e2e_legacy_append_i64(metadata, &offset, sizeof(metadata), 37L);
+    metadata[offset++] = 1U;
+  }
+  options.content_type = "application/x-lockdc-pouch-lease";
+  options.has_metadata = 1;
+  options.metadata = metadata;
+  options.metadata_length = offset;
+  rc = lc_source_from_memory("{}", 2U, &source, error);
+  assert_lc_ok(rc, error);
+  rc = lc_pouch_state_write(pouch, "default", key, source, &options, &result,
+                            error);
+  lc_source_close(source);
+  assert_lc_ok(rc, error);
+  lc_pouch_state_write_result_cleanup(NULL, &result);
+}
+
+static void pouch_e2e_remove_control_migration_marker(const char *root) {
+  char path[1024];
+  int written;
+
+  written =
+      snprintf(path, sizeof(path), "%s/.lockdc-control-migration-v1", root);
+  assert_true(written > 0 && (size_t)written < sizeof(path));
+  assert_int_equal(unlink(path), 0);
+}
+
 static void pouch_e2e_write_text_file(const char *path, const char *text) {
   FILE *fp;
 
@@ -3886,6 +3971,69 @@ static void test_s3_dequeue_with_state_roundtrip(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_pouch_direct_migrates_legacy_lease_before_client_open(void **state) {
+  lc_pouch *pouch;
+  lc_client *client;
+  lc_lease *lease;
+  lc_pouch_open_options options;
+  lc_acquire_req request;
+  lc_keepalive_op keepalive;
+  lc_keepalive_res kept;
+  lc_error error;
+  char root[512];
+  char endpoint[1024];
+  static const char crypto_key[] =
+      "lc-pouch-key-v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  client = NULL;
+  lease = NULL;
+  memset(&options, 0, sizeof(options));
+  lc_acquire_req_init(&request);
+  lc_keepalive_op_init(&keepalive);
+  memset(&kept, 0, sizeof(kept));
+  lc_error_init(&error);
+  make_pouch_root("legacy-control", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  options.crypto_key = crypto_key;
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_lc_ok(rc, &error);
+  pouch_e2e_write_legacy_lease(pouch, "state/legacy-control", 0, &error);
+  pouch_e2e_write_legacy_lease(pouch, "state/extended-legacy-control", 1,
+                               &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  pouch_e2e_remove_control_migration_marker(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s?crypto_key=%s",
+                       root, crypto_key) > 0);
+
+  open_pouch_client(endpoint, &client, &error);
+  request.key = "state/legacy-control";
+  request.owner = "pouch-e2e-migration";
+  request.ttl_seconds = 30L;
+  rc = client->acquire(client, &request, &lease, &error);
+  assert_lc_ok(rc, &error);
+  assert_non_null(lease);
+
+  keepalive.lease.namespace_name = "default";
+  keepalive.lease.key = "state/extended-legacy-control";
+  keepalive.lease.lease_id = "legacy-lease";
+  keepalive.lease.fencing_token = 4L;
+  keepalive.ttl_seconds = 30L;
+  rc = client->keepalive(client, &keepalive, &kept, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(kept.version, 37L);
+  lc_keepalive_res_cleanup(&kept);
+
+  lc_lease_close(lease);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_direct_state_attachment_reopen_roundtrip(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -5069,6 +5217,8 @@ int main(void) {
 #elif defined(LC_E2E_GROUP_POUCH_DIRECT)
 int main(void) {
   const struct CMUnitTest tests[] = {
+      cmocka_unit_test(
+          test_pouch_direct_migrates_legacy_lease_before_client_open),
       cmocka_unit_test(test_pouch_direct_state_attachment_reopen_roundtrip),
       cmocka_unit_test(
           test_pouch_direct_lifecycle_maintenance_reopen_roundtrip),

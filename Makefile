@@ -221,10 +221,10 @@ help:
 		'make pouch-integration-fuzz Run production-code Pouch integration mutation fuzzing (FUZZ_TIME=$(FUZZ_TIME)).' \
 		'make bench              Standard short name for benchmarks.' \
 		'make benchmarks         Build the shipped x86_64-linux-gnu release preset and run the local benchmark matrix (BENCH_ITERS=$(BENCH_ITERS)).' \
-		'make bench-check        Run native benchmarks and enforce Pouch-vs-disk parity.' \
-		'make bench-gate         Run native benchmarks and enforce Pouch-vs-disk parity.' \
+		'make bench-check        Run native benchmarks and enforce Pouch-vs-lockd performance thresholds.' \
+		'make bench-gate         Run native benchmarks and enforce Pouch-vs-lockd performance thresholds.' \
 		'make benchmarks-go      Run Go parity benchmarks through the standard lifecycle name.' \
-		'make perf-gate          Enforce Pouch-vs-disk core-operation parity for default and strict-durable I/O.' \
+		'make perf-gate          Enforce Pouch-vs-lockd core-operation performance thresholds for default and strict-durable I/O.' \
 		'make benchmark-pouch-perf Prepare native artifacts, then run one sub-minute pouch perf case (POUCH_PERF_CASE=$(POUCH_PERF_CASE), POUCH_PERF_ROWS=$(POUCH_PERF_ROWS), POUCH_PERF_CRYPTO=$(POUCH_PERF_CRYPTO)).' \
 		'make benchmark-workflow-pouch Run the large-outbox indexed-reconciliation benchmark against a fresh, un-compacted Pouch root.' \
 		'make benchmark-workflow-hardening Run persisted-index, compacted, and shared-writer Pouch workflow reconciliation hardening cases serially.' \
@@ -265,7 +265,7 @@ help:
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
 		'make prerelease         Run deterministic pre-release confidence without an initial clean.' \
 		'make prerelease-live    Refuse without LOCKDC_PRERELEASE_LIVE=1; no live-provider checks are currently defined.' \
-		'make prerelease-hardening  Run prerelease, Pouch workflow hardening, full fuzzing, and the release matrix.' \
+		'make prerelease-hardening  Run prerelease, performance gates, Pouch workflow hardening, full fuzzing, and the release matrix.' \
 		'make lifecycle-version-contract  Verify exact release tag semantics before clean release work.' \
 		'make print-release-version  Print the release version resolved by the Make-owned release surface.' \
 		'make release            Run the clean-slate final release workflow: version contract, clean, then the shared release proof graph.' \
@@ -955,7 +955,6 @@ __prerelease-ordinary:
 	$(TIMED) 'prerelease valgrind' $(MAKE_RECURSE) __valgrind
 	$(TIMED) 'prerelease fuzz-smoke' $(MAKE_RECURSE) __fuzz-smoke
 	$(TIMED) 'prerelease e2e' $(MAKE_RECURSE) __test-e2e
-	$(TIMED) 'prerelease bench-gate' $(MAKE_RECURSE) __bench-gate
 
 __prerelease: __prerelease-ordinary
 
@@ -981,7 +980,7 @@ __prerelease-live:
 prerelease-hardening:
 	$(TIMED) prerelease-hardening $(MAKE_RECURSE) __prerelease-hardening
 
-__prerelease-hardening: __prerelease __pouch-core-hardening __benchmark-workflow-hardening __fuzz __release-matrix
+__prerelease-hardening: __prerelease __bench-gate __pouch-core-hardening __benchmark-workflow-hardening __fuzz __release-matrix
 
 lifecycle-version-contract:
 	$(TIMED) lifecycle-version-contract $(MAKE_RECURSE) __lifecycle-version-contract

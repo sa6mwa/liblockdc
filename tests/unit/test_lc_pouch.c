@@ -1369,6 +1369,16 @@ static void cleanup_root(const char *root) {
   }
 }
 
+static void test_remove_control_migration_marker(const char *root) {
+  char path[1024];
+  int written;
+
+  written =
+      snprintf(path, sizeof(path), "%s/.lockdc-control-migration-v1", root);
+  assert_true(written > 0 && (size_t)written < sizeof(path));
+  assert_int_equal(unlink(path), 0);
+}
+
 static void cleanup_all_roots(void) {
   lc_test_tmp_cleanup_stale("/tmp", "liblockdc-unit-pouch-",
                             POUCH_UNIT_TMP_PREFIX);
@@ -4059,10 +4069,57 @@ static void test_write_binary_txn_record_voting(
   test_binary_buffer_cleanup(&buffer);
 }
 
-static void test_write_binary_lease_record(lc_pouch *pouch, const char *key,
-                                           lc_i64 fencing_token,
-                                           int current_layout,
-                                           lc_error *error) {
+static void test_write_binary_txn_record_layout_with_participants(
+    lc_pouch *pouch, const char *key, const char magic[4], const char *state,
+    int has_votes, unsigned char vote, size_t participant_count,
+    lc_error *error) {
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  test_binary_buffer buffer;
+  lc_source *source;
+  size_t i;
+  int rc;
+
+  memset(&buffer, 0, sizeof(buffer));
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  source = NULL;
+  test_binary_buffer_append(&buffer, magic, 4U);
+  test_binary_buffer_string(&buffer, state);
+  test_binary_buffer_i64(&buffer, 0L);
+  test_binary_buffer_u64(&buffer, 0U);
+  test_binary_buffer_string(&buffer, "");
+  test_binary_buffer_u64(&buffer, (uint64_t)participant_count);
+  for (i = 0U; i < participant_count; ++i) {
+    test_binary_buffer_string(&buffer, "migration");
+    test_binary_buffer_string(&buffer, "state/migration");
+    test_binary_buffer_string(&buffer, "");
+    if (has_votes) {
+      test_binary_buffer_append(&buffer, &vote, sizeof(vote));
+    }
+  }
+  options.content_type = "application/x-lockdc-pouch-txn";
+  options.object_record = 1;
+  rc = lc_source_from_memory(buffer.bytes, buffer.length, &source, error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, ".txns", key, source, &options,
+                            &write_result, error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  test_binary_buffer_cleanup(&buffer);
+}
+
+static void test_write_binary_txn_record_layout(
+    lc_pouch *pouch, const char *key, const char magic[4], const char *state,
+    int has_votes, unsigned char vote, lc_error *error) {
+  test_write_binary_txn_record_layout_with_participants(
+      pouch, key, magic, state, has_votes, vote, 1U, error);
+}
+
+static void test_write_binary_lease_record_with_expiry(
+    lc_pouch *pouch, const char *key, lc_i64 fencing_token,
+    lc_i64 lease_expires_at_unix, int current_layout, lc_error *error) {
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result write_result;
   test_binary_buffer buffer;
@@ -4080,7 +4137,7 @@ static void test_write_binary_lease_record(lc_pouch *pouch, const char *key,
   test_binary_buffer_string(&buffer, "prior-lease");
   test_binary_buffer_string(&buffer, "");
   test_binary_buffer_i64(&buffer, fencing_token);
-  test_binary_buffer_i64(&buffer, 0L);
+  test_binary_buffer_i64(&buffer, lease_expires_at_unix);
   if (current_layout) {
     unsigned char txn_explicit;
 
@@ -4100,6 +4157,38 @@ static void test_write_binary_lease_record(lc_pouch *pouch, const char *key,
   lc_source_close(source);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   test_binary_buffer_cleanup(&buffer);
+}
+
+static void test_write_binary_lease_record(lc_pouch *pouch, const char *key,
+                                           lc_i64 fencing_token,
+                                           int current_layout,
+                                           lc_error *error) {
+  test_write_binary_lease_record_with_expiry(pouch, key, fencing_token, 0L,
+                                             current_layout, error);
+}
+
+static void test_write_malformed_binary_lease_record(lc_pouch *pouch,
+                                                     const char *key,
+                                                     lc_error *error) {
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result write_result;
+  lc_source *source;
+  int rc;
+
+  memset(&options, 0, sizeof(options));
+  memset(&write_result, 0, sizeof(write_result));
+  source = NULL;
+  options.content_type = "application/x-lockdc-pouch-lease";
+  options.has_metadata = 1;
+  options.metadata = (const unsigned char *)"LPL1";
+  options.metadata_length = 4U;
+  rc = lc_source_from_memory("{}", 2U, &source, error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "default", key, source, &options,
+                            &write_result, error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(source);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
 }
 
 static void assert_file_contains(const char *path, const char *needle) {
@@ -24872,7 +24961,211 @@ static void test_pouch_fencing_tokens_do_not_wrap_or_narrow(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_pouch_rejects_previous_lease_record_layout(void **state) {
+static int migration_sync_calls;
+static int migration_sync_fail;
+
+static int test_migration_sync_fd(int fd) {
+  ++migration_sync_calls;
+  if (migration_sync_fail) {
+    errno = EIO;
+    return -1;
+  }
+  return fsync(fd);
+}
+
+static void test_pouch_migration_requires_durable_completion(void **state) {
+  lc_pouch *pouch = NULL;
+  lc_error error;
+  char root[512];
+  char marker[1024];
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  make_root("migration-durable-completion", root, sizeof(root));
+  cleanup_root(root);
+  assert_int_equal(lc_pouch_open(root, NULL, NULL, &pouch, &error), LC_OK);
+  /* A single transaction must be synced on retry even when its failed append
+   * is already visible as LPT3. A second legacy write would mask this bug. */
+  test_write_binary_txn_record_layout(pouch, "txn", "LPT1", "prepare", 0, 0U,
+                                      &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  test_remove_control_migration_marker(root);
+  snprintf(marker, sizeof(marker), "%s/.lockdc-control-migration-v1", root);
+  migration_sync_calls = 0;
+  migration_sync_fail = 1;
+  lc_pouch_test_sync_fd = test_migration_sync_fd;
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  lc_pouch_test_sync_fd = NULL;
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_null(pouch);
+  assert_true(migration_sync_calls > 0);
+  assert_false(path_is_file(marker));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  migration_sync_calls = 0;
+  lc_pouch_test_sync_fd = test_migration_sync_fd;
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  lc_pouch_test_sync_fd = NULL;
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_null(pouch);
+  assert_true(migration_sync_calls > 0);
+  assert_false(path_is_file(marker));
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  migration_sync_calls = 0;
+  migration_sync_fail = 0;
+  lc_pouch_test_sync_fd = test_migration_sync_fd;
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  lc_pouch_test_sync_fd = NULL;
+  assert_int_equal(rc, LC_OK);
+  assert_true(migration_sync_calls > 0);
+  assert_false(pouch->durable_sync);
+  assert_null(pouch->fsync_batcher);
+  assert_true(path_is_file(marker));
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  migration_sync_calls = 0;
+  migration_sync_fail = 1;
+  lc_pouch_test_sync_fd = test_migration_sync_fd;
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  lc_pouch_test_sync_fd = NULL;
+  migration_sync_fail = 0;
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(migration_sync_calls, 0);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_migration_retries_incomplete_scan(void **state) {
+  lc_pouch *pouch = NULL;
+  lc_pouch_state_read_result result;
+  lc_error error;
+  char root[512];
+  char marker[1024];
+  char segment[1024];
+  int attempt;
+
+  (void)state;
+  memset(&result, 0, sizeof(result));
+  lc_error_init(&error);
+  make_root("migration-incomplete-scan", root, sizeof(root));
+  cleanup_root(root);
+  assert_int_equal(lc_pouch_open(root, NULL, NULL, &pouch, &error), LC_OK);
+  test_write_binary_lease_record(pouch, "legacy", 1L, 0, &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  test_remove_control_migration_marker(root);
+  snprintf(marker, sizeof(marker), "%s/.lockdc-control-migration-v1", root);
+  pouch_state_segment_path(root, "default", 1UL, segment, sizeof(segment));
+  flip_file_byte(segment, 0L);
+  for (attempt = 0; attempt < 2; ++attempt) {
+    assert_int_equal(lc_pouch_open(root, NULL, NULL, &pouch, &error), LC_OK);
+    assert_false(path_is_file(marker));
+    lc_pouch_close(pouch);
+    pouch = NULL;
+  }
+  flip_file_byte(segment, 0L);
+  assert_int_equal(lc_pouch_open(root, NULL, NULL, &pouch, &error), LC_OK);
+  assert_true(path_is_file(marker));
+  assert_int_equal(
+      lc_pouch_state_read(pouch, "default", "legacy", &result, &error), LC_OK);
+  assert_true(result.metadata_length >= 4U);
+  assert_memory_equal(result.metadata, "LPL2", 4U);
+  lc_pouch_state_read_result_cleanup(NULL, &result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_migration_rejects_truncated_numbers(void **state) {
+  lc_pouch *pouch = NULL;
+  lc_error error;
+  char root[512];
+  int layout;
+  size_t field;
+  size_t partial;
+
+  (void)state;
+  lc_error_init(&error);
+  make_root("migration-truncated-numbers", root, sizeof(root));
+  for (layout = 0; layout < 3; ++layout) {
+    for (field = 0; field < (layout == 0 ? 2U : 3U); ++field) {
+      for (partial = 0; partial < 8U; ++partial) {
+        test_binary_buffer buffer;
+        lc_pouch_state_write_options options;
+        lc_pouch_state_write_result result;
+        lc_source *source = NULL;
+        size_t offsets[3];
+        memset(&buffer, 0, sizeof(buffer));
+        memset(&options, 0, sizeof(options));
+        memset(&result, 0, sizeof(result));
+        cleanup_root(root);
+        assert_int_equal(lc_pouch_open(root, NULL, NULL, &pouch, &error),
+                         LC_OK);
+        test_binary_buffer_append(&buffer,
+                                  layout == 0   ? "LPL1"
+                                  : layout == 1 ? "LPT1"
+                                                : "LPT2",
+                                  4U);
+        if (layout == 0) {
+          test_binary_buffer_string(&buffer, "default");
+          test_binary_buffer_string(&buffer, "legacy");
+          test_binary_buffer_string(&buffer, "owner");
+          test_binary_buffer_string(&buffer, "lease");
+          test_binary_buffer_string(&buffer, "");
+        } else {
+          test_binary_buffer_string(&buffer, "prepare");
+        }
+        offsets[0] = buffer.length;
+        test_binary_buffer_u64(&buffer, 1U);
+        offsets[1] = buffer.length;
+        test_binary_buffer_u64(&buffer, 0U);
+        if (layout != 0) {
+          test_binary_buffer_string(&buffer, "");
+          offsets[2] = buffer.length;
+          test_binary_buffer_u64(&buffer, 0U);
+        }
+        buffer.length = offsets[field] + partial;
+        if (layout == 0) {
+          options.has_metadata = 1;
+          options.metadata = buffer.bytes;
+          options.metadata_length = buffer.length;
+          assert_int_equal(lc_source_from_memory("{}", 2U, &source, &error),
+                           LC_OK);
+        } else {
+          options.object_record = 1;
+          assert_int_equal(lc_source_from_memory(buffer.bytes, buffer.length,
+                                                 &source, &error),
+                           LC_OK);
+        }
+        assert_int_equal(
+            lc_pouch_state_write(pouch, layout == 0 ? "default" : ".txns",
+                                 "legacy", source, &options, &result, &error),
+            LC_OK);
+        lc_source_close(source);
+        lc_pouch_state_write_result_cleanup(NULL, &result);
+        test_binary_buffer_cleanup(&buffer);
+        lc_pouch_close(pouch);
+        pouch = NULL;
+        test_remove_control_migration_marker(root);
+        assert_int_equal(lc_pouch_open(root, NULL, NULL, &pouch, &error),
+                         LC_ERR_INVALID);
+        assert_null(pouch);
+        assert_string_equal(error.message,
+                            "pouch control migration record is truncated");
+        lc_error_cleanup(&error);
+        lc_error_init(&error);
+      }
+    }
+  }
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_migrates_previous_lease_record_layout(void **state) {
   lc_pouch *pouch;
   lc_client *client;
   lc_lease *lease;
@@ -24894,21 +25187,452 @@ static void test_pouch_rejects_previous_lease_record_layout(void **state) {
 
   rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
   assert_int_equal(rc, LC_OK);
-  /* This is the former, shorter LPL1 layout. Pouch v0 deliberately does not
-   * migrate or infer its transaction semantics. */
+  /* LPL1 is the durable v0.13 lease layout. Opening migrates it before a
+   * client can enter its current-layout-only control paths. */
   test_write_binary_lease_record(pouch, key, 1L, 0, &error);
   lc_pouch_close(pouch);
   pouch = NULL;
+  test_remove_control_migration_marker(root);
 
   open_pouch_client(root, &client, &error);
   acquire_req.key = key;
   acquire_req.owner = "previous-lease-layout-owner";
   acquire_req.ttl_seconds = 30L;
   rc = client->acquire(client, &acquire_req, &lease, &error);
-  assert_int_equal(rc, LC_ERR_INVALID);
-  assert_null(lease);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(lease);
 
+  lc_lease_close(lease);
   lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_pouch_migrates_legacy_active_lease_state_version(void **state) {
+  lc_pouch *pouch;
+  lc_client *client;
+  lc_keepalive_op keepalive_op;
+  lc_keepalive_res keepalive_res;
+  lc_error error;
+  char root[512];
+  char key[96];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  client = NULL;
+  memset(&keepalive_res, 0, sizeof(keepalive_res));
+  lc_keepalive_op_init(&keepalive_op);
+  lc_error_init(&error);
+  make_root("legacy-lease-state-version", root, sizeof(root));
+  cleanup_root(root);
+  snprintf(key, sizeof(key), "state/legacy-lease-state-version/%ld",
+           (long)getpid());
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  test_write_binary_lease_record_with_expiry(
+      pouch, key, 7L, (lc_i64)time(NULL) + 30L, 0, &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  test_remove_control_migration_marker(root);
+
+  open_pouch_client(root, &client, &error);
+  keepalive_op.lease.namespace_name = "default";
+  keepalive_op.lease.key = key;
+  keepalive_op.lease.lease_id = "prior-lease";
+  keepalive_op.lease.fencing_token = 7L;
+  keepalive_op.ttl_seconds = 30L;
+  rc = client->keepalive(client, &keepalive_op, &keepalive_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(keepalive_res.version, 1L);
+
+  lc_keepalive_res_cleanup(&keepalive_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_pouch_migration_rejects_malformed_legacy_control_record(void **state) {
+  lc_pouch *pouch;
+  lc_error error;
+  char root[512];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  lc_error_init(&error);
+  make_root("malformed-legacy-control-migration", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  test_write_malformed_binary_lease_record(pouch, "state/malformed-legacy",
+                                           &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  test_remove_control_migration_marker(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(pouch);
+  assert_string_equal(error.message,
+                      "pouch control migration record is truncated");
+
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_migrates_extended_legacy_lease_layout(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_state_write_options options;
+  lc_pouch_state_write_result written;
+  lc_pouch_state_read_result result;
+  lc_source *source;
+  lc_error error;
+  test_binary_buffer buffer;
+  unsigned char tail[10];
+  uint64_t version;
+  size_t tail_length;
+  size_t i;
+  int fixture;
+  int reopen;
+  int valid;
+  int rc;
+  char root[512];
+
+  (void)state;
+  /* Six valid version/flag combinations, every partial tail, excess bytes,
+   * and both small and large invalid flag values. */
+  for (fixture = 0; fixture < 17; ++fixture) {
+    lc_error_init(&error);
+    memset(&options, 0, sizeof(options));
+    memset(&written, 0, sizeof(written));
+    memset(&buffer, 0, sizeof(buffer));
+    memset(tail, 0, sizeof(tail));
+    pouch = NULL;
+    source = NULL;
+    valid = fixture < 6;
+    version = fixture < 2
+                  ? 0U
+                  : (fixture < 4 ? (UINT64_C(1) << 32) + 7U : UINT64_MAX);
+    for (i = 0U; i < 8U; ++i) {
+      tail[i] = (unsigned char)(version >> (i * 8U));
+    }
+    tail[8] = (unsigned char)(fixture % 2);
+    tail_length = 9U;
+    if (fixture >= 6 && fixture < 14) {
+      tail_length = (size_t)(fixture - 5);
+    } else if (fixture == 14) {
+      tail_length = 10U;
+    } else if (fixture >= 15) {
+      tail[8] = fixture == 15 ? 2U : 255U;
+    }
+    make_root("extended-legacy-lease", root, sizeof(root));
+    cleanup_root(root);
+    assert_int_equal(lc_pouch_open(root, NULL, NULL, &pouch, &error), LC_OK);
+    test_binary_buffer_append(&buffer, "LPL1", 4U);
+    test_binary_buffer_string(&buffer, "default");
+    test_binary_buffer_string(&buffer, "state/extended");
+    test_binary_buffer_string(&buffer, "prior-owner");
+    test_binary_buffer_string(&buffer, "prior-lease");
+    test_binary_buffer_string(&buffer, "");
+    test_binary_buffer_i64(&buffer, 7L);
+    test_binary_buffer_i64(&buffer, (lc_i64)time(NULL) + 300L);
+    test_binary_buffer_append(&buffer, tail, tail_length);
+    options.content_type = "application/x-lockdc-pouch-lease";
+    options.has_metadata = 1;
+    options.metadata = buffer.bytes;
+    options.metadata_length = buffer.length;
+    assert_int_equal(lc_source_from_memory("{}", 2U, &source, &error), LC_OK);
+    assert_int_equal(lc_pouch_state_write(pouch, "default", "state/extended",
+                                          source, &options, &written, &error),
+                     LC_OK);
+    lc_source_close(source);
+    lc_pouch_state_write_result_cleanup(NULL, &written);
+    lc_pouch_close(pouch);
+    pouch = NULL;
+    test_remove_control_migration_marker(root);
+    for (reopen = 0; reopen < 2; ++reopen) {
+      rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+      if (valid) {
+        assert_int_equal(rc, LC_OK);
+        memset(&result, 0, sizeof(result));
+        assert_int_equal(lc_pouch_state_read(pouch, "default", "state/extended",
+                                             &result, &error),
+                         LC_OK);
+        assert_true(result.found);
+        assert_int_equal(result.metadata_length, buffer.length);
+        assert_memory_equal(result.metadata, "LPL2", 4U);
+        /* Preserve every encoded field, even zero or a version different
+         * from the backing entry, and explicit flags without a txn record. */
+        assert_memory_equal(result.metadata + 4U, buffer.bytes + 4U,
+                            buffer.length - 4U);
+        lc_pouch_state_read_result_cleanup(NULL, &result);
+        lc_pouch_close(pouch);
+        pouch = NULL;
+      } else {
+        assert_int_equal(rc, LC_ERR_INVALID);
+        assert_null(pouch);
+        lc_error_cleanup(&error);
+        lc_error_init(&error);
+      }
+    }
+    test_binary_buffer_cleanup(&buffer);
+    cleanup_root(root);
+    lc_error_cleanup(&error);
+  }
+}
+
+static void test_pouch_migrates_all_transaction_record_layouts(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char root[512];
+  unsigned char bytes[1024];
+  size_t length;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("control-layout-migration", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  test_write_binary_lease_record(pouch, "state/migration-lease", 7L, 0, &error);
+  test_write_binary_lease_record(pouch, "state/current-lease", 8L, 1, &error);
+  test_write_binary_txn_record_layout(pouch, "legacy-v1-prepare", "LPT1",
+                                      "prepare", 0, 0U, &error);
+  test_write_binary_txn_record_layout(pouch, "legacy-v1-commit", "LPT1",
+                                      "commit", 0, 0U, &error);
+  test_write_binary_txn_record_layout(pouch, "legacy-v1-rollback", "LPT1",
+                                      "rollback", 0, 0U, &error);
+  test_write_binary_txn_record_layout(pouch, "legacy-v2", "LPT2", "prepare", 1,
+                                      2U, &error);
+  test_write_binary_txn_record_layout(pouch, "current-v3", "LPT3", "prepare", 1,
+                                      1U, &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  test_remove_control_migration_marker(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "default", "state/migration-lease",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_true(read_result.metadata_length > 4U);
+  assert_memory_equal(read_result.metadata, "LPL2", 4U);
+  assert_int_equal(read_result.metadata[read_result.metadata_length - 1U], 0U);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+
+  rc = lc_pouch_state_read(pouch, "default", "state/current-lease",
+                           &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_memory_equal(read_result.metadata, "LPL2", 4U);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+
+  rc = lc_pouch_state_read(pouch, ".txns", "legacy-v1-prepare", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  length = read_source_to_bytes(read_result.body, bytes, sizeof(bytes));
+  assert_true(length > 4U);
+  assert_memory_equal(bytes, "LPT3", 4U);
+  assert_int_equal(bytes[length - 1U], 0U);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+
+  rc = lc_pouch_state_read(pouch, ".txns", "legacy-v1-commit", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  length = read_source_to_bytes(read_result.body, bytes, sizeof(bytes));
+  assert_memory_equal(bytes, "LPT3", 4U);
+  assert_int_equal(bytes[length - 1U], 1U);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+
+  rc = lc_pouch_state_read(pouch, ".txns", "legacy-v1-rollback", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  length = read_source_to_bytes(read_result.body, bytes, sizeof(bytes));
+  assert_memory_equal(bytes, "LPT3", 4U);
+  assert_int_equal(bytes[length - 1U], 2U);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+
+  rc = lc_pouch_state_read(pouch, ".txns", "legacy-v2", &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  length = read_source_to_bytes(read_result.body, bytes, sizeof(bytes));
+  assert_memory_equal(bytes, "LPT3", 4U);
+  assert_int_equal(bytes[length - 1U], 2U);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  memset(&read_result, 0, sizeof(read_result));
+
+  rc = lc_pouch_state_read(pouch, ".txns", "current-v3", &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  length = read_source_to_bytes(read_result.body, bytes, sizeof(bytes));
+  assert_memory_equal(bytes, "LPT3", 4U);
+  assert_int_equal(bytes[length - 1U], 1U);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_migrates_large_legacy_transaction_record(void **state) {
+  enum { participant_count = 9000U };
+  lc_pouch *pouch;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  unsigned char *bytes;
+  char root[512];
+  size_t count_offset;
+  size_t i;
+  size_t length;
+  uint64_t migrated_count;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  bytes = NULL;
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("large-legacy-transaction-migration", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  test_write_binary_txn_record_layout_with_participants(
+      pouch, "large-legacy", "LPT1", "prepare", 0, 0U, participant_count,
+      &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  test_remove_control_migration_marker(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc =
+      lc_pouch_state_read(pouch, ".txns", "large-legacy", &read_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(read_result.found);
+  assert_true(read_result.bytes > 64U * 1024U);
+  assert_true(read_result.bytes <= SIZE_MAX);
+  bytes = (unsigned char *)malloc((size_t)read_result.bytes);
+  assert_non_null(bytes);
+  length =
+      read_source_to_bytes(read_result.body, bytes, (size_t)read_result.bytes);
+  assert_int_equal(length, (size_t)read_result.bytes);
+  assert_memory_equal(bytes, "LPT3", 4U);
+  count_offset = 4U + 2U + strlen("prepare") + 8U + 8U + 2U;
+  assert_true(length >= count_offset + 8U);
+  migrated_count = 0U;
+  for (i = 0U; i < 8U; ++i) {
+    migrated_count |= (uint64_t)bytes[count_offset + i] << (i * 8U);
+  }
+  assert_int_equal(migrated_count, participant_count);
+
+  free(bytes);
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_pouch_migration_rejects_tampered_legacy_transaction(void **state) {
+  enum { participant_count = 40000U };
+  lc_pouch *pouch;
+  lc_pouch_open_options options;
+  lc_error error;
+  char *crypto_key;
+  char payload_path[1024];
+  char root[512];
+  uint64_t payload_length;
+  uint64_t payload_offset;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  crypto_key = NULL;
+  memset(&options, 0, sizeof(options));
+  lc_error_init(&error);
+  make_root("tampered-legacy-transaction-migration", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  options.crypto_key = crypto_key;
+
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  /* Exceed the body-cache threshold so migration must drain the encrypted
+   * source and authenticate its terminal zero-length frame. */
+  test_write_binary_txn_record_layout_with_participants(
+      pouch, "tampered-legacy", "LPT1", "prepare", 0, 0U, participant_count,
+      &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  test_remove_control_migration_marker(root);
+
+  pouch_state_payload_span_for_key(root, ".txns", "tampered-legacy",
+                                   payload_path, sizeof(payload_path),
+                                   &payload_offset, &payload_length);
+  assert_true(payload_length > 0U);
+  flip_file_byte(payload_path, payload_offset + payload_length - 1U);
+
+  rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
+  assert_int_equal(rc, LC_ERR_PROTOCOL);
+  assert_null(pouch);
+
+  lc_pouch_crypto_key_string_free(crypto_key);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_pouch_control_migration_marker_skips_complete_roots(void **state) {
+  lc_pouch *pouch;
+  lc_error error;
+  char marker_path[1024];
+  char root[512];
+  int rc;
+  int written;
+
+  (void)state;
+  pouch = NULL;
+  lc_error_init(&error);
+  make_root("control-migration-marker", root, sizeof(root));
+  cleanup_root(root);
+
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  test_write_malformed_binary_lease_record(pouch, "state/malformed-current",
+                                           &error);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  written = snprintf(marker_path, sizeof(marker_path),
+                     "%s/.lockdc-control-migration-v1", root);
+  assert_true(written > 0 && (size_t)written < sizeof(marker_path));
+  assert_true(path_is_file(marker_path));
+
+  /* A completed plain shared root does not rescan its namespaces. */
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  test_remove_control_migration_marker(root);
+  rc = lc_pouch_open(root, NULL, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(pouch);
+
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -25957,7 +26681,10 @@ test_explicit_xa_live_release_rolls_back_expired_peer(void **state) {
   open_pouch_client(root, &client, &error);
   acquire_first.key = first_key;
   acquire_first.owner = "explicit-xa-expired-peer-owner";
-  acquire_first.ttl_seconds = 1L;
+  /* Cross-runtime emulation can take longer than one second to prepare the
+   * second participant and stage both payloads. Keep that setup window well
+   * clear of expiry, then expire this participant deliberately below. */
+  acquire_first.ttl_seconds = 10L;
   acquire_first.txn_id = test_xid_for_label("explicit-xa-expired-peer");
   rc = client->acquire(client, &acquire_first, &first, &error);
   assert_int_equal(rc, LC_OK);
@@ -25981,7 +26708,7 @@ test_explicit_xa_live_release_rolls_back_expired_peer(void **state) {
   source->close(source);
   source = NULL;
 
-  sleep(2U);
+  sleep(11U);
   /* The earliest participant expiry rolls the complete XA unit back. */
   rc = second->release(second, NULL, &error);
   assert_int_equal(rc, LC_OK);
@@ -34163,7 +34890,20 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_acquire_rolls_back_unrepresentable_generation_claim),
       cmocka_unit_test(test_pouch_fencing_tokens_do_not_wrap_or_narrow),
-      cmocka_unit_test(test_pouch_rejects_previous_lease_record_layout),
+      cmocka_unit_test(test_pouch_migrates_previous_lease_record_layout),
+      cmocka_unit_test(test_pouch_migration_requires_durable_completion),
+      cmocka_unit_test(test_pouch_migration_retries_incomplete_scan),
+      cmocka_unit_test(test_pouch_migration_rejects_truncated_numbers),
+      cmocka_unit_test(test_pouch_migrates_legacy_active_lease_state_version),
+      cmocka_unit_test(test_pouch_migrates_extended_legacy_lease_layout),
+      cmocka_unit_test(
+          test_pouch_migration_rejects_malformed_legacy_control_record),
+      cmocka_unit_test(test_pouch_migrates_all_transaction_record_layouts),
+      cmocka_unit_test(test_pouch_migrates_large_legacy_transaction_record),
+      cmocka_unit_test(
+          test_pouch_migration_rejects_tampered_legacy_transaction),
+      cmocka_unit_test(
+          test_pouch_control_migration_marker_skips_complete_roots),
       cmocka_unit_test(test_acquire_honors_block_seconds),
       cmocka_unit_test(test_release_closes_state_bound_lease),
       cmocka_unit_test(

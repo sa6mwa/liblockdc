@@ -329,6 +329,7 @@ extern void *lc_pouch_test_tail_repair_context;
 /* Extends only test batch coalescing, without changing production scheduling.
  */
 extern long lc_pouch_test_fsync_batch_delay_ns;
+extern int (*lc_pouch_test_sync_fd)(int fd);
 size_t lc_pouch_test_resident_descriptor_count(lc_pouch *pouch);
 void lc_pouch_test_indexer_deadline(lc_pouch *pouch, struct timespec *deadline);
 char *lc_pouch_state_test_crypto_context(const lc_allocator *allocator,
@@ -351,6 +352,10 @@ int lc_pouch_state_shared_mutation_enter(
     lc_error *error);
 void lc_pouch_state_shared_mutation_leave(
     lc_pouch_state_shared_mutation_guard **guard);
+/* Converts historical binary lease and transaction control records before a
+ * Pouch handle is exposed. Runtime control decoders intentionally remain
+ * current-layout-only. */
+int lc_pouch_control_migration_run(lc_pouch *pouch, lc_error *error);
 /** Writes best-effort exclusive-root clean checkpoints after all append fsyncs.
  * Missing or invalid checkpoints only require a cold replay; they never alter
  * durable record ordering. */
@@ -512,6 +517,8 @@ void lc_pouch_state_scan_summaries_result_cleanup(
     const lc_allocator *allocator,
     lc_pouch_state_scan_summaries_result *result);
 int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error);
+int lc_pouch_fsync_batcher_init(lc_pouch *pouch, lc_error *error);
+void lc_pouch_fsync_batcher_close(lc_pouch *pouch);
 int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
                               const char *queue, uint64_t timeout_ms);
 /** Converts a durable Pouch byte count for generic C API response fields. */

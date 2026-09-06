@@ -369,6 +369,7 @@ set(lc_sources
     src/lc_management_api.c
     src/lc_message_api.c
     src/lc_mutate_stream.c
+    src/lc_pouch_control_migration.c
     src/lc_pouch_client.c
     src/lc_pouch.c
     src/lc_pouch_crypto.c

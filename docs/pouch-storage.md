@@ -81,9 +81,11 @@ only when this document names them and explains why the Go disk property is
 still preserved.
 
 Pouch has no Go-disk compatibility contract. It must not keep Go record
-readers, Go/C format dispatch, byte-compatibility migrations, or superseded
-Pouch-layout readers. Numeric rolling segments are the sole Pouch segment
-format.
+readers or Go/C format dispatch. Before exposing an opened Pouch handle, it
+automatically migrates every supported historical Pouch binary control record
+to the current layout under root mutation authority; normal runtime readers
+then accept only the current layout. Numeric rolling segments are the sole
+Pouch segment format.
 
 ### Storage API Boundary
 
@@ -1080,6 +1082,7 @@ Representative root layout:
 ```text
 root/
   manifest
+  .lockdc-control-migration-v1              # completed control-record migration
   namespaces/
     <escaped-namespace>/
       manifest
@@ -1100,6 +1103,18 @@ The root `manifest` records the root mode: plaintext, crypto, compression, and
 crypto+compression. Plaintext and transformed roots cannot mix. Opening a root
 with a different mode must fail. The initial release does not contain a
 plaintext/transformed migration path.
+
+When a root is first opened by a release that supports historical binary
+control records, Pouch completes the required migration before becoming
+available and durably writes `.lockdc-control-migration-v1`. Migration writes
+and existing replay files are synced before this marker is published, including
+records converted by an earlier failed attempt, regardless of the runtime
+`durable_sync` setting. If unrelated corruption prevents a complete scan, open
+can still succeed, but no completion marker is published; later opens retry.
+Later opens with a completion marker retain normal lazy namespace loading.
+Both historical `LPL1` lease layouts are supported. Extended records preserve
+their encoded state version and explicit-transaction flag; only short records
+infer these fields from the backing state and transaction records.
 
 ## Binary Record Header
 
@@ -1932,29 +1947,31 @@ metrics. Aggregate timing must not hide a slower core operation.
 
 Acceptance target: exclusive Pouch must materially outperform the matching Go
 lockd disk plaintext or crypto configuration on every gated core metric. The
-numeric release budget is a minimum `1.25x` Pouch speedup: every Pouch latency
+numeric hardening budget is a minimum `1.25x` Pouch speedup: every Pouch latency
 must be at most 80% of the matching Go disk median. The stable baseline is the
 median of five same-run production samples for each engine, preventing isolated
-sub-millisecond filesystem and scheduler outliers from redefining a release
+sub-millisecond filesystem and scheduler outliers from redefining a performance
 threshold. `make
 benchmark-pouch-go-parity-gate` enforces this with
 `POUCH_GO_PARITY_MIN_SPEEDUP=1.25`; strict-but-undefined "faster" is
 insufficient. Pouch compression variants retain their own reported performance
 evidence in the complete production matrix, but are excluded from the release
-gate because Go disk has no transform-equivalent compression mode. The release
-gate runs only plaintext and crypto Pouch/Go pairs, with five production
-samples each and a finite `POUCH_GO_PARITY_TIMEOUT=15m` budget. Shared root has
+performance gate because Go disk has no transform-equivalent compression mode.
+The performance gate runs only plaintext and crypto Pouch/Go pairs, with five
+production samples each and a finite `POUCH_GO_PARITY_TIMEOUT=15m` budget.
+Shared root has
 separate correctness, contention, handoff, and bounded-performance coverage and
-does not dilute the exclusive release target.
+does not dilute the exclusive performance comparison.
 
 Strict durable sync uses the same complete core-metric contract in `make
 benchmark-pouch-go-durable-gate`; it is part of `make perf-gate` rather than an
-opt-in diagnostic. Compression has no format-equivalent Go disk counterpart,
-so its core-operation churn remains measured by the hardening soak rather than
-a synthetic cross-engine threshold.
+opt-in diagnostic, and runs in `make prerelease-hardening`. Compression has no
+format-equivalent Go disk counterpart, so its core-operation churn remains
+measured by the hardening soak rather than a synthetic cross-engine threshold.
 
-`make prerelease-hardening` additionally runs a finite ten-minute Pouch core
-soak outside the normal release gate. It repeats an exclusive root's acquire,
+`make prerelease-hardening` runs the Pouch-vs-lockd performance thresholds and
+additionally runs a finite ten-minute Pouch core soak outside the normal release
+gate. It repeats an exclusive root's acquire,
 update, stale-precondition, leased/public read, attachment, queue, indexing,
 query, reopen, and recovery cycles under plaintext, crypto, compression, and
 crypto-plus-compression. It then proves forced and idle-debounced background
