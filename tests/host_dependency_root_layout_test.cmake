@@ -50,7 +50,7 @@ assert_contains(deps_script "toolchain_archive=$toolchain_archive" "dependency m
 assert_contains(deps_script "toolchain_root=$toolchain_root" "dependency manifest toolchain root")
 assert_contains(deps_script "toolchain_sysroot=$toolchain_sysroot" "dependency manifest toolchain sysroot")
 assert_contains(deps_script "toolchain_target_triple=$toolchain_target_triple" "dependency manifest toolchain target triple")
-assert_contains(deps_script [=[lonejson_abi_version=${LOCKDC_LONEJSON_ABI_VERSION:-25}]=] "lonejson ABI readiness check knob")
+assert_contains(deps_script [=[lonejson_abi_version=${LOCKDC_LONEJSON_ABI_VERSION:-26}]=] "lonejson ABI readiness check knob")
 assert_contains(deps_script [=[liblql_abi_version=${LOCKDC_LIBLQL_ABI_VERSION:-0}]=] "liblql ABI readiness check knob")
 assert_contains(deps_script [=[liblonejson.${lonejson_abi_version}.${shared_ext}]=] "Darwin lonejson ABI readiness path")
 assert_contains(deps_script [=[liblonejson.so.${lonejson_abi_version}]=] "Linux lonejson ABI readiness path")

@@ -123,6 +123,9 @@ foreach(symbol IN ITEMS
     lonejson_curl_parse_cleanup
     lonejson_curl_upload_init
     lonejson_curl_read_callback
+    lonejson_curl_upload_is_rewindable
+    lonejson_curl_upload_rewind
+    lonejson_curl_seek_callback
     lonejson_curl_upload_size
     lonejson_curl_upload_cleanup
     lonejson_curl_array_parse_init
@@ -181,6 +184,9 @@ foreach(alias_symbol IN ITEMS
     lj_curl_parse_cleanup
     lj_curl_upload_init
     lj_curl_read_callback
+    lj_curl_upload_is_rewindable
+    lj_curl_upload_rewind
+    lj_curl_seek_callback
     lj_curl_upload_size
     lj_curl_upload_cleanup
     lj_curl_array_parse_init

@@ -107,32 +107,32 @@ endfunction()
 
 create_fake_bootlin_root(
     x86_64-linux-gnu
-    x86-64--glibc--stable-2025.08-1
+    x86-64--glibc--stable-2026.08-1
     x86_64-linux
     x86_64-buildroot-linux-gnu/sysroot)
 create_fake_bootlin_root(
     x86_64-linux-musl
-    x86-64--musl--stable-2025.08-1
+    x86-64--musl--stable-2026.08-1
     x86_64-linux
     x86_64-buildroot-linux-musl/sysroot)
 create_fake_bootlin_root(
     aarch64-linux-gnu
-    aarch64--glibc--stable-2025.08-1
+    aarch64--glibc--stable-2026.08-1
     aarch64-linux
     aarch64-buildroot-linux-gnu/sysroot)
 create_fake_bootlin_root(
     aarch64-linux-musl
-    aarch64--musl--stable-2025.08-1
+    aarch64--musl--stable-2026.08-1
     aarch64-linux
     aarch64-buildroot-linux-musl/sysroot)
 create_fake_bootlin_root(
     armhf-linux-gnu
-    armv7-eabihf--glibc--stable-2025.08-1
+    armv7-eabihf--glibc--stable-2026.08-1
     arm-linux
     arm-buildroot-linux-gnueabihf/sysroot)
 create_fake_bootlin_root(
     armhf-linux-musl
-    armv7-eabihf--musl--stable-2025.08-1
+    armv7-eabihf--musl--stable-2026.08-1
     arm-linux
     arm-buildroot-linux-musleabihf/sysroot)
 
@@ -140,29 +140,29 @@ assert_bootlin_toolchain_import(
     x86_64-linux-gnu
     x86_64-linux
     x86_64-buildroot-linux-gnu/sysroot
-    x86-64--glibc--stable-2025.08-1)
+    x86-64--glibc--stable-2026.08-1)
 assert_bootlin_toolchain_import(
     x86_64-linux-musl
     x86_64-linux
     x86_64-buildroot-linux-musl/sysroot
-    x86-64--musl--stable-2025.08-1)
+    x86-64--musl--stable-2026.08-1)
 assert_bootlin_toolchain_import(
     aarch64-linux-gnu
     aarch64-linux
     aarch64-buildroot-linux-gnu/sysroot
-    aarch64--glibc--stable-2025.08-1)
+    aarch64--glibc--stable-2026.08-1)
 assert_bootlin_toolchain_import(
     aarch64-linux-musl
     aarch64-linux
     aarch64-buildroot-linux-musl/sysroot
-    aarch64--musl--stable-2025.08-1)
+    aarch64--musl--stable-2026.08-1)
 assert_bootlin_toolchain_import(
     armhf-linux-gnu
     arm-linux
     arm-buildroot-linux-gnueabihf/sysroot
-    armv7-eabihf--glibc--stable-2025.08-1)
+    armv7-eabihf--glibc--stable-2026.08-1)
 assert_bootlin_toolchain_import(
     armhf-linux-musl
     arm-linux
     arm-buildroot-linux-musleabihf/sysroot
-    armv7-eabihf--musl--stable-2025.08-1)
+    armv7-eabihf--musl--stable-2026.08-1)

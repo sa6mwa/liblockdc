@@ -72,8 +72,8 @@ set(LOCKDC_ZLIB_VERSION "1.3.2" CACHE STRING "Pinned zlib release supplied by c.
 set(LOCKDC_CURL_VERSION "8.20.0" CACHE STRING "Pinned curl release supplied by c.pkt.systems.")
 set(LOCKDC_NGHTTP2_VERSION "1.69.0" CACHE STRING "Pinned nghttp2 release supplied by c.pkt.systems.")
 set(LOCKDC_LIBSSH2_VERSION "1.11.1" CACHE STRING "Pinned libssh2 release supplied by c.pkt.systems.")
-set(LOCKDC_LONEJSON_VERSION "0.42.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
-set(LOCKDC_LONEJSON_ABI_VERSION "25" CACHE STRING "Pinned lonejson shared-library ABI/SOVERSION." FORCE)
+set(LOCKDC_LONEJSON_VERSION "0.43.0" CACHE STRING "Pinned lonejson release used for mapped JSON load/save and internal JSON parsing helpers." FORCE)
+set(LOCKDC_LONEJSON_ABI_VERSION "26" CACHE STRING "Pinned lonejson shared-library ABI/SOVERSION." FORCE)
 set(LOCKDC_LIBLQL_VERSION "0.2.0" CACHE STRING "Pinned liblql release used for pouch LQL query support." FORCE)
 set(LOCKDC_LIBLQL_ABI_VERSION "0" CACHE STRING "Pinned liblql shared-library ABI/SOVERSION." FORCE)
 set(LOCKDC_CMOCKA_VERSION "2.0.2" CACHE STRING "Pinned cmocka release used for unit tests.")
@@ -1103,12 +1103,25 @@ if(LOCKDC_BUILD_FUZZERS OR LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)
     lc_apply_default_test_timeouts()
 endif()
 
-find_program(GCOV_BIN NAMES gcov)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    get_filename_component(_lockdc_gcc_dir "${CMAKE_C_COMPILER}" DIRECTORY)
+    get_filename_component(_lockdc_gcc_name "${CMAKE_C_COMPILER}" NAME)
+    string(REGEX REPLACE "gcc$" "gcov" _lockdc_gcov_name "${_lockdc_gcc_name}")
+    if(NOT _lockdc_gcov_name STREQUAL _lockdc_gcc_name)
+        find_program(LOCKDC_GCOV_BIN
+            NAMES "${_lockdc_gcov_name}"
+            HINTS "${_lockdc_gcc_dir}"
+            NO_DEFAULT_PATH)
+    endif()
+endif()
+if(NOT LOCKDC_GCOV_BIN)
+    find_program(LOCKDC_GCOV_BIN NAMES gcov)
+endif()
 
-if(LOCKDC_BUILD_TESTS AND LOCKDC_ENABLE_COVERAGE AND GCOV_BIN)
+if(LOCKDC_BUILD_TESTS AND LOCKDC_ENABLE_COVERAGE AND LOCKDC_GCOV_BIN)
     add_custom_target(coverage-report
         COMMAND ${CMAKE_CTEST_COMMAND} --test-dir ${CMAKE_CURRENT_BINARY_DIR} --output-on-failure
-        COMMAND ${CMAKE_COMMAND} -E env GCOV=${GCOV_BIN}
+        COMMAND ${CMAKE_COMMAND} -E env GCOV=${LOCKDC_GCOV_BIN}
                 ${CMAKE_CURRENT_SOURCE_DIR}/scripts/coverage_report.sh
                 ${CMAKE_CURRENT_BINARY_DIR}
                 ${CMAKE_CURRENT_BINARY_DIR}/coverage-report

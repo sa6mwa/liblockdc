@@ -1305,6 +1305,8 @@ int lc_engine_http_json_request_stream(
       curl_easy_setopt(easy, CURLOPT_READFUNCTION,
                        lc_engine_lonejson_curl_upload_read_callback);
       curl_easy_setopt(easy, CURLOPT_READDATA, &body_upload);
+      curl_easy_setopt(easy, CURLOPT_SEEKFUNCTION, lonejson_curl_seek_callback);
+      curl_easy_setopt(easy, CURLOPT_SEEKDATA, &body_upload);
     } else if (strcmp(method, "POST") == 0) {
       curl_easy_setopt(easy, CURLOPT_POST, 1L);
     }

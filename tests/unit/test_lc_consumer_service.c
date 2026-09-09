@@ -15,7 +15,9 @@
 #include "lc_api_internal.h"
 #include "lc_log.h"
 
-typedef struct tracked_alloc_header {
+/* Preserve malloc's full alignment contract after the tracking prefix. */
+typedef union tracked_alloc_header {
+  long double alignment;
   size_t size;
 } tracked_alloc_header;
 

@@ -190,6 +190,18 @@ add_test(NAME coverage_pkgconfig_metadata_test
     -P "${CMAKE_SOURCE_DIR}/tests/coverage_pkgconfig_metadata_test.cmake"
 )
 
+add_test(NAME coverage_gcov_toolchain_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/coverage_gcov_toolchain_test.cmake"
+)
+
+add_test(NAME lonejson_upload_rewind_transport_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/lonejson_upload_rewind_transport_test.cmake"
+)
+
 set(LOCKDC_LUA_TEST_ENV_COMMON "")
 set(lockdc_lua_test_sanitizer_flags "${CMAKE_C_FLAGS}")
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")

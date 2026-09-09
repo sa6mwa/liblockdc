@@ -15,7 +15,7 @@ lua_script="$4"
 lua_bin="${LOCKDC_LUA_BIN:-lua5.5}"
 luarocks_bin="${LOCKDC_LUAROCKS_BIN:-luarocks}"
 lua_version="${LOCKDC_LUA_VERSION:-5.5}"
-lonejson_src_rock="${LOCKDC_LONEJSON_SRC_ROCK:-https://github.com/sa6mwa/lonejson/releases/download/v0.42.0/lonejson-0.42.0-1.src.rock}"
+lonejson_src_rock="${LOCKDC_LONEJSON_SRC_ROCK:-https://github.com/sa6mwa/lonejson/releases/download/v0.43.0/lonejson-0.43.0-1.src.rock}"
 luarocks_build_root="${LOCKDC_LUAROCKS_BUILD_ROOT:-${tree_dir}/.luarocks-build}"
 luarocks_workdir="${LOCKDC_LUAROCKS_WORKDIR:-$PWD}"
 run_lua_smoke="${LOCKDC_RUN_LUA_SMOKE:-1}"
@@ -53,7 +53,13 @@ if [ "$lua_runtime_version" != "Lua 5.5" ]; then
   exit 1
 fi
 
-install_lonejson_dependency() {
+install_lonejson_dependency() (
+  # LoneJSON 0.43 selects its native Bootlin toolchain through CMake.  Do not
+  # preload liblockdc's vendored libraries into that host-tool invocation:
+  # loader diagnostics on stderr are part of the target-discovery output.
+  unset LD_LIBRARY_PATH
+  unset LD_PRELOAD
+
   case "$lonejson_src_rock" in
     *.src.rock)
       if [ -f "$lonejson_src_rock" ]; then
@@ -89,7 +95,7 @@ install_lonejson_dependency() {
   esac
 
   "$luarocks_bin" --tree "$tree_dir" --lua-version "$lua_version" install "$lonejson_src_rock"
-}
+)
 
 export LD_LIBRARY_PATH="$sdk_prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export LOCKDC_PREFIX="$sdk_prefix"
