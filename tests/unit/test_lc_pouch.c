@@ -18174,6 +18174,7 @@ static void test_clean_reopen_recovers_live_staged_decision(void **state) {
   lc_pouch *pouch;
   lc_source *source;
   lc_pouch_state_write_result staged;
+  lc_pouch_state_write_result pending;
   lc_pouch_state_read_result read_result;
   lc_error error;
   char root[512];
@@ -18188,6 +18189,7 @@ static void test_clean_reopen_recovers_live_staged_decision(void **state) {
   source = NULL;
   namespace_path = NULL;
   memset(&staged, 0, sizeof(staged));
+  memset(&pending, 0, sizeof(pending));
   memset(&read_result, 0, sizeof(read_result));
   lc_error_init(&error);
   make_root("state-decision-recovery", root, sizeof(root));
@@ -18200,6 +18202,16 @@ static void test_clean_reopen_recovers_live_staged_decision(void **state) {
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_state_stage_write(pouch, "team/alpha", "state/recover",
                                   "txn-recover", source, NULL, &staged, &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  /* An undecided staged value must survive recovery of a different key. */
+  rc = lc_source_from_memory("{\"value\":10}", strlen("{\"value\":10}"),
+                             &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc =
+      lc_pouch_state_stage_write(pouch, "team/alpha", "state/pending",
+                                 "txn-pending", source, NULL, &pending, &error);
   lc_source_close(source);
   source = NULL;
   assert_int_equal(rc, LC_OK);
@@ -18227,8 +18239,18 @@ static void test_clean_reopen_recovers_live_staged_decision(void **state) {
   assert_int_equal(read_result.found, 0);
 
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  rc = lc_pouch_state_read(pouch, "team/alpha",
+                           "state/pending/.staging/txn-pending", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(read_result.found, 1);
+  assert_string_equal(read_result.etag, pending.etag);
+  assert_int_equal(read_result.version, pending.version);
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
   lc_free_with_allocator(NULL, namespace_path);
   lc_pouch_state_write_result_cleanup(NULL, &staged);
+  lc_pouch_state_write_result_cleanup(NULL, &pending);
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -19480,7 +19502,57 @@ static void test_client_queue_enqueue_dequeue_ack_and_nack(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_client_queue_dequeue_honors_wait_seconds(void **state) {
+typedef struct pouch_queue_test_clock {
+  struct timespec wall;
+  struct timespec monotonic;
+  unsigned int polls;
+  int advance_wall;
+} pouch_queue_test_clock;
+
+static int pouch_queue_test_gettime(clockid_t clock_id, struct timespec *out,
+                                    void *context) {
+  pouch_queue_test_clock *clock = (pouch_queue_test_clock *)context;
+
+  assert_true(clock_id == CLOCK_REALTIME || clock_id == CLOCK_MONOTONIC);
+  *out = clock_id == CLOCK_REALTIME ? clock->wall : clock->monotonic;
+  return 0;
+}
+
+static void pouch_queue_test_advance(struct timespec *now,
+                                     const struct timespec *delay) {
+  now->tv_sec += delay->tv_sec;
+  now->tv_nsec += delay->tv_nsec;
+  if (now->tv_nsec >= 1000000000L) {
+    now->tv_nsec -= 1000000000L;
+    ++now->tv_sec;
+  }
+}
+
+static void pouch_queue_test_poll(const struct timespec *delay, void *context) {
+  pouch_queue_test_clock *clock = (pouch_queue_test_clock *)context;
+
+  assert_int_equal(delay->tv_sec, 0);
+  assert_int_equal(delay->tv_nsec, 100000000L);
+  /* Fail a broken deadline deterministically rather than hanging. */
+  assert_true(clock->polls < 20U);
+  ++clock->polls;
+  pouch_queue_test_advance(&clock->monotonic, delay);
+  if (clock->advance_wall) {
+    pouch_queue_test_advance(&clock->wall, delay);
+  }
+}
+
+static int teardown_pouch_queue_test_clock(void **state) {
+  (void)state;
+  lc_pouch_test_queue_clock_gettime = NULL;
+  lc_pouch_test_queue_poll_delay = NULL;
+  lc_pouch_test_queue_time_context = NULL;
+  return 0;
+}
+
+static void pouch_queue_wait_case(long delay_seconds, long wait_seconds,
+                                  long start_nsec, int advance_wall,
+                                  unsigned int expected_polls, int delivered) {
   lc_client *client;
   lc_source *source;
   lc_enqueue_req enqueue_req;
@@ -19489,9 +19561,14 @@ static void test_client_queue_dequeue_honors_wait_seconds(void **state) {
   lc_message *message;
   lc_error error;
   char root[512];
+  pouch_queue_test_clock clock;
   int rc;
 
-  (void)state;
+  memset(&clock, 0, sizeof(clock));
+  clock.wall.tv_sec = time(NULL);
+  clock.wall.tv_nsec = start_nsec;
+  clock.monotonic.tv_sec = 100;
+  clock.advance_wall = advance_wall;
   client = NULL;
   source = NULL;
   message = NULL;
@@ -19503,8 +19580,11 @@ static void test_client_queue_dequeue_honors_wait_seconds(void **state) {
   cleanup_root(root);
 
   open_pouch_client(root, &client, &error);
+  lc_pouch_test_queue_time_context = &clock;
+  lc_pouch_test_queue_clock_gettime = pouch_queue_test_gettime;
+  lc_pouch_test_queue_poll_delay = pouch_queue_test_poll;
   enqueue_req.queue = "jobs";
-  enqueue_req.delay_seconds = 1L;
+  enqueue_req.delay_seconds = delay_seconds;
   rc = lc_source_from_memory("delayed", strlen("delayed"), &source, &error);
   assert_int_equal(rc, LC_OK);
   rc = client->enqueue(client, &enqueue_req, source, &enqueue_res, &error);
@@ -19514,22 +19594,37 @@ static void test_client_queue_dequeue_honors_wait_seconds(void **state) {
 
   dequeue_req.queue = "jobs";
   dequeue_req.owner = "worker-wait";
+  dequeue_req.wait_seconds = wait_seconds;
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
-  assert_null(message);
-
-  dequeue_req.wait_seconds = 2L;
-  rc = client->dequeue(client, &dequeue_req, &message, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_non_null(message);
-  assert_string_equal(message->message_id, enqueue_res.message_id);
-  assert_int_equal(message->attempts, 1);
-
-  message->close(message);
+  assert_int_equal(clock.polls, expected_polls);
+  if (delivered) {
+    assert_non_null(message);
+    assert_string_equal(message->message_id, enqueue_res.message_id);
+    assert_int_equal(message->attempts, 1);
+    message->close(message);
+  } else {
+    assert_null(message);
+  }
+  (void)teardown_pouch_queue_test_clock(NULL);
   lc_enqueue_res_cleanup(&enqueue_res);
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
+}
+
+static void test_client_queue_dequeue_honors_wait_seconds(void **state) {
+  (void)state;
+  /* No real sleep or elapsed-time assertion: only polling advances time. */
+  pouch_queue_wait_case(1L, 0L, 0L, 1, 0U, 0);
+  pouch_queue_wait_case(0L, 2L, 0L, 1, 0U, 1);
+  pouch_queue_wait_case(1L, 2L, 0L, 1, 10U, 1);
+  pouch_queue_wait_case(3L, 2L, 0L, 1, 20U, 0);
+  /* Visibility is rounded to Unix seconds, not enqueue time plus 1000 ms. */
+  pouch_queue_wait_case(1L, 0L, 900000000L, 1, 0U, 0);
+  pouch_queue_wait_case(1L, 2L, 900000000L, 1, 1U, 1);
+  /* The wait deadline uses monotonic time even if wall time stops moving. */
+  pouch_queue_wait_case(1L, 2L, 0L, 0, 20U, 0);
 }
 
 static void
@@ -34729,7 +34824,8 @@ int main(int argc, char **argv) {
           test_compaction_preserves_reachable_spans_in_writer_modes),
       cmocka_unit_test(test_client_queue_enqueue_dequeue_ack_and_nack),
       cmocka_unit_test(test_txn_queue_decision_rejects_newer_delivery_lease),
-      cmocka_unit_test(test_client_queue_dequeue_honors_wait_seconds),
+      cmocka_unit_test_teardown(test_client_queue_dequeue_honors_wait_seconds,
+                                teardown_pouch_queue_test_clock),
       cmocka_unit_test(
           test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout),
       cmocka_unit_test(test_client_queue_large_payload_stats_dequeue_and_ack),

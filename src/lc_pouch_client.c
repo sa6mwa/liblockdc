@@ -73,6 +73,26 @@ static void lc_pouch_txn_guard_mutexes_init(void) {
 }
 
 #ifdef LOCKDC_TEST_BUILD
+int (*lc_pouch_test_queue_clock_gettime)(clockid_t clock_id,
+                                         struct timespec *out,
+                                         void *context) = NULL;
+void (*lc_pouch_test_queue_poll_delay)(const struct timespec *delay,
+                                       void *context) = NULL;
+void *lc_pouch_test_queue_time_context = NULL;
+
+static int lc_pouch_queue_clock_gettime(clockid_t clock_id,
+                                        struct timespec *out) {
+  if (lc_pouch_test_queue_clock_gettime != NULL) {
+    return lc_pouch_test_queue_clock_gettime(clock_id, out,
+                                             lc_pouch_test_queue_time_context);
+  }
+  return clock_gettime(clock_id, out);
+}
+#else
+#define lc_pouch_queue_clock_gettime clock_gettime
+#endif
+
+#ifdef LOCKDC_TEST_BUILD
 lc_pouch_test_after_acquire_claim_hook_fn
     lc_pouch_test_after_acquire_claim_hook = NULL;
 void *lc_pouch_test_after_acquire_claim_context = NULL;
@@ -5320,7 +5340,21 @@ static int lc_pouch_now_unix(lc_pouch_unix_seconds *out, lc_error *error) {
                         "pouch time read requires output storage", NULL, NULL,
                         NULL);
   }
-  now = time(NULL);
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_pouch_test_queue_clock_gettime != NULL) {
+    struct timespec simulated;
+
+    if (lc_pouch_queue_clock_gettime(CLOCK_REALTIME, &simulated) != 0) {
+      return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to read pouch test wall clock", NULL, NULL,
+                          NULL);
+    }
+    now = simulated.tv_sec;
+  } else
+#endif
+  {
+    now = time(NULL);
+  }
   if (now == (time_t)-1) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to read pouch wall clock", NULL, NULL, NULL);
@@ -7683,7 +7717,7 @@ static char *lc_pouch_queue_message_id(lc_pouch_unix_seconds *seconds_out,
                        NULL, NULL, NULL);
     return NULL;
   }
-  if (clock_gettime(CLOCK_REALTIME, &now) != 0) {
+  if (lc_pouch_queue_clock_gettime(CLOCK_REALTIME, &now) != 0) {
     (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                        "failed to read pouch queue clock", strerror(errno),
                        NULL, NULL);
@@ -9436,7 +9470,7 @@ static int lc_pouch_queue_wait_deadline(long wait_seconds,
   if (wait_seconds == 0L) {
     return LC_OK;
   }
-  if (clock_gettime(CLOCK_MONOTONIC, deadline) != 0) {
+  if (lc_pouch_queue_clock_gettime(CLOCK_MONOTONIC, deadline) != 0) {
     return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                         "failed to read pouch dequeue wait clock",
                         strerror(errno), NULL, NULL);
@@ -9455,7 +9489,8 @@ static int
 lc_pouch_queue_wait_deadline_reached(const struct timespec *deadline) {
   struct timespec now;
 
-  if (deadline == NULL || clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+  if (deadline == NULL ||
+      lc_pouch_queue_clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
     return 1;
   }
   return now.tv_sec > deadline->tv_sec ||
@@ -9467,6 +9502,12 @@ static void lc_pouch_queue_dequeue_poll_delay(void) {
 
   delay.tv_sec = 0;
   delay.tv_nsec = 100L * 1000L * 1000L;
+#ifdef LOCKDC_TEST_BUILD
+  if (lc_pouch_test_queue_poll_delay != NULL) {
+    lc_pouch_test_queue_poll_delay(&delay, lc_pouch_test_queue_time_context);
+    return;
+  }
+#endif
   (void)nanosleep(&delay, NULL);
 }
 

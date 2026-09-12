@@ -13,3 +13,11 @@ target_include_directories(lockdc_bench PRIVATE
 target_link_libraries(lockdc_bench PRIVATE lc_static)
 lc_configure_c_target(lockdc_bench)
 lc_enable_coverage_if_requested(lockdc_bench)
+
+# Fresh-process public-API driver for tests/e2e/pouch_replay.py.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(lockdc_pouch_replay_probe pouch_replay_probe.c)
+  target_link_libraries(lockdc_pouch_replay_probe PRIVATE lc_static)
+  lc_configure_c_target(lockdc_pouch_replay_probe)
+  lc_enable_coverage_if_requested(lockdc_pouch_replay_probe)
+endif()

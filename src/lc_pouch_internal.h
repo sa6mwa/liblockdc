@@ -248,6 +248,13 @@ struct lc_pouch {
 };
 
 #ifdef LOCKDC_TEST_BUILD
+/* Scoped by single-threaded queue tests; absent from production builds. */
+extern int (*lc_pouch_test_queue_clock_gettime)(clockid_t clock_id,
+                                                struct timespec *out,
+                                                void *context);
+extern void (*lc_pouch_test_queue_poll_delay)(const struct timespec *delay,
+                                              void *context);
+extern void *lc_pouch_test_queue_time_context;
 typedef int (*lc_pouch_test_hook)(void *context, lc_error *error);
 extern lc_pouch_test_hook lc_pouch_test_after_snapshot_write_hook;
 extern void *lc_pouch_test_after_snapshot_write_context;

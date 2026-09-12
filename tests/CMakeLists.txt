@@ -251,6 +251,30 @@ endif()
 
 add_subdirectory(unit)
 add_subdirectory(integration)
+# Bootlin sets CMAKE_CROSSCOMPILING even for a host-architecture Linux build.
+# The Python driver launches the binary directly, without a QEMU wrapper.
+if(TARGET lockdc_pouch_replay_probe
+   AND CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux"
+   AND CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR
+   AND LOCKDC_TARGET_LIBC STREQUAL "gnu")
+  find_program(LOCKDC_REPLAY_PYTHON NAMES python3 REQUIRED)
+  foreach(replay_transform IN ITEMS plain encrypted)
+    set(replay_args)
+    if(replay_transform STREQUAL "encrypted")
+      list(APPEND replay_args --encrypted)
+    endif()
+    add_test(NAME pouch_replay_${replay_transform}
+      COMMAND "${LOCKDC_REPLAY_PYTHON}"
+        "${CMAKE_SOURCE_DIR}/tests/e2e/pouch_replay.py"
+        $<TARGET_FILE:lockdc_pouch_replay_probe>
+        --keys 1 --updates 256 --shared --unclean --live-staged
+        --segment-bytes 65536 ${replay_args})
+    set_tests_properties(pouch_replay_${replay_transform} PROPERTIES
+      LABELS "integration;offline;pouch;e2e"
+      RUN_SERIAL TRUE TIMEOUT 60
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
+  endforeach()
+endif()
 if(LOCKDC_BUILD_E2E_TESTS)
   add_subdirectory(e2e)
 endif()

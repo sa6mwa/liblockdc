@@ -12179,8 +12179,14 @@ static int lc_pouch_state_recover_staged_decisions_locked(
     lc_pouch_unix_seconds updated_at_unix;
 
     memset(&staged, 0, sizeof(staged));
-    rc = lc_pouch_state_scan(pouch, &manifest, decision->staged_key, &staged,
-                             &max_version, error);
+    /* The namespace projection already resolves each key's latest record.
+     * Scanning the entire durable history for every old decision makes one
+     * surviving staged key turn recovery into quadratic log reads. Use the
+     * normal mode-aware lookup so shared writers and invalidated projections
+     * still refresh under the mutation authority held by this caller. */
+    rc = lc_pouch_state_cache_lookup(pouch, namespace_name, &manifest,
+                                     decision->staged_key, &staged,
+                                     &max_version, error);
     if (rc != LC_OK) {
       lc_pouch_state_entry_cleanup(&pouch->allocator, &staged);
       break;
