@@ -103,6 +103,14 @@ function(write_shared_consumer_project project_dir)
         "add_subdirectory(\"${LOCKDC_ROOT}\" lockdc-src)\n"
         "add_executable(shared_consumer main.c)\n"
         "target_link_libraries(shared_consumer PRIVATE lc_shared)\n"
+        "if(CMAKE_SYSTEM_NAME STREQUAL \"Linux\")\n"
+        "  target_link_options(shared_consumer PRIVATE \"LINKER:-rpath,$<TARGET_FILE_DIR:lc_shared>\")\n"
+        "endif()\n"
+        "enable_testing()\n"
+        "if(CMAKE_SYSTEM_NAME STREQUAL CMAKE_HOST_SYSTEM_NAME AND CMAKE_SYSTEM_PROCESSOR STREQUAL CMAKE_HOST_SYSTEM_PROCESSOR)\n"
+        "  add_test(NAME shared_consumer_runs COMMAND shared_consumer)\n"
+        "  add_test(NAME lua_module_loads COMMAND lockdc_lua_runner -e \"package.cpath = [[$<TARGET_FILE_DIR:lockdc_lua_core>/../?.so]]; assert(require('lockdc.core'))\")\n"
+        "endif()\n"
     )
     file(WRITE "${project_dir}/main.c" [=[
 #include <lc/lc.h>
@@ -136,6 +144,7 @@ append_toolchain_arg(shared_consumer_configure_args
     -B "${shared_consumer_build}"
     -DLOCKDC_BUILD_STATIC=OFF
     -DLOCKDC_BUILD_SHARED=ON
+    -DLOCKDC_BUILD_LUA_BINDINGS=ON
     -DLOCKDC_BUILD_TESTS=OFF
     -DLOCKDC_BUILD_E2E_TESTS=OFF
     -DLOCKDC_BUILD_EXAMPLES=OFF
@@ -148,9 +157,12 @@ append_toolchain_arg(shared_consumer_configure_args
 )
 run_checked("shared consumer configure" ${shared_consumer_configure_args})
 run_checked("shared consumer build"
-    "${CMAKE_COMMAND}" --build "${shared_consumer_build}" --target shared_consumer
+    "${CMAKE_COMMAND}" --build "${shared_consumer_build}" --target shared_consumer lockdc_lua_runner lockdc_lua_core
 )
 assert_bootlin_development_executable("${shared_consumer_build}/shared_consumer")
+run_checked("shared consumer and Lua module execution"
+    "${CMAKE_COMMAND}" -E env --unset=LD_LIBRARY_PATH --unset=LD_PRELOAD
+    "${CMAKE_CTEST_COMMAND}" --test-dir "${shared_consumer_build}" --output-on-failure)
 
 append_toolchain_arg(shared_configure_args
     "${CMAKE_COMMAND}"

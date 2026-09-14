@@ -209,7 +209,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSROOT)
         list(GET lockdc_runtime_loaders 0 LOCKDC_DEVELOPMENT_RUNTIME_LOADER)
     endif()
 
-    set(LOCKDC_DEVELOPMENT_RUNTIME_DIRS "${CMAKE_BINARY_DIR}")
+    set(LOCKDC_DEVELOPMENT_RUNTIME_DIRS "${CMAKE_CURRENT_BINARY_DIR}")
+    if(LOCKDC_BUILD_SHARED)
+        list(APPEND LOCKDC_DEVELOPMENT_RUNTIME_DIRS "$<TARGET_FILE_DIR:lc_shared>")
+    endif()
     foreach(lockdc_runtime_dir
             "${CMAKE_SYSROOT}/lib"
             "${CMAKE_SYSROOT}/usr/lib"
