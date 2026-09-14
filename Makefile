@@ -905,8 +905,9 @@ __lua-test: __build-debug
 lua-env:
 	$(TIMED) lua-env $(MAKE_RECURSE) __lua-env
 
-__lua-env:
+__lua-env: __build-x86_64-linux-gnu-release
 	@printf 'export LOCKDC_PREFIX=%s\n' '$(X86_64_GNU_RELEASE_BUILD_DIR)/package/liblockdc-$$(sed -n '"'"'s/^set(LOCKDC_VERSION "\(.*\)")$$/\1/p'"'"' $(X86_64_GNU_RELEASE_BUILD_DIR)/package-metadata.cmake)-x86_64-linux-gnu'
+	@printf 'export LOCKDC_LUA_BIN=%s\n' '$(X86_64_GNU_RELEASE_BUILD_DIR)/lockdc_lua_runner'
 	@printf 'export LUA_PATH=%s\n' '$(ROOT)/lua/?.lua;$(ROOT)/lua/?/init.lua;;'
 	@printf 'export LUA_CPATH=%s\n' '$(ROOT)/.luarocks-build/lockdc/?.so;;'
 

@@ -7,6 +7,10 @@ file(READ "${LOCKDC_ROOT}/src/lua/lockdc_lua.c" lua_binding)
 foreach(required_snippet
     "static long lcdc_check_long(lua_State *L, int index, const char *name)"
     "lc_i64_to_long_checked((lc_i64)value, &result)"
+    "static lc_version lcdc_check_version(lua_State *L, int index,"
+    "static int lcdc_opt_version_field(lua_State *L, int index, const char *name,"
+    "lcdc_opt_version_field(L, 2, \"if_version\", &request.if_version)"
+    "static void lcdc_set_version_field(lua_State *L, const char *name,"
     "timeout_ms = lcdc_check_long(L, 2, \"workflow next timeout\")"
     "long ttl_seconds = lcdc_check_long(L, 2, \"outbox renewal ttl\")"
     "static int lcdc_set_size_field(lua_State *L, const char *name, size_t value,"
@@ -63,6 +67,13 @@ string(FIND "${participant_get_binding}"
 if(NOT participant_get_narrowing_index EQUAL -1)
     message(FATAL_ERROR
         "Lua workflow participant get must not narrow version through C long")
+endif()
+string(FIND "${participant_get_binding}"
+    "lcdc_set_int64_field(L, \"version\", result.version, &error)"
+    participant_get_wide_index)
+if(participant_get_wide_index EQUAL -1)
+    message(FATAL_ERROR
+        "Lua workflow participant get must preserve 64-bit versions")
 endif()
 
 string(FIND "${lua_binding}"

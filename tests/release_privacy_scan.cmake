@@ -28,6 +28,17 @@ function(lockdc_private_trace_needles out_var)
         endif()
     endforeach()
 
+    foreach(_toolchain_root IN LISTS LOCKDC_BOOTLIN_TOOLCHAIN_ROOTS)
+        if(_toolchain_root STREQUAL "")
+            continue()
+        endif()
+        string(REPLACE "\\" "/" _toolchain_root "${_toolchain_root}")
+        list(FIND _needles "${_toolchain_root}" _existing_needle_index)
+        if(_existing_needle_index EQUAL -1)
+            list(APPEND _needles "${_toolchain_root}" "BOOTLIN_TOOLCHAIN_ROOT")
+        endif()
+    endforeach()
+
     set(${out_var} "${_needles}" PARENT_SCOPE)
 endfunction()
 

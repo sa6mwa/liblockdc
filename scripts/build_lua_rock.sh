@@ -117,10 +117,17 @@ resolve_lockdc_from_prefix() {
   if ! lockdc_sdk_has_shared_library "$libdir"; then
     lockdc_shared_sdk_error
   fi
+  if [ "${version}" != "${expected_lockdc_version}" ]; then
+    lockdc_dependency_error "found liblockdc ${version}, but this Lua rock requires liblockdc ${expected_lockdc_version}"
+  fi
+  if ! command -v pkg-config >/dev/null 2>&1; then
+    lockdc_dependency_error "pkg-config is required to resolve liblockdc's public shared dependencies"
+  fi
 
   lockdc_resolved_version="$version"
-  lockdc_cflags="-I${prefix}/include"
-  lockdc_libs="-L${libdir} -Wl,-rpath,${libdir} -llockdc"
+  lockdc_pkg_config_path="${libdir}/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+  lockdc_cflags="$(PKG_CONFIG_PATH="${lockdc_pkg_config_path}" pkg-config --cflags lockdc)"
+  lockdc_libs="$(PKG_CONFIG_PATH="${lockdc_pkg_config_path}" pkg-config --libs lockdc)"
 }
 
 resolve_lockdc_from_pkg_config() {
@@ -159,7 +166,7 @@ lockdc_libs=""
 lockdc_resolved_version=""
 
 if [ "$(uname -s)" = "Linux" ]; then
-  linkflags="${linkflags} -Wl,--allow-shlib-undefined"
+  linkflags="${linkflags} -Wl,--allow-shlib-undefined -Wl,--disable-new-dtags"
 fi
 
 if [ -n "${LOCKDC_PREFIX:-}" ]; then

@@ -6,6 +6,8 @@ if(NOT DEFINED LOCKDC_ROOT)
     message(FATAL_ERROR "LOCKDC_ROOT is required")
 endif()
 
+include("${LOCKDC_ROOT}/tests/bootlin_runtime_test_support.cmake")
+
 function(lockdc_import_cache_value var_name)
     if(DEFINED ${var_name} AND NOT "${${var_name}}" STREQUAL "")
         return()
@@ -25,6 +27,7 @@ lockdc_import_cache_value(CMAKE_TOOLCHAIN_FILE)
 lockdc_import_cache_value(CMAKE_LINKER)
 lockdc_import_cache_value(CMAKE_EXE_LINKER_FLAGS)
 lockdc_import_cache_value(CMAKE_BUILD_TYPE)
+lockdc_import_cache_value(CMAKE_SYSROOT)
 
 if(NOT DEFINED CMAKE_C_COMPILER OR CMAKE_C_COMPILER STREQUAL "")
     message(FATAL_ERROR "CMAKE_C_COMPILER is required")
@@ -111,6 +114,14 @@ endif()
 if(NOT EXISTS "${release_prefix}")
     message(FATAL_ERROR "release tarball missing expected prefix directory: ${release_prefix}")
 endif()
+
+lockdc_resolve_bootlin_runtime("${CMAKE_SYSROOT}" "${LOCKDC_EXTERNAL_ROOT}"
+    "${release_prefix}/lib" lockdc_bootlin_runtime_loader
+    lockdc_bootlin_runtime_dirs)
+string(REPLACE ";" "\\;" lockdc_bootlin_runtime_dirs_arg
+    "${lockdc_bootlin_runtime_dirs}")
+lockdc_bootlin_runtime_link_flags("${lockdc_bootlin_runtime_loader}"
+    "${lockdc_bootlin_runtime_dirs}" lockdc_bootlin_direct_link_flags)
 
 foreach(required_path
     "${release_prefix}/include/lc/lc.h"
@@ -275,6 +286,16 @@ lockdc_assert_config_supports_quiet_optional_discovery(
 file(WRITE "${consumer_src_dir}/CMakeLists.txt" [=[
 cmake_minimum_required(VERSION 3.21)
 project(lockdc_release_tarball_consumer C)
+
+if(NOT "${LOCKDC_BOOTLIN_RUNTIME_LOADER}" STREQUAL "")
+    set(CMAKE_SKIP_BUILD_RPATH TRUE)
+    add_link_options(
+        "LINKER:--dynamic-linker,${LOCKDC_BOOTLIN_RUNTIME_LOADER}"
+        "LINKER:--disable-new-dtags")
+    foreach(lockdc_runtime_dir IN LISTS LOCKDC_BOOTLIN_RUNTIME_DIRS)
+        add_link_options("LINKER:-rpath,${lockdc_runtime_dir}")
+    endforeach()
+endif()
 
 find_package(lockdc CONFIG REQUIRED)
 
@@ -578,7 +599,9 @@ set(lockdc_consumer_configure_args
         "-DCMAKE_FIND_PACKAGE_NO_PACKAGE_REGISTRY=ON"
         "-Dlockdc_DIR=${release_prefix}/lib/cmake/lockdc"
         "-DLOCKDC_RELEASE_PREFIX=${release_prefix}"
-        "-DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}")
+        "-DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}"
+        "-DLOCKDC_BOOTLIN_RUNTIME_LOADER=${lockdc_bootlin_runtime_loader}"
+        "-DLOCKDC_BOOTLIN_RUNTIME_DIRS=${lockdc_bootlin_runtime_dirs_arg}")
 if(LOCKDC_TARGET_ID MATCHES "apple-darwin$"
         AND DEFINED CMAKE_TOOLCHAIN_FILE
         AND NOT "${CMAKE_TOOLCHAIN_FILE}" STREQUAL "")
@@ -613,16 +636,9 @@ if(NOT build_result EQUAL 0)
 endif()
 
 if(LOCKDC_RUN_DOWNSTREAM_BINARIES)
-    set(lockdc_release_runtime_env)
-    if(UNIX AND NOT APPLE)
-        set(lockdc_release_runtime_env
-            "LD_LIBRARY_PATH=${LOCKDC_EXTERNAL_ROOT}/curl/install/lib:${LOCKDC_EXTERNAL_ROOT}/openssl/install/lib:${LOCKDC_EXTERNAL_ROOT}/nghttp2/install/lib:${LOCKDC_EXTERNAL_ROOT}/pslog/install/lib:${LOCKDC_EXTERNAL_ROOT}/lonejson/install/lib:${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib:${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib:${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
-    endif()
     foreach(binary_name example_static test_static example_shared test_shared)
         execute_process(
-            COMMAND "${CMAKE_COMMAND}" -E env
-                ${lockdc_release_runtime_env}
-                "${consumer_bin_dir}/${binary_name}"
+            COMMAND "${consumer_bin_dir}/${binary_name}"
             RESULT_VARIABLE run_result
             OUTPUT_VARIABLE run_stdout
             ERROR_VARIABLE run_stderr
@@ -784,6 +800,7 @@ execute_process(
         ${lockdc_pkgconfig_shared_rpath_flag}
         -o "${lockdc_pkgconfig_shared_consumer}"
         ${lockdc_direct_link_flags}
+        ${lockdc_bootlin_direct_link_flags}
         ${lockdc_pkgconfig_shared_libs_list}
     RESULT_VARIABLE lockdc_pkgconfig_shared_build_result
     OUTPUT_VARIABLE lockdc_pkgconfig_shared_build_stdout

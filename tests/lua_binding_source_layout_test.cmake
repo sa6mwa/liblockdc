@@ -56,7 +56,8 @@ endforeach()
 
 foreach(required_snippet
     "set -euo pipefail"
-    "-llockdc"
+    "pkg-config --libs lockdc"
+    "pkg-config --cflags lockdc"
     "LOCKDC_CFLAGS_EXTRA"
     "LOCKDC_LIBS_EXTRA")
     string(FIND "${build_luarock_script}" "${required_snippet}" snippet_index)

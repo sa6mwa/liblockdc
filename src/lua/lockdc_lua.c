@@ -193,11 +193,15 @@ static void lcdc_set_uinteger_field(lua_State *L, const char *name,
 
 static int lcdc_set_size_field(lua_State *L, const char *name, size_t value,
                                lc_error *error) {
+#if SIZE_MAX > LUA_MAXINTEGER
   if ((uintmax_t)value > (uintmax_t)LUA_MAXINTEGER) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "workflow statistic exceeds Lua integer range", name,
                         NULL, NULL);
   }
+#else
+  (void)error;
+#endif
   lua_pushinteger(L, (lua_Integer)value);
   lua_setfield(L, -2, name);
   return LC_OK;
@@ -225,6 +229,15 @@ static int lcdc_set_int64_field(lua_State *L, const char *name, lc_i64 value,
   lua_pushinteger(L, (lua_Integer)value);
   lua_setfield(L, -2, name);
   return LC_OK;
+}
+
+static void lcdc_set_version_field(lua_State *L, const char *name,
+                                   lc_version value) {
+  if (value < (lc_version)LUA_MININTEGER ||
+      value > (lc_version)LUA_MAXINTEGER)
+    luaL_error(L, "%s exceeds the Lua integer range", name);
+  lua_pushinteger(L, (lua_Integer)value);
+  lua_setfield(L, -2, name);
 }
 
 static void lcdc_set_bool_field(lua_State *L, const char *name, int value) {
@@ -255,12 +268,34 @@ static long lcdc_check_long(lua_State *L, int index, const char *name) {
   return result;
 }
 
+static lc_version lcdc_check_version(lua_State *L, int index,
+                                     const char *name) {
+  lua_Integer value = luaL_checkinteger(L, index);
+
+  (void)name;
+  return (lc_version)value;
+}
+
 static int lcdc_opt_integer_field(lua_State *L, int index, const char *name,
                                   long *out) {
   if (lua_istable(L, index)) {
     lua_getfield(L, index, name);
     if (!lua_isnil(L, -1)) {
       *out = lcdc_check_long(L, -1, name);
+      lua_pop(L, 1);
+      return 1;
+    }
+    lua_pop(L, 1);
+  }
+  return 0;
+}
+
+static int lcdc_opt_version_field(lua_State *L, int index, const char *name,
+                                  lc_version *out) {
+  if (lua_istable(L, index)) {
+    lua_getfield(L, index, name);
+    if (!lua_isnil(L, -1)) {
+      *out = lcdc_check_version(L, -1, name);
       lua_pop(L, 1);
       return 1;
     }
@@ -650,7 +685,7 @@ static void lcdc_push_lease_info(lua_State *L, lc_lease *lease) {
   lcdc_set_string_field(L, "lease_id", lease->lease_id);
   lcdc_set_string_field(L, "txn_id", lease->txn_id);
   lcdc_set_integer_field(L, "fencing_token", lease->fencing_token);
-  lcdc_set_integer_field(L, "version", lease->version);
+  lcdc_set_version_field(L, "version", lease->version);
   lcdc_set_integer_field(L, "lease_expires_at_unix",
                          lease->lease_expires_at_unix);
   lcdc_set_string_field(L, "state_etag", lease->state_etag);
@@ -1224,7 +1259,7 @@ static int lcdc_acquire_for_update_handler_call(
   lcdc_set_bool_field(L, "no_content", !update->state.has_state);
   lcdc_set_string_field(L, "content_type", update->state.content_type);
   lcdc_set_string_field(L, "etag", update->state.etag);
-  lcdc_set_integer_field(L, "version", update->state.version);
+  lcdc_set_version_field(L, "version", update->state.version);
   lcdc_set_integer_field(L, "fencing_token", update->state.fencing_token);
   lcdc_set_string_field(L, "correlation_id", update->state.correlation_id);
   lua_setfield(L, -2, "state_meta");
@@ -1304,7 +1339,7 @@ static int lcdc_client_describe(lua_State *L) {
   lcdc_set_string_field(L, "namespace_name", res.namespace_name);
   lcdc_set_string_field(L, "key", res.key);
   lcdc_set_string_field(L, "owner", res.owner);
-  lcdc_set_integer_field(L, "version", res.version);
+  lcdc_set_version_field(L, "version", res.version);
   lcdc_set_string_field(L, "lease_id", res.lease_id);
   lcdc_set_integer_field(L, "lease_expires_at_unix", res.lease_expires_at_unix);
   lcdc_set_integer_field(L, "fencing_token", res.fencing_token);
@@ -1355,7 +1390,7 @@ static int lcdc_client_get(lua_State *L) {
   lcdc_set_bool_field(L, "no_content", res.no_content);
   lcdc_set_string_field(L, "content_type", res.content_type);
   lcdc_set_string_field(L, "etag", res.etag);
-  lcdc_set_integer_field(L, "version", res.version);
+  lcdc_set_version_field(L, "version", res.version);
   lcdc_set_integer_field(L, "fencing_token", res.fencing_token);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_get_res_cleanup(&res);
@@ -1379,7 +1414,7 @@ static int lcdc_client_update(lua_State *L) {
   luaL_checktype(L, 2, LUA_TTABLE);
   lcdc_parse_lease_ref(L, 2, &req.lease);
   req.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
-  if (lcdc_opt_integer_field(L, 2, "if_version", &req.if_version)) {
+  if (lcdc_opt_version_field(L, 2, "if_version", &req.if_version)) {
     req.has_if_version = 1;
   }
   req.content_type = lcdc_opt_string_field(L, 2, "content_type");
@@ -1397,7 +1432,7 @@ static int lcdc_client_update(lua_State *L) {
     return 3;
   }
   lua_newtable(L);
-  lcdc_set_integer_field(L, "new_version", res.new_version);
+  lcdc_set_version_field(L, "new_version", res.new_version);
   lcdc_set_string_field(L, "new_state_etag", res.new_state_etag);
   lcdc_set_integer_field(L, "bytes", res.bytes);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
@@ -1427,7 +1462,7 @@ static int lcdc_client_mutate(lua_State *L) {
   req.mutations = mutations;
   req.mutation_count = mutation_count;
   req.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
-  if (lcdc_opt_integer_field(L, 2, "if_version", &req.if_version)) {
+  if (lcdc_opt_version_field(L, 2, "if_version", &req.if_version)) {
     req.has_if_version = 1;
   }
   rc = lc_mutate(ud->client, &req, &res, &error);
@@ -1438,7 +1473,7 @@ static int lcdc_client_mutate(lua_State *L) {
     return 3;
   }
   lua_newtable(L);
-  lcdc_set_integer_field(L, "new_version", res.new_version);
+  lcdc_set_version_field(L, "new_version", res.new_version);
   lcdc_set_string_field(L, "new_state_etag", res.new_state_etag);
   lcdc_set_integer_field(L, "bytes", res.bytes);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
@@ -1463,7 +1498,7 @@ static int lcdc_client_metadata(lua_State *L) {
   if (lcdc_opt_boolean_field(L, 2, "query_hidden", &req.query_hidden)) {
     req.has_query_hidden = 1;
   }
-  if (lcdc_opt_integer_field(L, 2, "if_version", &req.if_version)) {
+  if (lcdc_opt_version_field(L, 2, "if_version", &req.if_version)) {
     req.has_if_version = 1;
   }
   rc = lc_metadata(ud->client, &req, &res, &error);
@@ -1475,7 +1510,7 @@ static int lcdc_client_metadata(lua_State *L) {
   lua_newtable(L);
   lcdc_set_string_field(L, "namespace_name", res.namespace_name);
   lcdc_set_string_field(L, "key", res.key);
-  lcdc_set_integer_field(L, "version", res.version);
+  lcdc_set_version_field(L, "version", res.version);
   lcdc_set_bool_field(L, "has_query_hidden", res.has_query_hidden);
   lcdc_set_bool_field(L, "query_hidden", res.query_hidden);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
@@ -1498,7 +1533,7 @@ static int lcdc_client_remove(lua_State *L) {
   luaL_checktype(L, 2, LUA_TTABLE);
   lcdc_parse_lease_ref(L, 2, &req.lease);
   req.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
-  if (lcdc_opt_integer_field(L, 2, "if_version", &req.if_version)) {
+  if (lcdc_opt_version_field(L, 2, "if_version", &req.if_version)) {
     req.has_if_version = 1;
   }
   rc = lc_remove(ud->client, &req, &res, &error);
@@ -1509,7 +1544,7 @@ static int lcdc_client_remove(lua_State *L) {
   }
   lua_newtable(L);
   lcdc_set_bool_field(L, "removed", res.removed);
-  lcdc_set_integer_field(L, "new_version", res.new_version);
+  lcdc_set_version_field(L, "new_version", res.new_version);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_remove_res_cleanup(&res);
   lc_error_cleanup(&error);
@@ -1538,7 +1573,7 @@ static int lcdc_client_keepalive(lua_State *L) {
   }
   lua_newtable(L);
   lcdc_set_integer_field(L, "lease_expires_at_unix", res.lease_expires_at_unix);
-  lcdc_set_integer_field(L, "version", res.version);
+  lcdc_set_version_field(L, "version", res.version);
   lcdc_set_string_field(L, "state_etag", res.state_etag);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_keepalive_res_cleanup(&res);
@@ -1612,7 +1647,7 @@ static int lcdc_client_attach(lua_State *L) {
   lcdc_push_attachment_info(L, &res.attachment);
   lua_setfield(L, -2, "attachment");
   lcdc_set_bool_field(L, "noop", res.noop);
-  lcdc_set_integer_field(L, "version", res.version);
+  lcdc_set_version_field(L, "version", res.version);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_attach_res_cleanup(&res);
   lc_error_cleanup(&error);
@@ -2244,7 +2279,7 @@ static int lcdc_lease_get(lua_State *L) {
   lcdc_set_bool_field(L, "no_content", res.no_content);
   lcdc_set_string_field(L, "content_type", res.content_type);
   lcdc_set_string_field(L, "etag", res.etag);
-  lcdc_set_integer_field(L, "version", res.version);
+  lcdc_set_version_field(L, "version", res.version);
   lcdc_set_integer_field(L, "fencing_token", res.fencing_token);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_get_res_cleanup(&res);
@@ -2266,7 +2301,7 @@ static int lcdc_lease_update(lua_State *L) {
   if (!lua_isnoneornil(L, 3)) {
     luaL_checktype(L, 3, LUA_TTABLE);
     opts.if_state_etag = lcdc_opt_string_field(L, 3, "if_state_etag");
-    if (lcdc_opt_integer_field(L, 3, "if_version", &opts.if_version)) {
+    if (lcdc_opt_version_field(L, 3, "if_version", &opts.if_version)) {
       opts.has_if_version = 1;
     }
     opts.content_type = lcdc_opt_string_field(L, 3, "content_type");
@@ -2307,7 +2342,7 @@ static int lcdc_lease_mutate(lua_State *L) {
   req.mutations = mutations;
   req.mutation_count = mutation_count;
   req.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
-  if (lcdc_opt_integer_field(L, 2, "if_version", &req.if_version)) {
+  if (lcdc_opt_version_field(L, 2, "if_version", &req.if_version)) {
     req.has_if_version = 1;
   }
   rc = lc_lease_mutate(ud->lease, &req, &error);
@@ -2342,7 +2377,7 @@ static int lcdc_lease_mutate_local(lua_State *L) {
   lcdc_opt_boolean_field(L, 2, "disable_fetched_cas", &req.disable_fetched_cas);
   req.file_value_base_dir = lcdc_opt_string_field(L, 2, "file_value_base_dir");
   req.update.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
-  if (lcdc_opt_integer_field(L, 2, "if_version", &req.update.if_version)) {
+  if (lcdc_opt_version_field(L, 2, "if_version", &req.update.if_version)) {
     req.update.has_if_version = 1;
   }
   req.update.content_type = lcdc_opt_string_field(L, 2, "content_type");
@@ -2371,7 +2406,7 @@ static int lcdc_lease_metadata(lua_State *L) {
   if (lcdc_opt_boolean_field(L, 2, "query_hidden", &req.query_hidden)) {
     req.has_query_hidden = 1;
   }
-  if (lcdc_opt_integer_field(L, 2, "if_version", &req.if_version)) {
+  if (lcdc_opt_version_field(L, 2, "if_version", &req.if_version)) {
     req.has_if_version = 1;
   }
   rc = lc_lease_metadata(ud->lease, &req, &error);
@@ -2397,7 +2432,7 @@ static int lcdc_lease_remove(lua_State *L) {
   if (!lua_isnoneornil(L, 2)) {
     luaL_checktype(L, 2, LUA_TTABLE);
     req.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
-    if (lcdc_opt_integer_field(L, 2, "if_version", &req.if_version)) {
+    if (lcdc_opt_version_field(L, 2, "if_version", &req.if_version)) {
       req.has_if_version = 1;
     }
   }
@@ -2500,7 +2535,7 @@ static int lcdc_lease_attach(lua_State *L) {
   lcdc_push_attachment_info(L, &res.attachment);
   lua_setfield(L, -2, "attachment");
   lcdc_set_bool_field(L, "noop", res.noop);
-  lcdc_set_integer_field(L, "version", res.version);
+  lcdc_set_version_field(L, "version", res.version);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_attach_res_cleanup(&res);
   lc_error_cleanup(&error);
@@ -3552,7 +3587,7 @@ static int lcdc_workflow_participant_update(lua_State *L) {
   if (!lua_isnoneornil(L, 3)) {
     luaL_checktype(L, 3, LUA_TTABLE);
     opts.if_state_etag = lcdc_opt_string_field(L, 3, "if_state_etag");
-    if (lcdc_opt_integer_field(L, 3, "if_version", &opts.if_version)) {
+    if (lcdc_opt_version_field(L, 3, "if_version", &opts.if_version)) {
       opts.has_if_version = 1;
     }
     opts.content_type = lcdc_opt_string_field(L, 3, "content_type");
@@ -3586,7 +3621,7 @@ static int lcdc_workflow_participant_mutate(lua_State *L) {
   request.mutations = mutations;
   request.mutation_count = mutation_count;
   request.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
-  if (lcdc_opt_integer_field(L, 2, "if_version", &request.if_version)) {
+  if (lcdc_opt_version_field(L, 2, "if_version", &request.if_version)) {
     request.has_if_version = 1;
   }
   lc_error_init(&error);
@@ -3620,7 +3655,7 @@ static int lcdc_workflow_participant_mutate_local(lua_State *L) {
   request.file_value_base_dir =
       lcdc_opt_string_field(L, 2, "file_value_base_dir");
   request.update.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
-  if (lcdc_opt_integer_field(L, 2, "if_version", &request.update.if_version)) {
+  if (lcdc_opt_version_field(L, 2, "if_version", &request.update.if_version)) {
     request.update.has_if_version = 1;
   }
   request.update.content_type = lcdc_opt_string_field(L, 2, "content_type");
@@ -3648,7 +3683,7 @@ static int lcdc_workflow_participant_metadata(lua_State *L) {
   if (lcdc_opt_boolean_field(L, 2, "query_hidden", &request.query_hidden)) {
     request.has_query_hidden = 1;
   }
-  if (lcdc_opt_integer_field(L, 2, "if_version", &request.if_version)) {
+  if (lcdc_opt_version_field(L, 2, "if_version", &request.if_version)) {
     request.has_if_version = 1;
   }
   lc_error_init(&error);
@@ -3673,7 +3708,7 @@ static int lcdc_workflow_participant_remove(lua_State *L) {
   if (!lua_isnoneornil(L, 2)) {
     luaL_checktype(L, 2, LUA_TTABLE);
     request.if_state_etag = lcdc_opt_string_field(L, 2, "if_state_etag");
-    if (lcdc_opt_integer_field(L, 2, "if_version", &request.if_version)) {
+    if (lcdc_opt_version_field(L, 2, "if_version", &request.if_version)) {
       request.has_if_version = 1;
     }
   }

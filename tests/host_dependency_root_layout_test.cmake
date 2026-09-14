@@ -67,8 +67,11 @@ assert_contains(host_test_script "-LE lifecycle-host" "host test excludes target
 assert_not_contains(host_test_script "resolve_host_arch" "ambient-host architecture resolver")
 assert_not_contains(host_test_script "have_native_musl_toolchain" "ambient-host musl resolver")
 assert_contains(root_cmake [=[list(APPEND LOCKDC_C_TEST_ENVIRONMENT "LOCKDC_SLOW_TEST_RUNTIME=1")]=] "C test cross slow-runtime environment")
-assert_contains(root_cmake [=[list(APPEND LOCKDC_C_TEST_ENVIRONMENT "LD_LIBRARY_PATH=${lockdc_c_test_runtime_path}")]=] "C test Bootlin runtime environment")
-assert_contains(root_cmake "-print-file-name=libatomic.so.1" "C test libatomic runtime discovery")
+assert_not_contains(root_cmake "LD_LIBRARY_PATH=${lockdc_c_test_runtime_path}" "ambient C test runtime loader path")
+assert_contains(root_cmake "function(lc_configure_development_runtime target)" "development executable Bootlin runtime helper")
+assert_contains(root_cmake "LINKER:--dynamic-linker" "development executable Bootlin interpreter")
+assert_contains(root_cmake "LINKER:--disable-new-dtags" "transitive Bootlin runtime lookup")
+assert_contains(root_cmake "libatomic.so.1" "development executable libatomic runtime discovery")
 assert_contains(root_cmake [=[set_tests_properties(lockdc_bench_help PROPERTIES
                 ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")]=] "benchmark help test Bootlin runtime environment")
 

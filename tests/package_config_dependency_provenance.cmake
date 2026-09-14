@@ -13,11 +13,11 @@ endif()
 
     file(WRITE "${fake_curl_dir}/CURLConfig.cmake" "${fake_curl_target_block}
 set(CURL_FOUND TRUE)
-set(CURL_VERSION \"8.20.0\")
+set(CURL_VERSION \"8.22.0\")
 ")
 
     file(WRITE "${fake_curl_dir}/CURLConfigVersion.cmake" [=[
-set(PACKAGE_VERSION "8.20.0")
+set(PACKAGE_VERSION "8.22.0")
 if(PACKAGE_FIND_VERSION VERSION_EQUAL PACKAGE_VERSION)
   set(PACKAGE_VERSION_EXACT TRUE)
 endif()
@@ -44,7 +44,7 @@ function(lockdc_write_fake_curl_not_found_config fake_curl_dir)
     file(WRITE "${fake_curl_dir}/CURLConfig.cmake" [=[
 set(CURL_FOUND FALSE)
 ]=])
-    lockdc_write_fake_package_version("${fake_curl_dir}" "8.20.0" "CURLConfigVersion.cmake")
+    lockdc_write_fake_package_version("${fake_curl_dir}" "8.22.0" "CURLConfigVersion.cmake")
 endfunction()
 
 function(lockdc_write_fake_shared_only_dependency_configs fake_root out_pslog_dir out_lonejson_dir out_liblql_dir)

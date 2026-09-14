@@ -45,6 +45,11 @@ standalone `liblockdc-lua-<version>.tar.gz` source package, the rendered
 embeds that exact standalone archive; all three artifacts are checksum-listed
 and recursively privacy-scanned before release.
 
+For local examples and test modules, use the `LOCKDC_LUA_BIN` value printed by
+`make lua-env`. It names the project-built Lua 5.5 runner linked to the selected
+Bootlin runtime. LuaRocks remains a packaging tool; it is not used as the
+interpreter for a Bootlin-built native module.
+
 The C SDK is pinned to the matching `lonejson 0.43.0` native dependency for
 mapped state load/save and internal typed JSON parsing. The Lua rock declares
 the corresponding Lua-facing `lonejson` rock so Lua JSON behavior and the C

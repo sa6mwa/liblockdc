@@ -14,9 +14,10 @@ set(test_root "${LOCKDC_BINARY_DIR}/release-privacy-recursive-test")
 set(inner_root "${test_root}/inner")
 set(inner_archive "${test_root}/lockdc-inner.tar.gz")
 set(outer_archive "${test_root}/lockdc-0.0.0-1.src.rock")
+set(toolchain_root "/opt/c.pkt.systems/toolchains/roots/x86-64--glibc--stable-2026.08-1")
 file(REMOVE_RECURSE "${test_root}")
 file(MAKE_DIRECTORY "${inner_root}")
-file(WRITE "${inner_root}/payload.txt" "private source=${LOCKDC_ROOT}\n")
+file(WRITE "${inner_root}/payload.txt" "private toolchain=${toolchain_root}\n")
 
 execute_process(
     COMMAND "${LOCKDC_TAR_BIN}" -czf "${inner_archive}" inner
@@ -39,6 +40,7 @@ endif()
 execute_process(
     COMMAND "${CMAKE_COMMAND}"
         -DLOCKDC_ROOT=${LOCKDC_ROOT}
+        -DLOCKDC_BOOTLIN_TOOLCHAIN_ROOTS=${toolchain_root}
         -DLOCKDC_SCAN_PATHS=${outer_archive}
         -P "${LOCKDC_ROOT}/tests/release_privacy_scan.cmake"
     RESULT_VARIABLE privacy_result
@@ -50,9 +52,9 @@ if(privacy_result EQUAL 0)
         "stdout:\n${privacy_output}\n"
         "stderr:\n${privacy_error}")
 endif()
-if(NOT privacy_error MATCHES "private trace LOCKDC_ROOT")
+if(NOT privacy_error MATCHES "private trace BOOTLIN_TOOLCHAIN_ROOT")
     message(FATAL_ERROR
-        "recursive release privacy scan failed without identifying the nested private trace\n"
+        "recursive release privacy scan failed without identifying the nested Bootlin toolchain trace\n"
         "stdout:\n${privacy_output}\n"
         "stderr:\n${privacy_error}")
 endif()

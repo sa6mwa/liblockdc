@@ -33,7 +33,7 @@ function(lc_add_lua_e2e_test test_name script_path)
   if(NOT LUA_E2E_PACKAGE_ONLY AND NOT TARGET lockdc_lua_core)
     return()
   endif()
-  if(NOT LOCKDC_LUA_BIN OR NOT LOCKDC_LUAROCKS_BIN)
+  if(NOT LOCKDC_LUA_RUNNABLE OR NOT LOCKDC_LUAROCKS_BIN)
     return()
   endif()
 
@@ -43,6 +43,7 @@ function(lc_add_lua_e2e_test test_name script_path)
       -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
       -DLOCKDC_TEST_NAME=${test_name}
       -DLOCKDC_LUA_TEST_SCRIPT=${script_path}
+      -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
   )
   if(LUA_E2E_ENV_OVERRIDES)
     string(REPLACE ";" "|" lua_e2e_env_overrides "${LUA_E2E_ENV_OVERRIDES}")
@@ -173,7 +174,6 @@ if(TARGET lc_example_startconsumer)
   )
 endif()
 
-find_program(LOCKDC_LUA_BIN NAMES lua5.5)
 find_program(LOCKDC_LUAROCKS_BIN NAMES luarocks)
 
 lc_add_lua_e2e_test(

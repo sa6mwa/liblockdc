@@ -121,6 +121,13 @@ and verified dependency archives under
 `${CPKT_DEPENDENCY_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/deps}`.
 Repository-local `.cache/` directories are disposable build and staging state.
 
+The pinned `c.pkt.systems` 0.10.0 GNU SDKs require glibc 2.43 or newer at
+deployment. This does not change the `liblockdc` public ABI, but deployments
+using the shared GNU SDK must upgrade their runtime accordingly. Development
+executables, tests, examples, Lua module checks, and SDK consumer probes run
+directly with their selected Bootlin ELF interpreter and private runtime lookup
+paths; they do not use `LD_LIBRARY_PATH` or a host Lua interpreter.
+
 ## Common workflows
 
 Build the normal host development preset:

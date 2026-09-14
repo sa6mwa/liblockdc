@@ -45,11 +45,20 @@ foreach(test_script
     "${LOCKDC_ROOT}/tests/release_tarball_sdk_test.cmake"
     "${LOCKDC_ROOT}/tests/lua_release_package_test.cmake"
 )
+    set(lockdc_test_args)
+    if(test_script STREQUAL "${LOCKDC_ROOT}/tests/lua_release_package_test.cmake")
+        set(lockdc_lua_runner "${LOCKDC_BINARY_DIR}/lockdc_lua_runner")
+        if(NOT EXISTS "${lockdc_lua_runner}")
+            message(FATAL_ERROR "missing project-built Bootlin Lua runner: ${lockdc_lua_runner}")
+        endif()
+        list(APPEND lockdc_test_args "-DLOCKDC_LUA_BIN=${lockdc_lua_runner}")
+    endif()
     execute_process(
         COMMAND "${CMAKE_COMMAND}"
             -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
             -DLOCKDC_ROOT=${LOCKDC_ROOT}
             -DLOCKDC_DIST_DIR=${lockdc_dist_dir}
+            ${lockdc_test_args}
             -P "${test_script}"
         RESULT_VARIABLE lockdc_test_result
         OUTPUT_VARIABLE lockdc_test_stdout
