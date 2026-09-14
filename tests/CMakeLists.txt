@@ -224,6 +224,10 @@ if(TARGET lockdc_lua_runner
 endif()
 
 if(LOCKDC_LUA_RUNNABLE)
+  add_test(NAME lua_runner_search_path_test
+    COMMAND "${CMAKE_COMMAND}" "-DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}"
+      -P "${CMAKE_SOURCE_DIR}/tests/lua_runner_search_path_test.cmake"
+  )
   add_test(NAME lua_facade_unit_test
     COMMAND "${LOCKDC_LUA_BIN}" "${CMAKE_SOURCE_DIR}/tests/lua/test_lockdc_facade_unit.lua"
   )

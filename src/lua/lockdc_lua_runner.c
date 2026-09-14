@@ -39,8 +39,6 @@ int main(int argc, char **argv)
 {
   cpkt_lua_runtime *runtime = NULL;
   cpkt_lua_runtime_status status;
-  const char *lua_path;
-  const char *lua_cpath;
   int result;
 
   if (argc < 2) {
@@ -62,26 +60,7 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  lua_path = getenv("LUA_PATH");
-  if (lua_path != NULL && lua_path[0] != '\0') {
-    status = cpkt_lua_runtime_set_package_path(runtime, lua_path);
-    if (status != CPKT_LUA_RUNTIME_OK) {
-      fprintf(stderr, "failed to set LUA_PATH: %s\n",
-              cpkt_lua_runtime_error(runtime));
-      cpkt_lua_runtime_free(runtime);
-      return 1;
-    }
-  }
-  lua_cpath = getenv("LUA_CPATH");
-  if (lua_cpath != NULL && lua_cpath[0] != '\0') {
-    status = cpkt_lua_runtime_set_package_cpath(runtime, lua_cpath);
-    if (status != CPKT_LUA_RUNTIME_OK) {
-      fprintf(stderr, "failed to set LUA_CPATH: %s\n",
-              cpkt_lua_runtime_error(runtime));
-      cpkt_lua_runtime_free(runtime);
-      return 1;
-    }
-  }
+  /* openlibs applies Lua's environment precedence and default-path expansion. */
 
   if (strcmp(argv[1], "-e") == 0) {
     if (argc != 3) {

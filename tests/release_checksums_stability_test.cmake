@@ -10,6 +10,8 @@ if(NOT EXISTS "${LOCKDC_BINARY_DIR}/package-metadata.cmake")
     message(FATAL_ERROR "missing package metadata: ${LOCKDC_BINARY_DIR}/package-metadata.cmake")
 endif()
 include("${LOCKDC_BINARY_DIR}/package-metadata.cmake")
+include("${LOCKDC_ROOT}/tests/bootlin_runtime_test_support.cmake")
+lockdc_import_cmake_cache_value("${LOCKDC_BINARY_DIR}" LOCKDC_BUILD_LUA_BINDINGS)
 
 set(lockdc_test_root "${LOCKDC_BINARY_DIR}/release-checksums-stability-test")
 set(lockdc_dist_dir "${lockdc_test_root}/dist")
@@ -23,6 +25,10 @@ foreach(script_path
     "${LOCKDC_ROOT}/cmake/package_lua_rock.cmake"
     "${LOCKDC_ROOT}/cmake/package_checksums.cmake"
 )
+    if(script_path STREQUAL "${LOCKDC_ROOT}/cmake/package_lua_rock.cmake"
+       AND NOT LOCKDC_BUILD_LUA_BINDINGS)
+        continue()
+    endif()
     execute_process(
         COMMAND "${CMAKE_COMMAND}"
             -DLOCKDC_BINARY_DIR=${LOCKDC_BINARY_DIR}
@@ -47,6 +53,9 @@ foreach(test_script
 )
     set(lockdc_test_args)
     if(test_script STREQUAL "${LOCKDC_ROOT}/tests/lua_release_package_test.cmake")
+        if(NOT LOCKDC_BUILD_LUA_BINDINGS)
+            continue()
+        endif()
         set(lockdc_lua_runner "${LOCKDC_BINARY_DIR}/lockdc_lua_runner")
         if(NOT EXISTS "${lockdc_lua_runner}")
             message(FATAL_ERROR "missing project-built Bootlin Lua runner: ${lockdc_lua_runner}")
