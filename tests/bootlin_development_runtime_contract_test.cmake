@@ -12,11 +12,20 @@ endif()
 string(REGEX REPLACE "^[^=]*=" "" LOCKDC_READELF "${lockdc_readelf_cache}")
 string(REGEX REPLACE "^[^=]*=" "" LOCKDC_SYSROOT "${lockdc_sysroot_cache}")
 
-foreach(binary_path IN ITEMS
-    "${LOCKDC_BINARY_DIR}/tests/unit/lc_unit_streams"
-    "${LOCKDC_BINARY_DIR}/lockdc_lua_runner")
+set(lockdc_runtime_manifest
+    "${LOCKDC_BINARY_DIR}/bootlin-development-runtime-targets.cmake")
+if(NOT EXISTS "${lockdc_runtime_manifest}")
+    message(FATAL_ERROR
+        "missing development runtime target manifest: ${lockdc_runtime_manifest}")
+endif()
+include("${lockdc_runtime_manifest}")
+if(NOT LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLES)
+    message(FATAL_ERROR "development runtime target manifest has no executables")
+endif()
+
+function(lockdc_assert_development_runtime binary_path target_kind)
     if(NOT EXISTS "${binary_path}")
-        message(FATAL_ERROR "missing development executable: ${binary_path}")
+        message(FATAL_ERROR "missing development ${target_kind}: ${binary_path}")
     endif()
     execute_process(
         COMMAND "${LOCKDC_READELF}" -l "${binary_path}"
@@ -28,9 +37,15 @@ foreach(binary_path IN ITEMS
     endif()
     string(FIND "${interpreter_output}" "Requesting program interpreter" interpreter_at)
     string(FIND "${interpreter_output}" "${LOCKDC_SYSROOT}" sysroot_at)
-    if(interpreter_at EQUAL -1 OR sysroot_at EQUAL -1)
+    if(target_kind STREQUAL "executable" AND
+       (interpreter_at EQUAL -1 OR sysroot_at EQUAL -1))
         message(FATAL_ERROR
             "development executable does not use the selected Bootlin interpreter: ${binary_path}\n"
+            "${interpreter_output}")
+    endif()
+    if(target_kind STREQUAL "module" AND NOT interpreter_at EQUAL -1)
+        message(FATAL_ERROR
+            "development module must not contain an ELF interpreter: ${binary_path}\n"
             "${interpreter_output}")
     endif()
 
@@ -46,12 +61,19 @@ foreach(binary_path IN ITEMS
     string(FIND "${dynamic_output}" "(RUNPATH)" runpath_at)
     if(rpath_at EQUAL -1 OR NOT runpath_at EQUAL -1)
         message(FATAL_ERROR
-            "development executable must use transitive DT_RPATH, not DT_RUNPATH: ${binary_path}\n"
+            "development ${target_kind} must use transitive DT_RPATH, not DT_RUNPATH: ${binary_path}\n"
             "${dynamic_output}")
     endif()
     if(dynamic_output MATCHES "(:|\\[)/lib(:|\\])")
         message(FATAL_ERROR
-            "development executable must not fall back to the host /lib runtime: ${binary_path}\n"
+            "development ${target_kind} must not fall back to the host /lib runtime: ${binary_path}\n"
             "${dynamic_output}")
     endif()
+endfunction()
+
+foreach(binary_path IN LISTS LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLES)
+    lockdc_assert_development_runtime("${binary_path}" "executable")
+endforeach()
+foreach(binary_path IN LISTS LOCKDC_DEVELOPMENT_RUNTIME_MODULES)
+    lockdc_assert_development_runtime("${binary_path}" "module")
 endforeach()

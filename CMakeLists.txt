@@ -280,6 +280,63 @@ function(lc_configure_development_module_runtime target)
     endforeach()
 endfunction()
 
+function(lc_collect_development_runtime_targets directory)
+    get_property(lockdc_directory_targets DIRECTORY "${directory}"
+        PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(lockdc_directory_target IN LISTS lockdc_directory_targets)
+        get_target_property(lockdc_target_type "${lockdc_directory_target}" TYPE)
+        if(lockdc_target_type STREQUAL "EXECUTABLE")
+            set_property(GLOBAL APPEND PROPERTY
+                LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLE_TARGETS
+                "${lockdc_directory_target}")
+        elseif(lockdc_target_type STREQUAL "MODULE_LIBRARY")
+            set_property(GLOBAL APPEND PROPERTY
+                LOCKDC_DEVELOPMENT_RUNTIME_MODULE_TARGETS
+                "${lockdc_directory_target}")
+        endif()
+    endforeach()
+
+    get_property(lockdc_subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+    foreach(lockdc_subdirectory IN LISTS lockdc_subdirectories)
+        lc_collect_development_runtime_targets("${lockdc_subdirectory}")
+    endforeach()
+endfunction()
+
+function(lc_write_development_runtime_contract_manifest)
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSROOT)
+        return()
+    endif()
+
+    set_property(GLOBAL PROPERTY LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLE_TARGETS "")
+    set_property(GLOBAL PROPERTY LOCKDC_DEVELOPMENT_RUNTIME_MODULE_TARGETS "")
+    lc_collect_development_runtime_targets("${CMAKE_CURRENT_SOURCE_DIR}")
+    get_property(lockdc_development_runtime_executables GLOBAL PROPERTY
+        LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLE_TARGETS)
+    get_property(lockdc_development_runtime_modules GLOBAL PROPERTY
+        LOCKDC_DEVELOPMENT_RUNTIME_MODULE_TARGETS)
+    list(REMOVE_DUPLICATES lockdc_development_runtime_executables)
+    list(REMOVE_DUPLICATES lockdc_development_runtime_modules)
+
+    set(lockdc_development_runtime_manifest
+        "set(LOCKDC_DEVELOPMENT_RUNTIME_EXECUTABLES\n")
+    foreach(lockdc_development_runtime_target
+            IN LISTS lockdc_development_runtime_executables)
+        string(APPEND lockdc_development_runtime_manifest
+            "  \"$<TARGET_FILE:${lockdc_development_runtime_target}>\"\n")
+    endforeach()
+    string(APPEND lockdc_development_runtime_manifest ")\n"
+        "set(LOCKDC_DEVELOPMENT_RUNTIME_MODULES\n")
+    foreach(lockdc_development_runtime_target
+            IN LISTS lockdc_development_runtime_modules)
+        string(APPEND lockdc_development_runtime_manifest
+            "  \"$<TARGET_FILE:${lockdc_development_runtime_target}>\"\n")
+    endforeach()
+    string(APPEND lockdc_development_runtime_manifest ")\n")
+    file(GENERATE
+        OUTPUT "${CMAKE_BINARY_DIR}/bootlin-development-runtime-targets.cmake"
+        CONTENT "${lockdc_development_runtime_manifest}")
+endfunction()
+
 function(lc_configure_fatal_linker_warnings target)
     get_target_property(target_type ${target} TYPE)
     if(NOT target_type STREQUAL "EXECUTABLE" AND
@@ -1013,6 +1070,9 @@ if(LOCKDC_BUILD_TESTS)
             -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
             -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -DLOCKDC_SYSTEM_NAME=${CMAKE_SYSTEM_NAME}
+            -DLOCKDC_CMAKE_SYSROOT=${CMAKE_SYSROOT}
+            -DLOCKDC_CMAKE_READELF=${CMAKE_READELF}
             $<$<BOOL:${CMAKE_TOOLCHAIN_FILE}>:-DLOCKDC_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}>
             -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
             -DLOCKDC_DEPENDENCY_BUILD_ROOT=${LOCKDC_DEPENDENCY_BUILD_ROOT}
@@ -1168,6 +1228,8 @@ if(LOCKDC_BUILD_FUZZERS OR LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)
     add_subdirectory(tests/fuzz)
     lc_apply_default_test_timeouts()
 endif()
+
+lc_write_development_runtime_contract_manifest()
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     get_filename_component(_lockdc_gcc_dir "${CMAKE_C_COMPILER}" DIRECTORY)
