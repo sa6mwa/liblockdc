@@ -125,6 +125,7 @@ resolve_lockdc_from_prefix() {
   fi
 
   lockdc_resolved_version="$version"
+  lockdc_prefix_libdir="$libdir"
   lockdc_pkg_config_path="${libdir}/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
   lockdc_cflags="$(PKG_CONFIG_PATH="${lockdc_pkg_config_path}" pkg-config --cflags lockdc)"
   lockdc_libs="$(PKG_CONFIG_PATH="${lockdc_pkg_config_path}" pkg-config --libs lockdc)"
@@ -164,6 +165,7 @@ linkflags="${LDFLAGS:-}"
 lockdc_cflags=""
 lockdc_libs=""
 lockdc_resolved_version=""
+lockdc_prefix_libdir=""
 
 if [ "$(uname -s)" = "Linux" ]; then
   linkflags="${linkflags} -Wl,--allow-shlib-undefined -Wl,--disable-new-dtags"
@@ -181,6 +183,13 @@ fi
 
 if [ "${lockdc_resolved_version}" != "${expected_lockdc_version}" ]; then
   lockdc_dependency_error "found liblockdc ${lockdc_resolved_version}, but this Lua rock requires liblockdc ${expected_lockdc_version}"
+fi
+
+# A prefix-selected SDK need not be registered with the system loader.  Keep
+# the module coupled to the SDK selected by LOCKDC_PREFIX/LOCKDC_DIR without
+# relying on an environment-variable loader workaround.
+if [ -n "${lockdc_prefix_libdir}" ]; then
+  linkflags="${linkflags} -Wl,-rpath,${lockdc_prefix_libdir}"
 fi
 
 lockdc_cflags="${lockdc_cflags}${LOCKDC_CFLAGS_EXTRA:+ ${LOCKDC_CFLAGS_EXTRA}}"

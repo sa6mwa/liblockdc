@@ -183,8 +183,17 @@ set(lockdc_lua_external_link_flags "-Wl,--disable-new-dtags")
 set(lockdc_lua_pkg_config_path
     "${LOCKDC_SDK_PREFIX}/lib/pkgconfig:${LOCKDC_EXTERNAL_ROOT}/c.pkt.systems/install/lib/pkgconfig")
 foreach(lockdc_runtime_dir IN LISTS lockdc_runtime_dirs)
-    string(APPEND lockdc_lua_external_link_flags " -Wl,-rpath,${lockdc_runtime_dir}")
+    if(NOT lockdc_runtime_dir STREQUAL "${LOCKDC_SDK_PREFIX}/lib")
+        string(APPEND lockdc_lua_external_link_flags " -Wl,-rpath,${lockdc_runtime_dir}")
+    endif()
 endforeach()
+string(FIND "${lockdc_lua_external_link_flags}" "-Wl,-rpath,${LOCKDC_SDK_PREFIX}/lib"
+    lockdc_sdk_rpath_injected)
+if(NOT lockdc_sdk_rpath_injected EQUAL -1)
+    message(FATAL_ERROR
+        "Lua rock validation must not inject the selected SDK library directory; "
+        "the prefix-selected module must provide that RPATH itself")
+endif()
 
 set(lua_build_root "${lua_rock_workdir}/.luarocks-build")
 
