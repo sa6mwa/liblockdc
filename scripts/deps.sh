@@ -200,26 +200,26 @@ esac
 lonejson_asset_name="liblonejson-$lonejson_version-${preset#deps-}.tar.gz"
 lonejson_download_url="https://github.com/sa6mwa/lonejson/releases/download/v$lonejson_version/$lonejson_asset_name"
 case "$lonejson_asset_name" in
-  liblonejson-0.43.0-x86_64-linux-gnu.tar.gz)
-    lonejson_asset_hash=520e045c7bfe13396b9dd2ef664d2aaf723ff3173ac02e0f0fe08bcf96f14fa2
+  liblonejson-0.44.0-x86_64-linux-gnu.tar.gz)
+    lonejson_asset_hash=5255a32cef6dd89cd4f068c2a4f1bd6a8f8e79d5cffe6d6922cb2506d320c520
     ;;
-  liblonejson-0.43.0-x86_64-linux-musl.tar.gz)
-    lonejson_asset_hash=f830d9e848663fb780bcabe58fcd0e61c93ff2725484d8133c3ab3318ebd8a59
+  liblonejson-0.44.0-x86_64-linux-musl.tar.gz)
+    lonejson_asset_hash=5520d01f1b3b20e4cd31beeeec906f061b41ea924e1c4bdbade2ad3830387c3d
     ;;
-  liblonejson-0.43.0-aarch64-linux-gnu.tar.gz)
-    lonejson_asset_hash=beacf0b574fc90478d37cd624c70edeac868a3d46241becbc82652ad430fd79e
+  liblonejson-0.44.0-aarch64-linux-gnu.tar.gz)
+    lonejson_asset_hash=c0383600f45e8a027cfeb68e70e20d81c957ae9e18a18ad07bd4e56605f90368
     ;;
-  liblonejson-0.43.0-aarch64-linux-musl.tar.gz)
-    lonejson_asset_hash=5e57b91810389dc61111ce77ce4c17b6704884be1ee21c69d96e1e594cb9ce8b
+  liblonejson-0.44.0-aarch64-linux-musl.tar.gz)
+    lonejson_asset_hash=ab4fdda63bc2a7a0046a740158fbb5e2e7eb2d92cb3051f8e7f0d739b7dc7c80
     ;;
-  liblonejson-0.43.0-armhf-linux-gnu.tar.gz)
-    lonejson_asset_hash=95595747b861440c189fc473cdaefec2529df15bfd6772b627c637c93bacf3a9
+  liblonejson-0.44.0-armhf-linux-gnu.tar.gz)
+    lonejson_asset_hash=d20200676ed838c89021b1099aa4e25fb73e36425f8e6241336bcf72c04befd8
     ;;
-  liblonejson-0.43.0-armhf-linux-musl.tar.gz)
-    lonejson_asset_hash=22a8507bd441e12c00e813a16c286478bd8c797a31028e406473e45de6712f5a
+  liblonejson-0.44.0-armhf-linux-musl.tar.gz)
+    lonejson_asset_hash=8e3bf6bfba135f40e1064f3a03502c71862cd294c47754ab3c65acec34769a50
     ;;
-  liblonejson-0.43.0-arm64-apple-darwin.tar.gz)
-    lonejson_asset_hash=2e5e349995e5bf6d84004ea0b829d51ae2c2ca90229a98104a640f155dd3c7ab
+  liblonejson-0.44.0-arm64-apple-darwin.tar.gz)
+    lonejson_asset_hash=d129d04988f255d92fea2d97a346a24ba0fe49e90262a96617d41347d955584e
     ;;
   *)
     printf 'unsupported lonejson release asset: %s\n' "$lonejson_asset_name" >&2

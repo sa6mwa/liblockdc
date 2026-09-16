@@ -36,7 +36,7 @@ SDK root or make `lockdc.pc` visible to `pkg-config`.
 The generated rockspec expects:
 
 - package `lockdc`
-- `lonejson == 0.43.0-1`
+- `lonejson == 0.44.0-1`
 - Lua `>= 5.5, < 5.6`
 
 The lifecycle executes and packages only Lua 5.5. Each release includes the
@@ -50,7 +50,7 @@ For local examples and test modules, use the `LOCKDC_LUA_BIN` value printed by
 Bootlin runtime. LuaRocks remains a packaging tool; it is not used as the
 interpreter for a Bootlin-built native module.
 
-The C SDK is pinned to the matching `lonejson 0.43.0` native dependency for
+The C SDK is pinned to the matching `lonejson 0.44.0` native dependency for
 mapped state load/save and internal typed JSON parsing. The Lua rock declares
 the corresponding Lua-facing `lonejson` rock so Lua JSON behavior and the C
 SDK JSON boundary stay in the same release line.
