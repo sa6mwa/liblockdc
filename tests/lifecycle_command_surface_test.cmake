@@ -1,6 +1,9 @@
 if(NOT DEFINED LOCKDC_ROOT)
     message(FATAL_ERROR "LOCKDC_ROOT is required")
 endif()
+if(NOT DEFINED LOCKDC_BINARY_DIR)
+    message(FATAL_ERROR "LOCKDC_BINARY_DIR is required")
+endif()
 
 set(makefile_path "${LOCKDC_ROOT}/Makefile")
 set(root_cmake_path "${LOCKDC_ROOT}/CMakeLists.txt")
@@ -153,6 +156,8 @@ assert_contains(root_makefile "export LUA_PATH=%q"
     "shell-quoted Lua module path export")
 assert_contains(root_makefile "export LUA_CPATH=%q"
     "shell-quoted Lua native-module path export")
+assert_contains(root_makefile "SDK version is missing"
+    "Lua environment version-extraction failure")
 assert_contains(root_makefile "bash ./scripts/test_release_from_source.sh" "standard source archive smoke runner")
 assert_contains(root_makefile "bash ./scripts/verify_release_privacy.sh" "standard release privacy runner")
 assert_contains(root_makefile "bash ./scripts/run_linux_release_matrix.sh" "standard release matrix runner")
@@ -185,6 +190,56 @@ assert_contains(clean_script "lockdc_assert_generated_path" "generated-path clea
 assert_not_contains(e2e_script "test.sh" "deleted e2e dispatcher reference")
 assert_contains(e2e_script "-L examples" "example-only e2e filter")
 assert_contains(e2e_script "unset LD_LIBRARY_PATH" "isolated e2e runtime loader path")
+
+set(lua_env_test_dir "${LOCKDC_BINARY_DIR}/lifecycle-lua-env-test")
+set(lua_env_metadata "${lua_env_test_dir}/package-metadata.cmake")
+set(lua_env_prefix "${lua_env_test_dir}/sdk")
+file(REMOVE_RECURSE "${lua_env_test_dir}")
+file(MAKE_DIRECTORY "${lua_env_test_dir}")
+file(WRITE "${lua_env_metadata}" "set(LOCKDC_VERSION \"9.8.7\")\n")
+execute_process(
+    COMMAND make -s lua-env
+        MAKE_RECURSE=:
+        "LOCKDC_LUA_ENV_PACKAGE_METADATA=${lua_env_metadata}"
+        "LOCKDC_LUA_ENV_PACKAGE_PREFIX=${lua_env_prefix}"
+    WORKING_DIRECTORY "${LOCKDC_ROOT}"
+    RESULT_VARIABLE lua_env_result
+    OUTPUT_VARIABLE lua_env_stdout
+    ERROR_VARIABLE lua_env_stderr)
+if(NOT lua_env_result EQUAL 0)
+    message(FATAL_ERROR
+        "shell-evaluable Lua environment target failed\n"
+        "stdout:\n${lua_env_stdout}\n"
+        "stderr:\n${lua_env_stderr}")
+endif()
+set(lua_env_expected_prefix
+    "export LOCKDC_PREFIX=${lua_env_prefix}/liblockdc-9.8.7-x86_64-linux-gnu")
+string(FIND "${lua_env_stdout}" "${lua_env_expected_prefix}" lua_env_prefix_index)
+if(lua_env_prefix_index EQUAL -1)
+    message(FATAL_ERROR
+        "Lua environment target did not export the metadata SDK version\n"
+        "stdout:\n${lua_env_stdout}\n"
+        "stderr:\n${lua_env_stderr}")
+endif()
+
+file(WRITE "${lua_env_metadata}" "# missing LOCKDC_VERSION\n")
+execute_process(
+    COMMAND make -s lua-env
+        MAKE_RECURSE=:
+        "LOCKDC_LUA_ENV_PACKAGE_METADATA=${lua_env_metadata}"
+        "LOCKDC_LUA_ENV_PACKAGE_PREFIX=${lua_env_prefix}"
+    WORKING_DIRECTORY "${LOCKDC_ROOT}"
+    RESULT_VARIABLE lua_env_missing_result
+    OUTPUT_VARIABLE lua_env_missing_stdout
+    ERROR_VARIABLE lua_env_missing_stderr)
+file(REMOVE_RECURSE "${lua_env_test_dir}")
+if(lua_env_missing_result EQUAL 0 OR
+   NOT lua_env_missing_stderr MATCHES "SDK version is missing")
+    message(FATAL_ERROR
+        "Lua environment target accepted missing SDK metadata\n"
+        "stdout:\n${lua_env_missing_stdout}\n"
+        "stderr:\n${lua_env_missing_stderr}")
+endif()
 
 execute_process(
     COMMAND

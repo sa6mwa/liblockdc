@@ -25,6 +25,8 @@ DEBUG_BUILD_DIR := $(ROOT)/build/$(DEBUG_PRESET)
 E2E_BUILD_DIR := $(ROOT)/build/$(E2E_PRESET)
 X86_64_GNU_RELEASE_BUILD_DIR := $(ROOT)/build/$(X86_64_GNU_RELEASE_PRESET)
 COVERAGE_BUILD_DIR := $(ROOT)/build/$(COVERAGE_PRESET)
+LOCKDC_LUA_ENV_PACKAGE_METADATA ?= $(X86_64_GNU_RELEASE_BUILD_DIR)/package-metadata.cmake
+LOCKDC_LUA_ENV_PACKAGE_PREFIX ?= $(X86_64_GNU_RELEASE_BUILD_DIR)/package
 
 DIST_DIR := $(ROOT)/dist
 BENCH_ITERS ?= 0
@@ -904,7 +906,15 @@ __lua-test: __build-debug
 
 lua-env:
 	@$(MAKE_RECURSE) --no-print-directory __lua-env >&2
-	@printf 'export LOCKDC_PREFIX=%q\n' "$(X86_64_GNU_RELEASE_BUILD_DIR)/package/liblockdc-$$(sed -n '"'"'s/^set(LOCKDC_VERSION "\(.*\)")$$/\1/p'"'"' $(X86_64_GNU_RELEASE_BUILD_DIR)/package-metadata.cmake)-x86_64-linux-gnu"
+	@if ! lockdc_version="$$(sed -n 's/^set(LOCKDC_VERSION "\(.*\)")$$/\1/p' "$(LOCKDC_LUA_ENV_PACKAGE_METADATA)")"; then \
+		printf 'lua-env: unable to read SDK version from %s\n' "$(LOCKDC_LUA_ENV_PACKAGE_METADATA)" >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$$lockdc_version" ]; then \
+		printf 'lua-env: SDK version is missing from %s\n' "$(LOCKDC_LUA_ENV_PACKAGE_METADATA)" >&2; \
+		exit 1; \
+	fi; \
+	printf 'export LOCKDC_PREFIX=%q\n' "$(LOCKDC_LUA_ENV_PACKAGE_PREFIX)/liblockdc-$$lockdc_version-x86_64-linux-gnu"
 	@printf 'export LOCKDC_LUA_BIN=%q\n' '$(X86_64_GNU_RELEASE_BUILD_DIR)/lockdc_lua_runner'
 	@printf 'export LUA_PATH=%q\n' '$(ROOT)/lua/?.lua;$(ROOT)/lua/?/init.lua;;'
 	@printf 'export LUA_CPATH=%q\n' '$(ROOT)/.luarocks-build/lockdc/?.so;;'
