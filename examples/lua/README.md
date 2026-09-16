@@ -26,13 +26,18 @@ For this release line, the `lockdc` rock declares `lonejson == 0.44.0-1`. That
 matches the native `lonejson 0.44.0` dependency used by the C SDK for mapped
 state load/save and internal JSON response parsing.
 
-When running from this repository after building and staging the SDK locally,
-one workable path is:
+When running from this repository after installing `lockdc` and `lonejson` into
+a local LuaRocks tree, run examples with the project-built Bootlin Lua runner:
 
 ```bash
 eval "$(make -s lua-env)"
-export LD_LIBRARY_PATH="$PWD/build/install-tree-sdk-test/prefix/lib:${LD_LIBRARY_PATH:-}"
+eval "$(luarocks --tree /path/to/lua-tree --lua-version 5.5 path)"
+"$LOCKDC_LUA_BIN" examples/lua/acquire_update_json.lua
 ```
+
+`make lua-env` does not install rocks; it supplies the Bootlin runner and
+repository paths. The LuaRocks export supplies the installed `lonejson` module.
+Do not use `LD_LIBRARY_PATH` or a host Lua interpreter for this flow.
 
 ## Common environment
 

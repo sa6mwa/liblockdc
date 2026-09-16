@@ -5,8 +5,7 @@
 #include <string.h>
 
 static int run_lua(cpkt_lua_runtime *runtime, const char *script, int argc,
-                   const char *const *argv)
-{
+                   const char *const *argv) {
   cpkt_lua_runtime_status status;
 
   status = cpkt_lua_runtime_run_file(runtime, script, argc, argv, 0);
@@ -19,13 +18,11 @@ static int run_lua(cpkt_lua_runtime *runtime, const char *script, int argc,
   return 1;
 }
 
-static int run_lua_buffer(cpkt_lua_runtime *runtime, const char *source)
-{
+static int run_lua_buffer(cpkt_lua_runtime *runtime, const char *source) {
   cpkt_lua_runtime_status status;
 
-  status = cpkt_lua_runtime_run_buffer(
-      runtime, (const unsigned char *)source, strlen(source), "-e", 0, NULL,
-      0);
+  status = cpkt_lua_runtime_run_buffer(runtime, (const unsigned char *)source,
+                                       strlen(source), "-e", 0, NULL, 0);
   if (status == CPKT_LUA_RUNTIME_OK) {
     return 0;
   }
@@ -35,8 +32,7 @@ static int run_lua_buffer(cpkt_lua_runtime *runtime, const char *source)
   return 1;
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
   cpkt_lua_runtime *runtime = NULL;
   cpkt_lua_runtime_status status;
   int result;
@@ -60,7 +56,8 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  /* openlibs applies Lua's environment precedence and default-path expansion. */
+  /* openlibs applies Lua's environment precedence and default-path expansion.
+   */
 
   if (strcmp(argv[1], "-e") == 0) {
     if (argc != 3) {
@@ -70,8 +67,8 @@ int main(int argc, char **argv)
     }
     result = run_lua_buffer(runtime, argv[2]);
   } else {
-    result = run_lua(runtime, argv[1], argc - 2,
-                     (const char *const *)(argv + 2));
+    result =
+        run_lua(runtime, argv[1], argc - 2, (const char *const *)(argv + 2));
   }
   cpkt_lua_runtime_free(runtime);
   return result;

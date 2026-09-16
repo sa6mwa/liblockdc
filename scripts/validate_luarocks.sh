@@ -58,7 +58,7 @@ if [ "$lua_runtime_version" != "Lua 5.5" ]; then
 fi
 
 install_lonejson_dependency() (
-  # LoneJSON 0.43 selects its native Bootlin toolchain through CMake.  Do not
+  # LoneJSON 0.44 selects its native Bootlin toolchain through CMake.  Do not
   # preload liblockdc's vendored libraries into that host-tool invocation:
   # loader diagnostics on stderr are part of the target-discovery output.
   unset LD_LIBRARY_PATH

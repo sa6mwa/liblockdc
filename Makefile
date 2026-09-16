@@ -257,7 +257,7 @@ help:
 		'make verify-release-privacy  Scan checksum-listed release artifacts for local private traces.' \
 		'make lua-rock           Build the Lua release package and source rock artifacts.' \
 		'make lua-test           Run local Lua layout, SDK, facade, and binding smoke tests.' \
-		'make lua-env            Print shell exports for the repo-local Lua 5.5 rock tree.' \
+		'make lua-env            Print shell-evaluable exports for the repo-local Lua 5.5 rock tree.' \
 		'make release-lua-artifacts  Build Lua release artifacts under dist/.' \
 		'make clean-dist         Reset dist/ release artifacts.' \
 		'make cross-build        Build all non-host cross release presets.' \
@@ -903,13 +903,14 @@ __lua-test: __build-debug
 	$(CTEST) --preset debug-lua --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL)
 
 lua-env:
-	$(TIMED) lua-env $(MAKE_RECURSE) __lua-env
+	@$(MAKE_RECURSE) --no-print-directory __lua-env >&2
+	@printf 'export LOCKDC_PREFIX=%q\n' "$(X86_64_GNU_RELEASE_BUILD_DIR)/package/liblockdc-$$(sed -n '"'"'s/^set(LOCKDC_VERSION "\(.*\)")$$/\1/p'"'"' $(X86_64_GNU_RELEASE_BUILD_DIR)/package-metadata.cmake)-x86_64-linux-gnu"
+	@printf 'export LOCKDC_LUA_BIN=%q\n' '$(X86_64_GNU_RELEASE_BUILD_DIR)/lockdc_lua_runner'
+	@printf 'export LUA_PATH=%q\n' '$(ROOT)/lua/?.lua;$(ROOT)/lua/?/init.lua;;'
+	@printf 'export LUA_CPATH=%q\n' '$(ROOT)/.luarocks-build/lockdc/?.so;;'
 
 __lua-env: __build-x86_64-linux-gnu-release
-	@printf 'export LOCKDC_PREFIX=%s\n' '$(X86_64_GNU_RELEASE_BUILD_DIR)/package/liblockdc-$$(sed -n '"'"'s/^set(LOCKDC_VERSION "\(.*\)")$$/\1/p'"'"' $(X86_64_GNU_RELEASE_BUILD_DIR)/package-metadata.cmake)-x86_64-linux-gnu'
-	@printf 'export LOCKDC_LUA_BIN=%s\n' '$(X86_64_GNU_RELEASE_BUILD_DIR)/lockdc_lua_runner'
-	@printf 'export LUA_PATH=%s\n' '$(ROOT)/lua/?.lua;$(ROOT)/lua/?/init.lua;;'
-	@printf 'export LUA_CPATH=%s\n' '$(ROOT)/.luarocks-build/lockdc/?.so;;'
+	@:
 
 release-lua-artifacts:
 	$(TIMED) release-lua-artifacts $(MAKE_RECURSE) __release-lua-artifacts

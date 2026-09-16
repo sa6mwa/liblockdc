@@ -108,6 +108,7 @@ Normal development expects:
 - Ninja
 - GNU Make
 - host `clang-format` for `make format`
+- host `clangd` for editor diagnostics of the public C API
 - host Valgrind for the native Memcheck gate
 - `qemu-aarch64` and `qemu-arm` for the non-host release test matrix
 - `nerdctl compose` preferred for the local development environment, with `docker compose` as a fallback

@@ -145,6 +145,14 @@ assert_contains(root_makefile "bash ./scripts/host_test.sh build" "standard host
 assert_contains(root_makefile "'^install_tree_sdk_test$$'" "installed SDK test filter")
 assert_contains(root_makefile "bash ./scripts/test-e2e.sh examples" "example smoke runner")
 assert_contains(root_makefile "$(CTEST) --preset debug-lua" "standard Lua test preset runner")
+assert_contains(root_makefile "lua-env:\n\t@$(MAKE_RECURSE) --no-print-directory __lua-env >&2"
+    "shell-evaluable Lua environment target")
+assert_not_contains(root_makefile "$(TIMED) lua-env $(MAKE_RECURSE) __lua-env"
+    "timing output in shell-evaluable Lua environment target")
+assert_contains(root_makefile "export LUA_PATH=%q"
+    "shell-quoted Lua module path export")
+assert_contains(root_makefile "export LUA_CPATH=%q"
+    "shell-quoted Lua native-module path export")
 assert_contains(root_makefile "bash ./scripts/test_release_from_source.sh" "standard source archive smoke runner")
 assert_contains(root_makefile "bash ./scripts/verify_release_privacy.sh" "standard release privacy runner")
 assert_contains(root_makefile "bash ./scripts/run_linux_release_matrix.sh" "standard release matrix runner")

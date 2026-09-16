@@ -50,6 +50,25 @@ For local examples and test modules, use the `LOCKDC_LUA_BIN` value printed by
 Bootlin runtime. LuaRocks remains a packaging tool; it is not used as the
 interpreter for a Bootlin-built native module.
 
+## Local runner and search paths
+
+`make lua-env` prints shell-evaluable exports for the project-built Bootlin Lua
+runner and the repository's local Lua module paths. It does not install either
+Lua rock. After installing `lockdc` and `lonejson` into a local LuaRocks tree,
+load that tree's complete paths after the project exports, then run examples
+with the Bootlin runner:
+
+```bash
+eval "$(make -s lua-env)"
+eval "$(luarocks --tree /path/to/lua-tree --lua-version 5.5 path)"
+"$LOCKDC_LUA_BIN" examples/lua/acquire_update_json.lua
+```
+
+The LuaRocks path export supplies the installed `lonejson` module as well as
+`lockdc`. Do not replace this setup with `LD_LIBRARY_PATH` or a host Lua
+interpreter: prefix-selected `lockdc` modules carry their SDK runtime path and
+the lifecycle checks them through the Bootlin runner.
+
 The C SDK is pinned to the matching `lonejson 0.44.0` native dependency for
 mapped state load/save and internal typed JSON parsing. The Lua rock declares
 the corresponding Lua-facing `lonejson` rock so Lua JSON behavior and the C

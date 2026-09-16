@@ -233,8 +233,7 @@ static int lcdc_set_int64_field(lua_State *L, const char *name, lc_i64 value,
 
 static void lcdc_set_version_field(lua_State *L, const char *name,
                                    lc_version value) {
-  if (value < (lc_version)LUA_MININTEGER ||
-      value > (lc_version)LUA_MAXINTEGER)
+  if (value < (lc_version)LUA_MININTEGER || value > (lc_version)LUA_MAXINTEGER)
     luaL_error(L, "%s exceeds the Lua integer range", name);
   lua_pushinteger(L, (lua_Integer)value);
   lua_setfield(L, -2, name);
