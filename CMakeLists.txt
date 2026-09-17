@@ -227,9 +227,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSROOT)
             "${LOCKDC_EXTERNAL_ROOT}/liblql/install/lib"
             "${LOCKDC_EXTERNAL_ROOT}/libssh2/install/lib"
             "${LOCKDC_EXTERNAL_ROOT}/zlib/install/lib")
-        if(IS_DIRECTORY "${lockdc_runtime_dir}")
-            list(APPEND LOCKDC_DEVELOPMENT_RUNTIME_DIRS "${lockdc_runtime_dir}")
-        endif()
+        # Vendored dependency prefixes can be created after this configure by
+        # lc_deps. Keep their paths in development RPATHs so one configure is
+        # sufficient for a fresh dependency root.
+        list(APPEND LOCKDC_DEVELOPMENT_RUNTIME_DIRS "${lockdc_runtime_dir}")
     endforeach()
     foreach(lockdc_runtime_library libatomic.so.1 libasan.so libubsan.so)
         execute_process(

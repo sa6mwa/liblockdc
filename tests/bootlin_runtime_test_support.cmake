@@ -45,9 +45,7 @@ function(lockdc_resolve_bootlin_runtime sysroot external_root primary_lib_dir
         "${external_root}/liblql/install/lib"
         "${external_root}/libssh2/install/lib"
         "${external_root}/zlib/install/lib")
-        if(IS_DIRECTORY "${runtime_dir}")
-            list(APPEND runtime_dirs "${runtime_dir}")
-        endif()
+        list(APPEND runtime_dirs "${runtime_dir}")
     endforeach()
     list(REMOVE_DUPLICATES runtime_dirs)
     set(${output_loader} "${runtime_loader}" PARENT_SCOPE)

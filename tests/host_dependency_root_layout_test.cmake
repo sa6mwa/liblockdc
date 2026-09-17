@@ -7,6 +7,7 @@ file(READ "${LOCKDC_ROOT}/CMakeLists.txt" root_cmake)
 file(READ "${LOCKDC_ROOT}/Makefile" root_makefile)
 file(READ "${LOCKDC_ROOT}/scripts/deps.sh" deps_script)
 file(READ "${LOCKDC_ROOT}/scripts/host_test.sh" host_test_script)
+file(READ "${LOCKDC_ROOT}/tests/bootlin_runtime_test_support.cmake" runtime_support)
 
 function(assert_contains haystack needle description)
     string(FIND "${${haystack}}" "${needle}" found_at)
@@ -71,6 +72,10 @@ assert_not_contains(root_cmake "LD_LIBRARY_PATH=${lockdc_c_test_runtime_path}" "
 assert_contains(root_cmake "function(lc_configure_development_runtime target)" "development executable Bootlin runtime helper")
 assert_contains(root_cmake "LINKER:--dynamic-linker" "development executable Bootlin interpreter")
 assert_contains(root_cmake "LINKER:--disable-new-dtags" "transitive Bootlin runtime lookup")
+assert_not_contains(root_cmake [=[if(IS_DIRECTORY "${lockdc_runtime_dir}")]=]
+    "configure-time filtering of vendored runtime paths")
+assert_not_contains(runtime_support [=[if(IS_DIRECTORY "${runtime_dir}")]=]
+    "configure-time filtering of Lua test runtime paths")
 assert_contains(root_cmake "libatomic.so.1" "development executable libatomic runtime discovery")
 assert_contains(root_cmake [=[set_tests_properties(lockdc_bench_help PROPERTIES
                 ENVIRONMENT "${LOCKDC_C_TEST_ENVIRONMENT}")]=] "benchmark help test Bootlin runtime environment")
