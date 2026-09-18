@@ -2056,7 +2056,10 @@ static size_t lc_pouch_state_body_cache_tee_source_read(lc_source *self,
     return 0U;
   }
   if (nread > 0U) {
-    if (!source->entry->retired) {
+    /* A complete entry may already serve independent cache sources.  A reset
+     * of this original tee must therefore become pass-through: published
+     * cache bytes are immutable for their remaining lifetime. */
+    if (!source->entry->retired && !source->entry->complete) {
       if (source->offset > source->entry->length ||
           nread > source->entry->length - source->offset) {
         source->entry->complete = 0;
@@ -2070,7 +2073,7 @@ static size_t lc_pouch_state_body_cache_tee_source_read(lc_source *self,
       source->offset += nread;
     }
   } else if ((error == NULL || error->code == LC_OK) &&
-             !source->entry->retired) {
+             !source->entry->retired && !source->entry->complete) {
     if (source->offset == source->entry->length) {
       source->entry->complete = 1;
     } else {
@@ -2112,9 +2115,10 @@ static int lc_pouch_state_body_cache_tee_source_reset(lc_source *self,
                         "failed to lock pouch body cache reference",
                         strerror(pthread_rc), NULL, "pouch");
   }
-  if (!source->entry->retired) {
-    source->entry->complete = 0;
-  }
+  /* Do not revoke completion here. Once published, independent cache readers
+   * access the bytes without this lock and must never race a refill. Before
+   * publication `complete` is already false, so resetting still permits the
+   * original tee to refill its private in-progress entry. */
   source->offset = 0U;
   (void)pthread_mutex_unlock(&source->entry->ref_mutex);
   return LC_OK;

@@ -5158,6 +5158,14 @@ static void test_single_writer_state_read_uses_projection_cache(void **state) {
   assert_true(read_res.found);
   read_source_to_string(read_res.body, buffer, sizeof(buffer));
   assert_string_equal(buffer, "{\"value\":1}");
+  /* Resetting the original cache-filling source after EOF must not revoke the
+   * completed entry: another reader can already hold an immutable cache
+   * source. The later unlinked-segment read proves the completed entry stays
+   * published. */
+  rc = read_res.body->reset(read_res.body, &error);
+  assert_int_equal(rc, LC_OK);
+  read_source_to_string(read_res.body, buffer, sizeof(buffer));
+  assert_string_equal(buffer, "{\"value\":1}");
   lc_pouch_state_read_result_cleanup(NULL, &read_res);
 
   pouch_state_segment_path(root, "default", 1UL, segment_path,
