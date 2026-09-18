@@ -44,11 +44,13 @@ it does not simulate a torn write, power loss, or cold page cache.
 
 Measurements separate open, first acquire/get/release, remaining keys, and
 close. Linux `/proc/self/io` provides logical bytes and read calls, including
-page-cache hits; these are process-wide, not segment-exclusive. Wall and CPU
-times are diagnostic only. The assertion bounds startup reads by 64 times the
-pre-open store size plus 1 MiB metadata allowance. It is a regression detector,
-not a promised storage complexity limit. The CTest watchdog is only a hang
-guard; neither fixture creation nor assertions use sleeps or timing thresholds.
+page-cache hits; these are process-wide, not segment-exclusive. The probe also
+reports current and peak resident bytes from `/proc/self/status` for every
+phase. Wall and CPU times are diagnostic only. The assertion bounds startup
+reads by 64 times the pre-open store size plus 1 MiB metadata allowance. It is
+a regression detector, not a promised storage complexity limit. The CTest
+watchdog is only a hang guard; neither fixture creation nor assertions use
+sleeps or timing thresholds.
 
 Two registered offline e2e cases exercise plain/encrypted shared roots with
 64 KiB segment targets. The Pouch unit recovery test separately verifies that
@@ -86,3 +88,36 @@ Control workloads without surviving staged updates did not reproduce:
 These controls were measured before the fix. The triggering regression cases
 and full debug suite were run after it. Historical binaries, production data,
 cold-cache behavior, and power-loss recovery were not tested here.
+
+## Capture-shaped encrypted memory diagnosis (2026-09-18)
+
+An encrypted captured metrics namespace contained 34,752 framed records in a
+single 21.65 MB active segment. It contained 20,691 legacy `LPL1` lease
+controls but only 23 distinct `snapshot.v1.*` keys; one key appeared 30,359
+times. This is history churn, not a high-cardinality current metric payload.
+
+The following disposable public-API fixture matches that key cardinality and
+approximately that record-history depth without copying or decrypting the
+capture:
+
+```sh
+python3 tests/e2e/pouch_replay.py build/debug/bench/lockdc_pouch_replay_probe \
+  --keys 23 --updates 504 --encrypted --shared --unclean \
+  --segment-bytes 67108864
+```
+
+On the current Bootlin debug build, this creates a 38.0 MB encrypted root. A
+fresh-process reopen reads 38.1 MB at open, reaches about 228 MB RSS at open,
+and reaches about 267 MB RSS after reading all keys. The same fixture with one
+live staged record reaches about 401 MB RSS because conservative staged
+recovery retains additional history. These are local diagnostic observations,
+not release thresholds.
+
+The retained memory is Pouch state-cache metadata for historical lease-control
+keys. It is not explained by the 23 current snapshot keys alone. The captured
+root is also ineligible for default background compaction: the active segment
+is excluded, compaction needs two inactive candidates, and the default segment
+rollover is 64 MiB. A one-segment 21.65 MB root therefore cannot compact before
+it has crossed at least two rollover boundaries. A real-capture open still
+requires its crypto key and must run on a disposable copy so that the one-time
+control migration can be measured safely.

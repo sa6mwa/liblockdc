@@ -34,7 +34,7 @@ static void check(int rc) {
 static void sample(const char *phase) {
   struct timespec wall;
   struct timespec cpu;
-  double bytes = 0, calls = 0;
+  double bytes = 0, calls = 0, resident_kib = 0, peak_resident_kib = 0;
   char line[128];
   FILE *fp = fopen("/proc/self/io", "r");
   if (fp == NULL) {
@@ -48,14 +48,27 @@ static void sample(const char *phase) {
     (void)sscanf(line, "syscr: %lf", &calls);
   }
   fclose(fp);
+  fp = fopen("/proc/self/status", "r");
+  if (fp == NULL) {
+    perror("/proc/self/status");
+    exit(1);
+  }
+  while (fgets(line, sizeof(line), fp) != NULL) {
+    if (sscanf(line, "VmRSS: %lf kB", &resident_kib) == 1) {
+      continue;
+    }
+    (void)sscanf(line, "VmHWM: %lf kB", &peak_resident_kib);
+  }
+  fclose(fp);
   if (clock_gettime(CLOCK_MONOTONIC, &wall) != 0 ||
       clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu) != 0) {
     perror("clock_gettime");
     exit(1);
   }
-  printf("%s %.9f %.9f %.0f %.0f\n", phase,
+  printf("%s %.9f %.9f %.0f %.0f %.0f %.0f\n", phase,
          (double)wall.tv_sec + (double)wall.tv_nsec / 1e9,
-         (double)cpu.tv_sec + (double)cpu.tv_nsec / 1e9, bytes, calls);
+         (double)cpu.tv_sec + (double)cpu.tv_nsec / 1e9, bytes, calls,
+         resident_kib * 1024.0, peak_resident_kib * 1024.0);
   fflush(stdout);
 }
 

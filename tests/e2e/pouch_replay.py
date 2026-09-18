@@ -58,7 +58,9 @@ def main():
                 if previous is not None:
                     phases[phase] = dict(zip(
                         ("wall_s", "cpu_s", "rchar", "syscr"),
-                        (a - b for a, b in zip(values, previous))))
+                        (a - b for a, b in zip(values[:4], previous[:4]))))
+                    phases[phase]["resident_bytes"] = values[4]
+                    phases[phase]["peak_resident_bytes"] = values[5]
                 previous = values
             size = sum(p.stat().st_size for p in (root / "store").rglob("*")
                        if p.is_file())
