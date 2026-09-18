@@ -166,7 +166,7 @@ assert_ok("Lua raw XA stage",
 local prepared = assert_ok("Lua raw XA prepare", client:txn_prepare({
   txn_id = raw_txn_id,
   participants = { raw_txn_participant },
-  expires_at_unix = 2147483647,
+  expires_at_unix = 2147483648,
   tc_term = 1,
 }))
 if prepared.state ~= "prepare" then

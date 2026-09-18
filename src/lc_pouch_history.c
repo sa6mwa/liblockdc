@@ -110,7 +110,9 @@ static int lc_pouch_history_file_path(lc_pouch *pouch,
                                       const char *consumer_id, int create,
                                       char **directory_out, char **path_out,
                                       lc_error *error) {
+  char *consumer_name;
   char *consumer_leaf;
+  size_t consumer_name_size;
   int rc;
 
   *directory_out = NULL;
@@ -120,7 +122,19 @@ static int lc_pouch_history_file_path(lc_pouch *pouch,
   if (rc != LC_OK) {
     return rc;
   }
-  consumer_leaf = lc_pouch_path_escape_name(&pouch->allocator, consumer_id);
+  consumer_name_size = strlen("consumer:") + strlen(consumer_id) + 1U;
+  consumer_name =
+      (char *)lc_alloc_with_allocator(&pouch->allocator, consumer_name_size);
+  if (consumer_name == NULL) {
+    lc_free_with_allocator(&pouch->allocator, *directory_out);
+    *directory_out = NULL;
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch history consumer record",
+                        NULL, NULL, "pouch");
+  }
+  snprintf(consumer_name, consumer_name_size, "consumer:%s", consumer_id);
+  consumer_leaf = lc_pouch_path_escape_name(&pouch->allocator, consumer_name);
+  lc_free_with_allocator(&pouch->allocator, consumer_name);
   *path_out =
       consumer_leaf != NULL
           ? lc_pouch_path_join(&pouch->allocator, *directory_out, consumer_leaf)

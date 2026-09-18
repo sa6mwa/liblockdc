@@ -290,6 +290,13 @@ static long lcdc_check_long(lua_State *L, int index, const char *name) {
   return result;
 }
 
+static lc_i64 lcdc_check_int64(lua_State *L, int index, const char *name) {
+  lua_Integer value = luaL_checkinteger(L, index);
+
+  (void)name;
+  return (lc_i64)value;
+}
+
 static lc_version lcdc_check_version(lua_State *L, int index,
                                      const char *name) {
   lua_Integer value = luaL_checkinteger(L, index);
@@ -304,6 +311,20 @@ static int lcdc_opt_integer_field(lua_State *L, int index, const char *name,
     lua_getfield(L, index, name);
     if (!lua_isnil(L, -1)) {
       *out = lcdc_check_long(L, -1, name);
+      lua_pop(L, 1);
+      return 1;
+    }
+    lua_pop(L, 1);
+  }
+  return 0;
+}
+
+static int lcdc_opt_int64_field(lua_State *L, int index, const char *name,
+                                lc_i64 *out) {
+  if (lua_istable(L, index)) {
+    lua_getfield(L, index, name);
+    if (!lua_isnil(L, -1)) {
+      *out = lcdc_check_int64(L, -1, name);
       lua_pop(L, 1);
       return 1;
     }
@@ -2386,7 +2407,7 @@ static void lcdc_parse_txn_decision_req(lua_State *L, int index,
                                         lc_txn_participant **participants) {
   lc_txn_decision_req_init(req);
   lcdc_require_string_field(L, index, "txn_id", &req->txn_id);
-  lcdc_opt_integer_field(L, index, "expires_at_unix", &req->expires_at_unix);
+  lcdc_opt_int64_field(L, index, "expires_at_unix", &req->expires_at_unix);
   lcdc_opt_uint64_field(L, index, "tc_term", &req->tc_term);
   req->target_backend_hash =
       lcdc_opt_string_field(L, index, "target_backend_hash");

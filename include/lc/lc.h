@@ -89,7 +89,7 @@ typedef uint64_t lc_index_seq;
  * consumer. This value is only meaningful in
  * `lc_history_consumer_config.initial_acknowledged_index_seq`.
  */
-#define LC_HISTORY_CONSUMER_START_AT_CURRENT ((lc_index_seq)UINT64_MAX)
+#define LC_HISTORY_CONSUMER_START_AT_CURRENT ((lc_index_seq)-1)
 /** Transaction-coordinator leader term. Mirrors lockd's unsigned uint64 value.
  */
 typedef uint64_t lc_tc_term;

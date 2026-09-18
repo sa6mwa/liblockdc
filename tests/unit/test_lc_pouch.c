@@ -16707,7 +16707,9 @@ static void test_history_consumer_pins_compaction_and_persists(void **state) {
   lc_error_cleanup(&error);
   lc_error_init(&error);
   lc_history_consumer_close(reopened);
-  config.consumer_id = "replica/current";
+  /* Consumer identities are application values: an internal control-directory
+   * name must remain usable after another cursor has created that directory. */
+  config.consumer_id = ".staging";
   config.initial_acknowledged_index_seq = LC_HISTORY_CONSUMER_START_AT_CURRENT;
   rc = client->new_history_consumer(client, &config, &current, &error);
   assert_int_equal(rc, LC_OK);
@@ -16800,7 +16802,7 @@ static void test_history_consumer_corruption_blocks_compaction(void **state) {
   assert_int_equal(rc, LC_OK);
 
   namespace_leaf = lc_pouch_path_escape_name(NULL, config.namespace_name);
-  consumer_leaf = lc_pouch_path_escape_name(NULL, config.consumer_id);
+  consumer_leaf = lc_pouch_path_escape_name(NULL, "consumer:replica/corrupt");
   control_path = lc_pouch_path_join(NULL, root, ".lockd");
   history_path = lc_pouch_path_join(NULL, control_path, "history-consumers");
   namespace_path = lc_pouch_path_join(NULL, history_path, namespace_leaf);
