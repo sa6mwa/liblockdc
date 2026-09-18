@@ -116,6 +116,7 @@ POUCH_GO_HARDENING_CONCURRENCY_WRITERS ?= 4
 POUCH_GO_HARDENING_CONCURRENCY_WRITES_PER_WRITER ?= 48
 POUCH_GO_HARDENING_CONCURRENCY_PAYLOAD_BYTES ?= 4096
 POUCH_GO_ROUTINE_TIMEOUT ?= 90s
+POUCH_REPLAY_CAPTURE_TIMEOUT ?= 10m
 POUCH_GO_ROUTINE_CONCURRENCY_WRITERS ?= 2
 POUCH_GO_ROUTINE_CONCURRENCY_WRITES_PER_WRITER ?= 8
 POUCH_GO_ROUTINE_CONCURRENCY_PAYLOAD_BYTES ?= 256
@@ -171,7 +172,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__build-debug __build-host __build-x86_64-linux-gnu-release __build-release __build-e2e __build-coverage __build-fuzz \
 	__test-debug __test-pouch-workflow-preflight __test-host __test-cross __test-e2e __test-install-tree __example-smoke-local __test-all __test-coverage \
 	__format \
-	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __pouch-integration-fuzz __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-workflow-prepare __benchmark-workflow-pouch __benchmark-workflow-hardening __benchmark-workflow-remote __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate __benchmark-pouch-go-core-soak __pouch-core-hardening \
+	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __pouch-integration-fuzz __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-workflow-prepare __benchmark-workflow-pouch __benchmark-workflow-hardening __benchmark-workflow-remote __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate __benchmark-pouch-go-core-soak __pouch-replay-capture-churn __pouch-core-hardening \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __verify-release-privacy __clean-dist \
 	__lua-rock __lua-test __lua-env __release-lua-artifacts \
 	__dev-up __dev-down __dev-reset __dev-ps __dev-logs __cross-build __cross-preset-test __cross-test \
@@ -180,7 +181,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	build build-debug build-host build-release build-e2e build-coverage build-fuzz \
 	test test-debug test-pouch-workflow-preflight test-host test-cross test-e2e test-install-tree example-smoke-local test-all test-coverage \
 	format \
-	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long pouch-integration-fuzz bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-workflow-pouch benchmark-workflow-hardening benchmark-workflow-remote benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate benchmark-pouch-go-core-soak \
+	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long pouch-integration-fuzz bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-workflow-pouch benchmark-workflow-hardening benchmark-workflow-remote benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate benchmark-pouch-go-core-soak pouch-replay-capture-churn \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives verify-release-privacy clean-dist \
 	lua-rock lua-test lua-env release-lua-artifacts \
 	dev-up dev-down dev-reset dev-ps dev-logs cross-build cross-preset-test cross-test \
@@ -250,6 +251,7 @@ help:
 		'make benchmark-pouch-go-parity-gate Run production pouch-vs-disk benchmarks and require at least $(POUCH_GO_PARITY_MIN_SPEEDUP)x Pouch speedup on each comparable core metric.' \
 		'make benchmark-pouch-go-durable-gate Run strict-durability production metrics and require the same Pouch speedup policy.' \
 		'make benchmark-pouch-go-core-soak Run the bounded, long-duration Pouch core-operation churn soak used by prerelease hardening.' \
+		'make pouch-replay-capture-churn Run the C89-shaped 4,687-key encrypted Pouch replay regression (hardening gate).' \
 		'make package            Build a clean native Bootlin release package with source, Lua, and checksums under dist/.' \
 		'make package-source     Build the source-only release archive.' \
 		'make package-source-smoke  Build and verify the source-only release archive.' \
@@ -837,7 +839,22 @@ __benchmark-pouch-go-core-soak:
 	  LOCKDC_BENCH_PRODUCTION_PAYLOAD_BYTES='$(POUCH_GO_CORE_SOAK_PAYLOAD_BYTES)' \
 	  LOCKDC_BENCH_PRODUCTION_SEGMENT_TARGET_BYTES='$(POUCH_GO_CORE_SOAK_SEGMENT_TARGET_BYTES)'
 
+pouch-replay-capture-churn: __build-x86_64-linux-gnu-release
+	$(TIMED) pouch-replay-capture-churn timeout --kill-after=5s \
+	  '$(POUCH_REPLAY_CAPTURE_TIMEOUT)' $(MAKE_RECURSE) __pouch-replay-capture-churn
+
+__pouch-replay-capture-churn:
+	cd $(X86_64_GNU_RELEASE_BUILD_DIR) && \
+	  python3 $(ROOT)/tests/e2e/pouch_replay.py \
+	    $(X86_64_GNU_RELEASE_BUILD_DIR)/bench/lockdc_pouch_replay_probe \
+	    --keys 4687 --updates 1 --encrypted --shared --unclean --live-staged \
+	    --segment-bytes 67108864 --expected-segments 1 \
+	    --max-startup-read-amplification 8 \
+	    --max-probe-read-amplification 16
+
 __pouch-core-hardening: __benchmark-pouch-go-prepare
+	$(TIMED) 'pouch-core-hardening replay-capture' timeout --kill-after=5s \
+	  '$(POUCH_REPLAY_CAPTURE_TIMEOUT)' $(MAKE_RECURSE) __pouch-replay-capture-churn
 	$(TIMED) 'pouch-core-hardening soak' timeout --kill-after=5s \
 	  '$(POUCH_GO_CORE_SOAK_TIMEOUT)' $(MAKE_RECURSE) __benchmark-pouch-go-core-soak
 	$(TIMED) 'pouch-core-hardening reclaim' timeout --kill-after=5s \

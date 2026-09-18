@@ -944,6 +944,34 @@ the public API or durable format.
   the configured interval, and joins on close or abort. It never forks or runs
   before a completed mutation.
 
+- Terminal retention and reclamation:
+  A completed lease, released queue delivery, deleted state, and resolved
+  transaction must disappear from the live logical projection immediately.
+  Their historical records are retained only until an authoritative immutable
+  checkpoint covers the result and every durable history consumer has advanced
+  beyond it. Durable consumers include watcher-resume cursors, replication,
+  backup/PITR readers, and XA recovery. Reclamation uses the oldest registered
+  consumer boundary; when there are no registered consumers, the next safe
+  checkpoint may reclaim ordinary terminal history. A time window may be a
+  deployment policy fallback, but it is not the correctness boundary.
+
+  Checkpoints retain the monotonic fencing high-water mark even after a lease
+  terminal record is reclaimed, so no future acquire can reuse a fencing token.
+  Unresolved XA decisions are retained indefinitely. A resolved XA decision is
+  retained until every participant effect and recovery acknowledgement is
+  durable, then may be compacted to the minimum durable recovery result while
+  its consumer boundary remains protected. Queue terminal history follows the
+  same boundary; workflow and idempotency receipts have their own explicit
+  policies.
+
+  This boundary is a compaction design requirement, not permission to run a
+  namespace-wide janitor on a write path. Reclamation must advance a durable
+  cursor or select checkpoint/segment ranges incrementally with bounded memory
+  and work per invocation. It must not visit every namespace, materialize all
+  expired keys, or let a watcher/resume consumer reintroduce replay-scale work.
+  The current `retention_seconds` sweep is a compatibility maintenance option,
+  not this future bounded reclamation mechanism.
+
 ### Remaining Operational And Public API Differences
 
 - Sync policy:

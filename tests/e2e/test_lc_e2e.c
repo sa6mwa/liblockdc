@@ -4034,6 +4034,107 @@ test_pouch_direct_migrates_legacy_lease_before_client_open(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_direct_query_indexing_disabled_roundtrip(void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/kind\",\"value\":\"pouch-non-query\"}}";
+  lc_client *client;
+  lc_client *reader;
+  lc_lease *lease;
+  lc_error error;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  pouch_e2e_key_count key_count;
+  char root[256];
+  char endpoint[512];
+  int rc;
+
+  (void)state;
+  make_pouch_root("query-indexing-disabled", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?query_indexing=false&query_engine=index&"
+                       "query_fallback_engine=index&indexer_flush_docs=1",
+                       root) > 0);
+  client = NULL;
+  reader = NULL;
+  lease = NULL;
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  memset(&flush_res, 0, sizeof(flush_res));
+  memset(&key_count, 0, sizeof(key_count));
+  lc_error_init(&error);
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  lc_query_req_init(&query_req);
+  lc_index_flush_req_init(&flush_req);
+  handler.begin = pouch_e2e_key_begin;
+  handler.chunk = pouch_e2e_key_chunk;
+  handler.end = pouch_e2e_key_end;
+
+  open_pouch_client(endpoint, &client, &error);
+  acquire_req.key = "docs/non-query";
+  acquire_req.owner = "lc-e2e-pouch-non-query";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_lc_ok(rc, &error);
+  save_json_text_or_die(lease, "{\"kind\":\"pouch-non-query\"}", &error);
+  rc = lease->release(lease, &release_req, &error);
+  assert_lc_ok(rc, &error);
+  lease = NULL;
+
+  query_req.selector_json = selector;
+  rc = client->query_keys(client, &query_req, &handler, &key_count, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(key_count.rows, 1U);
+  assert_string_equal(query_res.metadata_json, "{\"engine\":\"scan\"}");
+  lc_query_res_cleanup(&query_res);
+
+  lc_query_req_init(&query_req);
+  query_req.selector_json = selector;
+  query_req.engine = "index";
+  rc = client->query_keys(client, &query_req, &handler, &key_count, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch query indexing is disabled; use engine=scan");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  flush_req.namespace_name = "default";
+  flush_req.mode = "sync";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(
+      error.message,
+      "pouch query indexing is disabled; flush_index is unavailable");
+  lc_index_flush_res_cleanup(&flush_res);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  lc_client_close(client);
+  client = NULL;
+  open_pouch_client(endpoint, &reader, &error);
+  lc_query_req_init(&query_req);
+  memset(&key_count, 0, sizeof(key_count));
+  query_req.selector_json = selector;
+  rc = reader->query_keys(reader, &query_req, &handler, &key_count, &query_res,
+                          &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(key_count.rows, 1U);
+  assert_string_equal(query_res.metadata_json, "{\"engine\":\"scan\"}");
+  lc_query_res_cleanup(&query_res);
+
+  lc_client_close(reader);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_direct_state_attachment_reopen_roundtrip(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -5219,6 +5320,7 @@ int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(
           test_pouch_direct_migrates_legacy_lease_before_client_open),
+      cmocka_unit_test(test_pouch_direct_query_indexing_disabled_roundtrip),
       cmocka_unit_test(test_pouch_direct_state_attachment_reopen_roundtrip),
       cmocka_unit_test(
           test_pouch_direct_lifecycle_maintenance_reopen_roundtrip),

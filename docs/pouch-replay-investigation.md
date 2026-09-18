@@ -32,25 +32,32 @@ make build
 python3 tests/e2e/pouch_replay.py build/debug/bench/lockdc_pouch_replay_probe \
   --keys 1 --updates 256 --encrypted --shared --unclean --live-staged
 ctest --test-dir build/debug -R '^pouch_replay_' --output-on-failure --parallel 1 --no-tests=error
+make pouch-replay-capture-churn
 ```
 
-The driver creates disposable roots underneath the working directory, seeds
-through the public client/lease API, and starts two independent reader
-processes. It checks every committed JSON value and logical version. Reads use
-acquire/get/release, so probes append lease records; the second open observes
-that slightly larger root. `--live-staged` leaves an additional uncommitted
-update on a different key. `_exit` prevents clean-close projection creation;
-it does not simulate a torn write, power loss, or cold page cache.
+The driver creates disposable roots underneath the working directory and uses
+the public client/lease API to seed them before starting two independent reader
+processes. It checks every committed JSON value and logical version. The
+ordinary suite uses one small replay fixture. The separate hardening fixture
+uses the captured one-segment shape: 4,687 distinct keys, encrypted
+shared-root recovery, and a live staged record. It requires its exact
+one-segment topology and bounded logical reads for startup and all probe
+operations; it has no elapsed-time assertion. Reads use acquire/get/release,
+so probes append lease records; the second open observes that slightly larger
+root. `--live-staged` leaves an additional uncommitted update on a different
+key. `_exit` prevents clean-close projection creation; it does not simulate a
+torn write, power loss, or cold page cache.
 
 Measurements separate open, first acquire/get/release, remaining keys, and
 close. Linux `/proc/self/io` provides logical bytes and read calls, including
 page-cache hits; these are process-wide, not segment-exclusive. The probe also
 reports current and peak resident bytes from `/proc/self/status` for every
 phase. Wall and CPU times are diagnostic only. The assertion bounds startup
-reads by 64 times the pre-open store size plus 1 MiB metadata allowance. It is
-a regression detector, not a promised storage complexity limit. The CTest
-watchdog is only a hang guard; neither fixture creation nor assertions use
-sleeps or timing thresholds.
+reads by 64 times the pre-open store size plus 1 MiB metadata allowance. The
+capture hardening fixture tightens startup to 8 times and bounds all probe
+reads to 16 times. These are regression detectors, not promised storage
+complexity limits. Test watchdogs are only hang guards; neither fixture
+creation nor assertions use sleeps or timing thresholds.
 
 Two registered offline e2e cases exercise plain/encrypted shared roots with
 64 KiB segment targets. The Pouch unit recovery test separately verifies that

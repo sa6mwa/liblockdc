@@ -27,7 +27,9 @@ def main():
     parser.add_argument("--shared", action="store_true")
     parser.add_argument("--live-staged", action="store_true")
     parser.add_argument("--segment-bytes", type=int, default=1048576)
+    parser.add_argument("--expected-segments", type=int)
     parser.add_argument("--max-startup-read-amplification", type=int, default=64)
+    parser.add_argument("--max-probe-read-amplification", type=int)
     args = parser.parse_args()
     if min(args.keys, args.updates, args.namespaces, args.segment_bytes,
            args.max_startup_read_amplification) <= 0:
@@ -36,6 +38,11 @@ def main():
         parser.error("unclean requires --shared to avoid exclusive lease expiry")
     if args.live_staged and not (args.unclean and args.shared):
         parser.error("live-staged requires --unclean --shared")
+    if args.expected_segments is not None and args.expected_segments <= 0:
+        parser.error("expected segment count must be positive")
+    if (args.max_probe_read_amplification is not None and
+            args.max_probe_read_amplification <= 0):
+        parser.error("probe read amplification must be positive")
     # Stay inside the repository/build working directory, including key files.
     with tempfile.TemporaryDirectory(prefix="pouch-replay-", dir=".") as name:
         root = Path(name).resolve()
@@ -65,6 +72,15 @@ def main():
                 previous = values
             size = sum(p.stat().st_size for p in (root / "store").rglob("*")
                        if p.is_file())
+            if args.expected_segments is not None:
+                for namespace_index in range(args.namespaces):
+                    segment_dir = (root / "store" / "namespaces" /
+                                   f"namespace-{namespace_index}" / "segments")
+                    segment_count = len(list(segment_dir.glob("seg-*.log")))
+                    if segment_count != args.expected_segments:
+                        raise AssertionError(
+                            f"namespace-{namespace_index} has {segment_count} segments; "
+                            f"expected {args.expected_segments}")
             print(json.dumps({"mode": mode, "store_bytes": size,
                               "phases": phases}), flush=True)
             if mode == "probe":
@@ -74,6 +90,13 @@ def main():
                 limit = size_before * args.max_startup_read_amplification + 1048576
                 if startup_reads > limit:
                     raise AssertionError(f"startup read {startup_reads} bytes; bound {limit}")
+                if args.max_probe_read_amplification is not None:
+                    probe_reads = sum(phase["rchar"] for phase in phases.values())
+                    limit = (size_before * args.max_probe_read_amplification +
+                             1048576)
+                    if probe_reads > limit:
+                        raise AssertionError(
+                            f"probe read {probe_reads} bytes; bound {limit}")
         # The diagnostic's open-only mode accepts a key environment-variable
         # name. Exercise both variants without exposing the generated key
         # through process arguments.
