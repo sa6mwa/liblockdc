@@ -6825,7 +6825,8 @@ int lc_pouch_query_index_operation_begin(lc_pouch *pouch,
     *started_out = 0;
   }
   if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      key == NULL || key[0] == '\0' || !lc_pouch_single_writer_enabled(pouch) ||
+      key == NULL || key[0] == '\0' || !pouch->query_indexing_enabled ||
+      !lc_pouch_single_writer_enabled(pouch) ||
       lc_pouch_query_index_key_is_staged(key)) {
     return LC_OK;
   }

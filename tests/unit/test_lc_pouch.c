@@ -7275,6 +7275,7 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   assert_int_equal(status.retention_seconds, 5U);
   assert_int_equal(status.janitor_interval_seconds, 3U);
   assert_true(status.janitor_running);
+  assert_true(status.query_indexing_enabled);
   assert_non_null(status.queue_watch_mode);
   assert_non_null(status.queue_watch_reason);
   lc_pouch_status_cleanup(NULL, &status);
@@ -7356,6 +7357,7 @@ static void test_pouch_defaults_and_post_mutation_janitor(void **state) {
   assert_int_equal(status.retention_seconds, 0U);
   assert_int_equal(status.janitor_interval_seconds, 60U * 60U);
   assert_false(status.janitor_running);
+  assert_true(status.query_indexing_enabled);
   lc_pouch_status_cleanup(NULL, &status);
   lc_pouch_close(pouch);
   pouch = NULL;
@@ -13632,6 +13634,103 @@ test_pouch_endpoint_query_engine_routes_implicit_queries(void **state) {
                                  "\"engine\":\"index\""));
 
   lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_endpoint_disables_query_indexing(void **state) {
+  static const char selector[] =
+      "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_pouch_status status;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_query_key_handler handler;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_update_res update_res;
+  pouch_query_key_capture capture;
+  lc_error error;
+  char root[512];
+  char endpoint[640];
+  char *namespace_path;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  namespace_path = NULL;
+  memset(&status, 0, sizeof(status));
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&handler, 0, sizeof(handler));
+  lc_index_flush_req_init(&flush_req);
+  memset(&flush_res, 0, sizeof(flush_res));
+  memset(&update_res, 0, sizeof(update_res));
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  handler.begin = pouch_query_key_begin;
+  handler.chunk = pouch_query_key_chunk;
+  handler.end = pouch_query_key_end;
+
+  make_root("endpoint-query-indexing-disabled", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?query_indexing=false&query_engine=index&"
+                       "query_fallback_engine=index&indexer_flush_docs=1",
+                       root) > 0);
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  assert_non_null(handle->pouch);
+  assert_false(handle->pouch->indexer_thread_started);
+  assert_false(handle->pouch->indexer_mutex_initialized);
+  rc = lc_pouch_status_read(handle->pouch, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(status.query_indexing_enabled);
+  lc_pouch_status_cleanup(NULL, &status);
+
+  write_client_state(client, "doc/a", "{\"category\":\"planning\"}", NULL, 0L,
+                     0, &update_res, &error);
+  lc_update_res_cleanup(&update_res);
+  assert_null(handle->pouch->query_pending_index);
+  assert_null(handle->pouch->indexer_pending_namespaces);
+  assert_null(handle->pouch->query_active_operations);
+  namespace_path = lc_pouch_namespace_path(NULL, root, "default");
+  assert_non_null(namespace_path);
+  assert_int_equal(query_index_regular_file_count(namespace_path), 0U);
+
+  query_req.selector_json = selector;
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(capture.count, 1);
+  assert_true(pouch_query_capture_has(&capture, "doc/a"));
+  assert_string_equal(query_res.metadata_json, "{\"engine\":\"scan\"}");
+  lc_query_res_cleanup(&query_res);
+
+  memset(&capture, 0, sizeof(capture));
+  lc_query_req_init(&query_req);
+  query_req.selector_json = selector;
+  query_req.engine = "index";
+  rc = client->query_keys(client, &query_req, &handler, &capture, &query_res,
+                          &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(error.message,
+                      "pouch query indexing is disabled; use engine=scan");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  flush_req.namespace_name = "default";
+  flush_req.mode = "sync";
+  rc = client->flush_index(client, &flush_req, &flush_res, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_string_equal(
+      error.message,
+      "pouch query indexing is disabled; flush_index is unavailable");
+  lc_index_flush_res_cleanup(&flush_res);
+
+  lc_free_with_allocator(NULL, namespace_path);
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -34709,6 +34808,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_pouch_endpoint_rejects_unix_socket_mix),
       cmocka_unit_test(
           test_pouch_endpoint_query_engine_routes_implicit_queries),
+      cmocka_unit_test(test_pouch_endpoint_disables_query_indexing),
       cmocka_unit_test(
           test_pouch_namespace_config_persists_and_routes_implicit_queries),
       cmocka_unit_test(test_pouch_public_api_rejects_reserved_lockd_namespaces),

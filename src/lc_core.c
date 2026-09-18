@@ -1100,6 +1100,8 @@ typedef struct lc_pouch_endpoint_options {
   char *root_path;
   char *query_engine;
   char *query_fallback_engine;
+  int query_indexing_enabled;
+  int query_indexing_enabled_set;
   char *crypto_key;
   char *crypto_key_file;
   char *compression;
@@ -1416,6 +1418,16 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     rc = lc_pouch_endpoint_parse_boolean(allocator, value, value_len,
                                          "durable_sync", &options->durable_sync,
                                          error);
+    lc_free_with_allocator(allocator, decoded_key);
+    return rc;
+  }
+  if (lc_query_part_equal(decoded_key, strlen(decoded_key), "query_indexing")) {
+    rc = lc_pouch_endpoint_parse_boolean(
+        allocator, value, value_len, "query_indexing",
+        &options->query_indexing_enabled, error);
+    if (rc == LC_OK) {
+      options->query_indexing_enabled_set = 1;
+    }
     lc_free_with_allocator(allocator, decoded_key);
     return rc;
   }
@@ -2242,6 +2254,10 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     pouch_open_options.query_engine = pouch_endpoint_options.query_engine;
     pouch_open_options.query_fallback_engine =
         pouch_endpoint_options.query_fallback_engine;
+    pouch_open_options.query_indexing_enabled =
+        pouch_endpoint_options.query_indexing_enabled;
+    pouch_open_options.query_indexing_enabled_set =
+        pouch_endpoint_options.query_indexing_enabled_set;
     pouch_open_options.crypto_key = config->pouch_crypto_key != NULL
                                         ? config->pouch_crypto_key
                                         : pouch_endpoint_options.crypto_key;

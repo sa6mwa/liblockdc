@@ -12051,7 +12051,7 @@ static int lc_pouch_state_commit_staged_delete_locked(
     out->index_seq = committed_index_seq;
     out->version = version;
     out->updated_at_unix = updated_at_unix;
-    if (!object_record) {
+    if (pouch->query_indexing_enabled && !object_record) {
       lc_pouch_query_index_note_state_delete(pouch, namespace_name, key, out,
                                              operation_active);
     }
@@ -13179,7 +13179,8 @@ static void lc_pouch_state_log_write_result(
                                       ? options->query_hidden
                                       : 0);
     lc_log_trace(pouch->logger, "logstore.write", fields, 7U);
-    if ((options == NULL || !options->object_record) &&
+    if (pouch->query_indexing_enabled &&
+        (options == NULL || !options->object_record) &&
         (options == NULL || !options->suppress_query_index)) {
       lc_pouch_query_index_note_state_write(
           pouch, namespace_name, key,
@@ -14719,8 +14720,8 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
     fields[3] = lc_log_code_field(error);
     lc_log_error(pouch->logger, "logstore.delete.error", fields, 4U);
   }
-  if (rc == LC_OK && out != NULL && out->version > 0UL &&
-      (options == NULL || !options->object_record)) {
+  if (rc == LC_OK && pouch->query_indexing_enabled && out != NULL &&
+      out->version > 0UL && (options == NULL || !options->object_record)) {
     lc_pouch_query_index_note_state_delete(
         pouch, namespace_name, key, out,
         options != NULL && options->query_index_operation_active);
@@ -15386,7 +15387,8 @@ static int lc_pouch_state_promote_staged_locked(
   committed_descriptor = NULL;
   out->updated_at_unix = updated_at_unix;
   out->query_index_operation_guard_started = query_index_guard_started;
-  if (committed_record_type != LC_POUCH_STATE_RECORD_STATE_META &&
+  if (pouch->query_indexing_enabled &&
+      committed_record_type != LC_POUCH_STATE_RECORD_STATE_META &&
       !lc_pouch_state_record_type_is_object(staged.record_type)) {
     lc_pouch_query_index_note_state_write(
         pouch, namespace_name, key,
@@ -15613,7 +15615,8 @@ int lc_pouch_state_commit_staged_locked(lc_pouch *pouch,
   out->has_query_hidden = staged.has_query_hidden;
   out->query_hidden = staged.query_hidden;
   out->query_index_operation_guard_started = query_index_guard_started;
-  if (committed_record_type != LC_POUCH_STATE_RECORD_STATE_META &&
+  if (pouch->query_indexing_enabled &&
+      committed_record_type != LC_POUCH_STATE_RECORD_STATE_META &&
       !lc_pouch_state_record_type_is_object(staged.record_type)) {
     lc_pouch_query_index_note_state_write(
         pouch, namespace_name, key,

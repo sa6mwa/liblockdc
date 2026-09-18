@@ -1075,6 +1075,20 @@ static int lc_pouch_client_query_engine(lc_client_handle *client,
   int rc;
 
   *owned_engine = NULL;
+  if (client != NULL && client->pouch != NULL &&
+      !client->pouch->query_indexing_enabled) {
+    if (request_engine != NULL && request_engine[0] != '\0' &&
+        strcmp(request_engine, "index") == 0) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "pouch query indexing is disabled; use engine=scan",
+                          NULL, NULL, "pouch");
+    }
+    if (request_engine == NULL || request_engine[0] == '\0' ||
+        strcmp(request_engine, "scan") == 0) {
+      *out_engine = "scan";
+      return LC_OK;
+    }
+  }
   if (request_engine != NULL && request_engine[0] != '\0') {
     *out_engine = request_engine;
     return LC_OK;
@@ -1107,6 +1121,7 @@ static int lc_pouch_client_can_use_query_fallback(lc_client_handle *client,
     return 0;
   }
   return client != NULL && client->pouch != NULL &&
+         client->pouch->query_indexing_enabled &&
          client->pouch->query_fallback_engine != NULL &&
          strcmp(client->pouch->query_fallback_engine, fallback) == 0;
 }
@@ -16384,6 +16399,12 @@ int lc_pouch_client_flush_index_method(lc_client *self,
                         NULL, "pouch");
   }
   client = (lc_client_handle *)self;
+  if (client->pouch == NULL || !client->pouch->query_indexing_enabled) {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "pouch query indexing is disabled; flush_index is unavailable", NULL,
+        NULL, "pouch");
+  }
   rc = lc_pouch_client_public_namespace(client, req->namespace_name,
                                         &namespace_name, error);
   if (rc != LC_OK) {

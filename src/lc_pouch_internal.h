@@ -162,6 +162,7 @@ struct lc_pouch {
   int writer_root_lock_mode;
   char *query_engine;
   char *query_fallback_engine;
+  int query_indexing_enabled;
   char *compression;
   lc_pouch_crypto *crypto;
   char *crypto_key_file;

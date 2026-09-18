@@ -883,6 +883,14 @@ the public API or durable format.
   no handle owns the complete local mutation stream. Index-artifact failure is
   recoverable worker work and never changes the success of an already durable
   state mutation.
+
+- Non-query roots:
+  `query_indexing=false` is a root-open option for append-heavy Pouch roots
+  that do not need derived query indexes. It prevents index warming, indexer
+  startup, and write-side index extraction or publication. Implicit queries
+  use scans even if a namespace's durable preference is `index`; an explicit
+  `engine=index` request and `flush_index` fail clearly. The setting is local
+  to the Pouch endpoint and does not modify durable namespace configuration.
   Deployments that tune Go disk's index writer may set comparable bounds on
   Pouch, for example
   `pouch://...?indexer_flush_docs=64&indexer_flush_interval_seconds=1`.

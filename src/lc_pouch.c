@@ -1891,6 +1891,10 @@ static void lc_pouch_init_options(lc_pouch *pouch,
       &pouch->allocator,
       lc_pouch_option_string(
           options != NULL ? options->query_fallback_engine : NULL, ""));
+  pouch->query_indexing_enabled =
+      options != NULL && options->query_indexing_enabled_set
+          ? (options->query_indexing_enabled != 0 ? 1 : 0)
+          : 1;
   pouch->compression = lc_strdup_with_allocator(
       &pouch->allocator, lc_pouch_compression_option(options));
 }
@@ -2335,8 +2339,11 @@ static int lc_pouch_warm_open_namespaces(lc_pouch *pouch, lc_error *error) {
     }
     lc_error_cleanup(&warm_error);
     lc_error_init(&warm_error);
-    index_rc =
-        lc_pouch_query_index_warm_namespace(pouch, namespace_name, &warm_error);
+    index_rc = LC_OK;
+    if (pouch->query_indexing_enabled) {
+      index_rc = lc_pouch_query_index_warm_namespace(pouch, namespace_name,
+                                                     &warm_error);
+    }
     if (index_rc != LC_OK) {
       pslog_field fields[3];
 
@@ -3375,10 +3382,12 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
     lc_pouch_close(pouch);
     return rc;
   }
-  rc = lc_pouch_indexer_worker_init(pouch, error);
-  if (rc != LC_OK) {
-    lc_pouch_close(pouch);
-    return rc;
+  if (pouch->query_indexing_enabled) {
+    rc = lc_pouch_indexer_worker_init(pouch, error);
+    if (rc != LC_OK) {
+      lc_pouch_close(pouch);
+      return rc;
+    }
   }
   rc = lc_pouch_janitor_worker_init(pouch, error);
   if (rc != LC_OK) {
@@ -3387,7 +3396,7 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
   }
   *out = pouch;
   {
-    pslog_field fields[11];
+    pslog_field fields[12];
 
     fields[0] = lc_log_str_field("path", pouch->root_path);
     fields[1] = lc_log_str_field("query_engine", pouch->query_engine);
@@ -3407,7 +3416,9 @@ int lc_pouch_open(const char *root_path, const lc_allocator *allocator,
         lc_log_u64_field("indexer_flush_docs", pouch->indexer_flush_docs);
     fields[10] = lc_log_u64_field("indexer_flush_interval_seconds",
                                   pouch->indexer_flush_interval_seconds);
-    lc_log_info(pouch->logger, "open", fields, 11U);
+    fields[11] =
+        lc_log_bool_field("query_indexing", pouch->query_indexing_enabled);
+    lc_log_info(pouch->logger, "open", fields, 12U);
   }
   return LC_OK;
 }
@@ -4140,6 +4151,7 @@ int lc_pouch_status_read(lc_pouch *pouch, lc_pouch_status *out,
       lc_strdup_with_allocator(&pouch->allocator, pouch->query_engine);
   out->query_fallback_engine =
       lc_strdup_with_allocator(&pouch->allocator, pouch->query_fallback_engine);
+  out->query_indexing_enabled = pouch->query_indexing_enabled;
   out->compression =
       lc_strdup_with_allocator(&pouch->allocator, pouch->compression);
   out->crypto_enabled = lc_pouch_crypto_enabled(pouch->crypto);

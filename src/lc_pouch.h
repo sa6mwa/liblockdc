@@ -67,6 +67,10 @@ typedef struct lc_pouch_open_options {
   int single_writer;
   const char *query_engine;
   const char *query_fallback_engine;
+  /** Disables local derived query-index maintenance when set to zero. The
+   * default is enabled unless `query_indexing_enabled_set` is nonzero. */
+  int query_indexing_enabled;
+  int query_indexing_enabled_set;
   const char *crypto_key;
   const char *crypto_key_file;
   int crypto_generate_key_file;
@@ -132,6 +136,7 @@ typedef struct lc_pouch_status {
   char *queue_watch_reason;
   char *query_engine;
   char *query_fallback_engine;
+  int query_indexing_enabled;
   int crypto_enabled;
   char *crypto_key_file;
   char *compression;

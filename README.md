@@ -79,6 +79,9 @@ options. Common options are:
   local filesystem supports it, with polling fallback otherwise
 - `query_engine=index|scan` and `query_fallback_engine=index|scan` for the
   namespace query preference used at open
+- `query_indexing=false` for roots that never use indexed queries. This
+  disables local index maintenance and makes implicit queries use scans;
+  explicit indexed queries and `flush_index` are unavailable.
 
 The public API remains the same receiver-function SDK surface for remote and
 Pouch clients. State bodies, queue payloads, attachments, scan output,
