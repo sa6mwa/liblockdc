@@ -946,6 +946,11 @@ the public API or durable format.
   a Pouch namespace. Its `(namespace_name, consumer_id)` identity and
   acknowledgement are stored under `.lockd/history-consumers/`; acknowledge
   positions are monotonic and bounded by the current namespace sequence.
+  Cursor replacements stage beneath that namespace's private `.staging/`
+  directory and become registered only after an atomic rename into the final
+  consumer-record directory. A later cursor operation or compaction attempt
+  removes abandoned staged writes under the same namespace lock; staging files
+  never act as retention pins and cannot corrupt a registered record.
   `LC_HISTORY_CONSUMER_START_AT_CURRENT` registers only future retention.
   Closing a local handle preserves its pin; only `unregister()` removes it.
   This is the retention substrate for a watcher-resume, replication, backup,

@@ -136,6 +136,112 @@ static int lc_pouch_history_file_path(lc_pouch *pouch,
   return LC_OK;
 }
 
+/* Final consumer records are the retention authority.  Stage a replacement in
+ * a sibling directory so an interrupted generic atomic write never leaves a
+ * `.tmp.<pid>.<attempt>` file among registered consumer identities. */
+static int lc_pouch_history_staging_directory(lc_pouch *pouch,
+                                              const char *directory, int create,
+                                              char **out, lc_error *error) {
+  char *staging_directory;
+  int rc;
+
+  *out = NULL;
+  staging_directory =
+      lc_pouch_path_join(&pouch->allocator, directory, ".staging");
+  if (staging_directory == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch history staging directory",
+                        NULL, directory, "pouch");
+  }
+  if (!create) {
+    *out = staging_directory;
+    return LC_OK;
+  }
+  rc = lc_pouch_path_ensure_directory(
+      staging_directory, "failed to create pouch history staging directory",
+      error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_path_fsync_directory(
+        directory, "failed to sync pouch history consumer directory", error);
+  }
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, staging_directory);
+    return rc;
+  }
+  *out = staging_directory;
+  return LC_OK;
+}
+
+static int lc_pouch_history_staging_cleanup(lc_pouch *pouch,
+                                            const char *directory,
+                                            lc_error *error) {
+  char *staging_directory;
+  DIR *dir;
+  struct dirent *entry;
+  int removed;
+  int rc;
+
+  staging_directory = NULL;
+  rc = lc_pouch_history_staging_directory(pouch, directory, 0,
+                                          &staging_directory, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  dir = opendir(staging_directory);
+  if (dir == NULL) {
+    if (errno == ENOENT) {
+      lc_free_with_allocator(&pouch->allocator, staging_directory);
+      return LC_OK;
+    }
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to open pouch history staging directory",
+                      strerror(errno), staging_directory, "pouch");
+    lc_free_with_allocator(&pouch->allocator, staging_directory);
+    return rc;
+  }
+  removed = 0;
+  rc = LC_OK;
+  while (rc == LC_OK && (entry = readdir(dir)) != NULL) {
+    char *path;
+    struct stat st;
+
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    path =
+        lc_pouch_path_join(&pouch->allocator, staging_directory, entry->d_name);
+    if (path == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch history staging record", NULL,
+                        staging_directory, "pouch");
+    } else if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+      rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch history staging entry is not a regular file",
+                        NULL, path, "pouch");
+    } else if (unlink(path) != 0) {
+      rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to remove abandoned pouch history staging "
+                        "record",
+                        strerror(errno), path, "pouch");
+    } else {
+      removed = 1;
+    }
+    lc_free_with_allocator(&pouch->allocator, path);
+  }
+  if (closedir(dir) != 0 && rc == LC_OK) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to close pouch history staging directory",
+                      strerror(errno), staging_directory, "pouch");
+  }
+  if (rc == LC_OK && removed) {
+    rc = lc_pouch_path_fsync_directory(
+        staging_directory, "failed to sync pouch history staging directory",
+        error);
+  }
+  lc_free_with_allocator(&pouch->allocator, staging_directory);
+  return rc;
+}
+
 static int lc_pouch_history_parse_ack(char *line, lc_index_seq *out,
                                       lc_error *error) {
   lc_u64 value;
@@ -253,8 +359,11 @@ static int lc_pouch_history_write(lc_pouch *pouch, const char *directory,
                                   lc_error *error) {
   char acknowledged[32];
   char text[64];
+  char *staging_directory;
+  char *staging_path;
+  const char *leaf;
+  int rc;
 
-  (void)pouch;
   if (lc_u64_format_base10((lc_u64)acknowledged_index_seq, acknowledged,
                            sizeof(acknowledged)) < 0 ||
       snprintf(text, sizeof(text), LC_POUCH_HISTORY_MAGIC "\nack=%s\n",
@@ -268,12 +377,41 @@ static int lc_pouch_history_write(lc_pouch *pouch, const char *directory,
                         "pouch history consumer record exceeds limit", NULL,
                         NULL, "pouch");
   }
-  if (lc_pouch_path_write_text_file(path, text, error) != LC_OK) {
-    return error != NULL && error->code != LC_OK ? error->code
-                                                 : LC_ERR_TRANSPORT;
+  leaf = strrchr(path, '/');
+  leaf = leaf != NULL ? leaf + 1 : path;
+  staging_directory = NULL;
+  staging_path = NULL;
+  rc = lc_pouch_history_staging_directory(pouch, directory, 1,
+                                          &staging_directory, error);
+  if (rc == LC_OK) {
+    staging_path =
+        lc_pouch_path_join(&pouch->allocator, staging_directory, leaf);
+    if (staging_path == NULL) {
+      rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch history staging record", NULL,
+                        staging_directory, "pouch");
+    }
   }
-  return lc_pouch_path_fsync_directory(
-      directory, "failed to sync pouch history consumer directory", error);
+  if (rc == LC_OK) {
+    rc = lc_pouch_path_write_text_file(staging_path, text, error);
+  }
+  if (rc == LC_OK && rename(staging_path, path) != 0) {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                      "failed to publish pouch history consumer record",
+                      strerror(errno), path, "pouch");
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_path_fsync_directory(
+        directory, "failed to sync pouch history consumer directory", error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_path_fsync_directory(
+        staging_directory, "failed to sync pouch history staging directory",
+        error);
+  }
+  lc_free_with_allocator(&pouch->allocator, staging_path);
+  lc_free_with_allocator(&pouch->allocator, staging_directory);
+  return rc;
 }
 
 static int lc_pouch_history_current_locked(lc_pouch *pouch,
@@ -316,6 +454,11 @@ int lc_pouch_history_oldest_acknowledged(lc_pouch *pouch,
   if (rc != LC_OK) {
     return rc;
   }
+  rc = lc_pouch_history_staging_cleanup(pouch, directory, error);
+  if (rc != LC_OK) {
+    lc_free_with_allocator(&pouch->allocator, directory);
+    return rc;
+  }
   dir = opendir(directory);
   if (dir == NULL) {
     if (errno == ENOENT) {
@@ -336,6 +479,9 @@ int lc_pouch_history_oldest_acknowledged(lc_pouch *pouch,
     int found;
 
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+    if (strcmp(entry->d_name, ".staging") == 0) {
       continue;
     }
     decoded = lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
@@ -402,6 +548,10 @@ static int lc_pouch_history_operation_locked(void *opaque, lc_error *error) {
         consumer->client->pouch, consumer->namespace_name,
         consumer->consumer_id, context->operation == LC_POUCH_HISTORY_REGISTER,
         &directory, &path, error);
+  }
+  if (rc == LC_OK) {
+    rc = lc_pouch_history_staging_cleanup(consumer->client->pouch, directory,
+                                          error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_history_read(path, &found, &acknowledged_index_seq, error);

@@ -16742,6 +16742,8 @@ static void test_history_consumer_corruption_blocks_compaction(void **state) {
   char *history_path;
   char *namespace_path;
   char *consumer_path;
+  char *staging_path;
+  char *staging_consumer_path;
   const char *corrupt_records[] = {"bad\n", "LCH1\nack=\n",
                                    "LCH1\nack=0\ntrailing\n"};
   size_t corrupt_index;
@@ -16758,6 +16760,8 @@ static void test_history_consumer_corruption_blocks_compaction(void **state) {
   history_path = NULL;
   namespace_path = NULL;
   consumer_path = NULL;
+  staging_path = NULL;
+  staging_consumer_path = NULL;
   memset(&maintenance_options, 0, sizeof(maintenance_options));
   memset(&maintenance_result, 0, sizeof(maintenance_result));
   memset(&write_result, 0, sizeof(write_result));
@@ -16801,9 +16805,27 @@ static void test_history_consumer_corruption_blocks_compaction(void **state) {
   history_path = lc_pouch_path_join(NULL, control_path, "history-consumers");
   namespace_path = lc_pouch_path_join(NULL, history_path, namespace_leaf);
   consumer_path = lc_pouch_path_join(NULL, namespace_path, consumer_leaf);
+  staging_path = lc_pouch_path_join(NULL, namespace_path, ".staging");
+  staging_consumer_path = lc_pouch_path_join(NULL, staging_path, consumer_leaf);
   assert_non_null(consumer_path);
+  assert_non_null(staging_consumer_path);
   maintenance_options.namespace_name = config.namespace_name;
   maintenance_options.force = 1;
+  write_text_file(staging_consumer_path, "LCH1\nack=0\n");
+  rc = consumer->position(consumer, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(access(staging_consumer_path, F_OK), -1);
+  assert_int_equal(errno, ENOENT);
+  write_text_file(staging_consumer_path, "LCH1\nack=0\n");
+  rc = lc_pouch_maintenance_run(handle->pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.skipped);
+  assert_string_equal(maintenance_result.diagnostic, "history-consumer-behind");
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  assert_int_equal(access(staging_consumer_path, F_OK), -1);
+  assert_int_equal(errno, ENOENT);
   for (corrupt_index = 0U;
        corrupt_index < sizeof(corrupt_records) / sizeof(corrupt_records[0]);
        ++corrupt_index) {
@@ -16839,6 +16861,8 @@ static void test_history_consumer_corruption_blocks_compaction(void **state) {
   lc_free_with_allocator(NULL, history_path);
   lc_free_with_allocator(NULL, namespace_path);
   lc_free_with_allocator(NULL, consumer_path);
+  lc_free_with_allocator(NULL, staging_path);
+  lc_free_with_allocator(NULL, staging_consumer_path);
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);
