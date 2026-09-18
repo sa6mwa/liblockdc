@@ -197,6 +197,10 @@ function M.version_string()
   return core.version_string()
 end
 
+function M.xid_new()
+  return core.xid_new()
+end
+
 M.json_null = JSON_NULL
 
 function M.open(config)
@@ -387,6 +391,10 @@ function Client:query_raw(req, dest)
   return self._core:query(req, dest)
 end
 
+function Client:query_keys(req, handler)
+  return self._core:query_keys(req, handler)
+end
+
 function Client:get_namespace_config(req)
   return self._core:get_namespace_config(req)
 end
@@ -397,6 +405,62 @@ end
 
 function Client:flush_index(req)
   return self._core:flush_index(req)
+end
+
+function Client:txn_replay(req)
+  return self._core:txn_replay(req)
+end
+
+function Client:txn_prepare(req)
+  return self._core:txn_prepare(req)
+end
+
+function Client:txn_commit(req)
+  return self._core:txn_commit(req)
+end
+
+function Client:txn_rollback(req)
+  return self._core:txn_rollback(req)
+end
+
+function Client:tc_lease_acquire(req)
+  return self._core:tc_lease_acquire(req)
+end
+
+function Client:tc_lease_renew(req)
+  return self._core:tc_lease_renew(req)
+end
+
+function Client:tc_lease_release(req)
+  return self._core:tc_lease_release(req)
+end
+
+function Client:tc_leader()
+  return self._core:tc_leader()
+end
+
+function Client:tc_cluster_announce(req)
+  return self._core:tc_cluster_announce(req)
+end
+
+function Client:tc_cluster_leave()
+  return self._core:tc_cluster_leave()
+end
+
+function Client:tc_cluster_list()
+  return self._core:tc_cluster_list()
+end
+
+function Client:tc_rm_register(req)
+  return self._core:tc_rm_register(req)
+end
+
+function Client:tc_rm_unregister(req)
+  return self._core:tc_rm_unregister(req)
+end
+
+function Client:tc_rm_list()
+  return self._core:tc_rm_list()
 end
 
 function Client:enqueue(req, body)

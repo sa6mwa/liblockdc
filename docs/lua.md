@@ -210,17 +210,30 @@ Common client methods:
 - `client:query_raw(req, dest)` (`req.engine` and `req.refresh` may select the
   query engine/refresh mode; document-query trailer metadata is returned as
   `metadata_json`)
+- `client:query_keys(req, handler)` streams decoded key bytes to `handler`
 - `client:get_namespace_config(req)`
 - `client:update_namespace_config(req)`
 - `client:flush_index(req)`
+- `client:txn_replay(req)`
+- `client:txn_prepare(req)`
+- `client:txn_commit(req)`
+- `client:txn_rollback(req)`
+- `client:tc_lease_acquire(req)`
+- `client:tc_lease_renew(req)`
+- `client:tc_lease_release(req)`
+- `client:tc_leader()`
+- `client:tc_cluster_announce(req)`
+- `client:tc_cluster_leave()`
+- `client:tc_cluster_list()`
+- `client:tc_rm_register(req)`
+- `client:tc_rm_unregister(req)`
+- `client:tc_rm_list()`
 - `client:new_workflow(config)`
 - `client:subscribe(req, handler)`
 - `client:subscribe_with_state(req, handler)`
 - `client:watch_queue(req, handler)`
 - `client:new_consumer_service(...)`
 - `client:start_consumer(...)`
-
-The Lua binding intentionally excludes the TC/XA administrative APIs.
 
 ## Inbox/outbox workflows
 
@@ -319,6 +332,50 @@ exactly one terminal operation. A successful `complete`, `retry`, or
 job remains active and the same terminal operation may be retried until its
 claim expires. Use `job:close()` only when abandoning a non-terminal local
 handle; it does not retry or complete the durable job.
+
+## Raw XA and transaction-coordinator APIs
+
+The workflow API is the normal Lua transactional-outbox path. It creates and
+recovers durable decisions without requiring the application to manage an XID.
+For a coordinator, resource manager, or recovery tool that must operate at the
+same level as the C API, the raw XA surface is also available on `client`.
+
+Use `lockdc.xid_new()` to mint a valid transaction identifier for raw XA work.
+
+`txn_prepare`, `txn_commit`, and `txn_rollback` accept a table with `txn_id`,
+`participants`, optional `expires_at_unix`, optional `tc_term`, and optional
+`target_backend_hash`. Each participant has `namespace_name`, `key`, and an
+optional `backend_hash`. `txn_replay` accepts `{ txn_id = ... }`. Decision and
+replay results include `txn_id`, `state`, and `correlation_id`.
+
+```lua
+local txn_id = assert(lockdc.xid_new())
+local participant = { namespace_name = "orders", key = "order-42" }
+
+assert(client:txn_prepare({
+  txn_id = txn_id,
+  participants = { participant },
+  expires_at_unix = 2147483647,
+  tc_term = 1,
+}))
+assert(client:txn_commit({
+  txn_id = txn_id,
+  participants = { participant },
+  tc_term = 1,
+}))
+```
+
+The `tc_lease_*`, `tc_leader`, `tc_cluster_*`, and `tc_rm_*` methods map their
+C requests and results directly to Lua tables. Terms must fit Lua's
+non-negative integer range. Result lists are ordinary dense Lua arrays in
+`endpoints` or `backends`.
+
+`client:query_keys(req, handler)` has the same query request fields as
+`query_raw`, but sends each decoded key directly to Lua instead of materializing
+the query response. Pass either a function for key chunks or a table with a
+required `chunk(bytes)` function and optional `begin()` and `finish()` hooks.
+A key can arrive in multiple chunks, including inside a UTF-8 sequence; collect
+only the current key between `begin` and `finish` if complete strings are needed.
 
 `client:acquire_for_update(req, handler)` wraps the common acquire, snapshot,
 update, release workflow. The handler receives a context table with:

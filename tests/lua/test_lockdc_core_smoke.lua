@@ -9,6 +9,9 @@ package.cpath = table.concat({
 local core = require("lockdc.core")
 
 assert(type(core.version_string()) == "string")
+local xid = assert(core.xid_new())
+assert(type(xid) == "string" and #xid == 20)
+assert(xid:match("^[0-9a-v]+$") ~= nil)
 
 local client, err = core.open({})
 assert(client == nil)

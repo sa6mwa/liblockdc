@@ -71,6 +71,13 @@ typedef struct lcdc_acquire_for_update_handler {
   int handler_ref;
 } lcdc_acquire_for_update_handler;
 
+typedef struct lcdc_query_keys_handler {
+  lua_State *L;
+  int begin_ref;
+  int chunk_ref;
+  int finish_ref;
+} lcdc_query_keys_handler;
+
 static size_t lcdc_lua_source_read(void *context, void *buffer, size_t count,
                                    lc_error *error);
 static int lcdc_lua_source_reset(void *context, lc_error *error);
@@ -339,6 +346,29 @@ static int lcdc_opt_int_field(lua_State *L, int index, const char *name,
   *out = (int)value;
   lua_pop(L, 1);
   return 1;
+}
+
+static uint64_t lcdc_check_uint64(lua_State *L, int index, const char *name) {
+  lua_Integer value = luaL_checkinteger(L, index);
+
+  if (value < 0) {
+    luaL_error(L, "%s must be a non-negative 64-bit integer", name);
+  }
+  return (uint64_t)value;
+}
+
+static int lcdc_opt_uint64_field(lua_State *L, int index, const char *name,
+                                 uint64_t *out) {
+  if (lua_istable(L, index)) {
+    lua_getfield(L, index, name);
+    if (!lua_isnil(L, -1)) {
+      *out = lcdc_check_uint64(L, -1, name);
+      lua_pop(L, 1);
+      return 1;
+    }
+    lua_pop(L, 1);
+  }
+  return 0;
 }
 
 static const char *lcdc_opt_string_field(lua_State *L, int index,
@@ -1091,6 +1121,23 @@ static int lcdc_open(lua_State *L) {
 
 static int lcdc_version_string(lua_State *L) {
   lua_pushstring(L, lc_version_string());
+  return 1;
+}
+
+static int lcdc_xid_new(lua_State *L) {
+  char xid[LC_XID_STRING_SIZE];
+  lc_error error;
+  int rc;
+
+  lc_error_init(&error);
+  rc = lc_xid_new(xid, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushstring(L, xid);
+  lc_error_cleanup(&error);
   return 1;
 }
 
@@ -1981,6 +2028,146 @@ static int lcdc_client_query(lua_State *L) {
   return 2;
 }
 
+static int lcdc_query_keys_call(lua_State *L, int function_ref, int argc,
+                                lc_error *error) {
+  const char *message;
+
+  if (function_ref == LUA_NOREF) {
+    lua_pop(L, argc);
+    return 1;
+  }
+  lua_rawgeti(L, LUA_REGISTRYINDEX, function_ref);
+  lua_insert(L, -1 - argc);
+  if (lua_pcall(L, argc, 0, 0) != 0) {
+    message = lua_tostring(L, -1);
+    lc_error_set(error, LC_ERR_INVALID, 0L,
+                 message != NULL ? message : "Lua query_keys handler failed",
+                 NULL, NULL, NULL);
+    lua_pop(L, 1);
+    return 0;
+  }
+  return 1;
+}
+
+static int lcdc_query_keys_begin(void *context, lc_error *error) {
+  lcdc_query_keys_handler *handler = (lcdc_query_keys_handler *)context;
+
+  return lcdc_query_keys_call(handler->L, handler->begin_ref, 0, error);
+}
+
+static int lcdc_query_keys_chunk(void *context, const char *bytes, size_t len,
+                                 lc_error *error) {
+  lcdc_query_keys_handler *handler = (lcdc_query_keys_handler *)context;
+
+  lua_pushlstring(handler->L, bytes, len);
+  return lcdc_query_keys_call(handler->L, handler->chunk_ref, 1, error);
+}
+
+static int lcdc_query_keys_finish(void *context, lc_error *error) {
+  lcdc_query_keys_handler *handler = (lcdc_query_keys_handler *)context;
+
+  return lcdc_query_keys_call(handler->L, handler->finish_ref, 0, error);
+}
+
+static void lcdc_query_keys_handler_init(lua_State *L, int index,
+                                         lcdc_query_keys_handler *handler) {
+  int type;
+
+  handler->L = L;
+  handler->begin_ref = LUA_NOREF;
+  handler->chunk_ref = LUA_NOREF;
+  handler->finish_ref = LUA_NOREF;
+  type = lua_type(L, index);
+  if (type == LUA_TFUNCTION) {
+    lua_pushvalue(L, index);
+    handler->chunk_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    return;
+  }
+  luaL_checktype(L, index, LUA_TTABLE);
+  lua_getfield(L, index, "begin");
+  if (!lua_isnil(L, -1)) {
+    luaL_checktype(L, -1, LUA_TFUNCTION);
+    handler->begin_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  } else {
+    lua_pop(L, 1);
+  }
+  lua_getfield(L, index, "chunk");
+  luaL_checktype(L, -1, LUA_TFUNCTION);
+  handler->chunk_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  lua_getfield(L, index, "finish");
+  if (!lua_isnil(L, -1)) {
+    luaL_checktype(L, -1, LUA_TFUNCTION);
+    handler->finish_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  } else {
+    lua_pop(L, 1);
+  }
+}
+
+static void lcdc_query_keys_handler_cleanup(lcdc_query_keys_handler *handler) {
+  if (handler->begin_ref != LUA_NOREF) {
+    luaL_unref(handler->L, LUA_REGISTRYINDEX, handler->begin_ref);
+  }
+  if (handler->chunk_ref != LUA_NOREF) {
+    luaL_unref(handler->L, LUA_REGISTRYINDEX, handler->chunk_ref);
+  }
+  if (handler->finish_ref != LUA_NOREF) {
+    luaL_unref(handler->L, LUA_REGISTRYINDEX, handler->finish_ref);
+  }
+  handler->begin_ref = LUA_NOREF;
+  handler->chunk_ref = LUA_NOREF;
+  handler->finish_ref = LUA_NOREF;
+}
+
+static int lcdc_client_query_keys(lua_State *L) {
+  lcdc_client_ud *ud;
+  lc_query_req req;
+  lc_query_key_handler stream_handler;
+  lcdc_query_keys_handler handler;
+  lc_query_res res;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  lc_query_req_init(&req);
+  memset(&stream_handler, 0, sizeof(stream_handler));
+  memset(&res, 0, sizeof(res));
+  lc_error_init(&error);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  req.selector_lql = lcdc_opt_string_field(L, 2, "selector_lql");
+  req.selector_json = lcdc_opt_string_field(L, 2, "selector_json");
+  if ((req.selector_lql == NULL || req.selector_lql[0] == '\0') &&
+      (req.selector_json == NULL || req.selector_json[0] == '\0')) {
+    return luaL_error(L, "query_keys requires selector_lql or selector_json");
+  }
+  lcdc_opt_integer_field(L, 2, "limit", &req.limit);
+  req.cursor = lcdc_opt_string_field(L, 2, "cursor");
+  req.fields_json = lcdc_opt_string_field(L, 2, "fields_json");
+  req.engine = lcdc_opt_string_field(L, 2, "engine");
+  req.refresh = lcdc_opt_string_field(L, 2, "refresh");
+  lcdc_query_keys_handler_init(L, 3, &handler);
+  stream_handler.begin = lcdc_query_keys_begin;
+  stream_handler.chunk = lcdc_query_keys_chunk;
+  stream_handler.end = lcdc_query_keys_finish;
+  rc = lc_query_keys(ud->client, &req, &stream_handler, &handler, &res, &error);
+  lcdc_query_keys_handler_cleanup(&handler);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_query_res_cleanup(&res);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_newtable(L);
+  lcdc_set_string_field(L, "cursor", res.cursor);
+  lcdc_set_string_field(L, "return_mode", res.return_mode);
+  lcdc_set_uinteger_field(L, "index_seq", res.index_seq);
+  lcdc_set_string_field(L, "metadata_json", res.metadata_json);
+  lcdc_set_string_field(L, "correlation_id", res.correlation_id);
+  lc_query_res_cleanup(&res);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
 static int lcdc_client_get_namespace_config(lua_State *L) {
   lcdc_client_ud *ud;
   lc_namespace_config_req req;
@@ -2074,6 +2261,447 @@ static int lcdc_client_flush_index(lua_State *L) {
   lcdc_set_uinteger_field(L, "index_seq", res.index_seq);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_index_flush_res_cleanup(&res);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static void lcdc_free_txn_participants(lc_txn_participant **participants) {
+  if (participants != NULL && *participants != NULL) {
+    free(*participants);
+    *participants = NULL;
+  }
+}
+
+static void lcdc_parse_txn_participants(lua_State *L, int index,
+                                        lc_txn_participant **out,
+                                        size_t *count_out) {
+  lc_txn_participant *participants;
+  size_t count;
+  size_t i;
+
+  *out = NULL;
+  *count_out = 0U;
+  lua_getfield(L, index, "participants");
+  if (lua_isnil(L, -1)) {
+    lua_pop(L, 1);
+    return;
+  }
+  luaL_checktype(L, -1, LUA_TTABLE);
+  count = (size_t)lua_rawlen(L, -1);
+  if (count == 0U) {
+    lua_pop(L, 1);
+    return;
+  }
+  participants = (lc_txn_participant *)calloc(count, sizeof(*participants));
+  if (participants == NULL) {
+    luaL_error(L, "out of memory");
+  }
+  for (i = 0U; i < count; ++i) {
+    lua_rawgeti(L, -1, (lua_Integer)(i + 1U));
+    luaL_checktype(L, -1, LUA_TTABLE);
+    lcdc_require_string_field(L, -1, "namespace_name",
+                              &participants[i].namespace_name);
+    lcdc_require_string_field(L, -1, "key", &participants[i].key);
+    participants[i].backend_hash = lcdc_opt_string_field(L, -1, "backend_hash");
+    lua_pop(L, 1);
+  }
+  lua_pop(L, 1);
+  *out = participants;
+  *count_out = count;
+}
+
+static void lcdc_parse_txn_decision_req(lua_State *L, int index,
+                                        lc_txn_decision_req *req,
+                                        lc_txn_participant **participants) {
+  lc_txn_decision_req_init(req);
+  lcdc_require_string_field(L, index, "txn_id", &req->txn_id);
+  lcdc_parse_txn_participants(L, index, participants, &req->participant_count);
+  req->participants = *participants;
+  lcdc_opt_integer_field(L, index, "expires_at_unix", &req->expires_at_unix);
+  lcdc_opt_uint64_field(L, index, "tc_term", &req->tc_term);
+  req->target_backend_hash =
+      lcdc_opt_string_field(L, index, "target_backend_hash");
+}
+
+static int lcdc_push_txn_decision_res(lua_State *L,
+                                      const lc_txn_decision_res *res,
+                                      lc_error *error) {
+  lua_newtable(L);
+  lcdc_set_string_field(L, "txn_id", res->txn_id);
+  lcdc_set_string_field(L, "state", res->state);
+  lcdc_set_string_field(L, "correlation_id", res->correlation_id);
+  (void)error;
+  return LC_OK;
+}
+
+static int lcdc_client_txn_replay(lua_State *L) {
+  lcdc_client_ud *ud;
+  lc_txn_replay_req req;
+  lc_txn_replay_res res;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  lc_txn_replay_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  lc_error_init(&error);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_require_string_field(L, 2, "txn_id", &req.txn_id);
+  rc = lc_txn_replay(ud->client, &req, &res, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_newtable(L);
+  lcdc_set_string_field(L, "txn_id", res.txn_id);
+  lcdc_set_string_field(L, "state", res.state);
+  lcdc_set_string_field(L, "correlation_id", res.correlation_id);
+  lc_txn_replay_res_cleanup(&res);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_client_txn_decision(lua_State *L, int operation) {
+  lcdc_client_ud *ud;
+  lc_txn_decision_req req;
+  lc_txn_decision_res res;
+  lc_txn_participant *participants;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  memset(&res, 0, sizeof(res));
+  participants = NULL;
+  lc_error_init(&error);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_parse_txn_decision_req(L, 2, &req, &participants);
+  if (operation == 0) {
+    rc = lc_txn_prepare(ud->client, &req, &res, &error);
+  } else if (operation == 1) {
+    rc = lc_txn_commit(ud->client, &req, &res, &error);
+  } else {
+    rc = lc_txn_rollback(ud->client, &req, &res, &error);
+  }
+  lcdc_free_txn_participants(&participants);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_txn_decision_res(L, &res, &error);
+  lc_txn_decision_res_cleanup(&res);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_client_txn_prepare(lua_State *L) {
+  return lcdc_client_txn_decision(L, 0);
+}
+
+static int lcdc_client_txn_commit(lua_State *L) {
+  return lcdc_client_txn_decision(L, 1);
+}
+
+static int lcdc_client_txn_rollback(lua_State *L) {
+  return lcdc_client_txn_decision(L, 2);
+}
+
+static int lcdc_push_tc_lease_res(lua_State *L, const char *success_field,
+                                  int success, const char *leader_id,
+                                  const char *leader_endpoint, uint64_t term,
+                                  lc_unix_seconds expires_at_unix,
+                                  const char *correlation_id, lc_error *error) {
+  int rc;
+
+  lua_newtable(L);
+  lcdc_set_bool_field(L, success_field, success);
+  lcdc_set_string_field(L, "leader_id", leader_id);
+  lcdc_set_string_field(L, "leader_endpoint", leader_endpoint);
+  rc = lcdc_set_uint64_field(L, "term", term, error);
+  if (rc != LC_OK) {
+    lua_pop(L, 1);
+    return rc;
+  }
+  lcdc_set_integer_field(L, "expires_at_unix", expires_at_unix);
+  lcdc_set_string_field(L, "correlation_id", correlation_id);
+  return LC_OK;
+}
+
+static int lcdc_client_tc_lease_acquire(lua_State *L) {
+  lcdc_client_ud *ud;
+  lc_tc_lease_acquire_req req;
+  lc_tc_lease_acquire_res res;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  lc_tc_lease_acquire_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  lc_error_init(&error);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_require_string_field(L, 2, "candidate_id", &req.candidate_id);
+  lcdc_require_string_field(L, 2, "candidate_endpoint",
+                            &req.candidate_endpoint);
+  lcdc_opt_uint64_field(L, 2, "term", &req.term);
+  lcdc_opt_integer_field(L, 2, "ttl_ms", &req.ttl_ms);
+  rc = lc_tc_lease_acquire(ud->client, &req, &res, &error);
+  if (rc == LC_OK) {
+    rc = lcdc_push_tc_lease_res(
+        L, "granted", res.granted, res.leader_id, res.leader_endpoint, res.term,
+        res.expires_at_unix, res.correlation_id, &error);
+  }
+  lc_tc_lease_acquire_res_cleanup(&res);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_client_tc_lease_renew(lua_State *L) {
+  lcdc_client_ud *ud;
+  lc_tc_lease_renew_req req;
+  lc_tc_lease_renew_res res;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  lc_tc_lease_renew_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  lc_error_init(&error);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_require_string_field(L, 2, "leader_id", &req.leader_id);
+  lcdc_opt_uint64_field(L, 2, "term", &req.term);
+  lcdc_opt_integer_field(L, 2, "ttl_ms", &req.ttl_ms);
+  rc = lc_tc_lease_renew(ud->client, &req, &res, &error);
+  if (rc == LC_OK) {
+    rc = lcdc_push_tc_lease_res(
+        L, "renewed", res.renewed, res.leader_id, res.leader_endpoint, res.term,
+        res.expires_at_unix, res.correlation_id, &error);
+  }
+  lc_tc_lease_renew_res_cleanup(&res);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_client_tc_lease_release(lua_State *L) {
+  lcdc_client_ud *ud;
+  lc_tc_lease_release_req req;
+  lc_tc_lease_release_res res;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  lc_tc_lease_release_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  lc_error_init(&error);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_require_string_field(L, 2, "leader_id", &req.leader_id);
+  lcdc_opt_uint64_field(L, 2, "term", &req.term);
+  rc = lc_tc_lease_release(ud->client, &req, &res, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_newtable(L);
+  lcdc_set_bool_field(L, "released", res.released);
+  lcdc_set_string_field(L, "correlation_id", res.correlation_id);
+  lc_tc_lease_release_res_cleanup(&res);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_client_tc_leader(lua_State *L) {
+  lcdc_client_ud *ud;
+  lc_tc_leader_res res;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  memset(&res, 0, sizeof(res));
+  lc_error_init(&error);
+  rc = lc_tc_leader(ud->client, &res, &error);
+  if (rc == LC_OK) {
+    lua_newtable(L);
+    lcdc_set_string_field(L, "leader_id", res.leader_id);
+    lcdc_set_string_field(L, "leader_endpoint", res.leader_endpoint);
+    rc = lcdc_set_uint64_field(L, "term", res.term, &error);
+    if (rc == LC_OK) {
+      lcdc_set_integer_field(L, "expires_at_unix", res.expires_at_unix);
+      lcdc_set_string_field(L, "correlation_id", res.correlation_id);
+    } else {
+      lua_pop(L, 1);
+    }
+  }
+  lc_tc_leader_res_cleanup(&res);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static void lcdc_push_string_list(lua_State *L, const lc_string_list *list) {
+  size_t i;
+
+  lua_createtable(L, (int)list->count, 0);
+  for (i = 0U; i < list->count; ++i) {
+    lua_pushstring(L, list->items[i]);
+    lua_rawseti(L, -2, (lua_Integer)(i + 1U));
+  }
+}
+
+static int lcdc_push_tc_cluster_res(lua_State *L,
+                                    const lc_tc_cluster_res *res) {
+  lua_newtable(L);
+  lcdc_push_string_list(L, &res->endpoints);
+  lua_setfield(L, -2, "endpoints");
+  lcdc_set_integer_field(L, "updated_at_unix", res->updated_at_unix);
+  lcdc_set_integer_field(L, "expires_at_unix", res->expires_at_unix);
+  lcdc_set_string_field(L, "correlation_id", res->correlation_id);
+  return 1;
+}
+
+static int lcdc_client_tc_cluster(lua_State *L, int operation) {
+  lcdc_client_ud *ud;
+  lc_tc_cluster_announce_req req;
+  lc_tc_cluster_res res;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  lc_tc_cluster_announce_req_init(&req);
+  memset(&res, 0, sizeof(res));
+  lc_error_init(&error);
+  if (operation == 0) {
+    luaL_checktype(L, 2, LUA_TTABLE);
+    lcdc_require_string_field(L, 2, "self_endpoint", &req.self_endpoint);
+    rc = lc_tc_cluster_announce(ud->client, &req, &res, &error);
+  } else if (operation == 1) {
+    rc = lc_tc_cluster_leave(ud->client, &res, &error);
+  } else {
+    rc = lc_tc_cluster_list(ud->client, &res, &error);
+  }
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_tc_cluster_res_cleanup(&res);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_tc_cluster_res(L, &res);
+  lc_tc_cluster_res_cleanup(&res);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_client_tc_cluster_announce(lua_State *L) {
+  return lcdc_client_tc_cluster(L, 0);
+}
+
+static int lcdc_client_tc_cluster_leave(lua_State *L) {
+  return lcdc_client_tc_cluster(L, 1);
+}
+
+static int lcdc_client_tc_cluster_list(lua_State *L) {
+  return lcdc_client_tc_cluster(L, 2);
+}
+
+static int lcdc_push_tc_rm_res(lua_State *L, const lc_tc_rm_res *res) {
+  lua_newtable(L);
+  lcdc_set_string_field(L, "backend_hash", res->backend_hash);
+  lcdc_push_string_list(L, &res->endpoints);
+  lua_setfield(L, -2, "endpoints");
+  lcdc_set_integer_field(L, "updated_at_unix", res->updated_at_unix);
+  lcdc_set_string_field(L, "correlation_id", res->correlation_id);
+  return 1;
+}
+
+static int lcdc_client_tc_rm(lua_State *L, int operation) {
+  lcdc_client_ud *ud;
+  lc_tc_rm_register_req register_req;
+  lc_tc_rm_unregister_req unregister_req;
+  lc_tc_rm_res res;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  lc_tc_rm_register_req_init(&register_req);
+  lc_tc_rm_unregister_req_init(&unregister_req);
+  memset(&res, 0, sizeof(res));
+  lc_error_init(&error);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  if (operation == 0) {
+    lcdc_require_string_field(L, 2, "backend_hash", &register_req.backend_hash);
+    lcdc_require_string_field(L, 2, "endpoint", &register_req.endpoint);
+    rc = lc_tc_rm_register(ud->client, &register_req, &res, &error);
+  } else {
+    lcdc_require_string_field(L, 2, "backend_hash",
+                              &unregister_req.backend_hash);
+    lcdc_require_string_field(L, 2, "endpoint", &unregister_req.endpoint);
+    rc = lc_tc_rm_unregister(ud->client, &unregister_req, &res, &error);
+  }
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_tc_rm_res_cleanup(&res);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_tc_rm_res(L, &res);
+  lc_tc_rm_res_cleanup(&res);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_client_tc_rm_register(lua_State *L) {
+  return lcdc_client_tc_rm(L, 0);
+}
+
+static int lcdc_client_tc_rm_unregister(lua_State *L) {
+  return lcdc_client_tc_rm(L, 1);
+}
+
+static int lcdc_client_tc_rm_list(lua_State *L) {
+  lcdc_client_ud *ud;
+  lc_tc_rm_list_res res;
+  lc_error error;
+  size_t i;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  memset(&res, 0, sizeof(res));
+  lc_error_init(&error);
+  rc = lc_tc_rm_list(ud->client, &res, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_newtable(L);
+  lua_createtable(L, (int)res.backend_count, 0);
+  for (i = 0U; i < res.backend_count; ++i) {
+    lua_newtable(L);
+    lcdc_set_string_field(L, "backend_hash", res.backends[i].backend_hash);
+    lcdc_push_string_list(L, &res.backends[i].endpoints);
+    lua_setfield(L, -2, "endpoints");
+    lcdc_set_integer_field(L, "updated_at_unix",
+                           res.backends[i].updated_at_unix);
+    lua_rawseti(L, -2, (lua_Integer)(i + 1U));
+  }
+  lua_setfield(L, -2, "backends");
+  lcdc_set_integer_field(L, "updated_at_unix", res.updated_at_unix);
+  lcdc_set_string_field(L, "correlation_id", res.correlation_id);
+  lc_tc_rm_list_res_cleanup(&res);
   lc_error_cleanup(&error);
   return 1;
 }
@@ -4041,9 +4669,24 @@ static const luaL_Reg lcdc_client_methods[] = {
     {"queue_nack", lcdc_client_queue_nack},
     {"queue_extend", lcdc_client_queue_extend},
     {"query", lcdc_client_query},
+    {"query_keys", lcdc_client_query_keys},
     {"get_namespace_config", lcdc_client_get_namespace_config},
     {"update_namespace_config", lcdc_client_update_namespace_config},
     {"flush_index", lcdc_client_flush_index},
+    {"txn_replay", lcdc_client_txn_replay},
+    {"txn_prepare", lcdc_client_txn_prepare},
+    {"txn_commit", lcdc_client_txn_commit},
+    {"txn_rollback", lcdc_client_txn_rollback},
+    {"tc_lease_acquire", lcdc_client_tc_lease_acquire},
+    {"tc_lease_renew", lcdc_client_tc_lease_renew},
+    {"tc_lease_release", lcdc_client_tc_lease_release},
+    {"tc_leader", lcdc_client_tc_leader},
+    {"tc_cluster_announce", lcdc_client_tc_cluster_announce},
+    {"tc_cluster_leave", lcdc_client_tc_cluster_leave},
+    {"tc_cluster_list", lcdc_client_tc_cluster_list},
+    {"tc_rm_register", lcdc_client_tc_rm_register},
+    {"tc_rm_unregister", lcdc_client_tc_rm_unregister},
+    {"tc_rm_list", lcdc_client_tc_rm_list},
     {"enqueue", lcdc_client_enqueue},
     {"dequeue", lcdc_client_dequeue},
     {"dequeue_batch", lcdc_client_dequeue_batch},
@@ -4151,6 +4794,7 @@ int luaopen_lockdc_core(lua_State *L) {
   static const luaL_Reg module_functions[] = {
       {"open", lcdc_open},
       {"version_string", lcdc_version_string},
+      {"xid_new", lcdc_xid_new},
       {NULL, NULL}};
 
   lcdc_create_metatable(L, LCDC_CLIENT_MT, lcdc_client_methods, lcdc_client_gc);

@@ -113,6 +113,188 @@ if payload == nil or payload.source ~= "lua-pouch" or type(written_or_err) ~= "n
 end
 assert(message:ack())
 
+local function assert_ok(operation, value, value_err)
+  if value == nil then
+    error(("%s failed: %s"):format(operation,
+      value_err and value_err.message or tostring(value_err)))
+  end
+  return value
+end
+
+local raw_txn_id = assert(lockdc.xid_new())
+local raw_txn_participant = {
+  namespace_name = namespace_name,
+  key = "xa-state",
+}
+local raw_txn_lease = assert_ok("Lua raw XA acquire", client:acquire({
+  key = raw_txn_participant.key,
+  owner = "lua-pouch-xa",
+  ttl_seconds = 30,
+  txn_id = raw_txn_id,
+}))
+assert_ok("Lua raw XA stage",
+          raw_txn_lease:update_json({ source = "lua-pouch-xa", committed = true }))
+local prepared = assert_ok("Lua raw XA prepare", client:txn_prepare({
+  txn_id = raw_txn_id,
+  participants = { raw_txn_participant },
+  expires_at_unix = 2147483647,
+  tc_term = 1,
+}))
+if prepared.state ~= "prepare" then
+  raw_txn_lease:close()
+  client:close()
+  error("Lua raw XA prepare did not return prepare state")
+end
+local committed = assert_ok("Lua raw XA commit", client:txn_commit({
+  txn_id = raw_txn_id,
+  participants = { raw_txn_participant },
+  tc_term = 1,
+}))
+raw_txn_lease:close()
+if committed.state ~= "commit" then
+  client:close()
+  error("Lua raw XA commit did not return commit state")
+end
+local replayed = assert_ok("Lua raw XA replay",
+                           client:txn_replay({ txn_id = raw_txn_id }))
+if replayed.state ~= "commit" then
+  client:close()
+  error("Lua raw XA replay did not preserve commit state")
+end
+local xa_state, xa_state_err = client:get_json({ key = raw_txn_participant.key })
+if xa_state == nil or not xa_state.committed then
+  client:close()
+  error(("Lua raw XA state was not committed: %s"):format(
+    xa_state_err and xa_state_err.message or tostring(xa_state_err)))
+end
+local query_keys = {}
+local current_key
+local query_result = assert_ok("Lua query_keys", client:query_keys({
+  namespace_name = namespace_name,
+  selector_json = '{"eq":{"field":"/source","value":"lua-pouch-xa"}}',
+  engine = "scan",
+}, {
+  begin = function()
+    current_key = ""
+  end,
+  chunk = function(bytes)
+    current_key = current_key .. bytes
+  end,
+  finish = function()
+    table.insert(query_keys, current_key)
+  end,
+}))
+if #query_keys ~= 1 or query_keys[1] ~= raw_txn_participant.key or
+    query_result.return_mode ~= "keys" then
+  client:close()
+  error("Lua query_keys did not stream the matching Pouch key")
+end
+local callback_result, callback_err = client:query_keys({
+  namespace_name = namespace_name,
+  selector_json = '{"eq":{"field":"/source","value":"lua-pouch-xa"}}',
+  engine = "scan",
+}, function()
+  error("query key handler failure")
+end)
+if callback_result ~= nil or type(callback_err) ~= "table" or
+    not (callback_err.message or ""):match("query key handler failure", 1, true) then
+  client:close()
+  error("Lua query_keys did not propagate handler failure")
+end
+
+local rollback_txn_id = assert(lockdc.xid_new())
+local rollback_participant = {
+  namespace_name = namespace_name,
+  key = "xa-rollback-state",
+}
+local rollback_lease = assert_ok("Lua raw XA rollback acquire", client:acquire({
+  key = rollback_participant.key,
+  owner = "lua-pouch-xa-rollback",
+  ttl_seconds = 30,
+  txn_id = rollback_txn_id,
+}))
+assert_ok("Lua raw XA rollback stage", rollback_lease:update_json({ rolled_back = true }))
+local rolled_back = assert_ok("Lua raw XA rollback", client:txn_rollback({
+  txn_id = rollback_txn_id,
+  participants = { rollback_participant },
+  tc_term = 1,
+}))
+rollback_lease:close()
+if rolled_back.state ~= "rollback" then
+  client:close()
+  error("Lua raw XA rollback did not return rollback state")
+end
+
+local tc_lease = assert_ok("Lua TC lease acquire", client:tc_lease_acquire({
+  candidate_id = "lua-pouch-node",
+  candidate_endpoint = "pouch://lua-pouch-node",
+  term = 1,
+  ttl_ms = 60000,
+}))
+if not tc_lease.granted then
+  client:close()
+  error("Lua TC lease was not granted")
+end
+local tc_renewed = assert_ok("Lua TC lease renew", client:tc_lease_renew({
+  leader_id = "lua-pouch-node",
+  term = tc_lease.term,
+  ttl_ms = 60000,
+}))
+if not tc_renewed.renewed then
+  client:close()
+  error("Lua TC lease was not renewed")
+end
+local tc_leader = assert_ok("Lua TC leader", client:tc_leader())
+if tc_leader.leader_id ~= "lua-pouch-node" then
+  client:close()
+  error("Lua TC leader did not return the current leader")
+end
+assert_ok("Lua TC lease release", client:tc_lease_release({
+  leader_id = "lua-pouch-node",
+  term = tc_renewed.term,
+}))
+
+local announced = assert_ok("Lua TC cluster announce", client:tc_cluster_announce({
+  self_endpoint = "pouch://lua-pouch-node",
+}))
+if #announced.endpoints ~= 1 or announced.endpoints[1] ~= "pouch://lua-pouch-node" then
+  client:close()
+  error("Lua TC cluster announce did not return its endpoint")
+end
+local listed_cluster = assert_ok("Lua TC cluster list", client:tc_cluster_list())
+if #listed_cluster.endpoints ~= 1 then
+  client:close()
+  error("Lua TC cluster list did not preserve membership")
+end
+local left_cluster = assert_ok("Lua TC cluster leave", client:tc_cluster_leave())
+if #left_cluster.endpoints ~= 0 then
+  client:close()
+  error("Lua TC cluster leave did not remove membership")
+end
+
+local registered = assert_ok("Lua TC RM register", client:tc_rm_register({
+  backend_hash = "lua-pouch-backend",
+  endpoint = "pouch://lua-pouch-rm",
+}))
+if #registered.endpoints ~= 1 then
+  client:close()
+  error("Lua TC RM register did not return its endpoint")
+end
+local registered_rms = assert_ok("Lua TC RM list", client:tc_rm_list())
+if #registered_rms.backends ~= 1 or
+    registered_rms.backends[1].backend_hash ~= "lua-pouch-backend" then
+  client:close()
+  error("Lua TC RM list did not return the registered backend")
+end
+local unregistered = assert_ok("Lua TC RM unregister", client:tc_rm_unregister({
+  backend_hash = "lua-pouch-backend",
+  endpoint = "pouch://lua-pouch-rm",
+}))
+if #unregistered.endpoints ~= 0 then
+  client:close()
+  error("Lua TC RM unregister did not remove its endpoint")
+end
+
 local flush, flush_err = client:flush_index({ namespace_name = namespace_name, mode = "wait" })
 if flush == nil then
   client:close()

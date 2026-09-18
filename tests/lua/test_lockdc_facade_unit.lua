@@ -41,6 +41,9 @@ local core_stub = {
   version_string = function()
     return 'test-version'
   end,
+  xid_new = function()
+    return '0123456789abcdefghijkl'
+  end,
 }
 
 package.preload['lockdc.core'] = function()
@@ -63,6 +66,7 @@ end
 
 local function test_json_helpers()
   assert_eq(lockdc.version_string(), 'test-version', 'version_string should delegate to core')
+  assert_eq(lockdc.xid_new(), '0123456789abcdefghijkl', 'xid_new should delegate to core')
   assert_eq(lockdc.encode_json('123'), '123', 'encode_json should strip wrapper envelope')
   assert_eq(lockdc.encode_json(nil), 'null', 'encode_json should preserve legacy top-level nil null')
   assert_eq(lockdc.decode_json('{"k":1}'), '{"k":1}', 'decode_json should unwrap envelope payload')
@@ -176,6 +180,85 @@ local function test_pouch_open_config_passthrough()
   assert_eq(captured.config.pouch_crypto_key_file, '/var/lib/lockdc-lua-unit/root.key', 'pouch_crypto_key_file should pass through')
   assert_eq(captured.config.pouch_crypto_generate_key_file, true, 'pouch key-file generation should pass through')
   assert_eq(captured.config.pouch_compression, 'zlib', 'pouch compression should pass through')
+  client:close()
+end
+
+local function test_xa_and_transaction_coordinator_forwarding()
+  local captured = {}
+  local client_core = {
+    close = function() end,
+  }
+  local methods = {
+    'query_keys', 'txn_replay', 'txn_prepare', 'txn_commit', 'txn_rollback',
+    'tc_lease_acquire', 'tc_lease_renew', 'tc_lease_release',
+    'tc_cluster_announce', 'tc_rm_register', 'tc_rm_unregister',
+  }
+
+  for _, name in ipairs(methods) do
+    client_core[name] = function(_, req)
+      captured[name] = req
+      return { method = name }
+    end
+  end
+  client_core.tc_leader = function()
+    captured.tc_leader = true
+    return { method = 'tc_leader' }
+  end
+  client_core.tc_cluster_leave = function()
+    captured.tc_cluster_leave = true
+    return { method = 'tc_cluster_leave' }
+  end
+  client_core.tc_cluster_list = function()
+    captured.tc_cluster_list = true
+    return { method = 'tc_cluster_list' }
+  end
+  client_core.tc_rm_list = function()
+    captured.tc_rm_list = true
+    return { method = 'tc_rm_list' }
+  end
+  core_stub.open = function()
+    return client_core
+  end
+
+  local client = assert(lockdc.open({}))
+  local decision = {
+    txn_id = '00000000000000000001',
+    participants = { { namespace_name = 'orders', key = 'order-1' } },
+    tc_term = 1,
+  }
+
+  assert_eq(client:txn_replay({ txn_id = decision.txn_id }).method, 'txn_replay',
+            'txn_replay should delegate to core')
+  assert_eq(client:txn_prepare(decision).method, 'txn_prepare',
+            'txn_prepare should delegate to core')
+  assert_eq(client:txn_commit(decision).method, 'txn_commit',
+            'txn_commit should delegate to core')
+  assert_eq(client:txn_rollback(decision).method, 'txn_rollback',
+            'txn_rollback should delegate to core')
+  assert_eq(captured.txn_commit, decision,
+            'raw transaction decisions should preserve the request table')
+  assert_eq(client:query_keys({ selector_json = '{"kind":"order"}' }, function() end).method,
+            'query_keys', 'query_keys should delegate to core')
+  assert_eq(client:tc_lease_acquire({ candidate_id = 'node-a' }).method,
+            'tc_lease_acquire', 'TC lease acquire should delegate to core')
+  assert_eq(client:tc_lease_renew({ leader_id = 'node-a' }).method,
+            'tc_lease_renew', 'TC lease renew should delegate to core')
+  assert_eq(client:tc_lease_release({ leader_id = 'node-a' }).method,
+            'tc_lease_release', 'TC lease release should delegate to core')
+  assert_eq(client:tc_leader().method, 'tc_leader',
+            'TC leader should delegate to core')
+  assert_eq(client:tc_cluster_announce({ self_endpoint = 'pouch://node-a' }).method,
+            'tc_cluster_announce', 'TC cluster announce should delegate to core')
+  assert_eq(client:tc_cluster_leave().method, 'tc_cluster_leave',
+            'TC cluster leave should delegate to core')
+  assert_eq(client:tc_cluster_list().method, 'tc_cluster_list',
+            'TC cluster list should delegate to core')
+  assert_eq(client:tc_rm_register({ backend_hash = 'backend-a' }).method,
+            'tc_rm_register', 'TC RM register should delegate to core')
+  assert_eq(client:tc_rm_unregister({ backend_hash = 'backend-a' }).method,
+            'tc_rm_unregister', 'TC RM unregister should delegate to core')
+  assert_eq(client:tc_rm_list().method, 'tc_rm_list',
+            'TC RM list should delegate to core')
   client:close()
 end
 
@@ -846,6 +929,7 @@ end
 test_json_helpers()
 test_request_flattening_and_default_content_type()
 test_pouch_open_config_passthrough()
+test_xa_and_transaction_coordinator_forwarding()
 test_subscribe_ack_and_error_paths()
 test_acquire_for_update_propagates_sdk_failure_shape()
 test_subscribe_with_state_and_service_lifecycle()
