@@ -58,9 +58,9 @@ if(NOT TARGET pslog::pslog)
   add_library(pslog::pslog INTERFACE IMPORTED)
 endif()
 set(pslog_FOUND TRUE)
-set(pslog_VERSION "0.9.0")
+set(pslog_VERSION "0.10.0")
 ]=])
-    lockdc_write_fake_package_version("${fake_pslog_dir}" "0.9.0" "pslogConfigVersion.cmake")
+    lockdc_write_fake_package_version("${fake_pslog_dir}" "0.10.0" "pslogConfigVersion.cmake")
 
     file(WRITE "${fake_lonejson_dir}/lonejsonConfig.cmake" [=[
 if(NOT TARGET lonejson::lonejson)

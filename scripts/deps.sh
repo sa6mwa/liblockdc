@@ -261,26 +261,26 @@ esac
 pslog_asset_name="libpslog-$pslog_version-${preset#deps-}.tar.gz"
 pslog_download_url="https://github.com/sa6mwa/libpslog/releases/download/v$pslog_version/$pslog_asset_name"
 case "$pslog_asset_name" in
-  libpslog-0.9.0-x86_64-linux-gnu.tar.gz)
-    pslog_asset_hash=7981ce7e60f6f1e144042e7a9192bb661472756ae34336fb0c2ed8316b31945f
+  libpslog-0.10.0-x86_64-linux-gnu.tar.gz)
+    pslog_asset_hash=db4089205cd674ec65540ea7a2388a827a8db5dd7c841db39d4beb8d9eff3d26
     ;;
-  libpslog-0.9.0-x86_64-linux-musl.tar.gz)
-    pslog_asset_hash=d05e59e8d88018a2e78e0941d2db211f3c08e4fd7539065ed2de79ce7e371055
+  libpslog-0.10.0-x86_64-linux-musl.tar.gz)
+    pslog_asset_hash=b9c1f212df866e03a2d55bf95a1294f678b3d4765ec09281d7294653225ae424
     ;;
-  libpslog-0.9.0-aarch64-linux-gnu.tar.gz)
-    pslog_asset_hash=38bb08ca6646cf186925a724b61fb534fa49ec0d5e77ca95953dd7a5b18f76e1
+  libpslog-0.10.0-aarch64-linux-gnu.tar.gz)
+    pslog_asset_hash=3d08b7a8e175805c9441edd67cfad29dda3593eb03273b1011a70e959ddc2426
     ;;
-  libpslog-0.9.0-aarch64-linux-musl.tar.gz)
-    pslog_asset_hash=fce3c4f95b317563427437313ef2eb1987dc43973b0b0bf5169763d0a2705f69
+  libpslog-0.10.0-aarch64-linux-musl.tar.gz)
+    pslog_asset_hash=80a5374714479311b3f1f232f8ef658f693ed03d7c1b21bc5d913b8b9df4fc10
     ;;
-  libpslog-0.9.0-armhf-linux-gnu.tar.gz)
-    pslog_asset_hash=eff69fe9223cd2ad56572ad6acd768b560ac3e863e379c65367ad6338dbfffef
+  libpslog-0.10.0-armhf-linux-gnu.tar.gz)
+    pslog_asset_hash=5b0207766882dd1cb913e49c4c5ec6e9643a38a241045457a0e64d415a8295cd
     ;;
-  libpslog-0.9.0-armhf-linux-musl.tar.gz)
-    pslog_asset_hash=19eeadacfb82b7eba4187b1fc405225bf85a8866ea81939e2eaa841a23d3785c
+  libpslog-0.10.0-armhf-linux-musl.tar.gz)
+    pslog_asset_hash=daa40aec6622f7c9cfb650954ef86ac0b22ed718277d03d39f27114d28710889
     ;;
-  libpslog-0.9.0-arm64-apple-darwin.tar.gz)
-    pslog_asset_hash=ff5d2106bcbc5ea5bce8dfdbca54d21650f350e50fd214a4b52ac65b4f834073
+  libpslog-0.10.0-arm64-apple-darwin.tar.gz)
+    pslog_asset_hash=64a742fb493785ac234901eefa678e73f04441146d53009551078431cdc68e20
     ;;
   *)
     printf 'unsupported libpslog release asset: %s\n' "$pslog_asset_name" >&2
