@@ -21,6 +21,7 @@
 #include "lc_intcompat.h"
 #include "lc_pouch.h"
 #include "lc_pouch_crypto.h"
+#include "lc_pouch_format.h"
 #include "lc_pouch_index.h"
 #include "lc_pouch_internal.h"
 #include "lc_pouch_namespace.h"
@@ -7255,8 +7256,8 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
                        "fsync_batch_max_ops=0&"
                        "queue_watch=true&"
                        "background_compaction=false&"
-                       "disable_compaction_throttling=true&retention_seconds=5&"
-                       "janitor_interval_seconds=3",
+                       "disable_compaction_throttling=true&"
+                       "terminal_reclaim_min_bytes=8192",
                        root) > 0);
 
   open_pouch_client_endpoint(endpoint, &client, &error);
@@ -7272,9 +7273,7 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   assert_false(status.background_compaction_enabled);
   assert_true(status.compaction_throttling_disabled);
   assert_int_equal(status.compaction_max_io_bytes_per_sec, 0U);
-  assert_int_equal(status.retention_seconds, 5U);
-  assert_int_equal(status.janitor_interval_seconds, 3U);
-  assert_true(status.janitor_running);
+  assert_int_equal(status.terminal_reclaim_min_bytes, 8192U);
   assert_true(status.query_indexing_enabled);
   assert_non_null(status.queue_watch_mode);
   assert_non_null(status.queue_watch_reason);
@@ -7312,31 +7311,20 @@ static void test_pouch_indexer_deadline_clamps_u64_interval(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_pouch_defaults_and_post_mutation_janitor(void **state) {
+static void test_pouch_defaults_and_terminal_reclaim(void **state) {
   lc_pouch *pouch;
   lc_pouch_open_options options;
   lc_pouch_status status;
-  lc_pouch_fsync_stats fsync_stats;
-  lc_pouch_state_write_result write_result;
-  lc_pouch_state_read_result read_result;
-  lc_source *source;
   lc_error error;
-  struct timespec delay;
-  time_t deadline;
   char root[512];
-  int found;
   int rc;
 
   (void)state;
   pouch = NULL;
-  source = NULL;
   memset(&options, 0, sizeof(options));
   memset(&status, 0, sizeof(status));
-  memset(&fsync_stats, 0, sizeof(fsync_stats));
-  memset(&write_result, 0, sizeof(write_result));
-  memset(&read_result, 0, sizeof(read_result));
   lc_error_init(&error);
-  make_root("default-compaction-janitor", root, sizeof(root));
+  make_root("default-compaction-terminal-reclaim", root, sizeof(root));
   cleanup_root(root);
 
   rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
@@ -7354,64 +7342,20 @@ static void test_pouch_defaults_and_post_mutation_janitor(void **state) {
                    64U * 1024U * 1024U);
   assert_int_equal(status.compaction_delete_grace_seconds, 15U * 60U);
   assert_int_equal(status.compaction_max_io_bytes_per_sec, 8U * 1024U * 1024U);
-  assert_int_equal(status.retention_seconds, 0U);
-  assert_int_equal(status.janitor_interval_seconds, 60U * 60U);
-  assert_false(status.janitor_running);
+  assert_int_equal(status.terminal_reclaim_min_bytes, 1024U * 1024U);
   assert_true(status.query_indexing_enabled);
   lc_pouch_status_cleanup(NULL, &status);
   lc_pouch_close(pouch);
   pouch = NULL;
 
   memset(&options, 0, sizeof(options));
-  options.retention_seconds = 1U;
-  options.janitor_interval_seconds = 1U;
+  options.terminal_reclaim_min_bytes = 4096U;
   rc = lc_pouch_open(root, NULL, &options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_pouch_status_read(pouch, &status, &error);
   assert_int_equal(rc, LC_OK);
-  assert_true(status.janitor_running);
+  assert_int_equal(status.terminal_reclaim_min_bytes, 4096U);
   lc_pouch_status_cleanup(NULL, &status);
-
-  rc = lc_source_from_memory("expired", strlen("expired"), &source, &error);
-  assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "default", "expired", source, NULL,
-                            &write_result, &error);
-  assert_int_equal(rc, LC_OK);
-  lc_source_close(source);
-  source = NULL;
-  lc_pouch_state_write_result_cleanup(NULL, &write_result);
-  delay.tv_sec = 2;
-  delay.tv_nsec = 0L;
-  (void)nanosleep(&delay, NULL);
-
-  rc = lc_source_from_memory("trigger", strlen("trigger"), &source, &error);
-  assert_int_equal(rc, LC_OK);
-  rc = lc_pouch_state_write(pouch, "default", "trigger", source, NULL,
-                            &write_result, &error);
-  assert_int_equal(rc, LC_OK);
-  lc_source_close(source);
-  source = NULL;
-  lc_pouch_state_write_result_cleanup(NULL, &write_result);
-  rc = lc_pouch_fsync_stats_read(pouch, &fsync_stats, &error);
-  assert_int_equal(rc, LC_OK);
-  assert_int_equal(fsync_stats.total_batches, 0U);
-  assert_int_equal(fsync_stats.total_requests, 0U);
-
-  found = 1;
-  deadline = time(NULL) + 4;
-  delay.tv_sec = 0;
-  delay.tv_nsec = 50L * 1000L * 1000L;
-  while (found && time(NULL) <= deadline) {
-    memset(&read_result, 0, sizeof(read_result));
-    rc = lc_pouch_state_read(pouch, "default", "expired", &read_result, &error);
-    assert_int_equal(rc, LC_OK);
-    found = read_result.found;
-    lc_pouch_state_read_result_cleanup(NULL, &read_result);
-    if (found) {
-      (void)nanosleep(&delay, NULL);
-    }
-  }
-  assert_false(found);
 
   lc_pouch_close(pouch);
   cleanup_root(root);
@@ -16424,7 +16368,7 @@ test_metadata_batch_rollover_resets_active_segment_size(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_state_idle_compaction_installs_snapshot(void **state) {
+static void test_state_terminal_reclaim_installs_snapshot(void **state) {
   lc_pouch *pouch;
   lc_source *body;
   lc_pouch_open_options open_options;
@@ -16438,10 +16382,6 @@ static void test_state_idle_compaction_installs_snapshot(void **state) {
   char *namespace_path;
   char rejected_payload_file_path[1024];
   char path[1024];
-  char snapshot_path[1024];
-  char snapshot_manifest_line[128];
-  struct timespec delay;
-  int attempts;
   int written;
   int rc;
 
@@ -16460,6 +16400,7 @@ static void test_state_idle_compaction_installs_snapshot(void **state) {
   open_options.background_compaction_enabled = 1;
   open_options.compaction_min_segment_count = 1UL;
   open_options.compaction_min_reclaimable_bytes = 1UL;
+  open_options.terminal_reclaim_min_bytes = 1UL;
   open_options.compaction_interval_seconds = 1UL;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
@@ -16482,30 +16423,12 @@ static void test_state_idle_compaction_installs_snapshot(void **state) {
 
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/alpha");
   assert_non_null(namespace_path);
-  written = snprintf(snapshot_path, sizeof(snapshot_path), "%s/snapshots/%s",
-                     namespace_path, "snapshot-00000000000000000003.log");
-  assert_true(written > 0 && (size_t)written < sizeof(snapshot_path));
   written = snprintf(path, sizeof(path), "%s/manifest", namespace_path);
   assert_true(written > 0 && (size_t)written < sizeof(path));
-  written = snprintf(snapshot_manifest_line, sizeof(snapshot_manifest_line),
-                     "snapshot=%s", "snapshot-00000000000000000003.log");
-  assert_true(written > 0 && (size_t)written < sizeof(snapshot_manifest_line));
-  delay.tv_sec = 0;
-  delay.tv_nsec = 100L * 1000L * 1000L;
-  /* The successful writes debounce maintenance; this quiet interval permits it.
-   */
-  for (attempts = 0; attempts < 30 &&
-                     (!path_is_file(snapshot_path) ||
-                      !pouch_file_contains_text(path, snapshot_manifest_line));
-       ++attempts) {
-    assert_int_equal(nanosleep(&delay, NULL), 0);
-  }
-  assert_true(path_is_file(snapshot_path));
-  assert_true(pouch_file_contains_text(path, snapshot_manifest_line));
-  assert_path_file(namespace_path,
-                   "snapshots/snapshot-00000000000000000003.log");
-  assert_path_file_contains(namespace_path, "manifest",
-                            "snapshot=snapshot-00000000000000000003.log");
+  /* One worker turn is the scheduler contract. Do not couple the storage
+   * invariant to a wall-clock race. */
+  lc_pouch_test_compaction_run_pass(pouch);
+  assert_true(pouch_file_contains_text(path, "snapshot="));
   assert_path_file_not_contains(namespace_path, "manifest", "snapshot_mode=");
   pouch_state_segment_path(root, "team/alpha", 1UL, path, sizeof(path));
   assert_true(path_is_file(path));
@@ -16546,7 +16469,7 @@ static void test_state_idle_compaction_installs_snapshot(void **state) {
   lc_error_cleanup(&error);
 }
 
-static void test_state_idle_compaction_waits_for_first_mutation(void **state) {
+static void test_state_compaction_does_not_scan_root_at_open(void **state) {
   lc_pouch *pouch;
   lc_source *body;
   lc_pouch_open_options open_options;
@@ -16556,8 +16479,6 @@ static void test_state_idle_compaction_waits_for_first_mutation(void **state) {
   char root[512];
   char *namespace_path;
   char snapshot_path[1024];
-  struct timespec delay;
-  int attempts;
   int written;
   int rc;
 
@@ -16602,12 +16523,9 @@ static void test_state_idle_compaction_waits_for_first_mutation(void **state) {
                      namespace_path, "snapshot-00000000000000000003.log");
   assert_true(written > 0 && (size_t)written < sizeof(snapshot_path));
 
-  delay.tv_sec = 0;
-  delay.tv_nsec = 100L * 1000L * 1000L;
-  for (attempts = 0; attempts < 15; ++attempts) {
-    assert_false(path_is_file(snapshot_path));
-    assert_int_equal(nanosleep(&delay, NULL), 0);
-  }
+  /* No mutation of this handle and no persisted terminal marker means an open
+   * cannot discover the namespace or launch a compaction scan. */
+  lc_pouch_test_compaction_run_pass(pouch);
   assert_false(path_is_file(snapshot_path));
 
   lc_free_with_allocator(NULL, namespace_path);
@@ -16688,6 +16606,7 @@ static void test_maintenance_reports_disabled_without_force(void **state) {
   lc_pouch_state_write_result write_result;
   lc_error error;
   char root[512];
+  unsigned long segment_count;
   int rc;
 
   (void)state;
@@ -16713,6 +16632,8 @@ static void test_maintenance_reports_disabled_without_force(void **state) {
   body->close(body);
 
   maintenance_options.namespace_name = "team/alpha";
+  maintenance_options.terminal_reclaim = 1;
+  segment_count = pouch_state_segment_count(root, "team/alpha");
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
   assert_int_equal(rc, LC_OK);
@@ -16720,6 +16641,8 @@ static void test_maintenance_reports_disabled_without_force(void **state) {
   assert_string_equal(maintenance_result.diagnostic, "disabled");
   assert_true(maintenance_result.skipped);
   assert_false(maintenance_result.compacted);
+  assert_int_equal(pouch_state_segment_count(root, "team/alpha"),
+                   segment_count);
 
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
@@ -16819,6 +16742,228 @@ test_maintenance_retention_sweep_deletes_expired_state(void **state) {
   lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
   lc_pouch_state_write_result_cleanup(NULL, &write_result);
   lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_terminal_reclaim_compacts_active_segment_without_timing_wait(
+    void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_pouch_state_read_result read_result;
+  lc_source *body;
+  lc_error error;
+  char root[512];
+  char *namespace_path;
+  char *marker_leaf;
+  char marker_path[1024];
+  char manifest_path[1024];
+  char first_segment_path[1024];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  namespace_path = NULL;
+  marker_leaf = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("terminal-reclaim-active", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1024U * 1024U;
+  open_options.compaction_min_segment_count = 2UL;
+  open_options.compaction_min_reclaimable_bytes = 1024U * 1024U;
+  open_options.terminal_reclaim_min_bytes = 1U;
+  open_options.compaction_interval_seconds = 3600U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+
+  rc = lc_source_from_memory("terminal", strlen("terminal"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/terminal", "state/dead", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  rc = lc_pouch_state_delete(pouch, "team/terminal", "state/dead", NULL,
+                             &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+
+  marker_leaf = lc_pouch_path_escape_name(NULL, "team/terminal");
+  assert_non_null(marker_leaf);
+  assert_true(snprintf(marker_path, sizeof(marker_path),
+                       "%s/.lockd/terminal-reclaim/%s", root, marker_leaf) > 0);
+  /* A terminal mutation only coalesces bounded in-memory work. It does not
+   * perform marker I/O on the foreground mutation path. */
+  assert_false(path_is_file(marker_path));
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/terminal");
+  assert_non_null(namespace_path);
+  assert_true(snprintf(manifest_path, sizeof(manifest_path), "%s/manifest",
+                       namespace_path) > 0);
+  pouch_state_segment_path(root, "team/terminal", 1UL, first_segment_path,
+                           sizeof(first_segment_path));
+  assert_true(path_is_file(first_segment_path));
+
+  /* Run one worker turn directly: this is the observable scheduler contract,
+   * not a wall-clock race. */
+  lc_pouch_test_compaction_run_pass(pouch);
+  assert_false(path_is_file(marker_path));
+  assert_true(pouch_file_contains_text(manifest_path, "snapshot="));
+  assert_true(path_is_file(first_segment_path));
+
+  lc_pouch_close(pouch);
+  pouch = NULL;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read(pouch, "team/terminal", "state/dead", &read_result,
+                           &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(read_result.found);
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_free_with_allocator(NULL, marker_leaf);
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_terminal_reclaim_marker_resumes_after_reopen(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_source *body;
+  lc_error error;
+  char root[512];
+  char *marker_leaf;
+  char *namespace_path;
+  char control_directory[1024];
+  char marker_directory[1024];
+  char marker_path[1024];
+  char manifest_path[1024];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  marker_leaf = NULL;
+  namespace_path = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  lc_error_init(&error);
+  make_root("terminal-reclaim-reopen", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1024U * 1024U;
+  open_options.terminal_reclaim_min_bytes = 1U;
+  open_options.compaction_interval_seconds = 3600U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("terminal", strlen("terminal"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "team/reopen", "state/dead", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  rc = lc_pouch_state_delete(pouch, "team/reopen", "state/dead", NULL,
+                             &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  marker_leaf = lc_pouch_path_escape_name(NULL, "team/reopen");
+  assert_non_null(marker_leaf);
+  assert_true(snprintf(control_directory, sizeof(control_directory),
+                       "%s/.lockd", root) > 0);
+  rc = mkdir(control_directory, 0777);
+  assert_true(rc == 0 || (rc == -1 && errno == EEXIST));
+  assert_true(snprintf(marker_directory, sizeof(marker_directory),
+                       "%s/.lockd/terminal-reclaim", root) > 0);
+  rc = mkdir(marker_directory, 0777);
+  assert_true(rc == 0 || (rc == -1 && errno == EEXIST));
+  assert_true(snprintf(marker_path, sizeof(marker_path), "%s/%s",
+                       marker_directory, marker_leaf) > 0);
+  write_text_file(marker_path, "");
+
+  open_options.background_compaction_enabled = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(lc_pouch_test_compaction_queue_count(pouch), 1U);
+  lc_pouch_test_compaction_run_pass(pouch);
+  assert_false(path_is_file(marker_path));
+  namespace_path = lc_pouch_namespace_path(NULL, root, "team/reopen");
+  assert_non_null(namespace_path);
+  assert_true(snprintf(manifest_path, sizeof(manifest_path), "%s/manifest",
+                       namespace_path) > 0);
+  assert_true(pouch_file_contains_text(manifest_path, "snapshot="));
+
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_free_with_allocator(NULL, marker_leaf);
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_compaction_queue_is_bounded_per_root(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result write_result;
+  lc_source *body;
+  lc_error error;
+  char root[512];
+  char namespace_name[64];
+  unsigned int index;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_error_init(&error);
+  make_root("compaction-queue-bounded", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.compaction_interval_seconds = 3600U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  for (index = 0U; index < LC_POUCH_COMPACTION_QUEUE_MAX_NAMESPACES + 16U;
+       ++index) {
+    assert_true(
+        snprintf(namespace_name, sizeof(namespace_name), "team/%u", index) > 0);
+    rc = lc_source_from_memory("x", 1U, &body, &error);
+    assert_int_equal(rc, LC_OK);
+    rc = lc_pouch_state_write(pouch, namespace_name, "state/live", body, NULL,
+                              &write_result, &error);
+    assert_int_equal(rc, LC_OK);
+    lc_source_close(body);
+    body = NULL;
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+    memset(&write_result, 0, sizeof(write_result));
+  }
+  assert_int_equal(lc_pouch_test_compaction_queue_count(pouch),
+                   LC_POUCH_COMPACTION_QUEUE_MAX_NAMESPACES);
+
   lc_pouch_close(pouch);
   cleanup_root(root);
   lc_error_cleanup(&error);
@@ -34854,12 +34999,16 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_state_write_enforces_create_if_absent),
       cmocka_unit_test(test_state_writes_roll_active_segments),
       cmocka_unit_test(test_metadata_batch_rollover_resets_active_segment_size),
-      cmocka_unit_test(test_state_idle_compaction_installs_snapshot),
-      cmocka_unit_test(test_state_idle_compaction_waits_for_first_mutation),
+      cmocka_unit_test(test_state_terminal_reclaim_installs_snapshot),
+      cmocka_unit_test(test_state_compaction_does_not_scan_root_at_open),
       cmocka_unit_test(test_state_replay_ignores_stale_generation),
       cmocka_unit_test(test_pouch_root_path_aliases_share_store_identity),
       cmocka_unit_test(test_maintenance_reports_disabled_without_force),
       cmocka_unit_test(test_maintenance_retention_sweep_deletes_expired_state),
+      cmocka_unit_test(
+          test_terminal_reclaim_compacts_active_segment_without_timing_wait),
+      cmocka_unit_test(test_terminal_reclaim_marker_resumes_after_reopen),
+      cmocka_unit_test(test_compaction_queue_is_bounded_per_root),
       cmocka_unit_test(test_maintenance_creates_namespace_without_prior_writes),
       cmocka_unit_test(test_maintenance_reports_threshold_skip),
       cmocka_unit_test(test_maintenance_force_installs_snapshot),
@@ -35041,7 +35190,7 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_query_index_staleness_is_namespace_scoped),
       cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),
       cmocka_unit_test(test_pouch_indexer_deadline_clamps_u64_interval),
-      cmocka_unit_test(test_pouch_defaults_and_post_mutation_janitor),
+      cmocka_unit_test(test_pouch_defaults_and_terminal_reclaim),
       cmocka_unit_test(test_exclusive_writer_probe_heartbeat_precedence),
       cmocka_unit_test(
           test_single_writer_transition_invalidates_query_index_trust),

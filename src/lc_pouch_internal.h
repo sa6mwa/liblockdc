@@ -137,8 +137,7 @@ struct lc_pouch {
   uint64_t compaction_interval_seconds;
   uint64_t compaction_delete_grace_seconds;
   uint64_t compaction_max_io_bytes_per_sec;
-  uint64_t retention_seconds;
-  uint64_t janitor_interval_seconds;
+  uint64_t terminal_reclaim_min_bytes;
   uint64_t marker_sequence;
   int durable_sync;
   int background_compaction_enabled;
@@ -205,6 +204,7 @@ struct lc_pouch {
   int compaction_stop;
   int compaction_pending;
   char **compaction_namespaces;
+  unsigned char *compaction_namespace_terminal;
   size_t compaction_namespace_count;
   size_t compaction_namespace_capacity;
   /* Go disk's indexer batches durable-state replay away from mutations. */
@@ -216,14 +216,6 @@ struct lc_pouch {
   int indexer_thread_started;
   int indexer_stop;
   lc_pouch_indexer_pending_namespace *indexer_pending_namespaces;
-  pthread_mutex_t janitor_mutex;
-  pthread_cond_t janitor_cond;
-  pthread_t janitor_thread;
-  int janitor_mutex_initialized;
-  int janitor_cond_initialized;
-  int janitor_thread_started;
-  int janitor_stop;
-  int janitor_pending;
   lc_pouch_namespace_logstore *namespace_logstores;
   lc_pouch_namespace_logstore
       *namespace_logstore_buckets[LC_POUCH_NAMESPACE_REGISTRY_BUCKET_COUNT];
@@ -340,6 +332,8 @@ extern long lc_pouch_test_fsync_batch_delay_ns;
 extern int (*lc_pouch_test_sync_fd)(int fd);
 size_t lc_pouch_test_resident_descriptor_count(lc_pouch *pouch);
 void lc_pouch_test_indexer_deadline(lc_pouch *pouch, struct timespec *deadline);
+void lc_pouch_test_compaction_run_pass(lc_pouch *pouch);
+size_t lc_pouch_test_compaction_queue_count(lc_pouch *pouch);
 char *lc_pouch_state_test_crypto_context(const lc_allocator *allocator,
                                          const char *namespace_name,
                                          const char *key,
@@ -376,11 +370,12 @@ int lc_pouch_single_writer_enabled(lc_pouch *pouch);
  */
 int lc_pouch_writer_mode_operation_begin(lc_pouch *pouch, lc_error *error);
 void lc_pouch_writer_mode_operation_end(lc_pouch *pouch);
-/**
- * Starts a fresh idle-compaction delay after a successful mutation. The worker
- * does not compact at open or while successful mutations keep arriving.
- */
-void lc_pouch_compaction_note_mutation(lc_pouch *pouch);
+/** Queues one namespace-local compaction attempt after a successful mutation.
+ * Terminal transitions additionally leave durable reclaim work for a later
+ * restart; neither path scans the root at open. */
+void lc_pouch_compaction_note_mutation(lc_pouch *pouch,
+                                       const char *namespace_name,
+                                       int terminal);
 /** Schedules derived index publication after a mutation. The queue and bounded
  * normalized projection never retain a document body, and a failed derived
  * publication cannot revoke an already durable mutation. */
@@ -509,8 +504,6 @@ int lc_pouch_state_visible_count(lc_pouch *pouch, const char *namespace_name,
                                  size_t *count, lc_error *error);
 int lc_pouch_state_warm_namespace(lc_pouch *pouch, const char *namespace_name,
                                   lc_error *error);
-int lc_pouch_state_compaction_track_cached_namespaces(lc_pouch *pouch,
-                                                      lc_error *error);
 int lc_pouch_state_scan_summaries(lc_pouch *pouch, const char *namespace_name,
                                   const char *start_after, size_t limit,
                                   lc_pouch_state_scan_summary_visit_fn visitor,
@@ -531,9 +524,5 @@ int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
                               const char *queue, uint64_t timeout_ms);
 /** Converts a durable Pouch byte count for generic C API response fields. */
 int lc_pouch_size_to_public_long(uint64_t size, long *out, lc_error *error);
-void lc_pouch_janitor_note_mutation(lc_pouch *pouch);
-int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
-                                        const char *namespace_name,
-                                        lc_error *error);
 
 #endif

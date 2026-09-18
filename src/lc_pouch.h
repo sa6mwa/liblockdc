@@ -37,6 +37,9 @@ typedef struct lc_pouch_open_options {
   uint64_t compaction_interval_seconds;
   uint64_t compaction_delete_grace_seconds;
   uint64_t compaction_max_io_bytes_per_sec;
+  /** Minimum active-segment bytes before a pending terminal transition seals
+   * it for bounded snapshot reclamation. Zero selects the default. */
+  uint64_t terminal_reclaim_min_bytes;
   int background_compaction_enabled;
   /** Distinguishes an explicit compaction setting from the Go-compatible
    * default. */
@@ -44,11 +47,6 @@ typedef struct lc_pouch_open_options {
   /** Leaves compaction IO unlimited instead of using the default 8 MiB/s
    * throttle. */
   int compaction_throttling_disabled;
-  /** Zero disables retention. Positive values delete state older than this
-   * duration. */
-  uint64_t retention_seconds;
-  /** Zero uses the default one-hour retention sweep interval. */
-  uint64_t janitor_interval_seconds;
   /**
    * Selects the writer mode explicitly. When unset, Pouch uses its default
    * exclusive-root writer mode. Set this field before using `single_writer`
@@ -119,11 +117,9 @@ typedef struct lc_pouch_status {
   uint64_t compaction_interval_seconds;
   uint64_t compaction_delete_grace_seconds;
   uint64_t compaction_max_io_bytes_per_sec;
+  uint64_t terminal_reclaim_min_bytes;
   int background_compaction_enabled;
   int compaction_throttling_disabled;
-  uint64_t retention_seconds;
-  uint64_t janitor_interval_seconds;
-  int janitor_running;
   int single_writer;
   int supports_concurrent_writes;
   int aborted;
@@ -152,6 +148,12 @@ typedef struct lc_pouch_maintenance_options {
   const char *namespace_name;
   int force;
   int cleanup_only;
+  /** Requests a snapshot boundary for a pending terminal transition. This is
+   * used by Pouch's background reclaimer; ordinary callers normally leave it
+   * zero and use `force` for explicit full maintenance. */
+  int terminal_reclaim;
+  /** Explicit, namespace-scoped whole-document TTL maintenance. This is never
+   * run automatically by Pouch's background reclaimer. */
   lc_pouch_unix_seconds retention_updated_before_unix;
 } lc_pouch_maintenance_options;
 

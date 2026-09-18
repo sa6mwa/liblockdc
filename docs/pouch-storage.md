@@ -924,25 +924,16 @@ the public API or durable format.
   direct Pouch open options retain the full tuning surface.
 
 - Background compaction scheduling:
-  Go disk runs a pass at open and then on a fixed periodic timer. Pouch
-  deliberately uses idle-debounced scheduling instead: it does not compact at
-  open, and each successful mutation starts a fresh full interval. A pass runs
-  only after that interval has remained mutation-free, then repeats once per
-  interval while the root remains idle. Continuous successful mutation can
-  therefore defer automatic compaction indefinitely. This is intentional: it
-  keeps background maintenance out of Pouch's write hot path and prevents an
-  open-time worker from interleaving with application recovery or integrity
-  inspection. It does not affect replay or durability; it only delays space
-  reclamation. Callers that require reclamation under continuous writes must
-  invoke explicit namespace maintenance, which runs immediately.
-
-- Retention lifecycle:
-  `retention_seconds` enables one root-local pthread janitor;
-  `janitor_interval_seconds` defaults to one hour. Successful state mutations
-  signal the janitor only after their commit and namespace lock release. The
-  worker coalesces those signals, performs the existing retention sweep after
-  the configured interval, and joins on close or abort. It never forks or runs
-  before a completed mutation.
+  Go disk runs a pass at open and then on a fixed periodic timer. Pouch does
+  not compact at open. A successful mutation only coalesces its namespace in a
+  fixed-size, root-local work queue; it does not reset a global idle timer or
+  perform maintenance I/O. The worker makes one namespace-local attempt per
+  configured interval. Continuous successful mutation can therefore add work,
+  but cannot postpone an already scheduled turn indefinitely. If the bounded
+  queue is full, ordinary compaction work is dropped; terminal work falls back
+  to a durable marker for a later turn. This does not affect replay or
+  durability; it only delays space reclamation. Callers that require immediate
+  reclamation can invoke explicit namespace maintenance.
 
 - Terminal retention and reclamation:
   A completed lease, released queue delivery, deleted state, and resolved
@@ -964,13 +955,46 @@ the public API or durable format.
   same boundary; workflow and idempotency receipts have their own explicit
   policies.
 
-  This boundary is a compaction design requirement, not permission to run a
-  namespace-wide janitor on a write path. Reclamation must advance a durable
-  cursor or select checkpoint/segment ranges incrementally with bounded memory
-  and work per invocation. It must not visit every namespace, materialize all
-  expired keys, or let a watcher/resume consumer reintroduce replay-scale work.
-  The current `retention_seconds` sweep is a compatibility maintenance option,
-  not this future bounded reclamation mechanism.
+  Pouch implements this through terminal-reclaim work markers and compaction,
+  not a TTL sweeper. Once a terminal transition commits, its namespace is
+  coalesced in the bounded worker queue outside the mutation authority. Before
+  the worker starts its terminal compaction attempt, it records a best-effort
+  durable work marker. The marker is only a liveness hint: losing it cannot
+  resurrect a record, weaken a fence, or make an incomplete XA decision
+  reclaimable. A later terminal transition recreates it, and an operator can
+  always request namespace maintenance explicitly.
+
+  The root-local worker takes at most one queued namespace or marker per pass.
+  It never enumerates the root's namespaces, visits every state key, or
+  allocates a root-wide namespace snapshot. When the marked namespace has
+  accumulated at least the
+  configured terminal-reclaim byte threshold in its active segment, the worker
+  seals that segment, builds and fsyncs an immutable snapshot, installs the
+  snapshot in the manifest, and only then consumes the work marker. A marker
+  that finds too little work is likewise consumed; a later terminal transition
+  schedules the next bounded attempt. The snapshot contains the current
+  logical projection and the durable high-water values;
+  terminal tombstones therefore disappear from the new snapshot while their
+  fencing and ordering facts remain available. Superseded segment and snapshot
+  files still obey `compaction_delete_grace_seconds` before physical unlink.
+
+  This makes work bounded at the root scheduler level: one namespace and one
+  compaction attempt per worker turn. Snapshot construction remains bounded by
+  the selected segment/snapshot range rather than the root, and its byte
+  threshold prevents tiny terminal transitions from causing rewrite churn.
+  Continuous application writes do not restart a global idle timer or defer an
+  already queued terminal reclaim forever. Normal non-terminal compaction is
+  scheduled only for namespaces touched by the current handle and is discarded
+  from its in-memory queue after an attempt; it is never reconstructed by an
+  open-time namespace scan.
+
+  `retention_seconds` and `janitor_interval_seconds` are not automatic Pouch
+  endpoint controls. The explicit
+  `lc_pouch_maintenance_options.retention_updated_before_unix` operation
+  remains the deliberate whole-document TTL deletion tool for callers that
+  need that distinct policy. It is intentionally opt-in, namespace-scoped, and
+  may scan that named namespace; it is not used by normal Pouch initialization
+  or background maintenance.
 
 ### Remaining Operational And Public API Differences
 

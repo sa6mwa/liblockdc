@@ -2808,7 +2808,7 @@ int lc_pouch_state_with_key_lock(lc_pouch *pouch, const char *namespace_name,
     lc_pouch_state_key_mutation_end(pouch, &lock);
   }
   if (rc == LC_OK) {
-    lc_pouch_janitor_note_mutation(pouch);
+    lc_pouch_compaction_note_mutation(pouch, namespace_name, 0);
   }
   return rc;
 }
@@ -4635,7 +4635,6 @@ lc_pouch_namespace_logstore_find(lc_pouch *pouch, const char *namespace_name,
   lc_pouch_namespace_logstore *ns;
   unsigned long namespace_hash;
   size_t bucket_index;
-  int rc;
   int pthread_rc;
 
   if (pouch == NULL || namespace_name == NULL) {
@@ -4692,15 +4691,6 @@ lc_pouch_namespace_logstore_find(lc_pouch *pouch, const char *namespace_name,
   pouch->namespace_logstore_buckets[bucket_index] = ns;
   ns->next = pouch->namespace_logstores;
   pouch->namespace_logstores = ns;
-  rc = lc_pouch_compaction_track_namespace(pouch, ns->namespace_name, error);
-  if (rc != LC_OK) {
-    pouch->namespace_logstores = ns->next;
-    pouch->namespace_logstore_buckets[bucket_index] = ns->hash_next;
-    lc_free_with_allocator(&pouch->allocator, ns->namespace_name);
-    lc_free_with_allocator(&pouch->allocator, ns);
-    (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
-    return NULL;
-  }
   (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
   return ns;
 }
@@ -4761,34 +4751,6 @@ lc_pouch_state_exclusive_append_gate_unlock(pthread_mutex_t **gate) {
   }
   (void)pthread_mutex_unlock(*gate);
   *gate = NULL;
-}
-
-int lc_pouch_state_compaction_track_cached_namespaces(lc_pouch *pouch,
-                                                      lc_error *error) {
-  lc_pouch_namespace_logstore *ns;
-  int pthread_rc;
-  int rc;
-
-  if (pouch == NULL) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        "pouch compaction cache tracking requires pouch", NULL,
-                        NULL, "pouch");
-  }
-  pthread_rc = pthread_mutex_lock(&pouch->state_cache_mutex);
-  if (pthread_rc != 0) {
-    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
-                        "failed to lock pouch state cache registry",
-                        strerror(pthread_rc), NULL, "pouch");
-  }
-  for (ns = pouch->namespace_logstores; ns != NULL; ns = ns->next) {
-    rc = lc_pouch_compaction_track_namespace(pouch, ns->namespace_name, error);
-    if (rc != LC_OK) {
-      (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
-      return rc;
-    }
-  }
-  (void)pthread_mutex_unlock(&pouch->state_cache_mutex);
-  return LC_OK;
 }
 
 static unsigned long lc_pouch_state_cache_key_hash(const char *key) {
@@ -10969,7 +10931,7 @@ static int lc_pouch_state_queue_compacted_files(
 
 static int lc_pouch_state_compact_namespace_if_needed(
     lc_pouch *pouch, const char *namespace_name,
-    lc_pouch_namespace_manifest *manifest, int force,
+    lc_pouch_namespace_manifest *manifest, int force, int terminal_reclaim,
     lc_pouch_maintenance_result *out, lc_error *error) {
   unsigned long candidate_count;
   uint64_t candidate_bytes;
@@ -10977,6 +10939,8 @@ static int lc_pouch_state_compact_namespace_if_needed(
   unsigned long cleanup_pending_count;
   uint64_t compacted_segment_id;
   uint64_t now_seconds;
+  uint64_t minimum_reclaimable_bytes;
+  unsigned long minimum_segment_count;
   lc_pouch_state_compaction_capture capture;
   lc_pouch_namespace_logstore candidate_cache;
   int protected_snapshot_blocked;
@@ -10990,6 +10954,11 @@ static int lc_pouch_state_compact_namespace_if_needed(
       return rc;
     }
   }
+  minimum_segment_count =
+      terminal_reclaim ? 1UL : pouch->compaction_min_segment_count;
+  minimum_reclaimable_bytes = terminal_reclaim
+                                  ? pouch->terminal_reclaim_min_bytes
+                                  : pouch->compaction_min_reclaimable_bytes;
   cleanup_deleted_count = 0UL;
   cleanup_pending_count = 0UL;
   now_seconds = (uint64_t)lc_pouch_maintenance_now_seconds();
@@ -11016,6 +10985,67 @@ static int lc_pouch_state_compact_namespace_if_needed(
       lc_log_trace(pouch->logger, "compaction.skip", fields, 2U);
     }
     return lc_pouch_maintenance_set_diagnostic(pouch, out, "disabled", error);
+  }
+  if (terminal_reclaim && manifest->active_segment_id != LC_U64_MAX) {
+    char *active_path;
+    uint64_t active_size;
+
+    active_path =
+        lc_pouch_state_child_path(&pouch->allocator, manifest->namespace_path,
+                                  "segments", manifest->active_segment);
+    active_size = 0U;
+    if (active_path == NULL) {
+      return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                          "failed to allocate pouch terminal reclaim segment",
+                          NULL, NULL, "pouch");
+    }
+    rc = lc_pouch_state_file_size(active_path, &active_size, error);
+    lc_free_with_allocator(&pouch->allocator, active_path);
+    if (rc != LC_OK) {
+      return rc;
+    }
+    if (active_size >= pouch->terminal_reclaim_min_bytes) {
+      lc_pouch_namespace_logstore *cache;
+      char *next_active_path;
+      int next_active_fd;
+
+      rc = lc_pouch_namespace_manifest_rotate(
+          &pouch->allocator, namespace_name, manifest,
+          manifest->active_segment_id + 1U, error);
+      if (rc != LC_OK) {
+        return rc;
+      }
+      next_active_path =
+          lc_pouch_state_child_path(&pouch->allocator, manifest->namespace_path,
+                                    "segments", manifest->active_segment);
+      if (next_active_path == NULL) {
+        return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                            "failed to allocate pouch terminal active segment",
+                            NULL, NULL, "pouch");
+      }
+      next_active_fd = open(next_active_path, O_WRONLY | O_CREAT, 0666);
+      if (next_active_fd < 0) {
+        rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to create pouch terminal active segment",
+                          strerror(errno), next_active_path, "pouch");
+      } else if (close(next_active_fd) != 0) {
+        rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                          "failed to close pouch terminal active segment",
+                          strerror(errno), next_active_path, "pouch");
+      }
+      lc_free_with_allocator(&pouch->allocator, next_active_path);
+      if (rc != LC_OK) {
+        return rc;
+      }
+      cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0, NULL);
+      if (cache != NULL && cache->initialized &&
+          lc_pouch_state_cache_set_active_segment(pouch, cache, manifest, 0U,
+                                                  error) != LC_OK) {
+        lc_pouch_state_cache_invalidate_namespace(pouch, namespace_name);
+        return error != NULL && error->code != LC_OK ? error->code
+                                                     : LC_ERR_INVALID;
+      }
+    }
   }
   candidate_count = 0UL;
   {
@@ -11115,7 +11145,7 @@ static int lc_pouch_state_compact_namespace_if_needed(
     return lc_pouch_maintenance_set_diagnostic(pouch, out, "no-candidates",
                                                error);
   }
-  if (!force && candidate_count < pouch->compaction_min_segment_count) {
+  if (!force && candidate_count < minimum_segment_count) {
     if (out != NULL) {
       out->skipped = 1;
     }
@@ -11130,7 +11160,7 @@ static int lc_pouch_state_compact_namespace_if_needed(
     return lc_pouch_maintenance_set_diagnostic(
         pouch, out, "below-segment-threshold", error);
   }
-  if (!force && candidate_bytes < pouch->compaction_min_reclaimable_bytes) {
+  if (!force && candidate_bytes < minimum_reclaimable_bytes) {
     if (out != NULL) {
       out->skipped = 1;
     }
@@ -11491,7 +11521,8 @@ static int lc_pouch_maintenance_run_locked(
         error);
   } else {
     rc = lc_pouch_state_compact_namespace_if_needed(
-        pouch, namespace_name, &manifest, force, out, error);
+        pouch, namespace_name, &manifest, force, options->terminal_reclaim, out,
+        error);
     if (out != NULL) {
       out->cleanup_deleted_count += cleanup_deleted_count;
       out->cleanup_pending_count += cleanup_pending_count;
@@ -13280,7 +13311,7 @@ int lc_pouch_state_write(lc_pouch *pouch, const char *namespace_name,
     out->query_index_operation_guard_started = 0;
   }
   if (rc == LC_OK) {
-    lc_pouch_janitor_note_mutation(pouch);
+    lc_pouch_compaction_note_mutation(pouch, namespace_name, 0);
   }
   lc_pouch_state_log_write_result(pouch, namespace_name, key, options, body,
                                   out, rc, error);
@@ -14518,7 +14549,7 @@ int lc_pouch_state_update_metadata(lc_pouch *pouch, const char *namespace_name,
     out->query_index_operation_guard_started = 0;
   }
   if (rc == LC_OK) {
-    lc_pouch_janitor_note_mutation(pouch);
+    lc_pouch_compaction_note_mutation(pouch, namespace_name, 0);
   }
   return rc;
 }
@@ -14701,7 +14732,7 @@ int lc_pouch_state_delete(lc_pouch *pouch, const char *namespace_name,
     out->query_index_operation_guard_started = 0;
   }
   if (rc == LC_OK) {
-    lc_pouch_janitor_note_mutation(pouch);
+    lc_pouch_compaction_note_mutation(pouch, namespace_name, 1);
   }
   if (rc == LC_OK) {
     pslog_field fields[3];
@@ -15448,7 +15479,7 @@ static int lc_pouch_state_promote_staged_with_operation(
     out->query_index_operation_guard_started = 0;
   }
   if (rc == LC_OK) {
-    lc_pouch_janitor_note_mutation(pouch);
+    lc_pouch_compaction_note_mutation(pouch, namespace_name, 1);
   }
   return rc;
 }
@@ -15673,7 +15704,7 @@ static int lc_pouch_state_commit_staged_with_operation(
     out->query_index_operation_guard_started = 0;
   }
   if (rc == LC_OK) {
-    lc_pouch_janitor_note_mutation(pouch);
+    lc_pouch_compaction_note_mutation(pouch, namespace_name, 1);
   }
   return rc;
 }
@@ -15786,7 +15817,7 @@ int lc_pouch_state_discard_staged(lc_pouch *pouch, const char *namespace_name,
   rc = lc_pouch_state_finish_commit_group_after_mutation(
       pouch, &lock, commit_group, owns_commit_group, rc, error);
   if (rc == LC_OK) {
-    lc_pouch_janitor_note_mutation(pouch);
+    lc_pouch_compaction_note_mutation(pouch, namespace_name, 1);
   }
   return rc;
 }

@@ -73,8 +73,8 @@ options. Common options are:
 - `background_compaction=false` to disable the default idle-debounced
   compaction worker, and `disable_compaction_throttling=true` to remove its
   default throughput bound
-- `retention_seconds=<u64>` and `janitor_interval_seconds=<u64>` for the
-  post-mutation retention worker
+- `terminal_reclaim_min_bytes=<u64>` to set the minimum active-segment size
+  before bounded terminal-history compaction seals it (default 1 MiB)
 - `queue_watch=true` to request filesystem-assisted queue wake-up where the
   local filesystem supports it, with polling fallback otherwise
 - `query_engine=index|scan` and `query_fallback_engine=index|scan` for the

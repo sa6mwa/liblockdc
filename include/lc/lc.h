@@ -227,7 +227,7 @@ typedef struct lc_pouch_endpoint_option {
  * `durable_sync`, `fsync_batch_max_ops`, `segment_target_bytes`,
  * `indexer_flush_docs`, `indexer_flush_interval_seconds`,
  * `background_compaction`, `disable_compaction_throttling`,
- * `retention_seconds`, `janitor_interval_seconds`, `queue_watch`,
+ * `terminal_reclaim_min_bytes`, `queue_watch`,
  * `query_engine`, `query_fallback_engine`, and `query_indexing`.
  * Set `query_indexing=false` for roots that never execute indexed queries;
  * ordinary queries then use scans and explicit indexed queries are rejected.

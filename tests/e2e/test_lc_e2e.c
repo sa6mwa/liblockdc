@@ -4410,6 +4410,64 @@ static void pouch_e2e_force_maintenance_expect_segments(
 }
 
 static void
+pouch_e2e_reclaim_one_active_churn_segment(const char *root,
+                                           const char *namespace_name,
+                                           const char *kind, lc_error *error) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_source *source;
+  char key[128];
+  char body[192];
+  size_t index;
+  int rc;
+
+  pouch = NULL;
+  source = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  open_options.segment_target_bytes = 1024U * 1024U;
+  open_options.terminal_reclaim_min_bytes = 1U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
+  assert_lc_ok(rc, error);
+  for (index = 0U; index < 256U; ++index) {
+    assert_true(snprintf(key, sizeof(key), "pouch/churn/%03zu", index) > 0);
+    assert_true(snprintf(body, sizeof(body),
+                         "{\"kind\":\"%s\",\"ordinal\":%zu}", kind, index) > 0);
+    rc = lc_source_from_memory(body, strlen(body), &source, error);
+    assert_lc_ok(rc, error);
+    rc = lc_pouch_state_write(pouch, namespace_name, key, source, NULL,
+                              &write_result, error);
+    lc_source_close(source);
+    source = NULL;
+    assert_lc_ok(rc, error);
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  }
+  for (index = 0U; index < 255U; ++index) {
+    assert_true(snprintf(key, sizeof(key), "pouch/churn/%03zu", index) > 0);
+    rc = lc_pouch_state_delete(pouch, namespace_name, key, NULL, &write_result,
+                               error);
+    assert_lc_ok(rc, error);
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  }
+  maintenance_options.namespace_name = namespace_name;
+  maintenance_options.terminal_reclaim = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, error);
+  assert_lc_ok(rc, error);
+  assert_true(maintenance_result.compacted);
+  assert_int_equal(maintenance_result.candidate_segment_count, 1UL);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
+}
+
+static void
 test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -4627,6 +4685,37 @@ test_pouch_direct_large_namespace_segmented_index_reopen(void **state) {
   assert_int_equal(rows, doc_count);
 
   lc_index_flush_res_cleanup(&flush_res);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_terminal_reclaim_one_segment_churn_reopen(void **state) {
+  lc_client *client;
+  lc_error error;
+  char root[256];
+  char endpoint[320];
+  char kind[96];
+  char selector_json[192];
+  size_t rows;
+
+  (void)state;
+  make_pouch_root("terminal-churn", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  client = NULL;
+  lc_error_init(&error);
+  make_unique_name("pouch-terminal-churn", kind, sizeof(kind));
+  assert_true(snprintf(selector_json, sizeof(selector_json),
+                       "{\"eq\":{\"field\":\"/kind\",\"value\":\"%s\"}}",
+                       kind) > 0);
+
+  /* This mirrors the c89 shape: many terminal keys in one otherwise active
+   * segment. The deterministic maintenance boundary replaces a timing gate. */
+  pouch_e2e_reclaim_one_active_churn_segment(root, "churn", kind, &error);
+
+  open_pouch_client(endpoint, &client, &error);
+  rows = pouch_e2e_query_key_count(client, "churn", selector_json, &error);
+  assert_int_equal(rows, 1U);
   lc_client_close(client);
   lc_error_cleanup(&error);
   cleanup_pouch_root(root);
@@ -5326,6 +5415,7 @@ int main(void) {
           test_pouch_direct_lifecycle_maintenance_reopen_roundtrip),
       cmocka_unit_test(
           test_pouch_direct_large_namespace_segmented_index_reopen),
+      cmocka_unit_test(test_pouch_terminal_reclaim_one_segment_churn_reopen),
       cmocka_unit_test(
           test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot),
       cmocka_unit_test(test_pouch_direct_consumer_service_with_state)};

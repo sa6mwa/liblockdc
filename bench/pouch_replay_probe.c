@@ -109,8 +109,7 @@ int main(int argc, char **argv) {
             "usage: %s open ENDPOINT KEY_ENV|-\n"
             "       %s seed|probe ENDPOINT KEYS UPDATES NAMESPACES "
             "KEYFILE clean|unclean|staged\n",
-            argv[0],
-            argv[0]);
+            argv[0], argv[0]);
     return 2;
   }
   seed = strcmp(argv[1], "seed") == 0;

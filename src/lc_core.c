@@ -1117,8 +1117,7 @@ typedef struct lc_pouch_endpoint_options {
   int background_compaction_enabled;
   int background_compaction_enabled_set;
   int compaction_throttling_disabled;
-  uint64_t retention_seconds;
-  uint64_t janitor_interval_seconds;
+  uint64_t terminal_reclaim_min_bytes;
 } lc_pouch_endpoint_options;
 
 static void
@@ -1475,18 +1474,10 @@ static int lc_pouch_endpoint_parse_option(const lc_allocator *allocator,
     return rc;
   }
   if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "retention_seconds")) {
-    rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
-                                     "retention_seconds",
-                                     &options->retention_seconds, error);
-    lc_free_with_allocator(allocator, decoded_key);
-    return rc;
-  }
-  if (lc_query_part_equal(decoded_key, strlen(decoded_key),
-                          "janitor_interval_seconds")) {
-    rc = lc_pouch_endpoint_parse_u64(allocator, value, value_len,
-                                     "janitor_interval_seconds",
-                                     &options->janitor_interval_seconds, error);
+                          "terminal_reclaim_min_bytes")) {
+    rc = lc_pouch_endpoint_parse_u64(
+        allocator, value, value_len, "terminal_reclaim_min_bytes",
+        &options->terminal_reclaim_min_bytes, error);
     lc_free_with_allocator(allocator, decoded_key);
     return rc;
   }
@@ -2247,10 +2238,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
         pouch_endpoint_options.background_compaction_enabled_set;
     pouch_open_options.compaction_throttling_disabled =
         pouch_endpoint_options.compaction_throttling_disabled;
-    pouch_open_options.retention_seconds =
-        pouch_endpoint_options.retention_seconds;
-    pouch_open_options.janitor_interval_seconds =
-        pouch_endpoint_options.janitor_interval_seconds;
+    pouch_open_options.terminal_reclaim_min_bytes =
+        pouch_endpoint_options.terminal_reclaim_min_bytes;
     pouch_open_options.query_engine = pouch_endpoint_options.query_engine;
     pouch_open_options.query_fallback_engine =
         pouch_endpoint_options.query_fallback_engine;

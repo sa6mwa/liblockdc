@@ -248,7 +248,8 @@ static int lifecycle_query_count(lc_client *client, const char *namespace_name,
 
 static int lifecycle_run_maintenance(const char *root,
                                      const char *namespace_name, int force,
-                                     int cleanup_only, long retention_cutoff,
+                                     int cleanup_only, int terminal_reclaim,
+                                     long retention_cutoff,
                                      const lifecycle_mode *mode,
                                      lc_error *error) {
   lc_pouch *pouch;
@@ -270,6 +271,7 @@ static int lifecycle_run_maintenance(const char *root,
     maintenance_options.namespace_name = namespace_name;
     maintenance_options.force = force;
     maintenance_options.cleanup_only = cleanup_only;
+    maintenance_options.terminal_reclaim = terminal_reclaim;
     maintenance_options.retention_updated_before_unix = retention_cutoff;
     rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                   &maintenance_result, error);
@@ -513,17 +515,21 @@ static void lifecycle_run_input(const uint8_t *data, size_t size,
     client = NULL;
   }
   if (rc == LC_OK) {
+    stage = "terminal-reclaim-life";
+    rc = lifecycle_run_maintenance(root, "life", 0, 0, 1, 0L, mode, &error);
+  }
+  if (rc == LC_OK) {
     stage = "compact-life";
-    rc = lifecycle_run_maintenance(root, "life", 1, 0, 0L, mode, &error);
+    rc = lifecycle_run_maintenance(root, "life", 1, 0, 0, 0L, mode, &error);
   }
   if (rc == LC_OK && (knobs & 1U) != 0U) {
     stage = "cleanup-life";
-    rc = lifecycle_run_maintenance(root, "life", 0, 1, 0L, mode, &error);
+    rc = lifecycle_run_maintenance(root, "life", 0, 1, 0, 0L, mode, &error);
   }
   if (rc == LC_OK) {
     stage = "retention";
-    rc = lifecycle_run_maintenance(root, "life-retain", 0, 0, 2147483647L, mode,
-                                   &error);
+    rc = lifecycle_run_maintenance(root, "life-retain", 0, 0, 0, 2147483647L,
+                                   mode, &error);
   }
   if (rc == LC_OK) {
     unsigned int damage;
