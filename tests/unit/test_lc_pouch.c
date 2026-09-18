@@ -16816,7 +16816,10 @@ static void test_terminal_reclaim_compacts_active_segment_without_timing_wait(
   /* Run one worker turn directly: this is the observable scheduler contract,
    * not a wall-clock race. */
   lc_pouch_test_compaction_run_pass(pouch);
-  assert_false(path_is_file(marker_path));
+  /* The terminal marker and bounded queue remain live through the configured
+   * obsolete-file grace period, so physical unlink cannot be stranded. */
+  assert_true(path_is_file(marker_path));
+  assert_int_equal(lc_pouch_test_compaction_queue_count(pouch), 1U);
   assert_true(pouch_file_contains_text(manifest_path, "snapshot="));
   assert_true(path_is_file(first_segment_path));
 
@@ -16906,7 +16909,8 @@ static void test_terminal_reclaim_marker_resumes_after_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_int_equal(lc_pouch_test_compaction_queue_count(pouch), 1U);
   lc_pouch_test_compaction_run_pass(pouch);
-  assert_false(path_is_file(marker_path));
+  assert_true(path_is_file(marker_path));
+  assert_int_equal(lc_pouch_test_compaction_queue_count(pouch), 1U);
   namespace_path = lc_pouch_namespace_path(NULL, root, "team/reopen");
   assert_non_null(namespace_path);
   assert_true(snprintf(manifest_path, sizeof(manifest_path), "%s/manifest",

@@ -203,6 +203,7 @@ struct lc_pouch {
   int compaction_thread_started;
   int compaction_stop;
   int compaction_pending;
+  int compaction_marker_turn;
   char **compaction_namespaces;
   unsigned char *compaction_namespace_terminal;
   size_t compaction_namespace_count;

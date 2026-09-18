@@ -121,6 +121,22 @@ local function assert_ok(operation, value, value_err)
   return value
 end
 
+-- Transaction participants are parsed before any C-owned participant array is
+-- allocated.  This exercises Lua's longjmp argument-error path in the real
+-- binding rather than merely checking a returned lockdc error.
+local malformed_txn_ok, malformed_txn_err = pcall(function()
+  client:txn_commit({
+    txn_id = assert(lockdc.xid_new()),
+    participants = {
+      "not a participant table",
+    },
+  })
+end)
+if malformed_txn_ok or not tostring(malformed_txn_err):match("table") then
+  client:close()
+  error("Lua XA participant validation did not reject a non-table participant")
+end
+
 local raw_txn_id = assert(lockdc.xid_new())
 local raw_txn_participant = {
   namespace_name = namespace_name,

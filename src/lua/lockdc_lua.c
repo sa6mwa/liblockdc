@@ -394,7 +394,11 @@ static int lcdc_require_string_field(lua_State *L, int index, const char *name,
     luaL_error(L, "expected request table");
   }
   lua_getfield(L, index, name);
-  *out = luaL_checkstring(L, -1);
+  if (out != NULL) {
+    *out = luaL_checkstring(L, -1);
+  } else {
+    (void)luaL_checkstring(L, -1);
+  }
   lua_pop(L, 1);
   return 1;
 }
@@ -2291,6 +2295,16 @@ static void lcdc_parse_txn_participants(lua_State *L, int index,
   if (count == 0U) {
     lua_pop(L, 1);
     return;
+  }
+  /* Validate every Lua value before allocating C-owned storage: Lua argument
+   * errors use longjmp and would bypass ordinary C cleanup. */
+  for (i = 0U; i < count; ++i) {
+    lua_rawgeti(L, -1, (lua_Integer)(i + 1U));
+    luaL_checktype(L, -1, LUA_TTABLE);
+    lcdc_require_string_field(L, -1, "namespace_name", NULL);
+    lcdc_require_string_field(L, -1, "key", NULL);
+    (void)lcdc_opt_string_field(L, -1, "backend_hash");
+    lua_pop(L, 1);
   }
   participants = (lc_txn_participant *)calloc(count, sizeof(*participants));
   if (participants == NULL) {

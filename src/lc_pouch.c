@@ -912,9 +912,20 @@ static int lc_pouch_compaction_take_namespace(lc_pouch *pouch,
   return LC_OK;
 }
 
+static int lc_pouch_compaction_take_marker_turn(lc_pouch *pouch) {
+  int marker_turn;
+
+  pthread_mutex_lock(&pouch->compaction_mutex);
+  marker_turn = pouch->compaction_marker_turn;
+  pouch->compaction_marker_turn = !pouch->compaction_marker_turn;
+  pthread_mutex_unlock(&pouch->compaction_mutex);
+  return marker_turn;
+}
+
 static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
   char *namespace_name;
   int terminal_reclaim;
+  int marker_turn;
   lc_error error;
   int rc;
 
@@ -925,9 +936,19 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
   lc_error_init(&error);
   namespace_name = NULL;
   terminal_reclaim = 0;
-  rc = lc_pouch_compaction_take_namespace(pouch, &namespace_name,
-                                          &terminal_reclaim);
+  rc = LC_OK;
+  marker_turn = lc_pouch_compaction_take_marker_turn(pouch);
+  if (marker_turn) {
+    rc = lc_pouch_terminal_reclaim_marker_take(pouch, &namespace_name, &error);
+    if (rc == LC_OK && namespace_name != NULL) {
+      terminal_reclaim = 1;
+    }
+  }
   if (rc == LC_OK && namespace_name == NULL) {
+    rc = lc_pouch_compaction_take_namespace(pouch, &namespace_name,
+                                            &terminal_reclaim);
+  }
+  if (!marker_turn && rc == LC_OK && namespace_name == NULL) {
     rc = lc_pouch_terminal_reclaim_marker_take(pouch, &namespace_name, &error);
     if (rc == LC_OK && namespace_name != NULL) {
       terminal_reclaim = 1;
@@ -982,6 +1003,24 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
       fields[1] = lc_log_error_field("error", &maintenance_error);
       fields[2] = lc_log_code_field(&maintenance_error);
       lc_log_warn(pouch->logger, "compaction.background.error", fields, 3U);
+    } else if (result.cleanup_pending_count != 0UL) {
+      lc_error queue_error;
+      int queued;
+
+      lc_error_init(&queue_error);
+      queued = 0;
+      if (lc_pouch_compaction_track_namespace(pouch, namespace_name,
+                                              terminal_reclaim, &queued,
+                                              &queue_error) != LC_OK) {
+        pslog_field fields[3];
+
+        fields[0] = lc_log_str_field("ns", namespace_name);
+        fields[1] = lc_log_error_field("error", &queue_error);
+        fields[2] = lc_log_code_field(&queue_error);
+        lc_log_warn(pouch->logger, "compaction.background.queue.error", fields,
+                    3U);
+      }
+      lc_error_cleanup(&queue_error);
     } else if (terminal_reclaim) {
       lc_error marker_error;
 
