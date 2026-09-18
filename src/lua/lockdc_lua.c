@@ -2073,6 +2073,29 @@ static int lcdc_query_keys_finish(void *context, lc_error *error) {
   return lcdc_query_keys_call(handler->L, handler->finish_ref, 0, error);
 }
 
+static void lcdc_query_keys_handler_validate(lua_State *L, int index) {
+  int type;
+
+  type = lua_type(L, index);
+  if (type == LUA_TFUNCTION) {
+    return;
+  }
+  luaL_checktype(L, index, LUA_TTABLE);
+  lua_getfield(L, index, "begin");
+  if (!lua_isnil(L, -1)) {
+    luaL_checktype(L, -1, LUA_TFUNCTION);
+  }
+  lua_pop(L, 1);
+  lua_getfield(L, index, "chunk");
+  luaL_checktype(L, -1, LUA_TFUNCTION);
+  lua_pop(L, 1);
+  lua_getfield(L, index, "finish");
+  if (!lua_isnil(L, -1)) {
+    luaL_checktype(L, -1, LUA_TFUNCTION);
+  }
+  lua_pop(L, 1);
+}
+
 static void lcdc_query_keys_handler_init(lua_State *L, int index,
                                          lcdc_query_keys_handler *handler) {
   int type;
@@ -2081,26 +2104,25 @@ static void lcdc_query_keys_handler_init(lua_State *L, int index,
   handler->begin_ref = LUA_NOREF;
   handler->chunk_ref = LUA_NOREF;
   handler->finish_ref = LUA_NOREF;
+  /* Lua validation errors use longjmp. Validate the entire callback shape
+   * before registering any references that ordinary C cleanup cannot reach. */
+  lcdc_query_keys_handler_validate(L, index);
   type = lua_type(L, index);
   if (type == LUA_TFUNCTION) {
     lua_pushvalue(L, index);
     handler->chunk_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     return;
   }
-  luaL_checktype(L, index, LUA_TTABLE);
   lua_getfield(L, index, "begin");
   if (!lua_isnil(L, -1)) {
-    luaL_checktype(L, -1, LUA_TFUNCTION);
     handler->begin_ref = luaL_ref(L, LUA_REGISTRYINDEX);
   } else {
     lua_pop(L, 1);
   }
   lua_getfield(L, index, "chunk");
-  luaL_checktype(L, -1, LUA_TFUNCTION);
   handler->chunk_ref = luaL_ref(L, LUA_REGISTRYINDEX);
   lua_getfield(L, index, "finish");
   if (!lua_isnil(L, -1)) {
-    luaL_checktype(L, -1, LUA_TFUNCTION);
     handler->finish_ref = luaL_ref(L, LUA_REGISTRYINDEX);
   } else {
     lua_pop(L, 1);
@@ -2329,12 +2351,12 @@ static void lcdc_parse_txn_decision_req(lua_State *L, int index,
                                         lc_txn_participant **participants) {
   lc_txn_decision_req_init(req);
   lcdc_require_string_field(L, index, "txn_id", &req->txn_id);
-  lcdc_parse_txn_participants(L, index, participants, &req->participant_count);
-  req->participants = *participants;
   lcdc_opt_integer_field(L, index, "expires_at_unix", &req->expires_at_unix);
   lcdc_opt_uint64_field(L, index, "tc_term", &req->tc_term);
   req->target_backend_hash =
       lcdc_opt_string_field(L, index, "target_backend_hash");
+  lcdc_parse_txn_participants(L, index, participants, &req->participant_count);
+  req->participants = *participants;
 }
 
 static int lcdc_push_txn_decision_res(lua_State *L,

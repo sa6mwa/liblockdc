@@ -136,6 +136,19 @@ if malformed_txn_ok or not tostring(malformed_txn_err):match("table") then
   client:close()
   error("Lua XA participant validation did not reject a non-table participant")
 end
+local malformed_term_ok, malformed_term_err = pcall(function()
+  client:txn_commit({
+    txn_id = assert(lockdc.xid_new()),
+    participants = {
+      { namespace_name = namespace_name, key = "invalid-term" },
+    },
+    tc_term = -1,
+  })
+end)
+if malformed_term_ok or not tostring(malformed_term_err):match("tc_term") then
+  client:close()
+  error("Lua XA validation did not reject a negative coordinator term")
+end
 
 local raw_txn_id = assert(lockdc.xid_new())
 local raw_txn_participant = {
@@ -216,6 +229,34 @@ if callback_result ~= nil or type(callback_err) ~= "table" or
     not (callback_err.message or ""):match("query key handler failure", 1, true) then
   client:close()
   error("Lua query_keys did not propagate handler failure")
+end
+local retained_callbacks = setmetatable({}, { __mode = "v" })
+do
+  local callback_payload = {}
+  local function begin()
+    return callback_payload
+  end
+  retained_callbacks[1] = callback_payload
+  local invalid_callback_ok, invalid_callback_err = pcall(function()
+    client:query_keys({
+      namespace_name = namespace_name,
+      selector_json = '{"eq":{"field":"/source","value":"lua-pouch-xa"}}',
+      engine = "scan",
+    }, {
+      begin = begin,
+      chunk = false,
+    })
+  end)
+  if invalid_callback_ok or not tostring(invalid_callback_err):match("function") then
+    client:close()
+    error("Lua query_keys did not reject an invalid callback")
+  end
+end
+collectgarbage("collect")
+collectgarbage("collect")
+if retained_callbacks[1] ~= nil then
+  client:close()
+  error("Lua query_keys retained a callback after argument validation failed")
 end
 
 local rollback_txn_id = assert(lockdc.xid_new())
