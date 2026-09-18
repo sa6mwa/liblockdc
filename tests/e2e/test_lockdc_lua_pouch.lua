@@ -292,9 +292,34 @@ do
     error("Lua query_keys did not reject an invalid callback")
   end
 end
+do
+  local callback_payload = {}
+  local function begin()
+    return callback_payload
+  end
+  local function chunk()
+    return callback_payload
+  end
+  retained_callbacks[2] = callback_payload
+  local invalid_callback_ok, invalid_callback_err = pcall(function()
+    client:query_keys({
+      namespace_name = namespace_name,
+      selector_json = '{"eq":{"field":"/source","value":"lua-pouch-xa"}}',
+      engine = "scan",
+    }, {
+      begin = begin,
+      chunk = chunk,
+      finish = false,
+    })
+  end)
+  if invalid_callback_ok or not tostring(invalid_callback_err):match("function") then
+    client:close()
+    error("Lua query_keys did not reject an invalid finish callback")
+  end
+end
 collectgarbage("collect")
 collectgarbage("collect")
-if retained_callbacks[1] ~= nil then
+if retained_callbacks[1] ~= nil or retained_callbacks[2] ~= nil then
   client:close()
   error("Lua query_keys retained a callback after argument validation failed")
 end

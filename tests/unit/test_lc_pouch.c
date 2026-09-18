@@ -21390,7 +21390,9 @@ static void test_pouch_crypto_rejects_wrong_key(void **state) {
 static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   lc_client *client;
   lc_client *reader;
+  lc_client_handle *reader_handle;
   lc_update_res update_res;
+  lc_pouch_state_read_result metadata_result;
   lc_error error;
   char *crypto_key;
   char payload_path[1024];
@@ -21402,8 +21404,10 @@ static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   (void)state;
   client = NULL;
   reader = NULL;
+  reader_handle = NULL;
   crypto_key = NULL;
   memset(&update_res, 0, sizeof(update_res));
+  memset(&metadata_result, 0, sizeof(metadata_result));
   lc_error_init(&error);
   make_root("crypto-tamper", root, sizeof(root));
   cleanup_root(root);
@@ -21424,9 +21428,18 @@ static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   flip_file_byte(payload_path, payload_offset + 8U);
 
   open_pouch_client_crypto(root, crypto_key, &reader, &error);
+  reader_handle = (lc_client_handle *)reader;
+  assert_non_null(reader_handle->pouch);
+  rc = lc_pouch_state_read_metadata(reader_handle->pouch, "default",
+                                    "crypto/tamper", &metadata_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(metadata_result.found);
+  assert_null(metadata_result.body);
+  lc_pouch_state_read_result_cleanup(NULL, &metadata_result);
   assert_client_get_protocol_failure(reader, "crypto/tamper", &error);
 
   lc_client_close(reader);
+  lc_pouch_state_read_result_cleanup(NULL, &metadata_result);
   lc_update_res_cleanup(&update_res);
   lc_pouch_crypto_key_string_free(crypto_key);
   cleanup_root(root);
