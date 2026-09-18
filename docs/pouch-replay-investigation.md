@@ -89,35 +89,51 @@ These controls were measured before the fix. The triggering regression cases
 and full debug suite were run after it. Historical binaries, production data,
 cold-cache behavior, and power-loss recovery were not tested here.
 
-## Capture-shaped encrypted memory diagnosis (2026-09-18)
+## Captured C89 metrics diagnosis (2026-09-18)
 
-An encrypted captured metrics namespace contained 34,752 framed records in a
-single 21.65 MB active segment. It contained 20,691 legacy `LPL1` lease
-controls but only 23 distinct `snapshot.v1.*` keys; one key appeared 30,359
-times. This is history churn, not a high-cardinality current metric payload.
+The captured `c89-systems` executable is Vectis 0.15.1 statically linked with
+liblockdc 0.13.1. Its metrics worker persists one checkpoint through a new
+public liblockdc client at most once every five minutes: it opens the client,
+acquires and updates the checkpoint, then closes the client. The Vectis
+process is long-lived, but the Pouch client used for this operation is not.
 
-The following disposable public-API fixture matches that key cardinality and
-approximately that record-history depth without copying or decrypting the
-capture:
+The encrypted metrics namespace has one 21,653,369-byte active segment after
+migration, with 34,753 frames:
 
-```sh
-python3 tests/e2e/pouch_replay.py build/debug/bench/lockdc_pouch_replay_probe \
-  --keys 23 --updates 504 --encrypted --shared --unclean \
-  --segment-bytes 67108864
-```
+| Frame | Count |
+| --- | ---: |
+| state put | 4,687 |
+| state delete | 4,687 |
+| state link | 4,687 |
+| state metadata | 16,005 |
+| transaction decision | 4,687 |
 
-On the current Bootlin debug build, this creates a 38.0 MB encrypted root. A
-fresh-process reopen reads 38.1 MB at open, reaches about 228 MB RSS at open,
-and reaches about 267 MB RSS after reading all keys. The same fixture with one
-live staged record reaches about 401 MB RSS because conservative staged
-recovery retains additional history. These are local diagnostic observations,
-not release thresholds.
+There are 4,688 logical keys in the terminal projection: 4,687 deleted
+checkpoint/staging keys and one metadata key. Legacy `LPL1` records describe
+those canonical keys; they are not independent state-cache keys. The root has
+no query-index artifacts, and no live payload body large enough to account for
+the reported resident memory.
 
-The retained memory is Pouch state-cache metadata for historical lease-control
-keys. It is not explained by the 23 current snapshot keys alone. The captured
-root is also ineligible for default background compaction: the active segment
-is excluded, compaction needs two inactive candidates, and the default segment
-rollover is 64 MiB. A one-segment 21.65 MB root therefore cannot compact before
-it has crossed at least two rollover boundaries. A real-capture open still
-requires its crypto key and must run on a disposable copy so that the one-time
-control migration can be measured safely.
+This explains the periodic CPU report. On every fresh client, 0.13.1 runs
+staged-decision recovery before the checkpoint acquire. It enumerates all
+4,687 durable decisions and calls the full-log state scan once for each one,
+even though their staging keys are already absent. For this 21.65 MB encrypted
+segment that is about 101.5 GB of repeated logical traversal for one periodic
+checkpoint. A single core busy for minutes is therefore expected behavior from
+the deployed binary, not evidence of a compaction loop.
+
+The current implementation replaces the per-decision scan with a lookup in
+the namespace projection. The existing offline e2e uses separate processes,
+retains live staging, and bounds logical reads instead of elapsed time. A
+capture-scale fixture with 4,687 historical decisions completed its first
+recovery operation in about 0.17 CPU seconds. On a disposable migrated copy of
+the actual metrics root, subsequent encrypted opens read one 21.7 MB segment
+and used about 0.054 CPU seconds with a 10.5 MB RSS in a non-sanitized build.
+
+The current root is below the default 64 MiB active-segment rollover, so normal
+compaction has no inactive segment to reclaim. That is a storage-growth policy
+question, but it was not the source of this incident. The separately identified
+`lc_pouch_state_cache_warm_transformed_bodies` policy can still materialize
+every eligible live encrypted or compressed body at open (up to its cache
+limit). This capture has no such live bodies, so it is a distinct issue that
+requires its own bounded-cache design and regression coverage.
