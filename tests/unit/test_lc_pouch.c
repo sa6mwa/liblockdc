@@ -14600,6 +14600,80 @@ static void test_state_crypto_compression_round_trips(void **state) {
 }
 
 static void
+test_transformed_metadata_replay_defers_body_materialization(void **state) {
+  lc_pouch *writer;
+  lc_pouch *reader;
+  lc_source *body;
+  lc_pouch_open_options options;
+  lc_pouch_state_write_options write_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_read_result metadata_result;
+  lc_pouch_state_read_result read_result;
+  lc_error error;
+  char *crypto_key;
+  char root[512];
+  char segment_path[1024];
+  char payload[8192];
+  int rc;
+
+  (void)state;
+  writer = NULL;
+  reader = NULL;
+  body = NULL;
+  crypto_key = NULL;
+  memset(&options, 0, sizeof(options));
+  memset(&write_options, 0, sizeof(write_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&metadata_result, 0, sizeof(metadata_result));
+  memset(&read_result, 0, sizeof(read_result));
+  lc_error_init(&error);
+  make_root("transformed-lazy-body", root, sizeof(root));
+  cleanup_root(root);
+  fill_repeated_payload(payload, sizeof(payload));
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+
+  options.crypto_key = crypto_key;
+  options.compression = "zlib";
+  rc = lc_pouch_open(root, NULL, &options, &writer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory(payload, strlen(payload), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  write_options.content_type = "application/json";
+  rc = lc_pouch_state_write(writer, "default", "transformed/lazy", body,
+                            &write_options, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  body->close(body);
+  body = NULL;
+  lc_pouch_close(writer);
+  writer = NULL;
+
+  rc = lc_pouch_open(root, NULL, &options, &reader, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_read_metadata(reader, "default", "transformed/lazy",
+                                    &metadata_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(metadata_result.found);
+  assert_null(metadata_result.body);
+  lc_pouch_state_read_result_cleanup(NULL, &metadata_result);
+
+  pouch_state_segment_path(root, "default", 1UL, segment_path,
+                           sizeof(segment_path));
+  assert_int_equal(unlink(segment_path), 0);
+  rc = lc_pouch_state_read(reader, "default", "transformed/lazy", &read_result,
+                           &error);
+  assert_int_not_equal(rc, LC_OK);
+  assert_null(read_result.body);
+
+  lc_pouch_state_read_result_cleanup(NULL, &read_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(reader);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_crypto_compressed_source_authenticates_terminal_frame(void **state) {
   enum {
     terminal_frame_bytes = 8U + 16U,
@@ -35103,6 +35177,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_state_compression_streams_segment_payloads),
       cmocka_unit_test(test_state_compression_mode_is_root_invariant),
       cmocka_unit_test(test_state_crypto_compression_round_trips),
+      cmocka_unit_test(
+          test_transformed_metadata_replay_defers_body_materialization),
       cmocka_unit_test(
           test_crypto_compressed_source_authenticates_terminal_frame),
       cmocka_unit_test(

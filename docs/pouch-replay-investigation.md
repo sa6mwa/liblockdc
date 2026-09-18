@@ -139,8 +139,9 @@ and used about 0.054 CPU seconds with a 10.5 MB RSS in a non-sanitized build.
 
 The current root is below the default 64 MiB active-segment rollover, so normal
 compaction has no inactive segment to reclaim. That is a storage-growth policy
-question, but it was not the source of this incident. The separately identified
-`lc_pouch_state_cache_warm_transformed_bodies` policy can still materialize
-every eligible live encrypted or compressed body at open (up to its cache
-limit). This capture has no such live bodies, so it is a distinct issue that
-requires its own bounded-cache design and regression coverage.
+question, but it was not the source of this incident. Transformed bodies are
+cached only on demand after a caller opens and consumes the corresponding body
+source. Projection creation and metadata-only reads retain payload spans and
+never decrypt, decompress, or materialize every eligible live body to prefill
+that bounded cache. A direct regression removes the segment after metadata-only
+recovery and proves that the body was not silently retained.

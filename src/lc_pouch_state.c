@@ -8522,101 +8522,6 @@ static int lc_pouch_state_cache_replay_file(
   return rc;
 }
 
-static int lc_pouch_state_cache_warm_transformed_bodies(
-    lc_pouch *pouch, const char *namespace_name,
-    lc_pouch_namespace_logstore *cache,
-    const lc_pouch_namespace_manifest *manifest, lc_error *error) {
-  lc_pouch_state_cache_record *record;
-  int transformed;
-  int rc;
-
-  if (pouch == NULL || namespace_name == NULL || cache == NULL ||
-      manifest == NULL || manifest->namespace_path == NULL) {
-    return LC_OK;
-  }
-  transformed = lc_pouch_crypto_enabled(pouch->crypto) ||
-                lc_pouch_crypto_compression_enabled(pouch->crypto);
-  if (!transformed) {
-    return LC_OK;
-  }
-  rc = LC_OK;
-  for (record = cache->records; rc == LC_OK && record != NULL;
-       record = record->next) {
-    lc_pouch_state_entry current;
-    lc_source *source;
-    char *payload_span_path;
-    char *crypto_context;
-    char *binding_context;
-
-    if (!record->found || !record->payload_span.present ||
-        (record->has_query_hidden && record->query_hidden) ||
-        record->bytes > LC_POUCH_STATE_BODY_CACHE_RECORD_MAX_BYTES ||
-        cache->body_cache_bytes >= LC_POUCH_STATE_BODY_CACHE_MAX_BYTES ||
-        (record->body_cache != NULL &&
-         record->body_cache->version == record->version &&
-         record->body_cache->length == (size_t)record->bytes)) {
-      continue;
-    }
-    payload_span_path = lc_pouch_state_payload_span_path(
-        &pouch->allocator, manifest->namespace_path, &record->payload_span,
-        error);
-    crypto_context =
-        payload_span_path != NULL
-            ? lc_pouch_state_payload_context_for_read(
-                  &pouch->allocator, namespace_name, record->key,
-                  record->version,
-                  lc_pouch_state_payload_class(record->record_type, 0),
-                  record->payload_context)
-            : NULL;
-    binding_context =
-        payload_span_path != NULL
-            ? lc_pouch_state_crypto_context(
-                  &pouch->allocator, namespace_name, record->key,
-                  record->version,
-                  lc_pouch_state_payload_class(record->record_type, 0))
-            : NULL;
-    if (payload_span_path == NULL ||
-        (record->descriptor != NULL &&
-         (crypto_context == NULL || binding_context == NULL))) {
-      lc_free_with_allocator(&pouch->allocator, payload_span_path);
-      lc_free_with_allocator(&pouch->allocator, crypto_context);
-      lc_free_with_allocator(&pouch->allocator, binding_context);
-      return lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch transformed cache warm "
-                          "context",
-                          NULL, NULL, "pouch");
-    }
-    memset(&current, 0, sizeof(current));
-    current.key = record->key;
-    current.content_type = record->content_type;
-    current.etag = record->etag;
-    current.payload_span = record->payload_span;
-    current.payload_context = record->payload_context;
-    current.descriptor = record->descriptor;
-    current.version = record->version;
-    current.bytes = record->bytes;
-    current.cipher_bytes = record->cipher_bytes;
-    current.updated_at_unix = record->updated_at_unix;
-    current.has_query_hidden = record->has_query_hidden;
-    current.query_hidden = record->query_hidden;
-    current.staged_delete_marker = record->staged_delete_marker;
-    current.seen = 1;
-    current.found = 1;
-    source = NULL;
-    rc = lc_pouch_state_read_many_snapshot_body_from_cache(
-        pouch, cache, record, crypto_context, binding_context,
-        payload_span_path, record->payload_span.payload_offset,
-        record->payload_span.payload_length, &current, 0, &source, error);
-    if (source != NULL) {
-      source->close(source);
-    }
-    lc_free_with_allocator(&pouch->allocator, crypto_context);
-    lc_free_with_allocator(&pouch->allocator, binding_context);
-    lc_free_with_allocator(&pouch->allocator, payload_span_path);
-  }
-  return rc;
-}
-
 static int lc_pouch_state_cache_matches_manifest(
     const lc_pouch_namespace_logstore *cache,
     const lc_pouch_namespace_manifest *manifest) {
@@ -8697,12 +8602,10 @@ lc_pouch_state_cache_tail_active(lc_pouch *pouch,
   if (rc != LC_OK || *rebuild) {
     return rc;
   }
-  rc = lc_pouch_state_cache_warm_transformed_bodies(
-      pouch, cache->namespace_name, cache, manifest, error);
-  if (rc == LC_OK && manifest->state_max_version > cache->max_version) {
+  if (manifest->state_max_version > cache->max_version) {
     cache->max_version = manifest->state_max_version;
   }
-  return rc;
+  return LC_OK;
 }
 
 static int lc_pouch_state_cache_restore_clean_projection(
@@ -8821,13 +8724,6 @@ static int lc_pouch_state_cache_restore_clean_projection(
     cache->max_query_index_seq = checkpoint_query;
   }
   cache->initialized = 1;
-  rc = lc_pouch_state_cache_warm_transformed_bodies(
-      pouch, cache->namespace_name, cache, manifest, error);
-  if (rc != LC_OK) {
-    lc_pouch_namespace_logstore_clear_records(&pouch->allocator, cache);
-    cache->initialized = 0;
-    return rc;
-  }
   /* A clean projection is a complete view of the namespace after every local
    * writer has stopped. If no staged key survives in that view, historical
    * transaction decisions cannot have an effect: recovery only acts on a
@@ -8934,10 +8830,6 @@ static int lc_pouch_state_cache_refresh(
     if (rc != LC_OK) {
       break;
     }
-  }
-  if (rc == LC_OK) {
-    rc = lc_pouch_state_cache_warm_transformed_bodies(
-        pouch, cache->namespace_name, cache, manifest, error);
   }
   if (rc == LC_OK) {
     cache->namespace_path =

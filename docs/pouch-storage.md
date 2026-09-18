@@ -1653,7 +1653,12 @@ durability or projection visibility.
 
 Reads open bounded sources over segment/snapshot payload spans. The read path
 uses an LRU cache for open segment/snapshot file descriptors and dup-backed
-bounded sources for independent reader lifetimes.
+bounded sources for independent reader lifetimes. Projection creation and
+metadata-only reads never open, decrypt, decompress, or materialize a live
+payload merely to prefill the body cache. Small transformed bodies enter that
+bounded cache only after a caller actually opens and consumes the corresponding
+body source; cached entries preserve an already-returned source across
+concurrent projection invalidation.
 
 Required behavior:
 
