@@ -10,6 +10,7 @@ This is not a power-loss simulation.
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -73,6 +74,18 @@ def main():
                 limit = size_before * args.max_startup_read_amplification + 1048576
                 if startup_reads > limit:
                     raise AssertionError(f"startup read {startup_reads} bytes; bound {limit}")
+        # The diagnostic's open-only mode accepts a key environment-variable
+        # name. Exercise both variants without exposing the generated key
+        # through process arguments.
+        open_env = None
+        key_env_name = "-"
+        if args.encrypted:
+            key_env_name = "LOCKDC_POUCH_REPLAY_OPEN_KEY"
+            open_env = os.environ.copy()
+            open_env[key_env_name] = (root / "crypto.key").read_text().strip()
+        subprocess.run([str(args.probe.resolve()), "open", endpoint,
+                        key_env_name], stdout=subprocess.PIPE, text=True,
+                       check=True, env=open_env)
 
 
 if __name__ == "__main__":
