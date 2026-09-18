@@ -13652,6 +13652,7 @@ static void test_pouch_endpoint_disables_query_indexing(void **state) {
   assert_true(pouch_query_capture_has(&capture, "doc/a"));
   assert_string_equal(query_res.metadata_json, "{\"engine\":\"scan\"}");
   lc_query_res_cleanup(&query_res);
+  assert_int_equal(query_index_regular_file_count(namespace_path), 0U);
 
   memset(&capture, 0, sizeof(capture));
   lc_query_req_init(&query_req);
@@ -27410,6 +27411,7 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
   lc_client *client;
+  lc_pouch *pouch;
   lc_lease *lease;
   lc_source *source;
   lc_acquire_req acquire_req;
@@ -27426,10 +27428,12 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   lc_error error;
   char root[512];
   char key[96];
+  unsigned int queue_turn;
   int rc;
 
   (void)state;
   client = NULL;
+  pouch = NULL;
   lease = NULL;
   source = NULL;
   lc_acquire_req_init(&acquire_req);
@@ -27449,6 +27453,7 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   snprintf(key, sizeof(key), "doc/lease-txn-visible/%ld", (long)getpid());
 
   open_pouch_client(root, &client, &error);
+  pouch = ((lc_client_handle *)client)->pouch;
   acquire_req.namespace_name = "docs/lease-txn-visible";
   acquire_req.key = key;
   acquire_req.owner = "txn-owner";
@@ -27468,6 +27473,15 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   source = NULL;
   assert_int_equal(rc, LC_OK);
 
+  /* Clear prior acquire/stage maintenance work. The public transaction
+   * decision itself must then schedule terminal reclamation for this namespace.
+   */
+  for (queue_turn = 0U; queue_turn < LC_POUCH_COMPACTION_QUEUE_MAX_NAMESPACES;
+       ++queue_turn) {
+    lc_pouch_test_compaction_run_pass(pouch);
+  }
+  assert_int_equal(lc_pouch_test_compaction_queue_count(pouch), 0U);
+
   participant.namespace_name = acquire_req.namespace_name;
   participant.key = key;
   participant.backend_hash = NULL;
@@ -27476,6 +27490,7 @@ test_transaction_bound_lease_commit_makes_first_body_queryable(void **state) {
   decision_req.participant_count = 1U;
   rc = client->txn_commit(client, &decision_req, &decision_res, &error);
   assert_int_equal(rc, LC_OK);
+  assert_true(lc_pouch_test_compaction_queue_count(pouch) > 0U);
   lc_txn_decision_res_cleanup(&decision_res);
 
   describe_req.namespace_name = acquire_req.namespace_name;

@@ -4740,7 +4740,8 @@ static int lc_pouch_query_run_scan_predicate(lc_pouch_query_scan_context *scan,
   if (scan->selector != NULL) {
     rc = lc_pouch_query_index_plan_from_selector(scan->runtime, scan->selector,
                                                  &plan, error);
-    if (rc == LC_OK && lc_pouch_query_scan_scalar_plan_supported(&plan)) {
+    if (rc == LC_OK && scan->client->pouch->query_indexing_enabled &&
+        lc_pouch_query_scan_scalar_plan_supported(&plan)) {
       scan->scan_scalar_plan = &plan;
       if (!scan->emit_documents) {
         lc_pouch_generation flushed_seq;
@@ -11631,6 +11632,7 @@ static int lc_pouch_txn_apply_queue_message_participant(
     const char *message_lease_key, const char *txn_id, const char *state,
     lc_error *error) {
   lc_pouch_txn_queue_participant_context context;
+  int rc;
 
   memset(&context, 0, sizeof(context));
   context.client = client;
@@ -11638,9 +11640,14 @@ static int lc_pouch_txn_apply_queue_message_participant(
   context.lease_key = message_lease_key;
   context.txn_id = txn_id;
   context.state = state;
-  return lc_pouch_state_with_namespace_lock(
+
+  rc = lc_pouch_state_with_namespace_lock(
       client->pouch, namespace_name,
       lc_pouch_txn_apply_queue_participant_locked, &context, error);
+  if (rc == LC_OK) {
+    lc_pouch_compaction_note_mutation(client->pouch, namespace_name, 1);
+  }
+  return rc;
 }
 
 static int lc_pouch_txn_apply_queue_state_participant(
@@ -11648,6 +11655,7 @@ static int lc_pouch_txn_apply_queue_state_participant(
     const char *state_lease_key, const char *txn_id, const char *state,
     lc_error *error) {
   lc_pouch_txn_queue_participant_context context;
+  int rc;
 
   memset(&context, 0, sizeof(context));
   context.client = client;
@@ -11656,9 +11664,14 @@ static int lc_pouch_txn_apply_queue_state_participant(
   context.txn_id = txn_id;
   context.state = state;
   context.state_participant = 1;
-  return lc_pouch_state_with_namespace_lock(
+
+  rc = lc_pouch_state_with_namespace_lock(
       client->pouch, namespace_name,
       lc_pouch_txn_apply_queue_participant_locked, &context, error);
+  if (rc == LC_OK) {
+    lc_pouch_compaction_note_mutation(client->pouch, namespace_name, 1);
+  }
+  return rc;
 }
 
 static int lc_pouch_txn_metadata_has_lease_record(const unsigned char *bytes,
@@ -11833,6 +11846,7 @@ static int lc_pouch_txn_apply_state_participant(
     const char *namespace_name, const char *key, const char *txn_id,
     const char *state, lc_error *error) {
   lc_pouch_txn_state_participant_context context;
+  int rc;
 
   memset(&context, 0, sizeof(context));
   context.client = client;
@@ -11841,9 +11855,14 @@ static int lc_pouch_txn_apply_state_participant(
   context.key = key;
   context.txn_id = txn_id;
   context.state = state;
-  return lc_pouch_state_with_namespace_lock(
+
+  rc = lc_pouch_state_with_namespace_lock(
       client->pouch, namespace_name,
       lc_pouch_txn_apply_state_participant_locked, &context, error);
+  if (rc == LC_OK) {
+    lc_pouch_compaction_note_mutation(client->pouch, namespace_name, 1);
+  }
+  return rc;
 }
 
 static int lc_pouch_txn_is_queue_lease_mismatch(const lc_error *error) {
