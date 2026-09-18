@@ -372,8 +372,10 @@ non-negative integer range. Result lists are ordinary dense Lua arrays in
 
 `client:query_keys(req, handler)` has the same query request fields as
 `query_raw`, but sends each decoded key directly to Lua instead of materializing
-the query response. Pass either a function for key chunks or a table with a
-required `chunk(bytes)` function and optional `begin()` and `finish()` hooks.
+the query response. Selectors are optional, so `engine = "scan"` with a cursor
+can enumerate every key in a namespace. Pass either a function for key chunks
+or a table with a required `chunk(bytes)` function and optional `begin()` and
+`finish()` hooks.
 A key can arrive in multiple chunks, including inside a UTF-8 sequence; collect
 only the current key between `begin` and `finish` if complete strings are needed.
 

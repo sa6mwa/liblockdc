@@ -218,6 +218,46 @@ if #query_keys ~= 1 or query_keys[1] ~= raw_txn_participant.key or
   client:close()
   error("Lua query_keys did not stream the matching Pouch key")
 end
+local selector_free_keys = {}
+local selector_free_cursor
+repeat
+  local page_keys = {}
+  local current_page_key
+  local selector_free_result = assert_ok("Lua selector-free query_keys",
+                                         client:query_keys({
+    namespace_name = namespace_name,
+    engine = "scan",
+    limit = 1,
+    cursor = selector_free_cursor,
+  }, {
+    begin = function()
+      current_page_key = ""
+    end,
+    chunk = function(bytes)
+      current_page_key = current_page_key .. bytes
+    end,
+    finish = function()
+      table.insert(page_keys, current_page_key)
+    end,
+  }))
+  if #page_keys ~= 1 then
+    client:close()
+    error("Lua selector-free query_keys did not stream one paginated key")
+  end
+  table.insert(selector_free_keys, page_keys[1])
+  selector_free_cursor = selector_free_result.cursor
+until selector_free_cursor == nil
+local found_raw_txn_key = false
+for _, key in ipairs(selector_free_keys) do
+  if key == raw_txn_participant.key then
+    found_raw_txn_key = true
+    break
+  end
+end
+if #selector_free_keys < 2 or not found_raw_txn_key then
+  client:close()
+  error("Lua selector-free query_keys did not enumerate all Pouch keys")
+end
 local callback_result, callback_err = client:query_keys({
   namespace_name = namespace_name,
   selector_json = '{"eq":{"field":"/source","value":"lua-pouch-xa"}}',

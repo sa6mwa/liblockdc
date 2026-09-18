@@ -16927,6 +16927,122 @@ static void test_terminal_reclaim_marker_resumes_after_reopen(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_terminal_reclaim_failed_marker_does_not_starve_next_marker(void **state) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_source *body;
+  lc_error error;
+  char root[512];
+  char *blocked_marker_leaf;
+  char *healthy_marker_leaf;
+  char *blocked_namespace_path;
+  char *healthy_namespace_path;
+  char control_directory[1024];
+  char marker_directory[1024];
+  char blocked_marker_path[1024];
+  char healthy_marker_path[1024];
+  char healthy_manifest_path[1024];
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  blocked_marker_leaf = NULL;
+  healthy_marker_leaf = NULL;
+  blocked_namespace_path = NULL;
+  healthy_namespace_path = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  lc_error_init(&error);
+  make_root("terminal-reclaim-marker-fairness", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1024U * 1024U;
+  open_options.terminal_reclaim_min_bytes = 1U;
+  open_options.compaction_interval_seconds = 3600U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("blocked", strlen("blocked"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "aaa/blocked", "state/dead", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_pouch_state_delete(pouch, "aaa/blocked", "state/dead", NULL,
+                             &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+
+  rc = lc_source_from_memory("healthy", strlen("healthy"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "zzz/healthy", "state/dead", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_pouch_state_delete(pouch, "zzz/healthy", "state/dead", NULL,
+                             &delete_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  blocked_marker_leaf = lc_pouch_path_escape_name(NULL, "aaa/blocked");
+  healthy_marker_leaf = lc_pouch_path_escape_name(NULL, "zzz/healthy");
+  assert_non_null(blocked_marker_leaf);
+  assert_non_null(healthy_marker_leaf);
+  blocked_namespace_path = lc_pouch_namespace_path(NULL, root, "aaa/blocked");
+  healthy_namespace_path = lc_pouch_namespace_path(NULL, root, "zzz/healthy");
+  assert_non_null(blocked_namespace_path);
+  assert_non_null(healthy_namespace_path);
+  assert_true(strcmp(blocked_marker_leaf, healthy_marker_leaf) < 0);
+  assert_true(snprintf(control_directory, sizeof(control_directory),
+                       "%s/.lockd", root) > 0);
+  rc = mkdir(control_directory, 0777);
+  assert_true(rc == 0 || (rc == -1 && errno == EEXIST));
+  assert_true(snprintf(marker_directory, sizeof(marker_directory),
+                       "%s/.lockd/terminal-reclaim", root) > 0);
+  rc = mkdir(marker_directory, 0777);
+  assert_true(rc == 0 || (rc == -1 && errno == EEXIST));
+  assert_true(snprintf(blocked_marker_path, sizeof(blocked_marker_path),
+                       "%s/%s", marker_directory, blocked_marker_leaf) > 0);
+  assert_true(snprintf(healthy_marker_path, sizeof(healthy_marker_path),
+                       "%s/%s", marker_directory, healthy_marker_leaf) > 0);
+  write_text_file(blocked_marker_path, "");
+  write_text_file(healthy_marker_path, "");
+  assert_int_equal(chmod(blocked_namespace_path, 0), 0);
+
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  /* Keep the test scheduler-driven without starting a background thread. */
+  pouch->background_compaction_enabled = 1;
+  lc_pouch_test_compaction_run_pass(pouch);
+  assert_true(path_is_file(blocked_marker_path));
+  lc_pouch_test_compaction_run_pass(pouch);
+  assert_true(path_is_file(blocked_marker_path));
+  assert_true(snprintf(healthy_manifest_path, sizeof(healthy_manifest_path),
+                       "%s/manifest", healthy_namespace_path) > 0);
+  assert_true(pouch_file_contains_text(healthy_manifest_path, "snapshot="));
+
+  assert_int_equal(chmod(blocked_namespace_path, 0700), 0);
+  lc_pouch_close(pouch);
+  lc_free_with_allocator(NULL, healthy_namespace_path);
+  lc_free_with_allocator(NULL, blocked_namespace_path);
+  lc_free_with_allocator(NULL, healthy_marker_leaf);
+  lc_free_with_allocator(NULL, blocked_marker_leaf);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_compaction_queue_is_bounded_per_root(void **state) {
   lc_pouch *pouch;
   lc_pouch_open_options open_options;
@@ -35027,6 +35143,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(
           test_terminal_reclaim_compacts_active_segment_without_timing_wait),
       cmocka_unit_test(test_terminal_reclaim_marker_resumes_after_reopen),
+      cmocka_unit_test(
+          test_terminal_reclaim_failed_marker_does_not_starve_next_marker),
       cmocka_unit_test(test_compaction_queue_is_bounded_per_root),
       cmocka_unit_test(test_maintenance_creates_namespace_without_prior_writes),
       cmocka_unit_test(test_maintenance_reports_threshold_skip),

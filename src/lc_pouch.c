@@ -816,12 +816,20 @@ static int lc_pouch_terminal_reclaim_marker_take(lc_pouch *pouch,
                                                  char **namespace_name,
                                                  lc_error *error) {
   char *directory;
+  char *after_cursor_leaf;
+  char *after_cursor_namespace;
+  char *first_leaf;
+  char *first_namespace;
   DIR *dir;
   struct dirent *entry;
   int rc;
 
   *namespace_name = NULL;
   directory = NULL;
+  first_leaf = NULL;
+  first_namespace = NULL;
+  after_cursor_leaf = NULL;
+  after_cursor_namespace = NULL;
   rc = lc_pouch_terminal_reclaim_directory(pouch, 0, &directory, error);
   if (rc != LC_OK) {
     return rc;
@@ -839,12 +847,55 @@ static int lc_pouch_terminal_reclaim_marker_take(lc_pouch *pouch,
   rc = LC_OK;
   while ((entry = readdir(dir)) != NULL) {
     if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0) {
-      *namespace_name =
-          lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
-      if (*namespace_name == NULL) {
+      char *entry_namespace;
+      char *entry_leaf;
+      int select_after_cursor;
+      int select_first;
+
+      select_first =
+          first_leaf == NULL || strcmp(entry->d_name, first_leaf) < 0;
+      select_after_cursor =
+          pouch->terminal_reclaim_marker_cursor != NULL &&
+          strcmp(entry->d_name, pouch->terminal_reclaim_marker_cursor) > 0 &&
+          (after_cursor_leaf == NULL ||
+           strcmp(entry->d_name, after_cursor_leaf) < 0);
+      if (!select_first && !select_after_cursor) {
         continue;
       }
-      break;
+      entry_namespace =
+          lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
+      if (entry_namespace == NULL) {
+        continue;
+      }
+      if (select_first) {
+        entry_leaf = lc_strdup_with_allocator(&pouch->allocator, entry->d_name);
+        if (entry_leaf != NULL) {
+          lc_free_with_allocator(&pouch->allocator, first_leaf);
+          lc_free_with_allocator(&pouch->allocator, first_namespace);
+          first_leaf = entry_leaf;
+          first_namespace = entry_namespace;
+          entry_namespace = NULL;
+        }
+      }
+      if (select_after_cursor) {
+        if (entry_namespace == NULL) {
+          entry_namespace =
+              lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
+        }
+        entry_leaf = lc_strdup_with_allocator(&pouch->allocator, entry->d_name);
+        if (entry_namespace != NULL && entry_leaf != NULL) {
+          lc_free_with_allocator(&pouch->allocator, after_cursor_leaf);
+          lc_free_with_allocator(&pouch->allocator, after_cursor_namespace);
+          after_cursor_leaf = entry_leaf;
+          after_cursor_namespace = entry_namespace;
+          entry_namespace = NULL;
+        } else {
+          lc_free_with_allocator(&pouch->allocator, entry_leaf);
+          lc_free_with_allocator(&pouch->allocator, entry_namespace);
+          entry_namespace = NULL;
+        }
+      }
+      lc_free_with_allocator(&pouch->allocator, entry_namespace);
     }
   }
   if (closedir(dir) != 0 && rc == LC_OK) {
@@ -852,6 +903,27 @@ static int lc_pouch_terminal_reclaim_marker_take(lc_pouch *pouch,
                       "failed to close pouch terminal reclaim directory",
                       strerror(errno), directory, "pouch");
   }
+  if (rc == LC_OK) {
+    if (after_cursor_namespace != NULL) {
+      *namespace_name = after_cursor_namespace;
+      after_cursor_namespace = NULL;
+      lc_free_with_allocator(&pouch->allocator,
+                             pouch->terminal_reclaim_marker_cursor);
+      pouch->terminal_reclaim_marker_cursor = after_cursor_leaf;
+      after_cursor_leaf = NULL;
+    } else if (first_namespace != NULL) {
+      *namespace_name = first_namespace;
+      first_namespace = NULL;
+      lc_free_with_allocator(&pouch->allocator,
+                             pouch->terminal_reclaim_marker_cursor);
+      pouch->terminal_reclaim_marker_cursor = first_leaf;
+      first_leaf = NULL;
+    }
+  }
+  lc_free_with_allocator(&pouch->allocator, after_cursor_leaf);
+  lc_free_with_allocator(&pouch->allocator, after_cursor_namespace);
+  lc_free_with_allocator(&pouch->allocator, first_leaf);
+  lc_free_with_allocator(&pouch->allocator, first_namespace);
   lc_free_with_allocator(&pouch->allocator, directory);
   return rc;
 }
@@ -1203,6 +1275,9 @@ static void lc_pouch_compaction_worker_close(lc_pouch *pouch) {
   lc_free_with_allocator(&pouch->allocator,
                          pouch->compaction_namespace_terminal);
   pouch->compaction_namespace_terminal = NULL;
+  lc_free_with_allocator(&pouch->allocator,
+                         pouch->terminal_reclaim_marker_cursor);
+  pouch->terminal_reclaim_marker_cursor = NULL;
   pouch->compaction_namespace_count = 0U;
   pouch->compaction_namespace_capacity = 0U;
 }

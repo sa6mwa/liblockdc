@@ -204,6 +204,10 @@ struct lc_pouch {
   int compaction_stop;
   int compaction_pending;
   int compaction_marker_turn;
+  /* Last terminal-reclaim marker selected by the background worker. The
+   * durable marker remains until maintenance completes; this cursor prevents
+   * one failing marker from starving the other pending namespaces. */
+  char *terminal_reclaim_marker_cursor;
   char **compaction_namespaces;
   unsigned char *compaction_namespace_terminal;
   size_t compaction_namespace_count;
