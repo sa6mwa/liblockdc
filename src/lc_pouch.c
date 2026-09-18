@@ -1324,6 +1324,24 @@ void lc_pouch_compaction_note_mutation(lc_pouch *pouch,
   pthread_mutex_unlock(&pouch->compaction_mutex);
 }
 
+int lc_pouch_compaction_note_history_advanced(lc_pouch *pouch,
+                                              const char *namespace_name,
+                                              lc_error *error) {
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "history compaction notification requires pouch and "
+                        "namespace",
+                        NULL, NULL, "pouch");
+  }
+  rc = lc_pouch_terminal_reclaim_marker_write(pouch, namespace_name, error);
+  if (rc == LC_OK) {
+    lc_pouch_compaction_note_mutation(pouch, namespace_name, 1);
+  }
+  return rc;
+}
+
 static void lc_pouch_indexer_deadline(const lc_pouch *pouch,
                                       struct timespec *deadline) {
   uint64_t seconds;

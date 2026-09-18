@@ -261,6 +261,17 @@ int lc_client_new_workflow(lc_client *client, const lc_workflow_config *config,
   return client->new_workflow(client, config, out, error);
 }
 
+int lc_client_new_history_consumer(lc_client *client,
+                                   const lc_history_consumer_config *config,
+                                   lc_history_consumer **out, lc_error *error) {
+  if (client == NULL || client->new_history_consumer == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "history consumer requires a supporting client", NULL,
+                        NULL, NULL);
+  }
+  return client->new_history_consumer(client, config, out, error);
+}
+
 int lc_workflow_append_outbox(lc_workflow *workflow,
                               const lc_outbox_entry *entry, lc_source *payload,
                               lc_workflow_transaction **out_txn,
@@ -396,6 +407,12 @@ void lc_workflow_transaction_close(lc_workflow_transaction *transaction) {
 void lc_workflow_participant_close(lc_workflow_participant *participant) {
   if (participant != NULL)
     participant->close(participant);
+}
+
+void lc_history_consumer_close(lc_history_consumer *consumer) {
+  if (consumer != NULL) {
+    consumer->close(consumer);
+  }
 }
 
 int lc_watch_queue(lc_client *client, const lc_watch_queue_req *req,

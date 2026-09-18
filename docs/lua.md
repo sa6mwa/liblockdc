@@ -229,11 +229,41 @@ Common client methods:
 - `client:tc_rm_unregister(req)`
 - `client:tc_rm_list()`
 - `client:new_workflow(config)`
+- `client:new_history_consumer(config)`
 - `client:subscribe(req, handler)`
 - `client:subscribe_with_state(req, handler)`
 - `client:watch_queue(req, handler)`
 - `client:new_consumer_service(...)`
 - `client:start_consumer(...)`
+
+## Pouch durable-history consumers
+
+`client:new_history_consumer(config)` registers or reopens a durable Pouch
+retention cursor. It is a compaction-safety boundary, not a history-query API:
+the application remains responsible for obtaining and applying records through
+its own replication, backup, or resume protocol. Remote lockd clients reject
+this Pouch-only operation.
+
+`config.namespace` (or `namespace_name`) and `config.consumer_id` form the
+stable durable identity. A new identity begins at
+`initial_acknowledged_index_seq` (zero by default), or set
+`start_at_current = true` to retain only future history. Existing identities
+always keep their recorded acknowledgement; the supplied initial position is
+ignored. `start_at_current` and `initial_acknowledged_index_seq` are mutually
+exclusive.
+
+The returned receiver provides:
+
+- `history:position()` → `{ acknowledged_index_seq, current_index_seq }`
+- `history:advance(acknowledged_index_seq)` → the updated position; it may
+  only move forward and cannot exceed the current sequence.
+- `history:unregister()` → removes the durable retention pin.
+- `history:close()` → releases only the local handle; it deliberately leaves
+  the durable pin in place.
+
+Use a stable consumer ID and register it before producing history that must be
+retained. A slow cursor can retain more on-disk history, but normal Pouch open,
+read, query, and mutation paths never enumerate consumer records.
 
 ## Inbox/outbox workflows
 

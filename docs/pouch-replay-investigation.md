@@ -140,8 +140,9 @@ and used about 0.054 CPU seconds with a 10.5 MB RSS in a non-sanitized build.
 The current root is below the default 64 MiB active-segment rollover, so normal
 compaction has no inactive segment to reclaim. That is a storage-growth policy
 question, but it was not the source of this incident. Transformed bodies are
-cached only on demand after a caller opens and consumes the corresponding body
-source. Projection creation and metadata-only reads retain payload spans and
+cached only after a caller consumes the corresponding source through successful
+authenticated EOF. The first body source remains a direct streaming transform;
+projection creation, metadata-only reads, and writes retain payload spans and
 never decrypt, decompress, or materialize every eligible live body to prefill
-that bounded cache. A direct regression removes the segment after metadata-only
-recovery and proves that the body was not silently retained.
+the 16 MiB per-namespace cache. A direct regression removes the segment after
+metadata-only recovery and proves that the body was not silently retained.

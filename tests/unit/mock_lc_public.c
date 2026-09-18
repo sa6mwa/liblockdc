@@ -869,6 +869,21 @@ mock_client_new_consumer_service(lc_client *self,
   return mock->rc;
 }
 
+static int
+mock_client_new_history_consumer(lc_client *self,
+                                 const lc_history_consumer_config *config,
+                                 lc_history_consumer **out, lc_error *error) {
+  lc_public_mock_client *mock;
+
+  mock = (lc_public_mock_client *)self;
+  lc_public_mock_record(&mock->new_history_consumer_call, self, config, out,
+                        error, NULL, NULL);
+  if (out != NULL) {
+    *out = NULL;
+  }
+  return mock->rc;
+}
+
 static int mock_client_watch_queue(lc_client *self,
                                    const lc_watch_queue_req *req,
                                    const lc_watch_handler *handler,
@@ -952,6 +967,7 @@ void lc_public_mock_client_init(lc_public_mock_client *mock) {
   mock->pub.subscribe = mock_client_subscribe;
   mock->pub.subscribe_with_state = mock_client_subscribe_with_state;
   mock->pub.new_consumer_service = mock_client_new_consumer_service;
+  mock->pub.new_history_consumer = mock_client_new_history_consumer;
   mock->pub.watch_queue = mock_client_watch_queue;
   mock->pub.close = mock_client_close;
 }

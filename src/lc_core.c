@@ -1963,6 +1963,7 @@ LC_INIT_STRUCT_FUNC(lc_watch_queue_req, lc_watch_queue_req_init)
 LC_INIT_STRUCT_FUNC(lc_watch_handler, lc_watch_handler_init)
 LC_INIT_STRUCT_FUNC(lc_consumer, lc_consumer_init)
 LC_INIT_STRUCT_FUNC(lc_consumer_service_config, lc_consumer_service_config_init)
+LC_INIT_STRUCT_FUNC(lc_history_consumer_config, lc_history_consumer_config_init)
 LC_INIT_STRUCT_FUNC(lc_workflow_config, lc_workflow_config_init)
 void lc_dead_letter_export_opts_init(lc_dead_letter_export_opts *options) {
   if (options == NULL)
@@ -2426,6 +2427,7 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->pub.subscribe_with_state = lc_client_subscribe_with_state_method;
   client->pub.new_consumer_service = lc_client_new_consumer_service_method;
   client->pub.new_workflow = lc_client_new_workflow_method;
+  client->pub.new_history_consumer = lc_client_new_history_consumer_method;
   client->pub.watch_queue = lc_client_watch_queue_method;
   client->pub.close = lc_client_close_method;
   if (client->is_pouch) {
@@ -2481,6 +2483,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
     client->pub.tc_rm_register = lc_pouch_client_tc_rm_register_method;
     client->pub.tc_rm_unregister = lc_pouch_client_tc_rm_unregister_method;
     client->pub.tc_rm_list = lc_pouch_client_tc_rm_list_method;
+    client->pub.new_history_consumer =
+        lc_pouch_client_new_history_consumer_method;
     rc = lc_pouch_client_recover_transactions(&client->pub, error);
     if (rc != LC_OK) {
       lc_client_close_method(&client->pub);

@@ -1597,6 +1597,59 @@ static int bench_pouch_perf_index_docs(long iterations) {
       "icontains{field=/narrative/summary,value=remediation}", "index", 1);
 }
 
+static int bench_pouch_perf_get_body(long iterations) {
+  bench_pouch_perf_fixture fixture;
+  lc_error error;
+  lc_get_opts options;
+  lc_sink *sink;
+  double start;
+  double elapsed;
+  long calls;
+  long index;
+  int rc;
+
+  lc_error_init(&error);
+  memset(&fixture, 0, sizeof(fixture));
+  lc_get_opts_init(&options);
+  options.public_read = 1;
+  sink = NULL;
+  calls = bench_pouch_perf_rows(iterations);
+  rc = bench_pouch_perf_prepare(&fixture, 1L, bench_pouch_perf_payload_bytes(),
+                                &error);
+  if (rc == LC_OK) {
+    rc = lc_sink_to_discard(&sink, &error);
+  }
+  if (rc == LC_OK) {
+    lc_get_res result;
+
+    memset(&result, 0, sizeof(result));
+    rc = fixture.client->get(fixture.client, "doc/00000000", &options, sink,
+                             &result, &error);
+    lc_get_res_cleanup(&result);
+  }
+  start = bench_now_seconds();
+  for (index = 0L; rc == LC_OK && index < calls; ++index) {
+    lc_get_res result;
+
+    memset(&result, 0, sizeof(result));
+    rc = fixture.client->get(fixture.client, "doc/00000000", &options, sink,
+                             &result, &error);
+    lc_get_res_cleanup(&result);
+  }
+  elapsed = bench_now_seconds() - start;
+  printf("metric=pouch-perf-get-body calls=%ld bytes=%ld crypto=%d "
+         "seconds=%.6f per_call_us=%.3f rc=%d\n",
+         calls, bench_pouch_perf_payload_bytes(),
+         bench_env_enabled("LOCKDC_POUCH_PERF_CRYPTO"), elapsed,
+         calls > 0L ? (elapsed * 1000000.0) / (double)calls : 0.0, rc);
+  if (sink != NULL) {
+    lc_sink_close(sink);
+  }
+  bench_pouch_perf_fixture_close(&fixture);
+  lc_error_cleanup(&error);
+  return rc == LC_OK ? 0 : 1;
+}
+
 static int bench_pouch_perf_full_text_keys(long iterations) {
   return bench_pouch_perf_query_case(iterations, "pouch-perf-full-text-keys",
                                      "icontains{field=/...,value=audit}",
@@ -2118,6 +2171,7 @@ static const bench_case *bench_cases(void) {
       {"pouch-open", 1000L, bench_pouch_open},
       {"pouch-namespace", 1000L, bench_pouch_namespace},
       {"pouch-perf-index-docs", 128L, bench_pouch_perf_index_docs},
+      {"pouch-perf-get-body", 1024L, bench_pouch_perf_get_body},
       {"pouch-perf-full-text-keys", 128L, bench_pouch_perf_full_text_keys},
       {"pouch-perf-full-text-reopen-keys", 128L,
        bench_pouch_perf_full_text_reopen_keys},

@@ -1299,7 +1299,7 @@ explicit performance gate.
 ## Remaining Proof Obligations and Future Work
 
 The public workflow receiver names, request records, envelope metadata, and
-liblockdc shared-library ABI 3 line are finalized for this release. Future
+liblockdc shared-library ABI 4 line are finalized for this release. Future
 public-surface changes require the same API and ABI review. The remaining
 component-specific work is:
 

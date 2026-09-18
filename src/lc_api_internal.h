@@ -28,6 +28,7 @@ typedef struct lc_client_handle lc_client_handle;
 typedef struct lc_lease_handle lc_lease_handle;
 typedef struct lc_message_handle lc_message_handle;
 typedef struct lc_consumer_service_handle lc_consumer_service_handle;
+typedef struct lc_history_consumer_handle lc_history_consumer_handle;
 
 #ifdef LOCKDC_TEST_BUILD
 typedef void (*lc_workflow_test_after_reconcile_query_hook_fn)(void *context);
@@ -635,6 +636,12 @@ int lc_client_new_consumer_service_method(
 int lc_client_new_workflow_method(lc_client *self,
                                   const lc_workflow_config *config,
                                   lc_workflow **out, lc_error *error);
+int lc_client_new_history_consumer_method(
+    lc_client *self, const lc_history_consumer_config *config,
+    lc_history_consumer **out, lc_error *error);
+int lc_pouch_client_new_history_consumer_method(
+    lc_client *self, const lc_history_consumer_config *config,
+    lc_history_consumer **out, lc_error *error);
 int lc_client_clone_remote_for_workflow(lc_client_handle *source,
                                         long timeout_ms, lc_client **out,
                                         lc_error *error);

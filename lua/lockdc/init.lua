@@ -24,6 +24,9 @@ WorkflowParticipant.__index = WorkflowParticipant
 local OutboxJob = {}
 OutboxJob.__index = OutboxJob
 
+local HistoryConsumer = {}
+HistoryConsumer.__index = HistoryConsumer
+
 local Service = {}
 Service.__index = Service
 
@@ -63,6 +66,10 @@ local function wrap_outbox_job(core_job)
     _closed = false,
     _terminal = false,
   }, OutboxJob)
+end
+
+local function wrap_history_consumer(core_consumer)
+  return setmetatable({ _core = core_consumer, _closed = false }, HistoryConsumer)
 end
 
 local function normalize_result(a, b)
@@ -230,6 +237,35 @@ function Client:new_workflow(config)
     return nil, err
   end
   return wrap_workflow(workflow)
+end
+
+function Client:new_history_consumer(config)
+  local consumer, err = self._core:new_history_consumer(config)
+
+  if consumer == nil then
+    return nil, err
+  end
+  return wrap_history_consumer(consumer)
+end
+
+function HistoryConsumer:position()
+  return self._core:position()
+end
+
+function HistoryConsumer:advance(acknowledged_index_seq)
+  return self._core:advance(acknowledged_index_seq)
+end
+
+function HistoryConsumer:unregister()
+  return self._core:unregister()
+end
+
+function HistoryConsumer:close()
+  if self._core ~= nil then
+    self._core:close()
+    self._core = nil
+    self._closed = true
+  end
 end
 
 function Client:acquire(req)

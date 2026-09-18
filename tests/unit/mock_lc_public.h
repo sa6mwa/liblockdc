@@ -135,6 +135,7 @@ typedef struct lc_public_mock_client {
   lc_public_mock_call subscribe_call;
   lc_public_mock_call subscribe_with_state_call;
   lc_public_mock_call new_consumer_service_call;
+  lc_public_mock_call new_history_consumer_call;
   lc_public_mock_call watch_queue_call;
   int close_calls;
 } lc_public_mock_client;

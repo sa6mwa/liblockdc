@@ -381,6 +381,23 @@ void lc_pouch_writer_mode_operation_end(lc_pouch *pouch);
 void lc_pouch_compaction_note_mutation(lc_pouch *pouch,
                                        const char *namespace_name,
                                        int terminal);
+/**
+ * Persists terminal-reclaim work after a durable history cursor advances so a
+ * restart can reclaim newly unpinned history without an open-time sweep.
+ */
+int lc_pouch_compaction_note_history_advanced(lc_pouch *pouch,
+                                              const char *namespace_name,
+                                              lc_error *error);
+/**
+ * Reads the oldest durable history-consumer acknowledgement for one namespace.
+ * Callers that make a reclamation decision must hold that namespace's mutation
+ * authority for the entire decision.
+ */
+int lc_pouch_history_oldest_acknowledged(lc_pouch *pouch,
+                                         const char *namespace_name,
+                                         int *has_consumers,
+                                         lc_pouch_generation *out,
+                                         lc_error *error);
 /** Schedules derived index publication after a mutation. The queue and bounded
  * normalized projection never retain a document body, and a failed derived
  * publication cannot revoke an already durable mutation. */

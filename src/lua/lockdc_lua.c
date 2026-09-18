@@ -19,6 +19,7 @@
 #define LCDC_WORKFLOW_TXN_MT "lockdc.workflow_transaction"
 #define LCDC_WORKFLOW_PARTICIPANT_MT "lockdc.workflow_participant"
 #define LCDC_OUTBOX_JOB_MT "lockdc.outbox_job"
+#define LCDC_HISTORY_CONSUMER_MT "lockdc.history_consumer"
 
 typedef struct lcdc_client_ud {
   lc_client *client;
@@ -52,6 +53,10 @@ typedef struct lcdc_outbox_job_ud {
   lc_outbox_job *job;
   int owner_ref;
 } lcdc_outbox_job_ud;
+
+typedef struct lcdc_history_consumer_ud {
+  lc_history_consumer *consumer;
+} lcdc_history_consumer_ud;
 
 typedef struct lcdc_output {
   lc_sink *sink;
@@ -175,6 +180,17 @@ static lcdc_outbox_job_ud *lcdc_check_outbox_job(lua_State *L, int index) {
       (lcdc_outbox_job_ud *)luaL_checkudata(L, index, LCDC_OUTBOX_JOB_MT);
   luaL_argcheck(L, ud != NULL && ud->job != NULL, index,
                 "lockdc outbox job is closed");
+  return ud;
+}
+
+static lcdc_history_consumer_ud *lcdc_check_history_consumer(lua_State *L,
+                                                             int index) {
+  lcdc_history_consumer_ud *ud;
+
+  ud = (lcdc_history_consumer_ud *)luaL_checkudata(L, index,
+                                                   LCDC_HISTORY_CONSUMER_MT);
+  luaL_argcheck(L, ud != NULL && ud->consumer != NULL, index,
+                "lockdc history consumer is closed");
   return ud;
 }
 
@@ -846,6 +862,17 @@ static int lcdc_push_outbox_job(lua_State *L, lc_outbox_job *job,
   return 1;
 }
 
+static int lcdc_push_history_consumer(lua_State *L,
+                                      lc_history_consumer *consumer) {
+  lcdc_history_consumer_ud *ud;
+
+  ud = (lcdc_history_consumer_ud *)lua_newuserdata(L, sizeof(*ud));
+  ud->consumer = consumer;
+  luaL_getmetatable(L, LCDC_HISTORY_CONSUMER_MT);
+  lua_setmetatable(L, -2);
+  return 1;
+}
+
 static int lcdc_push_cloned_lease(lua_State *L, const lc_lease *lease) {
   const lc_lease_handle *lease_handle;
   lc_lease *lease_copy;
@@ -1031,6 +1058,18 @@ static int lcdc_outbox_job_gc(lua_State *L) {
   if (ud->owner_ref != LUA_NOREF) {
     luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
     ud->owner_ref = LUA_NOREF;
+  }
+  return 0;
+}
+
+static int lcdc_history_consumer_gc(lua_State *L) {
+  lcdc_history_consumer_ud *ud;
+
+  ud = (lcdc_history_consumer_ud *)luaL_checkudata(L, 1,
+                                                   LCDC_HISTORY_CONSUMER_MT);
+  if (ud->consumer != NULL) {
+    lc_history_consumer_close(ud->consumer);
+    ud->consumer = NULL;
   }
   return 0;
 }
@@ -3651,6 +3690,149 @@ static int lcdc_client_new_workflow(lua_State *L) {
   return lcdc_push_workflow(L, workflow, 1);
 }
 
+static int lcdc_push_history_consumer_position(
+    lua_State *L, const lc_history_consumer_position *position,
+    lc_error *error) {
+  lua_newtable(L);
+  if (lcdc_set_uint64_field(L, "acknowledged_index_seq",
+                            position->acknowledged_index_seq, error) != LC_OK ||
+      lcdc_set_uint64_field(L, "current_index_seq", position->current_index_seq,
+                            error) != LC_OK) {
+    lua_pop(L, 1);
+    return LC_ERR_INVALID;
+  }
+  return LC_OK;
+}
+
+static int lcdc_client_new_history_consumer(lua_State *L) {
+  lcdc_client_ud *client_ud;
+  lc_history_consumer_config config;
+  lc_history_consumer *consumer;
+  lc_error error;
+  int has_initial_acknowledged_index_seq;
+  int start_at_current;
+  int rc;
+
+  client_ud = lcdc_check_client(L, 1);
+  lc_history_consumer_config_init(&config);
+  lc_error_init(&error);
+  consumer = NULL;
+  luaL_checktype(L, 2, LUA_TTABLE);
+  config.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  if (config.namespace_name == NULL) {
+    config.namespace_name = lcdc_opt_string_field(L, 2, "namespace");
+  }
+  lcdc_require_string_field(L, 2, "consumer_id", &config.consumer_id);
+  has_initial_acknowledged_index_seq = 0;
+  lua_getfield(L, 2, "initial_acknowledged_index_seq");
+  if (!lua_isnil(L, -1)) {
+    config.initial_acknowledged_index_seq =
+        lcdc_check_uint64(L, -1, "initial_acknowledged_index_seq");
+    has_initial_acknowledged_index_seq = 1;
+  }
+  lua_pop(L, 1);
+  start_at_current = 0;
+  (void)lcdc_opt_boolean_field(L, 2, "start_at_current", &start_at_current);
+  if (start_at_current && has_initial_acknowledged_index_seq) {
+    lc_error_set(&error, LC_ERR_INVALID, 0L,
+                 "start_at_current and initial_acknowledged_index_seq cannot "
+                 "both be supplied",
+                 NULL, NULL, NULL);
+    lcdc_push_status_error(L, LC_ERR_INVALID, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  if (start_at_current) {
+    config.initial_acknowledged_index_seq =
+        LC_HISTORY_CONSUMER_START_AT_CURRENT;
+  }
+  rc = lc_client_new_history_consumer(client_ud->client, &config, &consumer,
+                                      &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lc_error_cleanup(&error);
+  return lcdc_push_history_consumer(L, consumer);
+}
+
+static int lcdc_history_consumer_position(lua_State *L) {
+  lcdc_history_consumer_ud *ud;
+  lc_history_consumer_position position;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_history_consumer(L, 1);
+  memset(&position, 0, sizeof(position));
+  lc_error_init(&error);
+  rc = ud->consumer->position(ud->consumer, &position, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  rc = lcdc_push_history_consumer_position(L, &position, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_history_consumer_advance(lua_State *L) {
+  lcdc_history_consumer_ud *ud;
+  lc_history_consumer_position position;
+  lc_index_seq acknowledged_index_seq;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_history_consumer(L, 1);
+  acknowledged_index_seq =
+      (lc_index_seq)lcdc_check_uint64(L, 2, "acknowledged_index_seq");
+  memset(&position, 0, sizeof(position));
+  lc_error_init(&error);
+  rc = ud->consumer->advance(ud->consumer, acknowledged_index_seq, &position,
+                             &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  rc = lcdc_push_history_consumer_position(L, &position, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_history_consumer_unregister(lua_State *L) {
+  lcdc_history_consumer_ud *ud;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_history_consumer(L, 1);
+  lc_error_init(&error);
+  rc = ud->consumer->unregister(ud->consumer, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushboolean(L, 1);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_history_consumer_close(lua_State *L) {
+  return lcdc_history_consumer_gc(L);
+}
+
 static int lcdc_workflow_close(lua_State *L) { return lcdc_workflow_gc(L); }
 
 static int lcdc_workflow_append_outbox(lua_State *L) {
@@ -4681,6 +4863,7 @@ static const luaL_Reg lcdc_client_methods[] = {
     {"info", lcdc_client_info},
     {"close", lcdc_client_close},
     {"new_workflow", lcdc_client_new_workflow},
+    {"new_history_consumer", lcdc_client_new_history_consumer},
     {"acquire", lcdc_client_acquire},
     {"acquire_for_update", lcdc_client_acquire_for_update},
     {"describe", lcdc_client_describe},
@@ -4811,6 +4994,13 @@ static const luaL_Reg lcdc_outbox_job_methods[] = {
     {"dead_letter", lcdc_outbox_job_dead_letter},
     {NULL, NULL}};
 
+static const luaL_Reg lcdc_history_consumer_methods[] = {
+    {"position", lcdc_history_consumer_position},
+    {"advance", lcdc_history_consumer_advance},
+    {"unregister", lcdc_history_consumer_unregister},
+    {"close", lcdc_history_consumer_close},
+    {NULL, NULL}};
+
 static void lcdc_create_metatable(lua_State *L, const char *name,
                                   const luaL_Reg *methods, lua_CFunction gc) {
   luaL_newmetatable(L, name);
@@ -4842,6 +5032,9 @@ int luaopen_lockdc_core(lua_State *L) {
                         lcdc_workflow_participant_gc);
   lcdc_create_metatable(L, LCDC_OUTBOX_JOB_MT, lcdc_outbox_job_methods,
                         lcdc_outbox_job_gc);
+  lcdc_create_metatable(L, LCDC_HISTORY_CONSUMER_MT,
+                        lcdc_history_consumer_methods,
+                        lcdc_history_consumer_gc);
   lua_newtable(L);
   luaL_setfuncs(L, module_functions, 0);
   lua_pushinteger(L, LC_OK);

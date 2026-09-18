@@ -16544,6 +16544,306 @@ static void test_state_terminal_reclaim_installs_snapshot(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_history_consumer_pins_compaction_and_persists(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_history_consumer *consumer;
+  lc_history_consumer *reopened;
+  lc_history_consumer *current;
+  lc_history_consumer_config config;
+  lc_history_consumer_position position;
+  lc_acquire_req acquire_req;
+  lc_release_req release_req;
+  lc_pouch *pouch;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_generation direct_index_seq;
+  lc_index_seq current_index_seq;
+  lc_lease *lease;
+  lc_source *body;
+  lc_error error;
+  char root[512];
+  char endpoint[600];
+  int rc;
+  int written;
+
+  (void)state;
+  client = NULL;
+  consumer = NULL;
+  reopened = NULL;
+  current = NULL;
+  lease = NULL;
+  body = NULL;
+  direct_index_seq = 0U;
+  current_index_seq = 0U;
+  lc_acquire_req_init(&acquire_req);
+  lc_release_req_init(&release_req);
+  memset(&position, 0, sizeof(position));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  lc_error_init(&error);
+  make_root("history-consumer", root, sizeof(root));
+  cleanup_root(root);
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?segment_target_bytes=1&"
+                     "background_compaction=false",
+                     root);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  pouch = handle->pouch;
+
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "history/ns", "state/a", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, "history/ns", "state/b", body, NULL,
+                            &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  assert_true(pouch_state_segment_count(root, "history/ns") >= 2UL);
+  rc = lc_pouch_state_index_seq(pouch, "history/ns", &direct_index_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(direct_index_seq >= 2U);
+
+  acquire_req.namespace_name = "history/ns";
+  acquire_req.key = "state/client";
+  acquire_req.owner = "history-consumer-test";
+  acquire_req.ttl_seconds = 30L;
+  rc = client->acquire(client, &acquire_req, &lease, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("three", strlen("three"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lease->update(lease, body, NULL, &error);
+  lc_source_close(body);
+  body = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lease->release(lease, &release_req, &error);
+  assert_int_equal(rc, LC_OK);
+  lease = NULL;
+
+  lc_history_consumer_config_init(&config);
+  config.namespace_name = "history/ns";
+  config.consumer_id = "replica/a";
+  config.initial_acknowledged_index_seq = 0U;
+  rc = lc_client_new_history_consumer(client, &config, &consumer, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(consumer);
+  rc = consumer->position(consumer, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(position.acknowledged_index_seq, 0U);
+  assert_true(position.current_index_seq > direct_index_seq);
+  current_index_seq = position.current_index_seq;
+
+  config.consumer_id = "replica/invalid-ahead";
+  config.initial_acknowledged_index_seq = current_index_seq + 1U;
+  rc = lc_client_new_history_consumer(client, &config, &current, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(current);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  config.consumer_id = "replica/a";
+  config.initial_acknowledged_index_seq = 0U;
+
+  maintenance_options.namespace_name = "history/ns";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.skipped);
+  assert_string_equal(maintenance_result.diagnostic, "history-consumer-behind");
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+
+  rc = consumer->advance(consumer, current_index_seq + 1U, &position, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = consumer->advance(consumer, current_index_seq, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(position.acknowledged_index_seq, current_index_seq);
+  assert_int_equal(position.current_index_seq, current_index_seq);
+  rc = consumer->advance(consumer, current_index_seq - 1U, &position, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.compacted);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+
+  lc_client_close(client);
+  client = NULL;
+  rc = consumer->position(consumer, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(position.acknowledged_index_seq, position.current_index_seq);
+  lc_history_consumer_close(consumer);
+  consumer = NULL;
+
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  config.initial_acknowledged_index_seq = 0U;
+  rc = client->new_history_consumer(client, &config, &reopened, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = reopened->position(reopened, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(position.acknowledged_index_seq, position.current_index_seq);
+  rc = reopened->unregister(reopened, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = reopened->position(reopened, &position, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_history_consumer_close(reopened);
+  config.consumer_id = "replica/current";
+  config.initial_acknowledged_index_seq = LC_HISTORY_CONSUMER_START_AT_CURRENT;
+  rc = client->new_history_consumer(client, &config, &current, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = current->position(current, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(position.acknowledged_index_seq, position.current_index_seq);
+  rc = current->unregister(current, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_history_consumer_close(current);
+  current = NULL;
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void test_history_consumer_corruption_blocks_compaction(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_history_consumer *consumer;
+  lc_history_consumer_config config;
+  lc_history_consumer_position position;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_source *body;
+  lc_error error;
+  char root[512];
+  char endpoint[600];
+  char *namespace_leaf;
+  char *consumer_leaf;
+  char *control_path;
+  char *history_path;
+  char *namespace_path;
+  char *consumer_path;
+  const char *corrupt_records[] = {"bad\n", "LCH1\nack=\n",
+                                   "LCH1\nack=0\ntrailing\n"};
+  size_t corrupt_index;
+  int rc;
+  int written;
+
+  (void)state;
+  client = NULL;
+  consumer = NULL;
+  body = NULL;
+  namespace_leaf = NULL;
+  consumer_leaf = NULL;
+  control_path = NULL;
+  history_path = NULL;
+  namespace_path = NULL;
+  consumer_path = NULL;
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&position, 0, sizeof(position));
+  lc_error_init(&error);
+  make_root("history-corruption", root, sizeof(root));
+  cleanup_root(root);
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?segment_target_bytes=1&"
+                     "background_compaction=false",
+                     root);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+  rc = lc_source_from_memory("one", strlen("one"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(handle->pouch, "history/corrupt", "state/a", body,
+                            NULL, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  rc = lc_source_from_memory("two", strlen("two"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(handle->pouch, "history/corrupt", "state/b", body,
+                            NULL, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  lc_history_consumer_config_init(&config);
+  config.namespace_name = "history/corrupt";
+  config.consumer_id = "replica/corrupt";
+  rc = client->new_history_consumer(client, &config, &consumer, &error);
+  assert_int_equal(rc, LC_OK);
+
+  namespace_leaf = lc_pouch_path_escape_name(NULL, config.namespace_name);
+  consumer_leaf = lc_pouch_path_escape_name(NULL, config.consumer_id);
+  control_path = lc_pouch_path_join(NULL, root, ".lockd");
+  history_path = lc_pouch_path_join(NULL, control_path, "history-consumers");
+  namespace_path = lc_pouch_path_join(NULL, history_path, namespace_leaf);
+  consumer_path = lc_pouch_path_join(NULL, namespace_path, consumer_leaf);
+  assert_non_null(consumer_path);
+  maintenance_options.namespace_name = config.namespace_name;
+  maintenance_options.force = 1;
+  for (corrupt_index = 0U;
+       corrupt_index < sizeof(corrupt_records) / sizeof(corrupt_records[0]);
+       ++corrupt_index) {
+    write_text_file(consumer_path, corrupt_records[corrupt_index]);
+    rc = consumer->position(consumer, &position, &error);
+    assert_int_equal(rc, LC_ERR_INVALID);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+    rc = lc_pouch_maintenance_run(handle->pouch, &maintenance_options,
+                                  &maintenance_result, &error);
+    assert_int_equal(rc, LC_ERR_INVALID);
+    assert_false(maintenance_result.compacted);
+    lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+  }
+  assert_int_equal(unlink(consumer_path), 0);
+  assert_int_equal(symlink(root, consumer_path), 0);
+  rc = consumer->position(consumer, &position, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  rc = lc_pouch_maintenance_run(handle->pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_false(maintenance_result.compacted);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_history_consumer_close(consumer);
+  consumer = NULL;
+  lc_free_with_allocator(NULL, namespace_leaf);
+  lc_free_with_allocator(NULL, consumer_leaf);
+  lc_free_with_allocator(NULL, control_path);
+  lc_free_with_allocator(NULL, history_path);
+  lc_free_with_allocator(NULL, namespace_path);
+  lc_free_with_allocator(NULL, consumer_path);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_state_compaction_does_not_scan_root_at_open(void **state) {
   lc_pouch *pouch;
   lc_source *body;
@@ -21393,6 +21693,7 @@ static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   lc_client_handle *reader_handle;
   lc_update_res update_res;
   lc_pouch_state_read_result metadata_result;
+  lc_pouch_state_read_result body_result;
   lc_error error;
   char *crypto_key;
   char payload_path[1024];
@@ -21408,6 +21709,7 @@ static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   crypto_key = NULL;
   memset(&update_res, 0, sizeof(update_res));
   memset(&metadata_result, 0, sizeof(metadata_result));
+  memset(&body_result, 0, sizeof(body_result));
   lc_error_init(&error);
   make_root("crypto-tamper", root, sizeof(root));
   cleanup_root(root);
@@ -21436,10 +21738,33 @@ static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   assert_true(metadata_result.found);
   assert_null(metadata_result.body);
   lc_pouch_state_read_result_cleanup(NULL, &metadata_result);
+  /* A body source must be returned before its terminal authentication tag is
+   * consumed. The read then fails at EOF; eager cache warming would instead
+   * fail this state_read call before the caller receives a source. */
+  rc = lc_pouch_state_read(reader_handle->pouch, "default", "crypto/tamper",
+                           &body_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(body_result.found);
+  assert_non_null(body_result.body);
+  for (;;) {
+    unsigned char bytes[16];
+    size_t nread;
+
+    nread =
+        body_result.body->read(body_result.body, bytes, sizeof(bytes), &error);
+    if (nread == 0U) {
+      break;
+    }
+  }
+  assert_int_equal(error.code, LC_ERR_PROTOCOL);
+  lc_pouch_state_read_result_cleanup(NULL, &body_result);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
   assert_client_get_protocol_failure(reader, "crypto/tamper", &error);
 
   lc_client_close(reader);
   lc_pouch_state_read_result_cleanup(NULL, &metadata_result);
+  lc_pouch_state_read_result_cleanup(NULL, &body_result);
   lc_update_res_cleanup(&update_res);
   lc_pouch_crypto_key_string_free(crypto_key);
   cleanup_root(root);
@@ -35224,6 +35549,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_state_writes_roll_active_segments),
       cmocka_unit_test(test_metadata_batch_rollover_resets_active_segment_size),
       cmocka_unit_test(test_state_terminal_reclaim_installs_snapshot),
+      cmocka_unit_test(test_history_consumer_pins_compaction_and_persists),
+      cmocka_unit_test(test_history_consumer_corruption_blocks_compaction),
       cmocka_unit_test(test_state_compaction_does_not_scan_root_at_open),
       cmocka_unit_test(test_state_replay_ignores_stale_generation),
       cmocka_unit_test(test_pouch_root_path_aliases_share_store_identity),

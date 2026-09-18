@@ -776,7 +776,8 @@ the public API or durable format.
   with an actionable error and must not silently use shared-root behavior.
   `lc_pouch_abort` stops Pouch-owned workers and releases the process-bound
   root lock as a crash would. Before that release it closes resident append and
-  source descriptors and clears derived query state, while retaining the
+  source descriptors, bounded authenticated body-cache entries, and clears
+  derived query state, while retaining the
   durable heartbeat marker as takeover evidence until it expires. An explicit
   shared-root abort can reopen immediately and replays the last finalized
   record; an exclusive-root abort instead requires clean handoff or heartbeat
@@ -938,22 +939,41 @@ the public API or durable format.
 - Terminal retention and reclamation:
   A completed lease, released queue delivery, deleted state, and resolved
   transaction must disappear from the live logical projection immediately.
-  Their historical records are retained only until an authoritative immutable
-  checkpoint covers the result and every durable history consumer has advanced
-  beyond it. Durable consumers include watcher-resume cursors, replication,
-  backup/PITR readers, and XA recovery. Reclamation uses the oldest registered
-  consumer boundary; when there are no registered consumers, the next safe
-  checkpoint may reclaim ordinary terminal history. A time window may be a
-  deployment policy fallback, but it is not the correctness boundary.
+  Their physical records remain available until an immutable checkpoint covers
+  the resulting projection and Pouch can reclaim its obsolete segments.
+
+  `lc_client_new_history_consumer()` adds an explicit durable retention pin for
+  a Pouch namespace. Its `(namespace_name, consumer_id)` identity and
+  acknowledgement are stored under `.lockd/history-consumers/`; acknowledge
+  positions are monotonic and bounded by the current namespace sequence.
+  `LC_HISTORY_CONSUMER_START_AT_CURRENT` registers only future retention.
+  Closing a local handle preserves its pin; only `unregister()` removes it.
+  This is the retention substrate for a watcher-resume, replication, backup,
+  or PITR implementation, but it intentionally does **not** itself expose a
+  chronological history reader or make a remote lockd promise.
+
+  The initial implementation is conservative: while any registered consumer
+  is behind the namespace's durable current sequence, compaction does not
+  replace that namespace's candidate segments. Once all pins are current (or
+  have been unregistered), ordinary compaction can proceed. This is a safe
+  whole-compaction barrier, not a fine-grained segment-prefix collector; a
+  deliberately slow consumer therefore grows retained disk history. It does
+  not introduce a history scan, replay allocation, or consumer-directory I/O
+  on normal Pouch open, read, query, or mutation paths. Consumer records are
+  inspected only inside the already-selected namespace compaction attempt.
+
+  A consumer must be registered before it relies on historical recovery:
+  Pouch cannot recreate data compacted before a pin existed. Corrupt or
+  unreadable consumer control records fail that namespace's compaction rather
+  than weakening retention.
 
   Checkpoints retain the monotonic fencing high-water mark even after a lease
   terminal record is reclaimed, so no future acquire can reuse a fencing token.
-  Unresolved XA decisions are retained indefinitely. A resolved XA decision is
-  retained until every participant effect and recovery acknowledgement is
-  durable, then may be compacted to the minimum durable recovery result while
-  its consumer boundary remains protected. Queue terminal history follows the
-  same boundary; workflow and idempotency receipts have their own explicit
-  policies.
+  Unresolved XA decisions are retained indefinitely. Resolved decisions,
+  queue terminal records, workflow receipts, and idempotency records retain
+  their existing compaction semantics; a history pin conservatively prevents
+  the selected namespace compaction while it is behind. Fine-grained consumer
+  boundaries for those individual record families remain future work.
 
   Pouch implements this through terminal-reclaim work markers and compaction,
   not a TTL sweeper. Once a terminal transition commits, its namespace is
@@ -1653,12 +1673,15 @@ durability or projection visibility.
 
 Reads open bounded sources over segment/snapshot payload spans. The read path
 uses an LRU cache for open segment/snapshot file descriptors and dup-backed
-bounded sources for independent reader lifetimes. Projection creation and
-metadata-only reads never open, decrypt, decompress, or materialize a live
-payload merely to prefill the body cache. Small transformed bodies enter that
-bounded cache only when a caller requests the corresponding body source;
-cached entries preserve an already-returned source across concurrent projection
-invalidation.
+bounded sources for independent reader lifetimes. Projection creation,
+metadata-only reads, and writes never open, decrypt, decompress, or
+materialize a live payload merely to prefill the body cache. A requested body
+source streams directly from its payload span on its first consumption while a
+bounded tee copies delivered plaintext into a provisional cache entry. Only a
+source that reaches successful authenticated EOF publishes its entry; partial,
+failed, and tampered reads never become cache hits. The cache is capped at 16
+MiB per resident namespace, and cached entries preserve an already-returned
+source across concurrent projection invalidation.
 
 Required behavior:
 
@@ -1667,9 +1690,10 @@ Required behavior:
 - expose payload readers that stream transforms in the correct order;
 - return metadata from projections without opening payload bytes;
 - when a public copy operation needs a payload, capture its result metadata and
-  a dup-backed segment source or retained bounded body-cache source while
-  coordinated, then release namespace coordination before copying into the
-  caller sink. A slow or blocked caller sink must not serialize another read;
+  a dup-backed segment source or retained, authenticated bounded body-cache
+  source while coordinated, then release namespace coordination before copying
+  into the caller sink. A slow or blocked caller sink must not serialize
+  another read;
 - avoid opening hidden, staged, reserved, and internal-prefix rows for scan
   summaries;
 - keep public state, private state, attachment/object, queue, and transaction

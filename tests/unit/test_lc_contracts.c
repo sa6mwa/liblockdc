@@ -80,12 +80,14 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   lc_dequeue_batch_res dequeue_batch_res;
   lc_consumer consumer;
   lc_consumer_service_config consumer_service_config;
+  lc_history_consumer_config history_consumer_config;
   lc_watch_queue_req watch_queue_req;
   lc_watch_handler watch_handler;
   lc_source source_for_update;
   lc_lease *lease_out;
   lc_message *message_out;
   lc_consumer_service *service_out;
+  lc_history_consumer *history_consumer_out;
   int deleted;
   int deleted_count;
   int rc;
@@ -161,6 +163,7 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   memset(&dequeue_batch_res, 0, sizeof(dequeue_batch_res));
   memset(&consumer, 0, sizeof(consumer));
   memset(&consumer_service_config, 0, sizeof(consumer_service_config));
+  memset(&history_consumer_config, 0, sizeof(history_consumer_config));
   memset(&watch_queue_req, 0, sizeof(watch_queue_req));
   memset(&watch_handler, 0, sizeof(watch_handler));
   lc_error_init(&error);
@@ -171,6 +174,7 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   lease_out = NULL;
   message_out = NULL;
   service_out = NULL;
+  history_consumer_out = NULL;
   deleted = 0;
   deleted_count = 0;
 
@@ -301,6 +305,10 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
                                       &service_out, &error);
   assert_int_equal(rc, LC_OK);
   assert_ptr_equal(service_out, &service.pub);
+  rc = lc_client_new_history_consumer(&client.pub, &history_consumer_config,
+                                      &history_consumer_out, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(client.new_history_consumer_call.count, 1);
   rc = lc_watch_queue(&client.pub, &watch_queue_req, &watch_handler, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -350,6 +358,7 @@ static void test_client_wrappers_delegate_full_public_surface(void **state) {
   assert_int_equal(client.subscribe_call.count, 1);
   assert_int_equal(client.subscribe_with_state_call.count, 1);
   assert_int_equal(client.new_consumer_service_call.count, 1);
+  assert_int_equal(client.new_history_consumer_call.count, 1);
   assert_int_equal(client.watch_queue_call.count, 1);
 
   lc_client_close(&client.pub);
@@ -403,6 +412,12 @@ static void test_public_struct_layout_preserves_stable_prefixes(void **state) {
                        sizeof(((lc_client *)0)->query));
   assert_true(offsetof(lc_client, query_keys) >
               offsetof(lc_client, acquire_for_update));
+  assert_true(offsetof(lc_client, new_history_consumer) >
+              offsetof(lc_client, query_keys));
+  assert_true(offsetof(lc_client, reserved_extension_slots) >
+              offsetof(lc_client, new_history_consumer));
+  assert_int_equal(sizeof(((lc_client *)0)->reserved_extension_slots),
+                   8U * sizeof(void *));
 }
 
 static void test_lease_wrappers_delegate_full_public_surface(void **state) {

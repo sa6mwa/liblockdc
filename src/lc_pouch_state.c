@@ -37,7 +37,7 @@
 #define LC_POUCH_STATE_RECORD_KEY_MAX_BYTES (1024U * 1024U)
 #define LC_POUCH_STATE_RECORD_DESCRIPTOR_RESERVE 256U
 #define LC_POUCH_STATE_SHARED_FORCE_AFTER_SKIPS 64UL
-#define LC_POUCH_STATE_BODY_CACHE_MAX_BYTES (128U * 1024U * 1024U)
+#define LC_POUCH_STATE_BODY_CACHE_MAX_BYTES (16U * 1024U * 1024U)
 #define LC_POUCH_STATE_BODY_CACHE_RECORD_MAX_BYTES (1024U * 1024U)
 #define LC_POUCH_STATE_SOURCE_CACHE_MAX_FILES 64U
 #define LC_POUCH_STATE_WRITEV_MAX_PARTS 15
@@ -1666,6 +1666,7 @@ typedef struct lc_pouch_state_body_cache_entry {
   pthread_mutex_t ref_mutex;
   unsigned long refcount;
   int retired;
+  int complete;
   int ref_mutex_initialized;
 } lc_pouch_state_body_cache_entry;
 
@@ -1831,6 +1832,14 @@ typedef struct lc_pouch_state_body_cache_source {
   size_t offset;
 } lc_pouch_state_body_cache_source;
 
+typedef struct lc_pouch_state_body_cache_tee_source {
+  lc_source pub;
+  lc_allocator allocator;
+  lc_source *inner;
+  lc_pouch_state_body_cache_entry *entry;
+  size_t offset;
+} lc_pouch_state_body_cache_tee_source;
+
 static int lc_pouch_state_read_text_file(lc_pouch *pouch, const char *path,
                                          char **out, size_t *out_length,
                                          lc_error *error);
@@ -1843,6 +1852,8 @@ lc_pouch_state_body_cache_entry_init(lc_pouch_state_body_cache_entry *entry,
 static int
 lc_pouch_state_body_cache_entry_retain(lc_pouch_state_body_cache_entry *entry,
                                        lc_error *error);
+static int lc_pouch_state_body_cache_entry_retain_for_fill(
+    lc_pouch_state_body_cache_entry *entry, lc_error *error);
 static void
 lc_pouch_state_body_cache_entry_release(const lc_allocator *allocator,
                                         lc_pouch_state_body_cache_entry *entry);
@@ -1908,6 +1919,19 @@ static int lc_pouch_state_hash_source_reset(lc_source *self, lc_error *error) {
   }
   source->failed = 0;
   return LC_OK;
+}
+
+static int
+lc_pouch_state_body_cache_entry_ready(lc_pouch_state_body_cache_entry *entry) {
+  int ready;
+
+  if (entry == NULL || !entry->ref_mutex_initialized ||
+      pthread_mutex_lock(&entry->ref_mutex) != 0) {
+    return 0;
+  }
+  ready = !entry->retired && entry->complete;
+  (void)pthread_mutex_unlock(&entry->ref_mutex);
+  return ready;
 }
 
 static void lc_pouch_state_hash_source_close(lc_source *self) { (void)self; }
@@ -2000,6 +2024,155 @@ lc_pouch_state_body_cache_source_open(const lc_allocator *allocator,
   source->pub.read = lc_pouch_state_body_cache_source_read;
   source->pub.reset = lc_pouch_state_body_cache_source_reset;
   source->pub.close = lc_pouch_state_body_cache_source_close;
+  source->pub.impl = source;
+  *out = &source->pub;
+  return LC_OK;
+}
+
+static size_t lc_pouch_state_body_cache_tee_source_read(lc_source *self,
+                                                        void *buffer,
+                                                        size_t count,
+                                                        lc_error *error) {
+  lc_pouch_state_body_cache_tee_source *source;
+  size_t nread;
+  int pthread_rc;
+
+  if (self == NULL || buffer == NULL || count == 0U) {
+    return 0U;
+  }
+  source = (lc_pouch_state_body_cache_tee_source *)self->impl;
+  if (source == NULL || source->inner == NULL || source->entry == NULL) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "pouch body cache tee source is unavailable", NULL, NULL,
+                       "pouch");
+    return 0U;
+  }
+  nread = source->inner->read(source->inner, buffer, count, error);
+  pthread_rc = pthread_mutex_lock(&source->entry->ref_mutex);
+  if (pthread_rc != 0) {
+    (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                       "failed to lock pouch body cache reference",
+                       strerror(pthread_rc), NULL, "pouch");
+    return 0U;
+  }
+  if (nread > 0U) {
+    if (!source->entry->retired) {
+      if (source->offset > source->entry->length ||
+          nread > source->entry->length - source->offset) {
+        source->entry->complete = 0;
+        (void)pthread_mutex_unlock(&source->entry->ref_mutex);
+        (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                           "pouch payload plaintext byte count changed", NULL,
+                           NULL, "pouch");
+        return 0U;
+      }
+      memcpy(source->entry->bytes + source->offset, buffer, nread);
+      source->offset += nread;
+    }
+  } else if ((error == NULL || error->code == LC_OK) &&
+             !source->entry->retired) {
+    if (source->offset == source->entry->length) {
+      source->entry->complete = 1;
+    } else {
+      source->entry->complete = 0;
+      (void)pthread_mutex_unlock(&source->entry->ref_mutex);
+      (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                         "pouch payload plaintext byte count changed", NULL,
+                         NULL, "pouch");
+      return 0U;
+    }
+  }
+  (void)pthread_mutex_unlock(&source->entry->ref_mutex);
+  return nread;
+}
+
+static int lc_pouch_state_body_cache_tee_source_reset(lc_source *self,
+                                                      lc_error *error) {
+  lc_pouch_state_body_cache_tee_source *source;
+  int pthread_rc;
+  int rc;
+
+  if (self == NULL) {
+    return LC_ERR_INVALID;
+  }
+  source = (lc_pouch_state_body_cache_tee_source *)self->impl;
+  if (source == NULL || source->inner == NULL || source->inner->reset == NULL ||
+      source->entry == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch body cache tee source is unavailable", NULL,
+                        NULL, "pouch");
+  }
+  rc = source->inner->reset(source->inner, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  pthread_rc = pthread_mutex_lock(&source->entry->ref_mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch body cache reference",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
+  if (!source->entry->retired) {
+    source->entry->complete = 0;
+  }
+  source->offset = 0U;
+  (void)pthread_mutex_unlock(&source->entry->ref_mutex);
+  return LC_OK;
+}
+
+static void lc_pouch_state_body_cache_tee_source_close(lc_source *self) {
+  lc_pouch_state_body_cache_tee_source *source;
+
+  if (self == NULL) {
+    return;
+  }
+  source = (lc_pouch_state_body_cache_tee_source *)self->impl;
+  if (source == NULL) {
+    return;
+  }
+  if (source->inner != NULL) {
+    source->inner->close(source->inner);
+  }
+  if (source->entry != NULL) {
+    lc_pouch_state_body_cache_entry_release(&source->allocator, source->entry);
+  }
+  lc_free_with_allocator(&source->allocator, source);
+}
+
+static int lc_pouch_state_body_cache_tee_source_open(
+    const lc_allocator *allocator, lc_source *inner,
+    lc_pouch_state_body_cache_entry *entry, lc_source **out, lc_error *error) {
+  lc_pouch_state_body_cache_tee_source *source;
+
+  if (inner == NULL || entry == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch body cache tee requires source, entry, and "
+                        "output",
+                        NULL, NULL, "pouch");
+  }
+  *out = NULL;
+  source = (lc_pouch_state_body_cache_tee_source *)lc_calloc_with_allocator(
+      allocator, 1U, sizeof(*source));
+  if (source == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate pouch body cache tee", NULL, NULL,
+                        "pouch");
+  }
+  if (allocator != NULL) {
+    source->allocator = *allocator;
+  } else {
+    lc_allocator_init(&source->allocator);
+  }
+  if (lc_pouch_state_body_cache_entry_retain_for_fill(entry, error) != LC_OK) {
+    lc_free_with_allocator(&source->allocator, source);
+    return error != NULL && error->code != LC_OK ? error->code
+                                                 : LC_ERR_TRANSPORT;
+  }
+  source->inner = inner;
+  source->entry = entry;
+  source->pub.read = lc_pouch_state_body_cache_tee_source_read;
+  source->pub.reset = lc_pouch_state_body_cache_tee_source_reset;
+  source->pub.close = lc_pouch_state_body_cache_tee_source_close;
   source->pub.impl = source;
   *out = &source->pub;
   return LC_OK;
@@ -3339,6 +3512,32 @@ lc_pouch_state_body_cache_entry_retain(lc_pouch_state_body_cache_entry *entry,
                         "failed to lock pouch body cache reference",
                         strerror(pthread_rc), NULL, "pouch");
   }
+  if (entry->retired || !entry->complete) {
+    (void)pthread_mutex_unlock(&entry->ref_mutex);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch body cache entry is unavailable", NULL, NULL,
+                        "pouch");
+  }
+  entry->refcount += 1UL;
+  (void)pthread_mutex_unlock(&entry->ref_mutex);
+  return LC_OK;
+}
+
+static int lc_pouch_state_body_cache_entry_retain_for_fill(
+    lc_pouch_state_body_cache_entry *entry, lc_error *error) {
+  int pthread_rc;
+
+  if (entry == NULL || !entry->ref_mutex_initialized) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch body cache entry is unavailable", NULL, NULL,
+                        "pouch");
+  }
+  pthread_rc = pthread_mutex_lock(&entry->ref_mutex);
+  if (pthread_rc != 0) {
+    return lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+                        "failed to lock pouch body cache reference",
+                        strerror(pthread_rc), NULL, "pouch");
+  }
   if (entry->retired) {
     (void)pthread_mutex_unlock(&entry->ref_mutex);
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -3762,7 +3961,8 @@ static int lc_pouch_state_scan_body_snapshot_append(
   snapshot->cipher_bytes = record->cipher_bytes;
   if (record->body_cache != NULL &&
       record->body_cache->version == record->version &&
-      record->body_cache->length == (size_t)record->bytes) {
+      record->body_cache->length == (size_t)record->bytes &&
+      lc_pouch_state_body_cache_entry_ready(record->body_cache)) {
     if (lc_pouch_state_body_cache_entry_retain(record->body_cache, error) !=
         LC_OK) {
       lc_pouch_state_scan_body_snapshot_cleanup(&pouch->allocator, snapshot);
@@ -3917,11 +4117,8 @@ static int lc_pouch_state_read_many_snapshot_body_from_cache(
     const lc_pouch_state_entry *current, int copy_cached_body, lc_source **out,
     lc_error *error) {
   lc_source *source;
-  lc_sink *sink;
   lc_pouch_state_body_cache_entry *entry;
-  const void *bytes;
-  size_t length;
-  size_t written;
+  lc_error cache_error;
   int rc;
 
   entry = NULL;
@@ -3935,7 +4132,8 @@ static int lc_pouch_state_read_many_snapshot_body_from_cache(
   *out = NULL;
   if (record->body_cache != NULL &&
       record->body_cache->version == record->version &&
-      record->body_cache->length == (size_t)record->bytes) {
+      record->body_cache->length == (size_t)record->bytes &&
+      lc_pouch_state_body_cache_entry_ready(record->body_cache)) {
     if (copy_cached_body) {
       return lc_source_from_memory(record->body_cache->bytes,
                                    record->body_cache->length, out, error);
@@ -3952,169 +4150,50 @@ static int lc_pouch_state_read_many_snapshot_body_from_cache(
         payload_offset, payload_length, current->descriptor, out, error);
   }
   source = NULL;
-  sink = NULL;
   rc = lc_pouch_state_source_from_span(
       pouch, crypto_context, binding_context, payload_span_path, payload_offset,
       payload_length, current->descriptor, &source, error);
-  if (rc == LC_OK) {
-    rc = lc_sink_to_memory(&sink, error);
+  if (rc != LC_OK) {
+    return rc;
   }
-  written = 0U;
-  if (rc == LC_OK) {
-    rc = lc_copy(source, sink, &written, error);
+  lc_error_init(&cache_error);
+  if (cache->body_cache_bytes + (size_t)current->bytes >
+      LC_POUCH_STATE_BODY_CACHE_MAX_BYTES) {
+    lc_pouch_namespace_logstore_clear_body_cache(&pouch->allocator, cache);
   }
-  if (rc == LC_OK && written != (size_t)current->bytes) {
-    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                      "pouch payload plaintext byte count changed", NULL, NULL,
-                      "pouch");
-  }
-  bytes = NULL;
-  length = 0U;
-  if (rc == LC_OK) {
-    rc = lc_sink_memory_bytes(sink, &bytes, &length, error);
-  }
-  if (rc == LC_OK && length != (size_t)current->bytes) {
-    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
-                      "pouch payload cache byte count changed", NULL, NULL,
-                      "pouch");
-  }
-  if (rc == LC_OK) {
-    if (cache->body_cache_bytes + length >
-        LC_POUCH_STATE_BODY_CACHE_MAX_BYTES) {
-      lc_pouch_namespace_logstore_clear_body_cache(&pouch->allocator, cache);
-    }
-    if (length <= LC_POUCH_STATE_BODY_CACHE_MAX_BYTES) {
-      entry = (lc_pouch_state_body_cache_entry *)lc_calloc_with_allocator(
-          &pouch->allocator, 1U, sizeof(*entry));
-      if (entry == NULL) {
-        rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                          "failed to allocate pouch body cache", NULL, NULL,
-                          "pouch");
-      } else {
-        rc = lc_pouch_state_body_cache_entry_init(entry, error);
-        if (rc == LC_OK && length > 0U) {
-          entry->bytes = (unsigned char *)lc_alloc_with_allocator(
-              &pouch->allocator, length);
-          if (entry->bytes == NULL) {
-            lc_pouch_state_body_cache_entry_destroy(&pouch->allocator, entry);
-            entry = NULL;
-            rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
-                              "failed to allocate pouch body cache", NULL, NULL,
-                              "pouch");
-          } else {
-            memcpy(entry->bytes, bytes, length);
-          }
-        }
-        if (rc == LC_OK) {
-          entry->length = length;
-          entry->version = record->version;
-          record->body_cache = entry;
-          cache->body_cache_bytes += length;
-          entry = NULL;
-        }
-      }
-    }
-  }
-  if (entry != NULL) {
+  entry = (lc_pouch_state_body_cache_entry *)lc_calloc_with_allocator(
+      &pouch->allocator, 1U, sizeof(*entry));
+  if (entry == NULL ||
+      lc_pouch_state_body_cache_entry_init(entry, &cache_error) != LC_OK) {
+    lc_error_cleanup(&cache_error);
     lc_pouch_state_body_cache_entry_destroy(&pouch->allocator, entry);
+    *out = source;
+    return LC_OK;
   }
+  entry->length = (size_t)current->bytes;
+  entry->version = record->version;
+  if (entry->length > 0U) {
+    entry->bytes = (unsigned char *)lc_alloc_with_allocator(&pouch->allocator,
+                                                            entry->length);
+  }
+  if (entry->length > 0U && entry->bytes == NULL) {
+    lc_error_cleanup(&cache_error);
+    lc_pouch_state_body_cache_entry_destroy(&pouch->allocator, entry);
+    *out = source;
+    return LC_OK;
+  }
+  record->body_cache = entry;
+  cache->body_cache_bytes += entry->length;
+  rc = lc_pouch_state_body_cache_tee_source_open(&pouch->allocator, source,
+                                                 entry, out, &cache_error);
   if (rc == LC_OK) {
-    if (!copy_cached_body && record->body_cache != NULL &&
-        record->body_cache->version == record->version &&
-        record->body_cache->length == length) {
-      rc = lc_pouch_state_body_cache_source_open(
-          &pouch->allocator, record->body_cache, out, error);
-    } else {
-      const void *cached_bytes;
-
-      cached_bytes =
-          record->body_cache != NULL && record->body_cache->bytes != NULL
-              ? (const void *)record->body_cache->bytes
-              : (const void *)"";
-      rc = lc_source_from_memory(cached_bytes, length, out, error);
-    }
+    lc_error_cleanup(&cache_error);
+    return LC_OK;
   }
-  if (source != NULL) {
-    source->close(source);
-  }
-  if (sink != NULL) {
-    sink->close(sink);
-  }
-  return rc;
-}
-
-static void lc_pouch_state_cache_record_store_body_source(
-    lc_pouch *pouch, lc_pouch_namespace_logstore *cache,
-    lc_pouch_state_cache_record *record, lc_source *body,
-    lc_pouch_generation version, uint64_t bytes) {
-  lc_pouch_state_body_cache_entry *entry;
-  lc_sink *sink;
-  const void *data;
-  size_t length;
-  size_t written;
-  lc_error error;
-  int rc;
-
-  if (pouch == NULL || cache == NULL || record == NULL || body == NULL ||
-      body->reset == NULL ||
-      bytes > LC_POUCH_STATE_BODY_CACHE_RECORD_MAX_BYTES) {
-    return;
-  }
-  lc_error_init(&error);
-  entry = NULL;
-  sink = NULL;
-  rc = body->reset(body, &error);
-  if (rc == LC_OK) {
-    rc = lc_sink_to_memory(&sink, &error);
-  }
-  written = 0U;
-  if (rc == LC_OK) {
-    rc = lc_copy(body, sink, &written, &error);
-  }
-  data = NULL;
-  length = 0U;
-  if (rc == LC_OK) {
-    rc = lc_sink_memory_bytes(sink, &data, &length, &error);
-  }
-  if (rc == LC_OK && (written != (size_t)bytes || length != (size_t)bytes)) {
-    rc = LC_ERR_PROTOCOL;
-  }
-  if (rc == LC_OK) {
-    if (record->body_cache != NULL) {
-      lc_pouch_state_cache_record_body_clear(&pouch->allocator, cache, record);
-    }
-    if (cache->body_cache_bytes + length >
-        LC_POUCH_STATE_BODY_CACHE_MAX_BYTES) {
-      lc_pouch_namespace_logstore_clear_body_cache(&pouch->allocator, cache);
-    }
-    entry = (lc_pouch_state_body_cache_entry *)lc_calloc_with_allocator(
-        &pouch->allocator, 1U, sizeof(*entry));
-    if (entry != NULL) {
-      if (lc_pouch_state_body_cache_entry_init(entry, &error) != LC_OK) {
-        lc_pouch_state_body_cache_entry_destroy(&pouch->allocator, entry);
-        entry = NULL;
-      } else if (length > 0U) {
-        entry->bytes =
-            (unsigned char *)lc_alloc_with_allocator(&pouch->allocator, length);
-        if (entry->bytes == NULL) {
-          lc_pouch_state_body_cache_entry_destroy(&pouch->allocator, entry);
-          entry = NULL;
-        } else {
-          memcpy(entry->bytes, data, length);
-        }
-      }
-      if (entry != NULL) {
-        entry->length = length;
-        entry->version = version;
-        record->body_cache = entry;
-        cache->body_cache_bytes += length;
-      }
-    }
-  }
-  if (sink != NULL) {
-    sink->close(sink);
-  }
-  lc_error_cleanup(&error);
+  lc_pouch_state_cache_record_body_clear(&pouch->allocator, cache, record);
+  lc_error_cleanup(&cache_error);
+  *out = source;
+  return LC_OK;
 }
 
 static int lc_pouch_state_read_many_snapshot_from_entry(
@@ -10825,6 +10904,8 @@ static int lc_pouch_state_compact_namespace_if_needed(
     lc_pouch *pouch, const char *namespace_name,
     lc_pouch_namespace_manifest *manifest, int force, int terminal_reclaim,
     lc_pouch_maintenance_result *out, lc_error *error) {
+  lc_pouch_generation oldest_history_acknowledged;
+  lc_pouch_generation current_history_index_seq;
   unsigned long candidate_count;
   uint64_t candidate_bytes;
   unsigned long cleanup_deleted_count;
@@ -10836,6 +10917,7 @@ static int lc_pouch_state_compact_namespace_if_needed(
   lc_pouch_state_compaction_capture capture;
   lc_pouch_namespace_logstore candidate_cache;
   int protected_snapshot_blocked;
+  int has_history_consumers;
   int rc;
 
   if (out != NULL) {
@@ -10877,6 +10959,39 @@ static int lc_pouch_state_compact_namespace_if_needed(
       lc_log_trace(pouch->logger, "compaction.skip", fields, 2U);
     }
     return lc_pouch_maintenance_set_diagnostic(pouch, out, "disabled", error);
+  }
+  has_history_consumers = 0;
+  oldest_history_acknowledged = 0U;
+  current_history_index_seq = 0U;
+  rc = lc_pouch_history_oldest_acknowledged(
+      pouch, namespace_name, &has_history_consumers,
+      &oldest_history_acknowledged, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  if (has_history_consumers) {
+    rc = lc_pouch_state_index_seq(pouch, namespace_name,
+                                  &current_history_index_seq, error);
+    if (rc != LC_OK) {
+      return rc;
+    }
+  }
+  if (has_history_consumers &&
+      oldest_history_acknowledged < current_history_index_seq) {
+    if (out != NULL) {
+      out->skipped = 1;
+    }
+    {
+      pslog_field fields[3];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_u64_field("ack", oldest_history_acknowledged);
+      fields[2] = lc_log_u64_field("current", current_history_index_seq);
+      lc_log_trace(pouch->logger, "compaction.skip.history_consumer", fields,
+                   3U);
+    }
+    return lc_pouch_maintenance_set_diagnostic(
+        pouch, out, "history-consumer-behind", error);
   }
   if (terminal_reclaim && manifest->active_segment_id != LC_U64_MAX) {
     char *active_path;
@@ -12958,24 +13073,6 @@ static int lc_pouch_state_write_resolved_locked(
         &payload_span, payload_context, metadata, metadata_length, version,
         bytes, cipher_bytes, descriptor, updated_at_unix, has_query_hidden,
         query_hidden, staged_delete_marker, 1, put_record_type);
-    if (body->reset != NULL &&
-        bytes <= LC_POUCH_STATE_BODY_CACHE_RECORD_MAX_BYTES) {
-      lc_pouch_namespace_logstore *cache;
-      lc_pouch_state_cache_record *record;
-      lc_error cache_error;
-
-      lc_error_init(&cache_error);
-      cache = lc_pouch_namespace_logstore_find(pouch, namespace_name, 0,
-                                               &cache_error);
-      record =
-          cache != NULL ? lc_pouch_state_cache_record_find(cache, key) : NULL;
-      if (record != NULL && record->found && record->version == version &&
-          record->bytes == bytes) {
-        lc_pouch_state_cache_record_store_body_source(pouch, cache, record,
-                                                      body, version, bytes);
-      }
-      lc_error_cleanup(&cache_error);
-    }
   }
   if (rc == LC_OK) {
     out->etag = etag;
@@ -16016,7 +16113,8 @@ int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
         cache != NULL ? lc_pouch_state_cache_record_find(cache, key) : NULL;
     if (record != NULL && record->found && record->body_cache != NULL &&
         record->body_cache->version == record->version &&
-        record->body_cache->length == (size_t)record->bytes) {
+        record->body_cache->length == (size_t)record->bytes &&
+        lc_pouch_state_body_cache_entry_ready(record->body_cache)) {
       rc = lc_pouch_state_read_result_from_cache_record(pouch, record, out,
                                                         error);
       if (rc == LC_OK) {
@@ -16042,7 +16140,8 @@ int lc_pouch_state_copy(lc_pouch *pouch, const char *namespace_name,
   record = cache != NULL ? lc_pouch_state_cache_record_find(cache, key) : NULL;
   if (cache != NULL && record != NULL && record->body_cache != NULL &&
       record->body_cache->version == record->version &&
-      record->body_cache->length == (size_t)record->bytes) {
+      record->body_cache->length == (size_t)record->bytes &&
+      lc_pouch_state_body_cache_entry_ready(record->body_cache)) {
     if (rc == LC_OK) {
       rc = lc_pouch_state_read_result_from_cache_record(pouch, record, out,
                                                         error);

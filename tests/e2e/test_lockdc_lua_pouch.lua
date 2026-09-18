@@ -258,6 +258,92 @@ if #selector_free_keys < 2 or not found_raw_txn_key then
   client:close()
   error("Lua selector-free query_keys did not enumerate all Pouch keys")
 end
+
+local conflicting_history, conflicting_history_err = client:new_history_consumer({
+  namespace_name = namespace_name,
+  consumer_id = "lua-history-invalid",
+  initial_acknowledged_index_seq = 0,
+  start_at_current = true,
+})
+if conflicting_history ~= nil or type(conflicting_history_err) ~= "table" or
+    not tostring(conflicting_history_err.message):match("cannot both be supplied") then
+  client:close()
+  error("Lua history consumer accepted conflicting initial positions")
+end
+
+local history_consumer_id = assert(lockdc.xid_new())
+local history, history_err = client:new_history_consumer({
+  namespace = namespace_name,
+  consumer_id = history_consumer_id,
+  initial_acknowledged_index_seq = 0,
+})
+history = assert_ok("Lua history consumer create", history, history_err)
+local history_position = assert_ok("Lua history consumer position",
+                                   history:position())
+if history_position.acknowledged_index_seq ~= 0 or
+    type(history_position.current_index_seq) ~= "number" or
+    history_position.current_index_seq < 1 then
+  history:close()
+  client:close()
+  error("Lua history consumer did not report its durable initial position")
+end
+local advanced_history_position = assert_ok("Lua history consumer advance",
+                                            history:advance(
+  history_position.current_index_seq))
+if advanced_history_position.acknowledged_index_seq ~=
+    advanced_history_position.current_index_seq then
+  history:close()
+  client:close()
+  error("Lua history consumer did not persist its acknowledgement")
+end
+local backward_history, backward_history_err = history:advance(
+  advanced_history_position.current_index_seq - 1)
+if backward_history ~= nil or type(backward_history_err) ~= "table" then
+  history:close()
+  client:close()
+  error("Lua history consumer accepted a backward acknowledgement")
+end
+history:close()
+
+local reopened_history = assert_ok("Lua history consumer reopen",
+                                   client:new_history_consumer({
+  namespace_name = namespace_name,
+  consumer_id = history_consumer_id,
+  initial_acknowledged_index_seq = 0,
+}))
+local reopened_history_position = assert_ok("Lua history consumer persisted position",
+                                            reopened_history:position())
+if reopened_history_position.acknowledged_index_seq ~=
+    advanced_history_position.acknowledged_index_seq then
+  reopened_history:close()
+  client:close()
+  error("Lua history consumer did not retain its durable acknowledgement")
+end
+assert_ok("Lua history consumer unregister", reopened_history:unregister())
+local unregistered_history, unregistered_history_err = reopened_history:position()
+if unregistered_history ~= nil or type(unregistered_history_err) ~= "table" then
+  reopened_history:close()
+  client:close()
+  error("Lua history consumer remained usable after unregister")
+end
+reopened_history:close()
+
+local current_history = assert_ok("Lua history consumer start current",
+                                  client:new_history_consumer({
+  namespace_name = namespace_name,
+  consumer_id = assert(lockdc.xid_new()),
+  start_at_current = true,
+}))
+local current_history_position = assert_ok("Lua history consumer current position",
+                                           current_history:position())
+if current_history_position.acknowledged_index_seq ~=
+    current_history_position.current_index_seq then
+  current_history:close()
+  client:close()
+  error("Lua history consumer start_at_current did not select current sequence")
+end
+assert_ok("Lua history consumer current unregister", current_history:unregister())
+current_history:close()
 local callback_result, callback_err = client:query_keys({
   namespace_name = namespace_name,
   selector_json = '{"eq":{"field":"/source","value":"lua-pouch-xa"}}',

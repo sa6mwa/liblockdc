@@ -58,6 +58,8 @@ typedef struct lc_lease lc_lease;
 typedef struct lc_message lc_message;
 /** Opaque managed queue consumer service. */
 typedef struct lc_consumer_service lc_consumer_service;
+/** Opaque durable Pouch history-retention consumer. */
+typedef struct lc_history_consumer lc_history_consumer;
 /** Opaque inbox/outbox workflow handle. */
 typedef struct lc_workflow lc_workflow;
 /** Opaque workflow transaction handle. */
@@ -82,6 +84,12 @@ typedef int64_t lc_version;
 typedef int64_t lc_unix_seconds;
 /** Query/index sequence. Mirrors lockd's unsigned uint64 value. */
 typedef uint64_t lc_index_seq;
+/**
+ * Selects the namespace's durable current sequence when creating a history
+ * consumer. This value is only meaningful in
+ * `lc_history_consumer_config.initial_acknowledged_index_seq`.
+ */
+#define LC_HISTORY_CONSUMER_START_AT_CURRENT ((lc_index_seq)UINT64_MAX)
 /** Transaction-coordinator leader term. Mirrors lockd's unsigned uint64 value.
  */
 typedef uint64_t lc_tc_term;
@@ -789,6 +797,34 @@ typedef struct lc_query_key_handler {
    */
   int (*end)(void *context, lc_error *error);
 } lc_query_key_handler;
+
+/**
+ * Creates or reopens one durable history-retention consumer.
+ *
+ * The `(namespace_name, consumer_id)` pair is durable identity. A consumer
+ * pins Pouch log history until it advances its acknowledged sequence or is
+ * explicitly unregistered. It does not itself deliver history records.
+ */
+typedef struct lc_history_consumer_config {
+  /** Namespace whose durable history this consumer retains. */
+  const char *namespace_name;
+  /** Stable, nonempty application-defined consumer identity. */
+  const char *consumer_id;
+  /**
+   * Initial retained boundary for a newly created consumer. Existing durable
+   * consumers retain their recorded boundary and ignore this field. Set
+   * `LC_HISTORY_CONSUMER_START_AT_CURRENT` to retain only later records.
+   */
+  lc_index_seq initial_acknowledged_index_seq;
+} lc_history_consumer_config;
+
+/** Durable and current positions reported by a history consumer. */
+typedef struct lc_history_consumer_position {
+  /** Highest history sequence durably acknowledged by this consumer. */
+  lc_index_seq acknowledged_index_seq;
+  /** Current durable namespace sequence observed by this operation. */
+  lc_index_seq current_index_seq;
+} lc_history_consumer_position;
 
 /** Generic owned string list used by several management responses. */
 typedef struct lc_string_list {
@@ -2552,6 +2588,31 @@ struct lc_workflow {
 };
 
 /**
+ * Durable cursor which prevents Pouch compaction from reclaiming unacknowledged
+ * namespace history.
+ *
+ * Closing this local handle does not unregister the durable consumer. Call
+ * `unregister()` only after the consumer no longer needs retained history.
+ */
+struct lc_history_consumer {
+  /** Reads this consumer's durable acknowledgement and current sequence. */
+  int (*position)(lc_history_consumer *self, lc_history_consumer_position *out,
+                  lc_error *error);
+  /**
+   * Durably advances the acknowledgement. The value must be monotonic and no
+   * greater than the current namespace sequence.
+   */
+  int (*advance)(lc_history_consumer *self, lc_index_seq acknowledged_index_seq,
+                 lc_history_consumer_position *out, lc_error *error);
+  /** Removes the durable retention pin. The local handle remains closable. */
+  int (*unregister)(lc_history_consumer *self, lc_error *error);
+  /** Releases the local handle without changing its durable registration. */
+  void (*close)(lc_history_consumer *self);
+  /** Private implementation pointer; callers must not inspect or modify it. */
+  void *impl;
+};
+
+/**
  * Root client handle.
  *
  * This is the root object for the SDK. Open it once with `lc_client_open()`,
@@ -2803,6 +2864,19 @@ struct lc_client {
   int (*query_keys)(lc_client *self, const lc_query_req *req,
                     const lc_query_key_handler *handler, void *context,
                     lc_query_res *out, lc_error *error);
+  /**
+   * Opens a durable Pouch history-retention consumer.
+   *
+   * Remote lockd clients currently reject this local-storage operation.
+   */
+  int (*new_history_consumer)(lc_client *self,
+                              const lc_history_consumer_config *config,
+                              lc_history_consumer **out, lc_error *error);
+  /**
+   * Reserved ABI-4 extension slots. They are always `NULL`; callers must not
+   * inspect or modify them.
+   */
+  void *reserved_extension_slots[8];
 };
 
 /**
@@ -2944,6 +3018,8 @@ void lc_consumer_restart_policy_init(lc_consumer_restart_policy *policy);
 void lc_consumer_config_init(lc_consumer_config *config);
 /** Initializes a consumer service config to all-zero/empty values. */
 void lc_consumer_service_config_init(lc_consumer_service_config *config);
+/** Initializes a history-consumer config with a zero acknowledgement. */
+void lc_history_consumer_config_init(lc_history_consumer_config *config);
 /** Initializes an inbox/outbox workflow config to all-zero/empty values. */
 void lc_workflow_config_init(lc_workflow_config *config);
 /** Initializes a dead-letter export request to JSON with the default bound. */
@@ -3438,6 +3514,10 @@ int lc_client_new_consumer_service(lc_client *client,
  */
 int lc_client_new_workflow(lc_client *client, const lc_workflow_config *config,
                            lc_workflow **out, lc_error *error);
+/** Opens a durable Pouch history-retention consumer. */
+int lc_client_new_history_consumer(lc_client *client,
+                                   const lc_history_consumer_config *config,
+                                   lc_history_consumer **out, lc_error *error);
 /** Watches queue depth changes with a streaming watch callback. */
 int lc_watch_queue(lc_client *client, const lc_watch_queue_req *req,
                    const lc_watch_handler *handler, lc_error *error);
@@ -3684,5 +3764,7 @@ int lc_workflow_transaction_rollback(lc_workflow_transaction *transaction,
 void lc_workflow_transaction_close(lc_workflow_transaction *transaction);
 /** Releases a workflow participant view; it cannot make a terminal decision. */
 void lc_workflow_participant_close(lc_workflow_participant *participant);
+/** Releases a history-consumer handle without unregistering it. */
+void lc_history_consumer_close(lc_history_consumer *consumer);
 
 #endif
