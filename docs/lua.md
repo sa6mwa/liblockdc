@@ -305,6 +305,8 @@ txn:close()
 -- worker.lua, in a dedicated worker/service process. This opens its own client
 -- and workflow, then returns the one compatible local dispatcher or starts it
 -- lazily. It does not run Lua on its private C thread.
+-- For a Pouch root shared with the producer process, both client configurations
+-- must explicitly select the supported `single_writer=false` shared-root mode.
 local worker_client = assert(lockdc.open(worker_client_config))
 local worker_workflow = assert(worker_client:new_workflow({
   namespace = "orders-workflow",
@@ -354,10 +356,18 @@ durable work:
   result body, and `workflow:resume_command(identity)` to obtain a transaction
   for a pending command. A terminal command resumes as `nil, receipt`.
 - `workflow:transaction(fn)` provides a lazy transaction proxy. Its first
-  operation must be `append_outbox`, `accept_inbox`, or `accept_command`; it
-  commits on normal callback return and rolls back on an error. Its successful
-  result includes `outbox_receipts`, so only that result contains fresh keys
-  safe to forward. It does not add a generic durable `begin()` operation.
+  participant may be `acquire`, `append_outbox`, `accept_inbox`, or
+  `accept_command`; it commits on normal callback return and rolls back on an
+  error. It starts no durable marker by itself, so an empty transaction is
+  invalid. Its successful result includes `outbox_receipts`, so only that
+  result contains fresh keys safe to forward. A pre-existing duplicate found
+  after a domain participant is staged makes the transaction rollback-only, so
+  no domain change can commit without its outbox/idempotency boundary. A
+  duplicate before a domain participant is enrolled may still allow an
+  independently fresh workflow receipt to commit.
+- `workflow:begin()` returns the same lazy transaction receiver for advanced
+  code that needs explicit commit/rollback control. Its first participant has
+  the same domain-acquire/command/inbox/outbox choices as `transaction(fn)`.
 - `workflow:dispatcher()` acquires the compatible local dispatcher. It has no
   configuration argument because dispatch policy comes from the workflow's
   canonical configuration.
@@ -406,6 +416,7 @@ construct an outcome that the façade applies after the handler returns. The
 same methods on a job returned by raw `dispatcher:next()` perform the direct
 terminal operation. `retry({ delay_seconds = n, diagnostic = message })`
 durably reschedules the job within the configured retry bounds.
+`retry("diagnostic")` is the shorthand form that uses the normal retry delay.
 
 ## Raw XA and transaction-coordinator APIs
 

@@ -1,10 +1,10 @@
 # liblockdc Transactional Messaging Design Specification
 
-Status: inbox, outbox, operational recovery, and dead-letter controls are
-implemented for Pouch. This document specifies the durable model: command
-receipts, explicit message/causation identity, delivery-completion evidence,
-and endpoint-neutral transaction semantics. The threadless producer and
-explicit dispatcher API cutover is specified separately in
+Status: the durable inbox, outbox, recovery, and dead-letter model is
+implemented for Pouch. This document specifies command receipts, explicit
+message/causation identity, delivery-completion evidence, and endpoint-neutral
+transaction semantics. The threadless producer and explicit dispatcher API
+cutover is specified separately in
 [the workflow dispatch architecture](workflow-dispatch-architecture.md).
 Where that document differs from an older workflow receiver or private-thread
 description below, the dispatch architecture governs the implementation.
@@ -37,12 +37,13 @@ foreign system is the required idempotency mechanism for that boundary.
   optional command results are immutable attachments, not JSON fields.
 - State change, command/inbox/outbox intent, and attachment commit in one
   existing lockd/Pouch transaction.
-- The first durable command, inbox, or outbox acquire omits `txn_id` and
-  retains the endpoint-minted rs/xid-compatible identifier from its lease.
-  Every later participant supplies that identifier. Pouch durably enrolls the
-  first lease when the second participant arrives; terminal releases vote and
-  publish only after every enrolled participant commits. The workflow owns the
-  participant ledger and terminal releases, and exposes no new coordinator.
+- The first workflow participant—domain key, command, inbox, or outbox—omits
+  `txn_id` and retains the endpoint-minted rs/xid-compatible identifier from
+  its lease. Every later participant supplies that identifier. Pouch durably
+  enrolls the first lease when the second participant arrives; terminal
+  releases vote and publish only after every enrolled participant commits. The
+  workflow owns the participant ledger and terminal releases, and exposes no
+  new coordinator.
 - A threadless workflow producer may attach a compatible explicit dispatcher
   for same-process post-commit key notification. Other hosts forward committed
   receipt keys to their dispatcher through host-owned bounded IPC.
@@ -106,9 +107,10 @@ caller-supplied transaction id and uses only the endpoint-minted one.
 
 ### Workflow adapter rules
 
-- `accept_command()`, `append_outbox()`, or `accept_inbox()` is the first
-  workflow operation. It acquires its deterministic record key without an xid,
-  retains the endpoint-minted xid, and creates the transaction receiver.
+- `begin()` creates a lazy transaction receiver but no durable record or xid.
+  Its first domain acquisition, command, inbox, or outbox operation acquires
+  the real deterministic record key without an xid and retains the
+  endpoint-minted xid.
 - Every later domain, command, inbox, and outbox lease uses that xid and is
   recorded exactly once as a `(namespace, key)` participant.
 - `commit()`/`rollback()` invokes the backend's implicit XA terminal release
@@ -119,6 +121,13 @@ caller-supplied transaction id and uses only the endpoint-minted one.
 - If staging or the terminal decision fails, no post-commit notification is
   emitted. The transaction remains recoverable according to the selected
   backend's existing transaction recovery rules.
+- If a command, inbox, or outbox operation finds a matching committed duplicate
+  after the transaction has acquired a domain participant, the transaction is
+  rollback-only and releases every participant. It returns the normal duplicate
+  result, but `commit()` is rejected. Before any domain participant is
+  enrolled, a duplicate leaves the transaction usable so a fresh inbox receipt
+  can, for example, commit even if its separately owned command is already a
+  duplicate.
 
 ## Scope and Non-goals
 
@@ -260,6 +269,8 @@ struct lc_workflow {
                         const lc_command_identity *identity,
                         lc_workflow_transaction **out,
                         lc_command_receipt *receipt, lc_error *error);
+  int (*begin)(lc_workflow *self, lc_workflow_transaction **out,
+               lc_error *error);
   int (*append_outbox)(lc_workflow *self, const lc_outbox_entry *entry,
                        lc_source *payload, lc_workflow_transaction **out,
                        lc_outbox_receipt *duplicate_receipt, lc_error *error);
@@ -365,25 +376,28 @@ The ABI-reviewed names below establish these interaction boundaries:
   construction, payload attachment naming, participant tracking, post-commit
   notification, and lease references. `effect_key` is caller supplied,
   immutable, and retained for every foreign-effect retry.
-- `workflow->accept_command()`, `workflow->append_outbox()`, or
-  `workflow->accept_inbox()` is the first workflow operation. It acquires its
-  deterministic record lease without an xid and retains the endpoint-minted
-  xid returned on that lease. It returns the transaction only after the
-  relevant duplicate barrier succeeds. A duplicate command or inbox result
-  returns a successful structured receipt and no transaction.
+- `workflow->begin()` creates a lazy transaction receiver without a durable
+  marker or xid. Its first participant may be `txn->acquire()`,
+  `txn->accept_command()`, `txn->append_outbox()`, or
+  `txn->accept_inbox()`. That operation acquires its record without an xid and
+  retains the endpoint-minted xid returned on that lease. A duplicate command
+  or inbox result returns a successful structured receipt and no durable
+  participant.
 - `txn->acquire()` is the normal way to obtain a domain lease inside the
-  workflow transaction. It supplies the workflow transaction id and retains
-  the participant for terminal processing. It returns a workflow participant
-  receiver whose non-terminal surface mirrors the normal lease state,
+  workflow transaction and may be its first participant. Later acquisitions,
+  command/inbox records, and outbox entries use the workflow-owned xid. The
+  participant receiver's non-terminal surface mirrors the normal lease state,
   metadata, keepalive, and streaming attachment operations. It deliberately
-  exposes no `release()` or transaction-decision operation. Later outbox
-  entries use the same workflow-owned xid through `txn->append_outbox()`.
+  exposes no `release()` or transaction-decision operation.
 - A successful transaction commit returns the stable outbox identities and
   `effect_key` values needed for post-commit wakes, logs, and foreign-system
   calls without revealing storage layout. A matching committed outbox append
-  returns that existing receipt as a successful `duplicate` result and returns
-  no transaction; a caller therefore cannot accidentally repeat the associated
-  domain mutation. Fresh staged appends never expose a wakeable outbox key.
+  returns that existing receipt as a successful `duplicate` result. The
+  top-level append returns no transaction; a transaction append returns the
+  receipt but becomes rollback-only when it has already acquired a domain
+  participant. A caller therefore cannot accidentally repeat or publish the
+  associated domain mutation. Fresh staged appends never expose a wakeable
+  outbox key.
 - Inbox acceptance reports `accepted` or `duplicate` as successful structured
   outcomes. It does not force callers to inspect an error string to distinguish
   a normal duplicate from a conflict.
@@ -407,14 +421,13 @@ acquisition.
 
 ### Transaction creation and ownership
 
-There is no public begin, join, or lease-adoption surface. To start an API
-command, `workflow->accept_command()` derives the command-receipt key,
-acquires it without an xid, and retains the endpoint-minted xid. To start
-outbound or inbound work, `workflow->append_outbox()` or
-`workflow->accept_inbox()` does the same for its own durable record. liblockdc
-keeps the xid inside the owned workflow transaction and supplies it for every
-later participant. A duplicate command or inbox result is successful and
-returns no transaction.
+There is a public lazy `begin()` receiver but no durable transaction marker,
+join, or lease-adoption surface. `begin()` itself creates no xid. Its first
+domain acquisition, command receipt, inbox record, or outbox record acquires
+without an xid and retains the endpoint-minted xid. liblockdc keeps that xid
+inside the owned workflow transaction and supplies it for every later
+participant. A duplicate command or inbox result is successful and returns no
+durable participant. Empty transaction commit is invalid.
 
 Once a lease is acquired through the transaction, terminal ownership belongs
 to the workflow. Application code receives only its participant receiver for
@@ -451,13 +464,22 @@ end
 -- A duplicate returns the stored command receipt, including pending or
 -- terminal outcome, and never repeats the domain mutation.
 
-local txn = workflow:append_outbox(entry, payload_source)
+local txn, duplicate = workflow:append_outbox(entry, payload_source)
+if txn then
+  local order = txn:acquire({ namespace = "orders", key = order_id,
+                              owner = "orders-api", ttl_seconds = 30 })
+  order:update_raw(order_update_source)
+  local result = txn:commit() -- result.outbox_receipts are now safe to wake
+else
+  -- duplicate is already committed and safe to notify, with no domain update.
+end
 
-local order = txn:acquire({ namespace = "orders", key = order_id,
-                            owner = "orders-api", ttl_seconds = 30 })
-order:update_raw(order_update_source)
-txn:append_outbox(entry, payload_source)
-local result = txn:commit() -- result.outbox_receipts are now safe to wake
+local update_first = workflow:begin()
+local updated_order = update_first:acquire({ namespace = "orders", key = order_id,
+                                              owner = "orders-api", ttl_seconds = 30 })
+updated_order:update_raw(order_update_source)
+update_first:append_outbox(entry, payload_source)
+local update_result = update_first:commit()
 
 local inbound_txn, accepted = workflow:accept_inbox(message)
 if accepted.accepted then
@@ -685,22 +707,24 @@ wrapper over existing lockd and Pouch transaction facilities. The receiver
 surface in [Consumer Experience and Public Surface](#consumer-experience-and-public-surface)
 is the intended public boundary.
 
-The transaction has an explicit participant ledger. Its first command, inbox,
-or outbox record lease receives an endpoint-minted xid; every later participant
-supplies that xid and, in Pouch, makes the first lease a durable participant
-before returning. The application obtains a domain participant through
-`txn->acquire()`, mutates through that receiver, and leaves terminal processing
-to the workflow. The wrapper stages command/inbox/outbox keys and attachments
-under that same transaction id.
+The transaction has an explicit participant ledger. Its first participating
+lease, whether domain, command, inbox, or outbox, receives an endpoint-minted
+xid; every later participant supplies that xid and, in Pouch, makes the first
+lease a durable participant before returning. The application obtains a domain
+participant through `txn->acquire()`, mutates through that receiver, and leaves
+terminal processing to the workflow. The wrapper stages command/inbox/outbox
+keys and attachments under that same transaction id.
 
-The workflow must choose its duplicate barrier before the application performs
-the associated domain mutation. The first `workflow->accept_command()`,
-`workflow->append_outbox()`, or `workflow->accept_inbox()` call acquires its
-deterministic record key with the create-only precondition before returning a
-transaction. A committed matching record yields the normal duplicate outcome
-before a new domain effect is staged; an immutable mismatch is a conflict. A
-currently leased record is neither a duplicate nor fresh work: the operation
-reports its acquire/read failure and the host decides whether to retry.
+The top-level `workflow->accept_command()`, `workflow->append_outbox()`, and
+`workflow->accept_inbox()` operations choose their duplicate barrier before
+returning a transaction. A committed matching record yields the normal
+duplicate outcome before a new domain effect is staged; an immutable mismatch
+is a conflict. A lazy transaction may stage its domain participant first. If a
+later command, inbox, or outbox lookup then finds a matching committed
+duplicate, the transaction rolls back instead of publishing that domain
+participant. A currently leased record is neither a duplicate nor fresh work:
+the operation reports its acquire/read failure and the host decides whether to
+retry.
 
 ### Command acceptance and result
 
@@ -771,25 +795,32 @@ uses an inbox receipt exactly as for any other message.
 
 ### Outbox append
 
-1. The caller calls `workflow->append_outbox()` before staging the associated
-   domain mutation. It derives the deterministic outbox key, applies the
-   create-only duplicate barrier, acquires it without an xid, retains the
-   endpoint-minted xid, and returns a transaction carrying that private xid.
-2. The caller acquires and stages domain mutation leases through that
-   transaction. The attachment and envelope metadata stage with the outbox
-   participant. Further effects use `txn->append_outbox()` and the same xid.
+1. The effect-first form, `workflow->append_outbox()`, derives the deterministic
+   outbox key, applies the create-only duplicate barrier, acquires it without
+   an xid, retains the endpoint-minted xid, and returns a transaction carrying
+   that private xid. The update-first form begins a lazy transaction, acquires
+   its domain participant, then calls `txn->append_outbox()` under that same
+   xid. Both forms stage the same immutable outbox participant and attachment.
+2. The caller stages domain mutation leases and any additional effects through
+   the transaction. Further effects use `txn->append_outbox()` and the same
+   xid. A matching committed duplicate encountered after a domain participant
+   makes the transaction rollback-only, so its earlier domain work cannot
+   become visible.
 3. The backend-specific terminal adapter makes the domain changes, outbox
    intent, and payload visible together, or rolls all of them back.
-4. Only after a successful terminal decision does liblockdc notify the local
-   dispatcher with the returned outbox key.
+4. Only after a successful terminal decision does `commit()` return fresh
+   outbox receipts. An attached local dispatcher may receive those keys
+   internally; a separate host forwards only these committed receipts.
 
 Submitting the same `(operation_id, effect_id)` again is idempotent only when
 all immutable fields, including `effect_key`, `payload_digest`, `causation_id`,
 routing metadata, and schema version, match. A conflicting repeat fails
-visibly. A matching
-committed repeat returns the existing outbox receipt with `duplicate` set and
-no transaction; it does not create or stage any new domain or outbox
-participant.
+visibly. A matching committed repeat through `workflow->append_outbox()`
+returns the existing outbox receipt with `duplicate` set and no transaction;
+it does not create or stage any new domain or outbox participant. The
+transaction receiver returns the same existing receipt. If it had already
+acquired a domain participant, it also becomes rollback-only, preventing that
+domain work from being published without the requested outbox effect.
 
 ### Inbox acceptance
 
@@ -874,8 +905,9 @@ registry, attachment, start, stop, wait, and close rules.
 After an attached outbox transaction commits, liblockdc passes the exact
 outbox key to its compatible dispatcher. A host with a separate producer and
 dispatcher process calls `dispatcher->notify_outbox_key()` after its own
-bounded key handoff. The dispatcher attempts to acquire that key directly and
-does not perform a namespace query.
+bounded key handoff. The dispatcher records that key as a bounded candidate;
+only a later `dispatcher->next()` request claims it directly, with no namespace
+query.
 
 The in-memory notification path is bounded by `notification_capacity`. It holds
 candidate keys, not preclaimed jobs. `dispatcher->next()` requests one unit of
@@ -1041,7 +1073,7 @@ to repair conditions that a local notification cannot cover:
 - retry deadlines not retained by a stopped dispatcher; and
 - an optional infrequent reconciliation cadence.
 
-`workflow->reconcile()` is an explicit, asynchronous request for this same
+`dispatcher->reconcile()` is an explicit, asynchronous request for this same
 private recovery sweep; it does not expose dispatcher coordination or execute
 host work in the caller. `replay_dead_letters_on_startup` is opt-in. When set,
 the initial reconciliation first scans bounded pages of durable dead letters,
@@ -1172,11 +1204,11 @@ dispatcher lifecycle state
 latest dispatcher error text
 ```
 
-The snapshot also reports the current bounded notification-candidate backlog
-plus delayed wakes and waiting consumer requests. It does not query or
-aggregate durable namespace counts, and it is reset when its dispatcher is
-replaced. These counters are observability only; durable state keys remain the
-sole recovery source of truth.
+The snapshot's live gauges are `pending_candidates`, `delayed_wakes`, and
+`waiting_consumers`. It does not query or aggregate durable namespace counts,
+and it is reset when its dispatcher is replaced. These counters are
+observability only; durable state keys remain the sole recovery source of
+truth.
 
 ## Required Verification
 
@@ -1186,14 +1218,15 @@ environment. The command-receipt extension is not complete until every command
 composition obligation is proven for Pouch; it gains remote parity only after
 the repaired remote implicit-XA contract is present in that E2E environment.
 
-1. The first `accept_command()`, `append_outbox()`, or `accept_inbox()` acquire
-   omits `txn_id` and retains the endpoint-minted xid. Every later domain,
-   command, inbox, or outbox participant propagates that xid. There is no
-   caller transaction-id construction, join, or lease-adoption surface.
+1. The first participating domain acquisition, `accept_command()`,
+   `append_outbox()`, or `accept_inbox()` acquire omits `txn_id` and retains
+   the endpoint-minted xid. Every later domain, command, inbox, or outbox
+   participant propagates that xid. There is no caller transaction-id
+   construction, join, or lease-adoption surface.
 2. One workflow participant ledger containing domain mutation, command/inbox/
    outbox key, and attachment commits atomically; rollback exposes none of
-   them. Pouch proves that releasing the first participant before the last
-   keeps every staged value private. Remote lockd requires the upstream
+   them. Pouch proves that releasing an early participant before the last keeps
+   every staged value private. Remote lockd requires the upstream
    implicit-XA enrollment fix before it can satisfy this criterion.
 3. A command retry with matching scope, command type, idempotency key, and
    request digest returns the exact durable pending or terminal receipt without
@@ -1206,9 +1239,13 @@ the repaired remote implicit-XA contract is present in that E2E environment.
 5. An incoming message that starts an owned command commits inbox receipt,
    command receipt, domain state, and reply/downstream outbox effects together.
    Broker acknowledgement occurs only after that commit. Duplicate delivery and
-   a duplicate command each avoid a second business effect.
+   a duplicate command each avoid a second business effect. A fresh inbox whose
+   separately owned command is already a matching duplicate still commits that
+   inbox receipt without staging domain state.
 6. Repeated outbox append with the same operation/effect identity creates one
-   intent; a conflicting immutable repeat fails.
+   intent; a conflicting immutable repeat fails. A matching duplicate found
+   after a domain participant is enrolled makes the transaction rollback-only,
+   exposing neither that domain state nor a fresh receipt.
 7. Inbox redelivery is idempotent and a payload-digest conflict is rejected.
 8. Direct-key notification performs no recovery query and claims nothing until
    a consumer requests one job.
@@ -1251,9 +1288,9 @@ the repaired remote implicit-XA contract is present in that E2E environment.
     result status/streaming, dispatcher `next()` streamed-payload handoff, and
     terminal job transitions without dispatcher thread callbacks.
 20. Transaction ownership is enforced: a workflow participant exposes no
-    release/decision method; the transaction begins only from its deterministic
-    first record lease; the Pouch terminal decision contains every enrolled
-    participant; and a consumed participant cannot be reused.
+    release/decision method; the first domain, command, inbox, or outbox lease
+    anchors the transaction; the Pouch terminal decision contains every
+    enrolled participant; and a consumed participant cannot be reused.
 21. A matching committed outbox duplicate returns its existing receipt with no
     transaction and cannot stage a second domain mutation or outbox intent.
 22. Dead-letter export contains envelope JSON but no payload bytes; explicit

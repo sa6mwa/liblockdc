@@ -59,6 +59,7 @@ notification queue, recovery loop, claim, or foreign-effect execution.
 
 The workflow receiver retains the producer-side operations:
 
+- lazy workflow transaction creation;
 - command acceptance, lookup, result streaming, and resume;
 - inbox acceptance;
 - outbox append;
@@ -68,11 +69,24 @@ The workflow receiver retains the producer-side operations:
 It deliberately has no `next`, stats, reconciliation, dead-letter, claim, or
 job-terminal operation. These belong only to a dispatcher.
 
-The first durable command, inbox, or outbox operation remains the transaction
-anchor. It obtains the endpoint-minted transaction id; later participants use
-that id. There is no generic `begin()` that invents a separate durable anchor.
-The first operation must be one of the existing durable workflow facts. This
-preserves implicit-XA semantics and avoids a new persistent record type.
+`lc_workflow_begin()` creates a threadless, lazy transaction receiver. It does
+not create a durable transaction marker or mint an id by itself. Its first
+participating operation—domain `acquire`, command acceptance, inbox acceptance,
+or outbox append—acquires its real record without an xid and retains the
+endpoint-minted xid. Every later participant uses that xid. This preserves
+implicit-XA semantics without a new persistent record type, while allowing a
+host such as Vectis to stage a domain update before it appends an outbox effect.
+A transaction that reaches `commit()` with no participant is invalid; closing
+such an empty transaction is a local no-op.
+
+If a command, inbox, or outbox operation later finds a pre-existing committed
+duplicate after the transaction has acquired a domain participant, liblockdc
+makes the whole transaction rollback-only and releases its participants. It
+returns the normal duplicate result but rejects `commit()`. This prevents a
+domain update from becoming visible without the required idempotency barrier or
+outbox effect. A duplicate before any domain participant is enrolled leaves
+the transaction usable: for example, a fresh inbox receipt may commit even
+when its separately owned command is already a durable duplicate.
 
 ### Commit-published outbox receipts
 
@@ -111,6 +125,11 @@ internally at the same boundary; it may also receive an existing duplicate key.
 A separate host forwards only a successful commit result's fresh receipts or an
 already committed duplicate receipt. No public API exposes a fresh staged
 outbox key that could accidentally be sent before commit.
+
+A later duplicate append after a staged domain participant follows the
+rollback-only rule above: its existing receipt is safe to notify, but the
+current transaction has no fresh commit result and cannot publish its earlier
+staged domain work.
 
 Commit-result storage is prepared before the terminal backend decision. If the
 library cannot allocate or copy the required result, it returns before voting
@@ -163,10 +182,12 @@ typedef struct lc_workflow_dispatcher lc_workflow_dispatcher;
 int lc_client_new_workflow(lc_client *client,
                            const lc_workflow_config *config,
                            lc_workflow **out, lc_error *error);
+int lc_workflow_begin(lc_workflow *workflow,
+                      lc_workflow_transaction **out, lc_error *error);
 int lc_client_new_workflow_with_dispatcher(
     lc_client *client, const lc_workflow_config *config,
     lc_workflow_dispatcher *dispatcher, lc_workflow **out, lc_error *error);
-int lc_workflow_get_or_start_dispatcher(lc_workflow *workflow,
+int lc_workflow_dispatcher_get_or_start(lc_workflow *workflow,
                                         lc_workflow_dispatcher **out,
                                         lc_error *error);
 int lc_workflow_dispatcher_notify_outbox_key(
@@ -375,23 +396,28 @@ or dispatcher statistics methods. The dispatcher façade includes `run`,
 bounded `pump`, raw `next`, `notify_outbox_key`, `stats`, `reconcile`,
 dead-letter controls, `stop`, `wait`, and close. It has no producer shortcut.
 
-`workflow:transaction(fn)` is a Lua convenience, not a new durable begin
-operation. It supplies a lazy transaction proxy. The first proxy operation must
-be `append_outbox`, `accept_inbox`, or `accept_command`; that operation creates
-the existing durable anchor and its endpoint-minted transaction id. Calling
-`acquire` before an anchor fails. On normal callback return, the façade commits
-the concrete transaction; on a Lua error, explicit rollback, or a staging
-failure, it rolls back and rethrows/returns the structured failure. A duplicate
-first operation creates no transaction and is returned as its ordinary durable
-duplicate result. Advanced users may keep using the explicit
-`workflow:append_outbox`, `accept_inbox`, and `accept_command` methods when
-they need to inspect and control each transaction step directly.
+`workflow:begin()` and `workflow:transaction(fn)` create a lazy transaction
+receiver, not a durable transaction marker. Its first participant may be
+`acquire`, `append_outbox`, `accept_inbox`, or `accept_command`; that operation
+receives the endpoint-minted xid and anchors every later participant. This lets
+a Vectis transaction stage a domain update before its outbox append while
+remaining one implicit-XA decision. On normal callback return, the façade
+commits the concrete transaction; on a Lua error, explicit rollback, or a
+staging failure, it rolls back and rethrows/returns the structured failure. A
+duplicate first command/inbox/outbox operation is returned as its ordinary
+durable duplicate result. Advanced users may keep using the explicit producer
+operations when they need to inspect and control each transaction step.
 
-Returning normally without an anchor operation is `LC_ERR_INVALID`; the façade
-does not commit an empty pseudo-transaction. A duplicate anchor is the sole
-normal callback path without a concrete transaction. The callback may inspect
+Returning normally without a participant is `LC_ERR_INVALID`; the façade does
+not commit an empty pseudo-transaction. A duplicate first record is the sole
+normal callback path without a durable participant. The callback may inspect
 that duplicate result and return, after which the façade returns it without a
-terminal decision.
+terminal decision. A duplicate discovered after a domain participant has
+staged makes the proxy rollback-only; the façade rolls it back and returns that
+duplicate result rather than committing partial work. A duplicate before any
+domain participant may still let the callback commit an independently fresh
+workflow receipt, such as an inbox delivery whose owned command was already
+committed.
 
 On success, `workflow:transaction(fn)` returns the same commit result as the
 explicit transaction's `commit()`, including `outbox_receipts`. This gives a
@@ -422,7 +448,7 @@ advanced applications; liblockdc does not invent a Vectis policy for them.
 
 A Lua handler receives a claimed job with a handler-scoped streaming
 `payload_source()`. It may consume the source during that call but cannot
-retain it after the handler returns. `job:complete()`, `job:retry(opts)`, and
+retain it after the handler returns. `job:complete()`, `job:retry(value)`, and
 `job:dead_letter(diagnostic)` create typed outcomes; the façade applies the
 actual terminal mutation after the handler returns. An exception, cancellation,
 or handler deadline produces the configured retry outcome unless an explicit
@@ -430,37 +456,69 @@ adapter policy selects dead-lettering. The façade renews a live claim while a
 handler is executing and reports renewal/terminal failures without pretending
 the job succeeded.
 
-`retry` supports an optional bounded `delay_seconds` and diagnostic, mapping to
-the existing durable retry policy. Rescheduling is therefore a normal retry
-terminal outcome, not an in-memory timer.
+`retry("diagnostic")` is shorthand for a diagnostic with the normal retry
+policy. `retry({ delay_seconds = n, diagnostic = message })` supports a bounded
+reschedule delay and diagnostic. Both map to the existing durable retry policy;
+rescheduling is therefore a normal retry terminal outcome, not an in-memory
+timer.
 
 ## Vectis integration contract
 
 Vectis is not implemented in this repository. Its required liblockdc contract
-is nevertheless explicit:
+is nevertheless explicit. This section restates the workflow behavior in
+[`stash/supervisor-workflow-spec.md`](../stash/supervisor-workflow-spec.md);
+it does not redefine Vectis supervisor ownership or lifecycle policy:
 
 ```text
 route worker                         supervisor process
 ------------                         ------------------
 threadless workflow                  workflow dispatcher + Lua lane
   └─ durable commit ─ receipt key ─> bounded host IPC ─> notify_outbox_key()
-       (or no wake)                     full/closed ───> reconcile()
-                                                     └──> claim → handler → outcome
+       full ────────────────> OUTBOX_RECONCILE signal ─> reconcile()
+       closed/lost ────────────────────────────> startup recovery
+                                                     └──> capacity-aware next()
+                                                          → claim → handler → outcome
 ```
 
 1. Each application declares one canonical workflow configuration per durable
    namespace.
 2. Route workers construct threadless producers using their own post-fork
-   clients. They mutate domain state and append outbox effects atomically.
+   clients. They begin one lazy workflow transaction, mutate domain state, and
+   append outbox effects atomically.
 3. After a successful commit, a worker copies every returned receipt key to
    Vectis's bounded workflow-key channel. On its first full send it emits one
    payload-free reconciliation wake; it never blocks a route or attempts effect
-   delivery.
+   delivery. A closed or lost handoff is repaired by durable startup recovery.
 4. The supervisor process owns a separate client, obtains the one local
    dispatcher, receives keys/wakes, and calls `notify_outbox_key` or
    `reconcile`.
 5. The supervisor requests a job only when its chosen logical supervisor and
    Lua lane have capacity. It applies the job outcome after the handler returns.
+
+Vectis uses the dispatcher's raw C pull mode, not liblockdc's dependency-native
+Lua `run()`/`pump()` bridge. Its one native source router can therefore call
+`next()` for whichever of several logical supervisor lanes has capacity, then
+invoke the selected Vectis-owned Lua lane. The liblockdc dispatcher sees only
+claimed jobs and terminal outcomes; it does not own Vectis handler registration
+or try to bind one global Lua handler map.
+
+Vectis's high-level `tx:update_json(order)` resolves to its configured domain
+participant acquisition. It may be the lazy workflow transaction's first
+participant, captures the endpoint-minted xid, and lets a later
+`tx:append_outbox()` join the same implicit-XA decision. If Vectis rejects an
+unregistered outbox kind after staging that domain participant, it marks the
+enclosing transaction failed: commit is impossible and all staged state rolls
+back before the route can report success. Raw liblockdc remains available for
+deliberately decoupled producers that select a different unhandled-job policy.
+
+For a remote Lockd root, route and supervisor clients are naturally independent
+connections. For local Pouch, a Vectis route-worker process and supervisor
+process cannot share an exclusive single-writer session across a fork boundary.
+A multi-process Pouch deployment must explicitly use the supported shared-root
+mode (`single_writer=false`) in the one canonical client/root configuration.
+Default exclusive mode continues to reject the second live process rather than
+silently weakening its ownership guarantee. liblockdc never carries a Pouch
+client or dispatcher thread across the fork boundary.
 
 The channel carries copied receipt-key bytes only. It is neither a second queue
 nor a persistence layer. A failed channel send, overflow, restart, or lost
@@ -496,6 +554,12 @@ invariants, including failure paths:
 - `new_workflow()` creates no dispatcher thread, client clone, claim, or scan;
 - producer transaction, command, inbox, outbox, XA, rollback, and receipt
   semantics remain unchanged for Pouch;
+- lazy transaction coverage proves that `begin()` creates no durable marker,
+  an update-first domain participant and later outbox append commit as one
+  decision, an empty commit is invalid, and a later duplicate after a domain
+  participant rolls that decision back without exposing domain state or a fresh
+  receipt; a fresh inbox plus its already-committed owned command remains
+  independently committable;
 - compatible concurrent acquisition returns exactly one dispatcher, while a
   configuration mismatch, stop race, failed dispatcher, and client close leave
   no stale or dangling instance;
