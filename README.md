@@ -33,9 +33,11 @@ The library itself is delivered as:
   and dead-letter workflow receivers
 - integrated SDK logging through `libpslog`
 
-The transactional messaging model, endpoint constraints, and C receiver
-surface are specified in [the workflow design](docs/inbox-outbox.md). The Lua
-workflow facade is documented in [the Lua SDK guide](docs/lua.md).
+The durable transactional messaging model and endpoint constraints are
+specified in [the workflow design](docs/inbox-outbox.md). The threadless
+producer, explicit dispatcher, and Vectis integration contract are specified
+in [the workflow dispatch architecture](docs/workflow-dispatch-architecture.md).
+The Lua workflow facade is documented in [the Lua SDK guide](docs/lua.md).
 
 ## Pouch storage
 

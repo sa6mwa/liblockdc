@@ -1,10 +1,14 @@
 # liblockdc Transactional Messaging Design Specification
 
 Status: inbox, outbox, operational recovery, and dead-letter controls are
-implemented for Pouch. This document also specifies the command-receipt
-extension, its explicit message/causation envelope identity, and delivery
-completion evidence. The public workflow surface remains endpoint-neutral;
-remote lockd verification is deferred only because its current implicit-XA
+implemented for Pouch. This document specifies the durable model: command
+receipts, explicit message/causation identity, delivery-completion evidence,
+and endpoint-neutral transaction semantics. The threadless producer and
+explicit dispatcher API cutover is specified separately in
+[the workflow dispatch architecture](workflow-dispatch-architecture.md).
+Where that document differs from an older workflow receiver or private-thread
+description below, the dispatch architecture governs the implementation.
+Remote lockd verification is deferred only because its current implicit-XA
 enrollment defect breaks multi-participant atomicity.
 
 ## Purpose
