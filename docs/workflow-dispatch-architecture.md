@@ -74,6 +74,44 @@ that id. There is no generic `begin()` that invents a separate durable anchor.
 The first operation must be one of the existing durable workflow facts. This
 preserves implicit-XA semantics and avoids a new persistent record type.
 
+### Commit-published outbox receipts
+
+An outbox key is safe to wake only after its transaction has committed. The
+cutover therefore separates a staged append from its committed receipt:
+
+- a fresh `workflow->append_outbox()` returns its transaction but no public
+  outbox receipt;
+- a transaction's `append_outbox()` stages another effect and returns no fresh
+  outbox key; and
+- `transaction->commit()` returns one owned receipt for every outbox effect
+  made durable by that decision.
+
+The C commit result is an initialized/cleanup-owned result record containing a
+receipt array:
+
+```c
+typedef struct lc_workflow_commit_result {
+  lc_outbox_receipt *outbox_receipts;
+  size_t outbox_receipt_count;
+} lc_workflow_commit_result;
+
+void lc_workflow_commit_result_init(lc_workflow_commit_result *result);
+void lc_workflow_commit_result_cleanup(lc_workflow_commit_result *result);
+int lc_workflow_transaction_commit(lc_workflow_transaction *transaction,
+                                   lc_workflow_commit_result *out,
+                                   lc_error *error);
+```
+
+The result is populated only after the backend reports its durable terminal
+commit. On failure or rollback it is empty. A duplicate top-level or later
+transaction append is different: it finds an already committed effect and
+returns that existing durable receipt directly. Such a receipt is already safe
+to notify. An attached local dispatcher receives fresh committed keys
+internally at the same boundary; it may also receive an existing duplicate key.
+A separate host forwards only a successful commit result's fresh receipts or an
+already committed duplicate receipt. No public API exposes a fresh staged
+outbox key that could accidentally be sent before commit.
+
 Closing a workflow closes any still-open owned transaction by best-effort
 rollback, releases any attached dispatcher reference, and releases its client
 reference. It never stops a dispatcher.
@@ -153,11 +191,15 @@ outbox keys only in committed receipts and may forward them to a host-owned
 dispatcher through host IPC. It must never forward a key from a failed or
 rolled-back transaction.
 
-`lc_workflow_dispatcher_close()` releases an acquisition; it does not stop a
-shared dispatcher. `lc_workflow_dispatcher_stop()` requests the state-changing
-shutdown and `wait()` observes it. Client close stops and joins registered
-dispatchers before releasing their client state. Every workflow and dispatcher
-handle then becomes closed; no live handle retains a usable freed client.
+The registry retains a started dispatcher until explicit `stop()` completes or
+its client closes. `lc_workflow_dispatcher_close()` releases only one caller's
+handle; it does not stop a dispatcher, including when it happens to be the last
+external handle. This deliberately lets a lazily started dispatcher remain
+available for later producer attachments and asynchronous work. Hosts that no
+longer need it call `stop()` and then `wait()`. Client close stops and joins all
+registered dispatchers before releasing client state. Every workflow and
+dispatcher handle then becomes closed; no live handle retains a usable freed
+client.
 
 ## Dispatcher activation and work limits
 
@@ -171,9 +213,10 @@ claim-ready only when a consumer is attached:
 - a second incompatible sink fails instead of replacing the first one.
 
 The dispatcher must not preclaim more jobs than the sink's available capacity.
-A raw C pull consumer has bounded configured ready-job capacity. A Lua lane
-defaults to one active handler. A host that needs C concurrency supplies it
-explicitly; no unbounded ready queue or claim set is permitted.
+The existing `notification_capacity` bounds both direct-key notifications and
+the raw C pull ready-job set. A Lua lane defaults to one active handler. A host
+that needs C concurrency supplies it explicitly; no unbounded ready queue or
+claim set is permitted.
 
 Stopping first prevents new claims and wake acceptance. It then waits only up
 to its deadline for active jobs to reach a terminal outcome. Remaining claims
@@ -242,6 +285,11 @@ struct lc_workflow_dispatcher {
 semantics remain unchanged. A terminal failure must leave the claim recoverable
 through retry or expiry, never silently consume it.
 
+The producer and transaction receivers' `append_outbox` operations return an
+optional receipt only for an already committed duplicate. Their `commit`
+operation accepts an `lc_workflow_commit_result *` as above. That result is the
+only public source of **fresh** wakeable outbox keys.
+
 ## Lua workflow and dispatcher façade
 
 Lua mirrors the ownership split exactly.
@@ -257,8 +305,13 @@ workflow:transaction(function(tx)
   tx:append_outbox(entry, payload_source)
 end)
 
--- Worker/service domain: acquire the shared local dispatcher.
-local dispatcher = assert(workflow:dispatcher())
+-- Worker/service domain, normally a distinct process with its own client.
+local worker_client = assert(lockdc.open(worker_client_config))
+local worker_workflow = assert(worker_client:new_workflow({
+  namespace_name = "myapp.orders",
+  max_attempts = 12,
+}))
+local dispatcher = assert(worker_workflow:dispatcher())
 assert(dispatcher:run({
   handlers = {
     ["order.webhook"] = function(job)
@@ -283,6 +336,24 @@ or dispatcher statistics methods. The dispatcher façade includes `run`,
 bounded `pump`, raw `next`, `notify_outbox_key`, `stats`, `reconcile`,
 dead-letter controls, `stop`, `wait`, and close. It has no producer shortcut.
 
+`workflow:transaction(fn)` is a Lua convenience, not a new durable begin
+operation. It supplies a lazy transaction proxy. The first proxy operation must
+be `append_outbox`, `accept_inbox`, or `accept_command`; that operation creates
+the existing durable anchor and its endpoint-minted transaction id. Calling
+`acquire` before an anchor fails. On normal callback return, the façade commits
+the concrete transaction; on a Lua error, explicit rollback, or a staging
+failure, it rolls back and rethrows/returns the structured failure. A duplicate
+first operation creates no transaction and is returned as its ordinary durable
+duplicate result. Advanced users may keep using the explicit
+`workflow:append_outbox`, `accept_inbox`, and `accept_command` methods when
+they need to inspect and control each transaction step directly.
+
+On success, `workflow:transaction(fn)` returns the same commit result as the
+explicit transaction's `commit()`, including `outbox_receipts`. This gives a
+host its forwardable keys only after the durable decision. A duplicate first
+append instead returns its existing `receipt` and no commit result, because no
+new effect was committed.
+
 `run` is a blocking owner-state loop for a dedicated worker or service process.
 `pump` invokes at most its configured bounded amount of work synchronously on
 the calling Lua state, for hosts with their own event loop. Neither permits a
@@ -290,6 +361,12 @@ private liblockdc thread to access Lua. Calling either from an HTTP route is
 supported only insofar as the host itself allows it, but is documented as an
 incorrect deployment for foreign-effect dispatch because it puts effect latency
 on the request path.
+
+`pump(options)` defaults to one job and a zero wait. Its `max_jobs` must be a
+small positive bounded integer and its `timeout_ms` is bounded by the
+dispatcher shutdown/request limit. It returns the number of handler outcomes
+processed and never starts a second Lua owner loop. A host schedules another
+pump when it is ready; liblockdc does not create an event-loop thread.
 
 `run`/`pump` bind exactly one Lua owner state and one handler map for the
 dispatcher lifetime. A second concurrent run/pump, a different Lua state, or a
@@ -316,6 +393,15 @@ terminal outcome, not an in-memory timer.
 
 Vectis is not implemented in this repository. Its required liblockdc contract
 is nevertheless explicit:
+
+```text
+route worker                         supervisor process
+------------                         ------------------
+threadless workflow                  workflow dispatcher + Lua lane
+  └─ durable commit ─ receipt key ─> bounded host IPC ─> notify_outbox_key()
+       (or no wake)                     full/closed ───> reconcile()
+                                                     └──> claim → handler → outcome
+```
 
 1. Each application declares one canonical workflow configuration per durable
    namespace.
@@ -353,7 +439,8 @@ pattern, not merely individual calls:
 6. restart and reconciliation repair every missing wake.
 
 Examples must include a direct liblockdc deployment with a producer process
-and a dedicated Lua dispatcher process, plus a Vectis-facing lifecycle diagram.
+and a dedicated Lua dispatcher process, plus the Vectis-facing lifecycle
+diagram above.
 They must never demonstrate `dispatcher:run()` inside a route handler or an
 implicit dispatcher created by producer construction.
 

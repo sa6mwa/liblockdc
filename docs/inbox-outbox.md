@@ -43,9 +43,9 @@ foreign system is the required idempotency mechanism for that boundary.
   first lease when the second participant arrives; terminal releases vote and
   publish only after every enrolled participant commits. The workflow owns the
   participant ledger and terminal releases, and exposes no new coordinator.
-- The normal dispatch path passes the newly committed outbox key to an
-  internal dispatcher. The host sees work only through `workflow->next()`;
-  it does not query the namespace or manage dispatcher internals.
+- A threadless workflow producer may attach a compatible explicit dispatcher
+  for same-process post-commit key notification. Other hosts forward committed
+  receipt keys to their dispatcher through host-owned bounded IPC.
 - Indexed `query_keys()` is a recovery and reconciliation mechanism only.
 - A lease on an outbox key is its time-bounded claim. The lease and the
   post-acquisition record recheck are authoritative; a notification or query
@@ -228,6 +228,7 @@ fields, and completion evidence below are the current public surface.
 
 ```c
 typedef struct lc_workflow lc_workflow;
+typedef struct lc_workflow_dispatcher lc_workflow_dispatcher;
 typedef struct lc_workflow_transaction lc_workflow_transaction;
 typedef struct lc_workflow_participant lc_workflow_participant;
 typedef struct lc_outbox_job lc_outbox_job;
@@ -235,9 +236,14 @@ typedef struct lc_command_identity lc_command_identity;
 typedef struct lc_command_request lc_command_request;
 typedef struct lc_command_receipt lc_command_receipt;
 typedef struct lc_command_result lc_command_result;
+typedef struct lc_workflow_commit_result lc_workflow_commit_result;
 
 int (*new_workflow)(lc_client *self, const lc_workflow_config *config,
                     lc_workflow **out, lc_error *error);
+int (*new_workflow_with_dispatcher)(lc_client *self,
+                                    const lc_workflow_config *config,
+                                    lc_workflow_dispatcher *dispatcher,
+                                    lc_workflow **out, lc_error *error);
 
 struct lc_workflow {
   int (*accept_command)(lc_workflow *self,
@@ -256,24 +262,15 @@ struct lc_workflow {
                         lc_command_receipt *receipt, lc_error *error);
   int (*append_outbox)(lc_workflow *self, const lc_outbox_entry *entry,
                        lc_source *payload, lc_workflow_transaction **out,
-                       lc_outbox_receipt *receipt, lc_error *error);
+                       lc_outbox_receipt *duplicate_receipt, lc_error *error);
   int (*accept_inbox)(lc_workflow *self, const lc_inbox_message *message,
                       lc_workflow_transaction **out,
                       lc_inbox_accept_result *result, lc_error *error);
-  int (*next)(lc_workflow *self, long timeout_ms, lc_outbox_job **out,
-              lc_error *error);
-  int (*get_stats)(lc_workflow *self, lc_workflow_stats *out,
-                   lc_error *error);
-  int (*reconcile)(lc_workflow *self, lc_error *error);
-  int (*replay_dead_letter)(lc_workflow *self, const char *outbox_key,
-                            lc_error *error);
-  int (*delete_dead_letter)(lc_workflow *self, const char *outbox_key,
-                            lc_error *error);
-  int (*export_dead_letters)(lc_workflow *self,
-                             const lc_dead_letter_export_opts *options,
-                             lc_sink *dst, lc_dead_letter_export_res *out,
-                             lc_error *error);
+  int (*get_or_start_dispatcher)(lc_workflow *self,
+                                 lc_workflow_dispatcher **out,
+                                 lc_error *error);
   void (*close)(lc_workflow *self);
+  void *reserved_extension_slots[8];
 };
 
 struct lc_workflow_transaction {
@@ -285,12 +282,13 @@ struct lc_workflow_transaction {
                  lc_workflow_participant **out, lc_error *error);
   int (*append_outbox)(lc_workflow_transaction *self,
                         const lc_outbox_entry *entry, lc_source *payload,
-                        lc_outbox_receipt *out, lc_error *error);
+                        lc_outbox_receipt *duplicate_receipt, lc_error *error);
   int (*complete_command)(lc_workflow_transaction *self,
                           const lc_command_result *result, lc_error *error);
   int (*fail_command)(lc_workflow_transaction *self,
                       const lc_command_result *result, lc_error *error);
-  int (*commit)(lc_workflow_transaction *self, lc_error *error);
+  int (*commit)(lc_workflow_transaction *self,
+                lc_workflow_commit_result *out, lc_error *error);
   int (*rollback)(lc_workflow_transaction *self, lc_error *error);
   void (*close)(lc_workflow_transaction *self);
 };
@@ -380,11 +378,12 @@ The ABI-reviewed names below establish these interaction boundaries:
   metadata, keepalive, and streaming attachment operations. It deliberately
   exposes no `release()` or transaction-decision operation. Later outbox
   entries use the same workflow-owned xid through `txn->append_outbox()`.
-- An outbox receipt contains the stable outbox identity and `effect_key` needed
-  for logs and foreign-system calls without revealing storage layout. A
-  matching committed outbox append returns that existing receipt as a successful
-  `duplicate` result and returns no transaction; a caller therefore cannot
-  accidentally repeat the associated domain mutation.
+- A successful transaction commit returns the stable outbox identities and
+  `effect_key` values needed for post-commit wakes, logs, and foreign-system
+  calls without revealing storage layout. A matching committed outbox append
+  returns that existing receipt as a successful `duplicate` result and returns
+  no transaction; a caller therefore cannot accidentally repeat the associated
+  domain mutation. Fresh staged appends never expose a wakeable outbox key.
 - Inbox acceptance reports `accepted` or `duplicate` as successful structured
   outcomes. It does not force callers to inspect an error string to distinguish
   a normal duplicate from a conflict.
@@ -451,13 +450,13 @@ end
 -- A duplicate returns the stored command receipt, including pending or
 -- terminal outcome, and never repeats the domain mutation.
 
-local txn, receipt = workflow:append_outbox(entry, payload_source)
+local txn = workflow:append_outbox(entry, payload_source)
 
 local order = txn:acquire({ namespace = "orders", key = order_id,
                             owner = "orders-api", ttl_seconds = 30 })
 order:update_raw(order_update_source)
 txn:append_outbox(entry, payload_source)
-local result = txn:commit()
+local result = txn:commit() -- result.outbox_receipts are now safe to wake
 
 local inbound_txn, accepted = workflow:accept_inbox(message)
 if accepted.accepted then
@@ -475,7 +474,8 @@ if accepted.accepted then
   inbound_txn:commit()
 end
 
-local job = workflow:next(1000)
+local dispatcher = workflow:dispatcher()
+local job = dispatcher:next(1000)
 if job then
   job:write_payload(foreign_request_body_sink)
   -- host-owned Lua code performs the foreign effect here.
@@ -484,15 +484,16 @@ end
 ```
 
 Lua receives explicit result values and normal `nil, error` failures. Payload
-objects retain the binding's streaming semantics. `workflow:next()` runs in the
-calling Lua context; the private native dispatcher never enters a Lua VM or
+objects retain the binding's streaming semantics. `dispatcher:next()` runs in
+the calling Lua context; the private native dispatcher never enters a Lua VM or
 invokes a Lua callback. This keeps the facility usable by any Lua host without
 assuming its scheduler, mailbox, or runtime-lifetime rules.
 
-The Lua façade supplies the matching parent operations as `workflow:stats()`,
-`workflow:reconcile()`, `workflow:replay_dead_letter(outbox_key)`,
-`workflow:delete_dead_letter(outbox_key)`, and
-`workflow:export_dead_letters(options, destination)`. `options.format` is
+The Lua dispatcher façade supplies the matching consumer operations as
+`dispatcher:stats()`, `dispatcher:reconcile()`,
+`dispatcher:replay_dead_letter(outbox_key)`,
+`dispatcher:delete_dead_letter(outbox_key)`, and
+`dispatcher:export_dead_letters(options, destination)`. `options.format` is
 `"json"` or `"jsonl"`; an omitted destination returns the bounded export as a
 Lua string, while the usual Lua file/fd destination forms stream directly.
 
@@ -508,8 +509,9 @@ materialized string.
 
 The C and Lua surfaces must have parity for workflow creation, first-operation
 command/outbox/inbox transaction creation, command status and terminal result,
-commit/rollback, later outbox append, parent `next()`, job inspection, payload
-streaming, renewal, retry, completion, and dead-lettering. Host integrations
+commit/rollback, later outbox append, dispatcher acquisition, dispatcher
+`next()`, job inspection, payload streaming, renewal, retry, completion, and
+dead-lettering. Host integrations
 may add conveniences, but may not weaken
 the durable semantics or replace direct job ownership with callbacks.
 
@@ -855,28 +857,31 @@ remains the limiting correctness boundary.
 
 ## Dispatcher
 
-The dispatcher is private to `lc_workflow`: it owns a remote client clone or a
-retained Pouch-session reference and its coordination thread, but never runs
-user code. A Pouch workflow deliberately shares its one local session with the
-parent workflow so default exclusive-root ownership remains valid. The host
-calls the parent receiver's `workflow->next(timeout_ms, &job, error)`, receives
-an owned claimed job, performs the foreign effect, and calls the job's
+The dispatcher is an explicit `lc_workflow_dispatcher` acquired from a
+threadless workflow. It owns a remote client clone or retained Pouch-session
+reference and its coordination thread, but never runs user code. Pouch keeps
+the necessary retained local-session ownership valid for its configured root
+mode. The host calls `dispatcher->next(timeout_ms, &job, error)`, receives an
+owned claimed job, performs the foreign effect, and calls the job's
 `complete()`, `retry()`, or `dead_letter()` operation. Dispatcher
-configuration belongs to the workflow configuration; there is no public
-dispatcher handle, start, stop, or signal surface.
+configuration is the canonical workflow configuration; see
+[the workflow dispatch architecture](workflow-dispatch-architecture.md) for
+registry, attachment, start, stop, wait, and close rules.
 
 ### Direct-key fast path
 
-After an outbox transaction commits, liblockdc internally passes the exact
-outbox key to its dispatcher. The dispatcher attempts to acquire that key
-directly and does not perform a namespace query.
+After an attached outbox transaction commits, liblockdc passes the exact
+outbox key to its compatible dispatcher. A host with a separate producer and
+dispatcher process calls `dispatcher->notify_outbox_key()` after its own
+bounded key handoff. The dispatcher attempts to acquire that key directly and
+does not perform a namespace query.
 
 The in-memory notification path and preclaimed-job handoff are bounded by
-`notification_capacity`. The dispatcher stops claiming when the host handoff
-is full and resumes when `next()` consumes a job. It may coalesce duplicate
-keys. If it cannot retain another notification, it records a recovery-needed
-condition and wakes the dispatcher; it never makes durable work depend on an
-unbounded memory queue.
+`notification_capacity`. The dispatcher stops claiming when its consumer
+handoff is full and resumes when `dispatcher->next()` consumes a job. It may
+coalesce duplicate keys. If it cannot retain another notification, it records a
+recovery-needed condition and schedules reconciliation; it never makes durable
+work depend on an unbounded memory queue.
 
 The outbox record must be committed before notification. A process failure
 between those actions is safe because recovery discovers the durable key later.
@@ -885,16 +890,16 @@ between those actions is safe because recovery discovers the durable key later.
 
 The dispatcher thread is a liblockdc coordination thread only. It must not
 invoke caller-owned C callbacks, Lua, Kore, or any other host-runtime code.
-The only handoff to host execution is an owned job returned from
-`workflow->next()`; there is no callback registration API. This keeps thread
-affinity, runtime lifetime, and host scheduling under the application's
-control.
+The raw handoff to host execution is an owned job returned from
+`dispatcher->next()`. Lua `run()` and `pump()` invoke Lua only on their caller
+owner state. This keeps thread affinity, runtime lifetime, and host scheduling
+under the application's control.
 
 The dispatcher owns its remote client clone or retained Pouch-session reference
 and its thread lifecycle. Callers must not rely on its client, lease,
 payload-transfer handle, or thread being usable from another process or as a
-host-runtime execution context. A job returned from `workflow->next()` is the
-explicit owned boundary for a host worker.
+host-runtime execution context. A job returned from `dispatcher->next()` is
+the explicit owned boundary for a host worker.
 
 For a remote endpoint, the private dispatcher clone uses
 `LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT` for its library-owned record reads. The
@@ -912,18 +917,18 @@ client's typed-JSON response budget, with zero retaining the documented
 command metadata are validated as one durable receipt before persistence, so a
 client cannot commit a receipt that it will later be unable to read.
 
-`workflow->close()` prevents new claims and notifications, wakes blocked
-`next()` callers, cancels a remote dispatcher request, and joins the private
-dispatcher. A handed-off job owns a separate uncancelled remote client, so it
-remains usable for payload streaming, renewal, and terminal completion after
-the workflow closes. `shutdown_timeout_ms` bounds each remote dispatcher
-request; zero inherits an explicit root-client timeout or defaults to 30
-seconds. Close never abandons a live thread. It does not
-manufacture completion, retry, or dead-letter transitions for jobs already
-handed to host workers, run host work, or forcibly terminate it. The
+`workflow->close()` releases only a producer and any local dispatcher
+attachment. `dispatcher->stop()` prevents new claims and notifications, wakes
+blocked `next()` callers, cancels a remote dispatcher request, and `wait()`
+joins its private thread. A handed-off job owns a separate uncancelled remote
+client, so it remains usable for payload streaming, renewal, and terminal
+completion after producer close. `shutdown_timeout_ms` bounds each remote
+dispatcher request; zero inherits an explicit root-client timeout or defaults
+to 30 seconds. Stop never manufactures completion, retry, or dead-letter
+transitions for handed-off jobs, runs host work, or forcibly terminates it. The
 application gives its workers a bounded shutdown grace period. A job that
 remains unfinished is left claimed until its lease expires and is then
-recovered by the normal durable recovery path.
+recovered by normal durable recovery.
 
 ### Claim and terminal transitions
 
@@ -1135,9 +1140,9 @@ system's backoff instruction, but liblockdc rejects values above
 `host_retry_delay_max`. After the final failed attempt the record is
 dead-lettered; it is never discarded automatically. These defaults and limits
 are exposed through `lc_workflow_config`; zero selects the defaults. A retry
-scheduled by a live workflow is held as a bounded delayed direct-key signal,
+scheduled by a live dispatcher is held as a bounded delayed direct-key signal,
 not a queue entry or a namespace scan. Scheduler overflow and work owned after
-workflow shutdown remain recoverable through the durable reconciliation path.
+dispatcher shutdown remain recoverable through the durable reconciliation path.
 A host renewing a claim for a longer foreign effect must do so before the
 five-minute claim expiry. Renewal also durably publishes the renewed recovery
 deadline, bound to that delivery attempt and replay generation, so another
@@ -1145,7 +1150,7 @@ process does not retry a still-live shared-Pouch claim at its superseded
 deadline. A stale renewal hint never applies to a completed or later claim.
 
 The component exposes an MVP read-only, process-local snapshot through
-`lc_workflow_get_stats()` / `workflow:stats()`, including:
+`lc_workflow_dispatcher_get_stats()` / `dispatcher:stats()`, including:
 
 ```text
 direct_notifications (all accepted internal key notifications)
@@ -1160,8 +1165,8 @@ latest dispatcher error text
 
 The snapshot also reports the current bounded notification and ready-job
 backlogs. It does not query or aggregate durable namespace counts, and it is
-reset on workflow recreation. These counters are observability only; durable
-state keys remain the sole recovery source of truth.
+reset when its dispatcher is replaced. These counters are observability only;
+durable state keys remain the sole recovery source of truth.
 
 ## Required Verification
 
@@ -1220,17 +1225,17 @@ the repaired remote implicit-XA contract is present in that E2E environment.
     profile with retained terminal population, continuous state-transition
     churn, and an un-compacted Pouch log; payload size must not change
     discovery cost.
-16. Parent close behavior leaves incomplete claims for later expiry recovery
-    and never manufactures completion.
+16. Producer close releases any dispatcher attachment, leaves incomplete claims
+    for later expiry recovery, and never manufactures completion.
 17. The dispatcher never invokes host callbacks or host-runtime code on its
-    thread; a host worker receives work only through `next()` and owns its
-    execution context.
-18. Shutdown stops new claims, wakes blocked parent `next()` callers, joins
-    the private dispatcher within the configured deadline, and permits an
-    active host job to recover through lease expiry after its grace period.
+    thread; a host worker receives work only through `dispatcher->next()` or a
+    caller-owned Lua run/pump execution context.
+18. Dispatcher shutdown stops new claims, wakes blocked `next()` callers,
+    joins the private dispatcher within the configured deadline, and permits
+    an active host job to recover through lease expiry after its grace period.
 19. C and Lua integration tests prove the same observable workflow outcomes:
     idempotent command/append/accept, explicit duplicate results, command
-    result status/streaming, parent `next()` streamed-payload handoff, and
+    result status/streaming, dispatcher `next()` streamed-payload handoff, and
     terminal job transitions without dispatcher thread callbacks.
 20. Transaction ownership is enforced: a workflow participant exposes no
     release/decision method; the transaction begins only from its deterministic
@@ -1247,8 +1252,8 @@ the repaired remote implicit-XA contract is present in that E2E environment.
 ## Reconciliation Performance Benchmark
 
 `lockdc_bench workflow-reconcile` is the load benchmark for the recovery path.
-It seeds public outbox envelopes through the normal client API, then starts a
-new workflow so that delivery can occur only through its private indexed
+It seeds public outbox envelopes through the normal client API, then starts an
+explicit dispatcher so that delivery can occur only through its indexed
 reconciliation path. The workload contains:
 
 - `pending_rows` dispatchable records, each with an optional payload

@@ -267,20 +267,23 @@ read, query, and mutation paths never enumerate consumer records.
 
 ## Inbox/outbox workflows
 
-`client:new_workflow(config)` creates the inbox/outbox parent receiver. Its
-`namespace` (or `namespace_name`) contains both durable inbox and outbox keys;
-the private dispatcher signals committed keys locally and performs recovery
-internally. Lua code never supplies an xid, manages the dispatcher, or receives
-a callback from its thread.
+`client:new_workflow(config)` creates a threadless inbox/outbox producer. Its
+`namespace` (or `namespace_name`) contains both durable inbox and outbox keys.
+It never starts a dispatcher, claims a job, performs recovery, or invokes a
+foreign effect. Use `workflow:dispatcher()` only in the dedicated worker or
+service domain that owns delivery. The complete lifecycle and host-integration
+contract is in [the workflow dispatch architecture](workflow-dispatch-architecture.md).
 
 ```lua
+-- Request/producer domain: this is safe to construct without creating a
+-- background dispatcher.
 local workflow = assert(client:new_workflow({
   namespace = "orders-workflow",
   owner = "orders-api",
   max_attempts = 100,
 }))
 
-local txn, receipt = assert(workflow:append_outbox({
+local txn = assert(workflow:append_outbox({
   operation_id = order_id,
   effect_id = "charge-card",
   effect_key = "charge:" .. order_id,
@@ -293,14 +296,30 @@ local txn, receipt = assert(workflow:append_outbox({
 local order = assert(txn:acquire({ namespace_name = "orders", key = order_id }))
 assert(order:update_json({ status = "payment_pending" }))
 order:close()
-assert(txn:commit())
+local commit = assert(txn:commit())
 txn:close()
 
-local job = assert(workflow:next(1000))
--- Stream arbitrary bytes to a host-owned request-body sink; no dispatcher
--- thread enters the Lua VM.
-assert(job:write_payload(foreign_request_body_sink))
-assert(job:complete())
+-- `commit.outbox_receipts` exists only after the durable commit. A host with a
+-- bounded worker/supervisor wake channel may copy those keys now, never before.
+
+-- worker.lua, in a dedicated worker/service process. This opens its own client
+-- and workflow, then returns the one compatible local dispatcher or starts it
+-- lazily. It does not run Lua on its private C thread.
+local worker_client = assert(lockdc.open(worker_client_config))
+local worker_workflow = assert(worker_client:new_workflow({
+  namespace = "orders-workflow",
+  owner = "orders-api",
+  max_attempts = 100,
+}))
+local dispatcher = assert(worker_workflow:dispatcher())
+assert(dispatcher:run({
+  handlers = {
+    http = function(job)
+      assert(job:write_payload(foreign_request_body_sink))
+      return job:complete()
+    end,
+  },
+}))
 ```
 
 `headers` is the façade convenience form and is JSON-encoded into the durable
@@ -323,8 +342,9 @@ Workflow receivers are explicit and owned. Parent acceptance and append
 operations return a new `WorkflowTransaction` only when they created fresh
 durable work:
 
-- `workflow:append_outbox(entry, payload)` returns `txn, receipt`; a matching
-  effect returns `nil, receipt` with `receipt.duplicate`.
+- `workflow:append_outbox(entry, payload)` returns `txn, nil` for a fresh
+  append. Its receipt appears only in the successful `txn:commit()` result. A
+  matching committed effect returns `nil, receipt` with `receipt.duplicate`.
 - `workflow:accept_inbox(message)` returns `txn, result`; a matching source
   message returns `nil, result` with `result.duplicate`.
 - `workflow:accept_command(request)` returns `txn, receipt`; a matching
@@ -333,20 +353,36 @@ durable work:
   `workflow:write_command_result(identity, destination)` to stream a completed
   result body, and `workflow:resume_command(identity)` to obtain a transaction
   for a pending command. A terminal command resumes as `nil, receipt`.
-- `workflow:next(timeout_ms)` returns a claimed job. `0` only checks the local
-  ready set and `-1` waits indefinitely.
-- `workflow:stats()` returns process-local dispatcher counters;
-  `workflow:reconcile()` requests an asynchronous durable recovery sweep.
-- `workflow:replay_dead_letter(outbox_key)` returns one dead-lettered effect to
-  pending; `workflow:delete_dead_letter(outbox_key)` permanently deletes it and
-  its payload. `workflow:export_dead_letters(options, destination)` exports
+- `workflow:transaction(fn)` provides a lazy transaction proxy. Its first
+  operation must be `append_outbox`, `accept_inbox`, or `accept_command`; it
+  commits on normal callback return and rolls back on an error. Its successful
+  result includes `outbox_receipts`, so only that result contains fresh keys
+  safe to forward. It does not add a generic durable `begin()` operation.
+- `workflow:dispatcher()` acquires the compatible local dispatcher. It has no
+  configuration argument because dispatch policy comes from the workflow's
+  canonical configuration.
+- `dispatcher:next(timeout_ms)` returns a claimed job for advanced pull-based
+  consumers. `dispatcher:run({handlers = ...})` is the blocking dedicated
+  worker loop; bounded `dispatcher:pump(options)` is for hosts that own their
+  event loop. Neither should run foreign effects in an HTTP route.
+- `dispatcher:stats()` returns process-local counters;
+  `dispatcher:reconcile()` requests durable recovery.
+- `dispatcher:replay_dead_letter(outbox_key)` returns one dead-lettered effect
+  to pending; `dispatcher:delete_dead_letter(outbox_key)` permanently deletes
+  it and its payload. `dispatcher:export_dead_letters(options, destination)` exports
   envelopes as `"json"` or `"jsonl"`; omitting `destination` returns a
   materialized Lua string, while file/fd destinations stream directly.
-- `workflow:close()` stops and joins the private dispatcher.
+- `workflow:close()` releases only the producer. `dispatcher:stop()` and
+  `dispatcher:wait()` control the explicitly acquired dispatcher;
+  `dispatcher:close()` releases a handle and does not stop shared work.
 
 Transactions provide `acquire`, `append_outbox`, `accept_command`,
 `complete_command`, `fail_command`, `commit`, `rollback`, and `close`.
 `accept_command` permits at most one command receipt per transaction.
+`txn:commit()` returns `{ outbox_receipts = { ... } }` only after a durable
+commit; it returns no fresh outbox key on failure or rollback.
+`txn:append_outbox()` may return an existing duplicate receipt, which is
+already safe to forward; fresh appended keys remain commit-published.
 Participants provide `info`, `describe`, `get_raw`, `get_json`, `update_raw`,
 `update_json`, `mutate`, `mutate_local`, `metadata`, `remove`, `keepalive`, and
 the full attachment surface. Jobs provide `info`, `write_payload` (also
@@ -355,13 +391,20 @@ the full attachment surface. Jobs provide `info`, `write_payload` (also
 
 Participants deliberately have no release or terminal-decision method. Closing
 or deciding a transaction invalidates its participants, so close each view when
-finished. A workflow job is the only handoff to host effect execution; keep its
-claim alive with `job:renew()` for longer foreign operations, then select
+finished. A dispatcher job is the only handoff to host effect execution; keep
+its claim alive with `job:renew()` for longer foreign operations, then select
 exactly one terminal operation. A successful `complete`, `retry`, or
 `dead_letter` consumes the job. If a terminal operation returns an error, the
 job remains active and the same terminal operation may be retried until its
 claim expires. Use `job:close()` only when abandoning a non-terminal local
 handle; it does not retry or complete the durable job.
+
+Inside a `dispatcher:run()` or `dispatcher:pump()` handler,
+`job:complete()`, `job:retry(options)`, and `job:dead_letter(diagnostic)`
+construct an outcome that the façade applies after the handler returns. The
+same methods on a job returned by raw `dispatcher:next()` perform the direct
+terminal operation. `retry({ delay_seconds = n, diagnostic = message })`
+durably reschedules the job within the configured retry bounds.
 
 ## Raw XA and transaction-coordinator APIs
 
