@@ -331,6 +331,11 @@ typedef void (*lc_pouch_test_tail_repair_hook_fn)(void *context,
                                                   const char *segment);
 extern lc_pouch_test_tail_repair_hook_fn lc_pouch_test_tail_repair_hook;
 extern void *lc_pouch_test_tail_repair_context;
+/* Invoked under namespace mutation authority immediately before a completed
+ * terminal-reclaim pass consumes its durable marker. */
+extern lc_pouch_test_hook
+    lc_pouch_test_before_terminal_reclaim_marker_remove_hook;
+extern void *lc_pouch_test_before_terminal_reclaim_marker_remove_context;
 /* Extends only test batch coalescing, without changing production scheduling.
  */
 extern long lc_pouch_test_fsync_batch_delay_ns;
@@ -388,6 +393,11 @@ void lc_pouch_compaction_note_mutation(lc_pouch *pouch,
 int lc_pouch_compaction_note_history_advanced(lc_pouch *pouch,
                                               const char *namespace_name,
                                               lc_error *error);
+/* Consumes completed terminal-reclaim work while the caller holds the same
+ * namespace mutation authority used to make the reclamation decision. */
+int lc_pouch_terminal_reclaim_marker_remove(lc_pouch *pouch,
+                                            const char *namespace_name,
+                                            lc_error *error);
 /**
  * Reads the oldest durable history-consumer acknowledgement for one namespace.
  * Callers that make a reclamation decision must hold that namespace's mutation

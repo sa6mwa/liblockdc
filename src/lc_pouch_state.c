@@ -75,6 +75,9 @@ lc_pouch_test_body_append_hook_fn lc_pouch_test_body_append_hook = NULL;
 void *lc_pouch_test_body_append_context = NULL;
 lc_pouch_test_tail_repair_hook_fn lc_pouch_test_tail_repair_hook = NULL;
 void *lc_pouch_test_tail_repair_context = NULL;
+lc_pouch_test_hook lc_pouch_test_before_terminal_reclaim_marker_remove_hook =
+    NULL;
+void *lc_pouch_test_before_terminal_reclaim_marker_remove_context = NULL;
 #endif
 
 typedef struct lc_pouch_state_namespace_lock {
@@ -11608,6 +11611,31 @@ int lc_pouch_maintenance_run(lc_pouch *pouch,
   rc = lc_pouch_maintenance_run_locked(pouch, options, out, error);
   rc = lc_pouch_state_finish_commit_group(commit_group, owns_commit_group, rc,
                                           error);
+  if (rc == LC_OK && options->terminal_reclaim &&
+      (out == NULL || out->cleanup_pending_count == 0UL)) {
+    lc_error marker_error;
+
+    lc_error_init(&marker_error);
+#ifdef LOCKDC_TEST_BUILD
+    if (lc_pouch_test_before_terminal_reclaim_marker_remove_hook != NULL) {
+      (void)lc_pouch_test_before_terminal_reclaim_marker_remove_hook(
+          lc_pouch_test_before_terminal_reclaim_marker_remove_context,
+          &marker_error);
+    }
+#endif
+    if (marker_error.code == LC_OK &&
+        lc_pouch_terminal_reclaim_marker_remove(pouch, namespace_name,
+                                                &marker_error) != LC_OK) {
+      pslog_field fields[3];
+
+      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[1] = lc_log_error_field("error", &marker_error);
+      fields[2] = lc_log_code_field(&marker_error);
+      lc_log_warn(pouch->logger, "compaction.terminal.marker.error", fields,
+                  3U);
+    }
+    lc_error_cleanup(&marker_error);
+  }
   if (rc != LC_OK) {
     lc_pouch_state_cache_invalidate_namespace(pouch, namespace_name);
   }

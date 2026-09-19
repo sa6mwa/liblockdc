@@ -928,9 +928,9 @@ static int lc_pouch_terminal_reclaim_marker_take(lc_pouch *pouch,
   return rc;
 }
 
-static int lc_pouch_terminal_reclaim_marker_remove(lc_pouch *pouch,
-                                                   const char *namespace_name,
-                                                   lc_error *error) {
+int lc_pouch_terminal_reclaim_marker_remove(lc_pouch *pouch,
+                                            const char *namespace_name,
+                                            lc_error *error) {
   char *directory;
   char *path;
   int rc;
@@ -1093,21 +1093,6 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
                     3U);
       }
       lc_error_cleanup(&queue_error);
-    } else if (terminal_reclaim) {
-      lc_error marker_error;
-
-      lc_error_init(&marker_error);
-      if (lc_pouch_terminal_reclaim_marker_remove(pouch, namespace_name,
-                                                  &marker_error) != LC_OK) {
-        pslog_field fields[3];
-
-        fields[0] = lc_log_str_field("ns", namespace_name);
-        fields[1] = lc_log_error_field("error", &marker_error);
-        fields[2] = lc_log_code_field(&marker_error);
-        lc_log_warn(pouch->logger, "compaction.terminal.marker.error", fields,
-                    3U);
-      }
-      lc_error_cleanup(&marker_error);
     }
     lc_error_cleanup(&maintenance_error);
     lc_pouch_maintenance_result_cleanup(&pouch->allocator, &result);

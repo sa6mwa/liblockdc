@@ -377,6 +377,19 @@ typedef struct pouch_body_cache_retire_context {
   int write_rc;
 } pouch_body_cache_retire_context;
 
+typedef struct pouch_history_marker_race_context {
+  lc_pouch *pouch;
+  lc_history_consumer *consumer;
+  lc_index_seq acknowledged_index_seq;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+  int removal_ready;
+  int advance_started;
+  int allow_removal;
+  int advance_rc;
+  lc_error advance_error;
+} pouch_history_marker_race_context;
+
 typedef struct pouch_maintenance_barrier_context {
   lc_pouch *pouch;
   pthread_mutex_t mutex;
@@ -3897,6 +3910,47 @@ static int pouch_compaction_process_wait_hook(void *context, lc_error *error) {
     return LC_ERR_TRANSPORT;
   }
   return LC_OK;
+}
+
+static int pouch_history_marker_remove_wait_hook(void *context,
+                                                 lc_error *error) {
+  pouch_history_marker_race_context *race;
+
+  (void)error;
+  race = (pouch_history_marker_race_context *)context;
+  assert_non_null(race);
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  race->removal_ready = 1;
+  assert_int_equal(pthread_cond_broadcast(&race->cond), 0);
+  while (!race->allow_removal) {
+    assert_int_equal(pthread_cond_wait(&race->cond, &race->mutex), 0);
+  }
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+  return LC_OK;
+}
+
+static void *pouch_history_marker_run_pass(void *context) {
+  pouch_history_marker_race_context *race;
+
+  race = (pouch_history_marker_race_context *)context;
+  lc_pouch_test_compaction_run_pass(race->pouch);
+  return NULL;
+}
+
+static void *pouch_history_marker_advance_consumer(void *context) {
+  pouch_history_marker_race_context *race;
+  lc_history_consumer_position position;
+
+  race = (pouch_history_marker_race_context *)context;
+  memset(&position, 0, sizeof(position));
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  race->advance_started = 1;
+  assert_int_equal(pthread_cond_broadcast(&race->cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+  race->advance_rc =
+      race->consumer->advance(race->consumer, race->acknowledged_index_seq,
+                              &position, &race->advance_error);
+  return NULL;
 }
 
 typedef struct test_binary_buffer {
@@ -16729,6 +16783,129 @@ static void test_history_consumer_pins_compaction_and_persists(void **state) {
   lc_history_consumer_close(current);
   current = NULL;
   lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_history_consumer_advance_preserves_new_reclaim_marker(void **state) {
+  lc_client *client;
+  lc_client_handle *handle;
+  lc_history_consumer *consumer;
+  lc_history_consumer_config config;
+  lc_history_consumer_position position;
+  lc_pouch_state_write_result write_result;
+  lc_source *body;
+  pouch_history_marker_race_context race;
+  lc_error error;
+  pthread_t pass_thread;
+  pthread_t advance_thread;
+  char root[512];
+  char endpoint[600];
+  char marker_directory[1024];
+  char marker_path[1024];
+  char *marker_leaf;
+  int rc;
+  int written;
+
+  (void)state;
+  client = NULL;
+  consumer = NULL;
+  body = NULL;
+  marker_leaf = NULL;
+  memset(&position, 0, sizeof(position));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&race, 0, sizeof(race));
+  lc_error_init(&error);
+  make_root("history-marker-race", root, sizeof(root));
+  cleanup_root(root);
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?segment_target_bytes=1&"
+                     "background_compaction=false",
+                     root);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  open_pouch_client_endpoint(endpoint, &client, &error);
+  handle = (lc_client_handle *)client;
+
+  rc = lc_source_from_memory("history", strlen("history"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(handle->pouch, "history/race", "state/a", body,
+                            NULL, &write_result, &error);
+  assert_int_equal(rc, LC_OK);
+  lc_source_close(body);
+  body = NULL;
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+
+  lc_history_consumer_config_init(&config);
+  config.namespace_name = "history/race";
+  config.consumer_id = "replica/race";
+  config.initial_acknowledged_index_seq = 0U;
+  rc = lc_client_new_history_consumer(client, &config, &consumer, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = consumer->position(consumer, &position, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(position.current_index_seq > position.acknowledged_index_seq);
+
+  /* Seed the durable work selected by the pass. The production transition is
+   * an earlier terminal write; this direct notification isolates the cursor
+   * advancement/removal interleaving. */
+  rc = lc_pouch_compaction_note_history_advanced(handle->pouch, "history/race",
+                                                 &error);
+  assert_int_equal(rc, LC_OK);
+  marker_leaf = lc_pouch_path_escape_name(NULL, "history/race");
+  assert_non_null(marker_leaf);
+  written = snprintf(marker_directory, sizeof(marker_directory),
+                     "%s/.lockd/terminal-reclaim", root);
+  assert_true(written > 0 && (size_t)written < sizeof(marker_directory));
+  written = snprintf(marker_path, sizeof(marker_path), "%s/%s",
+                     marker_directory, marker_leaf);
+  assert_true(written > 0 && (size_t)written < sizeof(marker_path));
+  assert_true(path_is_file(marker_path));
+
+  /* The test runs one selected pass directly. The normal worker was disabled
+   * at open so no unrelated turn can consume the seeded marker. */
+  handle->pouch->background_compaction_enabled = 1;
+  handle->pouch->compaction_interval_seconds = 1U;
+  race.pouch = handle->pouch;
+  race.consumer = consumer;
+  race.acknowledged_index_seq = position.current_index_seq;
+  lc_error_init(&race.advance_error);
+  assert_int_equal(pthread_mutex_init(&race.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&race.cond, NULL), 0);
+  lc_pouch_test_before_terminal_reclaim_marker_remove_hook =
+      pouch_history_marker_remove_wait_hook;
+  lc_pouch_test_before_terminal_reclaim_marker_remove_context = &race;
+  assert_int_equal(
+      pthread_create(&pass_thread, NULL, pouch_history_marker_run_pass, &race),
+      0);
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  while (!race.removal_ready) {
+    assert_int_equal(pthread_cond_wait(&race.cond, &race.mutex), 0);
+  }
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+  assert_int_equal(pthread_create(&advance_thread, NULL,
+                                  pouch_history_marker_advance_consumer, &race),
+                   0);
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  while (!race.advance_started) {
+    assert_int_equal(pthread_cond_wait(&race.cond, &race.mutex), 0);
+  }
+  race.allow_removal = 1;
+  assert_int_equal(pthread_cond_broadcast(&race.cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+  assert_int_equal(pthread_join(pass_thread, NULL), 0);
+  assert_int_equal(pthread_join(advance_thread, NULL), 0);
+  lc_pouch_test_before_terminal_reclaim_marker_remove_hook = NULL;
+  lc_pouch_test_before_terminal_reclaim_marker_remove_context = NULL;
+  assert_int_equal(race.advance_rc, LC_OK);
+  assert_true(path_is_file(marker_path));
+
+  assert_int_equal(pthread_cond_destroy(&race.cond), 0);
+  assert_int_equal(pthread_mutex_destroy(&race.mutex), 0);
+  lc_error_cleanup(&race.advance_error);
+  lc_history_consumer_close(consumer);
+  lc_client_close(client);
+  lc_free_with_allocator(NULL, marker_leaf);
   cleanup_root(root);
   lc_error_cleanup(&error);
 }
@@ -35584,6 +35761,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_metadata_batch_rollover_resets_active_segment_size),
       cmocka_unit_test(test_state_terminal_reclaim_installs_snapshot),
       cmocka_unit_test(test_history_consumer_pins_compaction_and_persists),
+      cmocka_unit_test(
+          test_history_consumer_advance_preserves_new_reclaim_marker),
       cmocka_unit_test(test_history_consumer_corruption_blocks_compaction),
       cmocka_unit_test(test_state_compaction_does_not_scan_root_at_open),
       cmocka_unit_test(test_state_replay_ignores_stale_generation),
