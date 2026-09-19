@@ -362,9 +362,10 @@ durable work:
   configuration argument because dispatch policy comes from the workflow's
   canonical configuration.
 - `dispatcher:next(timeout_ms)` returns a claimed job for advanced pull-based
-  consumers. `dispatcher:run({handlers = ...})` is the blocking dedicated
-  worker loop; bounded `dispatcher:pump(options)` is for hosts that own their
-  event loop. Neither should run foreign effects in an HTTP route.
+  consumers and claims only on that demand. `dispatcher:run({handlers = ...})`
+  is the blocking dedicated worker loop; bounded `dispatcher:pump(options)` is
+  for hosts that own their event loop. Neither should run foreign effects in an
+  HTTP route.
 - `dispatcher:stats()` returns process-local counters;
   `dispatcher:reconcile()` requests durable recovery.
 - `dispatcher:replay_dead_letter(outbox_key)` returns one dead-lettered effect

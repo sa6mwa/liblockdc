@@ -402,7 +402,8 @@ The ABI-reviewed names below establish these interaction boundaries:
 Errors must identify the failed semantic operation and relevant identity
 (`idempotency_key`, operation ID, inbox identity, or outbox receipt) without
 logging payload bytes, request digests, or credentials. The API must reject
-contradictory configuration before a worker thread starts.
+contradictory configuration before workflow construction or dispatcher
+acquisition.
 
 ### Transaction creation and ownership
 
@@ -876,12 +877,17 @@ dispatcher process calls `dispatcher->notify_outbox_key()` after its own
 bounded key handoff. The dispatcher attempts to acquire that key directly and
 does not perform a namespace query.
 
-The in-memory notification path and preclaimed-job handoff are bounded by
-`notification_capacity`. The dispatcher stops claiming when its consumer
-handoff is full and resumes when `dispatcher->next()` consumes a job. It may
+The in-memory notification path is bounded by `notification_capacity`. It holds
+candidate keys, not preclaimed jobs. `dispatcher->next()` requests one unit of
+consumer capacity, then claims one candidate directly. The dispatcher may
 coalesce duplicate keys. If it cannot retain another notification, it records a
 recovery-needed condition and schedules reconciliation; it never makes durable
-work depend on an unbounded memory queue.
+work depend on an unbounded memory queue or claim set.
+
+Reconciliation streams candidate keys with a resumable cursor. When the shared
+candidate budget is full, it records the cursor and resumes only after a
+consumer request drains capacity. It never materializes the outstanding outbox
+population and never claims a record merely because reconciliation found it.
 
 The outbox record must be committed before notification. A process failure
 between those actions is safe because recovery discovers the durable key later.
@@ -919,16 +925,19 @@ client cannot commit a receipt that it will later be unable to read.
 
 `workflow->close()` releases only a producer and any local dispatcher
 attachment. `dispatcher->stop()` prevents new claims and notifications, wakes
-blocked `next()` callers, cancels a remote dispatcher request, and `wait()`
-joins its private thread. A handed-off job owns a separate uncancelled remote
-client, so it remains usable for payload streaming, renewal, and terminal
-completion after producer close. `shutdown_timeout_ms` bounds each remote
-dispatcher request; zero inherits an explicit root-client timeout or defaults
-to 30 seconds. Stop never manufactures completion, retry, or dead-letter
-transitions for handed-off jobs, runs host work, or forcibly terminates it. The
-application gives its workers a bounded shutdown grace period. A job that
-remains unfinished is left claimed until its lease expires and is then
-recovered by normal durable recovery.
+blocked `next()` callers, cancels a remote dispatcher request, and waits up to
+its deadline for shutdown. `wait()` observes a stop already in progress or
+continues after a stop timeout. A handed-off job remains usable for payload
+streaming, renewal, and terminal completion after producer or dispatcher stop.
+`shutdown_timeout_ms` bounds each remote dispatcher request; zero inherits an
+explicit root-client timeout or defaults to 30 seconds. Stop never
+manufactures completion, retry, or dead-letter transitions for handed-off jobs,
+runs host work, or forcibly terminates it. The application gives its workers a
+bounded shutdown grace period. A job that remains unfinished is left claimed
+until its lease expires and is then recovered by normal durable recovery.
+Client close is the stronger invalidation boundary: after it returns, remaining
+workflow, dispatcher, and job handles are closed and unfinished claims recover
+through expiry.
 
 ### Claim and terminal transitions
 
@@ -1098,7 +1107,7 @@ configuration must additionally bound:
 - scope, command type, idempotency key, request digest, operation, effect,
   source, consumer, kind, destination, schema, and header sizes;
 - attachment size when the application requests a maximum;
-- dispatcher notification and preclaimed-job capacity;
+- dispatcher notification-candidate capacity and host-selected worker capacity;
 - claim TTL, renewal cadence, retry delay, and maximum attempts; and
 - retained diagnostics and dead-letter retention.
 
@@ -1153,20 +1162,21 @@ The component exposes an MVP read-only, process-local snapshot through
 `lc_workflow_dispatcher_get_stats()` / `dispatcher:stats()`, including:
 
 ```text
-direct_notifications (all accepted internal key notifications)
+direct_notifications (all accepted direct-key notifications)
 notification_overflows
 recovery_queries
-recovered_claims (outbox keys rediscovered by reconciliation)
+recovered_candidates (outbox keys rediscovered by reconciliation)
 claim_losses
 payload_open_failures
 dispatcher lifecycle state
 latest dispatcher error text
 ```
 
-The snapshot also reports the current bounded notification and ready-job
-backlogs. It does not query or aggregate durable namespace counts, and it is
-reset when its dispatcher is replaced. These counters are observability only;
-durable state keys remain the sole recovery source of truth.
+The snapshot also reports the current bounded notification-candidate backlog
+plus delayed wakes and waiting consumer requests. It does not query or
+aggregate durable namespace counts, and it is reset when its dispatcher is
+replaced. These counters are observability only; durable state keys remain the
+sole recovery source of truth.
 
 ## Required Verification
 
@@ -1200,7 +1210,8 @@ the repaired remote implicit-XA contract is present in that E2E environment.
 6. Repeated outbox append with the same operation/effect identity creates one
    intent; a conflicting immutable repeat fails.
 7. Inbox redelivery is idempotent and a payload-digest conflict is rejected.
-8. The ordinary append-to-dispatch path performs no recovery query.
+8. Direct-key notification performs no recovery query and claims nothing until
+   a consumer requests one job.
 9. A process crash after commit and before notification is recovered by another
    dispatcher from an indexed query.
 10. A crash after the foreign effect and before completion redelivers the same
@@ -1218,21 +1229,23 @@ the repaired remote implicit-XA contract is present in that E2E environment.
     active lease-authorized claim and recover abandoned claims. Tests must not
     assert identical public visibility of a live `claimed` envelope across the
     two backends.
-15. The regression baseline seeds 256 pending records with a 16-key
-    notification bound, proves paged indexed reconciliation delivers every
-    record, and records wall-clock latency under a deliberately broad 30-second
-    failure bound. A separate load benchmark before v1 release must extend this
-    profile with retained terminal population, continuous state-transition
-    churn, and an un-compacted Pouch log; payload size must not change
-    discovery cost.
+15. The regression baseline seeds 256 pending records with a 16-key shared
+    candidate bound and proves paged reconciliation delivers every record
+    through deterministic query-page, candidate, and claim counts. It proves
+    that a full candidate budget retains a resumable cursor rather than
+    materializing or claiming later keys. A separate load benchmark before v1
+    release must extend this profile with retained terminal population,
+    continuous state-transition churn, and an un-compacted Pouch log; payload
+    size must not change discovery cost.
 16. Producer close releases any dispatcher attachment, leaves incomplete claims
     for later expiry recovery, and never manufactures completion.
 17. The dispatcher never invokes host callbacks or host-runtime code on its
     thread; a host worker receives work only through `dispatcher->next()` or a
     caller-owned Lua run/pump execution context.
-18. Dispatcher shutdown stops new claims, wakes blocked `next()` callers,
-    joins the private dispatcher within the configured deadline, and permits
-    an active host job to recover through lease expiry after its grace period.
+18. Dispatcher shutdown stops new claims, wakes blocked `next()` callers, and
+    waits only to its configured deadline. A timeout remains stopping and a
+    later wait can observe completion; an active host job may still reach a
+    terminal outcome or recover through lease expiry after its grace period.
 19. C and Lua integration tests prove the same observable workflow outcomes:
     idempotent command/append/accept, explicit duplicate results, command
     result status/streaming, dispatcher `next()` streamed-payload handoff, and

@@ -112,6 +112,14 @@ A separate host forwards only a successful commit result's fresh receipts or an
 already committed duplicate receipt. No public API exposes a fresh staged
 outbox key that could accidentally be sent before commit.
 
+Commit-result storage is prepared before the terminal backend decision. If the
+library cannot allocate or copy the required result, it returns before voting
+commit and leaves the transaction available for rollback or retry. Once the
+backend confirms a commit, returning its receipts cannot fail due to local
+allocation. An indeterminate backend error returns no fresh receipt even if a
+later recovery proves the commit durable; reconciliation is then the required
+repair path.
+
 Closing a workflow closes any still-open owned transaction by best-effort
 rollback, releases any attached dispatcher reference, and releases its client
 reference. It never stops a dispatcher.
@@ -121,15 +129,16 @@ reference. It never stops a dispatcher.
 `lc_workflow_dispatcher` is an opaque receiver with an independent explicit
 lifecycle. It owns:
 
-- the bounded direct-key wake queue and its delayed retry wakes;
+- bounded direct-key candidate and delayed-retry wake queues;
 - a private C-only notification/recovery thread and, for remote endpoints, its
   dedicated bounded dispatcher client;
-- targeted claim/read for supplied outbox keys;
+- targeted claim/read only when a consumer requests work;
 - indexed reconciliation, claim-expiry recovery, retry, dead-letter controls,
   and dispatcher statistics.
 
-It does not own application callbacks. A private dispatcher thread may prepare
-and queue claimed jobs, but never invokes C or Lua application code.
+It does not own application callbacks. Its private dispatcher thread queues
+candidate keys and recovery intent, but never claims a job or invokes C or Lua
+application code.
 
 One live dispatcher exists at most once for a `(client instance, canonical
 workflow configuration)` registry key. The key includes every configuration
@@ -196,27 +205,40 @@ its client closes. `lc_workflow_dispatcher_close()` releases only one caller's
 handle; it does not stop a dispatcher, including when it happens to be the last
 external handle. This deliberately lets a lazily started dispatcher remain
 available for later producer attachments and asynchronous work. Hosts that no
-longer need it call `stop()` and then `wait()`. Client close stops and joins all
-registered dispatchers before releasing client state. Every workflow and
-dispatcher handle then becomes closed; no live handle retains a usable freed
-client.
+longer need it call `stop()`; `wait()` is available to a different lifecycle
+observer or after a timeout.
+
+`stop(deadline_ms)` is idempotent. It changes the dispatcher to stopping,
+rejects new wake and work requests, and waits up to its deadline for private
+infrastructure and handed-out jobs to become terminal. A timeout leaves it
+stopping; a later `wait(deadline_ms)` observes the same shutdown and never
+restarts it. Stop never invalidates an already handed-out job: it remains able
+to reach a terminal outcome until its owner closes it or its claim expires.
+Client close stops and joins all registered dispatchers before releasing client
+state, then invalidates all remaining workflow, dispatcher, and outbox-job
+handles. Any unfinished claim is left for normal expiry recovery; no handle
+retains a usable freed client.
 
 ## Dispatcher activation and work limits
 
 Acquisition starts private notification/recovery infrastructure but is
-**passive**: it cannot claim a job merely because it has a wake. It becomes
-claim-ready only when a consumer is attached:
+**passive**: it cannot claim a job merely because it has a wake. Claiming is
+demand-driven: a consumer asks for one job only when it has execution capacity.
+The first request selects a consumer mode:
 
-- raw C consumption becomes ready with `dispatcher->next()`;
+- raw C consumption uses `dispatcher->next()`;
 - Lua `dispatcher:run()` and `dispatcher:pump()` bind their owner-state sink
-  before enabling claims; and
-- a second incompatible sink fails instead of replacing the first one.
+  before requesting work; and
+- a Lua owner state cannot be replaced, while concurrent raw C `next()` calls
+  share the raw pull mode.
 
-The dispatcher must not preclaim more jobs than the sink's available capacity.
-The existing `notification_capacity` bounds both direct-key notifications and
-the raw C pull ready-job set. A Lua lane defaults to one active handler. A host
-that needs C concurrency supplies it explicitly; no unbounded ready queue or
-claim set is permitted.
+`notification_capacity` is one shared bound across direct-key candidates and
+delayed retry wakes; it does not authorize preclaiming. `next()` removes or discovers one candidate,
+claims it, and returns the owned job to the caller. A Lua lane requests one
+job only when it has an idle handler slot. A Vectis source router does the same
+for an available logical-supervisor lane. Raw C callers choose their own bounded
+worker capacity by issuing only that many concurrent or outstanding `next()`
+requests. No unbounded ready queue or library-owned claim set exists.
 
 Stopping first prevents new claims and wake acceptance. It then waits only up
 to its deadline for active jobs to reach a terminal outcome. Remaining claims
@@ -228,12 +250,21 @@ wake arrived after shutdown began.
 
 `lc_workflow_dispatcher_notify_outbox_key()` accepts only a non-empty durable
 outbox key already known by the caller to have committed. It copies and
-deduplicates the key in the existing bounded queue, wakes the private
-dispatcher, and uses a targeted claim/read path. It does not query or scan the
-workflow namespace solely because it received a key.
+deduplicates the key in the existing bounded candidate queue and wakes waiting
+consumers. The next consumer request uses a targeted claim/read path. It does
+not query or scan the workflow namespace solely because it received a key.
 
 Duplicate notifications coalesce. A full queue increments observable overflow
-state and schedules one indexed reconciliation; it never drops durable work.
+state and schedules one indexed reconciliation candidate; it never drops
+durable work.
+
+Reconciliation discovers candidates but never claims them. It uses a bounded
+streaming query and a resumable cursor: when the shared candidate budget is
+full, it retains enough cursor state to resume later rather than materializing
+the remaining namespace keys. A consumer request drains one candidate before
+continuing that cursor. This holds for indexed and explicit scan recovery, so a
+large retained outbox population cannot turn a wake or recovery pass into an
+unbounded allocation.
 Unknown, already-terminal, not-yet-eligible, or actively claimed keys are
 normal no-work candidates, not evidence that the durable outbox was lost.
 
@@ -279,16 +310,24 @@ struct lc_workflow_dispatcher {
 };
 ```
 
-`next()` is the raw expert pull surface. It returns one owned claimed
-`lc_outbox_job`; the job retains its active claim until `complete`, `retry`,
-`dead_letter`, or close. Existing terminal operations and payload streaming
-semantics remain unchanged. A terminal failure must leave the claim recoverable
-through retry or expiry, never silently consume it.
+`next()` is the raw expert pull surface and one unit of demand. It waits for or
+discovers one candidate, claims it, and returns one owned `lc_outbox_job`; the
+job retains its active claim until `complete`, `retry`, `dead_letter`, or
+close. Existing terminal operations and payload streaming semantics remain
+unchanged. A terminal failure must leave the claim recoverable through retry or
+expiry, never silently consume it.
 
 The producer and transaction receivers' `append_outbox` operations return an
 optional receipt only for an already committed duplicate. Their `commit`
 operation accepts an `lc_workflow_commit_result *` as above. That result is the
 only public source of **fresh** wakeable outbox keys.
+
+`lc_workflow_stats` is dispatcher-only in this cutover. Its live gauges are
+`pending_candidates`, `delayed_wakes`, and `waiting_consumers`; the old
+preclaimed `ready_jobs` gauge is removed. Its monotonic direct-notification,
+overflow, recovery-query, recovered-candidate, claim-loss, and payload-failure
+counters retain their existing observability role. None of these reads queries
+the durable namespace.
 
 ## Lua workflow and dispatcher façade
 
@@ -347,6 +386,12 @@ first operation creates no transaction and is returned as its ordinary durable
 duplicate result. Advanced users may keep using the explicit
 `workflow:append_outbox`, `accept_inbox`, and `accept_command` methods when
 they need to inspect and control each transaction step directly.
+
+Returning normally without an anchor operation is `LC_ERR_INVALID`; the façade
+does not commit an empty pseudo-transaction. A duplicate anchor is the sole
+normal callback path without a concrete transaction. The callback may inspect
+that duplicate result and return, after which the façade returns it without a
+terminal decision.
 
 On success, `workflow:transaction(fn)` returns the same commit result as the
 explicit transaction's `commit()`, including `outbox_receipts`. This gives a
@@ -414,9 +459,8 @@ threadless workflow                  workflow dispatcher + Lua lane
 4. The supervisor process owns a separate client, obtains the one local
    dispatcher, receives keys/wakes, and calls `notify_outbox_key` or
    `reconcile`.
-5. The supervisor routes claimed jobs to its chosen logical supervisor and Lua
-   lane only when that lane has capacity. It applies the job outcome after the
-   handler returns.
+5. The supervisor requests a job only when its chosen logical supervisor and
+   Lua lane have capacity. It applies the job outcome after the handler returns.
 
 The channel carries copied receipt-key bytes only. It is neither a second queue
 nor a persistence layer. A failed channel send, overflow, restart, or lost
@@ -458,18 +502,27 @@ invariants, including failure paths:
 - workflow attachment performs post-commit local wake only after durable
   success; workflow close does not stop the dispatcher; uncommitted close
   cannot expose a wakeable receipt;
-- direct notification uses no namespace scan, coalesces duplicates, and queue
-  overflow/restart/closed IPC equivalently recover through reconciliation;
+- commit-result allocation failure occurs before a terminal vote; an
+  indeterminate terminal error exposes no fresh receipt and is repaired only
+  through durable recovery;
+- direct notification uses no namespace scan and no claim before consumer
+  demand, coalesces duplicates, and queue overflow/restart/closed IPC
+  equivalently recover through reconciliation;
+- reconciliation uses bounded streamed pages and a resumable cursor under a
+  full candidate budget, without materializing or preclaiming the namespace;
 - raw C and Lua dispatch preserve payload streaming, claim renewal, complete,
   retry/reschedule, dead-letter, terminal failure, expiry, and startup replay;
 - Lua run/pump executes only on its caller Lua state; handler exceptions,
-  cancellation, renewal failure, terminal failure, stop, and duplicate binding
-  are deterministic;
+  cancellation, renewal failure, terminal failure, empty transaction, duplicate
+  anchor, stop, and duplicate binding are deterministic;
+- stop timeout, later wait, and client-close invalidation preserve handed-out
+  job recovery without leaving a live thread or dangling client reference;
 - multiple Lua worker processes safely compete for a Pouch namespace in its
   supported shared-root configuration; and
-- performance gates demonstrate that direct wake remains targeted and bounded,
-  and that passive producers add no dispatcher/recovery overhead to request
-  construction or commits.
+- performance gates demonstrate bounded candidate memory and deterministic
+  query/claim counts for direct wake and reconciliation, and that passive
+  producers add no dispatcher/recovery overhead to request construction or
+  commits.
 
 The full release matrix, Lua SDK/package checks, and Pouch e2e coverage must
 run after the cutover. Vectis-specific supervisor and IPC tests belong in
