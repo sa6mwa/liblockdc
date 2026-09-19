@@ -1841,6 +1841,7 @@ typedef struct lc_pouch_state_body_cache_tee_source {
   lc_source *inner;
   lc_pouch_state_body_cache_entry *entry;
   size_t offset;
+  int failed;
 } lc_pouch_state_body_cache_tee_source;
 
 static int lc_pouch_state_read_text_file(lc_pouch *pouch, const char *path,
@@ -2037,7 +2038,10 @@ static size_t lc_pouch_state_body_cache_tee_source_read(lc_source *self,
                                                         size_t count,
                                                         lc_error *error) {
   lc_pouch_state_body_cache_tee_source *source;
+  lc_error local_error;
+  lc_error *read_error;
   size_t nread;
+  int own_local_error;
   int pthread_rc;
 
   if (self == NULL || buffer == NULL || count == 0U) {
@@ -2050,12 +2054,25 @@ static size_t lc_pouch_state_body_cache_tee_source_read(lc_source *self,
                        "pouch");
     return 0U;
   }
-  nread = source->inner->read(source->inner, buffer, count, error);
+  own_local_error = error == NULL;
+  if (own_local_error) {
+    lc_error_init(&local_error);
+    read_error = &local_error;
+  } else {
+    read_error = error;
+  }
+  nread = source->inner->read(source->inner, buffer, count, read_error);
+  if (read_error->code != LC_OK) {
+    source->failed = 1;
+  }
   pthread_rc = pthread_mutex_lock(&source->entry->ref_mutex);
   if (pthread_rc != 0) {
-    (void)lc_error_set(error, LC_ERR_TRANSPORT, 0L,
+    (void)lc_error_set(read_error, LC_ERR_TRANSPORT, 0L,
                        "failed to lock pouch body cache reference",
                        strerror(pthread_rc), NULL, "pouch");
+    if (own_local_error) {
+      lc_error_cleanup(&local_error);
+    }
     return 0U;
   }
   if (nread > 0U) {
@@ -2066,29 +2083,39 @@ static size_t lc_pouch_state_body_cache_tee_source_read(lc_source *self,
       if (source->offset > source->entry->length ||
           nread > source->entry->length - source->offset) {
         source->entry->complete = 0;
+        source->failed = 1;
         (void)pthread_mutex_unlock(&source->entry->ref_mutex);
-        (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+        (void)lc_error_set(read_error, LC_ERR_PROTOCOL, 0L,
                            "pouch payload plaintext byte count changed", NULL,
                            NULL, "pouch");
+        if (own_local_error) {
+          lc_error_cleanup(&local_error);
+        }
         return 0U;
       }
       memcpy(source->entry->bytes + source->offset, buffer, nread);
       source->offset += nread;
     }
-  } else if ((error == NULL || error->code == LC_OK) &&
+  } else if (!source->failed && read_error->code == LC_OK &&
              !source->entry->retired && !source->entry->complete) {
     if (source->offset == source->entry->length) {
       source->entry->complete = 1;
     } else {
       source->entry->complete = 0;
       (void)pthread_mutex_unlock(&source->entry->ref_mutex);
-      (void)lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+      (void)lc_error_set(read_error, LC_ERR_PROTOCOL, 0L,
                          "pouch payload plaintext byte count changed", NULL,
                          NULL, "pouch");
+      if (own_local_error) {
+        lc_error_cleanup(&local_error);
+      }
       return 0U;
     }
   }
   (void)pthread_mutex_unlock(&source->entry->ref_mutex);
+  if (own_local_error) {
+    lc_error_cleanup(&local_error);
+  }
   return nread;
 }
 
@@ -2123,6 +2150,7 @@ static int lc_pouch_state_body_cache_tee_source_reset(lc_source *self,
    * publication `complete` is already false, so resetting still permits the
    * original tee to refill its private in-progress entry. */
   source->offset = 0U;
+  source->failed = 0;
   (void)pthread_mutex_unlock(&source->entry->ref_mutex);
   return LC_OK;
 }

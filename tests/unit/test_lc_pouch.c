@@ -21950,8 +21950,9 @@ static void test_pouch_crypto_rejects_tampered_payload(void **state) {
   assert_null(metadata_result.body);
   lc_pouch_state_read_result_cleanup(NULL, &metadata_result);
   /* A body source must be returned before its terminal authentication tag is
-   * consumed. The read then fails at EOF; eager cache warming would instead
-   * fail this state_read call before the caller receives a source. */
+   * consumed. Deliberately discard the terminal read error: even then an
+   * invalid source must never publish its fully copied plaintext to the cache.
+   */
   rc = lc_pouch_state_read(reader_handle->pouch, "default", "crypto/tamper",
                            &body_result, &error);
   assert_int_equal(rc, LC_OK);
@@ -21962,15 +21963,17 @@ static void test_pouch_crypto_rejects_tampered_payload(void **state) {
     size_t nread;
 
     nread =
-        body_result.body->read(body_result.body, bytes, sizeof(bytes), &error);
+        body_result.body->read(body_result.body, bytes, sizeof(bytes), NULL);
     if (nread == 0U) {
       break;
     }
   }
-  assert_int_equal(error.code, LC_ERR_PROTOCOL);
   lc_pouch_state_read_result_cleanup(NULL, &body_result);
   lc_error_cleanup(&error);
   lc_error_init(&error);
+  /* Reopening the body must reach its authenticated source, rather than a
+   * falsely published cache entry, and therefore report the same corruption.
+   */
   assert_client_get_protocol_failure(reader, "crypto/tamper", &error);
 
   lc_client_close(reader);
