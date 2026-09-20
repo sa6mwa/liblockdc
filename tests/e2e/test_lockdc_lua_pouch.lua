@@ -736,6 +736,58 @@ if #query_keys ~= 1 or query_keys[1] ~= raw_txn_participant.key or
   client:close()
   error("Lua query_keys did not stream the matching Pouch key")
 end
+
+-- Parsing a later metatable field may collect a dynamically generated query
+-- selector. The native query keeps its private normalized request until done.
+do
+  local rooted_query_result, rooted_query_err = client:query_keys(
+    setmetatable({ namespace = namespace, engine = "scan" }, {
+      __index = function(_, key)
+        if key == "selector_json" then
+          return '{"eq":{"field":"/source","value":"' ..
+              "not-present-" .. assert(lockdc.xid_new()) .. '"}}'
+        end
+        if key == "limit" then
+          collectgarbage("collect")
+          collectgarbage("collect")
+          return 1
+        end
+        return nil
+      end,
+    }), function() end)
+  rooted_query_result = assert_ok("Lua rooted query_keys",
+                                  rooted_query_result, rooted_query_err)
+  if rooted_query_result.return_mode ~= "keys" then
+    client:close()
+    error("Lua rooted query_keys did not return its key-stream metadata")
+  end
+end
+
+do
+  local rooted_query_body, rooted_query_meta = client:query(
+    setmetatable({ namespace = namespace, engine = "scan" }, {
+      __index = function(_, key)
+        if key == "selector_json" then
+          return '{"eq":{"field":"/source","value":"' ..
+              "not-present-" .. assert(lockdc.xid_new()) .. '"}}'
+        end
+        if key == "limit" then
+          collectgarbage("collect")
+          collectgarbage("collect")
+          return 1
+        end
+        return nil
+      end,
+    }), { write = function() end })
+  if rooted_query_body ~= nil or type(rooted_query_meta) ~= "table" then
+    client:close()
+    error(("Lua rooted query did not safely stream an empty result " ..
+      "(body=%s metadata=%s)"):format(tostring(rooted_query_body),
+      tostring(rooted_query_meta and rooted_query_meta.message or
+      rooted_query_meta)))
+  end
+end
+
 local selector_free_keys = {}
 local selector_free_cursor
 repeat

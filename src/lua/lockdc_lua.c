@@ -3120,6 +3120,8 @@ static int lcdc_client_queue_extend(lua_State *L) {
   return 1;
 }
 
+static void lcdc_parse_query_req(lua_State *L, int index, lc_query_req *req);
+
 static int lcdc_client_query(lua_State *L) {
   lcdc_client_ud *ud;
   lc_query_req req;
@@ -3133,27 +3135,21 @@ static int lcdc_client_query(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  req.ns = lcdc_opt_string_field(L, 2, "namespace");
-  req.selector_lql = lcdc_opt_string_field(L, 2, "selector_lql");
-  req.selector_json = lcdc_opt_string_field(L, 2, "selector_json");
+  lcdc_parse_query_req(L, 2, &req);
   if ((req.selector_lql == NULL || req.selector_lql[0] == '\0') &&
       (req.selector_json == NULL || req.selector_json[0] == '\0')) {
     return luaL_error(L, "query requires selector_lql or selector_json");
   }
-  lcdc_opt_integer_field(L, 2, "limit", &req.limit);
-  req.cursor = lcdc_opt_string_field(L, 2, "cursor");
-  req.fields_json = lcdc_opt_string_field(L, 2, "fields_json");
-  req.return_mode = lcdc_opt_string_field(L, 2, "return_mode");
-  req.engine = lcdc_opt_string_field(L, 2, "engine");
-  req.refresh = lcdc_opt_string_field(L, 2, "refresh");
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc != LC_OK) {
+    lua_pop(L, 1);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
   ud->streaming = 1;
   rc = lc_query(ud->client, &req, output.sink, &res, &error);
+  lua_pop(L, 1);
   if (rc != LC_OK) {
     if (output.sink != NULL) {
       lc_sink_close(output.sink);
@@ -3281,6 +3277,32 @@ static void lcdc_query_keys_handler_cleanup(lcdc_query_keys_handler *handler) {
   handler->finish_ref = LUA_NOREF;
 }
 
+/* Leaves a plain Lua table on the stack which owns all request strings until
+ * the caller has returned from native code and every Lua callback it invokes.
+ */
+static void lcdc_parse_query_req(lua_State *L, int index, lc_query_req *req) {
+  index = lua_absindex(L, index);
+  lc_query_req_init(req);
+  lua_createtable(L, 0, 8);
+  lcdc_normalize_string_field(L, index, -1, "namespace", 0);
+  lcdc_normalize_string_field(L, index, -1, "selector_lql", 0);
+  lcdc_normalize_string_field(L, index, -1, "selector_json", 0);
+  lcdc_normalize_string_field(L, index, -1, "cursor", 0);
+  lcdc_normalize_string_field(L, index, -1, "fields_json", 0);
+  lcdc_normalize_string_field(L, index, -1, "return_mode", 0);
+  lcdc_normalize_string_field(L, index, -1, "engine", 0);
+  lcdc_normalize_string_field(L, index, -1, "refresh", 0);
+  lcdc_opt_integer_field(L, index, "limit", &req->limit);
+  req->ns = lcdc_normalized_string_value(L, -1, "namespace");
+  req->selector_lql = lcdc_normalized_string_value(L, -1, "selector_lql");
+  req->selector_json = lcdc_normalized_string_value(L, -1, "selector_json");
+  req->cursor = lcdc_normalized_string_value(L, -1, "cursor");
+  req->fields_json = lcdc_normalized_string_value(L, -1, "fields_json");
+  req->return_mode = lcdc_normalized_string_value(L, -1, "return_mode");
+  req->engine = lcdc_normalized_string_value(L, -1, "engine");
+  req->refresh = lcdc_normalized_string_value(L, -1, "refresh");
+}
+
 static int lcdc_client_query_keys(lua_State *L) {
   lcdc_client_ud *ud;
   lc_client_handle *client;
@@ -3298,14 +3320,7 @@ static int lcdc_client_query_keys(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  req.ns = lcdc_opt_string_field(L, 2, "namespace");
-  req.selector_lql = lcdc_opt_string_field(L, 2, "selector_lql");
-  req.selector_json = lcdc_opt_string_field(L, 2, "selector_json");
-  lcdc_opt_integer_field(L, 2, "limit", &req.limit);
-  req.cursor = lcdc_opt_string_field(L, 2, "cursor");
-  req.fields_json = lcdc_opt_string_field(L, 2, "fields_json");
-  req.engine = lcdc_opt_string_field(L, 2, "engine");
-  req.refresh = lcdc_opt_string_field(L, 2, "refresh");
+  lcdc_parse_query_req(L, 2, &req);
   lcdc_query_keys_handler_init(L, 3, &handler);
   stream_handler.begin = lcdc_query_keys_begin;
   stream_handler.chunk = lcdc_query_keys_chunk;
@@ -3317,6 +3332,7 @@ static int lcdc_client_query_keys(lua_State *L) {
   client = (lc_client_handle *)ud->client;
   if (client == NULL) {
     lcdc_query_keys_handler_cleanup(&handler);
+    lua_pop(L, 1);
     (void)lc_error_set(&error, LC_ERR_INVALID, 0L,
                        "client was closed while preparing query_keys", NULL,
                        NULL, NULL);
@@ -3331,6 +3347,7 @@ static int lcdc_client_query_keys(lua_State *L) {
   rc = lc_query_keys(&client->pub, &req, &stream_handler, &handler, &res,
                      &error);
   lcdc_query_keys_handler_cleanup(&handler);
+  lua_pop(L, 1);
   if (client != NULL)
     lc_client_handle_release(client);
   if (rc != LC_OK) {
