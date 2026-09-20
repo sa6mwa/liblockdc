@@ -950,6 +950,7 @@ missing_outbox:close()
 
 -- Separate façade wrappers for one native dispatcher must be able to reuse the
 -- same application handler table. The binding owns a stable wrapped map.
+do
 local alias_outbox = assert_ok(client:new_outbox({
   namespace = "lua-outbox-dispatcher-alias",
   owner = "lua-outbox-dispatcher-alias-worker",
@@ -960,9 +961,13 @@ local alias_dispatcher = assert_ok(alias_outbox:dispatcher(), nil,
 local alias_dispatcher_again = assert_ok(alias_outbox:dispatcher(), nil,
                                          "Lua second dispatcher alias")
 local alias_calls = 0
+local alias_capture = {}
+local alias_capture_weak = setmetatable({}, { __mode = "v" })
+alias_capture_weak[1] = alias_capture
 local alias_handlers = {
   http = function(alias_job)
     alias_calls = alias_calls + 1
+    alias_capture.calls = alias_calls
     assert_ok(alias_job:complete(), nil, "Lua alias handler completion")
   end,
 }
@@ -1001,6 +1006,7 @@ end
 alias_dispatcher_again:close()
 alias_handlers.http = function(alias_job)
   alias_calls = alias_calls + 1
+  alias_capture.calls = alias_calls
   assert_ok(alias_job:complete(), nil, "Lua replacement alias handler completion")
 end
 alias_txn, alias_receipt_or_err = alias_outbox:append({
@@ -1029,6 +1035,14 @@ end
 assert_ok(alias_reopened:stop(-1), nil, "Lua dispatcher alias stop")
 alias_reopened:close()
 alias_outbox:close()
+alias_handlers = nil
+alias_capture = nil
+collectgarbage("collect")
+collectgarbage("collect")
+if alias_capture_weak[1] ~= nil then
+  error("Lua dispatcher close retained handler captures")
+end
+end
 
 -- Closing the wrapper that entered pump() from its own handler must not leave
 -- the shared binding in recursive-consumption state. A surviving alias owns

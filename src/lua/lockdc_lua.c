@@ -1714,6 +1714,11 @@ static int lcdc_outbox_dispatcher_gc(lua_State *L) {
     lc_outbox_dispatcher_close(ud->dispatcher);
     ud->dispatcher = NULL;
   }
+  /* A closed wrapper must not retain an adapter closure after its native
+   * binding has been released. Other live aliases retain their own uservalue
+   * and the shared registry owner until they close. */
+  lua_pushnil(L);
+  lua_setiuservalue(L, 1, 1);
   lcdc_outbox_dispatcher_binding_release(L, ud->binding);
   ud->binding = NULL;
   if (ud->owner_ref != LUA_NOREF) {

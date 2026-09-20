@@ -13597,8 +13597,9 @@ int lc_pouch_query_index_invalidate_namespace(lc_pouch *pouch, const char *ns,
                       strerror(errno), NULL, "pouch");
   }
   if (rc == LC_OK && manifest_present) {
-    rc = lc_pouch_path_write_text_file_relaxed(manifest_path, "invalid\n",
-                                               error);
+    /* Compaction may now discard mutations absent from this derived view.
+     * Publish invalidation durably before that irreversible boundary. */
+    rc = lc_pouch_path_write_text_file(manifest_path, "invalid\n", error);
   }
   lc_free_with_allocator(&pouch->allocator, manifest_path);
   lc_pouch_query_index_flush_unlock(pouch);
