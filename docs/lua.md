@@ -113,6 +113,7 @@ Primary entrypoints:
 
 - `lockdc.open(config)`
 - `lockdc.version_string()`
+- `lockdc.xid_new()`
 - `lockdc.encode_json(value)`
 - `lockdc.decode_json(payload)`
 - `lockdc.json_null`
@@ -693,8 +694,11 @@ succeeded or failed. There is no Lua
 `start()` or `start_consumer()` alias and no multi-worker/multi-config service
 because neither can safely call one Lua VM concurrently. Start separate Lua
 states or processes when concurrency is needed. A normal handler return
-acknowledges an open message. `nil, err`, `false, err`, or a raised error nacks
-it and returns that failure from `run()`; a failed nack is returned instead.
+acknowledges an open message. A handler that has already acknowledged,
+negatively acknowledged, or closed its message may also return normally; the
+service does not apply a second terminal operation. `nil, err`, `false, err`,
+or a raised error nacks a still-open message and returns that failure from
+`run()`; a failed nack is returned instead.
 
 ## Examples
 

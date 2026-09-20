@@ -158,8 +158,10 @@ dependency cache.
 Run the host release suites for the shipped x86_64 GNU and musl builds:
 
 ```bash
-make test
+make test-host
 ```
+
+`make test` is the short alias for the sanitizer-instrumented debug suite.
 
 Run the non-host cross release suites:
 
@@ -173,18 +175,17 @@ Run the complete local confidence path:
 make test-all
 ```
 
-`make test-all` runs the sanitizer-instrumented debug suite, both
-host-executable Bootlin release suites, QEMU cross suites, Valgrind, and
-deterministic local e2e. Its CTest suites use a bounded four-job default
+`make test-all` runs the sanitizer-instrumented debug suite and deterministic
+local e2e. It is the complete fast functional edit-loop gate, not an alias for
+the release matrix. Its CTest suites use a bounded four-job default
 (`LOCKDC_CTEST_PARALLEL_LEVEL` overrides it), while tests marked serial remain
-serial. Fuzz smoke stays explicit (`make fuzz-smoke`) and in `make prerelease`:
-it runs AFL++ only for deterministic unit-level parsers, streams, and Pouch
-primitives, then runs the full Pouch LQL and lifecycle scenarios in isolated
-normal processes with deterministic input mutation. The AFL++ compiler
-bootstrap is hardening work, not an everyday functional invariant. Performance
-workloads likewise belong to the explicit
-`make bench-gate` command. The complete artifact rehearsal remains `make
-release-matrix`.
+serial. Cross-target testing, Valgrind, and fuzzing are release confidence
+work: `make prerelease` runs the native debug/e2e suite, Valgrind, and full
+fuzzing, while `make release-matrix` builds, tests, packages, and verifies the
+shipped Bootlin GNU/musl and QEMU cross matrix. The AFL++ compiler bootstrap is
+hardening work, not an everyday functional invariant. Performance workloads
+belong to the explicit `make bench-gate` command. The complete artifact
+rehearsal remains `make release`.
 
 `make prerelease-hardening` is the longer pre-release layer. It keeps the
 normal release gate bounded, then adds native benchmarks, the Pouch-vs-lockd
@@ -262,8 +263,9 @@ make release
 `make release` is the final clean-slate release outbox. It verifies release
 tag semantics, removes generated state, then runs the same proof graph as
 `make prerelease`: formatting, debug sanitizer tests including Lua coverage,
-Valgrind, fuzz smoke, lockd e2e, bounded benchmark smoke, and the release
-matrix. Use
+Valgrind, full deterministic fuzzing, lockd e2e, and the release matrix. The
+longer performance, churn, and compaction campaigns remain the explicit
+`make prerelease-hardening` layer. Use
 `make release-matrix` when you explicitly want to reuse existing build and
 dependency caches for a faster release matrix/package rerun.
 

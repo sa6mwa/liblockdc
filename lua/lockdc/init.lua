@@ -1201,11 +1201,13 @@ local function run_threadless_service(client, req, with_state, handler, should_s
       state = nil
     end
     if ok and (handler_result == nil and handler_err == nil or
-        handler_result == true) and message:is_open() then
-      local ack_ok, ack_err = message:ack()
+        handler_result == true) then
+      if message:is_open() then
+        local ack_ok, ack_err = message:ack()
 
-      if ack_ok == nil then
-        return nil, ack_err
+        if ack_ok == nil then
+          return nil, ack_err
+        end
       end
     else
       local failure = handler_err or handler_result

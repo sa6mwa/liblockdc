@@ -444,6 +444,48 @@ local function test_subscribe_with_state_and_service_lifecycle()
   assert_eq(service_message.ack_count, 1, 'service handler success should ack message')
   assert_truthy(service:wait(), 'wait after completed run should succeed')
 
+  local explicitly_acked_message = {
+    closed = false,
+    ack_count = 0,
+  }
+  function explicitly_acked_message:ack()
+    self.ack_count = self.ack_count + 1
+    self.closed = true
+    return true
+  end
+  function explicitly_acked_message:nack(req)
+    self.closed = true
+    self.last_nack_req = req
+    return true
+  end
+  function explicitly_acked_message:close()
+    self.closed = true
+  end
+  function explicitly_acked_message:state()
+    return nil
+  end
+
+  client_core.dequeue = function()
+    return explicitly_acked_message
+  end
+  local explicitly_acking_service
+  explicitly_acking_service = client:new_consumer_service({
+    name = 'explicitly-acking-worker',
+    request = { namespace_name = 'default', queue = 'explicitly-acked-jobs' },
+    handle = function(message)
+      assert_truthy(message:ack(), 'handler should be able to acknowledge directly')
+      explicitly_acking_service:stop()
+      return nil
+    end,
+  })
+  ok, err = explicitly_acking_service:run()
+  assert_truthy(ok,
+      'a normally returning handler that terminalized its message must not fail the service')
+  assert_eq(err, nil,
+      'a normally returning handler that terminalized its message should not report failure')
+  assert_eq(explicitly_acked_message.ack_count, 1,
+      'a handler-owned acknowledgement must not be repeated by the service')
+
   local failed_message = {
     closed = false,
     ack_count = 0,

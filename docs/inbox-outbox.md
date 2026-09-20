@@ -1255,11 +1255,14 @@ truth.
 
 ## Required Verification
 
-The existing inbox/outbox surface is not complete until its applicable behavior
-is proven for both Pouch and the repository's compose-backed remote lockd E2E
-environment. The command-receipt extension is not complete until every command
-composition obligation is proven for Pouch; it gains remote parity only after
-the repaired remote implicit-XA contract is present in that E2E environment.
+The following are the regression acceptance conditions for the implemented
+Pouch outbox. The repository also exercises remote lockd operations where that
+endpoint supports them, but remote multi-participant implicit-XA enrollment is
+not an operationally verified composition path. Requirements that describe a
+remote composed transaction remain the intended future endpoint contract; they
+must not be read as a Vectis deployment guarantee. The current Vectis handover
+uses Pouch, as documented in
+[the dedicated integration guide](outbox-vectis-handover.md).
 
 1. The first participating domain acquisition, `accept_command()`,
    `append()`, or `accept_inbox()` acquire omits `txn_id` and retains
@@ -1293,7 +1296,8 @@ the repaired remote implicit-XA contract is present in that E2E environment.
 8. Direct-key notification performs no recovery query and claims nothing until
    a consumer requests one job.
 9. A process crash after commit and before notification is recovered by another
-   dispatcher from an indexed query.
+   dispatcher through bounded durable reconciliation (an indexed query when
+   index maintenance is enabled, otherwise the explicit bounded scan path).
 10. A crash after the foreign effect and before completion redelivers the same
    `effect_key`.
 11. Stale completion, retry, and dead-letter operations cannot alter a later
@@ -1305,10 +1309,10 @@ the repaired remote implicit-XA contract is present in that E2E environment.
 13. Payload and command-result reads remain streaming under fragmented reads, large attachments,
    cancellation, and backend failover/reopen; tests prove no full-payload
    materialization.
-14. Competing remote dispatchers and shared-root Pouch dispatchers produce one
-    active lease-authorized claim and recover abandoned claims. Tests must not
-    assert identical public visibility of a live `claimed` envelope across the
-    two backends.
+14. Shared-root Pouch dispatchers produce one active lease-authorized claim and
+    recover abandoned claims. The future remote equivalent must not assert
+    identical public visibility of a live `claimed` envelope across the two
+    backends.
 15. The regression baseline seeds 256 pending records with a 16-key shared
     candidate bound and proves paged reconciliation delivers every record
     through deterministic query-page, candidate, and claim counts. It proves
@@ -1401,10 +1405,9 @@ explicit performance gate.
 ## Remaining Proof Obligations and Future Work
 
 The durable record rules in this document remain the outbox compatibility
-boundary. Threadless producer and explicit-dispatcher receiver names, lifecycle,
-and Lua ownership are governed by
-[the outbox dispatch architecture](outbox-dispatch-architecture.md) while
-that unreleased ABI-4 cutover is implemented and verified. Future released
+boundary. Threadless producer and explicit-dispatcher receiver names,
+lifecycle, and Lua ownership are governed by
+[the outbox dispatch architecture](outbox-dispatch-architecture.md). Future
 public-surface changes require the same API and ABI review. The remaining
 component-specific work is:
 

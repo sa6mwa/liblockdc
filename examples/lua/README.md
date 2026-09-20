@@ -106,6 +106,10 @@ The Lua consumer path is intentionally simple and single-threaded.
 - the Lua handler runs to completion on the calling Lua state
 - after the handler completes, the next message is consumed
 
+A handler may explicitly `ack()`, `nack()`, or `close()` its message and then
+return normally. The managed service only acknowledges an still-open message;
+it never applies a second terminal operation.
+
 This is deliberate. The Lua binding does not expose the native threaded C
 consumer callback model because calling back into the same Lua state from
 multiple native threads would be unsafe.
