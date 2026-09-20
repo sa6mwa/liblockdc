@@ -1,6 +1,6 @@
 # liblockdc
 
-`liblockdc` is a C89/C90 client library for `lockd`. It provides a receiver-function public API for client, lease, queue delivery, attachment, management, and consumer-service handles, plus stream-based JSON and payload I/O. The project ships both static and shared libraries, a local development environment, a cross-architecture release outbox, and dependency-backed unit, e2e, sanitizer, coverage, fuzz, and benchmark targets.
+`liblockdc` is a C89/C90 client library for `lockd`. It provides a receiver-function public API for client, lease, queue delivery, attachment, management, and consumer-service handles, plus stream-based JSON and payload I/O. The project ships both static and shared libraries, a local development environment, a cross-architecture release pipeline, and dependency-backed unit, e2e, sanitizer, coverage, fuzz, and benchmark targets.
 
 ## Supported targets
 
@@ -101,7 +101,7 @@ the caller explicitly chooses an in-memory source or sink.
 
 ## Build system
 
-The repository (<https://github.com/sa6mwa/liblockdc>) uses a Makefile-first outbox with CMake as the build backend:
+The repository (<https://github.com/sa6mwa/liblockdc>) uses a Makefile-first lifecycle with CMake as the build backend:
 
 - `Makefile`
   - primary developer entry point
@@ -129,7 +129,7 @@ Normal development expects:
 
 Every Linux build uses its matching pinned Bootlin GCC collection, including
 the compiler, linker, binutils, sysroot, headers, and runtime. The Make and
-CMake outboxes provision those collections automatically; do not substitute
+CMake configurations provision those collections automatically; do not substitute
 host or distro cross compilers. Toolchains are shared under
 `${CPKT_TOOLCHAIN_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/toolchains}`
 and verified dependency archives under
@@ -143,7 +143,7 @@ executables, tests, examples, Lua module checks, and SDK consumer probes run
 directly with their selected Bootlin ELF interpreter and private runtime lookup
 paths; they do not use `LD_LIBRARY_PATH` or a host Lua interpreter.
 
-## Common outboxes
+## Common commands
 
 Build the normal host development preset:
 
@@ -217,7 +217,7 @@ the same iteration count across all benchmark cases.
 All significant Make targets print total elapsed time on completion.
 
 `make format` runs `clang-format` over the C source/header tree and is also
-part of the clean-slate release outbox.
+part of the clean-slate release pipeline.
 
 ## Local development environment
 
@@ -246,7 +246,7 @@ Stop the environment:
 make dev-down
 ```
 
-The e2e outbox is self-contained. `make test-e2e` resets the generated environment state, starts the compose stack, waits for the generated bundles and listeners, probes the active disk endpoint, and then runs the e2e CTest preset.
+The e2e environment is self-contained. `make test-e2e` resets the generated environment state, starts the compose stack, waits for the generated bundles and listeners, probes the active disk endpoint, and then runs the e2e CTest preset.
 
 Additional development-environment notes are available in the repository at `devenv/README.md`.
 
@@ -260,7 +260,7 @@ Create the complete release set:
 make release
 ```
 
-`make release` is the final clean-slate release outbox. It verifies release
+`make release` is the final clean-slate release pipeline. It verifies release
 tag semantics, removes generated state, then runs the same proof graph as
 `make prerelease`: formatting, debug sanitizer tests including Lua coverage,
 Valgrind, full deterministic fuzzing, lockd e2e, and the release matrix. The
@@ -567,7 +567,7 @@ The examples in the repository at <https://github.com/sa6mwa/liblockdc/tree/main
   - AFL++ unit harnesses and isolated-process Pouch integration mutation
     harnesses
 - `scripts/`
-  - outbox and environment scripts
+  - build, release, and environment scripts
 - `devenv/`
   - local environment notes
 
