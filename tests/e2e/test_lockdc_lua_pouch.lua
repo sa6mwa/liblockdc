@@ -488,6 +488,47 @@ if watch_failure_ok ~= nil or type(watch_failure_err) ~= "table" or
     tostring(watch_failure_ok), tostring(watch_failure_err and watch_failure_err.message)))
 end
 
+-- Callback error records are application-owned values. Their field lookup
+-- must not be able to bypass native cleanup through an __index exception.
+local callback_error_record = setmetatable({}, {
+  __index = function()
+    error("callback error record must be read without invoking __index")
+  end,
+})
+local callback_error_message, callback_error_enqueue_err = client:enqueue({
+  queue = "direct-subscribe-error-record",
+  visibility_timeout_seconds = 30,
+  ttl_seconds = 30,
+}, "callback-error-record")
+if callback_error_message == nil then
+  client:close()
+  error(("Lua callback error-record enqueue failed: %s"):format(
+    callback_error_enqueue_err and callback_error_enqueue_err.message or tostring(callback_error_enqueue_err)))
+end
+local callback_error_subscribe_ok, callback_error_subscribe_err = client:subscribe({
+  queue = "direct-subscribe-error-record",
+  owner = "lua-direct-subscribe-error-record",
+  visibility_timeout_seconds = 30,
+  wait_seconds = 0,
+}, function()
+  return nil, callback_error_record
+end)
+if callback_error_subscribe_ok ~= nil or type(callback_error_subscribe_err) ~= "table" or
+    not tostring(callback_error_subscribe_err.message):find("Lua subscribe handler failed", 1, true) then
+  client:close()
+  error("Lua subscription did not safely decode a callback error record")
+end
+local callback_error_watch_ok, callback_error_watch_err = client:watch_queue({
+  queue = "direct-watch-error-record",
+}, function()
+  return nil, callback_error_record
+end)
+if callback_error_watch_ok ~= nil or type(callback_error_watch_err) ~= "table" or
+    not tostring(callback_error_watch_err.message):find("Lua queue watch failed", 1, true) then
+  client:close()
+  error("Lua queue watch did not safely decode a callback error record")
+end
+
 local function assert_ok(operation, value, value_err)
   if value == nil then
     error(("%s failed: %s"):format(operation,

@@ -117,6 +117,51 @@ local function assert_ok(value, err, operation)
   return value
 end
 
+-- Participant source/sink callbacks can re-enter the explicit transaction.
+-- They must not be allowed to release the lease that the suspended native I/O
+-- operation still owns.
+local streaming_txn = assert_ok(outbox:begin(), nil,
+                                "Lua streaming transaction begin")
+local streaming_participant = assert_ok(streaming_txn:acquire({
+  namespace_name = "lua-outbox-streaming",
+  key = "state",
+  owner = "lua-outbox-streaming",
+}), nil, "Lua streaming transaction acquire")
+local function assert_streaming_terminal_guard()
+  for _, terminal in ipairs({ "close", "commit", "rollback" }) do
+    local terminal_ok, terminal_err = pcall(function()
+      return streaming_txn[terminal](streaming_txn)
+    end)
+    if terminal_ok or not tostring(terminal_err):find("participant I/O is streaming", 1, true) then
+      error("Lua transaction terminal operation escaped a participant streaming callback")
+    end
+  end
+end
+local source_sent = false
+assert_ok(streaming_participant:update({
+  read = function()
+    if source_sent then
+      return nil
+    end
+    source_sent = true
+    assert_streaming_terminal_guard()
+    return "streamed participant state"
+  end,
+}), nil, "Lua streaming transaction state update")
+local streaming_get_output, streaming_get_result = streaming_participant:get({}, {
+  write = function()
+    assert_streaming_terminal_guard()
+    return true
+  end,
+})
+if streaming_get_output ~= nil or type(streaming_get_result) ~= "table" then
+  error("Lua streaming transaction state read did not preserve sink semantics")
+end
+assert_ok(streaming_txn:rollback(), nil,
+          "Lua streaming transaction rollback after read")
+streaming_participant:close()
+streaming_txn:close()
+
 local function append_effect(effect_id, payload)
   local txn, receipt_or_err = outbox:append({
     operation_id = "lua-order-1",

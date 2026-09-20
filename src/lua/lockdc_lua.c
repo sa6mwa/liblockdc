@@ -78,6 +78,10 @@ typedef struct lcdc_outbox_dispatcher_ud {
 typedef struct lcdc_outbox_txn_ud {
   lc_outbox_transaction *transaction;
   int owner_ref;
+  /* A participant source/sink can re-enter Lua. Keep terminal transaction
+   * operations out of that frame because they release the participant leases
+   * still owned by the native operation. */
+  size_t streaming_count;
   int callback_scoped;
   int callback_staging_failed;
   int callback_duplicate_seen;
@@ -1418,6 +1422,7 @@ static int lcdc_push_outbox_txn(lua_State *L,
       (lcdc_outbox_txn_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->transaction = transaction;
   ud->owner_ref = LUA_NOREF;
+  ud->streaming_count = 0U;
   ud->callback_scoped = 0;
   ud->callback_staging_failed = 0;
   ud->callback_duplicate_seen = 0;
@@ -2226,15 +2231,17 @@ static const char *lcdc_lua_error_message(lua_State *L, int index) {
     index = lua_gettop(L) + index + 1;
   }
   if (lua_istable(L, index)) {
-    lua_getfield(L, index, "message");
+    /* Handler-supplied error objects are untrusted Lua values. Raw access
+     * keeps an __index metamethod from longjmping past callback cleanup. */
+    lua_pushliteral(L, "message");
+    lua_rawget(L, index);
     message = lua_tostring(L, -1);
     lua_pop(L, 1);
     if (message != NULL) {
       return message;
     }
   }
-  message = lua_tostring(L, index);
-  return message != NULL ? message : "Lua acquire_for_update handler failed";
+  return lua_tostring(L, index);
 }
 
 static int lcdc_lua_error_to_lc_error(lua_State *L, int index,
@@ -2251,14 +2258,18 @@ static int lcdc_lua_error_to_lc_error(lua_State *L, int index,
     index = lua_gettop(L) + index + 1;
   }
   if (!lua_istable(L, index)) {
-    return lc_error_set(error, LC_ERR_INVALID, 0L,
-                        lcdc_lua_error_message(L, index), NULL, NULL, NULL);
+    message = lcdc_lua_error_message(L, index);
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        message != NULL ? message : "Lua acquire_for_update handler failed",
+        NULL, NULL, NULL);
   }
 
   code = LC_ERR_INVALID;
   http_status = 0L;
 
-  lua_getfield(L, index, "code");
+  lua_pushliteral(L, "code");
+  lua_rawget(L, index);
   if (lua_isnumber(L, -1)) {
     code = (int)lua_tointeger(L, -1);
   }
@@ -2267,19 +2278,24 @@ static int lcdc_lua_error_to_lc_error(lua_State *L, int index,
     code = LC_ERR_INVALID;
   }
 
-  lua_getfield(L, index, "http_status");
+  lua_pushliteral(L, "http_status");
+  lua_rawget(L, index);
   if (lua_isnumber(L, -1)) {
     http_status = (long)lua_tointeger(L, -1);
   }
   lua_pop(L, 1);
 
-  lua_getfield(L, index, "message");
+  lua_pushliteral(L, "message");
+  lua_rawget(L, index);
   message = lua_tostring(L, -1);
-  lua_getfield(L, index, "detail");
+  lua_pushliteral(L, "detail");
+  lua_rawget(L, index);
   detail = lua_tostring(L, -1);
-  lua_getfield(L, index, "server_code");
+  lua_pushliteral(L, "server_code");
+  lua_rawget(L, index);
   server_code = lua_tostring(L, -1);
-  lua_getfield(L, index, "correlation_id");
+  lua_pushliteral(L, "correlation_id");
+  lua_rawget(L, index);
   correlation_id = lua_tostring(L, -1);
 
   rc = lc_error_set(error, code, http_status,
@@ -2296,6 +2312,7 @@ static int lcdc_acquire_for_update_handler_call(
   lua_State *L;
   lc_sink *sink;
   const void *bytes;
+  const char *message;
   size_t length;
   size_t written;
   int rc;
@@ -2349,7 +2366,10 @@ static int lcdc_acquire_for_update_handler_call(
   lua_setfield(L, -2, "state_meta");
 
   if (lua_pcall(L, 1, 2, 0) != 0) {
-    rc = lc_error_set(error, LC_ERR_INVALID, 0L, lcdc_lua_error_message(L, -1),
+    message = lcdc_lua_error_message(L, -1);
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      message != NULL ? message
+                                      : "Lua acquire_for_update handler failed",
                       NULL, NULL, NULL);
     lua_pop(L, 1);
     return rc;
@@ -6271,6 +6291,11 @@ static int lcdc_outbox_dispatcher_close(lua_State *L) {
 static int lcdc_outbox_txn_close(lua_State *L) {
   lcdc_outbox_txn_ud *ud = lcdc_check_outbox_txn(L, 1);
 
+  if (ud->streaming_count != 0U) {
+    return luaL_error(
+        L, "outbox transaction close is not allowed while participant I/O is "
+           "streaming");
+  }
   if (ud->callback_scoped) {
     return luaL_error(
         L, "outbox transaction close is not allowed inside its callback");
@@ -6349,8 +6374,10 @@ static int lcdc_outbox_txn_append(lua_State *L) {
   lc_error_init(&error);
   rc = lcdc_source_from_value(L, 3, &payload, &error);
   if (rc == LC_OK) {
+    ++ud->streaming_count;
     rc = lc_outbox_transaction_append(ud->transaction, &entry, payload,
                                       &receipt, &error);
+    --ud->streaming_count;
   }
   lc_source_close(payload);
   if (rc != LC_OK) {
@@ -6471,10 +6498,14 @@ static int lcdc_outbox_txn_terminal_command(lua_State *L, int failed) {
     result.body = body;
   }
   lc_error_init(&error);
+  if (body != NULL)
+    ++ud->streaming_count;
   rc = failed ? lc_outbox_transaction_fail_command(ud->transaction, &result,
                                                    &error)
               : lc_outbox_transaction_complete_command(ud->transaction, &result,
                                                        &error);
+  if (body != NULL)
+    --ud->streaming_count;
   lc_source_close(body);
   if (rc != LC_OK) {
     lcdc_outbox_txn_note_staging_failure(ud);
@@ -6501,6 +6532,11 @@ static int lcdc_outbox_txn_terminal(lua_State *L, int rollback) {
   lc_outbox_commit_result commit_result;
   int rc;
 
+  if (ud->streaming_count != 0U) {
+    return luaL_error(
+        L, "outbox transaction terminal decisions are not allowed while "
+           "participant I/O is streaming");
+  }
   if (ud->callback_scoped) {
     return luaL_error(
         L, "outbox transaction terminal decisions are not allowed inside its "
@@ -6587,8 +6623,10 @@ static int lcdc_outbox_participant_get(lua_State *L) {
   rc = lcdc_init_output(L, 3, &output, &error);
   ud->streaming = rc == LC_OK;
   if (rc == LC_OK) {
+    ++ud->transaction_ud->streaming_count;
     rc = ud->participant->get(ud->participant, output.sink, &opts, &result,
                               &error);
+    --ud->transaction_ud->streaming_count;
   }
   if (rc != LC_OK) {
     if (output.sink != NULL)
@@ -6639,7 +6677,9 @@ static int lcdc_outbox_participant_update(lua_State *L) {
   }
   rc = lcdc_source_from_value(L, 2, &source, &error);
   if (rc == LC_OK) {
+    ++ud->transaction_ud->streaming_count;
     rc = ud->participant->update(ud->participant, source, &opts, &error);
+    --ud->transaction_ud->streaming_count;
   }
   lc_source_close(source);
   if (rc != LC_OK) {
@@ -6816,8 +6856,10 @@ static int lcdc_outbox_participant_attach(lua_State *L) {
   lc_error_init(&error);
   rc = lcdc_source_from_value(L, 3, &source, &error);
   if (rc == LC_OK) {
+    ++ud->transaction_ud->streaming_count;
     rc = ud->participant->attach(ud->participant, &request, source, &result,
                                  &error);
+    --ud->transaction_ud->streaming_count;
   }
   lc_source_close(source);
   if (rc != LC_OK) {
@@ -6865,8 +6907,10 @@ static int lcdc_outbox_participant_get_attachment(lua_State *L) {
   rc = lcdc_init_output(L, 3, &output, &error);
   ud->streaming = rc == LC_OK;
   if (rc == LC_OK) {
+    ++ud->transaction_ud->streaming_count;
     rc = ud->participant->get_attachment(ud->participant, &request, output.sink,
                                          &result, &error);
+    --ud->transaction_ud->streaming_count;
   }
   if (rc != LC_OK) {
     if (output.sink != NULL)
