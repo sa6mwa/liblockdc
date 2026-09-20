@@ -4740,10 +4740,17 @@ static int lc_pouch_query_run_scan_predicate(lc_pouch_query_scan_context *scan,
   if (scan->selector != NULL) {
     rc = lc_pouch_query_index_plan_from_selector(scan->runtime, scan->selector,
                                                  &plan, error);
-    if (rc == LC_OK && scan->client->pouch->query_indexing_enabled &&
-        lc_pouch_query_scan_scalar_plan_supported(&plan)) {
+    if (rc == LC_OK && lc_pouch_query_scan_scalar_plan_supported(&plan)) {
+      /* The scalar body matcher is a bounded streaming scan optimization, not
+       * a query-index feature. In particular, non-query Pouch roots must use
+       * it for workflow's durable envelope predicates: routing those simple
+       * scans through the generic LQL evaluator needlessly requires its large
+       * parser frame on the dispatcher's Musl thread stack. Only the optional
+       * key-index candidate shortcut below depends on indexing being enabled.
+       */
       scan->scan_scalar_plan = &plan;
-      if (!scan->emit_documents) {
+      if (scan->client->pouch->query_indexing_enabled &&
+          !scan->emit_documents) {
         lc_pouch_generation flushed_seq;
 
         flushed_seq = 0UL;

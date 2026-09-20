@@ -541,3 +541,30 @@ lc_add_https_unit_test_case(
   lc_unit_transport_https_public_queue_nack_rejects_invalid_intent
   LC_HTTPS_CASE_PUBLIC_QUEUE_NACK_REJECTS_INVALID_INTENT
 )
+
+# The QEMU matrix intentionally exercises this fixed, representative runtime
+# closure.  Building it explicitly avoids compiling every host-only test for
+# every target architecture before the selected cross-runtime CTest label can
+# run.
+add_custom_target(lockdc_cross_runtime_tests DEPENDS
+  lc_unit_streams
+  lc_unit_engine_allocator
+  lc_unit_contracts
+  lc_unit_xid_atfork
+  lc_unit_public_mock_usage
+  lc_unit_consumer_service
+  lc_unit_workflow
+  lc_unit_runtime
+  lc_unit_mutate_stream
+  lc_unit_pouch
+  lc_unit_transport_https_client_open_accepts_memory_bundle_source
+  lc_unit_transport_https_public_client_namespaced_load_rejects_empty_namespace
+  lc_unit_transport_https_state_paths_use_mtls
+  lc_unit_transport_https_state_parses_buffered_typed_json_response
+  lc_unit_transport_https_queue_paths_use_mtls
+  lc_unit_transport_https_watch_filters_and_finishes_trailing_event
+  lc_unit_transport_https_public_lease_attach_retries_node_passive_and_cleans_parser_state
+  lc_unit_transport_https_public_attachment_get_preserves_i64_timestamp_headers
+  lc_unit_transport_https_enqueue_from_checks_public_metadata_range
+  lc_unit_transport_https_public_query_keys_streams_chunks_and_headers
+)

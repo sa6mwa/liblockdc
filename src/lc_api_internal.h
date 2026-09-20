@@ -25,6 +25,7 @@
 typedef struct lc_stream_pipe lc_stream_pipe;
 
 typedef struct lc_client_handle lc_client_handle;
+typedef struct lc_workflow_dispatcher_handle lc_workflow_dispatcher_handle;
 typedef struct lc_lease_handle lc_lease_handle;
 typedef struct lc_message_handle lc_message_handle;
 typedef struct lc_consumer_service_handle lc_consumer_service_handle;
@@ -35,6 +36,15 @@ typedef void (*lc_workflow_test_after_reconcile_query_hook_fn)(void *context);
 extern lc_workflow_test_after_reconcile_query_hook_fn
     lc_workflow_test_after_reconcile_query_hook;
 extern void *lc_workflow_test_after_reconcile_query_context;
+extern lc_workflow_test_after_reconcile_query_hook_fn
+    lc_workflow_test_after_recovery_overflow_hook;
+extern void *lc_workflow_test_after_recovery_overflow_context;
+extern lc_workflow_test_after_reconcile_query_hook_fn
+    lc_workflow_test_before_recovery_query_hook;
+extern void *lc_workflow_test_before_recovery_query_context;
+extern lc_workflow_test_after_reconcile_query_hook_fn
+    lc_workflow_test_after_recovery_capacity_pause_hook;
+extern void *lc_workflow_test_after_recovery_capacity_pause_context;
 typedef void (*lc_workflow_test_dead_letter_replay_client_hook_fn)(
     lc_client *client, lc_client *dispatcher_client, void *context);
 extern lc_workflow_test_dead_letter_replay_client_hook_fn
@@ -53,6 +63,11 @@ extern lc_workflow_test_hook_fn lc_workflow_test_before_next_wait_hook;
 extern void *lc_workflow_test_before_next_wait_context;
 extern lc_workflow_test_hook_fn lc_workflow_test_before_next_release_hook;
 extern void *lc_workflow_test_before_next_release_context;
+extern lc_workflow_test_hook_fn
+    lc_workflow_test_after_dispatcher_core_retain_hook;
+extern void *lc_workflow_test_after_dispatcher_core_retain_context;
+size_t
+lc_workflow_test_dispatcher_ref_count(lc_workflow_dispatcher *dispatcher);
 extern lc_workflow_test_hook_fn
     lc_workflow_test_before_dead_letter_export_open_hook;
 extern void *lc_workflow_test_before_dead_letter_export_open_context;
@@ -130,6 +145,10 @@ int lc_workflow_test_renew_claim_lease(lc_lease *lease, long ttl_seconds,
 int lc_workflow_test_delayed_recovery_deadline(lc_workflow *workflow,
                                                const char *key,
                                                lc_i64 *out_deadline);
+int lc_workflow_test_dispatcher_delayed_recovery_deadline(
+    lc_workflow_dispatcher *dispatcher, const char *key, lc_i64 *out_deadline);
+int lc_workflow_test_dispatcher_periodic_recovery_is_armed(
+    lc_workflow_dispatcher *dispatcher);
 void lc_lonejson_test_fail_thread_runtime_once(void);
 #endif
 
@@ -161,7 +180,9 @@ struct lc_client_handle {
   int owns_logger;
   lc_allocator allocator;
   pthread_mutex_t lifecycle_mutex;
+  lc_workflow_dispatcher_handle *workflow_dispatchers;
   unsigned long refcount;
+  int close_requested;
   int lifecycle_mutex_initialized;
 };
 
@@ -636,6 +657,9 @@ int lc_client_new_consumer_service_method(
 int lc_client_new_workflow_method(lc_client *self,
                                   const lc_workflow_config *config,
                                   lc_workflow **out, lc_error *error);
+int lc_client_new_workflow_with_dispatcher_method(
+    lc_client *self, const lc_workflow_config *config,
+    lc_workflow_dispatcher *dispatcher, lc_workflow **out, lc_error *error);
 int lc_client_new_history_consumer_method(
     lc_client *self, const lc_history_consumer_config *config,
     lc_history_consumer **out, lc_error *error);
@@ -649,7 +673,9 @@ int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
                                  const lc_watch_handler *handler,
                                  lc_error *error);
 void lc_client_handle_retain(lc_client_handle *client);
+void lc_client_handle_release(lc_client_handle *client);
 void lc_client_close_method(lc_client *self);
+void lc_workflow_dispatchers_stop_for_client(lc_client_handle *client);
 
 int lc_lease_describe_method(lc_lease *self, lc_error *error);
 int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,

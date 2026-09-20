@@ -443,6 +443,32 @@ static int lc_pouch_state_namespace_lock_is_held(lc_pouch *pouch,
   return 0;
 }
 
+/* Closing a client from an application source or visitor callback is valid.
+ * Such callbacks can run under this authority while a workflow recovery
+ * thread is waiting to acquire it.  Lifecycle code uses this narrow
+ * thread-local query to defer a dispatcher join until that callback unwinds,
+ * avoiding a wait cycle without weakening the namespace lock itself. */
+int lc_pouch_state_namespace_lock_held_by_current_thread(lc_pouch *pouch) {
+  lc_pouch_state_namespace_lock *lock;
+
+  if (pouch == NULL) {
+    return 0;
+  }
+  pthread_once(&lc_pouch_state_namespace_lock_key_once,
+               lc_pouch_state_namespace_lock_key_init);
+  if (lc_pouch_state_namespace_lock_key_status != 0) {
+    return 0;
+  }
+  for (lock = (lc_pouch_state_namespace_lock *)pthread_getspecific(
+           lc_pouch_state_namespace_lock_key);
+       lock != NULL; lock = lock->previous_namespace_lock) {
+    if (lock->pouch == pouch) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static void
 lc_pouch_state_namespace_lock_untrack(lc_pouch_state_namespace_lock *lock) {
   if (lock == NULL || lock->pouch == NULL) {

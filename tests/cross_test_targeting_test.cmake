@@ -55,7 +55,7 @@ set -eu
   done
   printf '\n'
 } >> "${LOCKDC_TEST_LOG}"
-exit 77
+exit 0
 ]=])
 file(CHMOD "${fake_build}"
     PERMISSIONS
@@ -103,7 +103,7 @@ execute_process(
 )
 if(NOT cross_test_result EQUAL 0)
     message(FATAL_ERROR
-        "expected cross_test.sh release to succeed without rebuilding\n"
+        "expected cross_test.sh release to build its curated runtime closure\n"
         "stdout:\n${cross_test_stdout}\n"
         "stderr:\n${cross_test_stderr}")
 endif()
@@ -127,7 +127,14 @@ assert_log_contains("ctest\\|--preset\\|aarch64-linux-musl-release\\|--output-on
 assert_log_contains("ctest\\|--preset\\|armhf-linux-gnu-release\\|--output-on-failure\\|" "armhf gnu ctest invocation")
 assert_log_contains("ctest\\|--preset\\|armhf-linux-musl-release\\|--output-on-failure\\|" "armhf musl ctest invocation")
 assert_log_contains("-L\\|cross-runtime\\|" "curated target-runtime test label")
-assert_log_not_contains("build\\|" "release preset build invocation")
+foreach(preset
+        aarch64-linux-gnu-release
+        aarch64-linux-musl-release
+        armhf-linux-gnu-release
+        armhf-linux-musl-release)
+    assert_log_contains("build\\|${preset}\\|lockdc_cross_runtime_tests\\|"
+        "${preset} curated runtime build invocation")
+endforeach()
 
 file(WRITE "${fake_build}" [=[
 #!/usr/bin/env bash

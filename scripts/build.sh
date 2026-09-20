@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 preset=${1:-debug}
+shift || true
 
 unset LD_LIBRARY_PATH
 
@@ -16,4 +17,8 @@ case "$preset" in
 esac
 
 cmake --preset "$preset"
-cmake --build --preset "$preset"
+if [ "$#" -gt 0 ]; then
+  cmake --build --preset "$preset" --target "$@"
+else
+  cmake --build --preset "$preset"
+fi

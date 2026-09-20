@@ -38,6 +38,11 @@ specified in [the workflow design](docs/inbox-outbox.md). The threadless
 producer, explicit dispatcher, and Vectis integration contract are specified
 in [the workflow dispatch architecture](docs/workflow-dispatch-architecture.md).
 The Lua workflow facade is documented in [the Lua SDK guide](docs/lua.md).
+The executable direct deployment pair is
+[`examples/workflow_producer.c`](examples/workflow_producer.c) and
+[`examples/lua/workflow_dispatcher.lua`](examples/lua/workflow_dispatcher.lua):
+the producer commits and exits, while the dedicated Lua process performs the
+foreign-effect dispatch.
 
 ## Pouch storage
 
@@ -83,7 +88,8 @@ options. Common options are:
   namespace query preference used at open
 - `query_indexing=false` for roots that never use indexed queries. This
   disables local index maintenance and makes implicit queries use scans;
-  explicit indexed queries and `flush_index` are unavailable.
+  explicit indexed queries and `flush_index` are unavailable. Pouch workflow
+  recovery and dead-letter management continue through bounded scan queries.
 
 The public API remains the same receiver-function SDK surface for remote and
 Pouch clients. State bodies, queue payloads, attachments, scan output,

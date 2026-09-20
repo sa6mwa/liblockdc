@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,7 @@
 #define LCDC_LEASE_MT "lockdc.lease"
 #define LCDC_MESSAGE_MT "lockdc.message"
 #define LCDC_WORKFLOW_MT "lockdc.workflow"
+#define LCDC_WORKFLOW_DISPATCHER_MT "lockdc.workflow_dispatcher"
 #define LCDC_WORKFLOW_TXN_MT "lockdc.workflow_transaction"
 #define LCDC_WORKFLOW_PARTICIPANT_MT "lockdc.workflow_participant"
 #define LCDC_OUTBOX_JOB_MT "lockdc.outbox_job"
@@ -39,19 +41,61 @@ typedef struct lcdc_workflow_ud {
   int owner_ref;
 } lcdc_workflow_ud;
 
+typedef struct lcdc_workflow_dispatcher_binding {
+  lc_workflow_dispatcher *dispatcher;
+  lc_client *client;
+  lua_State *owner;
+  int handler_mode;
+  int raw_pull_mode;
+  int consuming;
+  int stopped;
+  size_t wrapper_count;
+  /* A pump/run frame pins this shared binding even when its handler closes
+   * the wrapper that entered the frame. */
+  size_t consumption_count;
+  struct lcdc_workflow_dispatcher_binding *next;
+} lcdc_workflow_dispatcher_binding;
+
+typedef struct lcdc_workflow_dispatcher_ud {
+  lc_workflow_dispatcher *dispatcher;
+  int owner_ref;
+  lcdc_workflow_dispatcher_binding *binding;
+} lcdc_workflow_dispatcher_ud;
+
 typedef struct lcdc_workflow_txn_ud {
   lc_workflow_transaction *transaction;
   int owner_ref;
+  int callback_scoped;
+  int callback_staging_failed;
+  int callback_duplicate_seen;
+  int callback_duplicate_after_domain_participant;
+  int callback_has_fresh_participant;
+  int callback_has_domain_participant;
+  int callback_duplicate_result_ref;
 } lcdc_workflow_txn_ud;
 
 typedef struct lcdc_workflow_participant_ud {
   lc_workflow_participant *participant;
   int owner_ref;
+  /* The transaction userdata owns this wrapper.  It lets callback-scoped
+   * transactions become rollback-only when a participant staging operation
+   * reports a structured failure that Lua code elects not to raise. */
+  lcdc_workflow_txn_ud *transaction_ud;
 } lcdc_workflow_participant_ud;
+
+static void lcdc_workflow_txn_note_staging_failure(lcdc_workflow_txn_ud *ud);
+static void lcdc_workflow_txn_note_duplicate(lua_State *L,
+                                             lcdc_workflow_txn_ud *ud,
+                                             int result_index);
+static void lcdc_workflow_txn_clear_duplicate_result(lua_State *L,
+                                                     lcdc_workflow_txn_ud *ud);
 
 typedef struct lcdc_outbox_job_ud {
   lc_outbox_job *job;
   int owner_ref;
+  int handler_scoped;
+  int terminal_operation;
+  int terminal_ref;
 } lcdc_outbox_job_ud;
 
 typedef struct lcdc_history_consumer_ud {
@@ -87,6 +131,85 @@ static size_t lcdc_lua_source_read(void *context, void *buffer, size_t count,
                                    lc_error *error);
 static int lcdc_lua_source_reset(void *context, lc_error *error);
 static void lcdc_lua_source_close(void *context);
+static int lcdc_outbox_job_apply_terminal(lua_State *L, lcdc_outbox_job_ud *ud,
+                                          int operation, int value_index,
+                                          lc_error *error);
+
+static pthread_mutex_t lcdc_workflow_dispatcher_bindings_mutex =
+    PTHREAD_MUTEX_INITIALIZER;
+static lcdc_workflow_dispatcher_binding *lcdc_workflow_dispatcher_bindings;
+static const char lcdc_workflow_dispatcher_handler_owners_key;
+
+static lua_State *lcdc_lua_main_thread(lua_State *L) {
+  lua_State *main_thread;
+
+  lua_rawgeti(L, LUA_REGISTRYINDEX, LUA_RIDX_MAINTHREAD);
+  main_thread = lua_tothread(L, -1);
+  lua_pop(L, 1);
+  return main_thread != NULL ? main_thread : L;
+}
+
+/* The registry owns this weak-value table, not its handler values.  The
+ * handler table is instead retained by the dispatcher userdata that installed
+ * it.  That makes a handler which closes over its dispatcher an ordinary Lua
+ * cycle, rather than a registry-rooted leak. */
+static void lcdc_push_workflow_dispatcher_handler_owners(lua_State *L) {
+  lua_rawgetp(L, LUA_REGISTRYINDEX,
+              (const void *)&lcdc_workflow_dispatcher_handler_owners_key);
+  if (!lua_isnil(L, -1))
+    return;
+  lua_pop(L, 1);
+  lua_newtable(L);
+  lua_newtable(L);
+  lua_pushstring(L, "v");
+  lua_setfield(L, -2, "__mode");
+  lua_setmetatable(L, -2);
+  lua_pushvalue(L, -1);
+  lua_rawsetp(L, LUA_REGISTRYINDEX,
+              (const void *)&lcdc_workflow_dispatcher_handler_owners_key);
+}
+
+static void lcdc_workflow_dispatcher_clear_handlers(
+    lua_State *L, const lcdc_workflow_dispatcher_binding *binding) {
+  if (binding == NULL)
+    return;
+  lcdc_push_workflow_dispatcher_handler_owners(L);
+  lua_pushlightuserdata(L, binding->dispatcher);
+  lua_pushnil(L);
+  lua_rawset(L, -3);
+  lua_pop(L, 1);
+}
+
+/* Push the handler map retained by this wrapper, falling back to the
+ * collectible per-dispatcher map for an alias that predates handler binding. */
+static int lcdc_workflow_dispatcher_push_handlers(
+    lua_State *L, lcdc_workflow_dispatcher_ud *ud, int dispatcher_index) {
+  lcdc_push_workflow_dispatcher_handler_owners(L);
+  lua_pushlightuserdata(L, ud->dispatcher);
+  lua_rawget(L, -2);
+  lua_remove(L, -2);
+  if (lua_istable(L, -1)) {
+    lua_pushvalue(L, -1);
+    lua_setiuservalue(L, dispatcher_index, 1);
+    return 1;
+  }
+  lua_pop(L, 1);
+  lua_getiuservalue(L, dispatcher_index, 1);
+  return lua_istable(L, -1);
+}
+
+static void lcdc_workflow_dispatcher_set_handlers(
+    lua_State *L, lcdc_workflow_dispatcher_ud *ud, int dispatcher_index,
+    int handlers_index) {
+  handlers_index = lua_absindex(L, handlers_index);
+  lua_pushvalue(L, handlers_index);
+  lua_setiuservalue(L, dispatcher_index, 1);
+  lcdc_push_workflow_dispatcher_handler_owners(L);
+  lua_pushlightuserdata(L, ud->dispatcher);
+  lua_pushvalue(L, handlers_index);
+  lua_rawset(L, -3);
+  lua_pop(L, 1);
+}
 
 static int lcdc_push_error(lua_State *L, const lc_error *error) {
   lua_newtable(L);
@@ -131,6 +254,23 @@ static lcdc_client_ud *lcdc_check_client(lua_State *L, int index) {
   return ud;
 }
 
+/* Request-table field access may invoke Lua metamethods. In particular, an
+ * __index implementation can close this wrapper after its initial receiver
+ * check, so every request parser must revalidate before passing the client to
+ * the C API. */
+static int lcdc_client_revalidate(lcdc_client_ud *ud, lc_client **out,
+                                  lc_error *error) {
+  if (out != NULL)
+    *out = NULL;
+  if (ud == NULL || ud->client == NULL || out == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "client was closed while preparing request", NULL, NULL,
+                        NULL);
+  }
+  *out = ud->client;
+  return LC_OK;
+}
+
 static lcdc_lease_ud *lcdc_check_lease(lua_State *L, int index) {
   lcdc_lease_ud *ud;
 
@@ -162,6 +302,16 @@ static lcdc_workflow_txn_ud *lcdc_check_workflow_txn(lua_State *L, int index) {
       (lcdc_workflow_txn_ud *)luaL_checkudata(L, index, LCDC_WORKFLOW_TXN_MT);
   luaL_argcheck(L, ud != NULL && ud->transaction != NULL, index,
                 "lockdc workflow transaction is closed");
+  return ud;
+}
+
+static lcdc_workflow_dispatcher_ud *lcdc_check_workflow_dispatcher(lua_State *L,
+                                                                   int index) {
+  lcdc_workflow_dispatcher_ud *ud =
+      (lcdc_workflow_dispatcher_ud *)luaL_checkudata(
+          L, index, LCDC_WORKFLOW_DISPATCHER_MT);
+  luaL_argcheck(L, ud != NULL && ud->dispatcher != NULL, index,
+                "lockdc workflow dispatcher is closed");
   return ud;
 }
 
@@ -208,12 +358,6 @@ static void lcdc_set_integer_field(lua_State *L, const char *name, long value) {
   lua_setfield(L, -2, name);
 }
 
-static void lcdc_set_uinteger_field(lua_State *L, const char *name,
-                                    unsigned long value) {
-  lua_pushinteger(L, (lua_Integer)value);
-  lua_setfield(L, -2, name);
-}
-
 static int lcdc_set_size_field(lua_State *L, const char *name, size_t value,
                                lc_error *error) {
 #if SIZE_MAX > LUA_MAXINTEGER
@@ -252,6 +396,11 @@ static int lcdc_set_int64_field(lua_State *L, const char *name, lc_i64 value,
   lua_pushinteger(L, (lua_Integer)value);
   lua_setfield(L, -2, name);
   return LC_OK;
+}
+
+static int lcdc_set_unix_seconds_field(lua_State *L, const char *name,
+                                       lc_unix_seconds value, lc_error *error) {
+  return lcdc_set_int64_field(L, name, (lc_i64)value, error);
 }
 
 static void lcdc_set_version_field(lua_State *L, const char *name,
@@ -836,6 +985,168 @@ static int lcdc_push_workflow(lua_State *L, lc_workflow *workflow,
   return 1;
 }
 
+static int lcdc_workflow_dispatcher_binding_acquire(
+    lua_State *L, lc_workflow_dispatcher *dispatcher, int client_index,
+    lcdc_workflow_dispatcher_binding **out, lc_error *error) {
+  lcdc_workflow_dispatcher_binding *binding;
+  lua_State *owner;
+
+  owner = lcdc_lua_main_thread(L);
+  pthread_mutex_lock(&lcdc_workflow_dispatcher_bindings_mutex);
+  for (binding = lcdc_workflow_dispatcher_bindings; binding != NULL;
+       binding = binding->next) {
+    if (binding->dispatcher != dispatcher)
+      continue;
+    if (binding->owner != owner) {
+      pthread_mutex_unlock(&lcdc_workflow_dispatcher_bindings_mutex);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "dispatcher already belongs to another Lua state",
+                          NULL, NULL, NULL);
+    }
+    ++binding->wrapper_count;
+    pthread_mutex_unlock(&lcdc_workflow_dispatcher_bindings_mutex);
+    *out = binding;
+    return LC_OK;
+  }
+  binding = (lcdc_workflow_dispatcher_binding *)calloc(1U, sizeof(*binding));
+  if (binding == NULL) {
+    pthread_mutex_unlock(&lcdc_workflow_dispatcher_bindings_mutex);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate Lua dispatcher binding", NULL, NULL,
+                        NULL);
+  }
+  binding->dispatcher = dispatcher;
+  binding->client =
+      ((lcdc_client_ud *)luaL_checkudata(L, client_index, LCDC_CLIENT_MT))
+          ->client;
+  binding->owner = owner;
+  binding->handler_mode = 0;
+  binding->wrapper_count = 1U;
+  binding->next = lcdc_workflow_dispatcher_bindings;
+  lcdc_workflow_dispatcher_bindings = binding;
+  pthread_mutex_unlock(&lcdc_workflow_dispatcher_bindings_mutex);
+  *out = binding;
+  return LC_OK;
+}
+
+/* Client close stops each native dispatcher before releasing its runtime, then
+ * retires bindings that no live Lua wrapper still owns. */
+static void
+lcdc_workflow_dispatcher_bindings_note_client_stopped(lua_State *L,
+                                                      int client_index) {
+  lcdc_workflow_dispatcher_binding **link;
+  lcdc_workflow_dispatcher_binding *binding;
+  lcdc_workflow_dispatcher_binding *retired;
+  lc_client *client;
+
+  retired = NULL;
+  client = ((lcdc_client_ud *)luaL_checkudata(L, client_index, LCDC_CLIENT_MT))
+               ->client;
+  pthread_mutex_lock(&lcdc_workflow_dispatcher_bindings_mutex);
+  link = &lcdc_workflow_dispatcher_bindings;
+  while (*link != NULL) {
+    binding = *link;
+    if (binding->owner != lcdc_lua_main_thread(L) ||
+        binding->client != client) {
+      link = &binding->next;
+      continue;
+    }
+    binding->stopped = 1;
+    if (binding->wrapper_count != 0U || binding->consumption_count != 0U) {
+      link = &binding->next;
+      continue;
+    }
+    *link = binding->next;
+    binding->next = retired;
+    retired = binding;
+  }
+  pthread_mutex_unlock(&lcdc_workflow_dispatcher_bindings_mutex);
+  while (retired != NULL) {
+    binding = retired;
+    retired = binding->next;
+    lcdc_workflow_dispatcher_clear_handlers(L, binding);
+    free(binding);
+  }
+}
+
+static void lcdc_workflow_dispatcher_binding_release(
+    lua_State *L, lcdc_workflow_dispatcher_binding *binding) {
+  lcdc_workflow_dispatcher_binding **link;
+
+  if (binding == NULL)
+    return;
+  pthread_mutex_lock(&lcdc_workflow_dispatcher_bindings_mutex);
+  if (binding->wrapper_count > 0U)
+    --binding->wrapper_count;
+  /* A running handler pins the shared binding independently of its wrapper:
+   * handler code may close that wrapper before pump/run reaches cleanup. */
+  if (binding->wrapper_count == 0U && binding->consumption_count == 0U) {
+    link = &lcdc_workflow_dispatcher_bindings;
+    while (*link != NULL && *link != binding)
+      link = &(*link)->next;
+    if (*link == binding)
+      *link = binding->next;
+  } else {
+    binding = NULL;
+  }
+  pthread_mutex_unlock(&lcdc_workflow_dispatcher_bindings_mutex);
+  if (binding != NULL) {
+    lcdc_workflow_dispatcher_clear_handlers(L, binding);
+    free(binding);
+  }
+}
+
+static void lcdc_workflow_dispatcher_binding_note_stopped(
+    lua_State *L, lcdc_workflow_dispatcher_binding *binding) {
+  lcdc_workflow_dispatcher_binding **link;
+
+  if (binding == NULL)
+    return;
+  pthread_mutex_lock(&lcdc_workflow_dispatcher_bindings_mutex);
+  binding->stopped = 1;
+  if (binding->wrapper_count == 0U && binding->consumption_count == 0U) {
+    link = &lcdc_workflow_dispatcher_bindings;
+    while (*link != NULL && *link != binding)
+      link = &(*link)->next;
+    if (*link == binding)
+      *link = binding->next;
+  } else {
+    binding = NULL;
+  }
+  pthread_mutex_unlock(&lcdc_workflow_dispatcher_bindings_mutex);
+  if (binding != NULL) {
+    lcdc_workflow_dispatcher_clear_handlers(L, binding);
+    free(binding);
+  }
+}
+
+static int lcdc_push_workflow_dispatcher(lua_State *L,
+                                         lc_workflow_dispatcher *dispatcher,
+                                         int client_index, int owner_index,
+                                         lc_error *error) {
+  lcdc_workflow_dispatcher_ud *ud =
+      (lcdc_workflow_dispatcher_ud *)lua_newuserdatauv(L, sizeof(*ud), 1);
+  int rc;
+
+  ud->dispatcher = NULL;
+  ud->owner_ref = LUA_NOREF;
+  ud->binding = NULL;
+  rc = lcdc_workflow_dispatcher_binding_acquire(L, dispatcher, client_index,
+                                                &ud->binding, error);
+  if (rc != LC_OK) {
+    lua_pop(L, 1);
+    return rc;
+  }
+  ud->dispatcher = dispatcher;
+  if (owner_index != 0) {
+    lua_pushvalue(L, owner_index);
+    ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  }
+  luaL_getmetatable(L, LCDC_WORKFLOW_DISPATCHER_MT);
+  lua_setmetatable(L, -2);
+  return LC_OK;
+}
+
 static int lcdc_push_workflow_txn(lua_State *L,
                                   lc_workflow_transaction *transaction,
                                   int owner_index) {
@@ -843,6 +1154,13 @@ static int lcdc_push_workflow_txn(lua_State *L,
       (lcdc_workflow_txn_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->transaction = transaction;
   ud->owner_ref = LUA_NOREF;
+  ud->callback_scoped = 0;
+  ud->callback_staging_failed = 0;
+  ud->callback_duplicate_seen = 0;
+  ud->callback_duplicate_after_domain_participant = 0;
+  ud->callback_has_fresh_participant = 0;
+  ud->callback_has_domain_participant = 0;
+  ud->callback_duplicate_result_ref = LUA_NOREF;
   if (owner_index != 0) {
     lua_pushvalue(L, owner_index);
     ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -852,13 +1170,14 @@ static int lcdc_push_workflow_txn(lua_State *L,
   return 1;
 }
 
-static int lcdc_push_workflow_participant(lua_State *L,
-                                          lc_workflow_participant *participant,
-                                          int owner_index) {
+static int lcdc_push_workflow_participant(
+    lua_State *L, lc_workflow_participant *participant, int owner_index,
+    lcdc_workflow_txn_ud *transaction_ud) {
   lcdc_workflow_participant_ud *ud =
       (lcdc_workflow_participant_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->participant = participant;
   ud->owner_ref = LUA_NOREF;
+  ud->transaction_ud = transaction_ud;
   if (owner_index != 0) {
     lua_pushvalue(L, owner_index);
     ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -874,6 +1193,9 @@ static int lcdc_push_outbox_job(lua_State *L, lc_outbox_job *job,
       (lcdc_outbox_job_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->job = job;
   ud->owner_ref = LUA_NOREF;
+  ud->handler_scoped = 0;
+  ud->terminal_operation = -1;
+  ud->terminal_ref = LUA_NOREF;
   if (owner_index != 0) {
     lua_pushvalue(L, owner_index);
     ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -992,6 +1314,7 @@ static int lcdc_client_gc(lua_State *L) {
 
   ud = (lcdc_client_ud *)luaL_checkudata(L, 1, LCDC_CLIENT_MT);
   if (ud->client != NULL) {
+    lcdc_workflow_dispatcher_bindings_note_client_stopped(L, 1);
     lc_client_close(ud->client);
     ud->client = NULL;
   }
@@ -1040,6 +1363,23 @@ static int lcdc_workflow_gc(lua_State *L) {
   return 0;
 }
 
+static int lcdc_workflow_dispatcher_gc(lua_State *L) {
+  lcdc_workflow_dispatcher_ud *ud =
+      (lcdc_workflow_dispatcher_ud *)luaL_checkudata(
+          L, 1, LCDC_WORKFLOW_DISPATCHER_MT);
+  if (ud->dispatcher != NULL) {
+    lc_workflow_dispatcher_close(ud->dispatcher);
+    ud->dispatcher = NULL;
+  }
+  lcdc_workflow_dispatcher_binding_release(L, ud->binding);
+  ud->binding = NULL;
+  if (ud->owner_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
+    ud->owner_ref = LUA_NOREF;
+  }
+  return 0;
+}
+
 static int lcdc_workflow_txn_gc(lua_State *L) {
   lcdc_workflow_txn_ud *ud =
       (lcdc_workflow_txn_ud *)luaL_checkudata(L, 1, LCDC_WORKFLOW_TXN_MT);
@@ -1050,6 +1390,10 @@ static int lcdc_workflow_txn_gc(lua_State *L) {
   if (ud->owner_ref != LUA_NOREF) {
     luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
     ud->owner_ref = LUA_NOREF;
+  }
+  if (ud->callback_duplicate_result_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->callback_duplicate_result_ref);
+    ud->callback_duplicate_result_ref = LUA_NOREF;
   }
   return 0;
 }
@@ -1066,6 +1410,7 @@ static int lcdc_workflow_participant_gc(lua_State *L) {
     luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
     ud->owner_ref = LUA_NOREF;
   }
+  ud->transaction_ud = NULL;
   return 0;
 }
 
@@ -1075,6 +1420,10 @@ static int lcdc_outbox_job_gc(lua_State *L) {
   if (ud->job != NULL) {
     lc_outbox_job_close(ud->job);
     ud->job = NULL;
+  }
+  if (ud->terminal_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->terminal_ref);
+    ud->terminal_ref = LUA_NOREF;
   }
   if (ud->owner_ref != LUA_NOREF) {
     luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
@@ -2084,7 +2433,14 @@ static int lcdc_client_query(lua_State *L) {
   lua_newtable(L);
   lcdc_set_string_field(L, "cursor", res.cursor);
   lcdc_set_string_field(L, "return_mode", res.return_mode);
-  lcdc_set_uinteger_field(L, "index_seq", res.index_seq);
+  rc = lcdc_set_uint64_field(L, "index_seq", res.index_seq, &error);
+  if (rc != LC_OK) {
+    lua_pop(L, 1);
+    lcdc_push_status_error(L, rc, &error);
+    lc_query_res_cleanup(&res);
+    lc_error_cleanup(&error);
+    return 3;
+  }
   lcdc_set_string_field(L, "metadata_json", res.metadata_json);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_query_res_cleanup(&res);
@@ -2133,29 +2489,6 @@ static int lcdc_query_keys_finish(void *context, lc_error *error) {
   return lcdc_query_keys_call(handler->L, handler->finish_ref, 0, error);
 }
 
-static void lcdc_query_keys_handler_validate(lua_State *L, int index) {
-  int type;
-
-  type = lua_type(L, index);
-  if (type == LUA_TFUNCTION) {
-    return;
-  }
-  luaL_checktype(L, index, LUA_TTABLE);
-  lua_getfield(L, index, "begin");
-  if (!lua_isnil(L, -1)) {
-    luaL_checktype(L, -1, LUA_TFUNCTION);
-  }
-  lua_pop(L, 1);
-  lua_getfield(L, index, "chunk");
-  luaL_checktype(L, -1, LUA_TFUNCTION);
-  lua_pop(L, 1);
-  lua_getfield(L, index, "finish");
-  if (!lua_isnil(L, -1)) {
-    luaL_checktype(L, -1, LUA_TFUNCTION);
-  }
-  lua_pop(L, 1);
-}
-
 static void lcdc_query_keys_handler_init(lua_State *L, int index,
                                          lcdc_query_keys_handler *handler) {
   int type;
@@ -2164,26 +2497,35 @@ static void lcdc_query_keys_handler_init(lua_State *L, int index,
   handler->begin_ref = LUA_NOREF;
   handler->chunk_ref = LUA_NOREF;
   handler->finish_ref = LUA_NOREF;
-  /* Lua validation errors use longjmp. Validate the entire callback shape
-   * before registering any references that ordinary C cleanup cannot reach. */
-  lcdc_query_keys_handler_validate(L, index);
   type = lua_type(L, index);
   if (type == LUA_TFUNCTION) {
     lua_pushvalue(L, index);
     handler->chunk_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     return;
   }
+  index = lua_absindex(L, index);
+  /* Metamethod-backed field lookup may raise a Lua error.  Keep every value
+   * on the Lua stack until all three lookups and type checks have succeeded:
+   * luaL_error unwinds that stack, whereas a registry reference would survive
+   * the longjmp and retain a callback graph indefinitely. */
+  luaL_checktype(L, index, LUA_TTABLE);
   lua_getfield(L, index, "begin");
+  lua_getfield(L, index, "chunk");
+  lua_getfield(L, index, "finish");
+  if (!lua_isnil(L, -3))
+    luaL_checktype(L, -3, LUA_TFUNCTION);
+  luaL_checktype(L, -2, LUA_TFUNCTION);
   if (!lua_isnil(L, -1)) {
-    handler->begin_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    luaL_checktype(L, -1, LUA_TFUNCTION);
+  }
+  if (!lua_isnil(L, -1)) {
+    handler->finish_ref = luaL_ref(L, LUA_REGISTRYINDEX);
   } else {
     lua_pop(L, 1);
   }
-  lua_getfield(L, index, "chunk");
   handler->chunk_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-  lua_getfield(L, index, "finish");
   if (!lua_isnil(L, -1)) {
-    handler->finish_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    handler->begin_ref = luaL_ref(L, LUA_REGISTRYINDEX);
   } else {
     lua_pop(L, 1);
   }
@@ -2206,6 +2548,7 @@ static void lcdc_query_keys_handler_cleanup(lcdc_query_keys_handler *handler) {
 
 static int lcdc_client_query_keys(lua_State *L) {
   lcdc_client_ud *ud;
+  lc_client_handle *client;
   lc_query_req req;
   lc_query_key_handler stream_handler;
   lcdc_query_keys_handler handler;
@@ -2214,6 +2557,7 @@ static int lcdc_client_query_keys(lua_State *L) {
   int rc;
 
   ud = lcdc_check_client(L, 1);
+  client = NULL;
   lc_query_req_init(&req);
   memset(&stream_handler, 0, sizeof(stream_handler));
   memset(&res, 0, sizeof(res));
@@ -2231,8 +2575,29 @@ static int lcdc_client_query_keys(lua_State *L) {
   stream_handler.begin = lcdc_query_keys_begin;
   stream_handler.chunk = lcdc_query_keys_chunk;
   stream_handler.end = lcdc_query_keys_finish;
-  rc = lc_query_keys(ud->client, &req, &stream_handler, &handler, &res, &error);
+  /* Request and handler table lookups may execute Lua metamethods, including
+   * client:close(). Re-read the userdata only after those callbacks have
+   * returned; retaining a pointer captured before them can dereference a
+   * freed client allocation. */
+  client = (lc_client_handle *)ud->client;
+  if (client == NULL) {
+    lcdc_query_keys_handler_cleanup(&handler);
+    (void)lc_error_set(&error, LC_ERR_INVALID, 0L,
+                       "client was closed while preparing query_keys", NULL,
+                       NULL, NULL);
+    lcdc_push_status_error(L, LC_ERR_INVALID, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  /* A streaming callback may close its Lua client wrapper. Keep the native
+   * allocation alive until the engine and callback references have unwound;
+   * public close still rejects the request immediately. */
+  lc_client_handle_retain(client);
+  rc = lc_query_keys(&client->pub, &req, &stream_handler, &handler, &res,
+                     &error);
   lcdc_query_keys_handler_cleanup(&handler);
+  if (client != NULL)
+    lc_client_handle_release(client);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_query_res_cleanup(&res);
@@ -2242,7 +2607,14 @@ static int lcdc_client_query_keys(lua_State *L) {
   lua_newtable(L);
   lcdc_set_string_field(L, "cursor", res.cursor);
   lcdc_set_string_field(L, "return_mode", res.return_mode);
-  lcdc_set_uinteger_field(L, "index_seq", res.index_seq);
+  rc = lcdc_set_uint64_field(L, "index_seq", res.index_seq, &error);
+  if (rc != LC_OK) {
+    lua_pop(L, 1);
+    lcdc_push_status_error(L, rc, &error);
+    lc_query_res_cleanup(&res);
+    lc_error_cleanup(&error);
+    return 3;
+  }
   lcdc_set_string_field(L, "metadata_json", res.metadata_json);
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_query_res_cleanup(&res);
@@ -2340,7 +2712,14 @@ static int lcdc_client_flush_index(lua_State *L) {
   lcdc_set_bool_field(L, "accepted", res.accepted);
   lcdc_set_bool_field(L, "flushed", res.flushed);
   lcdc_set_bool_field(L, "pending", res.pending);
-  lcdc_set_uinteger_field(L, "index_seq", res.index_seq);
+  rc = lcdc_set_uint64_field(L, "index_seq", res.index_seq, &error);
+  if (rc != LC_OK) {
+    lua_pop(L, 1);
+    lcdc_push_status_error(L, rc, &error);
+    lc_index_flush_res_cleanup(&res);
+    lc_error_cleanup(&error);
+    return 3;
+  }
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_index_flush_res_cleanup(&res);
   lc_error_cleanup(&error);
@@ -2358,6 +2737,8 @@ static void lcdc_parse_txn_participants(lua_State *L, int index,
                                         lc_txn_participant **out,
                                         size_t *count_out) {
   lc_txn_participant *participants;
+  int normalized_index;
+  int participants_index;
   size_t count;
   size_t i;
 
@@ -2374,14 +2755,31 @@ static void lcdc_parse_txn_participants(lua_State *L, int index,
     lua_pop(L, 1);
     return;
   }
-  /* Validate every Lua value before allocating C-owned storage: Lua argument
-   * errors use longjmp and would bypass ordinary C cleanup. */
+  participants_index = lua_absindex(L, -1);
+  /* Normalize all metatable-backed fields before allocating C-owned storage.
+   * Lua argument errors use longjmp, so a second lookup after calloc() could
+   * otherwise bypass ordinary cleanup. The private, plain Lua table also keeps
+   * the string values alive until the native request completes. */
+  lua_createtable(L, (int)count, 0);
+  normalized_index = lua_absindex(L, -1);
   for (i = 0U; i < count; ++i) {
-    lua_rawgeti(L, -1, (lua_Integer)(i + 1U));
+    const char *value;
+
+    lua_rawgeti(L, participants_index, (lua_Integer)(i + 1U));
     luaL_checktype(L, -1, LUA_TTABLE);
-    lcdc_require_string_field(L, -1, "namespace_name", NULL);
-    lcdc_require_string_field(L, -1, "key", NULL);
-    (void)lcdc_opt_string_field(L, -1, "backend_hash");
+    lua_createtable(L, 0, 3);
+    lcdc_require_string_field(L, -2, "namespace_name", &value);
+    lua_pushstring(L, value);
+    lua_setfield(L, -2, "namespace_name");
+    lcdc_require_string_field(L, -2, "key", &value);
+    lua_pushstring(L, value);
+    lua_setfield(L, -2, "key");
+    value = lcdc_opt_string_field(L, -2, "backend_hash");
+    if (value != NULL) {
+      lua_pushstring(L, value);
+      lua_setfield(L, -2, "backend_hash");
+    }
+    lua_rawseti(L, normalized_index, (lua_Integer)(i + 1U));
     lua_pop(L, 1);
   }
   participants = (lc_txn_participant *)calloc(count, sizeof(*participants));
@@ -2389,15 +2787,19 @@ static void lcdc_parse_txn_participants(lua_State *L, int index,
     luaL_error(L, "out of memory");
   }
   for (i = 0U; i < count; ++i) {
-    lua_rawgeti(L, -1, (lua_Integer)(i + 1U));
-    luaL_checktype(L, -1, LUA_TTABLE);
-    lcdc_require_string_field(L, -1, "namespace_name",
-                              &participants[i].namespace_name);
-    lcdc_require_string_field(L, -1, "key", &participants[i].key);
-    participants[i].backend_hash = lcdc_opt_string_field(L, -1, "backend_hash");
+    lua_rawgeti(L, normalized_index, (lua_Integer)(i + 1U));
+    lua_getfield(L, -1, "namespace_name");
+    participants[i].namespace_name = lua_tostring(L, -1);
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "key");
+    participants[i].key = lua_tostring(L, -1);
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "backend_hash");
+    participants[i].backend_hash = lua_tostring(L, -1);
+    lua_pop(L, 1);
     lua_pop(L, 1);
   }
-  lua_pop(L, 1);
+  lua_pop(L, 2);
   *out = participants;
   *count_out = count;
 }
@@ -2428,6 +2830,7 @@ static int lcdc_push_txn_decision_res(lua_State *L,
 
 static int lcdc_client_txn_replay(lua_State *L) {
   lcdc_client_ud *ud;
+  lc_client *client;
   lc_txn_replay_req req;
   lc_txn_replay_res res;
   lc_error error;
@@ -2439,7 +2842,9 @@ static int lcdc_client_txn_replay(lua_State *L) {
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
   lcdc_require_string_field(L, 2, "txn_id", &req.txn_id);
-  rc = lc_txn_replay(ud->client, &req, &res, &error);
+  rc = lcdc_client_revalidate(ud, &client, &error);
+  if (rc == LC_OK)
+    rc = lc_txn_replay(client, &req, &res, &error);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -2456,6 +2861,7 @@ static int lcdc_client_txn_replay(lua_State *L) {
 
 static int lcdc_client_txn_decision(lua_State *L, int operation) {
   lcdc_client_ud *ud;
+  lc_client *client;
   lc_txn_decision_req req;
   lc_txn_decision_res res;
   lc_txn_participant *participants;
@@ -2468,12 +2874,13 @@ static int lcdc_client_txn_decision(lua_State *L, int operation) {
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
   lcdc_parse_txn_decision_req(L, 2, &req, &participants);
-  if (operation == 0) {
-    rc = lc_txn_prepare(ud->client, &req, &res, &error);
-  } else if (operation == 1) {
-    rc = lc_txn_commit(ud->client, &req, &res, &error);
-  } else {
-    rc = lc_txn_rollback(ud->client, &req, &res, &error);
+  rc = lcdc_client_revalidate(ud, &client, &error);
+  if (rc == LC_OK && operation == 0) {
+    rc = lc_txn_prepare(client, &req, &res, &error);
+  } else if (rc == LC_OK && operation == 1) {
+    rc = lc_txn_commit(client, &req, &res, &error);
+  } else if (rc == LC_OK) {
+    rc = lc_txn_rollback(client, &req, &res, &error);
   }
   lcdc_free_txn_participants(&participants);
   if (rc != LC_OK) {
@@ -2515,13 +2922,19 @@ static int lcdc_push_tc_lease_res(lua_State *L, const char *success_field,
     lua_pop(L, 1);
     return rc;
   }
-  lcdc_set_integer_field(L, "expires_at_unix", expires_at_unix);
+  rc =
+      lcdc_set_unix_seconds_field(L, "expires_at_unix", expires_at_unix, error);
+  if (rc != LC_OK) {
+    lua_pop(L, 1);
+    return rc;
+  }
   lcdc_set_string_field(L, "correlation_id", correlation_id);
   return LC_OK;
 }
 
 static int lcdc_client_tc_lease_acquire(lua_State *L) {
   lcdc_client_ud *ud;
+  lc_client *client;
   lc_tc_lease_acquire_req req;
   lc_tc_lease_acquire_res res;
   lc_error error;
@@ -2537,7 +2950,9 @@ static int lcdc_client_tc_lease_acquire(lua_State *L) {
                             &req.candidate_endpoint);
   lcdc_opt_uint64_field(L, 2, "term", &req.term);
   lcdc_opt_integer_field(L, 2, "ttl_ms", &req.ttl_ms);
-  rc = lc_tc_lease_acquire(ud->client, &req, &res, &error);
+  rc = lcdc_client_revalidate(ud, &client, &error);
+  if (rc == LC_OK)
+    rc = lc_tc_lease_acquire(client, &req, &res, &error);
   if (rc == LC_OK) {
     rc = lcdc_push_tc_lease_res(
         L, "granted", res.granted, res.leader_id, res.leader_endpoint, res.term,
@@ -2555,6 +2970,7 @@ static int lcdc_client_tc_lease_acquire(lua_State *L) {
 
 static int lcdc_client_tc_lease_renew(lua_State *L) {
   lcdc_client_ud *ud;
+  lc_client *client;
   lc_tc_lease_renew_req req;
   lc_tc_lease_renew_res res;
   lc_error error;
@@ -2568,7 +2984,9 @@ static int lcdc_client_tc_lease_renew(lua_State *L) {
   lcdc_require_string_field(L, 2, "leader_id", &req.leader_id);
   lcdc_opt_uint64_field(L, 2, "term", &req.term);
   lcdc_opt_integer_field(L, 2, "ttl_ms", &req.ttl_ms);
-  rc = lc_tc_lease_renew(ud->client, &req, &res, &error);
+  rc = lcdc_client_revalidate(ud, &client, &error);
+  if (rc == LC_OK)
+    rc = lc_tc_lease_renew(client, &req, &res, &error);
   if (rc == LC_OK) {
     rc = lcdc_push_tc_lease_res(
         L, "renewed", res.renewed, res.leader_id, res.leader_endpoint, res.term,
@@ -2586,6 +3004,7 @@ static int lcdc_client_tc_lease_renew(lua_State *L) {
 
 static int lcdc_client_tc_lease_release(lua_State *L) {
   lcdc_client_ud *ud;
+  lc_client *client;
   lc_tc_lease_release_req req;
   lc_tc_lease_release_res res;
   lc_error error;
@@ -2598,7 +3017,9 @@ static int lcdc_client_tc_lease_release(lua_State *L) {
   luaL_checktype(L, 2, LUA_TTABLE);
   lcdc_require_string_field(L, 2, "leader_id", &req.leader_id);
   lcdc_opt_uint64_field(L, 2, "term", &req.term);
-  rc = lc_tc_lease_release(ud->client, &req, &res, &error);
+  rc = lcdc_client_revalidate(ud, &client, &error);
+  if (rc == LC_OK)
+    rc = lc_tc_lease_release(client, &req, &res, &error);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -2628,7 +3049,10 @@ static int lcdc_client_tc_leader(lua_State *L) {
     lcdc_set_string_field(L, "leader_endpoint", res.leader_endpoint);
     rc = lcdc_set_uint64_field(L, "term", res.term, &error);
     if (rc == LC_OK) {
-      lcdc_set_integer_field(L, "expires_at_unix", res.expires_at_unix);
+      rc = lcdc_set_unix_seconds_field(L, "expires_at_unix",
+                                       res.expires_at_unix, &error);
+    }
+    if (rc == LC_OK) {
       lcdc_set_string_field(L, "correlation_id", res.correlation_id);
     } else {
       lua_pop(L, 1);
@@ -2654,19 +3078,29 @@ static void lcdc_push_string_list(lua_State *L, const lc_string_list *list) {
   }
 }
 
-static int lcdc_push_tc_cluster_res(lua_State *L,
-                                    const lc_tc_cluster_res *res) {
+static int lcdc_push_tc_cluster_res(lua_State *L, const lc_tc_cluster_res *res,
+                                    lc_error *error) {
+  int rc;
+
   lua_newtable(L);
   lcdc_push_string_list(L, &res->endpoints);
   lua_setfield(L, -2, "endpoints");
-  lcdc_set_integer_field(L, "updated_at_unix", res->updated_at_unix);
-  lcdc_set_integer_field(L, "expires_at_unix", res->expires_at_unix);
+  rc = lcdc_set_unix_seconds_field(L, "updated_at_unix", res->updated_at_unix,
+                                   error);
+  if (rc == LC_OK)
+    rc = lcdc_set_unix_seconds_field(L, "expires_at_unix", res->expires_at_unix,
+                                     error);
+  if (rc != LC_OK) {
+    lua_pop(L, 1);
+    return rc;
+  }
   lcdc_set_string_field(L, "correlation_id", res->correlation_id);
-  return 1;
+  return LC_OK;
 }
 
 static int lcdc_client_tc_cluster(lua_State *L, int operation) {
   lcdc_client_ud *ud;
+  lc_client *client;
   lc_tc_cluster_announce_req req;
   lc_tc_cluster_res res;
   lc_error error;
@@ -2679,11 +3113,14 @@ static int lcdc_client_tc_cluster(lua_State *L, int operation) {
   if (operation == 0) {
     luaL_checktype(L, 2, LUA_TTABLE);
     lcdc_require_string_field(L, 2, "self_endpoint", &req.self_endpoint);
-    rc = lc_tc_cluster_announce(ud->client, &req, &res, &error);
-  } else if (operation == 1) {
-    rc = lc_tc_cluster_leave(ud->client, &res, &error);
-  } else {
-    rc = lc_tc_cluster_list(ud->client, &res, &error);
+  }
+  rc = lcdc_client_revalidate(ud, &client, &error);
+  if (rc == LC_OK && operation == 0) {
+    rc = lc_tc_cluster_announce(client, &req, &res, &error);
+  } else if (rc == LC_OK && operation == 1) {
+    rc = lc_tc_cluster_leave(client, &res, &error);
+  } else if (rc == LC_OK) {
+    rc = lc_tc_cluster_list(client, &res, &error);
   }
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
@@ -2691,8 +3128,13 @@ static int lcdc_client_tc_cluster(lua_State *L, int operation) {
     lc_error_cleanup(&error);
     return 3;
   }
-  lcdc_push_tc_cluster_res(L, &res);
+  rc = lcdc_push_tc_cluster_res(L, &res, &error);
   lc_tc_cluster_res_cleanup(&res);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
   lc_error_cleanup(&error);
   return 1;
 }
@@ -2709,18 +3151,27 @@ static int lcdc_client_tc_cluster_list(lua_State *L) {
   return lcdc_client_tc_cluster(L, 2);
 }
 
-static int lcdc_push_tc_rm_res(lua_State *L, const lc_tc_rm_res *res) {
+static int lcdc_push_tc_rm_res(lua_State *L, const lc_tc_rm_res *res,
+                               lc_error *error) {
+  int rc;
+
   lua_newtable(L);
   lcdc_set_string_field(L, "backend_hash", res->backend_hash);
   lcdc_push_string_list(L, &res->endpoints);
   lua_setfield(L, -2, "endpoints");
-  lcdc_set_integer_field(L, "updated_at_unix", res->updated_at_unix);
+  rc = lcdc_set_unix_seconds_field(L, "updated_at_unix", res->updated_at_unix,
+                                   error);
+  if (rc != LC_OK) {
+    lua_pop(L, 1);
+    return rc;
+  }
   lcdc_set_string_field(L, "correlation_id", res->correlation_id);
-  return 1;
+  return LC_OK;
 }
 
 static int lcdc_client_tc_rm(lua_State *L, int operation) {
   lcdc_client_ud *ud;
+  lc_client *client;
   lc_tc_rm_register_req register_req;
   lc_tc_rm_unregister_req unregister_req;
   lc_tc_rm_res res;
@@ -2736,12 +3187,16 @@ static int lcdc_client_tc_rm(lua_State *L, int operation) {
   if (operation == 0) {
     lcdc_require_string_field(L, 2, "backend_hash", &register_req.backend_hash);
     lcdc_require_string_field(L, 2, "endpoint", &register_req.endpoint);
-    rc = lc_tc_rm_register(ud->client, &register_req, &res, &error);
   } else {
     lcdc_require_string_field(L, 2, "backend_hash",
                               &unregister_req.backend_hash);
     lcdc_require_string_field(L, 2, "endpoint", &unregister_req.endpoint);
-    rc = lc_tc_rm_unregister(ud->client, &unregister_req, &res, &error);
+  }
+  rc = lcdc_client_revalidate(ud, &client, &error);
+  if (rc == LC_OK && operation == 0) {
+    rc = lc_tc_rm_register(client, &register_req, &res, &error);
+  } else if (rc == LC_OK) {
+    rc = lc_tc_rm_unregister(client, &unregister_req, &res, &error);
   }
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
@@ -2749,8 +3204,13 @@ static int lcdc_client_tc_rm(lua_State *L, int operation) {
     lc_error_cleanup(&error);
     return 3;
   }
-  lcdc_push_tc_rm_res(L, &res);
+  rc = lcdc_push_tc_rm_res(L, &res, &error);
   lc_tc_rm_res_cleanup(&res);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
   lc_error_cleanup(&error);
   return 1;
 }
@@ -2786,12 +3246,27 @@ static int lcdc_client_tc_rm_list(lua_State *L) {
     lcdc_set_string_field(L, "backend_hash", res.backends[i].backend_hash);
     lcdc_push_string_list(L, &res.backends[i].endpoints);
     lua_setfield(L, -2, "endpoints");
-    lcdc_set_integer_field(L, "updated_at_unix",
-                           res.backends[i].updated_at_unix);
+    rc = lcdc_set_unix_seconds_field(L, "updated_at_unix",
+                                     res.backends[i].updated_at_unix, &error);
+    if (rc != LC_OK) {
+      lua_pop(L, 2);
+      lc_tc_rm_list_res_cleanup(&res);
+      lcdc_push_status_error(L, rc, &error);
+      lc_error_cleanup(&error);
+      return 3;
+    }
     lua_rawseti(L, -2, (lua_Integer)(i + 1U));
   }
   lua_setfield(L, -2, "backends");
-  lcdc_set_integer_field(L, "updated_at_unix", res.updated_at_unix);
+  rc = lcdc_set_unix_seconds_field(L, "updated_at_unix", res.updated_at_unix,
+                                   &error);
+  if (rc != LC_OK) {
+    lua_pop(L, 1);
+    lc_tc_rm_list_res_cleanup(&res);
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
   lcdc_set_string_field(L, "correlation_id", res.correlation_id);
   lc_tc_rm_list_res_cleanup(&res);
   lc_error_cleanup(&error);
@@ -3630,6 +4105,21 @@ static int lcdc_return_workflow_participant_info(
   return 1;
 }
 
+/* Lua C functions return result counts, not lc_status values. Keep the
+ * transaction callback rollback-only decision at the C-status boundary. */
+static int lcdc_return_workflow_participant_info_for_transaction(
+    lua_State *L, lcdc_workflow_participant_ud *ud, lc_error *error) {
+  int rc;
+
+  rc = lcdc_push_workflow_participant_info(L, ud->participant, error);
+  if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud->transaction_ud);
+    lcdc_push_status_error(L, rc, error);
+    return 3;
+  }
+  return 1;
+}
+
 static int lcdc_return_outbox_job_info(lua_State *L, const lc_outbox_job *job,
                                        lc_error *error) {
   int rc = lcdc_push_outbox_job_info(L, job, error);
@@ -3646,9 +4136,12 @@ static int lcdc_push_workflow_stats(lua_State *L,
                                     lc_error *error) {
   lua_newtable(L);
   lcdc_set_bool_field(L, "running", stats->running);
-  if (lcdc_set_size_field(L, "pending_notifications",
-                          stats->pending_notifications, error) != LC_OK ||
-      lcdc_set_size_field(L, "ready_jobs", stats->ready_jobs, error) != LC_OK ||
+  if (lcdc_set_size_field(L, "pending_candidates", stats->pending_candidates,
+                          error) != LC_OK ||
+      lcdc_set_size_field(L, "delayed_wakes", stats->delayed_wakes, error) !=
+          LC_OK ||
+      lcdc_set_size_field(L, "waiting_consumers", stats->waiting_consumers,
+                          error) != LC_OK ||
       lcdc_set_uint64_field(L, "direct_notifications",
                             stats->direct_notifications, error) != LC_OK ||
       lcdc_set_uint64_field(L, "notification_overflows",
@@ -3672,6 +4165,7 @@ static int lcdc_client_new_workflow(lua_State *L) {
   lcdc_client_ud *client_ud = lcdc_check_client(L, 1);
   lc_workflow_config config;
   lc_workflow *workflow = NULL;
+  lc_workflow_dispatcher *dispatcher = NULL;
   lc_error error;
   int rc;
 
@@ -3701,7 +4195,22 @@ static int lcdc_client_new_workflow(lua_State *L) {
                          &config.replay_dead_letters_on_startup);
   (void)lcdc_opt_size_field(L, 2, "notification_capacity",
                             &config.notification_capacity);
-  rc = lc_client_new_workflow(client_ud->client, &config, &workflow, &error);
+  if (!lua_isnoneornil(L, 3)) {
+    lcdc_workflow_dispatcher_ud *dispatcher_ud;
+
+    luaL_checktype(L, 3, LUA_TTABLE);
+    lua_getfield(L, 3, "dispatcher");
+    if (!lua_isnil(L, -1)) {
+      dispatcher_ud = lcdc_check_workflow_dispatcher(L, -1);
+      dispatcher = dispatcher_ud->dispatcher;
+    }
+    lua_pop(L, 1);
+  }
+  rc = dispatcher == NULL
+           ? lc_client_new_workflow(client_ud->client, &config, &workflow,
+                                    &error)
+           : lc_client_new_workflow_with_dispatcher(
+                 client_ud->client, &config, dispatcher, &workflow, &error);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -4036,17 +4545,612 @@ static int lcdc_workflow_resume_command(lua_State *L) {
   return 2;
 }
 
-static int lcdc_workflow_next(lua_State *L) {
+static int lcdc_workflow_begin(lua_State *L) {
   lcdc_workflow_ud *ud = lcdc_check_workflow(L, 1);
+  lc_workflow_transaction *transaction = NULL;
+  lc_error error;
+  int rc;
+
+  lc_error_init(&error);
+  rc = lc_workflow_begin(ud->workflow, &transaction, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lc_error_cleanup(&error);
+  return lcdc_push_workflow_txn(L, transaction, 1);
+}
+
+static int
+lcdc_push_workflow_commit_result(lua_State *L,
+                                 const lc_workflow_commit_result *result) {
+  size_t index;
+
+  lua_newtable(L);
+  lua_newtable(L);
+  for (index = 0U; index < result->outbox_receipt_count; ++index) {
+    lcdc_push_outbox_receipt(L, &result->outbox_receipts[index]);
+    lua_rawseti(L, -2, (lua_Integer)index + 1);
+  }
+  lua_setfield(L, -2, "outbox_receipts");
+  return 1;
+}
+
+static int lcdc_workflow_transaction(lua_State *L) {
+  lcdc_workflow_ud *workflow_ud = lcdc_check_workflow(L, 1);
+  lc_workflow_transaction *transaction = NULL;
+  lc_workflow_commit_result result;
+  lc_error error;
+  lcdc_workflow_txn_ud *transaction_ud;
+  int transaction_index;
+  int rc;
+
+  luaL_checktype(L, 2, LUA_TFUNCTION);
+  lc_error_init(&error);
+  rc = lc_workflow_begin(workflow_ud->workflow, &transaction, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_workflow_txn(L, transaction, 1);
+  transaction_index = lua_gettop(L);
+  transaction_ud = (lcdc_workflow_txn_ud *)lua_touserdata(L, transaction_index);
+  transaction_ud->callback_scoped = 1;
+  lua_pushvalue(L, 2);
+  lua_pushvalue(L, transaction_index);
+  if (lua_pcall(L, 1, LUA_MULTRET, 0) != 0) {
+    lc_error rollback_error;
+
+    transaction_ud->callback_scoped = 0;
+    lc_error_init(&rollback_error);
+    (void)lc_workflow_transaction_rollback(transaction, &rollback_error);
+    lc_error_cleanup(&rollback_error);
+    lc_workflow_transaction_close(transaction);
+    transaction_ud->transaction = NULL;
+    lcdc_workflow_txn_clear_duplicate_result(L, transaction_ud);
+    lua_remove(L, transaction_index);
+    return lua_error(L);
+  }
+  transaction_ud->callback_scoped = 0;
+  if (transaction_ud->callback_staging_failed) {
+    lc_error rollback_error;
+
+    lc_error_init(&rollback_error);
+    (void)lc_workflow_transaction_rollback(transaction, &rollback_error);
+    lc_error_cleanup(&rollback_error);
+    lc_workflow_transaction_close(transaction);
+    transaction_ud->transaction = NULL;
+    lcdc_workflow_txn_clear_duplicate_result(L, transaction_ud);
+    lua_settop(L, transaction_index);
+    lua_remove(L, transaction_index);
+    (void)lc_error_set(
+        &error, LC_ERR_INVALID, 0L,
+        "workflow callback ignored a failed staging operation; transaction "
+        "was rolled back",
+        NULL, NULL, NULL);
+    lcdc_push_status_error(L, LC_ERR_INVALID, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  if (transaction_ud->callback_duplicate_seen &&
+      (!transaction_ud->callback_has_fresh_participant ||
+       transaction_ud->callback_duplicate_after_domain_participant)) {
+    /* A duplicate first record owns no local xid. A duplicate found after a
+     * domain participant has already caused the C core to roll that xid back.
+     * In either case the callback's durable duplicate result is the outcome;
+     * do not invent a second terminal decision. */
+    lc_workflow_transaction_close(transaction);
+    transaction_ud->transaction = NULL;
+    lua_settop(L, transaction_index);
+    lua_remove(L, transaction_index);
+    if (transaction_ud->callback_duplicate_result_ref != LUA_NOREF) {
+      lua_rawgeti(L, LUA_REGISTRYINDEX,
+                  transaction_ud->callback_duplicate_result_ref);
+      lcdc_workflow_txn_clear_duplicate_result(L, transaction_ud);
+      lc_error_cleanup(&error);
+      return 1;
+    }
+    (void)lc_error_set(&error, LC_ERR_PROTOCOL, 0L,
+                       "scoped workflow transaction lost its duplicate result",
+                       NULL, NULL, NULL);
+    lcdc_push_status_error(L, LC_ERR_PROTOCOL, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lc_workflow_commit_result_init(&result);
+  rc = lc_workflow_transaction_commit(transaction, &result, &error);
+  lc_workflow_transaction_close(transaction);
+  transaction_ud->transaction = NULL;
+  lcdc_workflow_txn_clear_duplicate_result(L, transaction_ud);
+  /* Callback values are deliberately not part of the transaction contract:
+   * the only successful value is the durable commit result.  Clearing them
+   * before pushing it preserves the conventional Lua result, error shape even
+   * when a callback explicitly returns nil or incidental values. */
+  lua_settop(L, 2);
+  if (rc != LC_OK) {
+    lc_workflow_commit_result_cleanup(&result);
+    lua_settop(L, 2);
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_push_workflow_commit_result(L, &result);
+  lc_workflow_commit_result_cleanup(&result);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_dispatcher(lua_State *L) {
+  lcdc_workflow_ud *ud = lcdc_check_workflow(L, 1);
+  lc_workflow_dispatcher *dispatcher = NULL;
+  lc_error error;
+  int rc;
+
+  lc_error_init(&error);
+  rc = lc_workflow_dispatcher_get_or_start(ud->workflow, &dispatcher, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_rawgeti(L, LUA_REGISTRYINDEX, ud->owner_ref);
+  rc = lcdc_push_workflow_dispatcher(L, dispatcher, lua_gettop(L), 1, &error);
+  if (rc != LC_OK) {
+    lua_pop(L, 1);
+    lc_workflow_dispatcher_close(dispatcher);
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_remove(L, -2);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int
+lcdc_workflow_dispatcher_bind_handlers(lua_State *L,
+                                       lcdc_workflow_dispatcher_ud *ud,
+                                       int options_index, lc_error *error) {
+  lcdc_workflow_dispatcher_binding *binding = ud->binding;
+  size_t handler_count;
+  int matches;
+
+  luaL_checktype(L, options_index, LUA_TTABLE);
+  if (binding == NULL || binding->owner != lcdc_lua_main_thread(L)) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "dispatcher already belongs to another Lua state", NULL,
+                        NULL, NULL);
+  }
+  if (binding->raw_pull_mode) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "dispatcher is bound to raw pull mode", NULL, NULL,
+                        NULL);
+  }
+  lua_getfield(L, options_index, "handlers");
+  if (!lua_istable(L, -1)) {
+    lua_pop(L, 1);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "dispatcher handlers table is required", NULL, NULL,
+                        NULL);
+  }
+  /* `lua_getfield` may have run an options metatable that closed this last
+   * wrapper. The userdata remains valid, but its binding can already have
+   * been released, so do not dereference the pre-lookup pointer. */
+  if (ud->dispatcher == NULL || ud->binding == NULL || ud->binding != binding ||
+      binding->owner != lcdc_lua_main_thread(L)) {
+    lua_pop(L, 1);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "dispatcher was closed while preparing handlers", NULL,
+                        NULL, NULL);
+  }
+  handler_count = 0U;
+  lua_pushnil(L);
+  while (lua_next(L, -2) != 0) {
+    size_t kind_length;
+    const char *kind;
+
+    if (lua_type(L, -2) != LUA_TSTRING) {
+      lua_pop(L, 3);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "dispatcher handlers require non-empty kind keys "
+                          "and function values",
+                          NULL, NULL, NULL);
+    }
+    kind = lua_tolstring(L, -2, &kind_length);
+    if (kind == NULL || kind_length == 0U ||
+        memchr(kind, '\0', kind_length) != NULL || !lua_isfunction(L, -1)) {
+      lua_pop(L, 3);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "dispatcher handlers require non-empty kind keys "
+                          "and function values",
+                          NULL, NULL, NULL);
+    }
+    ++handler_count;
+    lua_pop(L, 1);
+  }
+  if (handler_count == 0U) {
+    lua_pop(L, 1);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "dispatcher handlers table must not be empty", NULL,
+                        NULL, NULL);
+  }
+  if (!binding->handler_mode) {
+    binding->handler_mode = 1;
+    lcdc_workflow_dispatcher_set_handlers(L, ud, 1, -1);
+    lua_pop(L, 1);
+    return LC_OK;
+  }
+  if (!lcdc_workflow_dispatcher_push_handlers(L, ud, 1)) {
+    lua_pop(L, 2);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "dispatcher handler map is no longer available", NULL,
+                        NULL, NULL);
+  }
+  matches = lua_rawequal(L, -1, -2);
+  lua_pop(L, 2);
+  if (!matches) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "dispatcher handlers cannot change after activation",
+                        NULL, NULL, NULL);
+  }
+  return LC_OK;
+}
+
+static int lcdc_workflow_dispatcher_begin_consumption(
+    lcdc_workflow_dispatcher_ud *ud, lcdc_workflow_dispatcher_binding **out,
+    lc_error *error) {
+  lcdc_workflow_dispatcher_binding *binding;
+
+  if (out != NULL)
+    *out = NULL;
+  binding = ud->binding;
+  if (binding == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "dispatcher binding is unavailable", NULL, NULL, NULL);
+  }
+  pthread_mutex_lock(&lcdc_workflow_dispatcher_bindings_mutex);
+  if (binding->consuming) {
+    pthread_mutex_unlock(&lcdc_workflow_dispatcher_bindings_mutex);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "dispatcher cannot consume recursively from a handler",
+                        NULL, NULL, NULL);
+  }
+  binding->consuming = 1;
+  ++binding->consumption_count;
+  pthread_mutex_unlock(&lcdc_workflow_dispatcher_bindings_mutex);
+  if (out != NULL)
+    *out = binding;
+  return LC_OK;
+}
+
+static void lcdc_workflow_dispatcher_end_consumption(
+    lua_State *L, lcdc_workflow_dispatcher_binding *binding) {
+  lcdc_workflow_dispatcher_binding **link;
+
+  if (binding == NULL)
+    return;
+  pthread_mutex_lock(&lcdc_workflow_dispatcher_bindings_mutex);
+  binding->consuming = 0;
+  if (binding->consumption_count > 0U)
+    --binding->consumption_count;
+  if (binding->wrapper_count == 0U && binding->consumption_count == 0U) {
+    link = &lcdc_workflow_dispatcher_bindings;
+    while (*link != NULL && *link != binding)
+      link = &(*link)->next;
+    if (*link == binding)
+      *link = binding->next;
+  } else {
+    binding = NULL;
+  }
+  pthread_mutex_unlock(&lcdc_workflow_dispatcher_bindings_mutex);
+  if (binding != NULL) {
+    lcdc_workflow_dispatcher_clear_handlers(L, binding);
+    free(binding);
+  }
+}
+
+static void lcdc_outbox_job_consumed(lua_State *L, lcdc_outbox_job_ud *ud) {
+  ud->job = NULL;
+  if (ud->owner_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
+    ud->owner_ref = LUA_NOREF;
+  }
+}
+
+/* A handler-owned job is never transferable to Lua code.  Release every
+ * native and registry resource before unwinding a failed handler path, so a
+ * dispatcher stop cannot depend on a future Lua garbage-collection cycle. */
+static void lcdc_outbox_job_discard(lua_State *L, lcdc_outbox_job_ud *ud) {
+  if (ud == NULL)
+    return;
+  if (ud->job != NULL) {
+    lc_outbox_job_close(ud->job);
+    ud->job = NULL;
+  }
+  if (ud->terminal_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->terminal_ref);
+    ud->terminal_ref = LUA_NOREF;
+  }
+  if (ud->owner_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
+    ud->owner_ref = LUA_NOREF;
+  }
+}
+
+static int lcdc_workflow_dispatcher_retry_handler_failure(
+    lua_State *L, lcdc_outbox_job_ud *job_ud, const char *diagnostic,
+    lc_error *error) {
+  char bounded_diagnostic[LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES + 1U];
+  lc_outbox_retry retry;
+  size_t diagnostic_length;
+  int rc;
+
+  if (job_ud == NULL || job_ud->job == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "Lua workflow handler invalidated its claimed job",
+                        NULL, NULL, NULL);
+  }
+  lc_outbox_retry_init(&retry);
+  /* A Lua error message is unbounded, while the durable retry diagnostic is
+   * deliberately capped. Preserve as much context as fits so handler failure
+   * cannot turn into an abandoned active claim merely because the exception
+   * was verbose. */
+  if (diagnostic == NULL) {
+    retry.diagnostic = "Lua workflow handler failed";
+  } else {
+    for (diagnostic_length = 0U;
+         diagnostic_length <= LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES;
+         ++diagnostic_length) {
+      if (diagnostic[diagnostic_length] == '\0')
+        break;
+    }
+    if (diagnostic_length <= LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES) {
+      retry.diagnostic = diagnostic;
+    } else {
+      memcpy(bounded_diagnostic, diagnostic, LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES);
+      bounded_diagnostic[LC_WORKFLOW_MAX_DIAGNOSTIC_BYTES] = '\0';
+      retry.diagnostic = bounded_diagnostic;
+    }
+  }
+  rc = lc_outbox_job_retry(job_ud->job, &retry, error);
+  if (rc == LC_OK)
+    lcdc_outbox_job_consumed(L, job_ud);
+  return rc;
+}
+
+typedef struct lcdc_deferred_terminal_apply {
+  lcdc_outbox_job_ud *job_ud;
+  int operation;
+  lc_error *error;
+  int rc;
+} lcdc_deferred_terminal_apply;
+
+/* Deferred handler outcomes are deliberately interpreted under lua_pcall().
+ * A handler can hand us an ordinary table that becomes invalid only while its
+ * fields are read (for example through a metatable); that must follow the
+ * handler-failure retry path instead of longjmping past dispatcher cleanup. */
+static int lcdc_outbox_job_apply_terminal_protected(lua_State *L) {
+  lcdc_deferred_terminal_apply *apply =
+      (lcdc_deferred_terminal_apply *)lua_touserdata(L, lua_upvalueindex(1));
+
+  if (apply == NULL || apply->job_ud == NULL || apply->error == NULL)
+    return luaL_error(L, "workflow deferred outcome context is unavailable");
+  apply->rc = lcdc_outbox_job_apply_terminal(L, apply->job_ud, apply->operation,
+                                             1, apply->error);
+  return 0;
+}
+
+static int lcdc_workflow_dispatcher_handle_one(
+    lua_State *L, lcdc_workflow_dispatcher_ud *dispatcher_ud, long timeout_ms,
+    int *handled, lc_error *error) {
+  lc_outbox_job *job;
+  lcdc_outbox_job_ud *job_ud;
+  const char *diagnostic;
+  int job_index;
+  int rc;
+
+  *handled = 0;
+  job = NULL;
+  rc = lc_workflow_dispatcher_next(dispatcher_ud->dispatcher, timeout_ms, &job,
+                                   error);
+  if (rc != LC_OK || job == NULL)
+    return rc;
+  if (!lcdc_workflow_dispatcher_push_handlers(L, dispatcher_ud, 1)) {
+    lua_pop(L, 1);
+    lc_outbox_job_close(job);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "dispatcher handler map is no longer available", NULL,
+                        NULL, NULL);
+  }
+  /* Handler maps are data, not an extension point. A raw lookup keeps a
+   * hostile __index metamethod from longjmping past the claimed-job cleanup. */
+  lua_pushstring(L, job->kind == NULL ? "" : job->kind);
+  lua_rawget(L, -2);
+  lua_remove(L, -2);
+  if (!lua_isfunction(L, -1)) {
+    lua_pop(L, 1);
+    lc_outbox_job_close(job);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "dispatcher has no handler for outbox kind", NULL, NULL,
+                        NULL);
+  }
+  lcdc_push_outbox_job(L, job, 1);
+  /* Keep one userdata reference below the function call: terminal handling
+   * after the callback still needs its native handle, and Lua may otherwise
+   * collect the argument immediately when lua_pcall returns. */
+  lua_pushvalue(L, -1);
+  lua_insert(L, -3);
+  job_index = lua_gettop(L) - 2;
+  job_ud = (lcdc_outbox_job_ud *)lua_touserdata(L, job_index);
+  job_ud->handler_scoped = 1;
+  if (lua_pcall(L, 1, 0, 0) != 0) {
+    diagnostic = lua_tostring(L, -1);
+    job_ud->handler_scoped = 0;
+    rc = lcdc_workflow_dispatcher_retry_handler_failure(
+        L, job_ud,
+        diagnostic == NULL ? "Lua workflow handler failed" : diagnostic, error);
+    lua_pop(L, 1);
+    goto cleanup;
+  }
+  job_ud->handler_scoped = 0;
+  if (job_ud->terminal_operation < 0) {
+    rc = lcdc_workflow_dispatcher_retry_handler_failure(
+        L, job_ud, "Lua workflow handler returned without an outcome", error);
+  } else if (job_ud->job == NULL) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "Lua workflow handler invalidated its claimed job", NULL,
+                      NULL, NULL);
+  } else {
+    lcdc_deferred_terminal_apply apply;
+
+    memset(&apply, 0, sizeof(apply));
+    apply.job_ud = job_ud;
+    apply.operation = job_ud->terminal_operation;
+    apply.error = error;
+    lua_pushlightuserdata(L, &apply);
+    lua_pushcclosure(L, lcdc_outbox_job_apply_terminal_protected, 1);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, job_ud->terminal_ref);
+    /* Outcome fields may invoke a metatable.  They remain inside the handler
+     * ownership boundary until decoding and terminal application finish, so a
+     * reentrant close cannot free the native claim under the C call. */
+    job_ud->handler_scoped = 1;
+    if (lua_pcall(L, 1, 0, 0) != 0) {
+      diagnostic = lua_tostring(L, -1);
+      job_ud->handler_scoped = 0;
+      rc = lcdc_workflow_dispatcher_retry_handler_failure(
+          L, job_ud,
+          diagnostic == NULL
+              ? "Lua workflow handler selected an invalid outcome"
+              : diagnostic,
+          error);
+      lua_pop(L, 1);
+    } else {
+      job_ud->handler_scoped = 0;
+      rc = apply.rc;
+    }
+  }
+cleanup:
+  /* Success consumes the native job.  Any failed terminal apply or fallback
+   * retry leaves a live claim, which must be closed before the handler frame
+   * is released.  This also drops a deferred value that may reference the job
+   * itself. */
+  lcdc_outbox_job_discard(L, job_ud);
+  lua_remove(L, job_index);
+  if (rc == LC_OK)
+    *handled = 1;
+  return rc;
+}
+
+static int lcdc_workflow_dispatcher_pump(lua_State *L) {
+  lcdc_workflow_dispatcher_ud *ud = lcdc_check_workflow_dispatcher(L, 1);
+  long max_jobs;
+  long timeout_ms;
+  /* A handler-map validation failure performs no pull, so the observable
+   * completed-job count is zero.  Initialize explicitly for optimized
+   * toolchains that cannot infer the guarded loop assignment below. */
+  long index = 0L;
+  int handled;
+  int consuming;
+  lcdc_workflow_dispatcher_binding *consuming_binding;
+  lc_error error;
+  int rc;
+
+  luaL_checktype(L, 2, LUA_TTABLE);
+  max_jobs = 1L;
+  timeout_ms = 0L;
+  lcdc_opt_integer_field(L, 2, "max_jobs", &max_jobs);
+  lcdc_opt_integer_field(L, 2, "timeout_ms", &timeout_ms);
+  if (max_jobs < 1L || max_jobs > 1024L || timeout_ms < -1L) {
+    return luaL_error(L, "dispatcher pump limits are invalid");
+  }
+  lc_error_init(&error);
+  consuming = 0;
+  consuming_binding = NULL;
+  /* Handler-map lookup is allowed to run Lua metamethods. Do it before
+   * consuming is marked so a Lua longjmp cannot strand the shared binding. */
+  rc = lcdc_workflow_dispatcher_bind_handlers(L, ud, 2, &error);
+  if (rc == LC_OK) {
+    rc = lcdc_workflow_dispatcher_begin_consumption(ud, &consuming_binding,
+                                                    &error);
+    consuming = rc == LC_OK;
+  }
+  if (rc == LC_OK) {
+    for (index = 0L; index < max_jobs; ++index) {
+      handled = 0;
+      rc = lcdc_workflow_dispatcher_handle_one(
+          L, ud, index == 0L ? timeout_ms : 0L, &handled, &error);
+      if (rc != LC_OK || !handled)
+        break;
+    }
+  }
+  if (consuming)
+    lcdc_workflow_dispatcher_end_consumption(L, consuming_binding);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushinteger(L, (lua_Integer)index);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_dispatcher_run(lua_State *L) {
+  lcdc_workflow_dispatcher_ud *ud = lcdc_check_workflow_dispatcher(L, 1);
+  lc_error error;
+  int handled;
+  int consuming;
+  lcdc_workflow_dispatcher_binding *consuming_binding;
+  int rc;
+
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lc_error_init(&error);
+  consuming = 0;
+  consuming_binding = NULL;
+  /* See pump(): binding validates Lua-owned handler data before it enters the
+   * consumption scope whose cleanup must always run. */
+  rc = lcdc_workflow_dispatcher_bind_handlers(L, ud, 2, &error);
+  if (rc == LC_OK) {
+    rc = lcdc_workflow_dispatcher_begin_consumption(ud, &consuming_binding,
+                                                    &error);
+    consuming = rc == LC_OK;
+  }
+  while (rc == LC_OK) {
+    handled = 0;
+    rc = lcdc_workflow_dispatcher_handle_one(L, ud, -1L, &handled, &error);
+    if (rc == LC_OK && !handled)
+      continue;
+  }
+  if (consuming)
+    lcdc_workflow_dispatcher_end_consumption(L, consuming_binding);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushboolean(L, 1);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_dispatcher_next(lua_State *L) {
+  lcdc_workflow_dispatcher_ud *ud = lcdc_check_workflow_dispatcher(L, 1);
   lc_outbox_job *job = NULL;
   lc_error error;
   long timeout_ms = -1L;
   int rc;
 
+  if (ud->binding != NULL && ud->binding->handler_mode)
+    return luaL_error(L, "dispatcher is bound to Lua handler mode");
   if (!lua_isnoneornil(L, 2))
-    timeout_ms = lcdc_check_long(L, 2, "workflow next timeout");
+    timeout_ms = lcdc_check_long(L, 2, "workflow dispatcher next timeout");
+  if (ud->binding == NULL || ud->binding->owner != lcdc_lua_main_thread(L))
+    return luaL_error(L, "dispatcher already belongs to another Lua state");
+  ud->binding->raw_pull_mode = 1;
   lc_error_init(&error);
-  rc = lc_workflow_next(ud->workflow, timeout_ms, &job, &error);
+  rc = lc_workflow_dispatcher_next(ud->dispatcher, timeout_ms, &job, &error);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -4060,15 +5164,15 @@ static int lcdc_workflow_next(lua_State *L) {
   return lcdc_push_outbox_job(L, job, 1);
 }
 
-static int lcdc_workflow_stats(lua_State *L) {
-  lcdc_workflow_ud *ud = lcdc_check_workflow(L, 1);
+static int lcdc_workflow_dispatcher_stats(lua_State *L) {
+  lcdc_workflow_dispatcher_ud *ud = lcdc_check_workflow_dispatcher(L, 1);
   lc_workflow_stats stats;
   lc_error error;
   int rc;
 
   lc_workflow_stats_init(&stats);
   lc_error_init(&error);
-  rc = lc_workflow_get_stats(ud->workflow, &stats, &error);
+  rc = lc_workflow_dispatcher_get_stats(ud->dispatcher, &stats, &error);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -4086,13 +5190,13 @@ static int lcdc_workflow_stats(lua_State *L) {
   return 1;
 }
 
-static int lcdc_workflow_reconcile(lua_State *L) {
-  lcdc_workflow_ud *ud = lcdc_check_workflow(L, 1);
+static int lcdc_workflow_dispatcher_reconcile(lua_State *L) {
+  lcdc_workflow_dispatcher_ud *ud = lcdc_check_workflow_dispatcher(L, 1);
   lc_error error;
   int rc;
 
   lc_error_init(&error);
-  rc = lc_workflow_reconcile(ud->workflow, &error);
+  rc = lc_workflow_dispatcher_reconcile(ud->dispatcher, &error);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -4103,14 +5207,15 @@ static int lcdc_workflow_reconcile(lua_State *L) {
   return 1;
 }
 
-static int lcdc_workflow_replay_dead_letter(lua_State *L) {
-  lcdc_workflow_ud *ud = lcdc_check_workflow(L, 1);
+static int lcdc_workflow_dispatcher_replay_dead_letter(lua_State *L) {
+  lcdc_workflow_dispatcher_ud *ud = lcdc_check_workflow_dispatcher(L, 1);
   const char *outbox_key = luaL_checkstring(L, 2);
   lc_error error;
   int rc;
 
   lc_error_init(&error);
-  rc = lc_workflow_replay_dead_letter(ud->workflow, outbox_key, &error);
+  rc = lc_workflow_dispatcher_replay_dead_letter(ud->dispatcher, outbox_key,
+                                                 &error);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -4121,14 +5226,15 @@ static int lcdc_workflow_replay_dead_letter(lua_State *L) {
   return 1;
 }
 
-static int lcdc_workflow_delete_dead_letter(lua_State *L) {
-  lcdc_workflow_ud *ud = lcdc_check_workflow(L, 1);
+static int lcdc_workflow_dispatcher_delete_dead_letter(lua_State *L) {
+  lcdc_workflow_dispatcher_ud *ud = lcdc_check_workflow_dispatcher(L, 1);
   const char *outbox_key = luaL_checkstring(L, 2);
   lc_error error;
   int rc;
 
   lc_error_init(&error);
-  rc = lc_workflow_delete_dead_letter(ud->workflow, outbox_key, &error);
+  rc = lc_workflow_dispatcher_delete_dead_letter(ud->dispatcher, outbox_key,
+                                                 &error);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -4139,8 +5245,8 @@ static int lcdc_workflow_delete_dead_letter(lua_State *L) {
   return 1;
 }
 
-static int lcdc_workflow_export_dead_letters(lua_State *L) {
-  lcdc_workflow_ud *ud = lcdc_check_workflow(L, 1);
+static int lcdc_workflow_dispatcher_export_dead_letters(lua_State *L) {
+  lcdc_workflow_dispatcher_ud *ud = lcdc_check_workflow_dispatcher(L, 1);
   lc_dead_letter_export_opts options;
   lc_dead_letter_export_res result;
   lcdc_output output;
@@ -4172,8 +5278,8 @@ static int lcdc_workflow_export_dead_letters(lua_State *L) {
   }
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc == LC_OK) {
-    rc = lc_workflow_export_dead_letters(ud->workflow, &options, output.sink,
-                                         &result, &error);
+    rc = lc_workflow_dispatcher_export_dead_letters(
+        ud->dispatcher, &options, output.sink, &result, &error);
   }
   if (rc != LC_OK) {
     if (output.sink != NULL)
@@ -4189,8 +5295,121 @@ static int lcdc_workflow_export_dead_letters(lua_State *L) {
   return 2;
 }
 
+static int lcdc_workflow_dispatcher_notify_outbox_key(lua_State *L) {
+  lcdc_workflow_dispatcher_ud *ud = lcdc_check_workflow_dispatcher(L, 1);
+  const char *key = luaL_checkstring(L, 2);
+  lc_error error;
+  int rc;
+
+  lc_error_init(&error);
+  rc = lc_workflow_dispatcher_notify_outbox_key(ud->dispatcher, key, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushboolean(L, 1);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_dispatcher_stop(lua_State *L) {
+  lcdc_workflow_dispatcher_ud *ud = lcdc_check_workflow_dispatcher(L, 1);
+  lc_error error;
+  long deadline_ms = -1L;
+  int rc;
+
+  if (!lua_isnoneornil(L, 2))
+    deadline_ms = lcdc_check_long(L, 2, "workflow dispatcher stop deadline");
+  lc_error_init(&error);
+  if (ud->binding != NULL && ud->binding->consuming) {
+    (void)lc_error_set(
+        &error, LC_ERR_INVALID, 0L,
+        "workflow dispatcher stop is not allowed inside its handler", NULL,
+        NULL, NULL);
+    lcdc_push_status_error(L, LC_ERR_INVALID, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  rc = lc_workflow_dispatcher_stop(ud->dispatcher, deadline_ms, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_workflow_dispatcher_binding_note_stopped(L, ud->binding);
+  lua_pushboolean(L, 1);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_dispatcher_wait(lua_State *L) {
+  lcdc_workflow_dispatcher_ud *ud = lcdc_check_workflow_dispatcher(L, 1);
+  lc_error error;
+  long deadline_ms = -1L;
+  int rc;
+
+  if (!lua_isnoneornil(L, 2))
+    deadline_ms = lcdc_check_long(L, 2, "workflow dispatcher wait deadline");
+  lc_error_init(&error);
+  if (ud->binding != NULL && ud->binding->consuming) {
+    (void)lc_error_set(
+        &error, LC_ERR_INVALID, 0L,
+        "workflow dispatcher wait is not allowed inside its handler", NULL,
+        NULL, NULL);
+    lcdc_push_status_error(L, LC_ERR_INVALID, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  rc = lc_workflow_dispatcher_wait(ud->dispatcher, deadline_ms, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lcdc_workflow_dispatcher_binding_note_stopped(L, ud->binding);
+  lua_pushboolean(L, 1);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_dispatcher_close(lua_State *L) {
+  return lcdc_workflow_dispatcher_gc(L);
+}
+
 static int lcdc_workflow_txn_close(lua_State *L) {
+  lcdc_workflow_txn_ud *ud = lcdc_check_workflow_txn(L, 1);
+
+  if (ud->callback_scoped) {
+    return luaL_error(
+        L, "workflow transaction close is not allowed inside its callback");
+  }
   return lcdc_workflow_txn_gc(L);
+}
+
+static void lcdc_workflow_txn_note_staging_failure(lcdc_workflow_txn_ud *ud) {
+  if (ud != NULL && ud->callback_scoped)
+    ud->callback_staging_failed = 1;
+}
+
+static void lcdc_workflow_txn_note_duplicate(lua_State *L,
+                                             lcdc_workflow_txn_ud *ud,
+                                             int result_index) {
+  ud->callback_duplicate_seen = 1;
+  if (ud->callback_has_domain_participant)
+    ud->callback_duplicate_after_domain_participant = 1;
+  if (ud->callback_scoped && ud->callback_duplicate_result_ref == LUA_NOREF) {
+    lua_pushvalue(L, result_index);
+    ud->callback_duplicate_result_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  }
+}
+
+static void lcdc_workflow_txn_clear_duplicate_result(lua_State *L,
+                                                     lcdc_workflow_txn_ud *ud) {
+  if (ud->callback_duplicate_result_ref != LUA_NOREF) {
+    luaL_unref(L, LUA_REGISTRYINDEX, ud->callback_duplicate_result_ref);
+    ud->callback_duplicate_result_ref = LUA_NOREF;
+  }
 }
 
 static int lcdc_workflow_txn_acquire(lua_State *L) {
@@ -4216,12 +5435,15 @@ static int lcdc_workflow_txn_acquire(lua_State *L) {
   rc = lc_workflow_transaction_acquire(ud->transaction, &request, &participant,
                                        &error);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
+  ud->callback_has_fresh_participant = 1;
+  ud->callback_has_domain_participant = 1;
   lc_error_cleanup(&error);
-  return lcdc_push_workflow_participant(L, participant, 1);
+  return lcdc_push_workflow_participant(L, participant, 1, ud);
 }
 
 static int lcdc_workflow_txn_append_outbox(lua_State *L) {
@@ -4242,12 +5464,19 @@ static int lcdc_workflow_txn_append_outbox(lua_State *L) {
   }
   lc_source_close(payload);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud);
     lc_outbox_receipt_cleanup(&receipt);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
-  lcdc_push_outbox_receipt(L, &receipt);
+  if (receipt.duplicate) {
+    lcdc_push_outbox_receipt(L, &receipt);
+    lcdc_workflow_txn_note_duplicate(L, ud, -1);
+  } else {
+    ud->callback_has_fresh_participant = 1;
+    lcdc_push_outbox_receipt(L, &receipt);
+  }
   lc_outbox_receipt_cleanup(&receipt);
   lc_error_cleanup(&error);
   return 1;
@@ -4266,13 +5495,56 @@ static int lcdc_workflow_txn_accept_command(lua_State *L) {
   rc = lc_workflow_transaction_accept_command(ud->transaction, &request,
                                               &receipt, &error);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud);
     lc_command_receipt_cleanup(&receipt);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
-  lcdc_push_command_receipt(L, &receipt);
+  if (receipt.duplicate) {
+    lcdc_push_command_receipt(L, &receipt);
+    lcdc_workflow_txn_note_duplicate(L, ud, -1);
+  } else {
+    ud->callback_has_fresh_participant = 1;
+    lcdc_push_command_receipt(L, &receipt);
+  }
   lc_command_receipt_cleanup(&receipt);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_workflow_txn_accept_inbox(lua_State *L) {
+  lcdc_workflow_txn_ud *ud = lcdc_check_workflow_txn(L, 1);
+  lc_inbox_message message;
+  lc_inbox_accept_result result;
+  lc_error error;
+  int rc;
+
+  lc_inbox_message_init(&message);
+  memset(&result, 0, sizeof(result));
+  luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_require_string_field(L, 2, "consumer_id", &message.consumer_id);
+  lcdc_require_string_field(L, 2, "source_kind", &message.source_kind);
+  lcdc_require_string_field(L, 2, "source_id", &message.source_id);
+  lcdc_require_string_field(L, 2, "message_id", &message.message_id);
+  message.payload_digest = lcdc_opt_string_field(L, 2, "payload_digest");
+  message.operation_id = lcdc_opt_string_field(L, 2, "operation_id");
+  lc_error_init(&error);
+  rc = lc_workflow_transaction_accept_inbox(ud->transaction, &message, &result,
+                                            &error);
+  if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud);
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  if (result.duplicate) {
+    lcdc_push_inbox_result(L, &result);
+    lcdc_workflow_txn_note_duplicate(L, ud, -1);
+  } else {
+    ud->callback_has_fresh_participant = 1;
+    lcdc_push_inbox_result(L, &result);
+  }
   lc_error_cleanup(&error);
   return 1;
 }
@@ -4299,6 +5571,7 @@ static int lcdc_workflow_txn_terminal_command(lua_State *L, int failed) {
       rc = lcdc_source_from_value(L, -1, &body, &error);
       if (rc != LC_OK) {
         lua_pop(L, 1);
+        lcdc_workflow_txn_note_staging_failure(ud);
         lcdc_push_status_error(L, rc, &error);
         lc_error_cleanup(&error);
         return 3;
@@ -4314,6 +5587,7 @@ static int lcdc_workflow_txn_terminal_command(lua_State *L, int failed) {
                                                          &result, &error);
   lc_source_close(body);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
@@ -4334,17 +5608,31 @@ static int lcdc_workflow_txn_fail_command(lua_State *L) {
 static int lcdc_workflow_txn_terminal(lua_State *L, int rollback) {
   lcdc_workflow_txn_ud *ud = lcdc_check_workflow_txn(L, 1);
   lc_error error;
+  lc_workflow_commit_result commit_result;
   int rc;
 
+  if (ud->callback_scoped) {
+    return luaL_error(
+        L, "workflow transaction terminal decisions are not allowed inside its "
+           "callback");
+  }
   lc_error_init(&error);
+  lc_workflow_commit_result_init(&commit_result);
   rc = rollback ? lc_workflow_transaction_rollback(ud->transaction, &error)
-                : lc_workflow_transaction_commit(ud->transaction, &error);
+                : lc_workflow_transaction_commit(ud->transaction,
+                                                 &commit_result, &error);
   if (rc != LC_OK) {
+    lc_workflow_commit_result_cleanup(&commit_result);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
-  lua_pushboolean(L, 1);
+  if (rollback) {
+    lua_pushboolean(L, 1);
+  } else {
+    lcdc_push_workflow_commit_result(L, &commit_result);
+  }
+  lc_workflow_commit_result_cleanup(&commit_result);
   lc_error_cleanup(&error);
   return 1;
 }
@@ -4380,11 +5668,12 @@ static int lcdc_workflow_participant_describe(lua_State *L) {
   lc_error_init(&error);
   rc = ud->participant->describe(ud->participant, &error);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud->transaction_ud);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
-  rc = lcdc_return_workflow_participant_info(L, ud->participant, &error);
+  rc = lcdc_return_workflow_participant_info_for_transaction(L, ud, &error);
   lc_error_cleanup(&error);
   return rc;
 }
@@ -4460,11 +5749,12 @@ static int lcdc_workflow_participant_update(lua_State *L) {
   }
   lc_source_close(source);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud->transaction_ud);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
-  rc = lcdc_return_workflow_participant_info(L, ud->participant, &error);
+  rc = lcdc_return_workflow_participant_info_for_transaction(L, ud, &error);
   lc_error_cleanup(&error);
   return rc;
 }
@@ -4490,11 +5780,12 @@ static int lcdc_workflow_participant_mutate(lua_State *L) {
   rc = ud->participant->mutate(ud->participant, &request, &error);
   lcdc_free_string_array(&mutations);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud->transaction_ud);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
-  rc = lcdc_return_workflow_participant_info(L, ud->participant, &error);
+  rc = lcdc_return_workflow_participant_info_for_transaction(L, ud, &error);
   lc_error_cleanup(&error);
   return rc;
 }
@@ -4525,11 +5816,12 @@ static int lcdc_workflow_participant_mutate_local(lua_State *L) {
   rc = ud->participant->mutate_local(ud->participant, &request, &error);
   lcdc_free_string_array(&mutations);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud->transaction_ud);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
-  rc = lcdc_return_workflow_participant_info(L, ud->participant, &error);
+  rc = lcdc_return_workflow_participant_info_for_transaction(L, ud, &error);
   lc_error_cleanup(&error);
   return rc;
 }
@@ -4551,11 +5843,12 @@ static int lcdc_workflow_participant_metadata(lua_State *L) {
   lc_error_init(&error);
   rc = ud->participant->metadata(ud->participant, &request, &error);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud->transaction_ud);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
-  rc = lcdc_return_workflow_participant_info(L, ud->participant, &error);
+  rc = lcdc_return_workflow_participant_info_for_transaction(L, ud, &error);
   lc_error_cleanup(&error);
   return rc;
 }
@@ -4577,11 +5870,12 @@ static int lcdc_workflow_participant_remove(lua_State *L) {
   lc_error_init(&error);
   rc = ud->participant->remove(ud->participant, &request, &error);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud->transaction_ud);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
-  rc = lcdc_return_workflow_participant_info(L, ud->participant, &error);
+  rc = lcdc_return_workflow_participant_info_for_transaction(L, ud, &error);
   lc_error_cleanup(&error);
   return rc;
 }
@@ -4598,11 +5892,12 @@ static int lcdc_workflow_participant_keepalive(lua_State *L) {
   lc_error_init(&error);
   rc = ud->participant->keepalive(ud->participant, &request, &error);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud->transaction_ud);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
-  rc = lcdc_return_workflow_participant_info(L, ud->participant, &error);
+  rc = lcdc_return_workflow_participant_info_for_transaction(L, ud, &error);
   lc_error_cleanup(&error);
   return rc;
 }
@@ -4632,6 +5927,7 @@ static int lcdc_workflow_participant_attach(lua_State *L) {
   }
   lc_source_close(source);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud->transaction_ud);
     lc_attach_res_cleanup(&result);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -4644,6 +5940,7 @@ static int lcdc_workflow_participant_attach(lua_State *L) {
   rc = lcdc_set_int64_field(L, "version", result.version, &error);
   if (rc != LC_OK) {
     lua_pop(L, 1);
+    lcdc_workflow_txn_note_staging_failure(ud->transaction_ud);
     lc_attach_res_cleanup(&result);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -4735,6 +6032,7 @@ static int lcdc_workflow_participant_delete_attachment(lua_State *L) {
   rc = ud->participant->delete_attachment(ud->participant, &selector, &deleted,
                                           &error);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud->transaction_ud);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
@@ -4754,6 +6052,7 @@ static int lcdc_workflow_participant_delete_all_attachments(lua_State *L) {
   rc = ud->participant->delete_all_attachments(ud->participant, &deleted_count,
                                                &error);
   if (rc != LC_OK) {
+    lcdc_workflow_txn_note_staging_failure(ud->transaction_ud);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
@@ -4763,7 +6062,15 @@ static int lcdc_workflow_participant_delete_all_attachments(lua_State *L) {
   return 1;
 }
 
-static int lcdc_outbox_job_close(lua_State *L) { return lcdc_outbox_job_gc(L); }
+static int lcdc_outbox_job_close(lua_State *L) {
+  lcdc_outbox_job_ud *ud = lcdc_check_outbox_job(L, 1);
+
+  if (ud->handler_scoped) {
+    return luaL_error(
+        L, "outbox job close is not allowed inside its dispatcher handler");
+  }
+  return lcdc_outbox_job_gc(L);
+}
 
 static int lcdc_outbox_job_info(lua_State *L) {
   lcdc_outbox_job_ud *ud = lcdc_check_outbox_job(L, 1);
@@ -4819,49 +6126,80 @@ static int lcdc_outbox_job_renew(lua_State *L) {
   return rc;
 }
 
-static int lcdc_outbox_job_terminal(lua_State *L, int operation) {
-  lcdc_outbox_job_ud *ud = lcdc_check_outbox_job(L, 1);
+static int lcdc_outbox_job_apply_terminal(lua_State *L, lcdc_outbox_job_ud *ud,
+                                          int operation, int value_index,
+                                          lc_error *error) {
   lc_outbox_completion completion;
-  lc_error error;
   int rc;
 
   lc_outbox_completion_init(&completion);
-  lc_error_init(&error);
   if (operation == 0) {
-    if (!lua_isnoneornil(L, 2)) {
-      luaL_checktype(L, 2, LUA_TTABLE);
+    if (value_index != 0 && !lua_isnoneornil(L, value_index)) {
+      luaL_checktype(L, value_index, LUA_TTABLE);
       completion.delivery_reference =
-          lcdc_opt_string_field(L, 2, "delivery_reference");
+          lcdc_opt_string_field(L, value_index, "delivery_reference");
       completion.response_digest =
-          lcdc_opt_string_field(L, 2, "response_digest");
+          lcdc_opt_string_field(L, value_index, "response_digest");
     }
-    rc = lc_outbox_job_complete(ud->job, &completion, &error);
+    rc = lc_outbox_job_complete(ud->job, &completion, error);
   } else if (operation == 1) {
     lc_outbox_retry retry;
+
     lc_outbox_retry_init(&retry);
-    if (!lua_isnoneornil(L, 2)) {
-      luaL_checktype(L, 2, LUA_TTABLE);
-      lcdc_opt_integer_field(L, 2, "delay_seconds", &retry.delay_seconds);
-      retry.diagnostic = lcdc_opt_string_field(L, 2, "diagnostic");
+    if (value_index != 0 && !lua_isnoneornil(L, value_index)) {
+      luaL_checktype(L, value_index, LUA_TTABLE);
+      lcdc_opt_integer_field(L, value_index, "delay_seconds",
+                             &retry.delay_seconds);
+      retry.diagnostic = lcdc_opt_string_field(L, value_index, "diagnostic");
     }
-    rc = lc_outbox_job_retry(ud->job, &retry, &error);
+    rc = lc_outbox_job_retry(ud->job, &retry, error);
   } else {
-    const char *diagnostic =
-        lua_isnoneornil(L, 2) ? NULL : luaL_checkstring(L, 2);
-    rc = lc_outbox_job_dead_letter(ud->job, diagnostic, &error);
-  }
-  if (rc != LC_OK) {
-    lcdc_push_status_error(L, rc, &error);
-    lc_error_cleanup(&error);
-    return 3;
+    const char *diagnostic = value_index == 0 || lua_isnoneornil(L, value_index)
+                                 ? NULL
+                                 : luaL_checkstring(L, value_index);
+
+    rc = lc_outbox_job_dead_letter(ud->job, diagnostic, error);
   }
   /* The C terminal methods consume successful jobs.  Retain the userdata for
    * Lua identity and GC safety, but release its native owner reference now so
    * neither an explicit close nor collection can touch the consumed handle. */
-  ud->job = NULL;
-  if (ud->owner_ref != LUA_NOREF) {
-    luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
-    ud->owner_ref = LUA_NOREF;
+  if (rc == LC_OK) {
+    ud->job = NULL;
+    if (ud->owner_ref != LUA_NOREF) {
+      luaL_unref(L, LUA_REGISTRYINDEX, ud->owner_ref);
+      ud->owner_ref = LUA_NOREF;
+    }
+  }
+  return rc;
+}
+
+static int lcdc_outbox_job_terminal(lua_State *L, int operation) {
+  lcdc_outbox_job_ud *ud = lcdc_check_outbox_job(L, 1);
+  lc_error error;
+  int rc;
+
+  if (ud->handler_scoped) {
+    if (ud->terminal_operation >= 0)
+      return luaL_error(L, "workflow handler selected more than one outcome");
+    if (operation != 2 && !lua_isnoneornil(L, 2))
+      luaL_checktype(L, 2, LUA_TTABLE);
+    if (operation == 2 && !lua_isnoneornil(L, 2))
+      (void)luaL_checkstring(L, 2);
+    ud->terminal_operation = operation;
+    if (lua_isnoneornil(L, 2))
+      lua_pushnil(L);
+    else
+      lua_pushvalue(L, 2);
+    ud->terminal_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  lc_error_init(&error);
+  rc = lcdc_outbox_job_apply_terminal(L, ud, operation, 2, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
   }
   lua_pushboolean(L, 1);
   lc_error_cleanup(&error);
@@ -4961,23 +6299,36 @@ static const luaL_Reg lcdc_message_methods[] = {
 
 static const luaL_Reg lcdc_workflow_methods[] = {
     {"close", lcdc_workflow_close},
+    {"begin", lcdc_workflow_begin},
+    {"transaction", lcdc_workflow_transaction},
+    {"dispatcher", lcdc_workflow_dispatcher},
     {"accept_command", lcdc_workflow_accept_command},
     {"get_command_receipt", lcdc_workflow_get_command_receipt},
     {"write_command_result", lcdc_workflow_write_command_result},
     {"resume_command", lcdc_workflow_resume_command},
     {"append_outbox", lcdc_workflow_append_outbox},
     {"accept_inbox", lcdc_workflow_accept_inbox},
-    {"next", lcdc_workflow_next},
-    {"stats", lcdc_workflow_stats},
-    {"reconcile", lcdc_workflow_reconcile},
-    {"replay_dead_letter", lcdc_workflow_replay_dead_letter},
-    {"delete_dead_letter", lcdc_workflow_delete_dead_letter},
-    {"export_dead_letters", lcdc_workflow_export_dead_letters},
+    {NULL, NULL}};
+
+static const luaL_Reg lcdc_workflow_dispatcher_methods[] = {
+    {"close", lcdc_workflow_dispatcher_close},
+    {"next", lcdc_workflow_dispatcher_next},
+    {"pump", lcdc_workflow_dispatcher_pump},
+    {"run", lcdc_workflow_dispatcher_run},
+    {"notify_outbox_key", lcdc_workflow_dispatcher_notify_outbox_key},
+    {"stats", lcdc_workflow_dispatcher_stats},
+    {"reconcile", lcdc_workflow_dispatcher_reconcile},
+    {"replay_dead_letter", lcdc_workflow_dispatcher_replay_dead_letter},
+    {"delete_dead_letter", lcdc_workflow_dispatcher_delete_dead_letter},
+    {"export_dead_letters", lcdc_workflow_dispatcher_export_dead_letters},
+    {"stop", lcdc_workflow_dispatcher_stop},
+    {"wait", lcdc_workflow_dispatcher_wait},
     {NULL, NULL}};
 
 static const luaL_Reg lcdc_workflow_txn_methods[] = {
     {"close", lcdc_workflow_txn_close},
     {"accept_command", lcdc_workflow_txn_accept_command},
+    {"accept_inbox", lcdc_workflow_txn_accept_inbox},
     {"acquire", lcdc_workflow_txn_acquire},
     {"append_outbox", lcdc_workflow_txn_append_outbox},
     {"complete_command", lcdc_workflow_txn_complete_command},
@@ -5046,6 +6397,9 @@ int luaopen_lockdc_core(lua_State *L) {
                         lcdc_message_gc);
   lcdc_create_metatable(L, LCDC_WORKFLOW_MT, lcdc_workflow_methods,
                         lcdc_workflow_gc);
+  lcdc_create_metatable(L, LCDC_WORKFLOW_DISPATCHER_MT,
+                        lcdc_workflow_dispatcher_methods,
+                        lcdc_workflow_dispatcher_gc);
   lcdc_create_metatable(L, LCDC_WORKFLOW_TXN_MT, lcdc_workflow_txn_methods,
                         lcdc_workflow_txn_gc);
   lcdc_create_metatable(L, LCDC_WORKFLOW_PARTICIPANT_MT,

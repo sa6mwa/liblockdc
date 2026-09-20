@@ -15,6 +15,9 @@ Message.__index = Message
 local Workflow = {}
 Workflow.__index = Workflow
 
+local WorkflowDispatcher = {}
+WorkflowDispatcher.__index = WorkflowDispatcher
+
 local WorkflowTransaction = {}
 WorkflowTransaction.__index = WorkflowTransaction
 
@@ -31,6 +34,10 @@ local Service = {}
 Service.__index = Service
 
 local JSON_NULL = lonejson.json_null
+-- Native dispatcher bindings are shared by aliases. Keep the Lua adapter map
+-- keyed by the application handler table so aliases pass the same native table
+-- and preserve the binding's immutable-handler invariant.
+local dispatcher_handler_maps = setmetatable({}, { __mode = "k" })
 
 local function wrap_client(core_client)
   return setmetatable({ _core = core_client }, Client)
@@ -46,6 +53,11 @@ end
 
 local function wrap_workflow(core_workflow)
   return setmetatable({ _core = core_workflow, _closed = false }, Workflow)
+end
+
+local function wrap_workflow_dispatcher(core_dispatcher)
+  return setmetatable({ _core = core_dispatcher, _closed = false },
+    WorkflowDispatcher)
 end
 
 local function wrap_workflow_transaction(core_transaction)
@@ -230,8 +242,13 @@ function Client:close()
   end
 end
 
-function Client:new_workflow(config)
-  local workflow, err = self._core:new_workflow(config)
+function Client:new_workflow(config, options)
+  local core_options = options
+
+  if options ~= nil and options.dispatcher ~= nil then
+    core_options = { dispatcher = options.dispatcher._core }
+  end
+  local workflow, err = self._core:new_workflow(config, core_options)
 
   if workflow == nil then
     return nil, err
@@ -692,6 +709,30 @@ function Workflow:close()
   end
 end
 
+function Workflow:begin()
+  local transaction, err = self._core:begin()
+
+  if transaction == nil then
+    return nil, err
+  end
+  return wrap_workflow_transaction(transaction)
+end
+
+function Workflow:transaction(fn)
+  return self._core:transaction(function(transaction)
+    return fn(wrap_workflow_transaction(transaction))
+  end)
+end
+
+function Workflow:dispatcher()
+  local dispatcher, err = self._core:dispatcher()
+
+  if dispatcher == nil then
+    return nil, err
+  end
+  return wrap_workflow_dispatcher(dispatcher)
+end
+
 function Workflow:append_outbox(entry, payload)
   local transaction, receipt_or_err = self._core:append_outbox(
     normalize_outbox_entry(entry), payload)
@@ -761,7 +802,19 @@ function Workflow:resume_command(identity)
   return wrap_workflow_transaction(transaction), receipt_or_err
 end
 
-function Workflow:next(timeout_ms)
+function WorkflowDispatcher:close()
+  if self._core ~= nil and not self._closed then
+    self._core:close()
+    self._closed = true
+  end
+  -- A Lua handler binding lasts while at least one dispatcher wrapper is
+  -- reachable. This wrapper no longer needs to retain its adapter map once it
+  -- has surrendered its receiver reference.
+  self._handler_source = nil
+  self._handler_core_map = nil
+end
+
+function WorkflowDispatcher:next(timeout_ms)
   local job, err = self._core:next(timeout_ms)
 
   if job == nil then
@@ -770,29 +823,103 @@ function Workflow:next(timeout_ms)
   return wrap_outbox_job(job)
 end
 
-function Workflow:stats()
+local function dispatcher_handler_options(self, options)
+  local handlers
+  local key, handler
+  local handler_count
+  local core_options
+  local core_handlers
+  local cached_handlers
+
+  if type(options) ~= "table" then
+    return options
+  end
+  handlers = options.handlers
+  if type(handlers) ~= "table" then
+    return options
+  end
+  handler_count = 0
+  for key, handler in pairs(handlers) do
+    if type(key) ~= "string" or key == "" or key:find("\0", 1, true) ~= nil or
+        type(handler) ~= "function" then
+      -- Let the native boundary report the standard structured argument error.
+      return options
+    end
+    handler_count = handler_count + 1
+  end
+  if handler_count == 0 then
+    return options
+  end
+  cached_handlers = dispatcher_handler_maps[handlers]
+  if cached_handlers == nil then
+    core_handlers = {}
+    for key, handler in pairs(handlers) do
+      local handler_function = handler
+
+      core_handlers[key] = function(core_job)
+        return handler_function(wrap_outbox_job(core_job))
+      end
+    end
+    cached_handlers = { core_handlers = core_handlers }
+    dispatcher_handler_maps[handlers] = cached_handlers
+  end
+  -- Keep the facade adapter on every valid call. The native binding, which is
+  -- the authority on whether it is already active, rejects a conflicting map.
+  -- Recording a candidate before that call succeeds would let a rejected pump
+  -- make the next valid handler bypass this adapter.
+  self._handler_source = handlers
+  self._handler_core_map = cached_handlers.core_handlers
+  core_options = {}
+  for key, handler in pairs(options) do
+    core_options[key] = handler
+  end
+  core_options.handlers = self._handler_core_map
+  return core_options
+end
+
+function WorkflowDispatcher:pump(options)
+  return self._core:pump(dispatcher_handler_options(self, options))
+end
+
+function WorkflowDispatcher:run(options)
+  return self._core:run(dispatcher_handler_options(self, options))
+end
+
+function WorkflowDispatcher:notify_outbox_key(outbox_key)
+  return self._core:notify_outbox_key(outbox_key)
+end
+
+function WorkflowDispatcher:stats()
   return self._core:stats()
 end
 
-function Workflow:reconcile()
+function WorkflowDispatcher:reconcile()
   return self._core:reconcile()
 end
 
-function Workflow:replay_dead_letter(outbox_key)
+function WorkflowDispatcher:replay_dead_letter(outbox_key)
   return self._core:replay_dead_letter(outbox_key)
 end
 
-function Workflow:delete_dead_letter(outbox_key)
+function WorkflowDispatcher:delete_dead_letter(outbox_key)
   return self._core:delete_dead_letter(outbox_key)
 end
 
-function Workflow:export_dead_letters(options, dest)
+function WorkflowDispatcher:export_dead_letters(options, dest)
   if dest == nil and (type(options) == "string" or type(options) == "number" or
       (type(options) == "table" and
        (options.path ~= nil or options.fd ~= nil))) then
     return self._core:export_dead_letters(nil, options)
   end
   return self._core:export_dead_letters(options, dest)
+end
+
+function WorkflowDispatcher:stop(deadline_ms)
+  return self._core:stop(deadline_ms)
+end
+
+function WorkflowDispatcher:wait(deadline_ms)
+  return self._core:wait(deadline_ms)
 end
 
 function WorkflowTransaction:close()
@@ -817,6 +944,10 @@ end
 
 function WorkflowTransaction:accept_command(request)
   return self._core:accept_command(request)
+end
+
+function WorkflowTransaction:accept_inbox(message)
+  return self._core:accept_inbox(message)
 end
 
 function WorkflowTransaction:complete_command(result)

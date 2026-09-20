@@ -201,13 +201,13 @@ help:
 		'make deps-cross         Provision all non-host cross release dependency trees.' \
 		'make test-debug         Run the ASan/UBSan debug preset test suite.' \
 		'make test-pouch-workflow-preflight Run fast clean-restart and shared-dispatcher Pouch regressions.' \
-		'make test               Run the pinned Bootlin host-executable GNU and musl release suites.' \
+		'make test               Run the fast native ASan/UBSan Debug functional suite.' \
 		'make test-host          Run the pinned Bootlin host-executable GNU and musl release suites.' \
 		'make test-cross         Run the non-host cross release suites.' \
 		'make test-e2e           Run the mTLS/libcurl e2e preset against the local devenv.' \
 		'make test-install-tree  Validate CMake and pkg-config consumers against the installed native SDK.' \
 		'make example-smoke-local Run local-service example smoke tests.' \
-		'make test-all           Run the parallel debug, host and QEMU cross functional matrix plus local e2e.' \
+		'make test-all           Run the complete native Debug and local-service E2E functional suite.' \
 		'make test-coverage      Run the coverage preset test suite and build the coverage report.' \
 		'make dev-up             Start the local compose-backed devenv and wait for generated client bundles.' \
 		'make dev-down           Stop and remove the local compose-backed devenv.' \
@@ -256,7 +256,7 @@ help:
 		'make package-source     Build the source-only release archive.' \
 		'make package-source-smoke  Build and verify the source-only release archive.' \
 		'make package-checksums  Refresh the dist/ checksum manifest.' \
-		'make package-verify     Run the full release matrix, checksum, source/SDK/Lua, and recursive privacy verification.' \
+		'make package-verify     Build and verify release packages, source/SDK/Lua artifacts, checksums, and recursive privacy without rerunning tests.' \
 		'make verify-release-archives  Assert the complete shipped Linux release archive set and checksums.' \
 		'make verify-release-privacy  Scan checksum-listed release artifacts for local private traces.' \
 		'make lua-rock           Build the Lua release package and source rock artifacts.' \
@@ -267,9 +267,9 @@ help:
 		'make cross-build        Build all non-host cross release presets.' \
 		'make cross-preset-test  Run the host ASan/UBSan debug cross-preset packaging-isolation check.' \
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
-		'make prerelease         Run deterministic pre-release confidence without an initial clean.' \
+		'make prerelease         Run mandatory native, Valgrind, and full-fuzz release confidence without an initial clean.' \
 		'make prerelease-live    Refuse without LOCKDC_PRERELEASE_LIVE=1; no live-provider checks are currently defined.' \
-		'make prerelease-hardening  Run prerelease, performance gates, Pouch workflow hardening, full fuzzing, and the release matrix.' \
+		'make prerelease-hardening  Run opt-in soak, performance, and workflow stress campaigns beyond release requirements.' \
 		'make lifecycle-version-contract  Verify exact release tag semantics before clean release work.' \
 		'make print-release-version  Print the release version resolved by the Make-owned release surface.' \
 		'make release            Run the clean-slate final release workflow: version contract, clean, then the shared release proof graph.' \
@@ -305,8 +305,8 @@ build-debug:
 	$(TIMED) build-debug $(MAKE_RECURSE) __build-debug
 
 __build-debug: __deps-debug
-	$(CMAKE) --preset $(DEBUG_PRESET)
-	$(CMAKE) --build --preset $(DEBUG_PRESET)
+	$(TIMED) 'build-debug configure' $(CMAKE) --preset $(DEBUG_PRESET)
+	$(TIMED) 'build-debug compile' $(CMAKE) --build --preset $(DEBUG_PRESET)
 
 build-host:
 	$(TIMED) build-host $(MAKE_RECURSE) __build-host
@@ -345,27 +345,28 @@ __build-fuzz: __deps-debug
 	$(CMAKE) --preset $(FUZZ_PRESET)
 	$(CMAKE) --build --preset $(FUZZ_PRESET)
 
-test: test-host
+test: test-debug
 
 test-debug:
 	$(TIMED) test-debug $(MAKE_RECURSE) __test-debug
 
-__test-debug: __build-debug
-	$(CTEST) --preset $(DEBUG_PRESET) --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL)
+__test-debug:
+	$(TIMED) 'test-debug build' $(MAKE_RECURSE) __build-debug
+	$(TIMED) 'test-debug ctest' $(CTEST) --preset $(DEBUG_PRESET) --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL)
 
 test-pouch-workflow-preflight:
 	$(TIMED) test-pouch-workflow-preflight $(MAKE_RECURSE) __test-pouch-workflow-preflight
 
 __test-pouch-workflow-preflight: __build-debug
-	CMOCKA_TEST_FILTER=test_pouch_multikey_terminal_failure_publishes_nothing $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
-	CMOCKA_TEST_FILTER=test_pouch_expired_multikey_commit_reports_rollback_without_signal $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_multikey_prevote_failure_publishes_nothing $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_expired_commit_reports_rollback_without_signal $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
 	CMOCKA_TEST_FILTER=test_pouch_duplicate_inbox_handles_json_runtime_failure $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
 	CMOCKA_TEST_FILTER=test_pouch_reconciliation_retains_overflow_request $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
 	CMOCKA_TEST_FILTER=test_pouch_clean_reopen_reconciles_durable_index $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
 	CMOCKA_TEST_FILTER=test_pouch_shared_reopen_reconciles_durable_index $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
 	CMOCKA_TEST_FILTER=test_pouch_shared_process_reconciles_each_outbox_once $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
 	CMOCKA_TEST_FILTER=test_pouch_workflow_rejects_out_of_range_durable_replay_counts $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
-	CMOCKA_TEST_FILTER=test_pouch_workflow_close_retains_blocked_next $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+	CMOCKA_TEST_FILTER=test_pouch_dispatcher_stop_retains_blocked_next $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
 
 test-host:
 	$(TIMED) test-host $(MAKE_RECURSE) __test-host
@@ -401,11 +402,10 @@ __example-smoke-local:
 test-all:
 	$(TIMED) test-all $(MAKE_RECURSE) __test-all
 
-# Fuzzing provisions an external compiler toolchain and is a hardening gate,
-# not a fast functional invariant. Keep it in `make prerelease` and invoke it
-# explicitly with `make fuzz-smoke`; do not make everyday confidence depend on
-# a cold bootstrap. Benchmark work is likewise deliberate and explicit.
-__test-all: __test-pouch-workflow-preflight __test-debug __test-host __test-cross __valgrind __test-e2e
+# `test-all` proves complete native behavior, including the local-service E2E
+# surface.  Release-only toolchains and diagnostics stay out of the edit loop:
+# `make release` invokes the GNU/musl, QEMU, Valgrind, and fuzz gates once.
+__test-all: __test-debug __test-e2e
 
 dev-up:
 	$(TIMED) dev-up $(MAKE_RECURSE) __dev-up
@@ -441,7 +441,7 @@ format:
 	$(TIMED) format $(MAKE_RECURSE) __format
 
 __format:
-	rg --files -g '*.c' -g '*.h' | xargs $(CLANG_FORMAT) -i
+	CLANG_FORMAT='$(CLANG_FORMAT)' bash ./scripts/format.sh
 
 finalize-slice:
 	$(TIMED) finalize-slice $(MAKE_RECURSE) __finalize-slice
@@ -874,7 +874,12 @@ __pouch-core-hardening: __benchmark-pouch-go-prepare
 package:
 	$(TIMED) package $(MAKE_RECURSE) __package
 
-__package: __build-x86_64-linux-gnu-release
+__package: __deps-release
+	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)
+	$(CMAKE) --build --preset $(X86_64_GNU_RELEASE_PRESET) --target lockdc_release_artifacts
+	@if grep -q '^LOCKDC_BUILD_LUA_BINDINGS:BOOL=ON$$' '$(X86_64_GNU_RELEASE_BUILD_DIR)/CMakeCache.txt'; then \
+		$(CMAKE) --build --preset $(X86_64_GNU_RELEASE_PRESET) --target lockdc_lua_runner; \
+	fi
 	$(MAKE_RECURSE) __clean-dist
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_archive.cmake
 	$(CMAKE) -DLOCKDC_BINARY_DIR=$(X86_64_GNU_RELEASE_BUILD_DIR) -DLOCKDC_ROOT=$(ROOT) -DLOCKDC_DIST_DIR=$(DIST_DIR) -P $(ROOT)/cmake/package_source.cmake
@@ -901,7 +906,13 @@ __package-checksums: __package
 package-verify:
 	$(TIMED) package-verify $(MAKE_RECURSE) __package-verify
 
-__package-verify: __release-matrix __verify-release-privacy
+__package-verify:
+	$(MAKE_RECURSE) __build-release
+	@if grep -q '^LOCKDC_BUILD_LUA_BINDINGS:BOOL=ON$$' '$(X86_64_GNU_RELEASE_BUILD_DIR)/CMakeCache.txt'; then \
+		$(CMAKE) --build --preset $(X86_64_GNU_RELEASE_PRESET) --target lockdc_lua_runner; \
+	fi
+	bash ./scripts/run_linux_package_matrix.sh
+	$(MAKE_RECURSE) __verify-release-privacy
 
 verify-release-privacy:
 	$(TIMED) verify-release-privacy $(MAKE_RECURSE) __verify-release-privacy
@@ -980,10 +991,10 @@ prerelease:
 	$(TIMED) prerelease $(MAKE_RECURSE) __prerelease
 
 __prerelease-ordinary:
-	$(TIMED) 'prerelease finalize-slice' $(MAKE_RECURSE) __finalize-slice
+	$(TIMED) 'prerelease format' $(MAKE_RECURSE) __format
+	$(TIMED) 'prerelease test-all' $(MAKE_RECURSE) __test-all
 	$(TIMED) 'prerelease valgrind' $(MAKE_RECURSE) __valgrind
-	$(TIMED) 'prerelease fuzz-smoke' $(MAKE_RECURSE) __fuzz-smoke
-	$(TIMED) 'prerelease e2e' $(MAKE_RECURSE) __test-e2e
+	$(TIMED) 'prerelease fuzz' $(MAKE_RECURSE) __fuzz
 
 __prerelease: __prerelease-ordinary
 
@@ -1009,7 +1020,7 @@ __prerelease-live:
 prerelease-hardening:
 	$(TIMED) prerelease-hardening $(MAKE_RECURSE) __prerelease-hardening
 
-__prerelease-hardening: __prerelease __bench-gate __pouch-core-hardening __benchmark-workflow-hardening __fuzz __release-matrix
+__prerelease-hardening: __prerelease __bench-gate __pouch-core-hardening __benchmark-workflow-hardening
 
 lifecycle-version-contract:
 	$(TIMED) lifecycle-version-contract $(MAKE_RECURSE) __lifecycle-version-contract

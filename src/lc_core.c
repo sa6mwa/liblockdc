@@ -1965,6 +1965,7 @@ LC_INIT_STRUCT_FUNC(lc_consumer, lc_consumer_init)
 LC_INIT_STRUCT_FUNC(lc_consumer_service_config, lc_consumer_service_config_init)
 LC_INIT_STRUCT_FUNC(lc_history_consumer_config, lc_history_consumer_config_init)
 LC_INIT_STRUCT_FUNC(lc_workflow_config, lc_workflow_config_init)
+LC_INIT_STRUCT_FUNC(lc_workflow_commit_result, lc_workflow_commit_result_init)
 void lc_dead_letter_export_opts_init(lc_dead_letter_export_opts *options) {
   if (options == NULL)
     return;
@@ -2003,6 +2004,17 @@ void lc_outbox_receipt_cleanup(lc_outbox_receipt *receipt) {
   free(receipt->outbox_key);
   free(receipt->effect_key);
   memset(receipt, 0, sizeof(*receipt));
+}
+
+void lc_workflow_commit_result_cleanup(lc_workflow_commit_result *result) {
+  size_t i;
+
+  if (result == NULL)
+    return;
+  for (i = 0U; i < result->outbox_receipt_count; ++i)
+    lc_outbox_receipt_cleanup(&result->outbox_receipts[i]);
+  free(result->outbox_receipts);
+  memset(result, 0, sizeof(*result));
 }
 
 void lc_command_receipt_cleanup(lc_command_receipt *receipt) {
@@ -2427,6 +2439,8 @@ int lc_client_open(const lc_client_config *config, lc_client **out,
   client->pub.subscribe_with_state = lc_client_subscribe_with_state_method;
   client->pub.new_consumer_service = lc_client_new_consumer_service_method;
   client->pub.new_workflow = lc_client_new_workflow_method;
+  client->pub.new_workflow_with_dispatcher =
+      lc_client_new_workflow_with_dispatcher_method;
   client->pub.new_history_consumer = lc_client_new_history_consumer_method;
   client->pub.watch_queue = lc_client_watch_queue_method;
   client->pub.close = lc_client_close_method;

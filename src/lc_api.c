@@ -258,7 +258,29 @@ int lc_client_new_consumer_service(lc_client *client,
 
 int lc_client_new_workflow(lc_client *client, const lc_workflow_config *config,
                            lc_workflow **out, lc_error *error) {
+  if (out != NULL)
+    *out = NULL;
+  if (client == NULL || client->new_workflow == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow requires a supporting client", NULL, NULL,
+                        NULL);
+  }
   return client->new_workflow(client, config, out, error);
+}
+
+int lc_client_new_workflow_with_dispatcher(lc_client *client,
+                                           const lc_workflow_config *config,
+                                           lc_workflow_dispatcher *dispatcher,
+                                           lc_workflow **out, lc_error *error) {
+  if (out != NULL)
+    *out = NULL;
+  if (client == NULL || client->new_workflow_with_dispatcher == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dispatcher requires a supporting client",
+                        NULL, NULL, NULL);
+  }
+  return client->new_workflow_with_dispatcher(client, config, dispatcher, out,
+                                              error);
 }
 
 int lc_client_new_history_consumer(lc_client *client,
@@ -278,6 +300,111 @@ int lc_workflow_append_outbox(lc_workflow *workflow,
                               lc_outbox_receipt *receipt, lc_error *error) {
   return workflow->append_outbox(workflow, entry, payload, out_txn, receipt,
                                  error);
+}
+
+int lc_workflow_begin(lc_workflow *workflow, lc_workflow_transaction **out,
+                      lc_error *error) {
+  if (workflow == NULL || workflow->begin == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow begin requires a workflow", NULL, NULL, NULL);
+  }
+  return workflow->begin(workflow, out, error);
+}
+
+int lc_workflow_dispatcher_get_or_start(lc_workflow *workflow,
+                                        lc_workflow_dispatcher **out,
+                                        lc_error *error) {
+  if (out != NULL)
+    *out = NULL;
+  if (workflow == NULL || workflow->get_or_start_dispatcher == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dispatcher requires a workflow", NULL, NULL,
+                        NULL);
+  }
+  return workflow->get_or_start_dispatcher(workflow, out, error);
+}
+
+int lc_workflow_dispatcher_next(lc_workflow_dispatcher *dispatcher,
+                                long timeout_ms, lc_outbox_job **out,
+                                lc_error *error) {
+  if (dispatcher == NULL || dispatcher->next == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dispatcher is required", NULL, NULL, NULL);
+  return dispatcher->next(dispatcher, timeout_ms, out, error);
+}
+
+int lc_workflow_dispatcher_notify_outbox_key(lc_workflow_dispatcher *dispatcher,
+                                             const char *outbox_key,
+                                             lc_error *error) {
+  if (dispatcher == NULL || dispatcher->notify_outbox_key == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dispatcher is required", NULL, NULL, NULL);
+  return dispatcher->notify_outbox_key(dispatcher, outbox_key, error);
+}
+
+int lc_workflow_dispatcher_get_stats(lc_workflow_dispatcher *dispatcher,
+                                     lc_workflow_stats *out, lc_error *error) {
+  if (dispatcher == NULL || dispatcher->get_stats == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dispatcher is required", NULL, NULL, NULL);
+  return dispatcher->get_stats(dispatcher, out, error);
+}
+
+int lc_workflow_dispatcher_reconcile(lc_workflow_dispatcher *dispatcher,
+                                     lc_error *error) {
+  if (dispatcher == NULL || dispatcher->reconcile == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dispatcher is required", NULL, NULL, NULL);
+  return dispatcher->reconcile(dispatcher, error);
+}
+
+int lc_workflow_dispatcher_replay_dead_letter(
+    lc_workflow_dispatcher *dispatcher, const char *outbox_key,
+    lc_error *error) {
+  if (dispatcher == NULL || dispatcher->replay_dead_letter == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dispatcher is required", NULL, NULL, NULL);
+  return dispatcher->replay_dead_letter(dispatcher, outbox_key, error);
+}
+
+int lc_workflow_dispatcher_delete_dead_letter(
+    lc_workflow_dispatcher *dispatcher, const char *outbox_key,
+    lc_error *error) {
+  if (dispatcher == NULL || dispatcher->delete_dead_letter == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dispatcher is required", NULL, NULL, NULL);
+  return dispatcher->delete_dead_letter(dispatcher, outbox_key, error);
+}
+
+int lc_workflow_dispatcher_export_dead_letters(
+    lc_workflow_dispatcher *dispatcher,
+    const lc_dead_letter_export_opts *options, lc_sink *dst,
+    lc_dead_letter_export_res *out, lc_error *error) {
+  if (dispatcher == NULL || dispatcher->export_dead_letters == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dispatcher is required", NULL, NULL, NULL);
+  return dispatcher->export_dead_letters(dispatcher, options, dst, out, error);
+}
+
+int lc_workflow_dispatcher_stop(lc_workflow_dispatcher *dispatcher,
+                                long deadline_ms, lc_error *error) {
+  if (dispatcher == NULL || dispatcher->stop == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dispatcher is required", NULL, NULL, NULL);
+  return dispatcher->stop(dispatcher, deadline_ms, error);
+}
+
+int lc_workflow_dispatcher_wait(lc_workflow_dispatcher *dispatcher,
+                                long deadline_ms, lc_error *error) {
+  if (dispatcher == NULL || dispatcher->wait == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow dispatcher is required", NULL, NULL, NULL);
+  return dispatcher->wait(dispatcher, deadline_ms, error);
+}
+
+void lc_workflow_dispatcher_close(lc_workflow_dispatcher *dispatcher) {
+  if (dispatcher != NULL && dispatcher->close != NULL)
+    dispatcher->close(dispatcher);
 }
 int lc_workflow_accept_inbox(lc_workflow *workflow,
                              const lc_inbox_message *message,
@@ -308,32 +435,6 @@ int lc_workflow_resume_command(lc_workflow *workflow,
                                lc_workflow_transaction **out_txn,
                                lc_command_receipt *receipt, lc_error *error) {
   return workflow->resume_command(workflow, identity, out_txn, receipt, error);
-}
-int lc_workflow_next(lc_workflow *workflow, long timeout_ms,
-                     lc_outbox_job **out, lc_error *error) {
-  return workflow->next(workflow, timeout_ms, out, error);
-}
-int lc_workflow_get_stats(lc_workflow *workflow, lc_workflow_stats *out,
-                          lc_error *error) {
-  return workflow->get_stats(workflow, out, error);
-}
-int lc_workflow_reconcile(lc_workflow *workflow, lc_error *error) {
-  return workflow->reconcile(workflow, error);
-}
-int lc_workflow_replay_dead_letter(lc_workflow *workflow,
-                                   const char *outbox_key, lc_error *error) {
-  return workflow->replay_dead_letter(workflow, outbox_key, error);
-}
-int lc_workflow_delete_dead_letter(lc_workflow *workflow,
-                                   const char *outbox_key, lc_error *error) {
-  return workflow->delete_dead_letter(workflow, outbox_key, error);
-}
-int lc_workflow_export_dead_letters(lc_workflow *workflow,
-                                    const lc_dead_letter_export_opts *options,
-                                    lc_sink *dst,
-                                    lc_dead_letter_export_res *out,
-                                    lc_error *error) {
-  return workflow->export_dead_letters(workflow, options, dst, out, error);
 }
 void lc_workflow_close(lc_workflow *workflow) {
   if (workflow != NULL)
@@ -382,6 +483,12 @@ int lc_workflow_transaction_accept_command(lc_workflow_transaction *transaction,
                                            lc_error *error) {
   return transaction->accept_command(transaction, request, receipt, error);
 }
+int lc_workflow_transaction_accept_inbox(lc_workflow_transaction *transaction,
+                                         const lc_inbox_message *message,
+                                         lc_inbox_accept_result *result,
+                                         lc_error *error) {
+  return transaction->accept_inbox(transaction, message, result, error);
+}
 int lc_workflow_transaction_complete_command(
     lc_workflow_transaction *transaction, const lc_command_result *result,
     lc_error *error) {
@@ -393,8 +500,14 @@ int lc_workflow_transaction_fail_command(lc_workflow_transaction *transaction,
   return transaction->fail_command(transaction, result, error);
 }
 int lc_workflow_transaction_commit(lc_workflow_transaction *transaction,
+                                   lc_workflow_commit_result *out,
                                    lc_error *error) {
-  return transaction->commit(transaction, error);
+  if (transaction == NULL || out == NULL || transaction->commit == NULL) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "workflow transaction and commit result are required",
+                        NULL, NULL, NULL);
+  }
+  return transaction->commit(transaction, out, error);
 }
 int lc_workflow_transaction_rollback(lc_workflow_transaction *transaction,
                                      lc_error *error) {

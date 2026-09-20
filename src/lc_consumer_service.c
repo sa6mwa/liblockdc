@@ -2403,7 +2403,7 @@ void lc_consumer_service_close_method(lc_consumer_service *self) {
   lc_free_with_allocator(&service->allocator, service->pouch_crypto_key_file);
   lc_free_with_allocator(&service->allocator, service->pouch_compression);
   if (service->pouch_client != NULL) {
-    lc_client_close_method(&service->pouch_client->pub);
+    lc_client_handle_release(service->pouch_client);
   }
   lc_error_cleanup(&service->fatal_error);
   pthread_cond_destroy(&service->cond);

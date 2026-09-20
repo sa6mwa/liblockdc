@@ -242,4 +242,65 @@ lc_add_lua_e2e_test(
   PACKAGE_ONLY
   POUCH_ROOT "${CMAKE_BINARY_DIR}/lua-pouch-e2e/lc_e2e_lua_workflow"
 )
+
+if(TARGET lc_example_workflow_producer AND LOCKDC_LUA_RUNNABLE AND
+   LOCKDC_LUAROCKS_BIN)
+  add_test(NAME lc_e2e_workflow_examples
+    COMMAND "${CMAKE_COMMAND}"
+      -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+      -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+      -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
+      -DLOCKDC_WORKFLOW_PRODUCER=$<TARGET_FILE:lc_example_workflow_producer>
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/workflow_examples_test.cmake"
+  )
+  set_tests_properties(lc_e2e_workflow_examples PROPERTIES
+    LABELS "e2e;examples;lua"
+    RUN_SERIAL TRUE
+    TIMEOUT 300
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  )
+endif()
+
+# E2E execution is deliberately isolated from the rest of the local test
+# fleet.  This closure contains every executable a test labelled `e2e` can
+# invoke, so the E2E runner does not build unrelated unit and transport tests.
+set(lockdc_e2e_test_targets
+  lc_e2e_disk_direct
+  lc_e2e_pouch_direct
+  lc_e2e_s3_direct
+  lc_e2e_mem_direct
+  lc_e2e_disk_consumer
+  lc_e2e_s3_consumer
+  lc_e2e_mem_consumer
+)
+set(lockdc_e2e_example_candidates
+  lc_example_acquire_lease_lifecycle
+  lc_example_acquire_for_update
+  lc_example_client_and_lease_methods
+  lc_example_management_admin
+  lc_example_curl_fetch_into_lockd
+  lc_example_local_mutate
+  lc_example_startconsumer
+  lc_example_workflow_producer
+)
+set(lockdc_e2e_example_targets)
+foreach(lockdc_e2e_example_target IN LISTS lockdc_e2e_example_candidates)
+  if(TARGET ${lockdc_e2e_example_target})
+    list(APPEND lockdc_e2e_example_targets ${lockdc_e2e_example_target})
+  endif()
+endforeach()
+list(APPEND lockdc_e2e_test_targets ${lockdc_e2e_example_targets})
+if(LOCKDC_LUA_RUNNABLE AND LOCKDC_LUAROCKS_BIN)
+  list(APPEND lockdc_e2e_test_targets lockdc_lua_runner)
+  list(APPEND lockdc_e2e_example_targets lockdc_lua_runner)
+  if(TARGET lockdc_lua_core)
+    list(APPEND lockdc_e2e_test_targets lockdc_lua_core)
+    list(APPEND lockdc_e2e_example_targets lockdc_lua_core)
+  endif()
+  if(TARGET lc_shared)
+    list(APPEND lockdc_e2e_example_targets lc_shared)
+  endif()
+endif()
+add_custom_target(lockdc_e2e_tests DEPENDS ${lockdc_e2e_test_targets})
+add_custom_target(lockdc_e2e_example_tests DEPENDS ${lockdc_e2e_example_targets})
 lc_apply_default_test_timeouts()

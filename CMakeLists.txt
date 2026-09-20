@@ -702,6 +702,13 @@ if(LOCKDC_BUILD_SHARED)
     lc_add_release_privacy_scan(lc_shared)
 endif()
 
+# Release packaging needs only the public library artifacts.  Keep this
+# separate from the default `all` target, which intentionally includes the
+# complete local test fleet for developer builds.
+if(TARGET lc_static AND TARGET lc_shared)
+    add_custom_target(lockdc_release_artifacts DEPENDS lc_static lc_shared)
+endif()
+
 if(LOCKDC_BUILD_TESTS)
     add_library(lc_test_static STATIC)
     lc_configure_library_target(lc_test_static)

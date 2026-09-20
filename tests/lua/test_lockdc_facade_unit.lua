@@ -751,6 +751,9 @@ local function test_workflow_facade_lifecycle()
       captured.inbox_message = message
       return nil, { accepted = false, duplicate = true }
     end,
+    dispatcher = function(self)
+      return self
+    end,
     next = function(_, timeout)
       captured.next_timeout = timeout
       return job_core
@@ -880,8 +883,9 @@ local function test_workflow_facade_lifecycle()
   assert_eq(resumed_txn, nil, 'terminal command resume should not expose a transaction')
   assert_eq(resumed.duplicate, true, 'terminal command resume should return receipt')
 
-  local job = assert(workflow:next(123))
-  assert_eq(captured.next_timeout, 123, 'workflow next should pass its timeout')
+  local dispatcher = assert(workflow:dispatcher())
+  local job = assert(dispatcher:next(123))
+  assert_eq(captured.next_timeout, 123, 'dispatcher next should pass its timeout')
   assert_eq(job:payload_json(), lockdc.json_null, 'job payload_json should decode JSON null')
   assert_truthy(job:renew(90), 'job renewal should delegate')
   assert_eq(captured.renew_ttl, 90, 'job renewal should preserve TTL')
@@ -894,19 +898,19 @@ local function test_workflow_facade_lifecycle()
   assert_eq(job_core.closed, nil,
       'terminal completion must consume the native job before close')
 
-  local stats = assert(workflow:stats())
-  assert_eq(stats.recovery_queries, 3, 'workflow stats should delegate')
-  assert_truthy(workflow:reconcile(), 'workflow reconciliation should delegate')
+  local stats = assert(dispatcher:stats())
+  assert_eq(stats.recovery_queries, 3, 'dispatcher stats should delegate')
+  assert_truthy(dispatcher:reconcile(), 'dispatcher reconciliation should delegate')
   assert_truthy(workflow_core.reconciled, 'workflow core should reconcile')
-  assert_truthy(workflow:replay_dead_letter('dead-key'),
+  assert_truthy(dispatcher:replay_dead_letter('dead-key'),
       'dead-letter replay should delegate')
   assert_eq(workflow_core.replayed_key, 'dead-key',
       'dead-letter replay key should pass through')
-  assert_truthy(workflow:delete_dead_letter('dead-key'),
+  assert_truthy(dispatcher:delete_dead_letter('dead-key'),
       'dead-letter delete should delegate')
   assert_eq(workflow_core.deleted_key, 'dead-key',
       'dead-letter delete key should pass through')
-  local exported, export_result = assert(workflow:export_dead_letters(
+  local exported, export_result = assert(dispatcher:export_dead_letters(
       { format = 'jsonl', limit = 10 }, { path = '/tmp/dead-letter.jsonl' }))
   assert_eq(export_result.exported, 1, 'dead-letter export result should delegate')
   assert_eq(captured.export_options.format, 'jsonl',
@@ -915,12 +919,14 @@ local function test_workflow_facade_lifecycle()
       'dead-letter export destination should pass through')
   assert_truthy(exported:find('dead_letter', 1, true),
       'dead-letter export should return the core output')
-  assert(workflow:export_dead_letters('/tmp/dead-letter.json'))
+  assert(dispatcher:export_dead_letters('/tmp/dead-letter.json'))
   assert_eq(captured.export_options, nil,
       'dead-letter export should allow a destination without options')
   assert_eq(captured.export_dest, '/tmp/dead-letter.json',
       'dead-letter export destination shorthand should pass through')
 
+  dispatcher:close()
+  assert_truthy(workflow_core.closed, 'dispatcher close should close the core receiver')
   workflow:close()
   assert_truthy(workflow_core.closed, 'workflow close should close the core receiver')
   client:close()

@@ -661,6 +661,7 @@ static int bench_workflow_reconcile_case(long iterations, int index_mode) {
   bench_workflow_fixture fixture;
   lc_workflow_config config;
   lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
   lc_workflow_stats stats;
   lc_outbox_job *job;
   lc_error error;
@@ -695,6 +696,7 @@ static int bench_workflow_reconcile_case(long iterations, int index_mode) {
       ((uint64_t)rows + (uint64_t)page_capacity - 1U) / (uint64_t)page_capacity;
   payload = NULL;
   workflow = NULL;
+  dispatcher = NULL;
   memset(&fixture, 0, sizeof(fixture));
   memset(&stats, 0, sizeof(stats));
   memset(&maintenance, 0, sizeof(maintenance));
@@ -788,10 +790,13 @@ static int bench_workflow_reconcile_case(long iterations, int index_mode) {
     goto done;
   }
   rc = lc_client_new_workflow(fixture.client, &config, &workflow, &error);
+  if (rc == LC_OK) {
+    rc = lc_workflow_dispatcher_get_or_start(workflow, &dispatcher, &error);
+  }
   first_delivery_seconds = 0.0;
   for (index = 0U; rc == LC_OK && index < (size_t)rows; ++index) {
     job = NULL;
-    rc = workflow->next(workflow, 30000L, &job, &error);
+    rc = dispatcher->next(dispatcher, 30000L, &job, &error);
     if (rc != LC_OK || job == NULL) {
       if (rc == LC_OK) {
         rc = 1;
@@ -828,7 +833,7 @@ static int bench_workflow_reconcile_case(long iterations, int index_mode) {
       bench_now_seconds() -
       ((double)started.tv_sec + (double)started.tv_nsec / 1000000000.0);
   if (rc == LC_OK) {
-    rc = workflow->get_stats(workflow, &stats, &error);
+    rc = dispatcher->get_stats(dispatcher, &stats, &error);
   }
   if (rc == LC_OK && (stats.recovered_claims < (uint64_t)rows ||
                       stats.recovery_queries < expected_recovery_queries)) {
@@ -863,6 +868,10 @@ static int bench_workflow_reconcile_case(long iterations, int index_mode) {
          maintenance_bytes, maintenance.compacted, rc);
 
 done:
+  if (dispatcher != NULL) {
+    (void)dispatcher->stop(dispatcher, 30000L, NULL);
+    dispatcher->close(dispatcher);
+  }
   if (workflow != NULL) {
     workflow->close(workflow);
   }
@@ -903,6 +912,7 @@ static int bench_workflow_dispatcher_child(
   bench_workflow_dispatcher_result result;
   lc_workflow_config config;
   lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
   lc_client *client;
   lc_error error;
   char owner[128];
@@ -912,6 +922,7 @@ static int bench_workflow_dispatcher_child(
 
   memset(&result, 0, sizeof(result));
   workflow = NULL;
+  dispatcher = NULL;
   client = NULL;
   idle_count = 0;
   lc_error_init(&error);
@@ -946,13 +957,16 @@ static int bench_workflow_dispatcher_child(
     config.notification_capacity = (size_t)page_capacity;
     config.recovery_interval_seconds = 1L;
     rc = lc_client_new_workflow(client, &config, &workflow, &error);
+    if (rc == LC_OK) {
+      rc = lc_workflow_dispatcher_get_or_start(workflow, &dispatcher, &error);
+    }
   }
   while (rc == LC_OK && idle_count < BENCH_WORKFLOW_DISPATCHER_IDLE_LIMIT) {
     lc_outbox_job *job;
 
     job = NULL;
     result.failure_stage = 5;
-    rc = workflow->next(workflow, 250L, &job, &error);
+    rc = dispatcher->next(dispatcher, 250L, &job, &error);
     if (rc != LC_OK) {
       break;
     }
@@ -1010,6 +1024,10 @@ static int bench_workflow_dispatcher_child(
   }
   if (workflow != NULL) {
     workflow->close(workflow);
+  }
+  if (dispatcher != NULL) {
+    (void)dispatcher->stop(dispatcher, 30000L, NULL);
+    dispatcher->close(dispatcher);
   }
   if (client != NULL) {
     client->close(client);

@@ -234,6 +234,8 @@ implementation-private state, created from an existing client. It follows the
 public library's receiver-function convention and zero-initializable
 configuration/request records. The command-receipt methods, message envelope
 fields, and completion evidence below are the current public surface.
+The abridged receiver declarations omit each handle's private `impl` pointer;
+the installed header is the complete C layout.
 
 ```c
 typedef struct lc_workflow lc_workflow;
@@ -281,6 +283,28 @@ struct lc_workflow {
                                  lc_workflow_dispatcher **out,
                                  lc_error *error);
   void (*close)(lc_workflow *self);
+  void *reserved_extension_slots[8];
+};
+
+struct lc_workflow_dispatcher {
+  int (*next)(lc_workflow_dispatcher *self, long timeout_ms,
+              lc_outbox_job **out, lc_error *error);
+  int (*notify_outbox_key)(lc_workflow_dispatcher *self,
+                           const char *outbox_key, lc_error *error);
+  int (*get_stats)(lc_workflow_dispatcher *self, lc_workflow_stats *out,
+                   lc_error *error);
+  int (*reconcile)(lc_workflow_dispatcher *self, lc_error *error);
+  int (*replay_dead_letter)(lc_workflow_dispatcher *self,
+                            const char *outbox_key, lc_error *error);
+  int (*delete_dead_letter)(lc_workflow_dispatcher *self,
+                            const char *outbox_key, lc_error *error);
+  int (*export_dead_letters)(lc_workflow_dispatcher *self,
+                             const lc_dead_letter_export_opts *options,
+                             lc_sink *dst, lc_dead_letter_export_res *out,
+                             lc_error *error);
+  int (*stop)(lc_workflow_dispatcher *self, long deadline_ms, lc_error *error);
+  int (*wait)(lc_workflow_dispatcher *self, long deadline_ms, lc_error *error);
+  void (*close)(lc_workflow_dispatcher *self);
   void *reserved_extension_slots[8];
 };
 
@@ -412,6 +436,14 @@ The ABI-reviewed names below establish these interaction boundaries:
   application to forget.
 - Dispatcher jobs expose immutable envelope metadata, streaming payload access,
   and only the terminal/renewal operations valid for their owned claim.
+
+Workflow production and dispatch are distinct receiver surfaces. A workflow
+has no `next`, claim, recovery, statistics, or dead-letter methods. Obtain an
+explicit dispatcher with `workflow->get_or_start_dispatcher()` in the process
+that owns foreign-effect delivery, or attach an already compatible dispatcher
+with `client->new_workflow_with_dispatcher()` for same-process post-commit
+wakes. The full lifecycle, registry, and Lua ownership contract is in
+[the workflow dispatch architecture](workflow-dispatch-architecture.md).
 
 Errors must identify the failed semantic operation and relevant identity
 (`idempotency_key`, operation ID, inbox identity, or outbox receipt) without
@@ -967,9 +999,11 @@ manufactures completion, retry, or dead-letter transitions for handed-off jobs,
 runs host work, or forcibly terminates it. The application gives its workers a
 bounded shutdown grace period. A job that remains unfinished is left claimed
 until its lease expires and is then recovered by normal durable recovery.
-Client close is the stronger invalidation boundary: after it returns, remaining
-workflow, dispatcher, and job handles are closed and unfinished claims recover
-through expiry.
+Client close joins private dispatcher workers before it releases the root
+client, but does not wait for application-owned handed-out jobs. Such a job
+retains exactly the client state needed to stream, renew, complete, or close
+itself; dispatcher shells reject new work and remain closeable. An unfinished
+claim recovers through expiry.
 
 ### Claim and terminal transitions
 
@@ -1357,8 +1391,11 @@ explicit performance gate.
 
 ## Remaining Proof Obligations and Future Work
 
-The public workflow receiver names, request records, envelope metadata, and
-liblockdc shared-library ABI 4 line are finalized for this release. Future
+The durable record rules in this document remain the workflow compatibility
+boundary. Threadless producer and explicit-dispatcher receiver names, lifecycle,
+and Lua ownership are governed by
+[the workflow dispatch architecture](workflow-dispatch-architecture.md) while
+that unreleased ABI-4 cutover is implemented and verified. Future released
 public-surface changes require the same API and ABI review. The remaining
 component-specific work is:
 

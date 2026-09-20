@@ -508,6 +508,25 @@ if flush == nil then
   client:close()
   error(("Pouch index flush failed: %s"):format(flush_err and flush_err.message or tostring(flush_err)))
 end
+
+-- Request tables may have metamethods.  Closing the client from one must
+-- yield a normal API error, rather than dereferencing the released receiver.
+local close_during_request_xid = assert(lockdc.xid_new())
+local close_during_request = setmetatable({}, {
+  __index = function(_, key)
+    if key == "txn_id" then
+      client:close()
+      return close_during_request_xid
+    end
+    return nil
+  end,
+})
+local close_during_request_result, close_during_request_err =
+  client:txn_replay(close_during_request)
+if close_during_request_result ~= nil or type(close_during_request_err) ~= "table" or
+    not tostring(close_during_request_err.message):find("closed while preparing request", 1, true) then
+  error("Lua transaction replay did not reject a client closed by request parsing")
+end
 client:close()
 
 local missing_key_client, missing_key_err = lockdc.open({

@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd -P)
+timed_bin="$script_dir/run_timed.sh"
 mode=${1:-all}
 
 case "$mode" in
@@ -13,6 +14,12 @@ case "$mode" in
     exit 2
     ;;
 esac
+
+if [ "$mode" = "examples" ]; then
+  e2e_build_target=lockdc_e2e_example_tests
+else
+  e2e_build_target=lockdc_e2e_tests
+fi
 
 export LOCKDC_E2E_DISK_ENDPOINT=${LOCKDC_E2E_DISK_ENDPOINT:-https://localhost:${LOCKDC_DISK_A_PORT:-19441}}
 export LOCKDC_E2E_DISK_BUNDLE=${LOCKDC_E2E_DISK_BUNDLE:-$repo_root/devenv/volumes/lockd-disk-a-config/client.pem}
@@ -129,8 +136,9 @@ select_active_disk_endpoint() {
 }
 
 cd "$repo_root"
-"$script_dir/dev-reset.sh"
-"$script_dir/dev-up.sh"
+"$timed_bin" "e2e build" "$script_dir/build.sh" e2e "$e2e_build_target"
+"$timed_bin" "e2e reset" "$script_dir/dev-reset.sh"
+"$timed_bin" "e2e start" "$script_dir/dev-up.sh"
 
 wait_for_file "$LOCKDC_E2E_DISK_BUNDLE" "disk client bundle"
 wait_for_file "$LOCKDC_E2E_S3_BUNDLE" "s3 client bundle"
@@ -139,7 +147,6 @@ wait_for_tcp "127.0.0.1" "${LOCKDC_DISK_A_PORT:-19441}" "disk lockd tcp listener
 wait_for_tcp "127.0.0.1" "${LOCKDC_DISK_B_PORT:-19442}" "disk-b lockd tcp listener"
 wait_for_tcp "127.0.0.1" "${LOCKDC_S3_PORT:-19443}" "s3 lockd tcp listener"
 
-"$script_dir/build.sh" e2e
 export LOCKDC_E2E_DISK_ENDPOINT="$(select_active_disk_endpoint \
   "$LOCKDC_E2E_DISK_ENDPOINT" \
   "${LOCKDC_E2E_DISK_B_ENDPOINT:-https://localhost:${LOCKDC_DISK_B_PORT:-19442}}" \
@@ -162,9 +169,9 @@ wait_for_lockd_probe \
   "$repo_root/build/e2e/examples/lc_example_acquire_lease_lifecycle"
 
 if [ "$mode" = "examples" ]; then
-  ctest --preset e2e --output-on-failure --progress --stop-on-failure \
+  "$timed_bin" "e2e examples" ctest --preset e2e --output-on-failure --progress --stop-on-failure \
     --timeout "$ctest_timeout" --parallel "$ctest_parallel_level" -L examples
 else
-  ctest --preset e2e --output-on-failure --progress --stop-on-failure \
+  "$timed_bin" "e2e ctest" ctest --preset e2e --output-on-failure --progress --stop-on-failure \
     --timeout "$ctest_timeout" --parallel "$ctest_parallel_level"
 fi

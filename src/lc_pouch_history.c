@@ -726,7 +726,7 @@ static void lc_history_consumer_close_method(lc_history_consumer *self) {
   lc_free_with_allocator(&allocator, consumer->consumer_id);
   lc_free_with_allocator(&allocator, consumer);
   if (client != NULL) {
-    lc_client_close_method(&client->pub);
+    lc_client_handle_release(client);
   }
 }
 

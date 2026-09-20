@@ -2879,15 +2879,10 @@ void lc_client_handle_retain(lc_client_handle *client) {
   pthread_mutex_unlock(&client->lifecycle_mutex);
 }
 
-void lc_client_close_method(lc_client *self) {
-  lc_client_handle *client;
+void lc_client_handle_release(lc_client_handle *client) {
   size_t i;
 
-  if (self == NULL) {
-    return;
-  }
-  client = (lc_client_handle *)self;
-  if (!client->lifecycle_mutex_initialized) {
+  if (client == NULL || !client->lifecycle_mutex_initialized) {
     return;
   }
   pthread_mutex_lock(&client->lifecycle_mutex);
@@ -2924,4 +2919,30 @@ void lc_client_close_method(lc_client *self) {
   lc_client_free(client, client->pouch_compression);
   pthread_mutex_destroy(&client->lifecycle_mutex);
   lc_client_free(client, client);
+}
+
+void lc_client_close_method(lc_client *self) {
+  lc_client_handle *client;
+
+  if (self == NULL) {
+    return;
+  }
+  client = (lc_client_handle *)self;
+  if (!client->lifecycle_mutex_initialized) {
+    return;
+  }
+  pthread_mutex_lock(&client->lifecycle_mutex);
+  if (client->close_requested) {
+    pthread_mutex_unlock(&client->lifecycle_mutex);
+    return;
+  }
+  /* Keep this state distinct from the final reference release. Workflows and
+   * handed-out jobs may still retain the allocation, but public close is a
+   * one-way boundary: no replacement dispatcher may be registered after it. */
+  client->close_requested = 1;
+  pthread_mutex_unlock(&client->lifecycle_mutex);
+  /* Public close is a lifecycle boundary, not merely an internal reference
+   * release: no registered dispatcher may continue consuming after it. */
+  lc_workflow_dispatchers_stop_for_client(client);
+  lc_client_handle_release(client);
 }

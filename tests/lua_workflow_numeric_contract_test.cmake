@@ -11,7 +11,7 @@ foreach(required_snippet
     "static int lcdc_opt_version_field(lua_State *L, int index, const char *name,"
     "lcdc_opt_version_field(L, 2, \"if_version\", &request.if_version)"
     "static void lcdc_set_version_field(lua_State *L, const char *name,"
-    "timeout_ms = lcdc_check_long(L, 2, \"workflow next timeout\")"
+    "timeout_ms = lcdc_check_long(L, 2, \"workflow dispatcher next timeout\")"
     "long ttl_seconds = lcdc_check_long(L, 2, \"outbox renewal ttl\")"
     "static int lcdc_set_size_field(lua_State *L, const char *name, size_t value,"
     "static int lcdc_set_uint64_field(lua_State *L, const char *name,"
@@ -20,6 +20,11 @@ foreach(required_snippet
     "workflow value exceeds Lua integer range"
     "lcdc_set_uint64_field(L, \"direct_notifications\","
     "stats->direct_notifications, error)"
+    "lcdc_set_uint64_field(L, \"index_seq\", res.index_seq, &error)"
+    "static int lcdc_set_unix_seconds_field(lua_State *L, const char *name,"
+    "lcdc_set_unix_seconds_field(L, \"expires_at_unix\", expires_at_unix,"
+    "lcdc_set_unix_seconds_field(L, \"updated_at_unix\", res->updated_at_unix,"
+    "static int lcdc_client_flush_index(lua_State *L)"
     "lcdc_set_int64_field(L, \"version\", participant->version, error)"
     "lcdc_set_int64_field(L, \"version\", result.version, &error)"
     "lcdc_set_int64_field(L, \"lease_expires_at_unix\","
@@ -42,7 +47,9 @@ foreach(forbidden_snippet
     "(long)stats->payload_open_failures"
     "lcdc_set_integer_field(L, \"version\", participant->version)"
     "lcdc_set_integer_field(L, \"lease_expires_at_unix\",
-                         job->lease_expires_at_unix)")
+                         job->lease_expires_at_unix)"
+    "lcdc_set_integer_field(L, \"expires_at_unix\", expires_at_unix)"
+    "lcdc_set_integer_field(L, \"updated_at_unix\", res->updated_at_unix)")
     string(FIND "${lua_binding}" "${forbidden_snippet}" snippet_index)
     if(NOT snippet_index EQUAL -1)
         message(FATAL_ERROR
@@ -57,6 +64,58 @@ string(FIND "${lua_binding}"
 if(participant_get_start EQUAL -1 OR participant_get_end EQUAL -1 OR
    participant_get_end LESS participant_get_start)
     message(FATAL_ERROR "Lua workflow participant get binding is missing")
+endif()
+
+string(FIND "${lua_binding}"
+    "static int lcdc_client_query_keys(lua_State *L)" query_keys_start)
+string(FIND "${lua_binding}"
+    "static int lcdc_client_get_namespace_config(lua_State *L)" query_keys_end)
+if(query_keys_start EQUAL -1 OR query_keys_end EQUAL -1 OR
+   query_keys_end LESS query_keys_start)
+    message(FATAL_ERROR "Lua query-key binding is missing")
+endif()
+
+string(FIND "${lua_binding}"
+    "static int lcdc_client_flush_index(lua_State *L)" flush_index_start)
+string(FIND "${lua_binding}"
+    "static void lcdc_free_txn_participants" flush_index_end)
+if(flush_index_start EQUAL -1 OR flush_index_end EQUAL -1 OR
+   flush_index_end LESS flush_index_start)
+    message(FATAL_ERROR "Lua index-flush binding is missing")
+endif()
+math(EXPR flush_index_length "${flush_index_end} - ${flush_index_start}")
+string(SUBSTRING "${lua_binding}" ${flush_index_start} ${flush_index_length}
+    flush_index_binding)
+string(FIND "${flush_index_binding}"
+    "lcdc_set_uint64_field(L, \"index_seq\", res.index_seq, &error)"
+    flush_index_wide_index)
+if(flush_index_wide_index EQUAL -1)
+    message(FATAL_ERROR
+        "Lua index-flush results must preserve 64-bit index sequences")
+endif()
+string(FIND "${flush_index_binding}"
+    "lcdc_set_uinteger_field(L, \"index_seq\", res.index_seq)"
+    flush_index_narrow_index)
+if(NOT flush_index_narrow_index EQUAL -1)
+    message(FATAL_ERROR
+        "Lua index-flush results must not narrow index sequences through C long")
+endif()
+math(EXPR query_keys_length "${query_keys_end} - ${query_keys_start}")
+string(SUBSTRING "${lua_binding}" ${query_keys_start} ${query_keys_length}
+    query_keys_binding)
+string(FIND "${query_keys_binding}"
+    "lcdc_set_uint64_field(L, \"index_seq\", res.index_seq, &error)"
+    query_keys_wide_index)
+if(query_keys_wide_index EQUAL -1)
+    message(FATAL_ERROR
+        "Lua query-key results must preserve 64-bit index sequences")
+endif()
+string(FIND "${query_keys_binding}"
+    "lcdc_set_uinteger_field(L, \"index_seq\", res.index_seq)"
+    query_keys_narrow_index)
+if(NOT query_keys_narrow_index EQUAL -1)
+    message(FATAL_ERROR
+        "Lua query-key results must not narrow index sequences through C long")
 endif()
 math(EXPR participant_get_length "${participant_get_end} - ${participant_get_start}")
 string(SUBSTRING "${lua_binding}" ${participant_get_start}

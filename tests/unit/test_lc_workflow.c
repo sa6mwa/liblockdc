@@ -30,6 +30,294 @@
 #define WORKFLOW_CLEAN_REOPEN_FOREIGN_CHURN 16U
 #define WORKFLOW_CLEAN_REOPEN_PENDING_RECORDS 32U
 
+typedef struct workflow_pouch_test_clock {
+  struct timespec wall;
+} workflow_pouch_test_clock;
+
+static int workflow_pouch_test_gettime(clockid_t clock_id, struct timespec *out,
+                                       void *context) {
+  workflow_pouch_test_clock *clock = (workflow_pouch_test_clock *)context;
+
+  if (clock_id == CLOCK_REALTIME) {
+    *out = clock->wall;
+    return 0;
+  }
+  return clock_gettime(clock_id, out);
+}
+
+static int workflow_pouch_test_clock_teardown(void **state) {
+  (void)state;
+  lc_pouch_test_queue_clock_gettime = NULL;
+  lc_pouch_test_queue_poll_delay = NULL;
+  lc_pouch_test_queue_time_context = NULL;
+  return 0;
+}
+
+/* The production API deliberately moved consumer operations to an explicit
+ * dispatcher. Keep the pre-cutover behavioral cases meaningful while the
+ * fixture is migrated: each adapter obtains that dispatcher, marks the old
+ * fixture close path to stop it, and calls the new receiver. No compatibility
+ * entry point is added to the installed SDK. */
+typedef struct workflow_test_receipt_link {
+  lc_workflow_transaction *transaction;
+  lc_outbox_receipt *receipt;
+  struct workflow_test_receipt_link *next;
+} workflow_test_receipt_link;
+
+static workflow_test_receipt_link *workflow_test_receipts;
+static workflow_test_receipt_link *workflow_test_receipts_tail;
+
+static void
+workflow_test_forget_receipts(lc_workflow_transaction *transaction) {
+  workflow_test_receipt_link **link;
+
+  link = &workflow_test_receipts;
+  while (*link != NULL) {
+    workflow_test_receipt_link *current = *link;
+
+    if (current->transaction == transaction) {
+      *link = current->next;
+      free(current);
+    } else {
+      link = &current->next;
+    }
+  }
+  workflow_test_receipts_tail = NULL;
+  for (link = &workflow_test_receipts; *link != NULL; link = &(*link)->next)
+    workflow_test_receipts_tail = *link;
+}
+
+static int workflow_test_track_receipt(lc_workflow_transaction *transaction,
+                                       lc_outbox_receipt *receipt,
+                                       lc_error *error) {
+  workflow_test_receipt_link *link;
+
+  link = (workflow_test_receipt_link *)malloc(sizeof(*link));
+  if (link == NULL) {
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to track workflow test receipt", NULL, NULL,
+                        NULL);
+  }
+  link->transaction = transaction;
+  link->receipt = receipt;
+  link->next = NULL;
+  if (workflow_test_receipts_tail == NULL)
+    workflow_test_receipts = link;
+  else
+    workflow_test_receipts_tail->next = link;
+  workflow_test_receipts_tail = link;
+  return LC_OK;
+}
+
+static int workflow_test_append_outbox(lc_workflow_transaction *transaction,
+                                       const lc_outbox_entry *entry,
+                                       lc_source *payload,
+                                       lc_outbox_receipt *receipt,
+                                       lc_error *error) {
+  int rc;
+
+  rc = lc_workflow_transaction_append_outbox(transaction, entry, payload,
+                                             receipt, error);
+  if (rc == LC_OK && !receipt->duplicate) {
+    rc = workflow_test_track_receipt(transaction, receipt, error);
+    if (rc != LC_OK)
+      (void)lc_workflow_transaction_rollback(transaction, NULL);
+  }
+  return rc;
+}
+
+static int workflow_test_workflow_append_outbox(
+    lc_workflow *workflow, const lc_outbox_entry *entry, lc_source *payload,
+    lc_workflow_transaction **transaction, lc_outbox_receipt *receipt,
+    lc_error *error) {
+  int rc;
+
+  rc = lc_workflow_append_outbox(workflow, entry, payload, transaction, receipt,
+                                 error);
+  if (rc == LC_OK && *transaction != NULL && !receipt->duplicate) {
+    rc = workflow_test_track_receipt(*transaction, receipt, error);
+    if (rc != LC_OK)
+      (void)lc_workflow_transaction_rollback(*transaction, NULL);
+  }
+  return rc;
+}
+
+static lc_workflow_dispatcher *workflow_test_dispatcher(lc_workflow *workflow,
+                                                        lc_error *error) {
+  lc_workflow_dispatcher *dispatcher = NULL;
+
+  if (lc_workflow_dispatcher_get_or_start(workflow, &dispatcher, error) !=
+      LC_OK)
+    return NULL;
+  return dispatcher;
+}
+
+static int workflow_test_next(lc_workflow *workflow, long timeout_ms,
+                              lc_outbox_job **out, lc_error *error) {
+  lc_workflow_dispatcher *dispatcher =
+      workflow_test_dispatcher(workflow, error);
+  int rc;
+
+  if (dispatcher == NULL)
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  rc = lc_workflow_dispatcher_next(dispatcher, timeout_ms, out, error);
+  lc_workflow_dispatcher_close(dispatcher);
+  return rc;
+}
+
+static int workflow_test_stats(lc_workflow *workflow, lc_workflow_stats *out,
+                               lc_error *error) {
+  lc_workflow_dispatcher *dispatcher =
+      workflow_test_dispatcher(workflow, error);
+  int rc;
+
+  if (dispatcher == NULL)
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  rc = lc_workflow_dispatcher_get_stats(dispatcher, out, error);
+  lc_workflow_dispatcher_close(dispatcher);
+  return rc;
+}
+
+static int workflow_test_reconcile(lc_workflow *workflow, lc_error *error) {
+  lc_workflow_dispatcher *dispatcher =
+      workflow_test_dispatcher(workflow, error);
+  int rc;
+
+  if (dispatcher == NULL)
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  rc = lc_workflow_dispatcher_reconcile(dispatcher, error);
+  lc_workflow_dispatcher_close(dispatcher);
+  return rc;
+}
+
+static int workflow_test_replay_dead_letter(lc_workflow *workflow,
+                                            const char *key, lc_error *error) {
+  lc_workflow_dispatcher *dispatcher =
+      workflow_test_dispatcher(workflow, error);
+  int rc;
+
+  if (dispatcher == NULL)
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  rc = lc_workflow_dispatcher_replay_dead_letter(dispatcher, key, error);
+  lc_workflow_dispatcher_close(dispatcher);
+  return rc;
+}
+
+static int workflow_test_delete_dead_letter(lc_workflow *workflow,
+                                            const char *key, lc_error *error) {
+  lc_workflow_dispatcher *dispatcher =
+      workflow_test_dispatcher(workflow, error);
+  int rc;
+
+  if (dispatcher == NULL)
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  rc = lc_workflow_dispatcher_delete_dead_letter(dispatcher, key, error);
+  lc_workflow_dispatcher_close(dispatcher);
+  return rc;
+}
+
+static int workflow_test_export_dead_letters(
+    lc_workflow *workflow, const lc_dead_letter_export_opts *options,
+    lc_sink *dst, lc_dead_letter_export_res *out, lc_error *error) {
+  lc_workflow_dispatcher *dispatcher =
+      workflow_test_dispatcher(workflow, error);
+  int rc;
+
+  if (dispatcher == NULL)
+    return error != NULL ? error->code : LC_ERR_INVALID;
+  rc = lc_workflow_dispatcher_export_dead_letters(dispatcher, options, dst, out,
+                                                  error);
+  lc_workflow_dispatcher_close(dispatcher);
+  return rc;
+}
+
+static int workflow_test_commit(lc_workflow_transaction *transaction,
+                                lc_error *error) {
+  lc_workflow_commit_result result;
+  workflow_test_receipt_link *link;
+  size_t index;
+  int rc;
+
+  lc_workflow_commit_result_init(&result);
+  rc = lc_workflow_transaction_commit(transaction, &result, error);
+  if (rc == LC_OK) {
+    index = 0U;
+    for (link = workflow_test_receipts; link != NULL; link = link->next) {
+      if (link->transaction == transaction &&
+          index < result.outbox_receipt_count) {
+        lc_outbox_receipt_cleanup(link->receipt);
+        *link->receipt = result.outbox_receipts[index];
+        memset(&result.outbox_receipts[index], 0,
+               sizeof(result.outbox_receipts[index]));
+        ++index;
+      }
+    }
+    workflow_test_forget_receipts(transaction);
+  }
+  lc_workflow_commit_result_cleanup(&result);
+  return rc;
+}
+
+static void
+workflow_test_transaction_close(lc_workflow_transaction *transaction) {
+  workflow_test_forget_receipts(transaction);
+  lc_workflow_transaction_close(transaction);
+}
+
+static int workflow_test_new(lc_client *client,
+                             const lc_workflow_config *config,
+                             lc_workflow **out, lc_error *error) {
+  lc_workflow_dispatcher *dispatcher;
+  int rc;
+
+  rc = lc_client_new_workflow(client, config, out, error);
+  if (rc != LC_OK)
+    return rc;
+  dispatcher = NULL;
+  rc = lc_workflow_dispatcher_get_or_start(*out, &dispatcher, error);
+  if (rc == LC_OK) {
+    lc_workflow_dispatcher_close(dispatcher);
+  }
+  if (rc != LC_OK) {
+    lc_workflow_close(*out);
+    *out = NULL;
+  }
+  return rc;
+}
+
+/* Keep direct public-wrapper coverage outside this test fixture's legacy
+ * dispatcher adapter. */
+static int workflow_public_new(lc_client *client,
+                               const lc_workflow_config *config,
+                               lc_workflow **out, lc_error *error) {
+  return lc_client_new_workflow(client, config, out, error);
+}
+
+static int workflow_public_new_with_dispatcher(
+    lc_client *client, const lc_workflow_config *config,
+    lc_workflow_dispatcher *dispatcher, lc_workflow **out, lc_error *error) {
+  return lc_client_new_workflow_with_dispatcher(client, config, dispatcher, out,
+                                                error);
+}
+
+static int workflow_public_get_or_start(lc_workflow *workflow,
+                                        lc_workflow_dispatcher **out,
+                                        lc_error *error) {
+  return lc_workflow_dispatcher_get_or_start(workflow, out, error);
+}
+
+#define lc_client_new_workflow workflow_test_new
+#define lc_workflow_append_outbox workflow_test_workflow_append_outbox
+#define lc_workflow_next workflow_test_next
+#define lc_workflow_get_stats workflow_test_stats
+#define lc_workflow_reconcile workflow_test_reconcile
+#define lc_workflow_replay_dead_letter workflow_test_replay_dead_letter
+#define lc_workflow_delete_dead_letter workflow_test_delete_dead_letter
+#define lc_workflow_export_dead_letters workflow_test_export_dead_letters
+#define lc_workflow_transaction_append_outbox workflow_test_append_outbox
+#define lc_workflow_transaction_commit workflow_test_commit
+#define lc_workflow_transaction_close workflow_test_transaction_close
+
 static int workflow_fail_allocation(void *context, lc_error *error) {
   (void)context;
   return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -59,6 +347,7 @@ typedef struct workflow_metadata_append_failure {
 
 typedef struct workflow_inbox_runtime_failure {
   lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
   lc_inbox_message message;
   lc_workflow_transaction *transaction;
   lc_inbox_accept_result result;
@@ -292,6 +581,12 @@ static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_after_close_requested_context = NULL;
   lc_workflow_test_dead_letter_replay_client_hook = NULL;
   lc_workflow_test_dead_letter_replay_client_context = NULL;
+  lc_workflow_test_after_recovery_overflow_hook = NULL;
+  lc_workflow_test_after_recovery_overflow_context = NULL;
+  lc_workflow_test_before_recovery_query_hook = NULL;
+  lc_workflow_test_before_recovery_query_context = NULL;
+  lc_workflow_test_after_recovery_capacity_pause_hook = NULL;
+  lc_workflow_test_after_recovery_capacity_pause_context = NULL;
   lc_workflow_test_before_ready_job_detach_hook = NULL;
   lc_workflow_test_before_ready_job_detach_context = NULL;
   lc_workflow_test_before_ready_job_teardown_hook = NULL;
@@ -302,6 +597,8 @@ static void workflow_reset_allocation_failures(void) {
   lc_workflow_test_before_next_wait_context = NULL;
   lc_workflow_test_before_next_release_hook = NULL;
   lc_workflow_test_before_next_release_context = NULL;
+  lc_workflow_test_after_dispatcher_core_retain_hook = NULL;
+  lc_workflow_test_after_dispatcher_core_retain_context = NULL;
   lc_workflow_test_before_dead_letter_export_open_hook = NULL;
   lc_workflow_test_before_dead_letter_export_open_context = NULL;
   lc_workflow_test_before_ledger_append_hook = NULL;
@@ -464,6 +761,88 @@ static void *workflow_next_wait_thread(void *context) {
   return NULL;
 }
 
+typedef struct workflow_dispatcher_core_race {
+  pthread_mutex_t mutex;
+  pthread_cond_t condition;
+  lc_workflow_dispatcher *dispatcher;
+  int core_retained;
+  int allow_stats;
+  int stats_finished;
+  int stats_rc;
+} workflow_dispatcher_core_race;
+
+typedef struct workflow_dispatcher_acquire_race {
+  lc_workflow *workflow;
+  pthread_barrier_t *barrier;
+  lc_workflow_dispatcher *dispatcher;
+  int rc;
+} workflow_dispatcher_acquire_race;
+
+static void *workflow_dispatcher_acquire_thread(void *context) {
+  workflow_dispatcher_acquire_race *race =
+      (workflow_dispatcher_acquire_race *)context;
+  lc_error error;
+  int barrier_rc;
+
+  lc_error_init(&error);
+  barrier_rc = pthread_barrier_wait(race->barrier);
+  assert_true(barrier_rc == 0 || barrier_rc == PTHREAD_BARRIER_SERIAL_THREAD);
+  race->rc = lc_workflow_dispatcher_get_or_start(race->workflow,
+                                                 &race->dispatcher, &error);
+  lc_error_cleanup(&error);
+  return NULL;
+}
+
+static int
+workflow_dispatcher_core_race_wait(workflow_dispatcher_core_race *race,
+                                   int *flag) {
+  struct timespec deadline;
+  int reached;
+  int rc;
+
+  assert_int_equal(clock_gettime(CLOCK_REALTIME, &deadline), 0);
+  deadline.tv_sec += 5L;
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  rc = 0;
+  while (!*flag && rc == 0)
+    rc = pthread_cond_timedwait(&race->condition, &race->mutex, &deadline);
+  reached = *flag;
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+  return rc == 0 && reached;
+}
+
+static void workflow_dispatcher_core_retained_hook(void *context) {
+  workflow_dispatcher_core_race *race =
+      (workflow_dispatcher_core_race *)context;
+
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  race->core_retained = 1;
+  assert_int_equal(pthread_cond_broadcast(&race->condition), 0);
+  while (!race->allow_stats)
+    assert_int_equal(pthread_cond_wait(&race->condition, &race->mutex), 0);
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+}
+
+static void *workflow_dispatcher_stats_thread(void *context) {
+  workflow_dispatcher_core_race *race =
+      (workflow_dispatcher_core_race *)context;
+  lc_workflow_stats stats;
+  lc_error error;
+  int rc;
+
+  lc_workflow_stats_init(&stats);
+  lc_error_init(&error);
+  rc = lc_workflow_dispatcher_get_stats(race->dispatcher, &stats, &error);
+  lc_workflow_stats_cleanup(&stats);
+  lc_error_cleanup(&error);
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  race->stats_rc = rc;
+  race->stats_finished = 1;
+  assert_int_equal(pthread_cond_broadcast(&race->condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+  return NULL;
+}
+
 static long workflow_claim_ttl_seconds(void) {
   return workflow_slow_test_runtime() ? 2L : 1L;
 }
@@ -499,7 +878,7 @@ typedef struct workflow_shutdown_race {
 typedef struct workflow_blocked_next_close_race {
   pthread_mutex_t mutex;
   pthread_cond_t condition;
-  lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
   int next_wait_entered;
   int close_requested;
   int allow_close;
@@ -662,7 +1041,12 @@ static void *workflow_blocked_next_close_thread(void *context) {
   workflow_blocked_next_close_race *race =
       (workflow_blocked_next_close_race *)context;
 
-  lc_workflow_close(race->workflow);
+  lc_error error;
+
+  lc_error_init(&error);
+  assert_int_equal(lc_workflow_dispatcher_stop(race->dispatcher, -1L, &error),
+                   LC_OK);
+  lc_error_cleanup(&error);
   (void)pthread_mutex_lock(&race->mutex);
   race->close_finished = 1;
   (void)pthread_cond_broadcast(&race->condition);
@@ -679,7 +1063,7 @@ static void *workflow_blocked_next_next_thread(void *context) {
 
   lc_error_init(&error);
   job = NULL;
-  rc = lc_workflow_next(race->workflow, -1L, &job, &error);
+  rc = lc_workflow_dispatcher_next(race->dispatcher, -1L, &job, &error);
   lc_error_cleanup(&error);
   (void)pthread_mutex_lock(&race->mutex);
   race->next_rc = rc;
@@ -811,6 +1195,20 @@ typedef struct workflow_reconcile_overflow_hook {
   int calls;
   int rc;
 } workflow_reconcile_overflow_hook;
+
+typedef struct workflow_recovery_overflow_drain_hook {
+  lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
+  const char *terminal_key;
+  pthread_mutex_t mutex;
+  pthread_cond_t condition;
+  int calls;
+  int query_gate_calls;
+  int query_started;
+  int allow_query;
+  int overflowed;
+  int rc;
+} workflow_recovery_overflow_drain_hook;
 
 static int workflow_query_count_begin(void *context, lc_error *error) {
   (void)context;
@@ -1322,6 +1720,172 @@ static void workflow_reconcile_overflow_commit_hook(void *context) {
   lc_error_cleanup(&error);
 }
 
+static void workflow_drain_recovery_overflow_hook(void *context) {
+  workflow_recovery_overflow_drain_hook *hook =
+      (workflow_recovery_overflow_drain_hook *)context;
+  lc_outbox_job *job;
+  lc_error error;
+
+  if (hook == NULL || hook->workflow == NULL || hook->calls != 0)
+    return;
+  ++hook->calls;
+  hook->rc = LC_ERR_INVALID;
+  job = NULL;
+  lc_error_init(&error);
+  hook->rc = lc_workflow_next(hook->workflow, 0L, &job, &error);
+  if (hook->rc == LC_OK && job != NULL) {
+    hook->rc = lc_outbox_job_complete(job, NULL, &error);
+    job = NULL;
+  }
+  if (job != NULL)
+    lc_outbox_job_close(job);
+  lc_error_cleanup(&error);
+  assert_int_equal(pthread_mutex_lock(&hook->mutex), 0);
+  hook->overflowed = 1;
+  assert_int_equal(pthread_cond_broadcast(&hook->condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&hook->mutex), 0);
+}
+
+static void workflow_gate_first_recovery_query(void *context) {
+  workflow_recovery_overflow_drain_hook *hook =
+      (workflow_recovery_overflow_drain_hook *)context;
+
+  assert_non_null(hook);
+  assert_int_equal(pthread_mutex_lock(&hook->mutex), 0);
+  if (hook->query_gate_calls++ == 0) {
+    hook->query_started = 1;
+    assert_int_equal(pthread_cond_broadcast(&hook->condition), 0);
+    while (!hook->allow_query)
+      assert_int_equal(pthread_cond_wait(&hook->condition, &hook->mutex), 0);
+  } else if (hook->query_gate_calls == 2) {
+    lc_error error;
+
+    assert_non_null(hook->dispatcher);
+    assert_non_null(hook->terminal_key);
+    lc_error_init(&error);
+    hook->rc = lc_workflow_dispatcher_notify_outbox_key(
+        hook->dispatcher, hook->terminal_key, &error);
+    lc_error_cleanup(&error);
+  }
+  assert_int_equal(pthread_mutex_unlock(&hook->mutex), 0);
+}
+
+static void workflow_wait_for_recovery_overflow_hook(
+    workflow_recovery_overflow_drain_hook *hook, int *flag) {
+  struct timespec deadline;
+  int wait_rc;
+
+  assert_int_equal(clock_gettime(CLOCK_REALTIME, &deadline), 0);
+  deadline.tv_sec += 5L;
+  assert_int_equal(pthread_mutex_lock(&hook->mutex), 0);
+  wait_rc = 0;
+  while (!*flag && wait_rc == 0)
+    wait_rc = pthread_cond_timedwait(&hook->condition, &hook->mutex, &deadline);
+  assert_int_equal(pthread_mutex_unlock(&hook->mutex), 0);
+  assert_int_equal(wait_rc, 0);
+  assert_true(*flag);
+}
+
+static void workflow_note_recovery_capacity_pause(void *context) {
+  workflow_recovery_overflow_drain_hook *hook =
+      (workflow_recovery_overflow_drain_hook *)context;
+
+  assert_non_null(hook);
+  assert_int_equal(pthread_mutex_lock(&hook->mutex), 0);
+  ++hook->calls;
+  hook->overflowed = 1;
+  assert_int_equal(pthread_cond_broadcast(&hook->condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&hook->mutex), 0);
+}
+
+/* Fill the candidate queue at the precise point where next() has removed the
+ * current key but has not yet installed its claim-recovery wake. This is the
+ * only interleaving that can otherwise exceed the combined bounded capacity. */
+static int workflow_claim_refill_hook(void *context, lc_error *error) {
+  workflow_reconcile_overflow_hook *hook =
+      (workflow_reconcile_overflow_hook *)context;
+
+  workflow_reconcile_overflow_commit_hook(context);
+  if (hook != NULL && hook->rc == LC_OK)
+    return LC_OK;
+  return lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "workflow claim refill hook failed", NULL, NULL, NULL);
+}
+
+static void test_pouch_claim_recovery_respects_combined_capacity(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  workflow_reconcile_overflow_hook hook;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
+  lc_outbox_job *job;
+  lc_workflow_stats stats;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "claim-capacity-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  dispatcher = NULL;
+  job = NULL;
+  memset(&hook, 0, sizeof(hook));
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-claim-capacity";
+  workflow_config.owner = "workflow-claim-capacity-test";
+  workflow_config.notification_capacity = 1U;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  dispatcher = workflow_test_dispatcher(workflow, &error);
+  assert_non_null(dispatcher);
+  seed_recovery_outbox(client, workflow_config.namespace_name,
+                       "__lockdc_io/v1/outbox/claim-capacity-a", &error);
+  assert_int_equal(lc_workflow_dispatcher_reconcile(dispatcher, &error), LC_OK);
+  assert_int_equal(lc_workflow_dispatcher_reconcile(dispatcher, &error), LC_OK);
+  hook.workflow = workflow;
+  lc_workflow_test_before_claim_outbox_hook = workflow_claim_refill_hook;
+  lc_workflow_test_before_claim_outbox_context = &hook;
+  assert_int_equal(lc_workflow_dispatcher_next(dispatcher, 3000L, &job, &error),
+                   LC_OK);
+  lc_workflow_test_before_claim_outbox_hook = NULL;
+  lc_workflow_test_before_claim_outbox_context = NULL;
+  assert_non_null(job);
+  assert_int_equal(hook.calls, 1);
+  assert_int_equal(hook.rc, LC_OK);
+  memset(&stats, 0, sizeof(stats));
+  assert_int_equal(lc_workflow_dispatcher_get_stats(dispatcher, &stats, &error),
+                   LC_OK);
+  assert_int_equal(stats.pending_candidates, 1U);
+  assert_int_equal(stats.delayed_wakes, 0U);
+  lc_workflow_stats_cleanup(&stats);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+  assert_int_equal(lc_workflow_dispatcher_next(dispatcher, 3000L, &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  lc_workflow_dispatcher_close(dispatcher);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
 static void
 test_pouch_outbox_duplicate_rejects_immutable_envelope_conflicts(void **state) {
   char root[256];
@@ -1485,6 +2049,11 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_acquire_req duplicate_barrier_acquire;
   lc_release_req duplicate_barrier_release;
   lc_lease *duplicate_barrier_lease;
+  lc_acquire_req domain_read_acquire;
+  lc_release_req domain_read_release;
+  lc_lease *domain_read_lease;
+  lc_get_opts domain_read_options;
+  lc_get_res domain_read_result;
   lc_source *payload;
   lc_source *state_source;
   lc_sink *payload_sink;
@@ -1534,7 +2103,8 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
                                              &transaction, &receipt, &error),
                    LC_OK);
   assert_non_null(transaction);
-  assert_non_null(receipt.outbox_key);
+  /* Fresh keys become observable only in the durable commit result. */
+  assert_null(receipt.outbox_key);
   lc_workflow_participant_request_init(&participant_request);
   participant_request.acquire.namespace_name = "domain";
   participant_request.acquire.key = "order-1";
@@ -1556,6 +2126,65 @@ static void test_pouch_outbox_transaction_and_duplicate(void **state) {
   lc_workflow_participant_close(participant);
   assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
   lc_workflow_transaction_close(transaction);
+
+  /* A lazy, domain-first transaction must still establish a durable XA
+   * decision. It used to stage its update under Pouch's single-lease implicit
+   * xid and then report commit without publishing the state. */
+  transaction = NULL;
+  assert_int_equal(lc_workflow_begin(workflow, &transaction, &error), LC_OK);
+  lc_workflow_participant_request_init(&participant_request);
+  participant_request.acquire.namespace_name = "domain";
+  participant_request.acquire.key = "order-domain-first";
+  participant_request.acquire.owner = "orders";
+  participant_request.acquire.ttl_seconds = 30L;
+  participant = NULL;
+  assert_int_equal(lc_workflow_transaction_acquire(
+                       transaction, &participant_request, &participant, &error),
+                   LC_OK);
+  assert_non_null(participant->txn_id);
+  state_source = NULL;
+  assert_int_equal(lc_source_from_memory("{\"status\":\"created\"}", 20U,
+                                         &state_source, &error),
+                   LC_OK);
+  assert_int_equal(participant->update(participant, state_source, NULL, &error),
+                   LC_OK);
+  lc_source_close(state_source);
+  lc_workflow_participant_close(participant);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  lc_acquire_req_init(&domain_read_acquire);
+  domain_read_acquire.namespace_name = "domain";
+  domain_read_acquire.key = "order-domain-first";
+  domain_read_acquire.owner = "domain-reader";
+  domain_read_acquire.ttl_seconds = 30L;
+  domain_read_lease = NULL;
+  assert_int_equal(
+      lc_acquire(client, &domain_read_acquire, &domain_read_lease, &error),
+      LC_OK);
+  lc_get_opts_init(&domain_read_options);
+  memset(&domain_read_result, 0, sizeof(domain_read_result));
+  payload_sink = NULL;
+  payload_bytes = NULL;
+  payload_length = 0U;
+  assert_int_equal(lc_sink_to_memory(&payload_sink, &error), LC_OK);
+  assert_int_equal(domain_read_lease->get(domain_read_lease, payload_sink,
+                                          &domain_read_options,
+                                          &domain_read_result, &error),
+                   LC_OK);
+  assert_false(domain_read_result.no_content);
+  assert_int_equal(lc_sink_memory_bytes(payload_sink, &payload_bytes,
+                                        &payload_length, &error),
+                   LC_OK);
+  assert_int_equal(payload_length, 20U);
+  assert_memory_equal(payload_bytes, "{\"status\":\"created\"}", 20U);
+  lc_get_res_cleanup(&domain_read_result);
+  lc_sink_close(payload_sink);
+  lc_release_req_init(&domain_read_release);
+  domain_read_release.rollback = 1;
+  assert_int_equal(
+      lc_lease_release(domain_read_lease, &domain_read_release, &error), LC_OK);
+  domain_read_lease = NULL;
+
   job = NULL;
   assert_int_equal(lc_workflow_next(workflow, 2000L, &job, &error), LC_OK);
   assert_non_null(job);
@@ -2322,6 +2951,7 @@ test_pouch_outbox_allocation_failures_roll_back_enrollment(void **state) {
   lc_source_close(payload);
   lc_outbox_receipt_cleanup(&receipt);
   assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_outbox_receipt_cleanup(&receipt);
   lc_workflow_transaction_close(transaction);
   lc_workflow_close(workflow);
   lc_client_close(client);
@@ -2779,6 +3409,9 @@ static void test_pouch_overflowing_foreground_retry_reconciles(void **state) {
   workflow_config.owner = "claim-retry-overflow-test";
   workflow_config.retry_initial_delay_seconds = LONG_MAX;
   workflow_config.retry_max_delay_seconds = LONG_MAX;
+  /* An unknown acquire result is retried at the claim-recovery boundary, not
+   * in a foreground spin. Keep that boundary short for this regression. */
+  workflow_config.claim_ttl_seconds = 1L;
   assert_int_equal(
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
       LC_OK);
@@ -2806,6 +3439,8 @@ static void test_pouch_overflowing_foreground_retry_reconciles(void **state) {
                    LC_OK);
   assert_non_null(job);
   assert_int_equal(failure.calls, 2U);
+  lc_workflow_test_before_claim_outbox_hook = NULL;
+  lc_workflow_test_before_claim_outbox_context = NULL;
   lc_workflow_stats_init(&stats);
   assert_int_equal(lc_workflow_get_stats(workflow, &stats, &error), LC_OK);
   assert_true(stats.claim_losses >= 1U);
@@ -3456,6 +4091,7 @@ test_pouch_workflow_periodic_schedule_failure_does_not_deadlock(void **state) {
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
       LC_OK);
   race.workflow = workflow;
+  assert_int_equal(lc_workflow_reconcile(workflow, &error), LC_OK);
   assert_true(
       workflow_shutdown_race_wait(&race, &race.periodic_schedule_entered));
   assert_int_equal(pthread_create(&close_thread, NULL,
@@ -3662,7 +4298,7 @@ test_pouch_multikey_prevote_failure_publishes_nothing(void **state) {
   lc_error_init(&error);
   lc_workflow_transaction_close(transaction);
   transaction = NULL;
-  workflow_assert_public_state_absent(client, receipt.outbox_key, &error);
+  assert_null(receipt.outbox_key);
   workflow_assert_public_state_absent(client, "domain-atomic", &error);
 
   lc_outbox_receipt_cleanup(&receipt);
@@ -4062,8 +4698,8 @@ static void test_pouch_indeterminate_commit_replay_retains_outbox_notification(
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
-static void test_pouch_expired_multikey_commit_reports_rollback_without_signal(
-    void **state) {
+static void
+test_pouch_expired_commit_reports_rollback_without_signal(void **state) {
   char root[256];
   char template_path[256];
   char endpoint[320];
@@ -4081,6 +4717,7 @@ static void test_pouch_expired_multikey_commit_reports_rollback_without_signal(
   lc_source *payload;
   lc_source *domain_state;
   lc_error error;
+  workflow_pouch_test_clock clock;
 
   (void)state;
   assert_true(snprintf(template_path, sizeof(template_path),
@@ -4096,6 +4733,7 @@ static void test_pouch_expired_multikey_commit_reports_rollback_without_signal(
   job = NULL;
   payload = NULL;
   domain_state = NULL;
+  memset(&clock, 0, sizeof(clock));
   lc_error_init(&error);
   lc_client_config_init(&client_config);
   client_config.endpoints = endpoints;
@@ -4111,6 +4749,9 @@ static void test_pouch_expired_multikey_commit_reports_rollback_without_signal(
   assert_int_equal(
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
       LC_OK);
+  assert_int_equal(clock_gettime(CLOCK_REALTIME, &clock.wall), 0);
+  lc_pouch_test_queue_time_context = &clock;
+  lc_pouch_test_queue_clock_gettime = workflow_pouch_test_gettime;
   lc_outbox_entry_init(&entry);
   entry.operation_id = "expired-terminal-operation";
   entry.effect_id = "expired-terminal-effect";
@@ -4144,25 +4785,485 @@ static void test_pouch_expired_multikey_commit_reports_rollback_without_signal(
   lc_workflow_participant_close(participant);
   participant = NULL;
 
-  /* The outbox lease expires while the domain participant remains live. Pouch
-   * correctly decides the shared XA record as rollback; the workflow surface
-   * must expose that outcome and must not publish a false dispatch signal. */
-  sleep(4U);
+  /* The outbox lease expires while the domain participant remains live. Advance
+   * Pouch's scoped test clock rather than sleeping: the shared XA record must
+   * roll back and the workflow must not publish a false dispatch signal. */
+  clock.wall.tv_sec += 4L;
   assert_int_equal(lc_workflow_transaction_commit(transaction, &error),
                    LC_ERR_INVALID);
+  (void)workflow_pouch_test_clock_teardown(NULL);
   lc_error_cleanup(&error);
   lc_error_init(&error);
   lc_workflow_transaction_close(transaction);
   transaction = NULL;
-  workflow_assert_public_state_absent(client, receipt.outbox_key, &error);
+  assert_null(receipt.outbox_key);
   workflow_assert_public_state_absent(client, "domain-expired-terminal",
                                       &error);
   assert_int_equal(lc_workflow_next(workflow, 250L, &job, &error), LC_OK);
   assert_null(job);
 
+  /* The workflow now always gives Pouch its own explicit xid, even when its
+   * only participant is a domain record. Its terminal result must therefore
+   * be replayed too: an expired one-participant vote cannot report commit. */
+  assert_int_equal(clock_gettime(CLOCK_REALTIME, &clock.wall), 0);
+  lc_pouch_test_queue_time_context = &clock;
+  lc_pouch_test_queue_clock_gettime = workflow_pouch_test_gettime;
+  assert_int_equal(lc_workflow_begin(workflow, &transaction, &error), LC_OK);
+  assert_non_null(transaction);
+  lc_workflow_participant_request_init(&participant_request);
+  participant_request.acquire.namespace_name = "workflow-expired-terminal";
+  participant_request.acquire.key = "domain-expired-single";
+  participant_request.acquire.owner = "workflow-expired-terminal-test";
+  participant_request.acquire.ttl_seconds = 3L;
+  assert_int_equal(lc_workflow_transaction_acquire(
+                       transaction, &participant_request, &participant, &error),
+                   LC_OK);
+  assert_int_equal(
+      lc_source_from_memory("{\"committed\":true}", 18U, &domain_state, &error),
+      LC_OK);
+  assert_int_equal(participant->update(participant, domain_state, NULL, &error),
+                   LC_OK);
+  lc_source_close(domain_state);
+  domain_state = NULL;
+  lc_workflow_participant_close(participant);
+  participant = NULL;
+  clock.wall.tv_sec += 4L;
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error),
+                   LC_ERR_INVALID);
+  (void)workflow_pouch_test_clock_teardown(NULL);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
+  workflow_assert_public_state_absent(client, "domain-expired-single", &error);
+
   lc_outbox_receipt_cleanup(&receipt);
   lc_source_close(payload);
   lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_recovery_overflow_resumes_after_capacity_frees(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  workflow_recovery_overflow_drain_hook hook;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
+  lc_outbox_job *job;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX
+                       "recovery-overflow-resume-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?query_indexing=false", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  dispatcher = NULL;
+  job = NULL;
+  memset(&hook, 0, sizeof(hook));
+  assert_int_equal(pthread_mutex_init(&hook.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&hook.condition, NULL), 0);
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-recovery-overflow-resume";
+  workflow_config.owner = "workflow-recovery-overflow-resume-owner";
+  workflow_config.notification_capacity = 1U;
+  workflow_config.recovery_interval_seconds = 0L;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  dispatcher = workflow_test_dispatcher(workflow, &error);
+  assert_non_null(dispatcher);
+  seed_recovery_outbox(client, workflow_config.namespace_name,
+                       "__lockdc_io/v1/outbox/recovery-overflow-pending",
+                       &error);
+  seed_terminal_workflow_outbox(
+      client, workflow_config.namespace_name,
+      "__lockdc_io/v1/outbox/recovery-overflow-terminal", &error);
+  /* The first gated recovery turn checks claimed records. On its subsequent
+   * pending turn, the gate injects this stale direct key after the available
+   * budget is calculated but before the query delivers the durable pending
+   * key. The overflow hook consumes that stale key before completion. */
+  hook.workflow = workflow;
+  hook.dispatcher = dispatcher;
+  hook.terminal_key = "__lockdc_io/v1/outbox/recovery-overflow-terminal";
+  lc_workflow_test_before_recovery_query_context = &hook;
+  lc_workflow_test_before_recovery_query_hook =
+      workflow_gate_first_recovery_query;
+  lc_workflow_test_after_recovery_overflow_context = &hook;
+  lc_workflow_test_after_recovery_overflow_hook =
+      workflow_drain_recovery_overflow_hook;
+  assert_int_equal(lc_workflow_dispatcher_reconcile(dispatcher, &error), LC_OK);
+  workflow_wait_for_recovery_overflow_hook(&hook, &hook.query_started);
+  assert_int_equal(pthread_mutex_lock(&hook.mutex), 0);
+  hook.allow_query = 1;
+  assert_int_equal(pthread_cond_broadcast(&hook.condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&hook.mutex), 0);
+  workflow_wait_for_recovery_overflow_hook(&hook, &hook.overflowed);
+  lc_workflow_test_before_recovery_query_hook = NULL;
+  lc_workflow_test_before_recovery_query_context = NULL;
+  lc_workflow_test_after_recovery_overflow_hook = NULL;
+  lc_workflow_test_after_recovery_overflow_context = NULL;
+  assert_int_equal(lc_workflow_dispatcher_next(dispatcher, 3000L, &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+  assert_int_equal(hook.calls, 1);
+  assert_int_equal(hook.rc, LC_OK);
+  assert_int_equal(lc_workflow_dispatcher_stop(dispatcher, -1L, &error), LC_OK);
+  lc_workflow_dispatcher_close(dispatcher);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  assert_int_equal(pthread_cond_destroy(&hook.condition), 0);
+  assert_int_equal(pthread_mutex_destroy(&hook.mutex), 0);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_delayed_wake_does_not_block_ready_reconciliation(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
+  lc_outbox_job *job;
+  lc_outbox_retry retry;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "delayed-wake-progress-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?query_indexing=false", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  dispatcher = NULL;
+  job = NULL;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-delayed-wake-progress";
+  workflow_config.owner = "workflow-delayed-wake-progress-owner";
+  workflow_config.notification_capacity = 1U;
+  workflow_config.recovery_interval_seconds = 0L;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  dispatcher = workflow_test_dispatcher(workflow, &error);
+  assert_non_null(dispatcher);
+  seed_recovery_outbox(client, workflow_config.namespace_name,
+                       "__lockdc_io/v1/outbox/delayed-wake-a", &error);
+  assert_int_equal(
+      lc_workflow_dispatcher_notify_outbox_key(
+          dispatcher, "__lockdc_io/v1/outbox/delayed-wake-a", &error),
+      LC_OK);
+  assert_int_equal(lc_workflow_dispatcher_next(dispatcher, 3000L, &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  lc_outbox_retry_init(&retry);
+  retry.delay_seconds = 3600L;
+  assert_int_equal(lc_outbox_job_retry(job, &retry, &error), LC_OK);
+  job = NULL;
+  seed_recovery_outbox(client, workflow_config.namespace_name,
+                       "__lockdc_io/v1/outbox/delayed-wake-b", &error);
+  /* B comes from another producer without a local notification. Explicit
+   * reconciliation must evict A's future durable retry wake and discover the
+   * ready envelope instead of treating the bounded delayed queue as a reason
+   * to skip the scan. */
+  assert_int_equal(lc_workflow_dispatcher_reconcile(dispatcher, &error), LC_OK);
+  assert_int_equal(lc_workflow_dispatcher_next(dispatcher, 3000L, &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  assert_string_equal(job->outbox_key, "__lockdc_io/v1/outbox/delayed-wake-b");
+  assert_string_equal(job->effect_key, "recovery-key");
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+  assert_int_equal(lc_workflow_dispatcher_stop(dispatcher, -1L, &error), LC_OK);
+  lc_workflow_dispatcher_close(dispatcher);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_evicted_claim_wake_recovers_at_expiry(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
+  lc_outbox_job *job;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "evicted-claim-wake-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?query_indexing=false", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  dispatcher = NULL;
+  job = NULL;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-evicted-claim-wake";
+  workflow_config.owner = "workflow-evicted-claim-wake-owner";
+  workflow_config.claim_ttl_seconds = 1L;
+  workflow_config.notification_capacity = 1U;
+  workflow_config.recovery_interval_seconds = 0L;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  dispatcher = workflow_test_dispatcher(workflow, &error);
+  assert_non_null(dispatcher);
+
+  seed_recovery_outbox(client, workflow_config.namespace_name,
+                       "__lockdc_io/v1/outbox/evicted-claim-a", &error);
+  assert_int_equal(
+      lc_workflow_dispatcher_notify_outbox_key(
+          dispatcher, "__lockdc_io/v1/outbox/evicted-claim-a", &error),
+      LC_OK);
+  assert_int_equal(lc_workflow_dispatcher_next(dispatcher, 3000L, &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  /* Closing abandons a durable active claim and schedules its one-slot local
+   * expiry wake. */
+  lc_outbox_job_close(job);
+  job = NULL;
+
+  seed_recovery_outbox(client, workflow_config.namespace_name,
+                       "__lockdc_io/v1/outbox/evicted-claim-b", &error);
+  assert_int_equal(
+      lc_workflow_dispatcher_notify_outbox_key(
+          dispatcher, "__lockdc_io/v1/outbox/evicted-claim-b", &error),
+      LC_OK);
+  assert_int_equal(lc_workflow_dispatcher_next(dispatcher, 3000L, &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  assert_string_equal(job->outbox_key, "__lockdc_io/v1/outbox/evicted-claim-b");
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+
+  /* B displaced A's local claim wake. Once A expires, its durable claimed
+   * envelope must be selected automatically; no explicit reconcile is needed.
+   */
+  assert_int_equal(lc_workflow_dispatcher_next(dispatcher, 5000L, &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  assert_string_equal(job->outbox_key, "__lockdc_io/v1/outbox/evicted-claim-a");
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+
+  assert_int_equal(lc_workflow_dispatcher_stop(dispatcher, -1L, &error), LC_OK);
+  lc_workflow_dispatcher_close(dispatcher);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_claim_recovery_survives_capacity_pause(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  workflow_recovery_overflow_drain_hook hook;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
+  lc_outbox_job *job;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX
+                       "claim-recovery-capacity-pause-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?query_indexing=false", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  dispatcher = NULL;
+  job = NULL;
+  memset(&hook, 0, sizeof(hook));
+  assert_int_equal(pthread_mutex_init(&hook.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&hook.condition, NULL), 0);
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-claim-recovery-capacity-pause";
+  workflow_config.owner = "workflow-claim-recovery-capacity-pause-owner";
+  workflow_config.notification_capacity = 1U;
+  workflow_config.recovery_interval_seconds = 0L;
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  dispatcher = workflow_test_dispatcher(workflow, &error);
+  assert_non_null(dispatcher);
+  /* The released seed lease leaves a durable, already-expired claim. Only a
+   * claim scan can turn it back into dispatchable pending work. */
+  seed_workflow_outbox_with_counters(
+      client, workflow_config.namespace_name,
+      "__lockdc_io/v1/outbox/claim-recovery-capacity-paused", "claimed", "0",
+      "0", &error);
+  seed_terminal_workflow_outbox(
+      client, workflow_config.namespace_name,
+      "__lockdc_io/v1/outbox/claim-recovery-capacity-terminal", &error);
+  assert_int_equal(lc_workflow_dispatcher_notify_outbox_key(
+                       dispatcher,
+                       "__lockdc_io/v1/outbox/claim-recovery-capacity-terminal",
+                       &error),
+                   LC_OK);
+  lc_workflow_test_after_recovery_capacity_pause_context = &hook;
+  lc_workflow_test_after_recovery_capacity_pause_hook =
+      workflow_note_recovery_capacity_pause;
+  assert_int_equal(lc_workflow_dispatcher_reconcile(dispatcher, &error), LC_OK);
+  workflow_wait_for_recovery_overflow_hook(&hook, &hook.overflowed);
+  lc_workflow_test_after_recovery_capacity_pause_hook = NULL;
+  lc_workflow_test_after_recovery_capacity_pause_context = NULL;
+  /* Removing the stale candidate must resume the deferred claim scan without
+   * another explicit reconcile request or a periodic recovery timer. */
+  assert_int_equal(lc_workflow_dispatcher_next(dispatcher, 0L, &job, &error),
+                   LC_OK);
+  assert_null(job);
+  assert_int_equal(lc_workflow_dispatcher_next(dispatcher, 3000L, &job, &error),
+                   LC_OK);
+  assert_non_null(job);
+  assert_string_equal(job->effect_key, "recovery-key");
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+  assert_int_equal(hook.calls, 1);
+  assert_int_equal(lc_workflow_dispatcher_stop(dispatcher, -1L, &error), LC_OK);
+  lc_workflow_dispatcher_close(dispatcher);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  assert_int_equal(pthread_cond_destroy(&hook.condition), 0);
+  assert_int_equal(pthread_mutex_destroy(&hook.mutex), 0);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_concurrent_dispatcher_acquisition_keeps_one_attachment_ref(
+    void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_error error;
+  size_t iteration;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX
+                       "dispatcher-acquire-race-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+
+  for (iteration = 0U; iteration < 20U; ++iteration) {
+    pthread_barrier_t barrier;
+    pthread_t first_thread;
+    pthread_t second_thread;
+    workflow_dispatcher_acquire_race first;
+    workflow_dispatcher_acquire_race second;
+
+    workflow = NULL;
+    memset(&first, 0, sizeof(first));
+    memset(&second, 0, sizeof(second));
+    lc_workflow_config_init(&workflow_config);
+    workflow_config.namespace_name = "workflow-dispatcher-acquire-race";
+    workflow_config.owner = "workflow-dispatcher-acquire-race-owner";
+    assert_int_equal(
+        workflow_public_new(client, &workflow_config, &workflow, &error),
+        LC_OK);
+    assert_int_equal(pthread_barrier_init(&barrier, NULL, 2U), 0);
+    first.workflow = workflow;
+    first.barrier = &barrier;
+    second.workflow = workflow;
+    second.barrier = &barrier;
+    assert_int_equal(pthread_create(&first_thread, NULL,
+                                    workflow_dispatcher_acquire_thread, &first),
+                     0);
+    assert_int_equal(pthread_create(&second_thread, NULL,
+                                    workflow_dispatcher_acquire_thread,
+                                    &second),
+                     0);
+    assert_int_equal(pthread_join(first_thread, NULL), 0);
+    assert_int_equal(pthread_join(second_thread, NULL), 0);
+    assert_int_equal(pthread_barrier_destroy(&barrier), 0);
+    assert_int_equal(first.rc, LC_OK);
+    assert_int_equal(second.rc, LC_OK);
+    assert_non_null(first.dispatcher);
+    assert_ptr_equal(first.dispatcher, second.dispatcher);
+    /* Registry + workflow attachment + exactly one reference per caller. */
+    assert_int_equal(lc_workflow_test_dispatcher_ref_count(first.dispatcher),
+                     4U);
+    assert_int_equal(lc_workflow_dispatcher_stop(first.dispatcher, -1L, &error),
+                     LC_OK);
+    lc_workflow_dispatcher_close(second.dispatcher);
+    lc_workflow_dispatcher_close(first.dispatcher);
+    lc_workflow_close(workflow);
+  }
+
   lc_client_close(client);
   lc_error_cleanup(&error);
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
@@ -4176,7 +5277,6 @@ static void test_pouch_reconciliation_retains_overflow_request(void **state) {
   lc_client_config client_config;
   lc_workflow_config workflow_config;
   workflow_reconcile_overflow_hook hook;
-  lc_workflow_stats stats;
   lc_client *client;
   lc_workflow *workflow;
   lc_outbox_job *job;
@@ -4212,26 +5312,8 @@ static void test_pouch_reconciliation_retains_overflow_request(void **state) {
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
       LC_OK);
 
-  /* Do not install the race hook until the mandatory empty startup sweep has
-   * completed. The following explicit sweep is therefore the only one that
-   * can add the second record while its notification queue is full. */
-  memset(&stats, 0, sizeof(stats));
-  for (attempt = 0U; attempt < 100U; ++attempt) {
-    assert_int_equal(lc_workflow_get_stats(workflow, &stats, &error), LC_OK);
-    if (stats.recovery_queries != 0U)
-      break;
-    lc_workflow_stats_cleanup(&stats);
-    memset(&stats, 0, sizeof(stats));
-    {
-      struct timespec delay;
-      delay.tv_sec = 0;
-      delay.tv_nsec = 10000000L;
-      (void)nanosleep(&delay, NULL);
-    }
-  }
-  assert_true(stats.recovery_queries != 0U);
-  lc_workflow_stats_cleanup(&stats);
-
+  /* The explicit sweep queues the first durable key. Its after-query hook
+   * commits the second key while the one-slot candidate queue is full. */
   seed_recovery_outbox(client, "workflow-reconcile-overflow",
                        "__lockdc_io/v1/outbox/recovered", &error);
   hook.workflow = workflow;
@@ -4280,7 +5362,6 @@ static void test_pouch_reconciliation_skips_disappeared_outbox(void **state) {
   lc_workflow *workflow;
   lc_outbox_job *job;
   lc_error error;
-  size_t attempt;
 
   (void)state;
   assert_true(snprintf(template_path, sizeof(template_path),
@@ -4306,26 +5387,6 @@ static void test_pouch_reconciliation_skips_disappeared_outbox(void **state) {
   assert_int_equal(
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
       LC_OK);
-
-  /* Let the initial claimed and dispatchable sweeps finish before installing
-   * the race hook. The following explicit reconciliation must therefore emit
-   * the key before the hook removes its durable record. */
-  for (attempt = 0U; attempt < 100U; ++attempt) {
-    assert_int_equal(lc_workflow_get_stats(workflow, &stats, &error), LC_OK);
-    if (stats.recovery_queries >= 2U)
-      break;
-    lc_workflow_stats_cleanup(&stats);
-    memset(&stats, 0, sizeof(stats));
-    {
-      struct timespec delay;
-      delay.tv_sec = 0;
-      delay.tv_nsec = 10000000L;
-      (void)nanosleep(&delay, NULL);
-    }
-  }
-  assert_true(stats.recovery_queries >= 2U);
-  lc_workflow_stats_cleanup(&stats);
-  memset(&stats, 0, sizeof(stats));
 
   seed_recovery_outbox(client, namespace_name, outbox_key, &error);
   workflow_delete_outbox_hook_init(&hook, client, namespace_name, outbox_key);
@@ -4413,14 +5474,14 @@ static void test_pouch_handoff_skips_disappeared_outbox(void **state) {
   assert_int_equal(lc_workflow_append_outbox(workflow, &entry, payload,
                                              &transaction, &receipt, &error),
                    LC_OK);
+  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
+  lc_workflow_transaction_close(transaction);
+  transaction = NULL;
   workflow_delete_outbox_hook_init(&hook, client, namespace_name,
                                    receipt.outbox_key);
   lc_workflow_test_before_outbox_handoff_reacquire_hook =
       workflow_delete_outbox_once;
   lc_workflow_test_before_outbox_handoff_reacquire_context = &hook;
-  assert_int_equal(lc_workflow_transaction_commit(transaction, &error), LC_OK);
-  lc_workflow_transaction_close(transaction);
-  transaction = NULL;
   assert_int_equal(lc_workflow_next(workflow, workflow_claim_next_timeout_ms(),
                                     &job, &error),
                    LC_OK);
@@ -4479,7 +5540,10 @@ static void test_pouch_dead_letter_operations(void **state) {
                        WORKFLOW_TMP_PREFIX "dead-letter-XXXXXX") > 0);
   assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
                                   WORKFLOW_TMP_PREFIX));
-  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  /* Dead-letter recovery and export are workflow operations, not public
+   * indexed queries. Exercise their supported scan-only root path too. */
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?query_indexing=false", root) > 0);
   endpoints[0] = endpoint;
   lc_error_init(&error);
   lc_client_config_init(&client_config);
@@ -5297,17 +6361,18 @@ static void test_pouch_next_timeout_uses_one_deadline(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
-static void test_pouch_next_long_max_timeout_waits_until_closed(void **state) {
+static void
+test_pouch_next_long_max_timeout_waits_until_dispatcher_stops(void **state) {
   char root[256], template_path[256], endpoint[320];
   const char *endpoints[1];
   lc_client_config client_config;
   lc_workflow_config workflow_config;
   lc_client *client;
   lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
   lc_error error;
   workflow_next_wait_race race;
   pthread_t next_thread;
-  struct timespec delay;
 
   (void)state;
   assert_true(snprintf(template_path, sizeof(template_path),
@@ -5322,6 +6387,7 @@ static void test_pouch_next_long_max_timeout_waits_until_closed(void **state) {
   client_config.endpoint_count = 1U;
   client = NULL;
   workflow = NULL;
+  dispatcher = NULL;
   memset(&race, 0, sizeof(race));
   assert_int_equal(pthread_mutex_init(&race.mutex, NULL), 0);
   assert_int_equal(pthread_cond_init(&race.condition, NULL), 0);
@@ -5334,22 +6400,23 @@ static void test_pouch_next_long_max_timeout_waits_until_closed(void **state) {
   assert_int_equal(
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
       LC_OK);
+  dispatcher = workflow_test_dispatcher(workflow, &error);
+  assert_non_null(dispatcher);
   race.workflow = workflow;
   race.timeout_ms = LONG_MAX;
   assert_int_equal(
       pthread_create(&next_thread, NULL, workflow_next_wait_thread, &race), 0);
   assert_true(workflow_next_wait_race_wait(&race, &race.next_wait_entered));
-  delay.tv_sec = 0;
-  delay.tv_nsec = 100000000L;
-  assert_int_equal(nanosleep(&delay, NULL), 0);
   assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
   assert_false(race.next_finished);
   assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
-  lc_workflow_close(workflow);
+  assert_int_equal(lc_workflow_dispatcher_stop(dispatcher, -1L, &error), LC_OK);
   assert_int_equal(pthread_join(next_thread, NULL), 0);
-  assert_int_equal(race.next_rc, LC_OK);
-  assert_null(race.job);
   workflow_reset_allocation_failures();
+  assert_int_equal(race.next_rc, LC_ERR_INVALID);
+  assert_null(race.job);
+  lc_workflow_dispatcher_close(dispatcher);
+  lc_workflow_close(workflow);
   lc_client_close(client);
   lc_error_cleanup(&error);
   assert_int_equal(pthread_cond_destroy(&race.condition), 0);
@@ -5647,7 +6714,8 @@ test_pouch_reconciliation_preserves_allocator_domains(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
-static void test_pouch_recovery_prefetch_is_bounded(void **state) {
+static void
+test_pouch_dispatcher_is_passive_until_consumer_demand(void **state) {
   char root[256];
   char template_path[256];
   char endpoint[320];
@@ -5656,11 +6724,11 @@ static void test_pouch_recovery_prefetch_is_bounded(void **state) {
   lc_workflow_config workflow_config;
   lc_client *client;
   lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
+  lc_outbox_job *job;
   lc_error error;
-  struct timespec deadline;
-  struct timespec now;
+  lc_workflow_stats stats;
   size_t index;
-  int found_unclaimed;
 
   (void)state;
   assert_true(snprintf(template_path, sizeof(template_path),
@@ -5674,6 +6742,9 @@ static void test_pouch_recovery_prefetch_is_bounded(void **state) {
   client_config.endpoints = endpoints;
   client_config.endpoint_count = 1U;
   client = NULL;
+  workflow = NULL;
+  dispatcher = NULL;
+  job = NULL;
   assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
   for (index = 0U; index < WORKFLOW_PREFETCH_RECORDS; ++index) {
     char key[128];
@@ -5687,55 +6758,472 @@ static void test_pouch_recovery_prefetch_is_bounded(void **state) {
   workflow_config.namespace_name = "workflow-prefetch";
   workflow_config.owner = "workflow-prefetch-test";
   workflow_config.notification_capacity = 2U;
+  workflow_config.recovery_interval_seconds = 1L;
+  /* Do not go through the legacy fixture adapter: this is the production
+   * producer contract. Construction is threadless and has no recovery state. */
+  assert_int_equal(
+      client->new_workflow(client, &workflow_config, &workflow, &error), LC_OK);
+  assert_int_equal(
+      workflow->get_or_start_dispatcher(workflow, &dispatcher, &error), LC_OK);
+  assert_non_null(dispatcher);
+  memset(&stats, 0, sizeof(stats));
+  assert_int_equal(dispatcher->get_stats(dispatcher, &stats, &error), LC_OK);
+  assert_int_equal(stats.recovery_queries, 0U);
+  assert_int_equal(stats.recovered_claims, 0U);
+  lc_workflow_stats_cleanup(&stats);
+  /* The interval is not an autonomous polling timer. It is armed only after
+   * an actual blocking consumer request or explicit reconciliation. Keep this
+   * deterministic instead of sleeping and hoping to observe no I/O. */
+  assert_false(
+      lc_workflow_test_dispatcher_periodic_recovery_is_armed(dispatcher));
+
+  /* Starting private recovery may discover candidates, but it must not take a
+   * lease until a real consumer asks for one.  Probe every seeded record after
+   * the dispatcher exists; each lease remains freely acquirable. */
+  for (index = 0U; index < WORKFLOW_PREFETCH_RECORDS; ++index) {
+    char key[128];
+    lc_acquire_req acquire;
+    lc_lease *lease;
+
+    assert_true(snprintf(key, sizeof(key),
+                         "__lockdc_io/v1/outbox/prefetch-%03lu",
+                         (unsigned long)index) > 0);
+    lc_acquire_req_init(&acquire);
+    acquire.namespace_name = "workflow-prefetch";
+    acquire.key = key;
+    acquire.owner = "workflow-prefetch-probe";
+    acquire.ttl_seconds = 30L;
+    lease = NULL;
+    assert_int_equal(lc_acquire(client, &acquire, &lease, &error), LC_OK);
+    assert_int_equal(lc_lease_release(lease, NULL, &error), LC_OK);
+  }
+
+  /* A zero-deadline probe must not turn host polling into an indexed scan. */
+  assert_int_equal(dispatcher->next(dispatcher, 0L, &job, &error), LC_OK);
+  assert_null(job);
+  memset(&stats, 0, sizeof(stats));
+  assert_int_equal(dispatcher->get_stats(dispatcher, &stats, &error), LC_OK);
+  assert_int_equal(stats.recovery_queries, 0U);
+  assert_int_equal(stats.recovered_claims, 0U);
+  lc_workflow_stats_cleanup(&stats);
+
+  /* One demand claims exactly one job.  No polling or prefetch sleep is part
+   * of this invariant. */
+  assert_int_equal(dispatcher->next(dispatcher, 5000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+  assert_int_equal(lc_workflow_dispatcher_stop(dispatcher, -1L, &error), LC_OK);
+  lc_workflow_dispatcher_close(dispatcher);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_dispatcher_scan_recovery_when_indexing_is_disabled(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[352];
+  const char *endpoints[1];
+  const char *outbox_key = "__lockdc_io/v1/outbox/scan-recovery";
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
+  lc_outbox_job *job;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "scan-recovery-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?query_indexing=false", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
   workflow = NULL;
+  dispatcher = NULL;
+  job = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  seed_recovery_outbox(client, "workflow-scan-recovery", outbox_key, &error);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-scan-recovery";
+  workflow_config.owner = "workflow-scan-recovery-test";
+  assert_int_equal(
+      client->new_workflow(client, &workflow_config, &workflow, &error), LC_OK);
+  assert_int_equal(
+      workflow->get_or_start_dispatcher(workflow, &dispatcher, &error), LC_OK);
+  assert_int_equal(dispatcher->next(dispatcher, 5000L, &job, &error), LC_OK);
+  assert_non_null(job);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+  assert_int_equal(lc_workflow_dispatcher_stop(dispatcher, -1L, &error), LC_OK);
+  lc_workflow_dispatcher_close(dispatcher);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+typedef struct workflow_client_close_callback_race {
+  pthread_mutex_t mutex;
+  pthread_cond_t condition;
+  lc_client *client;
+  lc_workflow_dispatcher *dispatcher;
+  int recovery_query_entered;
+  int allow_recovery_query;
+  int client_close_returned;
+  int source_reads;
+} workflow_client_close_callback_race;
+
+static void
+workflow_client_close_callback_before_recovery_query(void *context) {
+  workflow_client_close_callback_race *race =
+      (workflow_client_close_callback_race *)context;
+
+  assert_non_null(race);
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  race->recovery_query_entered = 1;
+  assert_int_equal(pthread_cond_broadcast(&race->condition), 0);
+  while (!race->allow_recovery_query) {
+    assert_int_equal(pthread_cond_wait(&race->condition, &race->mutex), 0);
+  }
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+}
+
+static size_t workflow_client_close_callback_source_read(void *context,
+                                                         void *buffer,
+                                                         size_t count,
+                                                         lc_error *error) {
+  workflow_client_close_callback_race *race =
+      (workflow_client_close_callback_race *)context;
+  lc_error reconcile_error;
+  int rc;
+
+  if (race->source_reads != 0) {
+    return 0U;
+  }
+  ++race->source_reads;
+  lc_error_init(&reconcile_error);
+  rc = lc_workflow_dispatcher_reconcile(race->dispatcher, &reconcile_error);
+  lc_error_cleanup(&reconcile_error);
+  if (rc != LC_OK) {
+    (void)lc_error_set(error, rc, 0L,
+                       "failed to schedule recovery from source callback", NULL,
+                       NULL, NULL);
+    return 0U;
+  }
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  while (!race->recovery_query_entered) {
+    assert_int_equal(pthread_cond_wait(&race->condition, &race->mutex), 0);
+  }
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+  /* This is the formerly cyclic close: the source callback owns the namespace
+   * lock while recovery has reached its attempt to acquire that same lock. */
+  lc_client_close(race->client);
+  assert_int_equal(pthread_mutex_lock(&race->mutex), 0);
+  race->client_close_returned = 1;
+  race->allow_recovery_query = 1;
+  assert_int_equal(pthread_cond_broadcast(&race->condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&race->mutex), 0);
+  if (count < 2U) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "workflow close-callback source buffer is too small",
+                       NULL, NULL, NULL);
+    return 0U;
+  }
+  memcpy(buffer, "{}", 2U);
+  return 2U;
+}
+
+static void test_pouch_client_close_from_source_callback(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_acquire_req acquire;
+  workflow_client_close_callback_race race;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
+  lc_lease *lease;
+  lc_source *source;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "client-close-callback-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?query_indexing=false", root) > 0);
+  endpoints[0] = endpoint;
+  client = NULL;
+  workflow = NULL;
+  dispatcher = NULL;
+  lease = NULL;
+  source = NULL;
+  memset(&race, 0, sizeof(race));
+  assert_int_equal(pthread_mutex_init(&race.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&race.condition, NULL), 0);
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-client-close-callback";
+  workflow_config.owner = "workflow-client-close-callback-owner";
+  workflow_config.recovery_interval_seconds = 0L;
   assert_int_equal(
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
       LC_OK);
-  assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &deadline), 0);
-  deadline.tv_sec += 3L;
-  found_unclaimed = 0;
-  do {
-    size_t locked = 0U;
-    size_t available = 0U;
+  assert_int_equal(
+      lc_workflow_dispatcher_get_or_start(workflow, &dispatcher, &error),
+      LC_OK);
+  race.client = client;
+  race.dispatcher = dispatcher;
+  lc_acquire_req_init(&acquire);
+  acquire.namespace_name = workflow_config.namespace_name;
+  acquire.key = "callback-state";
+  acquire.owner = "workflow-client-close-callback-lease";
+  acquire.ttl_seconds = 30L;
+  assert_int_equal(client->acquire(client, &acquire, &lease, &error), LC_OK);
+  assert_int_equal(
+      lc_source_from_callbacks(workflow_client_close_callback_source_read, NULL,
+                               NULL, &race, &source, &error),
+      LC_OK);
+  lc_workflow_test_before_recovery_query_hook =
+      workflow_client_close_callback_before_recovery_query;
+  lc_workflow_test_before_recovery_query_context = &race;
+  assert_int_equal(lease->update(lease, source, NULL, &error), LC_OK);
+  lc_workflow_test_before_recovery_query_hook = NULL;
+  lc_workflow_test_before_recovery_query_context = NULL;
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(race.client_close_returned, 1);
+  lc_lease_close(lease);
+  lease = NULL;
+  /* The callback returns before recovery has acquired its lock. This explicit
+   * wait proves the deferred worker cleanup reaches the normal terminal state
+   * without leaking a registered dispatcher. */
+  assert_int_equal(lc_workflow_dispatcher_wait(dispatcher, -1L, &error), LC_OK);
+  lc_workflow_dispatcher_close(dispatcher);
+  dispatcher = NULL;
+  lc_workflow_close(workflow);
+  workflow = NULL;
+  assert_int_equal(pthread_cond_destroy(&race.condition), 0);
+  assert_int_equal(pthread_mutex_destroy(&race.mutex), 0);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
 
-    for (index = 0U; index < WORKFLOW_PREFETCH_RECORDS; ++index) {
-      char key[128];
-      lc_acquire_req acquire;
-      lc_lease *lease;
-      int rc;
+static void
+test_pouch_dispatcher_rejects_client_closed_replacement(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow *rejected_workflow;
+  lc_workflow_dispatcher *dispatcher;
+  lc_error error;
 
-      assert_true(snprintf(key, sizeof(key),
-                           "__lockdc_io/v1/outbox/prefetch-%03lu",
-                           (unsigned long)index) > 0);
-      lc_acquire_req_init(&acquire);
-      acquire.namespace_name = "workflow-prefetch";
-      acquire.key = key;
-      acquire.owner = "workflow-prefetch-probe";
-      acquire.ttl_seconds = 30L;
-      lease = NULL;
-      rc = lc_acquire(client, &acquire, &lease, &error);
-      if (rc == LC_OK) {
-        ++available;
-        assert_int_equal(lc_lease_release(lease, NULL, &error), LC_OK);
-      } else {
-        ++locked;
-        lc_error_cleanup(&error);
-        lc_error_init(&error);
-      }
-    }
-    if (locked >= 2U && available > 0U)
-      found_unclaimed = 1;
-    if (!found_unclaimed) {
-      struct timespec delay;
-      delay.tv_sec = 0;
-      delay.tv_nsec = 10000000L;
-      (void)nanosleep(&delay, NULL);
-      assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &now), 0);
-    }
-  } while (!found_unclaimed &&
-           (now.tv_sec < deadline.tv_sec ||
-            (now.tv_sec == deadline.tv_sec && now.tv_nsec < deadline.tv_nsec)));
-  assert_true(found_unclaimed);
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "client-closed-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  rejected_workflow = NULL;
+  dispatcher = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-client-closed";
+  assert_int_equal(
+      client->new_workflow(client, &workflow_config, &workflow, &error), LC_OK);
+  lc_client_close(client);
+  assert_int_equal(
+      workflow->get_or_start_dispatcher(workflow, &dispatcher, &error),
+      LC_ERR_INVALID);
+  assert_null(dispatcher);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(client->new_workflow(client, &workflow_config,
+                                        &rejected_workflow, &error),
+                   LC_ERR_INVALID);
+  assert_null(rejected_workflow);
+  lc_error_cleanup(&error);
+  lc_workflow_close(workflow);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void
+test_pouch_dispatcher_stop_timeout_preserves_handed_out_job(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  const char *outbox_key = "__lockdc_io/v1/outbox/stop-timeout";
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow *second_workflow;
+  lc_workflow_dispatcher *dispatcher;
+  lc_workflow_dispatcher *second_dispatcher;
+  lc_outbox_job *job;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "stop-timeout-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  second_workflow = NULL;
+  dispatcher = NULL;
+  second_dispatcher = NULL;
+  job = NULL;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  seed_recovery_outbox(client, "workflow-stop-timeout", outbox_key, &error);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "workflow-stop-timeout";
+  workflow_config.owner = "workflow-stop-timeout-test";
+  assert_int_equal(
+      client->new_workflow(client, &workflow_config, &workflow, &error), LC_OK);
+  assert_int_equal(
+      workflow->get_or_start_dispatcher(workflow, &dispatcher, &error), LC_OK);
+  assert_int_equal(dispatcher->next(dispatcher, 5000L, &job, &error), LC_OK);
+  assert_non_null(job);
+
+  /* Shutdown requests are immediate, but neither private cleanup nor a
+   * handed-out durable claim is discarded to satisfy a zero deadline. */
+  assert_int_equal(lc_workflow_dispatcher_stop(dispatcher, 0L, &error),
+                   LC_ERR_TIMEOUT);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_workflow_dispatcher_wait(dispatcher, 0L, &error),
+                   LC_ERR_TIMEOUT);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(
+      client->new_workflow(client, &workflow_config, &second_workflow, &error),
+      LC_OK);
+  assert_int_equal(second_workflow->get_or_start_dispatcher(
+                       second_workflow, &second_dispatcher, &error),
+                   LC_ERR_INVALID);
+  assert_null(second_dispatcher);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_outbox_job_complete(job, NULL, &error), LC_OK);
+  job = NULL;
+  assert_int_equal(lc_workflow_dispatcher_wait(dispatcher, -1L, &error), LC_OK);
+  lc_workflow_dispatcher_close(dispatcher);
+  assert_int_equal(second_workflow->get_or_start_dispatcher(
+                       second_workflow, &second_dispatcher, &error),
+                   LC_OK);
+  assert_int_equal(lc_workflow_dispatcher_stop(second_dispatcher, -1L, &error),
+                   LC_OK);
+  lc_workflow_dispatcher_close(second_dispatcher);
+  lc_workflow_close(second_workflow);
+  lc_workflow_close(workflow);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
+}
+
+static void test_pouch_dispatcher_stop_retains_inflight_receiver(void **state) {
+  char root[256];
+  char template_path[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_workflow_config workflow_config;
+  workflow_dispatcher_core_race race;
+  lc_client *client;
+  lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
+  lc_error error;
+  pthread_t stats_thread;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       WORKFLOW_TMP_PREFIX "dispatcher-core-race-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  WORKFLOW_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  workflow = NULL;
+  dispatcher = NULL;
+  memset(&race, 0, sizeof(race));
+  assert_int_equal(pthread_mutex_init(&race.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&race.condition, NULL), 0);
+  workflow_reset_allocation_failures();
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_workflow_config_init(&workflow_config);
+  workflow_config.namespace_name = "dispatcher-core-race";
+  workflow_config.owner = "dispatcher-core-race-test";
+  assert_int_equal(
+      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
+      LC_OK);
+  assert_int_equal(
+      workflow->get_or_start_dispatcher(workflow, &dispatcher, &error), LC_OK);
+  race.dispatcher = dispatcher;
+  lc_workflow_test_after_dispatcher_core_retain_hook =
+      workflow_dispatcher_core_retained_hook;
+  lc_workflow_test_after_dispatcher_core_retain_context = &race;
+  assert_int_equal(pthread_create(&stats_thread, NULL,
+                                  workflow_dispatcher_stats_thread, &race),
+                   0);
+  assert_true(workflow_dispatcher_core_race_wait(&race, &race.core_retained));
+
+  /* stop() may detach its core while a receiver is already in flight. The
+   * receiver's acquired core reference must keep its snapshot valid. */
+  assert_int_equal(lc_workflow_dispatcher_stop(dispatcher, -1L, &error), LC_OK);
+  assert_int_equal(pthread_mutex_lock(&race.mutex), 0);
+  race.allow_stats = 1;
+  assert_int_equal(pthread_cond_broadcast(&race.condition), 0);
+  assert_int_equal(pthread_mutex_unlock(&race.mutex), 0);
+  assert_true(workflow_dispatcher_core_race_wait(&race, &race.stats_finished));
+  assert_int_equal(pthread_join(stats_thread, NULL), 0);
+  assert_int_equal(race.stats_rc, LC_OK);
+  workflow_reset_allocation_failures();
+  assert_int_equal(pthread_cond_destroy(&race.condition), 0);
+  assert_int_equal(pthread_mutex_destroy(&race.mutex), 0);
+  lc_workflow_dispatcher_close(dispatcher);
   lc_workflow_close(workflow);
   lc_client_close(client);
   lc_error_cleanup(&error);
@@ -6153,6 +7641,7 @@ test_pouch_failed_renew_refreshes_recovery_from_server_expiry(void **state) {
   lc_outbox_receipt receipt;
   lc_client *client;
   lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
   lc_workflow_transaction *transaction;
   lc_outbox_job *job;
   lc_source *payload;
@@ -6168,6 +7657,7 @@ test_pouch_failed_renew_refreshes_recovery_from_server_expiry(void **state) {
   endpoints[0] = endpoint;
   client = NULL;
   workflow = NULL;
+  dispatcher = NULL;
   transaction = NULL;
   job = NULL;
   payload = NULL;
@@ -6183,6 +7673,8 @@ test_pouch_failed_renew_refreshes_recovery_from_server_expiry(void **state) {
   assert_int_equal(
       lc_client_new_workflow(client, &workflow_config, &workflow, &error),
       LC_OK);
+  assert_int_equal(
+      workflow->get_or_start_dispatcher(workflow, &dispatcher, &error), LC_OK);
   lc_outbox_entry_init(&entry);
   entry.operation_id = "failed-renew-recovery-operation";
   entry.effect_id = "failed-renew-recovery-effect";
@@ -6213,14 +7705,15 @@ test_pouch_failed_renew_refreshes_recovery_from_server_expiry(void **state) {
   assert_int_equal(lc_outbox_job_renew(job, 300L, &error), LC_ERR_NOMEM);
   lc_workflow_test_before_outbox_renew_deadline_publish_hook = NULL;
   assert_true(job->lease_expires_at_unix > original_deadline);
-  assert_true(lc_workflow_test_delayed_recovery_deadline(
-      workflow, receipt.outbox_key, &scheduled_deadline));
+  assert_true(lc_workflow_test_dispatcher_delayed_recovery_deadline(
+      dispatcher, receipt.outbox_key, &scheduled_deadline));
   assert_int_equal(scheduled_deadline, job->lease_expires_at_unix);
 
   lc_error_cleanup(&error);
   lc_outbox_job_close(job);
   job = NULL;
   lc_outbox_receipt_cleanup(&receipt);
+  lc_workflow_dispatcher_close(dispatcher);
   lc_workflow_close(workflow);
   lc_client_close(client);
   workflow_reset_allocation_failures();
@@ -7299,7 +8792,7 @@ test_pouch_workflow_close_serializes_ready_job_detach(void **state) {
   memset(&stats, 0, sizeof(stats));
   for (attempt = 0U; attempt < 500U; ++attempt) {
     assert_int_equal(lc_workflow_get_stats(workflow, &stats, &error), LC_OK);
-    if (stats.ready_jobs == 1U)
+    if (stats.pending_candidates == 1U)
       break;
     lc_workflow_stats_cleanup(&stats);
     memset(&stats, 0, sizeof(stats));
@@ -7310,7 +8803,7 @@ test_pouch_workflow_close_serializes_ready_job_detach(void **state) {
       (void)nanosleep(&delay, NULL);
     }
   }
-  assert_int_equal(stats.ready_jobs, 1U);
+  assert_int_equal(stats.pending_candidates, 1U);
   lc_workflow_stats_cleanup(&stats);
 
   memset(&race, 0, sizeof(race));
@@ -7379,7 +8872,7 @@ test_pouch_workflow_close_serializes_ready_job_detach(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
-static void test_pouch_workflow_close_retains_blocked_next(void **state) {
+static void test_pouch_dispatcher_stop_retains_blocked_next(void **state) {
   char root[256], template_path[256], endpoint[320];
   const char *endpoints[1];
   lc_client_config client_config;
@@ -7387,6 +8880,7 @@ static void test_pouch_workflow_close_retains_blocked_next(void **state) {
   workflow_blocked_next_close_race race;
   lc_client *client;
   lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
   lc_error error;
   pthread_t close_thread, next_thread;
 
@@ -7403,6 +8897,7 @@ static void test_pouch_workflow_close_retains_blocked_next(void **state) {
   client_config.endpoint_count = 1U;
   client = NULL;
   workflow = NULL;
+  dispatcher = NULL;
   memset(&race, 0, sizeof(race));
   assert_int_equal(pthread_mutex_init(&race.mutex, NULL), 0);
   assert_int_equal(pthread_cond_init(&race.condition, NULL), 0);
@@ -7420,9 +8915,10 @@ static void test_pouch_workflow_close_retains_blocked_next(void **state) {
   lc_workflow_config_init(&workflow_config);
   workflow_config.namespace_name = "blocked-next-close";
   assert_int_equal(
-      lc_client_new_workflow(client, &workflow_config, &workflow, &error),
-      LC_OK);
-  race.workflow = workflow;
+      client->new_workflow(client, &workflow_config, &workflow, &error), LC_OK);
+  assert_int_equal(
+      workflow->get_or_start_dispatcher(workflow, &dispatcher, &error), LC_OK);
+  race.dispatcher = dispatcher;
   assert_int_equal(pthread_create(&next_thread, NULL,
                                   workflow_blocked_next_next_thread, &race),
                    0);
@@ -7449,11 +8945,13 @@ static void test_pouch_workflow_close_retains_blocked_next(void **state) {
       workflow_blocked_next_close_race_wait(&race, &race.next_finished));
   assert_int_equal(pthread_join(next_thread, NULL), 0);
   assert_int_equal(pthread_join(close_thread, NULL), 0);
-  assert_int_equal(race.next_rc, LC_OK);
+  assert_int_equal(race.next_rc, LC_ERR_INVALID);
   assert_null(race.job);
   workflow_reset_allocation_failures();
   assert_int_equal(pthread_cond_destroy(&race.condition), 0);
   assert_int_equal(pthread_mutex_destroy(&race.mutex), 0);
+  lc_workflow_dispatcher_close(dispatcher);
+  lc_workflow_close(workflow);
   lc_client_close(client);
   lc_error_cleanup(&error);
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
@@ -7723,6 +9221,35 @@ static void test_pouch_outbox_completion_evidence_is_bounded(void **state) {
   lc_test_tmp_cleanup_path(root, WORKFLOW_TMP_PREFIX);
 }
 
+static void test_workflow_public_rejections_clear_handle_outputs(void **state) {
+  lc_workflow_config config;
+  lc_workflow *workflow;
+  lc_workflow_dispatcher *dispatcher;
+  lc_error error;
+
+  (void)state;
+  lc_error_init(&error);
+  lc_workflow_config_init(&config);
+  workflow = (lc_workflow *)(uintptr_t)1U;
+  assert_int_equal(workflow_public_new(NULL, &config, &workflow, &error),
+                   LC_ERR_INVALID);
+  assert_null(workflow);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  workflow = (lc_workflow *)(uintptr_t)1U;
+  assert_int_equal(workflow_public_new_with_dispatcher(NULL, &config, NULL,
+                                                       &workflow, &error),
+                   LC_ERR_INVALID);
+  assert_null(workflow);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  dispatcher = (lc_workflow_dispatcher *)(uintptr_t)1U;
+  assert_int_equal(workflow_public_get_or_start(NULL, &dispatcher, &error),
+                   LC_ERR_INVALID);
+  assert_null(dispatcher);
+  lc_error_cleanup(&error);
+}
+
 int main(void) {
   const struct CMUnitTest tests[] = {
       cmocka_unit_test(
@@ -7739,6 +9266,7 @@ int main(void) {
           test_pouch_outbox_allocation_failures_roll_back_enrollment),
       cmocka_unit_test(
           test_pouch_notification_allocation_failure_reconciles_committed_outbox),
+      cmocka_unit_test(test_pouch_claim_recovery_respects_combined_capacity),
       cmocka_unit_test(
           test_pouch_retry_notification_allocation_failure_recovers_at_deadline),
       cmocka_unit_test(test_workflow_delayed_recovery_waits_for_deadline),
@@ -7760,6 +9288,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_command_attachment_failure_aborts_transaction),
       cmocka_unit_test(test_pouch_outbox_completion_evidence_is_bounded),
+      cmocka_unit_test(test_workflow_public_rejections_clear_handle_outputs),
       cmocka_unit_test(test_pouch_workflow_rejects_overflowing_deadlines),
       cmocka_unit_test(
           test_pouch_workflow_retry_uses_wide_timestamp_comparison),
@@ -7773,8 +9302,17 @@ int main(void) {
       cmocka_unit_test(test_pouch_indeterminate_first_vote_freezes_transaction),
       cmocka_unit_test(
           test_pouch_indeterminate_commit_replay_retains_outbox_notification),
+      cmocka_unit_test_setup_teardown(
+          test_pouch_expired_commit_reports_rollback_without_signal, NULL,
+          workflow_pouch_test_clock_teardown),
       cmocka_unit_test(
-          test_pouch_expired_multikey_commit_reports_rollback_without_signal),
+          test_pouch_recovery_overflow_resumes_after_capacity_frees),
+      cmocka_unit_test(
+          test_pouch_delayed_wake_does_not_block_ready_reconciliation),
+      cmocka_unit_test(test_pouch_evicted_claim_wake_recovers_at_expiry),
+      cmocka_unit_test(test_pouch_claim_recovery_survives_capacity_pause),
+      cmocka_unit_test(
+          test_pouch_concurrent_dispatcher_acquisition_keeps_one_attachment_ref),
       cmocka_unit_test(test_pouch_reconciliation_retains_overflow_request),
       cmocka_unit_test(test_pouch_reconciliation_skips_disappeared_outbox),
       cmocka_unit_test(test_pouch_handoff_skips_disappeared_outbox),
@@ -7787,14 +9325,22 @@ int main(void) {
       cmocka_unit_test(test_pouch_compacted_reopen_reconciles_released_outbox),
       cmocka_unit_test(test_pouch_dispatcher_wakeup_isolated_from_next_waiters),
       cmocka_unit_test(test_pouch_next_timeout_uses_one_deadline),
-      cmocka_unit_test(test_pouch_next_long_max_timeout_waits_until_closed),
+      cmocka_unit_test(
+          test_pouch_next_long_max_timeout_waits_until_dispatcher_stops),
       cmocka_unit_test(test_pouch_reconciliation_pages_large_outbox),
       cmocka_unit_test(
           test_pouch_reconciled_terminal_transport_failure_is_retryable),
       cmocka_unit_test(
           test_pouch_reconciled_terminal_release_failure_is_retryable),
       cmocka_unit_test(test_pouch_reconciliation_preserves_allocator_domains),
-      cmocka_unit_test(test_pouch_recovery_prefetch_is_bounded),
+      cmocka_unit_test(test_pouch_dispatcher_is_passive_until_consumer_demand),
+      cmocka_unit_test(
+          test_pouch_dispatcher_scan_recovery_when_indexing_is_disabled),
+      cmocka_unit_test(test_pouch_client_close_from_source_callback),
+      cmocka_unit_test(test_pouch_dispatcher_rejects_client_closed_replacement),
+      cmocka_unit_test(
+          test_pouch_dispatcher_stop_timeout_preserves_handed_out_job),
+      cmocka_unit_test(test_pouch_dispatcher_stop_retains_inflight_receiver),
       cmocka_unit_test(test_pouch_shared_process_dispatches_once),
       cmocka_unit_test(test_pouch_shared_process_reconciles_each_outbox_once),
       cmocka_unit_test(test_workflow_renewal_uses_server_expiry),
@@ -7820,8 +9366,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_workflow_rejects_out_of_range_durable_replay_counts),
       cmocka_unit_test(test_pouch_workflow_validates_durable_input_contracts),
-      cmocka_unit_test(test_pouch_workflow_close_serializes_ready_job_detach),
-      cmocka_unit_test(test_pouch_workflow_close_retains_blocked_next),
+      cmocka_unit_test(test_pouch_dispatcher_stop_retains_blocked_next),
   };
   return cmocka_run_group_tests(tests, NULL, NULL);
 }

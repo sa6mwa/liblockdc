@@ -436,6 +436,8 @@ int lc_pouch_state_with_namespace_lock(lc_pouch *pouch,
                                        const char *namespace_name,
                                        lc_pouch_state_precondition_fn callback,
                                        void *context, lc_error *error);
+/** Non-zero when this thread currently holds a namespace lock for `pouch`. */
+int lc_pouch_state_namespace_lock_held_by_current_thread(lc_pouch *pouch);
 int lc_pouch_state_with_key_lock(lc_pouch *pouch, const char *namespace_name,
                                  const char *key,
                                  lc_pouch_state_precondition_fn callback,

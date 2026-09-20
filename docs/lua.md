@@ -358,24 +358,38 @@ durable work:
 - `workflow:transaction(fn)` provides a lazy transaction proxy. Its first
   participant may be `acquire`, `append_outbox`, `accept_inbox`, or
   `accept_command`; it commits on normal callback return and rolls back on an
-  error. It starts no durable marker by itself, so an empty transaction is
-  invalid. Its successful result includes `outbox_receipts`, so only that
-  result contains fresh keys safe to forward. A pre-existing duplicate found
-  after a domain participant is staged makes the transaction rollback-only, so
-  no domain change can commit without its outbox/idempotency boundary. A
-  duplicate before a domain participant is enrolled may still allow an
-  independently fresh workflow receipt to commit.
+  error or any failed staged operation, even when the callback elects to
+  inspect and return normally from that structured error. It starts no durable
+  marker by itself, so an empty transaction is invalid. Its successful result
+  includes `outbox_receipts`, so only that result contains fresh keys safe to
+  forward. A pre-existing duplicate found after a domain participant is staged
+  makes the transaction rollback-only, so no domain change can commit without
+  its outbox/idempotency boundary. A duplicate first record returns its durable
+  receipt even when the callback does not return it; a duplicate before a
+  domain participant is enrolled may still allow an independently fresh
+  workflow receipt to commit.
 - `workflow:begin()` returns the same lazy transaction receiver for advanced
   code that needs explicit commit/rollback control. Its first participant has
   the same domain-acquire/command/inbox/outbox choices as `transaction(fn)`.
 - `workflow:dispatcher()` acquires the compatible local dispatcher. It has no
   configuration argument because dispatch policy comes from the workflow's
   canonical configuration.
+- `client:new_workflow(config, { dispatcher = dispatcher })` creates another
+  threadless producer attached to an already-compatible dispatcher. It is the
+  local fast wake path only: a committed receipt remains the durable source of
+  truth and may still be forwarded to a supervisor.
 - `dispatcher:next(timeout_ms)` returns a claimed job for advanced pull-based
-  consumers and claims only on that demand. `dispatcher:run({handlers = ...})`
-  is the blocking dedicated worker loop; bounded `dispatcher:pump(options)` is
-  for hosts that own their event loop. Neither should run foreign effects in an
-  HTTP route.
+  consumers and claims only on that demand. `dispatcher:next(0)` is strictly an
+  in-memory, non-query probe; a blocking call may request durable recovery.
+  `dispatcher:run({handlers = ...})` is the blocking dedicated worker loop;
+  bounded `dispatcher:pump(options)` is for hosts that own their event loop.
+  The first consumption choice binds a dispatcher to either raw pull or its
+  caller Lua state's handler table; the other mode, another handler table, or
+  another Lua state is rejected. A handler cannot recursively call `pump()` or
+  `run()` on that dispatcher (including through an alias), nor call blocking
+  `stop()` or `wait()` while it owns the active job. It must return its terminal
+  outcome before another job is consumed. Neither should run foreign effects in
+  an HTTP route.
 - `dispatcher:stats()` returns process-local counters;
   `dispatcher:reconcile()` requests durable recovery.
 - `dispatcher:replay_dead_letter(outbox_key)` returns one dead-lettered effect
@@ -386,8 +400,12 @@ durable work:
 - `workflow:close()` releases only the producer. `dispatcher:stop()` and
   `dispatcher:wait()` control the explicitly acquired dispatcher;
   `dispatcher:close()` releases a handle and does not stop shared work.
+- `client:close()` stops and joins private dispatcher workers but does not wait
+  for a job already returned to Lua. That job remains usable for its terminal
+  decision or close; stopped dispatcher wrappers reject new work and remain
+  closeable.
 
-Transactions provide `acquire`, `append_outbox`, `accept_command`,
+Transactions provide `acquire`, `append_outbox`, `accept_command`, `accept_inbox`,
 `complete_command`, `fail_command`, `commit`, `rollback`, and `close`.
 `accept_command` permits at most one command receipt per transaction.
 `txn:commit()` returns `{ outbox_receipts = { ... } }` only after a durable

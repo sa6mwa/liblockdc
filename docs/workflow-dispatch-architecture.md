@@ -72,10 +72,10 @@ job-terminal operation. These belong only to a dispatcher.
 `lc_workflow_begin()` creates a threadless, lazy transaction receiver. It does
 not create a durable transaction marker or mint an id by itself. Its first
 participating operation—domain `acquire`, command acceptance, inbox acceptance,
-or outbox append—acquires its real record without an xid and retains the
-endpoint-minted xid. Every later participant uses that xid. This preserves
-implicit-XA semantics without a new persistent record type, while allowing a
-host such as Vectis to stage a domain update before it appends an outbox effect.
+or outbox append—lazily mints an explicit xid and prepares that participant for
+one durable XA decision. Every later participant uses that xid. This lets a host
+such as Vectis stage a domain update before it appends an outbox effect without
+giving a domain-first transaction weaker recovery semantics.
 A transaction that reaches `commit()` with no participant is invalid; closing
 such an empty transaction is a local no-op.
 
@@ -235,23 +235,32 @@ infrastructure and handed-out jobs to become terminal. A timeout leaves it
 stopping; a later `wait(deadline_ms)` observes the same shutdown and never
 restarts it. Stop never invalidates an already handed-out job: it remains able
 to reach a terminal outcome until its owner closes it or its claim expires.
-Client close stops and joins all registered dispatchers before releasing client
-state, then invalidates all remaining workflow, dispatcher, and outbox-job
-handles. Any unfinished claim is left for normal expiry recovery; no handle
-retains a usable freed client.
+Client close stops and joins every registered dispatcher's private worker before
+releasing its client state. It does not wait for caller-owned handed-out jobs:
+each such job retains the client state required to stream, renew, complete, or
+close itself. Dispatcher shells remain closeable but reject new work after the
+stop; any unfinished claim is left for normal expiry recovery.
 
 ## Dispatcher activation and work limits
 
 Acquisition starts private notification/recovery infrastructure but is
-**passive**: it cannot claim a job merely because it has a wake. Claiming is
-demand-driven: a consumer asks for one job only when it has execution capacity.
-The first request selects a consumer mode:
+**passive**: it performs no namespace query, recovery sweep, or claim merely
+because a dispatcher exists or has a wake. A blocking consumer request or an
+explicit `reconcile()` starts durable recovery. `next(0)` is an in-memory
+non-query probe. Claiming is demand-driven: a consumer asks for one job only
+when it has execution capacity. The first request selects a consumer mode:
 
 - raw C consumption uses `dispatcher->next()`;
 - Lua `dispatcher:run()` and `dispatcher:pump()` bind their owner-state sink
   before requesting work; and
 - a Lua owner state cannot be replaced, while concurrent raw C `next()` calls
   share the raw pull mode.
+
+A Lua handler cannot recursively call `run()` or `pump()` on its dispatcher,
+including through an alias. The current handler must return so its outcome is
+applied before the caller-owned loop consumes another job. `stop()` and
+`wait()` are likewise rejected from that handler because they would wait for
+the handler-owned active claim.
 
 `notification_capacity` is one shared bound across direct-key candidates and
 delayed retry wakes; it does not authorize preclaiming. `next()` removes or discovers one candidate,
@@ -260,6 +269,11 @@ job only when it has an idle handler slot. A Vectis source router does the same
 for an available logical-supervisor lane. Raw C callers choose their own bounded
 worker capacity by issuing only that many concurrent or outstanding `next()`
 requests. No unbounded ready queue or library-owned claim set exists.
+
+On a Pouch root opened with `query_indexing=false`, dispatcher recovery and
+dead-letter management use the explicit `scan` query engine. They never call
+`flush_index` or silently re-enable index maintenance; this preserves the
+root's non-query opt-out while retaining durable outbox recovery.
 
 Stopping first prevents new claims and wake acceptance. It then waits only up
 to its deadline for active jobs to reach a terminal outcome. Remaining claims
@@ -375,7 +389,9 @@ local dispatcher = assert(worker_workflow:dispatcher())
 assert(dispatcher:run({
   handlers = {
     ["order.webhook"] = function(job)
-      local ok, err = deliver(job:payload_source(), job.effect_key)
+      local info = job:info()
+      local payload = assert(job:payload_json())
+      local ok, err = deliver(payload, info.effect_key)
       if not ok then
         return job:retry({ diagnostic = err, delay_seconds = 30 })
       end
@@ -399,11 +415,13 @@ dead-letter controls, `stop`, `wait`, and close. It has no producer shortcut.
 `workflow:begin()` and `workflow:transaction(fn)` create a lazy transaction
 receiver, not a durable transaction marker. Its first participant may be
 `acquire`, `append_outbox`, `accept_inbox`, or `accept_command`; that operation
-receives the endpoint-minted xid and anchors every later participant. This lets
-a Vectis transaction stage a domain update before its outbox append while
-remaining one implicit-XA decision. On normal callback return, the façade
-commits the concrete transaction; on a Lua error, explicit rollback, or a
-staging failure, it rolls back and rethrows/returns the structured failure. A
+lazily mints the explicit xid that anchors every later participant. This lets a
+Vectis transaction stage a domain update before its outbox append while
+remaining one durable XA decision. On normal callback return, the façade
+commits the concrete transaction; on a Lua error or staging failure, it rolls
+back and rethrows/returns the structured failure. Callback-scoped transactions
+reject explicit `commit`, `rollback`, and `close`: the façade is the sole owner
+of that terminal decision. A
 duplicate first command/inbox/outbox operation is returned as its ordinary
 durable duplicate result. Advanced users may keep using the explicit producer
 operations when they need to inspect and control each transaction step.
@@ -439,22 +457,29 @@ dispatcher shutdown/request limit. It returns the number of handler outcomes
 processed and never starts a second Lua owner loop. A host schedules another
 pump when it is ready; liblockdc does not create an event-loop thread.
 
-`run`/`pump` bind exactly one Lua owner state and one handler map for the
-dispatcher lifetime. A second concurrent run/pump, a different Lua state, or a
-conflicting handler map fails deterministically. Handler registrations are
-validated before activation: every key is a non-empty outbox kind and no key is
-registered twice. Unhandled kinds remain available through raw `next` for
-advanced applications; liblockdc does not invent a Vectis policy for them.
+`run`/`pump` bind exactly one Lua VM and one handler map while at least one Lua
+wrapper for the dispatcher remains live. Raw `next` instead binds raw-pull
+mode. The first consumption mode is permanent for that live-wrapper lifetime:
+a second run/pump, raw pull after handler activation, handler activation after
+raw pull, a different Lua VM, or a conflicting handler map fails
+deterministically. Dropping every Lua dispatcher wrapper releases the handler
+map and its Lua binding; a later wrapper establishes a new caller-owned Lua
+binding for the still-live native dispatcher. Handler registrations are
+validated before activation: the map is non-empty, every key is a non-empty
+outbox kind, and every value is a function. An
+unhandled kind leaves its claim for normal expiry recovery and returns a
+structured error; liblockdc does not invent a Vectis policy for it.
 
-A Lua handler receives a claimed job with a handler-scoped streaming
-`payload_source()`. It may consume the source during that call but cannot
-retain it after the handler returns. `job:complete()`, `job:retry(value)`, and
+A Lua handler receives a claimed job with the same streaming
+`job:write_payload(destination)` / `job:payload_json()` surface as raw pull.
+It may consume that payload only during the call and must not retain the job
+after returning. `job:complete()`, `job:retry(value)`, and
 `job:dead_letter(diagnostic)` create typed outcomes; the façade applies the
-actual terminal mutation after the handler returns. An exception, cancellation,
-or handler deadline produces the configured retry outcome unless an explicit
-adapter policy selects dead-lettering. The façade renews a live claim while a
-handler is executing and reports renewal/terminal failures without pretending
-the job succeeded.
+actual terminal mutation after the handler returns. An exception or a handler
+return without an outcome produces the configured retry outcome. A long foreign
+operation must call `job:renew(ttl_seconds)` before its claim expires, exactly
+as raw C and raw Lua consumers do; the binding never races a Lua callback with
+a hidden concurrent lease operation.
 
 `retry("diagnostic")` is shorthand for a diagnostic with the normal retry
 policy. `retry({ delay_seconds = n, diagnostic = message })` supports a bounded
@@ -546,6 +571,14 @@ diagram above.
 They must never demonstrate `dispatcher:run()` inside a route handler or an
 implicit dispatcher created by producer construction.
 
+The checked-in pair is `examples/workflow_producer.c` and
+`examples/lua/workflow_dispatcher.lua`. The producer commits one effect and
+exits; the Lua process owns the dispatcher and either blocks in `run()` or uses
+the explicit one-shot `LOCKDC_WORKFLOW_ONCE=1` demonstration mode. Their Pouch
+endpoint explicitly uses `single_writer=false` because they are separate
+processes. This is an executable topology example, not a recommendation to
+weaken the default single-writer mode for single-process deployments.
+
 ## Required verification
 
 Unit, integration, Lua, and end-to-end coverage must prove observable
@@ -569,8 +602,9 @@ invariants, including failure paths:
 - commit-result allocation failure occurs before a terminal vote; an
   indeterminate terminal error exposes no fresh receipt and is repaired only
   through durable recovery;
-- direct notification uses no namespace scan and no claim before consumer
-  demand, coalesces duplicates, and queue overflow/restart/closed IPC
+- dispatcher acquisition and direct notification use no namespace scan and no
+  claim before blocking consumer demand or explicit reconciliation; `next(0)`
+  is a non-query probe; duplicate wakes coalesce, and queue overflow/restart/closed IPC
   equivalently recover through reconciliation;
 - reconciliation uses bounded streamed pages and a resumable cursor under a
   full candidate budget, without materializing or preclaiming the namespace;

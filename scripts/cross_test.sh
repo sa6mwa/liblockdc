@@ -75,6 +75,8 @@ run_cross_release_matrix() {
   for preset in "${cross_release_presets[@]}"; do
     require_release_build_tree "$preset"
     require_release_runner "$preset"
+    "$timed_bin" "release-matrix build runtime tests $preset" \
+      "$script_dir/build.sh" "$preset" lockdc_cross_runtime_tests
     "$timed_bin" "release-matrix test $preset" env LOCKDC_SLOW_TEST_RUNTIME=1 \
       ctest --preset "$preset" --output-on-failure --progress --stop-on-failure \
         --timeout "$ctest_timeout" --parallel "$ctest_parallel_level" -L cross-runtime

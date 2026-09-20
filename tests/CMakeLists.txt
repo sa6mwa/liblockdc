@@ -77,6 +77,17 @@ set_tests_properties(benchmark_go_timeout_contract_test PROPERTIES
   TIMEOUT 10
 )
 
+add_test(NAME run_timed_log_test
+  COMMAND "${CMAKE_COMMAND}"
+    -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
+    -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
+    -P "${CMAKE_SOURCE_DIR}/tests/run_timed_log_test.cmake"
+)
+set_tests_properties(run_timed_log_test PROPERTIES
+  LABELS "unit;local"
+  TIMEOUT 10
+)
+
 add_test(NAME lua_binding_source_layout_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
@@ -269,7 +280,7 @@ if(TARGET lockdc_pouch_replay_probe
         --keys 1 --updates 256 --shared --unclean --live-staged
         --segment-bytes 65536 ${replay_args})
     set_tests_properties(pouch_replay_${replay_transform} PROPERTIES
-      LABELS "integration;offline;pouch;e2e"
+      LABELS "integration;offline;pouch;replay"
       RUN_SERIAL TRUE TIMEOUT 60
       WORKING_DIRECTORY "${CMAKE_BINARY_DIR}")
   endforeach()

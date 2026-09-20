@@ -23,5 +23,5 @@ else
 fi
 
 for preset in "${presets[@]}"; do
-  "$timed_bin" "release-matrix build $preset" "$script_dir/build.sh" "$preset"
+  "$timed_bin" "release-matrix build $preset" "$script_dir/build.sh" "$preset" lockdc_release_artifacts
 done

@@ -74,6 +74,20 @@ make dev-up
   through Lua's `pouch_*` client configuration fields
 - `consumer_handler.lua`
   run a stateful queue consumer with explicit message and lease handling
+- `../workflow_producer.c` and `workflow_dispatcher.lua`
+  demonstrate the transactional-outbox deployment boundary: the C producer
+  commits an effect into a shared-root Pouch store and exits; a dedicated Lua
+  dispatcher process later claims and completes it. Set `LOCKDC_POUCH_ROOT` to
+  the same absolute root for both commands. The producer prints its
+  commit-published outbox key; a real supervisor may forward that key as a
+  bounded latency hint, but restart reconciliation remains authoritative.
+
+For a one-shot local demonstration, run the producer first and then the Lua
+dispatcher with `LOCKDC_WORKFLOW_ONCE=1`. Without that variable,
+`workflow_dispatcher.lua` is the blocking dedicated worker process. Both
+processes deliberately use `single_writer=false`; default Pouch mode permits
+only one live writer and is the preferred setting when producer and dispatcher
+are in one process.
 
 ## Consumer model
 
