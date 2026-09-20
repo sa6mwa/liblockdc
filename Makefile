@@ -45,13 +45,13 @@ POUCH_GO_MEDIUM_BENCH ?= Medium
 POUCH_GO_MEDIUM_BENCHTIME ?= 1x
 POUCH_GO_MEDIUM_SEED_ROWS ?= 64
 POUCH_GO_MEDIUM_SCALE_ROWS ?= 64,1024
-POUCH_GO_MEDIUM_SCALE_SCENARIOS ?= EqSparse,EqDense,RangeHalf,InRegionSingle,InTags,ContainsMessage,IprefixTags,IcontainsTags,OrSparseOrFlag,DateAfter,RecursiveExists,TenantEnterprise,WorkflowEscalated,AmountBand,RiskSignal,NarrativeSummary,NarrativeDescription,FullTextAny
+POUCH_GO_MEDIUM_SCALE_SCENARIOS ?= EqSparse,EqDense,RangeHalf,InRegionSingle,InTags,ContainsMessage,IprefixTags,IcontainsTags,OrSparseOrFlag,DateAfter,RecursiveExists,TenantEnterprise,OutboxEscalated,AmountBand,RiskSignal,NarrativeSummary,NarrativeDescription,FullTextAny
 POUCH_GO_MEDIUM_TIMEOUT ?= 3m
-POUCH_GO_ACCEPTANCE_BENCH ?= Medium(LQL|LockdDisk)(Documents|Keys)/Docs4096/index/(EqSparse|RangeHalf|InTags|ContainsMessage|DateAfter|OrSparseOrFlag|TenantEnterprise|WorkflowEscalated|AmountBand|RiskSignal|NarrativeSummary|NarrativeDescription|FullTextAny)|MediumLQL(Documents|Keys)/Docs4096/scan/(EqSparse|RangeHalf|InTags|ContainsMessage|DateAfter|OrSparseOrFlag)
+POUCH_GO_ACCEPTANCE_BENCH ?= Medium(LQL|LockdDisk)(Documents|Keys)/Docs4096/index/(EqSparse|RangeHalf|InTags|ContainsMessage|DateAfter|OrSparseOrFlag|TenantEnterprise|OutboxEscalated|AmountBand|RiskSignal|NarrativeSummary|NarrativeDescription|FullTextAny)|MediumLQL(Documents|Keys)/Docs4096/scan/(EqSparse|RangeHalf|InTags|ContainsMessage|DateAfter|OrSparseOrFlag)
 POUCH_GO_ACCEPTANCE_BENCHTIME ?= 1x
 POUCH_GO_ACCEPTANCE_SEED_ROWS ?= 64
 POUCH_GO_ACCEPTANCE_SCALE_ROWS ?= 4096
-POUCH_GO_ACCEPTANCE_SCALE_SCENARIOS ?= EqSparse,RangeHalf,InTags,ContainsMessage,DateAfter,OrSparseOrFlag,TenantEnterprise,WorkflowEscalated,AmountBand,RiskSignal,NarrativeSummary,NarrativeDescription,FullTextAny
+POUCH_GO_ACCEPTANCE_SCALE_SCENARIOS ?= EqSparse,RangeHalf,InTags,ContainsMessage,DateAfter,OrSparseOrFlag,TenantEnterprise,OutboxEscalated,AmountBand,RiskSignal,NarrativeSummary,NarrativeDescription,FullTextAny
 POUCH_GO_ACCEPTANCE_TIMEOUT ?= 3m
 POUCH_GO_PRODUCTION_BENCH ?= Production(PouchPT|PouchCrypto|PouchCompression|PouchCryptoCompression|LockdDiskNoCrypto|LockdDiskCrypto)
 POUCH_GO_PRODUCTION_BENCHTIME ?= 1x
@@ -127,16 +127,16 @@ POUCH_PERF_CRYPTO ?= 0
 POUCH_PERF_TIMEOUT ?= 60s
 POUCH_PERF_ROUTINE_ROWS ?= 12
 POUCH_PERF_ROUTINE_PAYLOAD_BYTES ?= 131072
-WORKFLOW_BENCH_ROWS ?= 256
-WORKFLOW_BENCH_TERMINAL_ROWS ?= 1024
-WORKFLOW_BENCH_CHURN_UPDATES ?= 4
-WORKFLOW_BENCH_PAYLOAD_BYTES ?= 4096
-WORKFLOW_BENCH_PAGE_CAPACITY ?= 16
-WORKFLOW_BENCH_TIMEOUT ?= 10m
-WORKFLOW_BENCH_HARDENING_DISPATCHERS ?= 2
-WORKFLOW_BENCH_REMOTE_ENDPOINT ?= https://localhost:19441
-WORKFLOW_BENCH_REMOTE_FAILOVER_ENDPOINT ?= https://localhost:19442
-WORKFLOW_BENCH_REMOTE_BUNDLE ?= $(ROOT)/devenv/volumes/lockd-disk-a-config/client.pem
+OUTBOX_BENCH_ROWS ?= 256
+OUTBOX_BENCH_TERMINAL_ROWS ?= 1024
+OUTBOX_BENCH_CHURN_UPDATES ?= 4
+OUTBOX_BENCH_PAYLOAD_BYTES ?= 4096
+OUTBOX_BENCH_PAGE_CAPACITY ?= 16
+OUTBOX_BENCH_TIMEOUT ?= 10m
+OUTBOX_BENCH_HARDENING_DISPATCHERS ?= 2
+OUTBOX_BENCH_REMOTE_ENDPOINT ?= https://localhost:19441
+OUTBOX_BENCH_REMOTE_FAILOVER_ENDPOINT ?= https://localhost:19442
+OUTBOX_BENCH_REMOTE_BUNDLE ?= $(ROOT)/devenv/volumes/lockd-disk-a-config/client.pem
 FUZZ_TIME ?= 30
 FUZZ_LONG_TIME ?= 300
 POUCH_GO_BENCH_CFLAGS := \
@@ -170,18 +170,18 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	help \
 	__deps-debug __deps-release __deps-cross \
 	__build-debug __build-host __build-x86_64-linux-gnu-release __build-release __build-e2e __build-coverage __build-fuzz \
-	__test-debug __test-pouch-workflow-preflight __test-host __test-cross __test-e2e __test-install-tree __example-smoke-local __test-all __test-coverage \
+	__test-debug __test-pouch-outbox-preflight __test-host __test-cross __test-e2e __test-install-tree __example-smoke-local __test-all __test-coverage \
 	__format \
-	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __pouch-integration-fuzz __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-workflow-prepare __benchmark-workflow-pouch __benchmark-workflow-hardening __benchmark-workflow-remote __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate __benchmark-pouch-go-core-soak __pouch-replay-capture-churn __pouch-core-hardening \
+	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __pouch-integration-fuzz __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-outbox-prepare __benchmark-outbox-pouch __benchmark-outbox-hardening __benchmark-outbox-remote __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate __benchmark-pouch-go-core-soak __pouch-replay-capture-churn __pouch-core-hardening \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __verify-release-privacy __clean-dist \
 	__lua-rock __lua-test __lua-env __release-lua-artifacts \
 	__dev-up __dev-down __dev-reset __dev-ps __dev-logs __cross-build __cross-preset-test __cross-test \
 	__prerelease __prerelease-ordinary __prerelease-live __prerelease-hardening __lifecycle-version-contract __release __release-pipeline __release-matrix __clean \
 	deps-debug deps-release deps-cross \
 	build build-debug build-host build-release build-e2e build-coverage build-fuzz \
-	test test-debug test-pouch-workflow-preflight test-host test-cross test-e2e test-install-tree example-smoke-local test-all test-coverage \
+	test test-debug test-pouch-outbox-preflight test-host test-cross test-e2e test-install-tree example-smoke-local test-all test-coverage \
 	format \
-	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long pouch-integration-fuzz bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-workflow-pouch benchmark-workflow-hardening benchmark-workflow-remote benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate benchmark-pouch-go-core-soak pouch-replay-capture-churn \
+	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long pouch-integration-fuzz bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-outbox-pouch benchmark-outbox-hardening benchmark-outbox-remote benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate benchmark-pouch-go-core-soak pouch-replay-capture-churn \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives verify-release-privacy clean-dist \
 	lua-rock lua-test lua-env release-lua-artifacts \
 	dev-up dev-down dev-reset dev-ps dev-logs cross-build cross-preset-test cross-test \
@@ -200,7 +200,7 @@ help:
 		'make deps-release       Provision the shipped x86_64 GNU/musl release dependency trees.' \
 		'make deps-cross         Provision all non-host cross release dependency trees.' \
 		'make test-debug         Run the ASan/UBSan debug preset test suite.' \
-		'make test-pouch-workflow-preflight Run fast clean-restart and shared-dispatcher Pouch regressions.' \
+		'make test-pouch-outbox-preflight Run fast clean-restart and shared-dispatcher Pouch regressions.' \
 		'make test               Run the fast native ASan/UBSan Debug functional suite.' \
 		'make test-host          Run the pinned Bootlin host-executable GNU and musl release suites.' \
 		'make test-cross         Run the non-host cross release suites.' \
@@ -229,9 +229,9 @@ help:
 		'make benchmarks-go      Run Go parity benchmarks through the standard lifecycle name.' \
 		'make perf-gate          Enforce Pouch-vs-lockd core-operation performance thresholds for default and strict-durable I/O.' \
 		'make benchmark-pouch-perf Prepare native artifacts, then run one sub-minute pouch perf case (POUCH_PERF_CASE=$(POUCH_PERF_CASE), POUCH_PERF_ROWS=$(POUCH_PERF_ROWS), POUCH_PERF_CRYPTO=$(POUCH_PERF_CRYPTO)).' \
-		'make benchmark-workflow-pouch Run the large-outbox indexed-reconciliation benchmark against a fresh, un-compacted Pouch root.' \
-		'make benchmark-workflow-hardening Run persisted-index, compacted, and shared-writer Pouch workflow reconciliation hardening cases serially.' \
-		'make benchmark-workflow-remote Start the compose devenv, then run the same workflow reconciliation workload through the disk lockd endpoint.' \
+		'make benchmark-outbox-pouch Run the large-outbox indexed-reconciliation benchmark against a fresh, un-compacted Pouch root.' \
+		'make benchmark-outbox-hardening Run persisted-index, compacted, and shared-writer Pouch outbox reconciliation hardening cases serially.' \
+		'make benchmark-outbox-remote Start the compose devenv, then run the same outbox reconciliation workload through the disk lockd endpoint.' \
 		'make benchmark-pouch-routine Prepare benchmark artifacts, then run all bounded native phase probes plus production and shared-root concurrency comparison in at most $(POUCH_GO_ROUTINE_TIMEOUT).' \
 		'make benchmark-pouch-perf-index-docs Run the isolated public-API indexed narrative document query perf case.' \
 		'make benchmark-pouch-perf-full-text-keys Run the isolated public-API full-text key query perf case.' \
@@ -269,10 +269,10 @@ help:
 		'make cross-test         Run the host cross-preset isolation check plus all non-host cross release preset tests against existing build trees.' \
 		'make prerelease         Run mandatory native, Valgrind, and full-fuzz release confidence without an initial clean.' \
 		'make prerelease-live    Refuse without LOCKDC_PRERELEASE_LIVE=1; no live-provider checks are currently defined.' \
-		'make prerelease-hardening  Run opt-in soak, performance, and workflow stress campaigns beyond release requirements.' \
+		'make prerelease-hardening  Run opt-in soak, performance, and outbox stress campaigns beyond release requirements.' \
 		'make lifecycle-version-contract  Verify exact release tag semantics before clean release work.' \
 		'make print-release-version  Print the release version resolved by the Make-owned release surface.' \
-		'make release            Run the clean-slate final release workflow: version contract, clean, then the shared release proof graph.' \
+		'make release            Run the clean-slate final release outbox: version contract, clean, then the shared release proof graph.' \
 		'make release-matrix     Rebuild, test, package, and verify the release matrix while reusing existing build and dependency caches.' \
 		'make clean              Remove generated build, cache, dist, and devenv state.'
 
@@ -354,19 +354,19 @@ __test-debug:
 	$(TIMED) 'test-debug build' $(MAKE_RECURSE) __build-debug
 	$(TIMED) 'test-debug ctest' $(CTEST) --preset $(DEBUG_PRESET) --parallel $(LOCKDC_CTEST_PARALLEL_LEVEL)
 
-test-pouch-workflow-preflight:
-	$(TIMED) test-pouch-workflow-preflight $(MAKE_RECURSE) __test-pouch-workflow-preflight
+test-pouch-outbox-preflight:
+	$(TIMED) test-pouch-outbox-preflight $(MAKE_RECURSE) __test-pouch-outbox-preflight
 
-__test-pouch-workflow-preflight: __build-debug
-	CMOCKA_TEST_FILTER=test_pouch_multikey_prevote_failure_publishes_nothing $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
-	CMOCKA_TEST_FILTER=test_pouch_expired_commit_reports_rollback_without_signal $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
-	CMOCKA_TEST_FILTER=test_pouch_duplicate_inbox_handles_json_runtime_failure $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
-	CMOCKA_TEST_FILTER=test_pouch_reconciliation_retains_overflow_request $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
-	CMOCKA_TEST_FILTER=test_pouch_clean_reopen_reconciles_durable_index $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
-	CMOCKA_TEST_FILTER=test_pouch_shared_reopen_reconciles_durable_index $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
-	CMOCKA_TEST_FILTER=test_pouch_shared_process_reconciles_each_outbox_once $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
-	CMOCKA_TEST_FILTER=test_pouch_workflow_rejects_out_of_range_durable_replay_counts $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
-	CMOCKA_TEST_FILTER=test_pouch_dispatcher_stop_retains_blocked_next $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_workflow
+__test-pouch-outbox-preflight: __build-debug
+	CMOCKA_TEST_FILTER=test_pouch_multikey_prevote_failure_publishes_nothing $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_outbox
+	CMOCKA_TEST_FILTER=test_pouch_expired_commit_reports_rollback_without_signal $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_outbox
+	CMOCKA_TEST_FILTER=test_pouch_duplicate_inbox_handles_json_runtime_failure $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_outbox
+	CMOCKA_TEST_FILTER=test_pouch_reconciliation_retains_overflow_request $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_outbox
+	CMOCKA_TEST_FILTER=test_pouch_clean_reopen_reconciles_durable_index $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_outbox
+	CMOCKA_TEST_FILTER=test_pouch_shared_reopen_reconciles_durable_index $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_outbox
+	CMOCKA_TEST_FILTER=test_pouch_shared_process_reconciles_each_outbox_once $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_outbox
+	CMOCKA_TEST_FILTER=test_pouch_outbox_rejects_out_of_range_durable_replay_counts $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_outbox
+	CMOCKA_TEST_FILTER=test_pouch_dispatcher_stop_retains_blocked_next $(DEBUG_BUILD_DIR)/tests/unit/lc_unit_outbox
 
 test-host:
 	$(TIMED) test-host $(MAKE_RECURSE) __test-host
@@ -545,76 +545,76 @@ __benchmark-pouch-perf:
 	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
 	    $(POUCH_PERF_ROWS) $(POUCH_PERF_CASE)
 
-benchmark-workflow-pouch: __benchmark-workflow-prepare
-	$(TIMED) benchmark-workflow-pouch timeout --kill-after=5s \
-	  '$(WORKFLOW_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-workflow-pouch
+benchmark-outbox-pouch: __benchmark-outbox-prepare
+	$(TIMED) benchmark-outbox-pouch timeout --kill-after=5s \
+	  '$(OUTBOX_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-outbox-pouch
 
-__benchmark-workflow-prepare:
+__benchmark-outbox-prepare:
 	$(CMAKE) --preset $(X86_64_GNU_RELEASE_PRESET)
 	$(CMAKE) --build --preset $(X86_64_GNU_RELEASE_PRESET) --target lockdc_bench
 
-__benchmark-workflow-pouch:
-	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
-	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+__benchmark-outbox-pouch:
+	LOCKDC_OUTBOX_BENCH_TERMINAL_ROWS='$(OUTBOX_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_OUTBOX_BENCH_CHURN_UPDATES='$(OUTBOX_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_OUTBOX_BENCH_PAYLOAD_BYTES='$(OUTBOX_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_OUTBOX_BENCH_PAGE_CAPACITY='$(OUTBOX_BENCH_PAGE_CAPACITY)' \
 	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
-	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile
+	    $(OUTBOX_BENCH_ROWS) outbox-reconcile
 
-benchmark-workflow-hardening: __benchmark-workflow-prepare
-	$(TIMED) benchmark-workflow-hardening timeout --kill-after=5s \
-	  '$(WORKFLOW_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-workflow-hardening
+benchmark-outbox-hardening: __benchmark-outbox-prepare
+	$(TIMED) benchmark-outbox-hardening timeout --kill-after=5s \
+	  '$(OUTBOX_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-outbox-hardening
 
-__benchmark-workflow-hardening:
-	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
-	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+__benchmark-outbox-hardening:
+	LOCKDC_OUTBOX_BENCH_TERMINAL_ROWS='$(OUTBOX_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_OUTBOX_BENCH_CHURN_UPDATES='$(OUTBOX_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_OUTBOX_BENCH_PAYLOAD_BYTES='$(OUTBOX_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_OUTBOX_BENCH_PAGE_CAPACITY='$(OUTBOX_BENCH_PAGE_CAPACITY)' \
 	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
-	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile-preflushed
-	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
-	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+	    $(OUTBOX_BENCH_ROWS) outbox-reconcile-preflushed
+	LOCKDC_OUTBOX_BENCH_TERMINAL_ROWS='$(OUTBOX_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_OUTBOX_BENCH_CHURN_UPDATES='$(OUTBOX_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_OUTBOX_BENCH_PAYLOAD_BYTES='$(OUTBOX_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_OUTBOX_BENCH_PAGE_CAPACITY='$(OUTBOX_BENCH_PAGE_CAPACITY)' \
 	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
-	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile-warm
-	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
-	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+	    $(OUTBOX_BENCH_ROWS) outbox-reconcile-warm
+	LOCKDC_OUTBOX_BENCH_TERMINAL_ROWS='$(OUTBOX_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_OUTBOX_BENCH_CHURN_UPDATES='$(OUTBOX_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_OUTBOX_BENCH_PAYLOAD_BYTES='$(OUTBOX_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_OUTBOX_BENCH_PAGE_CAPACITY='$(OUTBOX_BENCH_PAGE_CAPACITY)' \
 	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
-	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile-compacted
-	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
-	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
-	  LOCKDC_WORKFLOW_BENCH_DISPATCHERS='$(WORKFLOW_BENCH_HARDENING_DISPATCHERS)' \
+	    $(OUTBOX_BENCH_ROWS) outbox-reconcile-compacted
+	LOCKDC_OUTBOX_BENCH_TERMINAL_ROWS='$(OUTBOX_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_OUTBOX_BENCH_CHURN_UPDATES='$(OUTBOX_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_OUTBOX_BENCH_PAYLOAD_BYTES='$(OUTBOX_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_OUTBOX_BENCH_PAGE_CAPACITY='$(OUTBOX_BENCH_PAGE_CAPACITY)' \
+	  LOCKDC_OUTBOX_BENCH_DISPATCHERS='$(OUTBOX_BENCH_HARDENING_DISPATCHERS)' \
 	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
-	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile-multi
-	LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
-	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
-	  LOCKDC_WORKFLOW_BENCH_DISPATCHERS='$(WORKFLOW_BENCH_HARDENING_DISPATCHERS)' \
+	    $(OUTBOX_BENCH_ROWS) outbox-reconcile-multi
+	LOCKDC_OUTBOX_BENCH_TERMINAL_ROWS='$(OUTBOX_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_OUTBOX_BENCH_CHURN_UPDATES='$(OUTBOX_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_OUTBOX_BENCH_PAYLOAD_BYTES='$(OUTBOX_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_OUTBOX_BENCH_PAGE_CAPACITY='$(OUTBOX_BENCH_PAGE_CAPACITY)' \
+	  LOCKDC_OUTBOX_BENCH_DISPATCHERS='$(OUTBOX_BENCH_HARDENING_DISPATCHERS)' \
 	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
-	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile-multi-compacted
+	    $(OUTBOX_BENCH_ROWS) outbox-reconcile-multi-compacted
 
-benchmark-workflow-remote: __benchmark-workflow-prepare
+benchmark-outbox-remote: __benchmark-outbox-prepare
 	$(MAKE_RECURSE) __dev-reset
 	$(MAKE_RECURSE) __dev-up
-	$(TIMED) benchmark-workflow-remote timeout --kill-after=5s \
-	  '$(WORKFLOW_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-workflow-remote
+	$(TIMED) benchmark-outbox-remote timeout --kill-after=5s \
+	  '$(OUTBOX_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-outbox-remote
 
-__benchmark-workflow-remote:
-	LOCKDC_WORKFLOW_BENCH_ENDPOINT='$(WORKFLOW_BENCH_REMOTE_ENDPOINT)' \
-	  LOCKDC_WORKFLOW_BENCH_FAILOVER_ENDPOINT='$(WORKFLOW_BENCH_REMOTE_FAILOVER_ENDPOINT)' \
-	  LOCKDC_WORKFLOW_BENCH_CLIENT_BUNDLE='$(WORKFLOW_BENCH_REMOTE_BUNDLE)' \
-	  LOCKDC_WORKFLOW_BENCH_TERMINAL_ROWS='$(WORKFLOW_BENCH_TERMINAL_ROWS)' \
-	  LOCKDC_WORKFLOW_BENCH_CHURN_UPDATES='$(WORKFLOW_BENCH_CHURN_UPDATES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAYLOAD_BYTES='$(WORKFLOW_BENCH_PAYLOAD_BYTES)' \
-	  LOCKDC_WORKFLOW_BENCH_PAGE_CAPACITY='$(WORKFLOW_BENCH_PAGE_CAPACITY)' \
+__benchmark-outbox-remote:
+	LOCKDC_OUTBOX_BENCH_ENDPOINT='$(OUTBOX_BENCH_REMOTE_ENDPOINT)' \
+	  LOCKDC_OUTBOX_BENCH_FAILOVER_ENDPOINT='$(OUTBOX_BENCH_REMOTE_FAILOVER_ENDPOINT)' \
+	  LOCKDC_OUTBOX_BENCH_CLIENT_BUNDLE='$(OUTBOX_BENCH_REMOTE_BUNDLE)' \
+	  LOCKDC_OUTBOX_BENCH_TERMINAL_ROWS='$(OUTBOX_BENCH_TERMINAL_ROWS)' \
+	  LOCKDC_OUTBOX_BENCH_CHURN_UPDATES='$(OUTBOX_BENCH_CHURN_UPDATES)' \
+	  LOCKDC_OUTBOX_BENCH_PAYLOAD_BYTES='$(OUTBOX_BENCH_PAYLOAD_BYTES)' \
+	  LOCKDC_OUTBOX_BENCH_PAGE_CAPACITY='$(OUTBOX_BENCH_PAGE_CAPACITY)' \
 	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
-	    $(WORKFLOW_BENCH_ROWS) workflow-reconcile
+	    $(OUTBOX_BENCH_ROWS) outbox-reconcile
 
 benchmark-pouch-perf-index-docs:
 	$(MAKE_RECURSE) benchmark-pouch-perf POUCH_PERF_CASE=pouch-perf-index-docs
@@ -1020,7 +1020,7 @@ __prerelease-live:
 prerelease-hardening:
 	$(TIMED) prerelease-hardening $(MAKE_RECURSE) __prerelease-hardening
 
-__prerelease-hardening: __prerelease __bench-gate __pouch-core-hardening __benchmark-workflow-hardening
+__prerelease-hardening: __prerelease __bench-gate __pouch-core-hardening __benchmark-outbox-hardening
 
 lifecycle-version-contract:
 	$(TIMED) lifecycle-version-contract $(MAKE_RECURSE) __lifecycle-version-contract

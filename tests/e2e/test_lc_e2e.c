@@ -4997,25 +4997,25 @@ static void test_pouch_direct_consumer_service_with_state(void **state) {
 #if defined(LC_E2E_GROUP_DISK_DIRECT)
 /*
  * lockd v0.8.1 does not correctly preserve implicit-XA atomicity once a
- * workflow enlists multiple participants.  Keep these remote workflow
+ * outbox enlists multiple participants.  Keep these remote outbox
  * scenarios ready for the upstream fix, but do not run them as product e2e
- * coverage meanwhile: Pouch is the supported and fully-tested workflow
+ * coverage meanwhile: Pouch is the supported and fully-tested outbox
  * backend.
  */
 #if 0
-static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
+static void test_disk_outbox_implicit_xa_roundtrip(void **state) {
   const char *endpoint;
   const char *bundle_path;
   lc_client *client;
-  lc_workflow *workflow;
-  lc_workflow_config config;
+  lc_outbox *outbox;
+  lc_outbox_config config;
   lc_outbox_entry entry;
   lc_outbox_receipt receipt;
   lc_outbox_receipt duplicate_receipt;
-  lc_workflow_transaction *transaction;
-  lc_workflow_transaction *duplicate_transaction;
-  lc_workflow_participant_request participant_request;
-  lc_workflow_participant *participant;
+  lc_outbox_transaction *transaction;
+  lc_outbox_transaction *duplicate_transaction;
+  lc_outbox_participant_request participant_request;
+  lc_outbox_participant *participant;
   lc_outbox_job *job;
   lc_source *payload;
   lc_source *duplicate_payload;
@@ -5037,9 +5037,9 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
       env_or_default("LOCKDC_E2E_DISK_BUNDLE",
                      "./devenv/volumes/lockd-disk-a-config/client.pem");
   require_file_or_skip(bundle_path);
-  make_unique_name("workflow-domain", domain_key, sizeof(domain_key));
+  make_unique_name("outbox-domain", domain_key, sizeof(domain_key));
   client = NULL;
-  workflow = NULL;
+  outbox = NULL;
   transaction = NULL;
   participant = NULL;
   job = NULL;
@@ -5055,46 +5055,46 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   lc_get_opts_init(&get_options);
   memset(&get_result, 0, sizeof(get_result));
   open_tcp_client(endpoint, bundle_path, &client, &error);
-  lc_workflow_config_init(&config);
+  lc_outbox_config_init(&config);
   config.namespace_name = "default";
-  config.owner = "workflow-e2e";
-  rc = lc_client_new_workflow(client, &config, &workflow, &error);
+  config.owner = "outbox-e2e";
+  rc = lc_client_new_outbox(client, &config, &outbox, &error);
   assert_lc_ok(rc, &error);
   lc_outbox_entry_init(&entry);
   entry.operation_id = domain_key;
   entry.effect_id = "notify";
   entry.effect_key = domain_key;
-  entry.payload_digest = "sha256:workflow-e2e-payload";
+  entry.payload_digest = "sha256:outbox-e2e-payload";
   entry.kind = "test";
-  entry.destination = "https://example.invalid/workflow";
+  entry.destination = "https://example.invalid/outbox";
   entry.content_type = "text/plain";
-  rc = lc_source_from_memory("workflow-payload", 16U, &payload, &error);
+  rc = lc_source_from_memory("outbox-payload", 16U, &payload, &error);
   assert_lc_ok(rc, &error);
   lc_outbox_receipt_init(&receipt);
-  rc = lc_workflow_append_outbox(workflow, &entry, payload, &transaction,
+  rc = lc_outbox_append(outbox, &entry, payload, &transaction,
                                  &receipt, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(transaction);
-  lc_workflow_participant_request_init(&participant_request);
+  lc_outbox_participant_request_init(&participant_request);
   participant_request.acquire.namespace_name = "default";
   participant_request.acquire.key = domain_key;
-  participant_request.acquire.owner = "workflow-e2e";
+  participant_request.acquire.owner = "outbox-e2e";
   participant_request.acquire.ttl_seconds = 30L;
-  rc = lc_workflow_transaction_acquire(transaction, &participant_request,
+  rc = lc_outbox_transaction_acquire(transaction, &participant_request,
                                        &participant, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(participant->txn_id);
-  rc = lc_source_from_memory("{\"workflow\":true}", 17U, &domain_state, &error);
+  rc = lc_source_from_memory("{\"outbox\":true}", 17U, &domain_state, &error);
   assert_lc_ok(rc, &error);
   rc = participant->update(participant, domain_state, NULL, &error);
   assert_lc_ok(rc, &error);
   lc_source_close(domain_state);
   domain_state = NULL;
-  lc_workflow_participant_close(participant);
+  lc_outbox_participant_close(participant);
   participant = NULL;
-  rc = lc_workflow_transaction_commit(transaction, &error);
+  rc = lc_outbox_transaction_commit(transaction, &error);
   assert_lc_ok(rc, &error);
-  lc_workflow_transaction_close(transaction);
+  lc_outbox_transaction_close(transaction);
   get_options.public_read = 1;
   rc = lc_sink_to_memory(&payload_sink, &error);
   assert_lc_ok(rc, &error);
@@ -5105,11 +5105,11 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   rc = lc_sink_memory_bytes(payload_sink, &payload_bytes, &payload_length,
                             &error);
   assert_lc_ok(rc, &error);
-  assert_memory_equal(payload_bytes, "{\"workflow\":true}", 17U);
+  assert_memory_equal(payload_bytes, "{\"outbox\":true}", 17U);
   lc_get_res_cleanup(&get_result);
   lc_sink_close(payload_sink);
   payload_sink = NULL;
-  rc = lc_workflow_next(workflow, 2000L, &job, &error);
+  rc = lc_outbox_next(outbox, 2000L, &job, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(job);
   assert_string_equal(job->effect_key, domain_key);
@@ -5122,18 +5122,18 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   assert_int_equal(payload_written, 16U);
   assert_int_equal(payload_length, 16U);
-  assert_memory_equal(payload_bytes, "workflow-payload", 16U);
+  assert_memory_equal(payload_bytes, "outbox-payload", 16U);
   lc_sink_close(payload_sink);
   payload_sink = NULL;
   rc = lc_outbox_job_complete(job, NULL, &error);
   assert_lc_ok(rc, &error);
   job = NULL;
-  rc = lc_source_from_memory("workflow-payload", 16U, &duplicate_payload,
+  rc = lc_source_from_memory("outbox-payload", 16U, &duplicate_payload,
                              &error);
   assert_lc_ok(rc, &error);
   lc_outbox_receipt_init(&duplicate_receipt);
-  duplicate_transaction = (lc_workflow_transaction *)1;
-  rc = lc_workflow_append_outbox(workflow, &entry, duplicate_payload,
+  duplicate_transaction = (lc_outbox_transaction *)1;
+  rc = lc_outbox_append(outbox, &entry, duplicate_payload,
                                  &duplicate_transaction, &duplicate_receipt,
                                  &error);
   assert_lc_ok(rc, &error);
@@ -5151,21 +5151,21 @@ static void test_disk_workflow_implicit_xa_roundtrip(void **state) {
     lc_sink_close(payload_sink);
   if (job != NULL)
     lc_outbox_job_close(job);
-  lc_workflow_close(workflow);
+  lc_outbox_close(outbox);
   lc_client_close(client);
   lc_error_cleanup(&error);
 }
 
 static void
-test_disk_workflow_dispatcher_uses_internal_json_limit(void **state) {
+test_disk_outbox_dispatcher_uses_internal_json_limit(void **state) {
   const char *endpoint;
   const char *bundle_path;
   lc_client *client;
-  lc_workflow *workflow;
-  lc_workflow_config config;
+  lc_outbox *outbox;
+  lc_outbox_config config;
   lc_outbox_entry entry;
   lc_outbox_receipt receipt;
-  lc_workflow_transaction *transaction;
+  lc_outbox_transaction *transaction;
   lc_outbox_job *job;
   lc_source *payload;
   lc_error error;
@@ -5182,47 +5182,47 @@ test_disk_workflow_dispatcher_uses_internal_json_limit(void **state) {
       env_or_default("LOCKDC_E2E_DISK_BUNDLE",
                      "./devenv/volumes/lockd-disk-a-config/client.pem");
   require_file_or_skip(bundle_path);
-  make_unique_name("workflow-response-limit", effect_key, sizeof(effect_key));
+  make_unique_name("outbox-response-limit", effect_key, sizeof(effect_key));
   memset(header_value, 'a', sizeof(header_value) - 1U);
   header_value[sizeof(header_value) - 1U] = '\0';
   header_length = snprintf(headers_json, sizeof(headers_json),
-                           "{\"x-workflow-proof\":\"%s\"}", header_value);
+                           "{\"x-outbox-proof\":\"%s\"}", header_value);
   assert_true(header_length > 1024);
   assert_true((size_t)header_length < sizeof(headers_json));
   client = NULL;
-  workflow = NULL;
+  outbox = NULL;
   transaction = NULL;
   job = NULL;
   payload = NULL;
   lc_error_init(&error);
   open_tcp_client_with_json_response_limit(endpoint, bundle_path, 1024U,
                                            &client, &error);
-  lc_workflow_config_init(&config);
+  lc_outbox_config_init(&config);
   config.namespace_name = "default";
-  config.owner = "workflow-response-limit-e2e";
-  rc = lc_client_new_workflow(client, &config, &workflow, &error);
+  config.owner = "outbox-response-limit-e2e";
+  rc = lc_client_new_outbox(client, &config, &outbox, &error);
   assert_lc_ok(rc, &error);
   lc_outbox_entry_init(&entry);
   entry.operation_id = effect_key;
   entry.effect_id = "notify";
   entry.effect_key = effect_key;
-  entry.payload_digest = "sha256:workflow-response-limit-payload";
+  entry.payload_digest = "sha256:outbox-response-limit-payload";
   entry.kind = "test";
-  entry.destination = "https://example.invalid/workflow-response-limit";
+  entry.destination = "https://example.invalid/outbox-response-limit";
   entry.content_type = "text/plain";
   entry.headers_json = headers_json;
-  rc = lc_source_from_memory("workflow-payload", 16U, &payload, &error);
+  rc = lc_source_from_memory("outbox-payload", 16U, &payload, &error);
   assert_lc_ok(rc, &error);
   lc_outbox_receipt_init(&receipt);
-  rc = lc_workflow_append_outbox(workflow, &entry, payload, &transaction,
+  rc = lc_outbox_append(outbox, &entry, payload, &transaction,
                                  &receipt, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(transaction);
-  rc = lc_workflow_transaction_commit(transaction, &error);
+  rc = lc_outbox_transaction_commit(transaction, &error);
   assert_lc_ok(rc, &error);
-  lc_workflow_transaction_close(transaction);
+  lc_outbox_transaction_close(transaction);
   transaction = NULL;
-  rc = lc_workflow_next(workflow, 5000L, &job, &error);
+  rc = lc_outbox_next(outbox, 5000L, &job, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(job);
   assert_string_equal(job->effect_key, effect_key);
@@ -5231,27 +5231,27 @@ test_disk_workflow_dispatcher_uses_internal_json_limit(void **state) {
   job = NULL;
   lc_outbox_receipt_cleanup(&receipt);
   lc_source_close(payload);
-  lc_workflow_close(workflow);
+  lc_outbox_close(outbox);
   lc_client_close(client);
   lc_error_cleanup(&error);
 }
 
-static void test_disk_workflow_retry_redelivery(void **state) {
+static void test_disk_outbox_retry_redelivery(void **state) {
   const char *endpoint;
   const char *bundle_path;
   lc_client *client;
-  lc_workflow *workflow;
-  lc_workflow_config config;
+  lc_outbox *outbox;
+  lc_outbox_config config;
   lc_outbox_entry entry;
   lc_outbox_receipt receipt;
-  lc_workflow_transaction *transaction;
+  lc_outbox_transaction *transaction;
   lc_outbox_job *job;
   lc_outbox_retry retry;
   lc_source *payload;
   lc_sink *export_sink;
   lc_dead_letter_export_opts export_options;
   lc_dead_letter_export_res export_result;
-  lc_workflow_stats workflow_stats;
+  lc_outbox_stats outbox_stats;
   const void *exported_bytes;
   size_t exported_length;
   lc_error error;
@@ -5265,39 +5265,39 @@ static void test_disk_workflow_retry_redelivery(void **state) {
       env_or_default("LOCKDC_E2E_DISK_BUNDLE",
                      "./devenv/volumes/lockd-disk-a-config/client.pem");
   require_file_or_skip(bundle_path);
-  make_unique_name("workflow-retry", effect_key, sizeof(effect_key));
+  make_unique_name("outbox-retry", effect_key, sizeof(effect_key));
   client = NULL;
-  workflow = NULL;
+  outbox = NULL;
   transaction = NULL;
   job = NULL;
   payload = NULL;
   export_sink = NULL;
   lc_error_init(&error);
   open_tcp_client(endpoint, bundle_path, &client, &error);
-  lc_workflow_config_init(&config);
+  lc_outbox_config_init(&config);
   config.namespace_name = "default";
-  config.owner = "workflow-retry-e2e";
-  rc = lc_client_new_workflow(client, &config, &workflow, &error);
+  config.owner = "outbox-retry-e2e";
+  rc = lc_client_new_outbox(client, &config, &outbox, &error);
   assert_lc_ok(rc, &error);
   lc_outbox_entry_init(&entry);
   entry.operation_id = effect_key;
   entry.effect_id = "retry";
   entry.effect_key = effect_key;
-  entry.payload_digest = "sha256:workflow-retry-payload";
+  entry.payload_digest = "sha256:outbox-retry-payload";
   entry.kind = "test";
   entry.destination = "retry://target";
   rc = lc_source_from_memory("retry-payload", 13U, &payload, &error);
   assert_lc_ok(rc, &error);
   lc_outbox_receipt_init(&receipt);
-  rc = lc_workflow_append_outbox(workflow, &entry, payload, &transaction,
+  rc = lc_outbox_append(outbox, &entry, payload, &transaction,
                                  &receipt, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(transaction);
-  rc = lc_workflow_transaction_commit(transaction, &error);
+  rc = lc_outbox_transaction_commit(transaction, &error);
   assert_lc_ok(rc, &error);
-  lc_workflow_transaction_close(transaction);
+  lc_outbox_transaction_close(transaction);
   transaction = NULL;
-  rc = lc_workflow_next(workflow, 3000L, &job, &error);
+  rc = lc_outbox_next(outbox, 3000L, &job, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(job);
   lc_outbox_retry_init(&retry);
@@ -5306,7 +5306,7 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   rc = lc_outbox_job_retry(job, &retry, &error);
   assert_lc_ok(rc, &error);
   job = NULL;
-  rc = lc_workflow_next(workflow, 5000L, &job, &error);
+  rc = lc_outbox_next(outbox, 5000L, &job, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(job);
   assert_string_equal(job->effect_key, effect_key);
@@ -5314,17 +5314,17 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   rc = lc_outbox_job_dead_letter(job, "permanent", &error);
   assert_lc_ok(rc, &error);
   job = NULL;
-  lc_workflow_stats_init(&workflow_stats);
-  rc = lc_workflow_get_stats(workflow, &workflow_stats, &error);
+  lc_outbox_stats_init(&outbox_stats);
+  rc = lc_outbox_get_stats(outbox, &outbox_stats, &error);
   assert_lc_ok(rc, &error);
-  assert_true(workflow_stats.running);
-  lc_workflow_stats_cleanup(&workflow_stats);
+  assert_true(outbox_stats.running);
+  lc_outbox_stats_cleanup(&outbox_stats);
   lc_dead_letter_export_opts_init(&export_options);
   export_options.format = LC_DEAD_LETTER_EXPORT_JSONL;
   lc_dead_letter_export_res_init(&export_result);
   rc = lc_sink_to_memory(&export_sink, &error);
   assert_lc_ok(rc, &error);
-  rc = lc_workflow_export_dead_letters(workflow, &export_options, export_sink,
+  rc = lc_outbox_export_dead_letters(outbox, &export_options, export_sink,
                                        &export_result, &error);
   assert_lc_ok(rc, &error);
   assert_int_equal(export_result.exported, 1U);
@@ -5336,9 +5336,9 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   assert_true(exported_length > 0U);
   lc_sink_close(export_sink);
   export_sink = NULL;
-  rc = lc_workflow_replay_dead_letter(workflow, receipt.outbox_key, &error);
+  rc = lc_outbox_replay_dead_letter(outbox, receipt.outbox_key, &error);
   assert_lc_ok(rc, &error);
-  rc = lc_workflow_next(workflow, 5000L, &job, &error);
+  rc = lc_outbox_next(outbox, 5000L, &job, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(job);
   assert_string_equal(job->effect_key, effect_key);
@@ -5349,7 +5349,7 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   lc_dead_letter_export_res_init(&export_result);
   rc = lc_sink_to_memory(&export_sink, &error);
   assert_lc_ok(rc, &error);
-  rc = lc_workflow_export_dead_letters(workflow, &export_options, export_sink,
+  rc = lc_outbox_export_dead_letters(outbox, &export_options, export_sink,
                                        &export_result, &error);
   assert_lc_ok(rc, &error);
   assert_int_equal(export_result.exported, 0U);
@@ -5357,12 +5357,12 @@ static void test_disk_workflow_retry_redelivery(void **state) {
   export_sink = NULL;
   lc_outbox_receipt_cleanup(&receipt);
   lc_source_close(payload);
-  lc_workflow_close(workflow);
+  lc_outbox_close(outbox);
   lc_client_close(client);
   lc_error_cleanup(&error);
 }
 
-static void test_disk_workflow_startup_recovery(void **state) {
+static void test_disk_outbox_startup_recovery(void **state) {
   static const char state_json[] =
       "{\"record_type\":\"lockdc.outbox.v1\",\"operation_id\":\"recovery-op\","
       "\"effect_id\":\"recovery-effect\",\"effect_key\":\"recovery-key\","
@@ -5374,8 +5374,8 @@ static void test_disk_workflow_startup_recovery(void **state) {
   const char *endpoint;
   const char *bundle_path;
   lc_client *client;
-  lc_workflow *workflow;
-  lc_workflow_config config;
+  lc_outbox *outbox;
+  lc_outbox_config config;
   lc_acquire_req acquire;
   lc_lease *lease;
   lc_source *state_source;
@@ -5395,14 +5395,14 @@ static void test_disk_workflow_startup_recovery(void **state) {
       env_or_default("LOCKDC_E2E_DISK_BUNDLE",
                      "./devenv/volumes/lockd-disk-a-config/client.pem");
   require_file_or_skip(bundle_path);
-  make_unique_name("workflow-recovery", suffix, sizeof(suffix));
+  make_unique_name("outbox-recovery", suffix, sizeof(suffix));
   /* This fixture sorts before digest-shaped production keys so a bounded
    * recovery page proves discovery without claiming unrelated durable work in
    * the shared compose-test namespace. */
   assert_true(snprintf(key, sizeof(key), "__lockdc_io/v1/outbox/-%s", suffix) >
               0);
   client = NULL;
-  workflow = NULL;
+  outbox = NULL;
   lease = NULL;
   state_source = NULL;
   payload_source = NULL;
@@ -5412,7 +5412,7 @@ static void test_disk_workflow_startup_recovery(void **state) {
   lc_acquire_req_init(&acquire);
   acquire.namespace_name = "default";
   acquire.key = key;
-  acquire.owner = "workflow-recovery-e2e";
+  acquire.owner = "outbox-recovery-e2e";
   acquire.ttl_seconds = 30L;
   rc = lc_acquire(client, &acquire, &lease, &error);
   assert_lc_ok(rc, &error);
@@ -5438,20 +5438,20 @@ static void test_disk_workflow_startup_recovery(void **state) {
   rc = lc_lease_release(lease, NULL, &error);
   assert_lc_ok(rc, &error);
   lease = NULL;
-  lc_workflow_config_init(&config);
+  lc_outbox_config_init(&config);
   config.namespace_name = "default";
-  config.owner = "workflow-recovery-e2e";
+  config.owner = "outbox-recovery-e2e";
   config.notification_capacity = 1U;
-  rc = lc_client_new_workflow(client, &config, &workflow, &error);
+  rc = lc_client_new_outbox(client, &config, &outbox, &error);
   assert_lc_ok(rc, &error);
-  rc = lc_workflow_next(workflow, 5000L, &job, &error);
+  rc = lc_outbox_next(outbox, 5000L, &job, &error);
   assert_lc_ok(rc, &error);
   assert_non_null(job);
   assert_string_equal(job->effect_key, "recovery-key");
   rc = lc_outbox_job_complete(job, NULL, &error);
   assert_lc_ok(rc, &error);
   job = NULL;
-  lc_workflow_close(workflow);
+  lc_outbox_close(outbox);
   lc_client_close(client);
   lc_error_cleanup(&error);
 }

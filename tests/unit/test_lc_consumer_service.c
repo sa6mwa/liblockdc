@@ -2800,7 +2800,7 @@ test_consumer_service_worker_clone_preserves_json_response_limit(void **state) {
 }
 
 static void
-test_workflow_dispatcher_clone_uses_standard_json_response_limit(void **state) {
+test_outbox_dispatcher_clone_uses_standard_json_response_limit(void **state) {
   tracked_allocator_state alloc_state;
   lc_allocator allocator;
   lc_client_handle client;
@@ -2822,7 +2822,7 @@ test_workflow_dispatcher_clone_uses_standard_json_response_limit(void **state) {
   dispatcher_client = NULL;
   g_consumer_test_state = &runtime_state;
 
-  assert_int_equal(lc_client_clone_remote_for_workflow(
+  assert_int_equal(lc_client_clone_remote_for_outbox(
                        &client, 456L, &dispatcher_client, &error),
                    LC_OK);
   assert_non_null(dispatcher_client);
@@ -3008,7 +3008,7 @@ int main(void) {
       cmocka_unit_test(
           test_consumer_service_worker_clone_preserves_json_response_limit),
       cmocka_unit_test(
-          test_workflow_dispatcher_clone_uses_standard_json_response_limit),
+          test_outbox_dispatcher_clone_uses_standard_json_response_limit),
       cmocka_unit_test(
           test_consumer_service_worker_clone_preserves_pouch_compression),
       cmocka_unit_test(

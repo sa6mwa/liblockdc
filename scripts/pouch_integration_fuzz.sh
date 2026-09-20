@@ -29,7 +29,7 @@ unset LD_LIBRARY_PATH
   "$build_dir/lc_pouch_integration_mutation_runner" \
   "$build_dir/lc_pouch_integration_lifecycle" \
   "$corpus_root/pouch_lifecycle" "$mutation_budget"
-"$timed_bin" "pouch integration fuzz workflow dispatcher" \
+"$timed_bin" "pouch integration fuzz outbox dispatcher" \
   "$build_dir/lc_pouch_integration_mutation_runner" \
-  "$build_dir/lc_pouch_integration_workflow_dispatcher" \
-  "$corpus_root/pouch_workflow_dispatcher" "$mutation_budget"
+  "$build_dir/lc_pouch_integration_outbox_dispatcher" \
+  "$corpus_root/pouch_outbox_dispatcher" "$mutation_budget"

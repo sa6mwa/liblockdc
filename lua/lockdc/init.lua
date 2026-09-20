@@ -12,17 +12,17 @@ Lease.__index = Lease
 local Message = {}
 Message.__index = Message
 
-local Workflow = {}
-Workflow.__index = Workflow
+local Outbox = {}
+Outbox.__index = Outbox
 
-local WorkflowDispatcher = {}
-WorkflowDispatcher.__index = WorkflowDispatcher
+local OutboxDispatcher = {}
+OutboxDispatcher.__index = OutboxDispatcher
 
-local WorkflowTransaction = {}
-WorkflowTransaction.__index = WorkflowTransaction
+local OutboxTransaction = {}
+OutboxTransaction.__index = OutboxTransaction
 
-local WorkflowParticipant = {}
-WorkflowParticipant.__index = WorkflowParticipant
+local OutboxParticipant = {}
+OutboxParticipant.__index = OutboxParticipant
 
 local OutboxJob = {}
 OutboxJob.__index = OutboxJob
@@ -51,25 +51,25 @@ local function wrap_message(core_message)
   return setmetatable({ _core = core_message, _closed = false }, Message)
 end
 
-local function wrap_workflow(core_workflow)
-  return setmetatable({ _core = core_workflow, _closed = false }, Workflow)
+local function wrap_outbox(core_outbox)
+  return setmetatable({ _core = core_outbox, _closed = false }, Outbox)
 end
 
-local function wrap_workflow_dispatcher(core_dispatcher)
+local function wrap_outbox_dispatcher(core_dispatcher)
   return setmetatable({ _core = core_dispatcher, _closed = false },
-    WorkflowDispatcher)
+    OutboxDispatcher)
 end
 
-local function wrap_workflow_transaction(core_transaction)
+local function wrap_outbox_transaction(core_transaction)
   return setmetatable({
     _core = core_transaction,
     _closed = false,
     _terminal = false,
-  }, WorkflowTransaction)
+  }, OutboxTransaction)
 end
 
-local function wrap_workflow_participant(core_participant)
-  return setmetatable({ _core = core_participant, _closed = false }, WorkflowParticipant)
+local function wrap_outbox_participant(core_participant)
+  return setmetatable({ _core = core_participant, _closed = false }, OutboxParticipant)
 end
 
 local function wrap_outbox_job(core_job)
@@ -242,18 +242,18 @@ function Client:close()
   end
 end
 
-function Client:new_workflow(config, options)
+function Client:new_outbox(config, options)
   local core_options = options
 
   if options ~= nil and options.dispatcher ~= nil then
     core_options = { dispatcher = options.dispatcher._core }
   end
-  local workflow, err = self._core:new_workflow(config, core_options)
+  local outbox, err = self._core:new_outbox(config, core_options)
 
-  if workflow == nil then
+  if outbox == nil then
     return nil, err
   end
-  return wrap_workflow(workflow)
+  return wrap_outbox(outbox)
 end
 
 function Client:new_history_consumer(config)
@@ -702,39 +702,39 @@ function Message:payload_json()
   return decode_json(payload), written_or_err
 end
 
-function Workflow:close()
+function Outbox:close()
   if self._core ~= nil and not self._closed then
     self._core:close()
     self._closed = true
   end
 end
 
-function Workflow:begin()
+function Outbox:begin()
   local transaction, err = self._core:begin()
 
   if transaction == nil then
     return nil, err
   end
-  return wrap_workflow_transaction(transaction)
+  return wrap_outbox_transaction(transaction)
 end
 
-function Workflow:transaction(fn)
+function Outbox:transaction(fn)
   return self._core:transaction(function(transaction)
-    return fn(wrap_workflow_transaction(transaction))
+    return fn(wrap_outbox_transaction(transaction))
   end)
 end
 
-function Workflow:dispatcher()
+function Outbox:dispatcher()
   local dispatcher, err = self._core:dispatcher()
 
   if dispatcher == nil then
     return nil, err
   end
-  return wrap_workflow_dispatcher(dispatcher)
+  return wrap_outbox_dispatcher(dispatcher)
 end
 
-function Workflow:append_outbox(entry, payload)
-  local transaction, receipt_or_err = self._core:append_outbox(
+function Outbox:append(entry, payload)
+  local transaction, receipt_or_err = self._core:append(
     normalize_outbox_entry(entry), payload)
 
   if transaction == nil and receipt_or_err == nil then
@@ -746,10 +746,10 @@ function Workflow:append_outbox(entry, payload)
   if transaction == nil then
     return nil, receipt_or_err
   end
-  return wrap_workflow_transaction(transaction), receipt_or_err
+  return wrap_outbox_transaction(transaction), receipt_or_err
 end
 
-function Workflow:accept_inbox(message)
+function Outbox:accept_inbox(message)
   local transaction, result_or_err = self._core:accept_inbox(message)
 
   if transaction == nil and result_or_err == nil then
@@ -761,10 +761,10 @@ function Workflow:accept_inbox(message)
   if transaction == nil then
     return nil, result_or_err
   end
-  return wrap_workflow_transaction(transaction), result_or_err
+  return wrap_outbox_transaction(transaction), result_or_err
 end
 
-function Workflow:accept_command(request)
+function Outbox:accept_command(request)
   local transaction, receipt_or_err = self._core:accept_command(request)
 
   if transaction == nil and receipt_or_err == nil then
@@ -776,18 +776,18 @@ function Workflow:accept_command(request)
   if transaction == nil then
     return nil, receipt_or_err
   end
-  return wrap_workflow_transaction(transaction), receipt_or_err
+  return wrap_outbox_transaction(transaction), receipt_or_err
 end
 
-function Workflow:command_receipt(identity)
+function Outbox:command_receipt(identity)
   return self._core:get_command_receipt(identity)
 end
 
-function Workflow:write_command_result(identity, dest)
+function Outbox:write_command_result(identity, dest)
   return self._core:write_command_result(identity, dest)
 end
 
-function Workflow:resume_command(identity)
+function Outbox:resume_command(identity)
   local transaction, receipt_or_err = self._core:resume_command(identity)
 
   if transaction == nil and receipt_or_err == nil then
@@ -799,10 +799,10 @@ function Workflow:resume_command(identity)
   if transaction == nil then
     return nil, receipt_or_err
   end
-  return wrap_workflow_transaction(transaction), receipt_or_err
+  return wrap_outbox_transaction(transaction), receipt_or_err
 end
 
-function WorkflowDispatcher:close()
+function OutboxDispatcher:close()
   if self._core ~= nil and not self._closed then
     self._core:close()
     self._closed = true
@@ -814,7 +814,7 @@ function WorkflowDispatcher:close()
   self._handler_core_map = nil
 end
 
-function WorkflowDispatcher:next(timeout_ms)
+function OutboxDispatcher:next(timeout_ms)
   local job, err = self._core:next(timeout_ms)
 
   if job == nil then
@@ -877,35 +877,35 @@ local function dispatcher_handler_options(self, options)
   return core_options
 end
 
-function WorkflowDispatcher:pump(options)
+function OutboxDispatcher:pump(options)
   return self._core:pump(dispatcher_handler_options(self, options))
 end
 
-function WorkflowDispatcher:run(options)
+function OutboxDispatcher:run(options)
   return self._core:run(dispatcher_handler_options(self, options))
 end
 
-function WorkflowDispatcher:notify_outbox_key(outbox_key)
+function OutboxDispatcher:notify_outbox_key(outbox_key)
   return self._core:notify_outbox_key(outbox_key)
 end
 
-function WorkflowDispatcher:stats()
+function OutboxDispatcher:stats()
   return self._core:stats()
 end
 
-function WorkflowDispatcher:reconcile()
+function OutboxDispatcher:reconcile()
   return self._core:reconcile()
 end
 
-function WorkflowDispatcher:replay_dead_letter(outbox_key)
+function OutboxDispatcher:replay_dead_letter(outbox_key)
   return self._core:replay_dead_letter(outbox_key)
 end
 
-function WorkflowDispatcher:delete_dead_letter(outbox_key)
+function OutboxDispatcher:delete_dead_letter(outbox_key)
   return self._core:delete_dead_letter(outbox_key)
 end
 
-function WorkflowDispatcher:export_dead_letters(options, dest)
+function OutboxDispatcher:export_dead_letters(options, dest)
   if dest == nil and (type(options) == "string" or type(options) == "number" or
       (type(options) == "table" and
        (options.path ~= nil or options.fd ~= nil))) then
@@ -914,51 +914,51 @@ function WorkflowDispatcher:export_dead_letters(options, dest)
   return self._core:export_dead_letters(options, dest)
 end
 
-function WorkflowDispatcher:stop(deadline_ms)
+function OutboxDispatcher:stop(deadline_ms)
   return self._core:stop(deadline_ms)
 end
 
-function WorkflowDispatcher:wait(deadline_ms)
+function OutboxDispatcher:wait(deadline_ms)
   return self._core:wait(deadline_ms)
 end
 
-function WorkflowTransaction:close()
+function OutboxTransaction:close()
   if self._core ~= nil and not self._closed then
     self._core:close()
     self._closed = true
   end
 end
 
-function WorkflowTransaction:acquire(req)
+function OutboxTransaction:acquire(req)
   local participant, err = self._core:acquire(req)
 
   if participant == nil then
     return nil, err
   end
-  return wrap_workflow_participant(participant)
+  return wrap_outbox_participant(participant)
 end
 
-function WorkflowTransaction:append_outbox(entry, payload)
-  return self._core:append_outbox(normalize_outbox_entry(entry), payload)
+function OutboxTransaction:append(entry, payload)
+  return self._core:append(normalize_outbox_entry(entry), payload)
 end
 
-function WorkflowTransaction:accept_command(request)
+function OutboxTransaction:accept_command(request)
   return self._core:accept_command(request)
 end
 
-function WorkflowTransaction:accept_inbox(message)
+function OutboxTransaction:accept_inbox(message)
   return self._core:accept_inbox(message)
 end
 
-function WorkflowTransaction:complete_command(result)
+function OutboxTransaction:complete_command(result)
   return self._core:complete_command(result)
 end
 
-function WorkflowTransaction:fail_command(result)
+function OutboxTransaction:fail_command(result)
   return self._core:fail_command(result)
 end
 
-function WorkflowTransaction:commit()
+function OutboxTransaction:commit()
   local ok, err = normalize_result(self._core:commit())
 
   if ok ~= nil then
@@ -967,7 +967,7 @@ function WorkflowTransaction:commit()
   return ok, err
 end
 
-function WorkflowTransaction:rollback()
+function OutboxTransaction:rollback()
   local ok, err = normalize_result(self._core:rollback())
 
   if ok ~= nil then
@@ -976,26 +976,26 @@ function WorkflowTransaction:rollback()
   return ok, err
 end
 
-function WorkflowParticipant:info()
+function OutboxParticipant:info()
   return self._core:info()
 end
 
-function WorkflowParticipant:close()
+function OutboxParticipant:close()
   if self._core ~= nil and not self._closed then
     self._core:close()
     self._closed = true
   end
 end
 
-function WorkflowParticipant:describe()
+function OutboxParticipant:describe()
   return self._core:describe()
 end
 
-function WorkflowParticipant:get_raw(opts, dest)
+function OutboxParticipant:get_raw(opts, dest)
   return self._core:get(opts, dest)
 end
 
-function WorkflowParticipant:get_json(opts)
+function OutboxParticipant:get_json(opts)
   local payload, meta_or_err = self._core:get(opts)
 
   if payload == nil then
@@ -1007,51 +1007,51 @@ function WorkflowParticipant:get_json(opts)
   return decode_json(payload), meta_or_err
 end
 
-function WorkflowParticipant:update_raw(body, opts)
+function OutboxParticipant:update_raw(body, opts)
   return self._core:update(body, opts)
 end
 
-function WorkflowParticipant:update_json(value, opts)
+function OutboxParticipant:update_json(value, opts)
   return self:update_raw(encode_json(value), with_json_content_type(opts))
 end
 
-function WorkflowParticipant:mutate(req)
+function OutboxParticipant:mutate(req)
   return self._core:mutate(req)
 end
 
-function WorkflowParticipant:mutate_local(req)
+function OutboxParticipant:mutate_local(req)
   return self._core:mutate_local(req)
 end
 
-function WorkflowParticipant:metadata(req)
+function OutboxParticipant:metadata(req)
   return self._core:metadata(req)
 end
 
-function WorkflowParticipant:remove(req)
+function OutboxParticipant:remove(req)
   return self._core:remove(req)
 end
 
-function WorkflowParticipant:keepalive(req)
+function OutboxParticipant:keepalive(req)
   return self._core:keepalive(req)
 end
 
-function WorkflowParticipant:attach(req, body)
+function OutboxParticipant:attach(req, body)
   return self._core:attach(req, body)
 end
 
-function WorkflowParticipant:list_attachments()
+function OutboxParticipant:list_attachments()
   return self._core:list_attachments()
 end
 
-function WorkflowParticipant:get_attachment(req, dest)
+function OutboxParticipant:get_attachment(req, dest)
   return self._core:get_attachment(req, dest)
 end
 
-function WorkflowParticipant:delete_attachment(selector)
+function OutboxParticipant:delete_attachment(selector)
   return self._core:delete_attachment(selector)
 end
 
-function WorkflowParticipant:delete_all_attachments()
+function OutboxParticipant:delete_all_attachments()
   return self._core:delete_all_attachments()
 end
 

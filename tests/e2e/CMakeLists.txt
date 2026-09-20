@@ -237,23 +237,23 @@ lc_add_lua_e2e_test(
 )
 
 lc_add_lua_e2e_test(
-  lc_e2e_lua_workflow
-  "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_workflow.lua"
+  lc_e2e_lua_outbox
+  "${CMAKE_SOURCE_DIR}/tests/e2e/test_lockdc_lua_outbox.lua"
   PACKAGE_ONLY
-  POUCH_ROOT "${CMAKE_BINARY_DIR}/lua-pouch-e2e/lc_e2e_lua_workflow"
+  POUCH_ROOT "${CMAKE_BINARY_DIR}/lua-pouch-e2e/lc_e2e_lua_outbox"
 )
 
-if(TARGET lc_example_workflow_producer AND LOCKDC_LUA_RUNNABLE AND
+if(TARGET lc_example_outbox_producer AND LOCKDC_LUA_RUNNABLE AND
    LOCKDC_LUAROCKS_BIN)
-  add_test(NAME lc_e2e_workflow_examples
+  add_test(NAME lc_e2e_outbox_examples
     COMMAND "${CMAKE_COMMAND}"
       -DLOCKDC_BINARY_DIR=${CMAKE_BINARY_DIR}
       -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
       -DLOCKDC_LUA_BIN=${LOCKDC_LUA_BIN}
-      -DLOCKDC_WORKFLOW_PRODUCER=$<TARGET_FILE:lc_example_workflow_producer>
-      -P "${CMAKE_CURRENT_SOURCE_DIR}/workflow_examples_test.cmake"
+      -DLOCKDC_OUTBOX_PRODUCER=$<TARGET_FILE:lc_example_outbox_producer>
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/outbox_examples_test.cmake"
   )
-  set_tests_properties(lc_e2e_workflow_examples PROPERTIES
+  set_tests_properties(lc_e2e_outbox_examples PROPERTIES
     LABELS "e2e;examples;lua"
     RUN_SERIAL TRUE
     TIMEOUT 300
@@ -281,7 +281,7 @@ set(lockdc_e2e_example_candidates
   lc_example_curl_fetch_into_lockd
   lc_example_local_mutate
   lc_example_startconsumer
-  lc_example_workflow_producer
+  lc_example_outbox_producer
 )
 set(lockdc_e2e_example_targets)
 foreach(lockdc_e2e_example_target IN LISTS lockdc_e2e_example_candidates)

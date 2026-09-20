@@ -444,7 +444,7 @@ static int lc_pouch_state_namespace_lock_is_held(lc_pouch *pouch,
 }
 
 /* Closing a client from an application source or visitor callback is valid.
- * Such callbacks can run under this authority while a workflow recovery
+ * Such callbacks can run under this authority while an outbox recovery
  * thread is waiting to acquire it.  Lifecycle code uses this narrow
  * thread-local query to defer a dispatcher join until that callback unwinds,
  * avoiding a wait cycle without weakening the namespace lock itself. */

@@ -197,7 +197,7 @@ func productionPayloadForGeneration(generation, updatesPerKey, payloadBytes int6
 const productionPayloadAlphabet = " !#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_`abcdefghijklmnopqrstuvwxyz{|}~"
 
 func productionPayloadSnippet(row, generation int64) string {
-	return fmt.Sprintf(" audit remediation evidence workflow row %d gen %d;", row, generation)
+	return fmt.Sprintf(" audit remediation evidence outbox row %d gen %d;", row, generation)
 }
 
 func productionPayloadFill(payload []byte, row, generation int64) {
@@ -218,7 +218,7 @@ func productionDocument(row, generation, payloadBytes int64) []byte {
 		target = 1024
 	}
 	prefix := fmt.Sprintf(
-		`{"bucket":"%s","group":"%s","region":"%s","value":%d,"generation":%d,"tags":["%s","%s"],"created_at":"%s","tenant":{"id":"tenant-%03d","tier":"%s","region":"%s"},"workflow":{"stage":"%s","attempt":%d,"owner":{"team":"%s","user":"user-%05d"}},"metrics":{"amount_usd":%d,"latency_ms":%d,"retries":%d},"risk":{"score":%d,"summary":"%s risk signal for production timeout workflow %d"},"narrative":{"summary":"%s","description":"%s","operator_notes":"%s"},"details":{"message":"%s production benchmark document %d","attributes":{"priority":"%s","source":"%s","schema_version":3}},"line_items":[{"sku":"sku-%04d","qty":%d,"price":%d},{"sku":"sku-%04d","qty":%d,"price":%d}],"flag":%s,"storage_pressure":null`,
+		`{"bucket":"%s","group":"%s","region":"%s","value":%d,"generation":%d,"tags":["%s","%s"],"created_at":"%s","tenant":{"id":"tenant-%03d","tier":"%s","region":"%s"},"outbox":{"stage":"%s","attempt":%d,"owner":{"team":"%s","user":"user-%05d"}},"metrics":{"amount_usd":%d,"latency_ms":%d,"retries":%d},"risk":{"score":%d,"summary":"%s risk signal for production timeout outbox %d"},"narrative":{"summary":"%s","description":"%s","operator_notes":"%s"},"details":{"message":"%s production benchmark document %d","attributes":{"priority":"%s","source":"%s","schema_version":3}},"line_items":[{"sku":"sku-%04d","qty":%d,"price":%d},{"sku":"sku-%04d","qty":%d,"price":%d}],"flag":%s,"storage_pressure":null`,
 		productionBucket(row),
 		productionGroup(row),
 		productionRegion(row),
@@ -230,7 +230,7 @@ func productionDocument(row, generation, payloadBytes int64) []byte {
 		row%47,
 		productionTenantTier(row),
 		productionRegion(row),
-		productionWorkflowStage(row),
+		productionOutboxStage(row),
 		generation+1,
 		productionTeam(row),
 		row%10000,
@@ -381,7 +381,7 @@ func productionTenantTier(row int64) string {
 	return "standard"
 }
 
-func productionWorkflowStage(row int64) string {
+func productionOutboxStage(row int64) string {
 	switch row % 6 {
 	case 0:
 		return "ingest"
@@ -444,12 +444,12 @@ func productionNarrativeSummary(row int64) string {
 }
 
 func productionNarrativeDescription(row int64) string {
-	return "long production description capturing the full audit trail, workflow transitions, validation notes, customer-visible symptoms, previous remediation attempts, backoffice comments, service ownership history, deployment context, business priority, compliance review markers, and expected follow-up actions for operators and automated reconciliation jobs"
+	return "long production description capturing the full audit trail, outbox transitions, validation notes, customer-visible symptoms, previous remediation attempts, backoffice comments, service ownership history, deployment context, business priority, compliance review markers, and expected follow-up actions for operators and automated reconciliation jobs"
 }
 
 func productionOperatorNotes(row int64) string {
 	if row%13 == 0 {
-		return "operator notes include critical escalation context, manual override history, cross-team review comments, incident timeline, retry budget exhaustion notes, and final remediation checklist for the current production workflow"
+		return "operator notes include critical escalation context, manual override history, cross-team review comments, incident timeline, retry budget exhaustion notes, and final remediation checklist for the current production outbox"
 	}
 	return "operator notes include routine triage comments, observed state transitions, queue consumer handoff details, attachment review status, replay expectations, and post-processing verification notes"
 }
@@ -463,7 +463,7 @@ func productionExpectedQueryMatches(scenario string, rows int64) int64 {
 		return rows
 	case "NarrativeSummary":
 		return ((rows - 1) / 8) + 1
-	case "WorkflowEscalated":
+	case "OutboxEscalated":
 		var count int64
 		for row := int64(0); row < rows; row++ {
 			if row%6 == 1 || row%6 == 3 {
@@ -524,16 +524,16 @@ func validateProductionDocumentFields(tb testing.TB, body []byte, row, generatio
 	expectString("/tenant/tier", stringValue("/tenant/tier", tenant["tier"]), productionTenantTier(row))
 	expectString("/tenant/region", stringValue("/tenant/region", tenant["region"]), productionRegion(row))
 
-	workflow := object("/workflow", doc["workflow"])
-	expectString("/workflow/stage", stringValue("/workflow/stage", workflow["stage"]), productionWorkflowStage(row))
-	expectNumber("/workflow/attempt", workflow["attempt"], generation+1)
-	owner := object("/workflow/owner", workflow["owner"])
-	expectString("/workflow/owner/team", stringValue("/workflow/owner/team", owner["team"]), productionTeam(row))
-	expectString("/workflow/owner/user", stringValue("/workflow/owner/user", owner["user"]), fmt.Sprintf("user-%05d", row%10000))
+	outbox := object("/outbox", doc["outbox"])
+	expectString("/outbox/stage", stringValue("/outbox/stage", outbox["stage"]), productionOutboxStage(row))
+	expectNumber("/outbox/attempt", outbox["attempt"], generation+1)
+	owner := object("/outbox/owner", outbox["owner"])
+	expectString("/outbox/owner/team", stringValue("/outbox/owner/team", owner["team"]), productionTeam(row))
+	expectString("/outbox/owner/user", stringValue("/outbox/owner/user", owner["user"]), fmt.Sprintf("user-%05d", row%10000))
 
 	risk := object("/risk", doc["risk"])
 	expectNumber("/risk/score", risk["score"], productionRiskScore(row))
-	expectString("/risk/summary", stringValue("/risk/summary", risk["summary"]), fmt.Sprintf("%s risk signal for production timeout workflow %d", productionMessage(row), row))
+	expectString("/risk/summary", stringValue("/risk/summary", risk["summary"]), fmt.Sprintf("%s risk signal for production timeout outbox %d", productionMessage(row), row))
 
 	narrative := object("/narrative", doc["narrative"])
 	expectString("/narrative/summary", stringValue("/narrative/summary", narrative["summary"]), productionNarrativeSummary(row))
@@ -548,7 +548,7 @@ func validateProductionDocumentFields(tb testing.TB, body []byte, row, generatio
 	expectNumber("/details/attributes/schema_version", attributes["schema_version"], 3)
 
 	payload := stringValue("/payload", doc["payload"])
-	expectedPayloadSnippet := fmt.Sprintf(" audit remediation evidence workflow row %d gen %d;", row, generation)
+	expectedPayloadSnippet := fmt.Sprintf(" audit remediation evidence outbox row %d gen %d;", row, generation)
 	if !bytes.Contains([]byte(payload), []byte(expectedPayloadSnippet)) {
 		tb.Fatalf("production document /payload missing expected content for row %d gen %d", row, generation)
 	}
@@ -860,10 +860,10 @@ func runLockdDiskProductionWithHAMode(b *testing.B, rows, updatesPerKey, payload
 		b.Fatalf("lockd disk production NarrativeSummary index query matched %d rows, want %d", matched, productionExpectedQueryMatches("NarrativeSummary", rows))
 	}
 	phaseStart = time.Now()
-	matched = runLockdDiskQuery(b, h, rows, "scan", "WorkflowEscalated", false)
+	matched = runLockdDiskQuery(b, h, rows, "scan", "OutboxEscalated", false)
 	addMetricDuration(&metrics.scanQueryKeysNS, phaseStart)
-	if int64(matched) != productionExpectedQueryMatches("WorkflowEscalated", rows) {
-		b.Fatalf("lockd disk production WorkflowEscalated scan query matched %d rows, want %d", matched, productionExpectedQueryMatches("WorkflowEscalated", rows))
+	if int64(matched) != productionExpectedQueryMatches("OutboxEscalated", rows) {
+		b.Fatalf("lockd disk production OutboxEscalated scan query matched %d rows, want %d", matched, productionExpectedQueryMatches("OutboxEscalated", rows))
 	}
 	warmLockdDiskProductionQuery(b, h, rows, "scan", "NarrativeDescription", true)
 	phaseStart = time.Now()

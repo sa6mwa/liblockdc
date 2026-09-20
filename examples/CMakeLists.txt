@@ -63,5 +63,5 @@ target_link_libraries(lc_example_curl_fetch_into_lockd PRIVATE ${lc_example_curl
 add_executable(lc_example_local_mutate local_mutate.c)
 lc_configure_minimal_example_target(lc_example_local_mutate)
 
-add_executable(lc_example_workflow_producer workflow_producer.c)
-lc_configure_minimal_example_target(lc_example_workflow_producer)
+add_executable(lc_example_outbox_producer outbox_producer.c)
+lc_configure_minimal_example_target(lc_example_outbox_producer)

@@ -4743,7 +4743,7 @@ static int lc_pouch_query_run_scan_predicate(lc_pouch_query_scan_context *scan,
     if (rc == LC_OK && lc_pouch_query_scan_scalar_plan_supported(&plan)) {
       /* The scalar body matcher is a bounded streaming scan optimization, not
        * a query-index feature. In particular, non-query Pouch roots must use
-       * it for workflow's durable envelope predicates: routing those simple
+       * it for outbox's durable envelope predicates: routing those simple
        * scans through the generic LQL evaluator needlessly requires its large
        * parser frame on the dispatcher's Musl thread stack. Only the optional
        * key-index candidate shortcut below depends on indexing being enabled.

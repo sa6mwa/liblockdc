@@ -378,7 +378,7 @@ Go disk queue relative keys are:
 - queue base: `q/<queue>`;
 - message metadata: `q/<queue>/msg/<id>.pb`;
 - message payload: `q/<queue>/msg/<id>.bin`;
-- workflow state: `q/<queue>/state/<id>.json`;
+- outbox state: `q/<queue>/state/<id>.json`;
 - DLQ metadata: `q/<queue>/dlq/msg/<id>.pb`;
 - DLQ payload: `q/<queue>/dlq/msg/<id>.bin`;
 - DLQ state: `q/<queue>/dlq/state/<id>.json`.
@@ -386,11 +386,11 @@ Go disk queue relative keys are:
 Go queue lease keys use relative keys without file extensions:
 
 - message lease: `q/<queue>/msg/<id>`;
-- workflow state lease: `q/<queue>/state/<id>`.
+- outbox state lease: `q/<queue>/state/<id>`.
 
 Pouch must use the same namespace-local layout family. Because Pouch does not
 use protobuf, the C-native queue metadata object key is
-`q/<queue>/msg/<id>.meta` instead of Go's `.pb`. Payload and workflow state
+`q/<queue>/msg/<id>.meta` instead of Go's `.pb`. Payload and outbox state
 keys stay Go-shaped: `q/<queue>/msg/<id>.bin` and
 `q/<queue>/state/<id>.json`. Message and state lease metadata keys remain
 extensionless: `q/<queue>/msg/<id>` and `q/<queue>/state/<id>`.
@@ -406,7 +406,7 @@ that changes participant semantics.
 Queue message leases are target-key metadata. The message document may carry
 delivery fields for API responses and CAS validation, but the authoritative
 lease, fencing token, transaction id, and lease expiry are stored and mutated on
-metadata key `q/<queue>/msg/<id>`. Workflow state leases use metadata key
+metadata key `q/<queue>/msg/<id>`. Outbox state leases use metadata key
 `q/<queue>/state/<id>`. Transaction commit/rollback must validate and clear
 those metadata leases the way Go disk does; scanning staged queue rows is not a
 substitute for participant semantics.
@@ -418,7 +418,7 @@ carries that token for ack, nack, extend, and transaction validation.
 
 Pouch transaction application routes queue participants by exact lease-key
 shape. `q/<queue>/msg/<id>` applies the staged `.meta` queue message decision
-and clears message lease metadata. `q/<queue>/state/<id>` applies workflow
+and clears message lease metadata. `q/<queue>/state/<id>` applies outbox
 state cleanup against `q/<queue>/state/<id>.json` and clears state lease
 metadata. A `.meta`, `.bin`, `.json`, staging, or scan-discovered key is not a
 queue transaction participant.
@@ -747,7 +747,7 @@ the public API or durable format.
 - Queue DLQ timing:
   Go queue moves max-attempt messages to DLQ when the ready cache observes a
   descriptor. Pouch has no Go ready-cache worker, so non-transactional terminal
-  failure nacks synchronously move message metadata, payload, and workflow
+  failure nacks synchronously move message metadata, payload, and outbox
   state to the DLQ keys. Reason: this preserves the same durable DLQ end state
   without adding a background cache layer; callers observe the terminal message
   removed from the live queue immediately.
@@ -815,8 +815,10 @@ the public API or durable format.
   recovery/takeover. Pouch deliberately does not add a second durable writer
   epoch as data authority. This is a supported Pouch extension, not the
   default Go-disk-aligned performance path.
-  Direct callers set `single_writer_set=1` and `single_writer=0`; endpoint
-  callers use `?single_writer=false`.
+  Direct internal callers set `single_writer_set=1` and `single_writer=0`;
+  public clients select the same policy with
+  `LC_POUCH_SETTING_SINGLE_WRITER` or the compatible
+  `?single_writer=false` endpoint option.
 
 - Mode transitions are lifecycle transitions. Pouch takes a writer-mode
   transition barrier that stops new append-capable operations and waits for
@@ -843,10 +845,10 @@ the public API or durable format.
   by Go disk's default `failover` mode. Finalized records are immediately
   visible and replay-safe in either policy. `durable_sync=1` enables Pouch's
   stronger root-scoped `fdatasync` group-commit policy. In that mode,
-  `fsync_batch_max_ops` is a `uint64_t` Pouch open option and a
+  `fsync_batch_max_ops` is a `uint64_t` Pouch open setting and a compatible
   `pouch://...?fsync_batch_max_ops=<u64>` endpoint option; zero is unbounded,
-  matching Go's `LogstoreCommitMaxOps`. `durable_sync` is available as both a
-  direct open option and `pouch://...?durable_sync=true`. The batcher collects
+  matching Go's `LogstoreCommitMaxOps`. `durable_sync` is available through
+  `lc_pouch_settings` and `pouch://...?durable_sync=true`. The batcher collects
   eligible requests for at most two milliseconds, or until
   `fsync_batch_max_ops` is reached, matching Go disk's bounded group-commit
   schedule. One root has one batcher: when multiple durable-sync handles are
@@ -886,7 +888,7 @@ the public API or durable format.
   state mutation.
 
 - Non-query roots:
-  `query_indexing=false` is a root-open option for append-heavy Pouch roots
+  `query_indexing=false` is a root-open setting for append-heavy Pouch roots
   that do not need derived query indexes. It prevents index warming, indexer
   startup, and write-side index extraction or publication. Implicit queries
   use scans even if a namespace's durable preference is `index`; an explicit
@@ -902,8 +904,8 @@ the public API or durable format.
   retains its active append descriptor; a shared writer retains descriptors
   only while its ownership/cursor remains valid. Rotation, recovery, takeover,
   maintenance, mode transition, close, and abort invalidate them. The
-  `queue_watch` option and
-  `pouch://...?queue_watch=true` enable Linux inotify wake-ups only on a known
+  `queue_watch` setting and compatible `pouch://...?queue_watch=true` enable
+  Linux inotify wake-ups only on a known
   non-NFS filesystem; unsupported or unknown filesystems report polling and
   retain the 100 ms polling fallback.
 
@@ -921,8 +923,9 @@ the public API or durable format.
   reclaim threshold, a 15-minute deletion grace, and an 8 MiB/s throttle.
   `background_compaction_enabled_set` distinguishes an explicit disable from
   the default, and `compaction_throttling_disabled` explicitly selects an
-  unlimited throttle. Endpoint options expose the enable/throttle choices;
-  direct Pouch open options retain the full tuning surface.
+  unlimited throttle. Typed client settings expose the public enable/throttle
+  choices; endpoint options remain a compatibility input and direct Pouch open
+  options retain the internal full tuning surface.
 
 - Background compaction scheduling:
   Go disk runs a pass at open and then on a fixed periodic timer. Pouch does
@@ -975,7 +978,7 @@ the public API or durable format.
   Checkpoints retain the monotonic fencing high-water mark even after a lease
   terminal record is reclaimed, so no future acquire can reuse a fencing token.
   Unresolved XA decisions are retained indefinitely. Resolved decisions,
-  queue terminal records, workflow receipts, and idempotency records retain
+  queue terminal records, outbox receipts, and idempotency records retain
   their existing compaction semantics; a history pin conservatively prevents
   the selected namespace compaction while it is behind. Fine-grained consumer
   boundaries for those individual record families remain future work.
@@ -1128,7 +1131,7 @@ caller namespace:
 
 - queue message metadata and payload records live under the caller namespace
   with `q/<queue>/msg/<id>`-style keys;
-- queue workflow state lives under the caller namespace with
+- queue outbox state lives under the caller namespace with
   `q/<queue>/state/<id>`-style keys;
 - attachments live under the caller namespace with
   `state/<key>/attachments/<id>` and staged attachment keys under
@@ -1257,7 +1260,7 @@ Higher-level Pouch features map onto those families:
 - queue message metadata and payloads are object records in the caller
   namespace under `q/<queue>/msg/<id>`-style keys, with documented Pouch
   extension choices if C-native records do not use `.pb`/`.bin`;
-- queue workflow state is an object record or metadata-backed queue state
+- queue outbox state is an object record or metadata-backed queue state
   record in the caller namespace under `q/<queue>/state/<id>`-style keys;
 - lease state is target-key metadata in the caller namespace;
 - transaction decisions, participants, retention markers, tombstones, and
@@ -1952,8 +1955,9 @@ The installed C header is part of this public contract. Doxygen comments for
 public Pouch-facing configuration and APIs must document the same behavior
 described here: `pouch://` uses one absolute local root, exclusive single-writer
 mode is the default, explicit shared-root writing requires
-`single_writer=false`, endpoint option values are
-copied at open, public `long` fields are range-checked before narrowing on
+`LC_POUCH_SETTING_SINGLE_WRITER` with zero (or compatible
+`single_writer=false`), typed and endpoint values are copied at open, public
+`long` fields are range-checked before narrowing on
 32-bit targets, and state bodies, queue payloads, attachments, scan output,
 query-document output, crypto, and compression remain real streaming paths
 unless the caller explicitly chooses a memory-backed source or sink.
@@ -2074,7 +2078,7 @@ shared-root contention. The soak has fixed workload and timeout controls in
 the root Makefile; it is deliberate release hardening, not an unbounded burn-in
 or a normal release prerequisite.
 
-The same lane also runs the bounded workflow reconciliation hardening suite:
+The same lane also runs the bounded outbox reconciliation hardening suite:
 preflushed and persisted indexes, a forced-compaction reopen, and shared-root
 dispatchers before and after compaction. Its cases are serial and use two
 shared-root dispatchers by default, so it exercises recovery correctness

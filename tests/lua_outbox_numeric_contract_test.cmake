@@ -11,13 +11,13 @@ foreach(required_snippet
     "static int lcdc_opt_version_field(lua_State *L, int index, const char *name,"
     "lcdc_opt_version_field(L, 2, \"if_version\", &request.if_version)"
     "static void lcdc_set_version_field(lua_State *L, const char *name,"
-    "timeout_ms = lcdc_check_long(L, 2, \"workflow dispatcher next timeout\")"
+    "timeout_ms = lcdc_check_long(L, 2, \"outbox dispatcher next timeout\")"
     "long ttl_seconds = lcdc_check_long(L, 2, \"outbox renewal ttl\")"
     "static int lcdc_set_size_field(lua_State *L, const char *name, size_t value,"
     "static int lcdc_set_uint64_field(lua_State *L, const char *name,"
     "static int lcdc_set_int64_field(lua_State *L, const char *name, lc_i64 value,"
-    "workflow statistic exceeds Lua integer range"
-    "workflow value exceeds Lua integer range"
+    "outbox statistic exceeds Lua integer range"
+    "outbox value exceeds Lua integer range"
     "lcdc_set_uint64_field(L, \"direct_notifications\","
     "stats->direct_notifications, error)"
     "lcdc_set_uint64_field(L, \"index_seq\", res.index_seq, &error)"
@@ -32,7 +32,7 @@ foreach(required_snippet
     string(FIND "${lua_binding}" "${required_snippet}" snippet_index)
     if(snippet_index EQUAL -1)
         message(FATAL_ERROR
-            "Lua workflow numeric conversion contract is missing: ${required_snippet}")
+            "Lua outbox numeric conversion contract is missing: ${required_snippet}")
     endif()
 endforeach()
 
@@ -53,17 +53,17 @@ foreach(forbidden_snippet
     string(FIND "${lua_binding}" "${forbidden_snippet}" snippet_index)
     if(NOT snippet_index EQUAL -1)
         message(FATAL_ERROR
-            "Lua workflow statistics must not narrow through C long: ${forbidden_snippet}")
+            "Lua outbox statistics must not narrow through C long: ${forbidden_snippet}")
     endif()
 endforeach()
 
 string(FIND "${lua_binding}"
-    "static int lcdc_workflow_participant_get(lua_State *L)" participant_get_start)
+    "static int lcdc_outbox_participant_get(lua_State *L)" participant_get_start)
 string(FIND "${lua_binding}"
-    "static int lcdc_workflow_participant_update(lua_State *L)" participant_get_end)
+    "static int lcdc_outbox_participant_update(lua_State *L)" participant_get_end)
 if(participant_get_start EQUAL -1 OR participant_get_end EQUAL -1 OR
    participant_get_end LESS participant_get_start)
-    message(FATAL_ERROR "Lua workflow participant get binding is missing")
+    message(FATAL_ERROR "Lua outbox participant get binding is missing")
 endif()
 
 string(FIND "${lua_binding}"
@@ -125,25 +125,25 @@ string(FIND "${participant_get_binding}"
     participant_get_narrowing_index)
 if(NOT participant_get_narrowing_index EQUAL -1)
     message(FATAL_ERROR
-        "Lua workflow participant get must not narrow version through C long")
+        "Lua outbox participant get must not narrow version through C long")
 endif()
 string(FIND "${participant_get_binding}"
     "lcdc_set_int64_field(L, \"version\", result.version, &error)"
     participant_get_wide_index)
 if(participant_get_wide_index EQUAL -1)
     message(FATAL_ERROR
-        "Lua workflow participant get must preserve 64-bit versions")
+        "Lua outbox participant get must preserve 64-bit versions")
 endif()
 
 string(FIND "${lua_binding}"
-    "static int lcdc_workflow_participant_attach(lua_State *L)"
+    "static int lcdc_outbox_participant_attach(lua_State *L)"
     participant_attach_start)
 string(FIND "${lua_binding}"
-    "static int lcdc_workflow_participant_get_attachment(lua_State *L)"
+    "static int lcdc_outbox_participant_get_attachment(lua_State *L)"
     participant_attach_end)
 if(participant_attach_start EQUAL -1 OR participant_attach_end EQUAL -1 OR
    participant_attach_end LESS participant_attach_start)
-    message(FATAL_ERROR "Lua workflow participant attach binding is missing")
+    message(FATAL_ERROR "Lua outbox participant attach binding is missing")
 endif()
 math(EXPR participant_attach_length
     "${participant_attach_end} - ${participant_attach_start}")
@@ -154,12 +154,12 @@ string(FIND "${participant_attach_binding}"
     participant_attach_wide_index)
 if(participant_attach_wide_index EQUAL -1)
     message(FATAL_ERROR
-        "Lua workflow participant attach must preserve 64-bit versions")
+        "Lua outbox participant attach must preserve 64-bit versions")
 endif()
 string(FIND "${participant_attach_binding}"
     "lcdc_set_integer_field(L, \"version\", result.version)"
     participant_attach_narrowing_index)
 if(NOT participant_attach_narrowing_index EQUAL -1)
     message(FATAL_ERROR
-        "Lua workflow participant attach must not narrow version through C long")
+        "Lua outbox participant attach must not narrow version through C long")
 endif()

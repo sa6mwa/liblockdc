@@ -658,7 +658,7 @@ test_list_attachments_response_parses_with_thread_runtime(void **state) {
 
 static void test_subscribe_meta_builds_queue_state_handle(void **state) {
   static const char json[] =
-      "{\"message\":{\"namespace\":\"default\",\"queue\":\"workflow\","
+      "{\"message\":{\"namespace\":\"default\",\"queue\":\"outbox\","
       "\"message_id\":\"msg-123\",\"attempts\":1,\"max_attempts\":5,"
       "\"payload_content_type\":\"application/"
       "json\",\"lease_id\":\"lease-msg\","
@@ -694,7 +694,7 @@ static void test_subscribe_meta_builds_queue_state_handle(void **state) {
   state_lease = message->state(message);
   assert_non_null(state_lease);
   assert_string_equal(state_lease->lease_id, "lease-state");
-  assert_string_equal(state_lease->key, "q/workflow/state/msg-123");
+  assert_string_equal(state_lease->key, "q/outbox/state/msg-123");
   assert_null(state_lease->state_etag);
 
   message->close(message);
@@ -705,7 +705,7 @@ static void test_subscribe_meta_builds_queue_state_handle(void **state) {
 static void
 test_subscribe_meta_without_state_has_no_state_handle(void **state) {
   static const char json[] =
-      "{\"message\":{\"namespace\":\"default\",\"queue\":\"workflow\","
+      "{\"message\":{\"namespace\":\"default\",\"queue\":\"outbox\","
       "\"message_id\":\"msg-456\",\"attempts\":1,\"max_attempts\":5,"
       "\"payload_content_type\":\"application/json\","
       "\"lease_id\":\"lease-msg\",\"txn_id\":\"txn-msg\","

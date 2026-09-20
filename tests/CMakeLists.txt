@@ -95,10 +95,10 @@ add_test(NAME lua_binding_source_layout_test
     -P "${CMAKE_SOURCE_DIR}/tests/lua_binding_source_layout_test.cmake"
 )
 
-add_test(NAME lua_workflow_numeric_contract_test
+add_test(NAME lua_outbox_numeric_contract_test
   COMMAND "${CMAKE_COMMAND}"
     -DLOCKDC_ROOT=${CMAKE_SOURCE_DIR}
-    -P "${CMAKE_SOURCE_DIR}/tests/lua_workflow_numeric_contract_test.cmake"
+    -P "${CMAKE_SOURCE_DIR}/tests/lua_outbox_numeric_contract_test.cmake"
 )
 
 add_test(NAME lua_external_sdk_contract_test

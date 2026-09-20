@@ -7346,6 +7346,236 @@ static void test_pouch_endpoint_configures_disk_runtime_controls(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void test_pouch_typed_settings_override_endpoint_options(void **state) {
+  lc_client *client;
+  lc_client_config config;
+  lc_client_handle *handle;
+  lc_pouch_settings settings;
+  lc_pouch_status status;
+  lc_error error;
+  const char *endpoints[1];
+  char root[512];
+  char endpoint[1536];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&status, 0, sizeof(status));
+  lc_error_init(&error);
+  make_root("typed-settings", root, sizeof(root));
+  cleanup_root(root);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?single_writer=true&durable_sync=true&"
+                       "fsync_batch_max_ops=9&segment_target_bytes=8192&"
+                       "indexer_flush_docs=32&indexer_flush_interval_seconds=2&"
+                       "queue_watch=true&background_compaction=true&"
+                       "disable_compaction_throttling=false&"
+                       "terminal_reclaim_min_bytes=4096&query_engine=index&"
+                       "query_fallback_engine=scan&query_indexing=true&"
+                       "compression=zlib",
+                       root) > 0);
+  endpoints[0] = endpoint;
+  lc_pouch_settings_init(&settings);
+  settings.set_mask =
+      LC_POUCH_SETTING_SINGLE_WRITER | LC_POUCH_SETTING_DURABLE_SYNC |
+      LC_POUCH_SETTING_FSYNC_BATCH_MAX_OPS |
+      LC_POUCH_SETTING_SEGMENT_TARGET_BYTES |
+      LC_POUCH_SETTING_INDEXER_FLUSH_DOCS |
+      LC_POUCH_SETTING_INDEXER_FLUSH_INTERVAL_SECONDS |
+      LC_POUCH_SETTING_BACKGROUND_COMPACTION |
+      LC_POUCH_SETTING_DISABLE_COMPACTION_THROTTLING |
+      LC_POUCH_SETTING_TERMINAL_RECLAIM_MIN_BYTES |
+      LC_POUCH_SETTING_QUEUE_WATCH | LC_POUCH_SETTING_QUERY_ENGINE |
+      LC_POUCH_SETTING_QUERY_FALLBACK_ENGINE | LC_POUCH_SETTING_QUERY_INDEXING |
+      LC_POUCH_SETTING_COMPRESSION;
+  settings.single_writer = 0;
+  settings.durable_sync = 0;
+  settings.fsync_batch_max_ops = 0U;
+  settings.segment_target_bytes = 4096U;
+  settings.indexer_flush_docs = 64U;
+  settings.indexer_flush_interval_seconds = 1U;
+  settings.background_compaction_enabled = 0;
+  settings.compaction_throttling_disabled = 1;
+  settings.terminal_reclaim_min_bytes = 8192U;
+  settings.queue_watch = 0;
+  settings.query_engine = "scan";
+  settings.query_fallback_engine = "index";
+  settings.query_indexing_enabled = 0;
+  settings.compression = "none";
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_settings = &settings;
+
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  handle = (lc_client_handle *)client;
+  rc = lc_pouch_status_read(handle->pouch, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_false(status.single_writer);
+  assert_false(status.durable_sync);
+  assert_int_equal(status.fsync_batch_max_ops, 0U);
+  assert_int_equal(status.segment_target_bytes, 4096U);
+  assert_int_equal(status.indexer_flush_docs, 64U);
+  assert_int_equal(status.indexer_flush_interval_seconds, 1U);
+  assert_false(status.background_compaction_enabled);
+  assert_true(status.compaction_throttling_disabled);
+  assert_int_equal(status.terminal_reclaim_min_bytes, 8192U);
+  assert_false(status.queue_watch_enabled);
+  assert_string_equal(status.query_engine, "scan");
+  assert_string_equal(status.query_fallback_engine, "index");
+  assert_false(status.query_indexing_enabled);
+  assert_string_equal(status.compression, "none");
+  lc_pouch_status_cleanup(NULL, &status);
+  lc_client_close(client);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_pouch_typed_settings_validate_backend_and_values(void **state) {
+  lc_client *client;
+  lc_client_config config;
+  lc_pouch_settings settings;
+  lc_error error;
+  const char *endpoints[1];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lc_error_init(&error);
+  lc_pouch_settings_init(&settings);
+  settings.set_mask = LC_POUCH_SETTING_DURABLE_SYNC;
+  settings.durable_sync = 1;
+  endpoints[0] = "https://lockd.invalid";
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_settings = &settings;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "pouch settings require exactly one pouch endpoint");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  settings.set_mask = LC_POUCH_SETTING_QUERY_INDEXING;
+  settings.query_indexing_enabled = 2;
+  endpoints[0] = "pouch:///tmp/liblockdc-invalid-pouch-settings";
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "pouch settings boolean fields must be zero or one");
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+
+  settings.set_mask = UINT64_C(1) << 63;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_INVALID);
+  assert_null(client);
+  assert_string_equal(error.message,
+                      "pouch settings contain an unknown set_mask bit");
+  lc_error_cleanup(&error);
+}
+
+static void test_pouch_typed_settings_override_crypto_options(void **state) {
+  lc_client *client;
+  lc_client_config config;
+  lc_client_handle *handle;
+  lc_pouch_settings settings;
+  lc_pouch_status status;
+  lc_error error;
+  const char *endpoints[1];
+  char *crypto_key;
+  char root[512];
+  char endpoint[1024];
+  int rc;
+
+  (void)state;
+  client = NULL;
+  crypto_key = NULL;
+  memset(&status, 0, sizeof(status));
+  lc_error_init(&error);
+  make_root("typed-settings-crypto", root, sizeof(root));
+  cleanup_root(root);
+  rc = lc_pouch_crypto_generate_key_string(&crypto_key, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_non_null(crypto_key);
+  assert_true(snprintf(endpoint, sizeof(endpoint),
+                       "pouch://%s?crypto_key=invalid&compression=zlib",
+                       root) > 0);
+  endpoints[0] = endpoint;
+  lc_pouch_settings_init(&settings);
+  settings.set_mask =
+      LC_POUCH_SETTING_CRYPTO_KEY | LC_POUCH_SETTING_COMPRESSION;
+  settings.crypto_key = crypto_key;
+  settings.compression = "none";
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_settings = &settings;
+
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+  handle = (lc_client_handle *)client;
+  rc = lc_pouch_status_read(handle->pouch, &status, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(status.crypto_enabled);
+  assert_string_equal(status.compression, "none");
+  lc_pouch_status_cleanup(NULL, &status);
+  lc_client_close(client);
+  lc_pouch_crypto_key_string_free(crypto_key);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
+test_pouch_typed_settings_override_crypto_file_generation(void **state) {
+  lc_client *client;
+  lc_client_config config;
+  lc_pouch_settings settings;
+  lc_error error;
+  const char *endpoints[1];
+  char endpoint[1536];
+  char key_path[640];
+  char root[512];
+  int written;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  lc_error_init(&error);
+  make_root("typed-settings-crypto-file", root, sizeof(root));
+  cleanup_root(root);
+  written = snprintf(key_path, sizeof(key_path), "%s/pouch.key", root);
+  assert_true(written > 0 && (size_t)written < sizeof(key_path));
+  written = snprintf(endpoint, sizeof(endpoint),
+                     "pouch://%s?crypto_key_file=%s&"
+                     "crypto_generate_key_file=true",
+                     root, key_path);
+  assert_true(written > 0 && (size_t)written < sizeof(endpoint));
+  endpoints[0] = endpoint;
+  lc_pouch_settings_init(&settings);
+  settings.set_mask = LC_POUCH_SETTING_CRYPTO_KEY_FILE |
+                      LC_POUCH_SETTING_CRYPTO_GENERATE_KEY_FILE;
+  settings.crypto_key_file = key_path;
+  settings.crypto_generate_key_file = 0;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_settings = &settings;
+
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_ERR_TRANSPORT);
+  assert_null(client);
+  assert_int_equal(access(key_path, F_OK), -1);
+
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_pouch_indexer_deadline_clamps_u64_interval(void **state) {
   lc_pouch *pouch;
   lc_pouch_open_options options;
@@ -11793,7 +12023,7 @@ static void test_query_index_ignores_internal_objects(void **state) {
   assert_int_equal(manifest_seq, query_seq);
 
   /* A cold selector query must ignore opaque attachment bytes. Regressions
-   * here mark scalar postings incomplete and strand workflow reconciliation. */
+   * here mark scalar postings incomplete and strand outbox reconciliation. */
   query_handler.begin = pouch_query_key_begin;
   query_handler.chunk = pouch_query_key_chunk;
   query_handler.end = pouch_query_key_end;
@@ -25764,7 +25994,7 @@ static void test_lease_keepalive_and_release_use_local_lifecycle(void **state) {
   assert_sha256_text_etag(lease->state_etag, "{\"value\":9}");
 
   /* Renewal is an extension: a shorter requested TTL cannot shorten a live
-   * lease or leave workflow recovery with a stale later deadline. */
+   * lease or leave outbox recovery with a stale later deadline. */
   before = lease->lease_expires_at_unix;
   keepalive_req.ttl_seconds = 1L;
   rc = lease->keepalive(lease, &keepalive_req, &error);
@@ -35958,6 +36188,11 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_shared_query_flush_observes_peer_streamed_state),
       cmocka_unit_test(test_query_index_staleness_is_namespace_scoped),
       cmocka_unit_test(test_pouch_endpoint_configures_disk_runtime_controls),
+      cmocka_unit_test(test_pouch_typed_settings_override_endpoint_options),
+      cmocka_unit_test(test_pouch_typed_settings_validate_backend_and_values),
+      cmocka_unit_test(test_pouch_typed_settings_override_crypto_options),
+      cmocka_unit_test(
+          test_pouch_typed_settings_override_crypto_file_generation),
       cmocka_unit_test(test_pouch_indexer_deadline_clamps_u64_interval),
       cmocka_unit_test(test_pouch_defaults_and_terminal_reclaim),
       cmocka_unit_test(test_exclusive_writer_probe_heartbeat_precedence),

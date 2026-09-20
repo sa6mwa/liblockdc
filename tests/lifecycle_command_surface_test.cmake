@@ -80,7 +80,7 @@ foreach(target
         bench-check
         benchmarks-go
         perf-gate
-        benchmark-workflow-hardening
+        benchmark-outbox-hardening
         dev-ps
         dev-logs
         release-lua-artifacts
@@ -89,18 +89,18 @@ foreach(target
     assert_contains(root_makefile "${target}:" "make target ${target}")
 endforeach()
 
-assert_contains(root_makefile "__benchmark-workflow-hardening:"
-    "workflow reconciliation hardening target")
-assert_contains(root_makefile "workflow-reconcile-preflushed"
-    "workflow hardening preflushed-index case")
-assert_contains(root_makefile "workflow-reconcile-warm"
-    "workflow hardening persisted-index case")
-assert_contains(root_makefile "workflow-reconcile-compacted"
-    "workflow hardening compacted case")
-assert_contains(root_makefile "workflow-reconcile-multi"
-    "workflow hardening shared-writer case")
-assert_contains(root_makefile "workflow-reconcile-multi-compacted"
-    "workflow hardening shared-writer compacted case")
+assert_contains(root_makefile "__benchmark-outbox-hardening:"
+    "outbox reconciliation hardening target")
+assert_contains(root_makefile "outbox-reconcile-preflushed"
+    "outbox hardening preflushed-index case")
+assert_contains(root_makefile "outbox-reconcile-warm"
+    "outbox hardening persisted-index case")
+assert_contains(root_makefile "outbox-reconcile-compacted"
+    "outbox hardening compacted case")
+assert_contains(root_makefile "outbox-reconcile-multi"
+    "outbox hardening shared-writer case")
+assert_contains(root_makefile "outbox-reconcile-multi-compacted"
+    "outbox hardening shared-writer compacted case")
 
 foreach(script
         scripts/dev-logs.sh
@@ -145,8 +145,8 @@ assert_contains(cross_test_script "\"$timed_bin\" \"release-matrix test $preset\
 assert_contains(cross_test_script "-L cross-runtime" "curated QEMU runtime test selection")
 assert_contains(cross_test_script "lockdc_cross_runtime_tests" "curated QEMU runtime build target")
 assert_contains(package_matrix_script "release-matrix package source-smoke" "per-artifact package timing")
-assert_contains(root_makefile "__prerelease-hardening: __prerelease __bench-gate __pouch-core-hardening __benchmark-workflow-hardening" "hardening prerelease graph")
-assert_not_contains(root_makefile "__prerelease-hardening: __prerelease __bench-gate __pouch-core-hardening __benchmark-workflow-hardening __fuzz" "duplicate fuzzing in hardening graph")
+assert_contains(root_makefile "__prerelease-hardening: __prerelease __bench-gate __pouch-core-hardening __benchmark-outbox-hardening" "hardening prerelease graph")
+assert_not_contains(root_makefile "__prerelease-hardening: __prerelease __bench-gate __pouch-core-hardening __benchmark-outbox-hardening __fuzz" "duplicate fuzzing in hardening graph")
 assert_contains(root_makefile "pouch-core-hardening soak" "hardening core soak timing")
 assert_contains(root_makefile "pouch-core-hardening reclaim" "hardening reclaim timing")
 assert_contains(root_makefile "pouch-core-hardening shared-root" "hardening shared-root timing")

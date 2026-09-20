@@ -76,20 +76,20 @@ assert_output_has_werror(
     TRUE
 )
 assert_output_has_werror(
-    "CMakeFiles/lc_static.dir/src/lc_workflow.c.o"
-    "workflow implementation"
+    "CMakeFiles/lc_static.dir/src/lc_outbox.c.o"
+    "outbox implementation"
     TRUE
     TRUE
 )
 if(LOCKDC_BUILD_TYPE STREQUAL "Release")
     string(REGEX MATCH
-        "\"command\": [^\n]*-O3[^\n]*\n  \"file\": [^\n]*\n  \"output\": \"[^\"]*CMakeFiles/lc_static.dir/src/lc_workflow.c.o\""
-        workflow_release_entry
+        "\"command\": [^\n]*-O3[^\n]*\n  \"file\": [^\n]*\n  \"output\": \"[^\"]*CMakeFiles/lc_static.dir/src/lc_outbox.c.o\""
+        outbox_release_entry
         "${compile_commands_json}"
     )
-    if(workflow_release_entry STREQUAL "")
+    if(outbox_release_entry STREQUAL "")
         message(FATAL_ERROR
-            "Expected optimized release compile command for workflow implementation")
+            "Expected optimized release compile command for outbox implementation")
     endif()
 endif()
 assert_output_has_werror(

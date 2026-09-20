@@ -1,6 +1,6 @@
 # liblockdc
 
-`liblockdc` is a C89/C90 client library for `lockd`. It provides a receiver-function public API for client, lease, queue delivery, attachment, management, and consumer-service handles, plus stream-based JSON and payload I/O. The project ships both static and shared libraries, a local development environment, a cross-architecture release workflow, and dependency-backed unit, e2e, sanitizer, coverage, fuzz, and benchmark targets.
+`liblockdc` is a C89/C90 client library for `lockd`. It provides a receiver-function public API for client, lease, queue delivery, attachment, management, and consumer-service handles, plus stream-based JSON and payload I/O. The project ships both static and shared libraries, a local development environment, a cross-architecture release outbox, and dependency-backed unit, e2e, sanitizer, coverage, fuzz, and benchmark targets.
 
 ## Supported targets
 
@@ -30,17 +30,17 @@ The library itself is delivered as:
 - streamed query-key callbacks and streaming queue subscribe/watch flows
 - managed consumer support with blocking and explicit start/stop/wait service modes
 - durable command-receipt, inbox, outbox, dispatcher, retry, reconciliation,
-  and dead-letter workflow receivers
+  and dead-letter outbox receivers
 - integrated SDK logging through `libpslog`
 
 The durable transactional messaging model and endpoint constraints are
-specified in [the workflow design](docs/inbox-outbox.md). The threadless
+specified in [the outbox design](docs/inbox-outbox.md). The threadless
 producer, explicit dispatcher, and Vectis integration contract are specified
-in [the workflow dispatch architecture](docs/workflow-dispatch-architecture.md).
-The Lua workflow facade is documented in [the Lua SDK guide](docs/lua.md).
+in [the outbox dispatch architecture](docs/outbox-dispatch-architecture.md).
+The Lua outbox facade is documented in [the Lua SDK guide](docs/lua.md).
 The executable direct deployment pair is
-[`examples/workflow_producer.c`](examples/workflow_producer.c) and
-[`examples/lua/workflow_dispatcher.lua`](examples/lua/workflow_dispatcher.lua):
+[`examples/outbox_producer.c`](examples/outbox_producer.c) and
+[`examples/lua/outbox_dispatcher.lua`](examples/lua/outbox_dispatcher.lua):
 the producer commits and exits, while the dedicated Lua process performs the
 foreign-effect dispatch.
 
@@ -63,8 +63,11 @@ available for callers that need multiple active local writers by adding
 `?single_writer=false`; that mode preserves
 correctness and process fencing but is not the primary performance target.
 
-Pouch endpoint options mirror the public C config and direct Pouch storage
-options. Common options are:
+New C and Lua applications should configure Pouch root policy with the typed
+`lc_pouch_settings` / `lockdc.open({ pouch = ... })` API. The endpoint options
+below remain fully supported for deployment compatibility and are overridden
+per field by typed settings. See [typed Pouch open settings](docs/pouch-open-settings-api.md).
+Common legacy options are:
 
 - `compression=zlib` for streaming at-rest zlib
   compression
@@ -88,7 +91,7 @@ options. Common options are:
   namespace query preference used at open
 - `query_indexing=false` for roots that never use indexed queries. This
   disables local index maintenance and makes implicit queries use scans;
-  explicit indexed queries and `flush_index` are unavailable. Pouch workflow
+  explicit indexed queries and `flush_index` are unavailable. Pouch outbox
   recovery and dead-letter management continue through bounded scan queries.
 
 The public API remains the same receiver-function SDK surface for remote and
@@ -98,7 +101,7 @@ the caller explicitly chooses an in-memory source or sink.
 
 ## Build system
 
-The repository (<https://github.com/sa6mwa/liblockdc>) uses a Makefile-first workflow with CMake as the build backend:
+The repository (<https://github.com/sa6mwa/liblockdc>) uses a Makefile-first outbox with CMake as the build backend:
 
 - `Makefile`
   - primary developer entry point
@@ -126,7 +129,7 @@ Normal development expects:
 
 Every Linux build uses its matching pinned Bootlin GCC collection, including
 the compiler, linker, binutils, sysroot, headers, and runtime. The Make and
-CMake workflows provision those collections automatically; do not substitute
+CMake outboxes provision those collections automatically; do not substitute
 host or distro cross compilers. Toolchains are shared under
 `${CPKT_TOOLCHAIN_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/c.pkt.systems/toolchains}`
 and verified dependency archives under
@@ -140,7 +143,7 @@ executables, tests, examples, Lua module checks, and SDK consumer probes run
 directly with their selected Bootlin ELF interpreter and private runtime lookup
 paths; they do not use `LD_LIBRARY_PATH` or a host Lua interpreter.
 
-## Common workflows
+## Common outboxes
 
 Build the normal host development preset:
 
@@ -213,7 +216,7 @@ the same iteration count across all benchmark cases.
 All significant Make targets print total elapsed time on completion.
 
 `make format` runs `clang-format` over the C source/header tree and is also
-part of the clean-slate release workflow.
+part of the clean-slate release outbox.
 
 ## Local development environment
 
@@ -242,7 +245,7 @@ Stop the environment:
 make dev-down
 ```
 
-The e2e workflow is self-contained. `make test-e2e` resets the generated environment state, starts the compose stack, waits for the generated bundles and listeners, probes the active disk endpoint, and then runs the e2e CTest preset.
+The e2e outbox is self-contained. `make test-e2e` resets the generated environment state, starts the compose stack, waits for the generated bundles and listeners, probes the active disk endpoint, and then runs the e2e CTest preset.
 
 Additional development-environment notes are available in the repository at `devenv/README.md`.
 
@@ -256,7 +259,7 @@ Create the complete release set:
 make release
 ```
 
-`make release` is the final clean-slate release workflow. It verifies release
+`make release` is the final clean-slate release outbox. It verifies release
 tag semantics, removes generated state, then runs the same proof graph as
 `make prerelease`: formatting, debug sanitizer tests including Lua coverage,
 Valgrind, fuzz smoke, lockd e2e, bounded benchmark smoke, and the release
@@ -417,7 +420,7 @@ The intended ownership model is:
   client distribution instead of maintaining a second `lockd` Lua client or an
   incompatible JSON binding layout
 
-This keeps one coherent SDK import path for downstream Lua workflow runtimes.
+This keeps one coherent SDK import path for downstream Lua outbox runtimes.
 
 For the Lua public surface, consumer behavior, and packaging model, see:
 
@@ -562,7 +565,7 @@ The examples in the repository at <https://github.com/sa6mwa/liblockdc/tree/main
   - AFL++ unit harnesses and isolated-process Pouch integration mutation
     harnesses
 - `scripts/`
-  - workflow and environment scripts
+  - outbox and environment scripts
 - `devenv/`
   - local environment notes
 

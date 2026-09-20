@@ -89,7 +89,7 @@ This keeps the Lua dependency graph coherent:
 
 - one SDK owner for the public lock client and JSON contract
 - one Lua JSON binding version aligned with the public `liblockdc` API surface
-- one installation/import path for downstream workflow runtimes
+- one installation/import path for downstream outbox runtimes
 
 The Lua binding does not expose `pslog` configuration. Native logging is a
 `liblockdc` SDK concern; normal Lua rock users get the SDK no-op logger
@@ -118,9 +118,9 @@ Primary handle types:
 - `Client`
 - `Lease`
 - `Message`
-- `Workflow`
-- `WorkflowTransaction`
-- `WorkflowParticipant`
+- `Outbox`
+- `OutboxTransaction`
+- `OutboxParticipant`
 - `OutboxJob`
 - `Service`
 
@@ -156,19 +156,25 @@ should prefer `client_bundle_source`.
 
 ### Local Pouch storage
 
-Use exactly one absolute `pouch://` endpoint for local storage. Lua exposes the
-same Pouch client configuration fields as `lc_client_config`: `pouch_crypto_key`,
+Use exactly one absolute `pouch://` endpoint for local storage. New Lua code
+should put root-open policy in the nested `pouch` table; it includes crypto,
+compression, writer, durability, maintenance, queue-watch, and query-index
+settings. Presence is significant: `false` and `0` deliberately override an
+endpoint option. The compatibility top-level fields `pouch_crypto_key`,
 `pouch_crypto_key_file`, `pouch_crypto_generate_key_file`, and
-`pouch_compression`. Explicit Lua configuration takes the same precedence over
-endpoint query options as the C client configuration.
+`pouch_compression` remain accepted, but a matching nested `pouch` value wins.
 
 ```lua
 local client, err = lockdc.open({
   endpoints = { "pouch:///var/lib/my-service/lockd-root" },
   default_namespace = "default",
-  pouch_crypto_key_file = "/var/lib/my-service/lockd-root/pouch.key",
-  pouch_crypto_generate_key_file = true,
-  pouch_compression = "zlib",
+  pouch = {
+    crypto_key_file = "/var/lib/my-service/lockd-root/pouch.key",
+    crypto_generate_key_file = true,
+    compression = "zlib",
+    query_indexing = false,
+    query_engine = "scan",
+  },
 })
 ```
 
@@ -177,6 +183,11 @@ exclusive single-writer by default; opening another writer for the same root
 returns the normal structured `lockdc.open` error. Endpoint query options stay
 supported for compatibility, including `?single_writer=false` where shared
 writers are explicitly required.
+
+Typed Pouch settings are local-only: supplying a non-empty `pouch` table to a
+remote or Unix-socket client returns the normal structured open error. See
+[typed Pouch open settings](pouch-open-settings-api.md) for every key and its
+precedence rule.
 
 Common client methods:
 
@@ -228,7 +239,7 @@ Common client methods:
 - `client:tc_rm_register(req)`
 - `client:tc_rm_unregister(req)`
 - `client:tc_rm_list()`
-- `client:new_workflow(config)`
+- `client:new_outbox(config)`
 - `client:new_history_consumer(config)`
 - `client:subscribe(req, handler)`
 - `client:subscribe_with_state(req, handler)`
@@ -265,25 +276,25 @@ Use a stable consumer ID and register it before producing history that must be
 retained. A slow cursor can retain more on-disk history, but normal Pouch open,
 read, query, and mutation paths never enumerate consumer records.
 
-## Inbox/outbox workflows
+## Inbox/outboxes
 
-`client:new_workflow(config)` creates a threadless inbox/outbox producer. Its
+`client:new_outbox(config)` creates a threadless inbox/outbox producer. Its
 `namespace` (or `namespace_name`) contains both durable inbox and outbox keys.
 It never starts a dispatcher, claims a job, performs recovery, or invokes a
-foreign effect. Use `workflow:dispatcher()` only in the dedicated worker or
+foreign effect. Use `outbox:dispatcher()` only in the dedicated worker or
 service domain that owns delivery. The complete lifecycle and host-integration
-contract is in [the workflow dispatch architecture](workflow-dispatch-architecture.md).
+contract is in [the outbox dispatch architecture](outbox-dispatch-architecture.md).
 
 ```lua
 -- Request/producer domain: this is safe to construct without creating a
 -- background dispatcher.
-local workflow = assert(client:new_workflow({
-  namespace = "orders-workflow",
+local outbox = assert(client:new_outbox({
+  namespace = "orders-outbox",
   owner = "orders-api",
   max_attempts = 100,
 }))
 
-local txn = assert(workflow:append_outbox({
+local txn = assert(outbox:append({
   operation_id = order_id,
   effect_id = "charge-card",
   effect_key = "charge:" .. order_id,
@@ -303,17 +314,17 @@ txn:close()
 -- bounded worker/supervisor wake channel may copy those keys now, never before.
 
 -- worker.lua, in a dedicated worker/service process. This opens its own client
--- and workflow, then returns the one compatible local dispatcher or starts it
+-- and outbox, then returns the one compatible local dispatcher or starts it
 -- lazily. It does not run Lua on its private C thread.
 -- For a Pouch root shared with the producer process, both client configurations
 -- must explicitly select the supported `single_writer=false` shared-root mode.
 local worker_client = assert(lockdc.open(worker_client_config))
-local worker_workflow = assert(worker_client:new_workflow({
-  namespace = "orders-workflow",
+local worker_outbox = assert(worker_client:new_outbox({
+  namespace = "orders-outbox",
   owner = "orders-api",
   max_attempts = 100,
 }))
-local dispatcher = assert(worker_workflow:dispatcher())
+local dispatcher = assert(worker_outbox:dispatcher())
 assert(dispatcher:run({
   handlers = {
     http = function(job)
@@ -326,9 +337,9 @@ assert(dispatcher:run({
 
 `headers` is the façade convenience form and is JSON-encoded into the durable
 `headers_json` envelope. Pass `headers_json` directly when it is already
-serialized; supplying both is an error. `workflow:accept_inbox(message)`
+serialized; supplying both is an error. `outbox:accept_inbox(message)`
 returns `nil, result` on an accepted duplicate, where `result.duplicate` is
-true. Otherwise it returns a `WorkflowTransaction` and `result.accepted` is
+true. Otherwise it returns a `OutboxTransaction` and `result.accepted` is
 true.
 
 Outbox `payload_digest` is required immutable metadata binding the supplied
@@ -340,23 +351,23 @@ or buffer the payload before it stages the attachment.
 `max_attempts` must fit the C API's signed 32-bit integer range; values outside
 that range are rejected instead of being narrowed or defaulted.
 
-Workflow receivers are explicit and owned. Parent acceptance and append
-operations return a new `WorkflowTransaction` only when they created fresh
+Outbox receivers are explicit and owned. Parent acceptance and append
+operations return a new `OutboxTransaction` only when they created fresh
 durable work:
 
-- `workflow:append_outbox(entry, payload)` returns `txn, nil` for a fresh
+- `outbox:append(entry, payload)` returns `txn, nil` for a fresh
   append. Its receipt appears only in the successful `txn:commit()` result. A
   matching committed effect returns `nil, receipt` with `receipt.duplicate`.
-- `workflow:accept_inbox(message)` returns `txn, result`; a matching source
+- `outbox:accept_inbox(message)` returns `txn, result`; a matching source
   message returns `nil, result` with `result.duplicate`.
-- `workflow:accept_command(request)` returns `txn, receipt`; a matching
+- `outbox:accept_command(request)` returns `txn, receipt`; a matching
   command returns `nil, receipt` with `receipt.duplicate`. Use
-  `workflow:command_receipt(identity)` for a direct durable status read,
-  `workflow:write_command_result(identity, destination)` to stream a completed
-  result body, and `workflow:resume_command(identity)` to obtain a transaction
+  `outbox:command_receipt(identity)` for a direct durable status read,
+  `outbox:write_command_result(identity, destination)` to stream a completed
+  result body, and `outbox:resume_command(identity)` to obtain a transaction
   for a pending command. A terminal command resumes as `nil, receipt`.
-- `workflow:transaction(fn)` provides a lazy transaction proxy. Its first
-  participant may be `acquire`, `append_outbox`, `accept_inbox`, or
+- `outbox:transaction(fn)` provides a lazy transaction proxy. Its first
+  participant may be `acquire`, `append`, `accept_inbox`, or
   `accept_command`; it commits on normal callback return and rolls back on an
   error or any failed staged operation, even when the callback elects to
   inspect and return normally from that structured error. It starts no durable
@@ -367,14 +378,14 @@ durable work:
   its outbox/idempotency boundary. A duplicate first record returns its durable
   receipt even when the callback does not return it; a duplicate before a
   domain participant is enrolled may still allow an independently fresh
-  workflow receipt to commit.
-- `workflow:begin()` returns the same lazy transaction receiver for advanced
+  outbox receipt to commit.
+- `outbox:begin()` returns the same lazy transaction receiver for advanced
   code that needs explicit commit/rollback control. Its first participant has
   the same domain-acquire/command/inbox/outbox choices as `transaction(fn)`.
-- `workflow:dispatcher()` acquires the compatible local dispatcher. It has no
-  configuration argument because dispatch policy comes from the workflow's
+- `outbox:dispatcher()` acquires the compatible local dispatcher. It has no
+  configuration argument because dispatch policy comes from the outbox's
   canonical configuration.
-- `client:new_workflow(config, { dispatcher = dispatcher })` creates another
+- `client:new_outbox(config, { dispatcher = dispatcher })` creates another
   threadless producer attached to an already-compatible dispatcher. It is the
   local fast wake path only: a committed receipt remains the durable source of
   truth and may still be forwarded to a supervisor.
@@ -397,7 +408,7 @@ durable work:
   it and its payload. `dispatcher:export_dead_letters(options, destination)` exports
   envelopes as `"json"` or `"jsonl"`; omitting `destination` returns a
   materialized Lua string, while file/fd destinations stream directly.
-- `workflow:close()` releases only the producer. `dispatcher:stop()` and
+- `outbox:close()` releases only the producer. `dispatcher:stop()` and
   `dispatcher:wait()` control the explicitly acquired dispatcher;
   `dispatcher:close()` releases a handle and does not stop shared work.
 - `client:close()` stops and joins private dispatcher workers but does not wait
@@ -405,12 +416,12 @@ durable work:
   decision or close; stopped dispatcher wrappers reject new work and remain
   closeable.
 
-Transactions provide `acquire`, `append_outbox`, `accept_command`, `accept_inbox`,
+Transactions provide `acquire`, `append`, `accept_command`, `accept_inbox`,
 `complete_command`, `fail_command`, `commit`, `rollback`, and `close`.
 `accept_command` permits at most one command receipt per transaction.
 `txn:commit()` returns `{ outbox_receipts = { ... } }` only after a durable
 commit; it returns no fresh outbox key on failure or rollback.
-`txn:append_outbox()` may return an existing duplicate receipt, which is
+`txn:append()` may return an existing duplicate receipt, which is
 already safe to forward; fresh appended keys remain commit-published.
 Participants provide `info`, `describe`, `get_raw`, `get_json`, `update_raw`,
 `update_json`, `mutate`, `mutate_local`, `metadata`, `remove`, `keepalive`, and
@@ -438,7 +449,7 @@ durably reschedules the job within the configured retry bounds.
 
 ## Raw XA and transaction-coordinator APIs
 
-The workflow API is the normal Lua transactional-outbox path. It creates and
+The outbox API is the normal Lua transactional-outbox path. It creates and
 recovers durable decisions without requiring the application to manage an XID.
 For a coordinator, resource manager, or recovery tool that must operate at the
 same level as the C API, the raw XA surface is also available on `client`.
@@ -483,7 +494,7 @@ A key can arrive in multiple chunks, including inside a UTF-8 sequence; collect
 only the current key between `begin` and `finish` if complete strings are needed.
 
 `client:acquire_for_update(req, handler)` wraps the common acquire, snapshot,
-update, release workflow. The handler receives a context table with:
+update, release outbox. The handler receives a context table with:
 
 - `lease`
 - `state`
@@ -572,7 +583,7 @@ Use:
 - `lease:update_json(value, req)`
 - `message:payload_json()`
 
-These helpers are for idiomatic Lua workflow code. They do not replace the
+These helpers are for idiomatic Lua outbox code. They do not replace the
 mapped `lonejson` APIs in the C SDK; those C APIs use caller-defined
 `LONEJSON_FIELD_*` maps for typed state load/save. The Lua helpers sit on top
 of the public `liblockdc` JSON transport surface and use the `lonejson`

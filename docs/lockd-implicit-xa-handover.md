@@ -1,10 +1,10 @@
-# lockd implicit-XA workflow blocker
+# lockd implicit-XA outbox blocker
 
 ## Summary
 
-liblockdc's workflow API starts a transaction by acquiring its first durable
+liblockdc's outbox API starts a transaction by acquiring its first durable
 record without a caller-provided XID. lockd mints that XID. Every later domain,
-inbox, command, and outbox acquire carries the minted XID, and the workflow
+inbox, command, and outbox acquire carries the minted XID, and the outbox
 then releases every participant to make the terminal decision.
 
 Pouch implements this correctly: a multi-participant implicit transaction does
@@ -49,7 +49,7 @@ implicit pending records.
 ## liblockdc posture
 
 liblockdc intentionally has no remote-endpoint guard or Pouch-specific public
-API. The workflow logic uses the ordinary client contract and will exercise the
+API. The outbox logic uses the ordinary client contract and will exercise the
 same composition against remote lockd once this server behavior is repaired.
 This branch proves exclusive and shared-writer Pouch behavior; remote command
 receipt E2E is deferred pending the lockd fix.

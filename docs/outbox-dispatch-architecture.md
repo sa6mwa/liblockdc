@@ -1,37 +1,41 @@
-# Threadless workflows and explicit dispatchers
+# Threadless transactional outboxes and explicit dispatchers
 
-Status: implementation authority for the workflow API cutover. This document
-supersedes the workflow-construction, dispatcher-lifecycle, and Lua-dispatch
-parts of [the transactional messaging specification](inbox-outbox.md). The
-durable record format, transaction rules, inbox/outbox identities, claim
-semantics, retry policy, dead-letter representation, and endpoint limitations
-in that document remain authoritative.
+Status: implemented API and architecture authority. This document supersedes
+the outbox-construction, dispatcher-lifecycle, and Lua-dispatch parts of [the
+transactional messaging specification](inbox-outbox.md). The durable record
+format, transaction rules, inbox/outbox identities, claim semantics, retry
+policy, dead-letter representation, and endpoint limitations in that document
+remain authoritative.
 
 ## Purpose
 
-`lc_workflow` currently combines durable transaction production with a private
-dispatcher thread. That makes a route-side producer unexpectedly allocate a
-long-lived worker, client/session state, notification queues, and recovery
-work. It is the wrong ownership model for web runtimes and for any process that
-only appends durable effects.
+An outbox producer must not allocate a private dispatcher thread. Route-side
+producers only append durable effects; requiring them to own a long-lived
+worker, client/session state, notification queues, and recovery work is the
+wrong model for web runtimes and for processes that only produce effects.
 
 This cutover splits those roles:
 
-- a **workflow** is a threadless transactional producer and receipt reader;
-- a **workflow dispatcher** is an explicit, process-local durable-work
+- an **outbox** is a threadless transactional producer and receipt reader;
+- a **outbox dispatcher** is an explicit, process-local durable-work
   consumer; and
 - a host decides its process topology, scheduling, and language-runtime
   ownership.
 
 The cutover is intentionally breaking. ABI generation 4 has not been released
-from this branch, so its public workflow receiver layout may be replaced
+from this branch, so its public outbox receiver layout may be replaced
 without changing `LOCKDC_ABI_VERSION`. The next ABI change after the released
 ABI must advance by exactly one, as usual. There is no compatibility
 constructor and no legacy implicit-thread mode.
 
+`outbox` is deliberately the distributed-systems term for this transactional
+messaging facility. It is not a business-workflow engine: activity graphs,
+workflow state machines, and supervisor policy belong to hosts such as Vectis
+or to a future explicitly named workflow subsystem.
+
 ## Ownership boundary
 
-liblockdc owns durable workflow semantics:
+liblockdc owns durable outbox semantics:
 
 - transaction enrollment and terminal decisions;
 - command receipts, inbox deduplication, immutable outbox records and payloads;
@@ -51,25 +55,25 @@ the durable authority.
 
 ## Handles and lifetimes
 
-### Threadless `lc_workflow`
+### Threadless `lc_outbox`
 
-`lc_client_new_workflow()` validates, canonicalizes, deep-copies, and retains
-an `lc_workflow_config`. It creates no thread, private client clone,
+`lc_client_new_outbox()` validates, canonicalizes, deep-copies, and retains
+an `lc_outbox_config`. It creates no thread, private client clone,
 notification queue, recovery loop, claim, or foreign-effect execution.
 
-The workflow receiver retains the producer-side operations:
+The outbox receiver retains the producer-side operations:
 
-- lazy workflow transaction creation;
+- lazy outbox transaction creation;
 - command acceptance, lookup, result streaming, and resume;
 - inbox acceptance;
 - outbox append;
-- workflow transaction participant acquisition, commit, rollback, and close;
-- receipt/result cleanup and workflow close.
+- outbox transaction participant acquisition, commit, rollback, and close;
+- receipt/result cleanup and outbox close.
 
 It deliberately has no `next`, stats, reconciliation, dead-letter, claim, or
 job-terminal operation. These belong only to a dispatcher.
 
-`lc_workflow_begin()` creates a threadless, lazy transaction receiver. It does
+`lc_outbox_begin()` creates a threadless, lazy transaction receiver. It does
 not create a durable transaction marker or mint an id by itself. Its first
 participating operation—domain `acquire`, command acceptance, inbox acceptance,
 or outbox append—lazily mints an explicit xid and prepares that participant for
@@ -93,9 +97,9 @@ when its separately owned command is already a durable duplicate.
 An outbox key is safe to wake only after its transaction has committed. The
 cutover therefore separates a staged append from its committed receipt:
 
-- a fresh `workflow->append_outbox()` returns its transaction but no public
+- a fresh `outbox->append()` returns its transaction but no public
   outbox receipt;
-- a transaction's `append_outbox()` stages another effect and returns no fresh
+- a transaction's `append()` stages another effect and returns no fresh
   outbox key; and
 - `transaction->commit()` returns one owned receipt for every outbox effect
   made durable by that decision.
@@ -104,15 +108,15 @@ The C commit result is an initialized/cleanup-owned result record containing a
 receipt array:
 
 ```c
-typedef struct lc_workflow_commit_result {
+typedef struct lc_outbox_commit_result {
   lc_outbox_receipt *outbox_receipts;
   size_t outbox_receipt_count;
-} lc_workflow_commit_result;
+} lc_outbox_commit_result;
 
-void lc_workflow_commit_result_init(lc_workflow_commit_result *result);
-void lc_workflow_commit_result_cleanup(lc_workflow_commit_result *result);
-int lc_workflow_transaction_commit(lc_workflow_transaction *transaction,
-                                   lc_workflow_commit_result *out,
+void lc_outbox_commit_result_init(lc_outbox_commit_result *result);
+void lc_outbox_commit_result_cleanup(lc_outbox_commit_result *result);
+int lc_outbox_transaction_commit(lc_outbox_transaction *transaction,
+                                   lc_outbox_commit_result *out,
                                    lc_error *error);
 ```
 
@@ -139,13 +143,13 @@ allocation. An indeterminate backend error returns no fresh receipt even if a
 later recovery proves the commit durable; reconciliation is then the required
 repair path.
 
-Closing a workflow closes any still-open owned transaction by best-effort
+Closing an outbox closes any still-open owned transaction by best-effort
 rollback, releases any attached dispatcher reference, and releases its client
 reference. It never stops a dispatcher.
 
-### `lc_workflow_dispatcher`
+### `lc_outbox_dispatcher`
 
-`lc_workflow_dispatcher` is an opaque receiver with an independent explicit
+`lc_outbox_dispatcher` is an opaque receiver with an independent explicit
 lifecycle. It owns:
 
 - bounded direct-key candidate and delayed-retry wake queues;
@@ -160,7 +164,7 @@ candidate keys and recovery intent, but never claims a job or invokes C or Lua
 application code.
 
 One live dispatcher exists at most once for a `(client instance, canonical
-workflow configuration)` registry key. The key includes every configuration
+outbox configuration)` registry key. The key includes every configuration
 field, after defaults and validation have been applied: namespace, owner,
 transaction and claim TTLs, retry policy, notification capacity, recovery
 cadence, shutdown request timeout, and dead-letter startup policy. Comparing
@@ -177,25 +181,25 @@ threadless producer clients and send committed receipt keys to that supervisor.
 The public C shape is:
 
 ```c
-typedef struct lc_workflow_dispatcher lc_workflow_dispatcher;
+typedef struct lc_outbox_dispatcher lc_outbox_dispatcher;
 
-int lc_client_new_workflow(lc_client *client,
-                           const lc_workflow_config *config,
-                           lc_workflow **out, lc_error *error);
-int lc_workflow_begin(lc_workflow *workflow,
-                      lc_workflow_transaction **out, lc_error *error);
-int lc_client_new_workflow_with_dispatcher(
-    lc_client *client, const lc_workflow_config *config,
-    lc_workflow_dispatcher *dispatcher, lc_workflow **out, lc_error *error);
-int lc_workflow_dispatcher_get_or_start(lc_workflow *workflow,
-                                        lc_workflow_dispatcher **out,
+int lc_client_new_outbox(lc_client *client,
+                           const lc_outbox_config *config,
+                           lc_outbox **out, lc_error *error);
+int lc_outbox_begin(lc_outbox *outbox,
+                      lc_outbox_transaction **out, lc_error *error);
+int lc_client_new_outbox_with_dispatcher(
+    lc_client *client, const lc_outbox_config *config,
+    lc_outbox_dispatcher *dispatcher, lc_outbox **out, lc_error *error);
+int lc_outbox_dispatcher_get_or_start(lc_outbox *outbox,
+                                        lc_outbox_dispatcher **out,
                                         lc_error *error);
-int lc_workflow_dispatcher_notify_outbox_key(
-    lc_workflow_dispatcher *dispatcher, const char *outbox_key,
+int lc_outbox_dispatcher_notify_outbox_key(
+    lc_outbox_dispatcher *dispatcher, const char *outbox_key,
     lc_error *error);
 ```
 
-The client receiver exposes both workflow constructors. The workflow receiver
+The client receiver exposes both outbox constructors. The outbox receiver
 exposes `get_or_start_dispatcher`; both receivers retain eight trailing
 `void *` extension slots. Every fallible receiver operation has the matching
 free-function form.
@@ -208,21 +212,21 @@ free-function form.
   a replacement; and
 - no operation temporarily creates two live dispatchers for one registry key.
 
-`new_workflow_with_dispatcher()` attaches an already acquired compatible
+`new_outbox_with_dispatcher()` attaches an already acquired compatible
 dispatcher to a producer. Compatibility requires the same client instance and
-canonical configuration. A successful commit on an attached workflow sends
+canonical configuration. A successful commit on an attached outbox sends
 each newly committed outbox receipt key to that dispatcher's local wake queue.
 The operation is only a fast path: queue overflow, an unavailable dispatcher,
 or a later crash cannot invalidate the durable commit and is repaired by
 reconciliation.
 
-An unattached workflow is still complete for production. Its caller receives
+An unattached outbox is still complete for production. Its caller receives
 outbox keys only in committed receipts and may forward them to a host-owned
 dispatcher through host IPC. It must never forward a key from a failed or
 rolled-back transaction.
 
 The registry retains a started dispatcher until explicit `stop()` completes or
-its client closes. `lc_workflow_dispatcher_close()` releases only one caller's
+its client closes. `lc_outbox_dispatcher_close()` releases only one caller's
 handle; it does not stop a dispatcher, including when it happens to be the last
 external handle. This deliberately lets a lazily started dispatcher remain
 available for later producer attachments and asynchronous work. Hosts that no
@@ -283,11 +287,11 @@ wake arrived after shutdown began.
 
 ## Direct-key notifications and recovery
 
-`lc_workflow_dispatcher_notify_outbox_key()` accepts only a non-empty durable
+`lc_outbox_dispatcher_notify_outbox_key()` accepts only a non-empty durable
 outbox key already known by the caller to have committed. It copies and
 deduplicates the key in the existing bounded candidate queue and wakes waiting
 consumers. The next consumer request uses a targeted claim/read path. It does
-not query or scan the workflow namespace solely because it received a key.
+not query or scan the outbox namespace solely because it received a key.
 
 Duplicate notifications coalesce. A full queue increments observable overflow
 state and schedules one indexed reconciliation candidate; it never drops
@@ -322,25 +326,25 @@ The dispatcher receiver provides the following operations, with free-function
 equivalents and public API comments:
 
 ```c
-struct lc_workflow_dispatcher {
-  int (*next)(lc_workflow_dispatcher *self, long timeout_ms,
+struct lc_outbox_dispatcher {
+  int (*next)(lc_outbox_dispatcher *self, long timeout_ms,
               lc_outbox_job **out, lc_error *error);
-  int (*notify_outbox_key)(lc_workflow_dispatcher *self,
+  int (*notify_outbox_key)(lc_outbox_dispatcher *self,
                            const char *outbox_key, lc_error *error);
-  int (*get_stats)(lc_workflow_dispatcher *self, lc_workflow_stats *out,
+  int (*get_stats)(lc_outbox_dispatcher *self, lc_outbox_stats *out,
                    lc_error *error);
-  int (*reconcile)(lc_workflow_dispatcher *self, lc_error *error);
-  int (*replay_dead_letter)(lc_workflow_dispatcher *self,
+  int (*reconcile)(lc_outbox_dispatcher *self, lc_error *error);
+  int (*replay_dead_letter)(lc_outbox_dispatcher *self,
                             const char *outbox_key, lc_error *error);
-  int (*delete_dead_letter)(lc_workflow_dispatcher *self,
+  int (*delete_dead_letter)(lc_outbox_dispatcher *self,
                             const char *outbox_key, lc_error *error);
-  int (*export_dead_letters)(lc_workflow_dispatcher *self,
+  int (*export_dead_letters)(lc_outbox_dispatcher *self,
                              const lc_dead_letter_export_opts *options,
                              lc_sink *dst, lc_dead_letter_export_res *out,
                              lc_error *error);
-  int (*stop)(lc_workflow_dispatcher *self, long deadline_ms, lc_error *error);
-  int (*wait)(lc_workflow_dispatcher *self, long deadline_ms, lc_error *error);
-  void (*close)(lc_workflow_dispatcher *self);
+  int (*stop)(lc_outbox_dispatcher *self, long deadline_ms, lc_error *error);
+  int (*wait)(lc_outbox_dispatcher *self, long deadline_ms, lc_error *error);
+  void (*close)(lc_outbox_dispatcher *self);
   void *reserved_extension_slots[8];
 };
 ```
@@ -352,40 +356,40 @@ close. Existing terminal operations and payload streaming semantics remain
 unchanged. A terminal failure must leave the claim recoverable through retry or
 expiry, never silently consume it.
 
-The producer and transaction receivers' `append_outbox` operations return an
+The producer and transaction receivers' `append` operations return an
 optional receipt only for an already committed duplicate. Their `commit`
-operation accepts an `lc_workflow_commit_result *` as above. That result is the
+operation accepts an `lc_outbox_commit_result *` as above. That result is the
 only public source of **fresh** wakeable outbox keys.
 
-`lc_workflow_stats` is dispatcher-only in this cutover. Its live gauges are
+`lc_outbox_stats` is dispatcher-only in this cutover. Its live gauges are
 `pending_candidates`, `delayed_wakes`, and `waiting_consumers`; the old
 preclaimed `ready_jobs` gauge is removed. Its monotonic direct-notification,
 overflow, recovery-query, recovered-candidate, claim-loss, and payload-failure
 counters retain their existing observability role. None of these reads queries
 the durable namespace.
 
-## Lua workflow and dispatcher façade
+## Lua outbox and dispatcher façade
 
 Lua mirrors the ownership split exactly.
 
 ```lua
 -- Producer or request domain: no dispatcher thread is created.
-local workflow = assert(client:new_workflow({
+local outbox = assert(client:new_outbox({
   namespace_name = "myapp.orders",
   max_attempts = 12,
 }))
 
-workflow:transaction(function(tx)
-  tx:append_outbox(entry, payload_source)
+outbox:transaction(function(tx)
+  tx:append(entry, payload_source)
 end)
 
 -- Worker/service domain, normally a distinct process with its own client.
 local worker_client = assert(lockdc.open(worker_client_config))
-local worker_workflow = assert(worker_client:new_workflow({
+local worker_outbox = assert(worker_client:new_outbox({
   namespace_name = "myapp.orders",
   max_attempts = 12,
 }))
-local dispatcher = assert(worker_workflow:dispatcher())
+local dispatcher = assert(worker_outbox:dispatcher())
 assert(dispatcher:run({
   handlers = {
     ["order.webhook"] = function(job)
@@ -401,20 +405,20 @@ assert(dispatcher:run({
 }))
 ```
 
-`client:new_workflow(config[, { dispatcher = dispatcher }])` creates a
+`client:new_outbox(config[, { dispatcher = dispatcher }])` creates a
 threadless producer, optionally with a compatible dispatcher attachment.
-`workflow:dispatcher()` is the Lua form of get-or-start and takes no
-configuration: the canonical workflow configuration is the sole policy source.
+`outbox:dispatcher()` is the Lua form of get-or-start and takes no
+configuration: the canonical outbox configuration is the sole policy source.
 
-The workflow façade includes transaction production, receipt access, and
+The outbox façade includes transaction production, receipt access, and
 close/garbage-collection cleanup. It has no `next`, claim, retry, dead-letter,
 or dispatcher statistics methods. The dispatcher façade includes `run`,
 bounded `pump`, raw `next`, `notify_outbox_key`, `stats`, `reconcile`,
 dead-letter controls, `stop`, `wait`, and close. It has no producer shortcut.
 
-`workflow:begin()` and `workflow:transaction(fn)` create a lazy transaction
+`outbox:begin()` and `outbox:transaction(fn)` create a lazy transaction
 receiver, not a durable transaction marker. Its first participant may be
-`acquire`, `append_outbox`, `accept_inbox`, or `accept_command`; that operation
+`acquire`, `append`, `accept_inbox`, or `accept_command`; that operation
 lazily mints the explicit xid that anchors every later participant. This lets a
 Vectis transaction stage a domain update before its outbox append while
 remaining one durable XA decision. On normal callback return, the façade
@@ -434,10 +438,10 @@ terminal decision. A duplicate discovered after a domain participant has
 staged makes the proxy rollback-only; the façade rolls it back and returns that
 duplicate result rather than committing partial work. A duplicate before any
 domain participant may still let the callback commit an independently fresh
-workflow receipt, such as an inbox delivery whose owned command was already
+outbox receipt, such as an inbox delivery whose owned command was already
 committed.
 
-On success, `workflow:transaction(fn)` returns the same commit result as the
+On success, `outbox:transaction(fn)` returns the same commit result as the
 explicit transaction's `commit()`, including `outbox_receipts`. This gives a
 host its forwardable keys only after the durable decision. A duplicate first
 append instead returns its existing `receipt` and no commit result, because no
@@ -490,14 +494,14 @@ timer.
 ## Vectis integration contract
 
 Vectis is not implemented in this repository. Its required liblockdc contract
-is nevertheless explicit. This section restates the workflow behavior in
-[`stash/supervisor-workflow-spec.md`](../stash/supervisor-workflow-spec.md);
+is nevertheless explicit. This section restates the outbox behavior in
+[`stash/supervisor-outbox-spec.md`](../stash/supervisor-outbox-spec.md);
 it does not redefine Vectis supervisor ownership or lifecycle policy:
 
 ```text
 route worker                         supervisor process
 ------------                         ------------------
-threadless workflow                  workflow dispatcher + Lua lane
+threadless outbox                  outbox dispatcher + Lua lane
   └─ durable commit ─ receipt key ─> bounded host IPC ─> notify_outbox_key()
        full ────────────────> OUTBOX_RECONCILE signal ─> reconcile()
        closed/lost ────────────────────────────> startup recovery
@@ -505,13 +509,13 @@ threadless workflow                  workflow dispatcher + Lua lane
                                                           → claim → handler → outcome
 ```
 
-1. Each application declares one canonical workflow configuration per durable
+1. Each application declares one canonical outbox configuration per durable
    namespace.
 2. Route workers construct threadless producers using their own post-fork
-   clients. They begin one lazy workflow transaction, mutate domain state, and
+   clients. They begin one lazy outbox transaction, mutate domain state, and
    append outbox effects atomically.
 3. After a successful commit, a worker copies every returned receipt key to
-   Vectis's bounded workflow-key channel. On its first full send it emits one
+   Vectis's bounded outbox-key channel. On its first full send it emits one
    payload-free reconciliation wake; it never blocks a route or attempts effect
    delivery. A closed or lost handoff is repaired by durable startup recovery.
 4. The supervisor process owns a separate client, obtains the one local
@@ -528,9 +532,9 @@ claimed jobs and terminal outcomes; it does not own Vectis handler registration
 or try to bind one global Lua handler map.
 
 Vectis's high-level `tx:update_json(order)` resolves to its configured domain
-participant acquisition. It may be the lazy workflow transaction's first
+participant acquisition. It may be the lazy outbox transaction's first
 participant, captures the endpoint-minted xid, and lets a later
-`tx:append_outbox()` join the same implicit-XA decision. If Vectis rejects an
+`tx:append()` join the same implicit-XA decision. If Vectis rejects an
 unregistered outbox kind after staging that domain participant, it marks the
 enclosing transaction failed: commit is impossible and all staged state rolls
 back before the route can report success. Raw liblockdc remains available for
@@ -548,7 +552,7 @@ client or dispatcher thread across the fork boundary.
 The channel carries copied receipt-key bytes only. It is neither a second queue
 nor a persistence layer. A failed channel send, overflow, restart, or lost
 wake changes latency only; reconciliation recovers durable work. Vectis must
-reject duplicate `(workflow namespace, kind)` handler ownership at declaration
+reject duplicate `(outbox namespace, kind)` handler ownership at declaration
 time and reject high-level unregistered kinds before committing a transaction.
 
 ## Documentation and examples
@@ -571,10 +575,10 @@ diagram above.
 They must never demonstrate `dispatcher:run()` inside a route handler or an
 implicit dispatcher created by producer construction.
 
-The checked-in pair is `examples/workflow_producer.c` and
-`examples/lua/workflow_dispatcher.lua`. The producer commits one effect and
+The checked-in pair is `examples/outbox_producer.c` and
+`examples/lua/outbox_dispatcher.lua`. The producer commits one effect and
 exits; the Lua process owns the dispatcher and either blocks in `run()` or uses
-the explicit one-shot `LOCKDC_WORKFLOW_ONCE=1` demonstration mode. Their Pouch
+the explicit one-shot `LOCKDC_OUTBOX_ONCE=1` demonstration mode. Their Pouch
 endpoint explicitly uses `single_writer=false` because they are separate
 processes. This is an executable topology example, not a recommendation to
 weaken the default single-writer mode for single-process deployments.
@@ -584,7 +588,7 @@ weaken the default single-writer mode for single-process deployments.
 Unit, integration, Lua, and end-to-end coverage must prove observable
 invariants, including failure paths:
 
-- `new_workflow()` creates no dispatcher thread, client clone, claim, or scan;
+- `new_outbox()` creates no dispatcher thread, client clone, claim, or scan;
 - producer transaction, command, inbox, outbox, XA, rollback, and receipt
   semantics remain unchanged for Pouch;
 - lazy transaction coverage proves that `begin()` creates no durable marker,
@@ -596,8 +600,8 @@ invariants, including failure paths:
 - compatible concurrent acquisition returns exactly one dispatcher, while a
   configuration mismatch, stop race, failed dispatcher, and client close leave
   no stale or dangling instance;
-- workflow attachment performs post-commit local wake only after durable
-  success; workflow close does not stop the dispatcher; uncommitted close
+- outbox attachment performs post-commit local wake only after durable
+  success; outbox close does not stop the dispatcher; uncommitted close
   cannot expose a wakeable receipt;
 - commit-result allocation failure occurs before a terminal vote; an
   indeterminate terminal error exposes no fresh receipt and is repaired only

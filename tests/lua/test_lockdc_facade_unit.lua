@@ -173,6 +173,11 @@ local function test_pouch_open_config_passthrough()
     pouch_crypto_key_file = '/var/lib/lockdc-lua-unit/root.key',
     pouch_crypto_generate_key_file = true,
     pouch_compression = 'zlib',
+    pouch = {
+      query_indexing = false,
+      query_engine = 'scan',
+      indexer_flush_docs = 64,
+    },
   }))
 
   assert_eq(captured.config.endpoints[1], 'pouch:///var/lib/lockdc-lua-unit', 'pouch endpoint should pass through')
@@ -180,6 +185,9 @@ local function test_pouch_open_config_passthrough()
   assert_eq(captured.config.pouch_crypto_key_file, '/var/lib/lockdc-lua-unit/root.key', 'pouch_crypto_key_file should pass through')
   assert_eq(captured.config.pouch_crypto_generate_key_file, true, 'pouch key-file generation should pass through')
   assert_eq(captured.config.pouch_compression, 'zlib', 'pouch compression should pass through')
+  assert_eq(captured.config.pouch.query_indexing, false, 'typed pouch false should pass through')
+  assert_eq(captured.config.pouch.query_engine, 'scan', 'typed pouch engine should pass through')
+  assert_eq(captured.config.pouch.indexer_flush_docs, 64, 'typed pouch numeric setting should pass through')
   client:close()
 end
 
@@ -622,7 +630,7 @@ local function test_json_null_roundtrip_helpers()
   assert_eq(written, 4, 'message:payload_json should preserve byte count')
 end
 
-local function test_workflow_facade_lifecycle()
+local function test_outbox_facade_lifecycle()
   local captured = {}
   local participant_core = {
     info = function()
@@ -670,7 +678,7 @@ local function test_workflow_facade_lifecycle()
       captured.acquire_req = req
       return participant_core
     end,
-    append_outbox = function(_, entry, payload)
+    append = function(_, entry, payload)
       captured.later_entry = entry
       captured.later_payload = payload
       return { outbox_key = 'later-key', duplicate = false }
@@ -724,7 +732,7 @@ local function test_workflow_facade_lifecycle()
     end,
     close = function(self) self.closed = true end,
   }
-  local workflow_core = {
+  local outbox_core = {
     accept_command = function(_, request)
       captured.command_request = request
       return transaction_core, { command_id = 'cmd-1', state = 1, duplicate = false }
@@ -742,7 +750,7 @@ local function test_workflow_facade_lifecycle()
       captured.resume_identity = identity
       return nil, { command_id = 'cmd-1', state = 2, duplicate = true }
     end,
-    append_outbox = function(_, entry, payload)
+    append = function(_, entry, payload)
       captured.first_entry = entry
       captured.first_payload = payload
       return transaction_core, { outbox_key = 'first-key', duplicate = false }
@@ -781,9 +789,9 @@ local function test_workflow_facade_lifecycle()
     close = function(self) self.closed = true end,
   }
   local client_core = {
-    new_workflow = function(_, config)
-      captured.workflow_config = config
-      return workflow_core
+    new_outbox = function(_, config)
+      captured.outbox_config = config
+      return outbox_core
     end,
     close = function() end,
   }
@@ -793,14 +801,14 @@ local function test_workflow_facade_lifecycle()
   end
 
   local client = assert(lockdc.open({}))
-  local workflow = assert(client:new_workflow({
-    namespace = 'workflow-ns',
+  local outbox = assert(client:new_outbox({
+    namespace = 'outbox-ns',
     owner = 'lua-worker',
     recovery_interval_seconds = 7,
     shutdown_timeout_ms = 1234,
     replay_dead_letters_on_startup = true,
   }))
-  local txn, receipt = assert(workflow:append_outbox({
+  local txn, receipt = assert(outbox:append({
     operation_id = 'op-1',
     effect_id = 'charge',
     effect_key = 'charge:order-1',
@@ -810,17 +818,17 @@ local function test_workflow_facade_lifecycle()
     headers = 'header-json',
   }, 'payload'))
 
-  assert_eq(captured.workflow_config.namespace, 'workflow-ns', 'new_workflow should pass config through')
-  assert_eq(captured.workflow_config.shutdown_timeout_ms, 1234,
-      'workflow shutdown timeout should pass through')
-  assert_eq(captured.workflow_config.replay_dead_letters_on_startup, true,
-      'workflow startup replay option should pass through')
-  assert_eq(captured.first_entry.headers_json, 'header-json', 'workflow should encode headers into headers_json')
-  assert_eq(captured.first_entry.headers, nil, 'workflow should not pass façade-only headers')
+  assert_eq(captured.outbox_config.namespace, 'outbox-ns', 'new_outbox should pass config through')
+  assert_eq(captured.outbox_config.shutdown_timeout_ms, 1234,
+      'outbox shutdown timeout should pass through')
+  assert_eq(captured.outbox_config.replay_dead_letters_on_startup, true,
+      'outbox startup replay option should pass through')
+  assert_eq(captured.first_entry.headers_json, 'header-json', 'outbox should encode headers into headers_json')
+  assert_eq(captured.first_entry.headers, nil, 'outbox should not pass façade-only headers')
   assert_eq(captured.first_entry.payload_digest, 'sha256:payload',
-      'workflow should preserve the immutable payload digest')
-  assert_eq(captured.first_payload, 'payload', 'workflow should preserve arbitrary payload source')
-  assert_eq(receipt.outbox_key, 'first-key', 'workflow should return the durable receipt')
+      'outbox should preserve the immutable payload digest')
+  assert_eq(captured.first_payload, 'payload', 'outbox should preserve arbitrary payload source')
+  assert_eq(receipt.outbox_key, 'first-key', 'outbox should return the durable receipt')
 
   local participant = assert(txn:acquire({ namespace_name = 'orders', key = 'order-1' }))
   participant:update_json(nil, { if_version = 1 })
@@ -845,7 +853,7 @@ local function test_workflow_facade_lifecycle()
   assert_truthy(transaction_core.closed,
       'transaction close must release the native transaction after commit')
 
-  local duplicate_txn, duplicate = workflow:accept_inbox({
+  local duplicate_txn, duplicate = outbox:accept_inbox({
     consumer_id = 'billing',
     source_kind = 'http',
     source_id = 'orders',
@@ -855,7 +863,7 @@ local function test_workflow_facade_lifecycle()
   assert_eq(duplicate.duplicate, true, 'duplicate inbox should retain the result')
   assert_eq(captured.inbox_message.message_id, 'message-1', 'inbox identity should pass through')
 
-  local command_txn, command_receipt = assert(workflow:accept_command({
+  local command_txn, command_receipt = assert(outbox:accept_command({
     scope = 'tenant-a', command_type = 'orders.create.v1',
     idempotency_key = 'request-1', request_digest = 'digest-1',
   }))
@@ -868,22 +876,22 @@ local function test_workflow_facade_lifecycle()
       'command result should pass through')
   assert_truthy(command_txn:fail_command({ failure_code = 'declined' }),
       'command failure should delegate')
-  local status = assert(workflow:command_receipt({
+  local status = assert(outbox:command_receipt({
     scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
   }))
   assert_eq(status.result_code, 'created', 'command status should delegate')
-  local result_bytes, result_written = assert(workflow:write_command_result({
+  local result_bytes, result_written = assert(outbox:write_command_result({
     scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
   }, { path = '/tmp/command-result' }))
   assert_eq(result_bytes, 'result-bytes', 'command result should preserve streamed output')
   assert_eq(result_written, 12, 'command result should preserve byte count')
-  local resumed_txn, resumed = workflow:resume_command({
+  local resumed_txn, resumed = outbox:resume_command({
     scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
   })
   assert_eq(resumed_txn, nil, 'terminal command resume should not expose a transaction')
   assert_eq(resumed.duplicate, true, 'terminal command resume should return receipt')
 
-  local dispatcher = assert(workflow:dispatcher())
+  local dispatcher = assert(outbox:dispatcher())
   local job = assert(dispatcher:next(123))
   assert_eq(captured.next_timeout, 123, 'dispatcher next should pass its timeout')
   assert_eq(job:payload_json(), lockdc.json_null, 'job payload_json should decode JSON null')
@@ -901,14 +909,14 @@ local function test_workflow_facade_lifecycle()
   local stats = assert(dispatcher:stats())
   assert_eq(stats.recovery_queries, 3, 'dispatcher stats should delegate')
   assert_truthy(dispatcher:reconcile(), 'dispatcher reconciliation should delegate')
-  assert_truthy(workflow_core.reconciled, 'workflow core should reconcile')
+  assert_truthy(outbox_core.reconciled, 'outbox core should reconcile')
   assert_truthy(dispatcher:replay_dead_letter('dead-key'),
       'dead-letter replay should delegate')
-  assert_eq(workflow_core.replayed_key, 'dead-key',
+  assert_eq(outbox_core.replayed_key, 'dead-key',
       'dead-letter replay key should pass through')
   assert_truthy(dispatcher:delete_dead_letter('dead-key'),
       'dead-letter delete should delegate')
-  assert_eq(workflow_core.deleted_key, 'dead-key',
+  assert_eq(outbox_core.deleted_key, 'dead-key',
       'dead-letter delete key should pass through')
   local exported, export_result = assert(dispatcher:export_dead_letters(
       { format = 'jsonl', limit = 10 }, { path = '/tmp/dead-letter.jsonl' }))
@@ -926,9 +934,9 @@ local function test_workflow_facade_lifecycle()
       'dead-letter export destination shorthand should pass through')
 
   dispatcher:close()
-  assert_truthy(workflow_core.closed, 'dispatcher close should close the core receiver')
-  workflow:close()
-  assert_truthy(workflow_core.closed, 'workflow close should close the core receiver')
+  assert_truthy(outbox_core.closed, 'dispatcher close should close the core receiver')
+  outbox:close()
+  assert_truthy(outbox_core.closed, 'outbox close should close the core receiver')
   client:close()
 end
 
@@ -941,4 +949,4 @@ test_acquire_for_update_propagates_sdk_failure_shape()
 test_subscribe_with_state_and_service_lifecycle()
 test_watch_queue_change_detection()
 test_json_null_roundtrip_helpers()
-test_workflow_facade_lifecycle()
+test_outbox_facade_lifecycle()

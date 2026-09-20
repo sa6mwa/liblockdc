@@ -76,8 +76,8 @@ if(LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)
     fuzz_lc_pouch_lql_plan.c)
   lc_add_pouch_integration_target(lc_pouch_integration_lifecycle
     fuzz_lc_pouch_lifecycle.c)
-  lc_add_pouch_integration_target(lc_pouch_integration_workflow_dispatcher
-    fuzz_lc_pouch_workflow_dispatcher.c)
+  lc_add_pouch_integration_target(lc_pouch_integration_outbox_dispatcher
+    fuzz_lc_pouch_outbox_dispatcher.c)
 
   add_executable(lc_pouch_integration_mutation_runner
     pouch_integration_mutation_runner.c)
@@ -99,10 +99,10 @@ if(LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)
     COMMAND lc_pouch_integration_mutation_runner
       $<TARGET_FILE:lc_pouch_integration_lifecycle>
       "${CMAKE_CURRENT_SOURCE_DIR}/corpus/pouch_lifecycle" 8)
-  add_test(NAME lc_pouch_integration_workflow_dispatcher_mutation_smoke
+  add_test(NAME lc_pouch_integration_outbox_dispatcher_mutation_smoke
     COMMAND lc_pouch_integration_mutation_runner
-      $<TARGET_FILE:lc_pouch_integration_workflow_dispatcher>
-      "${CMAKE_CURRENT_SOURCE_DIR}/corpus/pouch_workflow_dispatcher" 8)
+      $<TARGET_FILE:lc_pouch_integration_outbox_dispatcher>
+      "${CMAKE_CURRENT_SOURCE_DIR}/corpus/pouch_outbox_dispatcher" 8)
   add_test(NAME lc_pouch_integration_mutation_runner_regression
     COMMAND ${CMAKE_COMMAND}
       -DRUNNER=$<TARGET_FILE:lc_pouch_integration_mutation_runner>
@@ -114,7 +114,7 @@ if(LOCKDC_BUILD_POUCH_INTEGRATION_FUZZERS)
   set_tests_properties(
     lc_pouch_integration_lql_plan_mutation_smoke
     lc_pouch_integration_lifecycle_mutation_smoke
-    lc_pouch_integration_workflow_dispatcher_mutation_smoke
+    lc_pouch_integration_outbox_dispatcher_mutation_smoke
     lc_pouch_integration_mutation_runner_regression
     PROPERTIES LABELS "fuzz;integration;offline" TIMEOUT 120 RUN_SERIAL TRUE)
 endif()

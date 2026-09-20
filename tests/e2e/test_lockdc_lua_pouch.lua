@@ -6,6 +6,89 @@ local key_file = root .. "/pouch.key"
 local explicit_false_key_file = root .. "/explicit-false/pouch.key"
 local namespace_name = "lua-pouch"
 
+local typed_invalid_client, typed_invalid_err = lockdc.open({
+  endpoints = { endpoint .. "-typed-invalid" },
+  pouch = { compression = "invalid" },
+})
+if typed_invalid_client ~= nil then
+  typed_invalid_client:close()
+  error("invalid typed Pouch compression unexpectedly opened")
+end
+if type(typed_invalid_err) ~= "table" or not (typed_invalid_err.message or ""):match("compression") then
+  error("invalid typed Pouch compression did not return a structured error")
+end
+
+local remote_settings_client, remote_settings_err = lockdc.open({
+  endpoints = { "https://lockd.invalid" },
+  pouch = { durable_sync = true },
+})
+if remote_settings_client ~= nil then
+  remote_settings_client:close()
+  error("remote client unexpectedly accepted typed Pouch settings")
+end
+if type(remote_settings_err) ~= "table" or
+    not (remote_settings_err.message or ""):match("require exactly one pouch endpoint") then
+  error("remote typed Pouch settings did not return a structured local-only error")
+end
+
+local unknown_pouch_client, unknown_pouch_err = lockdc.open({
+  endpoints = { endpoint .. "-typed-unknown" },
+  pouch = { unexpected = true },
+})
+if unknown_pouch_client ~= nil then
+  unknown_pouch_client:close()
+  error("unknown typed Pouch setting unexpectedly opened")
+end
+if type(unknown_pouch_err) ~= "table" or
+    not (unknown_pouch_err.message or ""):match("unknown pouch setting") then
+  error("unknown typed Pouch setting did not return a structured error")
+end
+
+local wrong_type_client, wrong_type_err = lockdc.open({
+  endpoints = { endpoint .. "-typed-wrong-type" },
+  pouch = { query_indexing = "false" },
+})
+if wrong_type_client ~= nil then
+  wrong_type_client:close()
+  error("wrong typed Pouch value unexpectedly opened")
+end
+if type(wrong_type_err) ~= "table" or
+    not (wrong_type_err.message or ""):match("must be a boolean") then
+  error("wrong typed Pouch value did not return a structured error")
+end
+
+local typed_root = root .. "-typed"
+local typed_client, typed_err = lockdc.open({
+  endpoints = { "pouch://" .. typed_root .. "?compression=zlib&query_indexing=true" },
+  pouch_compression = "zlib",
+  pouch = {
+    single_writer = false,
+    durable_sync = false,
+    fsync_batch_max_ops = 0,
+    segment_target_bytes = 4096,
+    indexer_flush_docs = 64,
+    indexer_flush_interval_seconds = 1,
+    background_compaction = false,
+    disable_compaction_throttling = true,
+    terminal_reclaim_min_bytes = 8192,
+    queue_watch = false,
+    query_engine = "scan",
+    query_fallback_engine = "index",
+    query_indexing = false,
+    compression = "none",
+  },
+})
+if typed_client == nil then
+  error(("typed Pouch open failed: %s"):format(typed_err and typed_err.message or tostring(typed_err)))
+end
+typed_client:close()
+local typed_manifest = assert(io.open(typed_root .. "/manifest", "rb"))
+local typed_manifest_text = assert(typed_manifest:read("*a"))
+typed_manifest:close()
+if not typed_manifest_text:match("compression=none") then
+  error("nested typed Pouch compression did not override compatibility configuration")
+end
+
 local invalid_client, invalid_err = lockdc.open({
   endpoints = { endpoint },
   pouch_compression = "invalid",

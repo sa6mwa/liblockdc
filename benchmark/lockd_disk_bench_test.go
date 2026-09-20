@@ -55,8 +55,8 @@ func lockdBenchLQL(scenario string) string {
 		return "or.eq{field=/bucket,value=needle},or.eq{field=/flag,value=true}"
 	case "TenantEnterprise":
 		return "eq{field=/tenant/tier,value=enterprise}"
-	case "WorkflowEscalated":
-		return "in{field=/workflow/stage,any=review|escalated}"
+	case "OutboxEscalated":
+		return "in{field=/outbox/stage,any=review|escalated}"
 	case "AmountBand":
 		return "range{field=/metrics/amount_usd,gte=10000,lt=90000}"
 	case "RiskSignal":
@@ -415,7 +415,7 @@ func benchmarkLockdDisk(b *testing.B, documents bool) {
 		"OrSparseOrFlag",
 		"RecursiveExists",
 		"TenantEnterprise",
-		"WorkflowEscalated",
+		"OutboxEscalated",
 		"AmountBand",
 		"RiskSignal",
 		"NarrativeSummary",

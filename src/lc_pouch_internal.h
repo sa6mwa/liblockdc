@@ -303,7 +303,7 @@ extern void *lc_pouch_test_before_queue_message_build_context;
 extern lc_pouch_test_hook lc_pouch_test_after_queue_batch_message_build_hook;
 extern void *lc_pouch_test_after_queue_batch_message_build_context;
 /* Invoked immediately before a Pouch transaction decision is made durable.
- * Tests use this to prove that a workflow does not publish one participant
+ * Tests use this to prove that an outbox does not publish one participant
  * before its multi-key terminal decision exists. */
 extern lc_pouch_test_hook lc_pouch_test_before_txn_decision_hook;
 extern void *lc_pouch_test_before_txn_decision_context;

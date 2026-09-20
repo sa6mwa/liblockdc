@@ -2826,9 +2826,8 @@ int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
   return LC_OK;
 }
 
-int lc_client_clone_remote_for_workflow(lc_client_handle *source,
-                                        long timeout_ms, lc_client **out,
-                                        lc_error *error) {
+int lc_client_clone_remote_for_outbox(lc_client_handle *source, long timeout_ms,
+                                      lc_client **out, lc_error *error) {
   lc_client_config config;
   int rc;
 
@@ -2858,7 +2857,7 @@ int lc_client_clone_remote_for_workflow(lc_client_handle *source,
   config.insecure_skip_verify = source->insecure_skip_verify;
   config.prefer_http_2 = source->prefer_http_2;
   /* The root-client limit protects application-facing typed JSON reads. A
-   * workflow dispatcher must always be able to read its library-owned,
+   * outbox dispatcher must always be able to read its library-owned,
    * bounded durable envelope, so do not inherit an arbitrarily smaller
    * application limit here. */
   config.http_json_response_limit_bytes = LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT;
@@ -2936,13 +2935,13 @@ void lc_client_close_method(lc_client *self) {
     pthread_mutex_unlock(&client->lifecycle_mutex);
     return;
   }
-  /* Keep this state distinct from the final reference release. Workflows and
+  /* Keep this state distinct from the final reference release. Outboxes and
    * handed-out jobs may still retain the allocation, but public close is a
    * one-way boundary: no replacement dispatcher may be registered after it. */
   client->close_requested = 1;
   pthread_mutex_unlock(&client->lifecycle_mutex);
   /* Public close is a lifecycle boundary, not merely an internal reference
    * release: no registered dispatcher may continue consuming after it. */
-  lc_workflow_dispatchers_stop_for_client(client);
+  lc_outbox_dispatchers_stop_for_client(client);
   lc_client_handle_release(client);
 }

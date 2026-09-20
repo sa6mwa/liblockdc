@@ -163,13 +163,13 @@ target_link_options(lc_unit_xid_atfork PRIVATE
 )
 lc_add_unit_test(lc_unit_public_mock_usage test_lc_public_mock_usage.c mock_lc_public.c)
 lc_add_unit_test(lc_unit_consumer_service test_lc_consumer_service.c)
-lc_add_unit_test(lc_unit_workflow test_lc_workflow.c
+lc_add_unit_test(lc_unit_outbox test_lc_outbox.c
   ${CMAKE_SOURCE_DIR}/tests/support/lc_test_tmp.c)
-target_compile_definitions(lc_unit_workflow PRIVATE LOCKDC_TEST_BUILD=1)
-# The workflow suite intentionally exercises durable expiry/recovery paths.
+target_compile_definitions(lc_unit_outbox PRIVATE LOCKDC_TEST_BUILD=1)
+# The outbox suite intentionally exercises durable expiry/recovery paths.
 # Its bounded waits can exceed the generic 60-second unit cap; use the
 # project-wide 120-second default rather than a 90-second near-boundary cutoff.
-set_tests_properties(lc_unit_workflow PROPERTIES TIMEOUT 120)
+set_tests_properties(lc_unit_outbox PROPERTIES TIMEOUT 120)
 target_link_options(lc_unit_consumer_service PRIVATE
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_client_open>
   $<$<LINK_LANGUAGE:C>:-Wl,--wrap=lc_engine_client_subscribe>
@@ -553,7 +553,7 @@ add_custom_target(lockdc_cross_runtime_tests DEPENDS
   lc_unit_xid_atfork
   lc_unit_public_mock_usage
   lc_unit_consumer_service
-  lc_unit_workflow
+  lc_unit_outbox
   lc_unit_runtime
   lc_unit_mutate_stream
   lc_unit_pouch
