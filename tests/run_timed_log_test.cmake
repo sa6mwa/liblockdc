@@ -32,9 +32,8 @@ if(NOT timed_stdout MATCHES "timing-contract completed in")
   message(FATAL_ERROR "run_timed.sh did not emit its completion event:\n${timed_stdout}")
 endif()
 
-# The lifecycle clean step removes the default timing directory while its
-# outer timer is still active. That diagnostic append must not override the
-# successful command status or make `make release` fail before its proof graph.
+# A caller-selected timing directory may disappear during a command. That
+# diagnostic append must not override the successful command status.
 execute_process(
   COMMAND "${CMAKE_COMMAND}" -E env
     "LOCKDC_TIMING_DIR=${test_root}/timing-clean"
@@ -50,6 +49,41 @@ if(NOT clean_result EQUAL 0)
   message(FATAL_ERROR
     "run_timed.sh changed a successful clean command into failure\n"
     "stdout:\n${clean_stdout}\nstderr:\n${clean_stderr}")
+endif()
+
+# The default log is deliberately outside build/, so a lifecycle clean keeps
+# the enclosing timer's record. Run an isolated copy because this test must
+# not remove the real build directory.
+set(default_root "${test_root}/default-root")
+set(default_script_dir "${default_root}/scripts")
+file(MAKE_DIRECTORY "${default_script_dir}")
+file(COPY_FILE "${run_timed}" "${default_script_dir}/run_timed.sh")
+execute_process(
+  COMMAND env -u LOCKDC_TIMING_DIR -u LOCKDC_TIMING_LOG -u LOCKDC_TIMING_DEPTH
+    bash "${default_script_dir}/run_timed.sh" "timing-default-clean"
+      bash -c "rm -rf \"$PWD/build\"; exit 0"
+  WORKING_DIRECTORY "${default_root}"
+  RESULT_VARIABLE default_result
+  OUTPUT_VARIABLE default_stdout
+  ERROR_VARIABLE default_stderr
+)
+if(NOT default_result EQUAL 0)
+  message(FATAL_ERROR
+    "run_timed.sh default timing clean failed\n"
+    "stdout:\n${default_stdout}\nstderr:\n${default_stderr}")
+endif()
+file(GLOB default_logs "${default_root}/.cache/timings/*.tsv")
+list(LENGTH default_logs default_log_count)
+if(NOT default_log_count EQUAL 1)
+  message(FATAL_ERROR
+    "expected one default timing TSV after clean, got ${default_log_count}")
+endif()
+list(GET default_logs 0 default_log)
+file(READ "${default_log}" default_contents)
+string(REPLACE "\t" "|" default_records "${default_contents}")
+if(NOT default_records MATCHES "timing-default-clean\\|[0-9]+\\|0\\|0")
+  message(FATAL_ERROR
+    "default timing TSV is missing the clean event:\n${default_contents}")
 endif()
 
 file(GLOB timing_logs "${timing_dir}/*.tsv")

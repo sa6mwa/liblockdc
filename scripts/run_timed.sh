@@ -17,7 +17,10 @@ timing_log=${LOCKDC_TIMING_LOG:-}
 timing_root=0
 
 if [ -z "$timing_log" ]; then
-    timing_dir=${LOCKDC_TIMING_DIR:-"$repo_root/build/timings"}
+    # Keep the default outside build/: lifecycle commands deliberately remove
+    # that directory before rebuilding, while the timing record must survive
+    # the whole enclosing command.
+    timing_dir=${LOCKDC_TIMING_DIR:-"$repo_root/.cache/timings"}
     if mkdir -p "$timing_dir" 2>/dev/null; then
         timing_log="$timing_dir/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.tsv"
         printf 'started_at\tfinished_at\tlabel\telapsed_seconds\tstatus\tdepth\n' > "$timing_log"

@@ -219,39 +219,39 @@ typedef struct lc_pouch_endpoint_option {
 } lc_pouch_endpoint_option;
 
 /** Bit in `lc_pouch_settings.set_mask` selecting `single_writer`. */
-#define LC_POUCH_SETTING_SINGLE_WRITER UINT64_C(1)
+#define LC_POUCH_SETTING_SINGLE_WRITER ((uint64_t)1)
 /** Bit in `lc_pouch_settings.set_mask` selecting `durable_sync`. */
-#define LC_POUCH_SETTING_DURABLE_SYNC (UINT64_C(1) << 1)
+#define LC_POUCH_SETTING_DURABLE_SYNC ((uint64_t)1 << 1)
 /** Bit in `lc_pouch_settings.set_mask` selecting `fsync_batch_max_ops`. */
-#define LC_POUCH_SETTING_FSYNC_BATCH_MAX_OPS (UINT64_C(1) << 2)
+#define LC_POUCH_SETTING_FSYNC_BATCH_MAX_OPS ((uint64_t)1 << 2)
 /** Bit in `lc_pouch_settings.set_mask` selecting `segment_target_bytes`. */
-#define LC_POUCH_SETTING_SEGMENT_TARGET_BYTES (UINT64_C(1) << 3)
+#define LC_POUCH_SETTING_SEGMENT_TARGET_BYTES ((uint64_t)1 << 3)
 /** Bit in `lc_pouch_settings.set_mask` selecting `indexer_flush_docs`. */
-#define LC_POUCH_SETTING_INDEXER_FLUSH_DOCS (UINT64_C(1) << 4)
+#define LC_POUCH_SETTING_INDEXER_FLUSH_DOCS ((uint64_t)1 << 4)
 /** Bit selecting `indexer_flush_interval_seconds`. */
-#define LC_POUCH_SETTING_INDEXER_FLUSH_INTERVAL_SECONDS (UINT64_C(1) << 5)
+#define LC_POUCH_SETTING_INDEXER_FLUSH_INTERVAL_SECONDS ((uint64_t)1 << 5)
 /** Bit selecting `background_compaction_enabled`. */
-#define LC_POUCH_SETTING_BACKGROUND_COMPACTION (UINT64_C(1) << 6)
+#define LC_POUCH_SETTING_BACKGROUND_COMPACTION ((uint64_t)1 << 6)
 /** Bit selecting `compaction_throttling_disabled`. */
-#define LC_POUCH_SETTING_DISABLE_COMPACTION_THROTTLING (UINT64_C(1) << 7)
+#define LC_POUCH_SETTING_DISABLE_COMPACTION_THROTTLING ((uint64_t)1 << 7)
 /** Bit selecting `terminal_reclaim_min_bytes`. */
-#define LC_POUCH_SETTING_TERMINAL_RECLAIM_MIN_BYTES (UINT64_C(1) << 8)
+#define LC_POUCH_SETTING_TERMINAL_RECLAIM_MIN_BYTES ((uint64_t)1 << 8)
 /** Bit selecting `queue_watch`. */
-#define LC_POUCH_SETTING_QUEUE_WATCH (UINT64_C(1) << 9)
+#define LC_POUCH_SETTING_QUEUE_WATCH ((uint64_t)1 << 9)
 /** Bit selecting `query_engine`. */
-#define LC_POUCH_SETTING_QUERY_ENGINE (UINT64_C(1) << 10)
+#define LC_POUCH_SETTING_QUERY_ENGINE ((uint64_t)1 << 10)
 /** Bit selecting `query_fallback_engine`. */
-#define LC_POUCH_SETTING_QUERY_FALLBACK_ENGINE (UINT64_C(1) << 11)
+#define LC_POUCH_SETTING_QUERY_FALLBACK_ENGINE ((uint64_t)1 << 11)
 /** Bit selecting `query_indexing_enabled`. */
-#define LC_POUCH_SETTING_QUERY_INDEXING (UINT64_C(1) << 12)
+#define LC_POUCH_SETTING_QUERY_INDEXING ((uint64_t)1 << 12)
 /** Bit selecting `crypto_key`. */
-#define LC_POUCH_SETTING_CRYPTO_KEY (UINT64_C(1) << 13)
+#define LC_POUCH_SETTING_CRYPTO_KEY ((uint64_t)1 << 13)
 /** Bit selecting `crypto_key_file`. */
-#define LC_POUCH_SETTING_CRYPTO_KEY_FILE (UINT64_C(1) << 14)
+#define LC_POUCH_SETTING_CRYPTO_KEY_FILE ((uint64_t)1 << 14)
 /** Bit selecting `crypto_generate_key_file`. */
-#define LC_POUCH_SETTING_CRYPTO_GENERATE_KEY_FILE (UINT64_C(1) << 15)
+#define LC_POUCH_SETTING_CRYPTO_GENERATE_KEY_FILE ((uint64_t)1 << 15)
 /** Bit selecting `compression`. */
-#define LC_POUCH_SETTING_COMPRESSION (UINT64_C(1) << 16)
+#define LC_POUCH_SETTING_COMPRESSION ((uint64_t)1 << 16)
 
 /**
  * Optional typed local-Pouch root-open settings.
