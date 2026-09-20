@@ -656,7 +656,8 @@ JSON `null` payloads distinct from the binding's existing `nil, err` and
 
 `client:subscribe(req, handler)` and `client:subscribe_with_state(req, handler)`
 are direct bindings to the C streaming subscription operations. Their handlers
-run synchronously on the calling Lua state. A subscription handler must
+run synchronously on the calling Lua state and receive the normal public
+`Message` and optional `Lease` receivers, not raw native userdata. A subscription handler must
 explicitly `ack()` or `nack()` its borrowed message before returning; returning
 `false, message`, `nil, message`, or raising stops the subscription with a
 structured error. A message (and the optional state lease) is invalid once its

@@ -301,6 +301,24 @@ end
 
 local function test_subscribe_ack_and_error_paths()
   local captured = {}
+  local message_core = {
+    info = function()
+      return { message_id = 'message-1' }
+    end,
+    payload = function()
+      return '{"source":"subscription"}', 25
+    end,
+    ack = function()
+      return true
+    end,
+    close = function() end,
+  }
+  local state_core = {
+    info = function()
+      return { lease_id = 'lease-1' }
+    end,
+    close = function() end,
+  }
   local client_core = {
     close = function() end,
     subscribe = function(_, req, handler)
@@ -314,7 +332,20 @@ local function test_subscribe_ack_and_error_paths()
       return true
     end,
   }
-  local handler = function() end
+  local handler_calls = 0
+  local retained_message
+  local retained_state
+  local handler = function(message, state)
+    handler_calls = handler_calls + 1
+    retained_message = message
+    retained_state = state
+    assert_eq(message:read_payload(), '{"source":"subscription"}',
+        'subscription should expose the public Message payload helper')
+    if state ~= nil then
+      assert_eq(state:info().lease_id, 'lease-1',
+          'state subscription should expose the public Lease wrapper')
+    end
+  end
 
   core_stub.open = function()
     return client_core
@@ -325,14 +356,22 @@ local function test_subscribe_ack_and_error_paths()
       'subscribe should delegate to the native C streaming operation')
   assert_eq(captured.subscribe_req.queue, 'jobs',
       'subscribe should preserve the C dequeue request')
-  assert_eq(captured.subscribe_handler, handler,
-      'subscribe should preserve the Lua callback identity')
+  captured.subscribe_handler(message_core)
+  assert_eq(handler_calls, 1,
+      'subscribe should invoke the application handler through the public facade')
+  assert_truthy(not retained_message:is_open(),
+      'borrowed subscription Message wrapper should close after its callback')
   assert_truthy(client:subscribe_with_state({ queue = 'state-jobs' }, handler),
       'subscribe_with_state should delegate to the native C streaming operation')
   assert_eq(captured.subscribe_with_state_req.queue, 'state-jobs',
       'subscribe_with_state should preserve the C dequeue request')
-  assert_eq(captured.subscribe_with_state_handler, handler,
-      'subscribe_with_state should preserve the Lua callback identity')
+  captured.subscribe_with_state_handler(message_core, state_core)
+  assert_eq(handler_calls, 2,
+      'subscribe_with_state should invoke the application handler through the public facade')
+  assert_truthy(not retained_message:is_open(),
+      'borrowed state subscription Message wrapper should close after its callback')
+  assert_truthy(retained_state._closed,
+      'borrowed state subscription Lease wrapper should close after its callback')
 end
 
 local function test_acquire_for_update_propagates_sdk_failure_shape()

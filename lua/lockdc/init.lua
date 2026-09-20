@@ -1286,12 +1286,40 @@ local function run_threadless_service(client, req, with_state, handler, should_s
   end
 end
 
+local function invoke_subscription_handler(handler, core_message, core_state)
+  local message = wrap_message(core_message)
+  local state = core_state ~= nil and wrap_lease(core_state) or nil
+  local ok, first, second = pcall(handler, message, state)
+
+  -- Subscription deliveries and their attached state leases are borrowed from
+  -- the native callback frame. Keep the public wrapper's lifecycle truthful
+  -- when an application retains either object after the callback returns.
+  message._closed = true
+  if state ~= nil then
+    state._closed = true
+  end
+  if not ok then
+    error(first, 0)
+  end
+  return first, second
+end
+
 function Client:subscribe(req, handler)
-  return self._core:subscribe(req, handler)
+  if type(handler) ~= "function" then
+    error("client:subscribe requires a handler function")
+  end
+  return self._core:subscribe(req, function(message)
+    return invoke_subscription_handler(handler, message, nil)
+  end)
 end
 
 function Client:subscribe_with_state(req, handler)
-  return self._core:subscribe_with_state(req, handler)
+  if type(handler) ~= "function" then
+    error("client:subscribe_with_state requires a handler function")
+  end
+  return self._core:subscribe_with_state(req, function(message, state)
+    return invoke_subscription_handler(handler, message, state)
+  end)
 end
 
 function Client:watch_queue(req, handler)

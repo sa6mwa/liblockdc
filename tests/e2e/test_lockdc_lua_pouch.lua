@@ -179,6 +179,18 @@ if updated == nil then
 end
 assert(lease:release())
 
+local invalid_sink_ok = pcall(function()
+  client:get({ key = "state" }, { write = false })
+end)
+if invalid_sink_ok then
+  client:close()
+  error("Lua client:get accepted an invalid streaming sink")
+end
+if type(client:info()) ~= "table" then
+  client:close()
+  error("Lua client remained marked streaming after invalid sink validation")
+end
+
 local state, state_meta_or_err = client:read_json({ key = "state" })
 if state == nil or state.source ~= "lua-pouch" or state.value ~= 1 then
   client:close()
@@ -258,6 +270,9 @@ local subscription_ok, subscription_err = client:subscribe({
   subscription_calls = subscription_calls + 1
   retained_delivery = delivery
   assert(type(client:info()) == "table")
+  local payload = assert(delivery:read_payload_json())
+  assert(payload.source == "lua-direct-subscribe")
+  assert(delivery:is_open())
   local closed, close_err = pcall(function()
     client:close()
   end)
@@ -277,7 +292,7 @@ end
 local retained_ok = pcall(function()
   retained_delivery:ack()
 end)
-if retained_ok then
+if retained_ok or retained_delivery:is_open() then
   client:close()
   error("Lua retained a direct-subscription delivery beyond its native callback")
 end
@@ -413,6 +428,18 @@ if watch_stop_ok ~= true or watch_stop_err ~= nil then
   client:close()
   error(("Lua queue watch did not treat an intentional stop as success (ok=%s error=%s)"):format(
     tostring(watch_stop_ok), tostring(watch_stop_err and watch_stop_err.message)))
+end
+
+local watch_failure_ok, watch_failure_err = client:watch_queue({
+  queue = "direct-watch-handler-failure",
+}, function()
+  return false, "intentional Lua queue watch failure"
+end)
+if watch_failure_ok ~= nil or type(watch_failure_err) ~= "table" or
+    not tostring(watch_failure_err.message):find("intentional Lua queue watch failure", 1, true) then
+  client:close()
+  error(("Lua queue watch discarded handler failure (ok=%s error=%s)"):format(
+    tostring(watch_failure_ok), tostring(watch_failure_err and watch_failure_err.message)))
 end
 
 local function assert_ok(operation, value, value_err)

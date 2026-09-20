@@ -2450,14 +2450,13 @@ static int lcdc_client_get(lua_State *L) {
   luaL_checktype(L, 2, LUA_TTABLE);
   lcdc_require_string_field(L, 2, "key", &key);
   lcdc_opt_boolean_field(L, 2, "public_read", &opts.public_read);
-  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc != LC_OK) {
-    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
+  ud->streaming = 1;
   rc = lc_get(ud->client, key, &opts, output.sink, &res, &error);
   if (rc != LC_OK) {
     if (output.sink != NULL) {
@@ -2790,14 +2789,13 @@ static int lcdc_client_get_attachment(lua_State *L) {
   lcdc_parse_attachment_selector(L, -1, &req.selector);
   lua_pop(L, 1);
   lcdc_opt_boolean_field(L, 2, "public_read", &req.public_read);
-  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc != LC_OK) {
-    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
+  ud->streaming = 1;
   rc = lc_get_attachment(ud->client, &req, output.sink, &res, &error);
   if (rc != LC_OK) {
     if (output.sink != NULL) {
@@ -3043,14 +3041,13 @@ static int lcdc_client_query(lua_State *L) {
   req.return_mode = lcdc_opt_string_field(L, 2, "return_mode");
   req.engine = lcdc_opt_string_field(L, 2, "engine");
   req.refresh = lcdc_opt_string_field(L, 2, "refresh");
-  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc != LC_OK) {
-    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
+  ud->streaming = 1;
   rc = lc_query(ud->client, &req, output.sink, &res, &error);
   if (rc != LC_OK) {
     if (output.sink != NULL) {
@@ -4154,8 +4151,11 @@ static int lcdc_lua_watch_handle(void *context, const lc_watch_event *event,
     lua_settop(handler->L, top);
     return 0;
   }
-  failed = lua_isnil(handler->L, -2) && !lua_isnil(handler->L, -1);
-  stop = lua_isboolean(handler->L, -2) && !lua_toboolean(handler->L, -2);
+  failed = !lua_isnil(handler->L, -1) &&
+           (lua_isnil(handler->L, -2) ||
+            (lua_isboolean(handler->L, -2) && !lua_toboolean(handler->L, -2)));
+  stop = lua_isboolean(handler->L, -2) && !lua_toboolean(handler->L, -2) &&
+         lua_isnil(handler->L, -1);
   if (failed) {
     message = lcdc_lua_error_message(handler->L, -1);
     (void)lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -4287,14 +4287,13 @@ static int lcdc_lease_get(lua_State *L) {
     luaL_checktype(L, 2, LUA_TTABLE);
     lcdc_opt_boolean_field(L, 2, "public_read", &opts.public_read);
   }
-  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc != LC_OK) {
-    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
+  ud->streaming = 1;
   rc = lc_lease_get(ud->lease, output.sink, &opts, &res, &error);
   if (rc != LC_OK) {
     if (output.sink != NULL) {
@@ -4620,14 +4619,13 @@ static int lcdc_lease_get_attachment(lua_State *L) {
   lcdc_parse_attachment_selector(L, -1, &req.selector);
   lua_pop(L, 1);
   lcdc_opt_boolean_field(L, 2, "public_read", &req.public_read);
-  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc != LC_OK) {
-    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
+  ud->streaming = 1;
   rc = lc_lease_get_attachment(ud->lease, &req, output.sink, &res, &error);
   if (rc != LC_OK) {
     if (output.sink != NULL) {
@@ -4810,14 +4808,13 @@ static int lcdc_message_payload(lua_State *L) {
 
   ud = lcdc_check_message(L, 1);
   lc_error_init(&error);
-  ud->streaming = 1;
   rc = lcdc_init_output(L, 2, &output, &error);
   if (rc != LC_OK) {
-    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
+  ud->streaming = 1;
   rc = lc_message_write_payload(ud->message, output.sink, &output.written,
                                 &error);
   if (rc != LC_OK) {
@@ -5351,8 +5348,8 @@ static int lcdc_outbox_write_command_result(lua_State *L) {
 
   lcdc_parse_command_identity(L, 2, &identity);
   lc_error_init(&error);
-  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
+  ud->streaming = rc == LC_OK;
   if (rc == LC_OK) {
     rc = lc_outbox_write_command_result(ud->outbox, &identity, output.sink,
                                         &written, &error);
@@ -6140,8 +6137,8 @@ static int lcdc_outbox_dispatcher_export_dead_letters(lua_State *L) {
       options.limit = (size_t)limit;
     }
   }
-  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
+  ud->streaming = rc == LC_OK;
   if (rc == LC_OK) {
     rc = lc_outbox_dispatcher_export_dead_letters(ud->dispatcher, &options,
                                                   output.sink, &result, &error);
@@ -6561,8 +6558,8 @@ static int lcdc_outbox_participant_get(lua_State *L) {
     luaL_checktype(L, 2, LUA_TTABLE);
     lcdc_opt_boolean_field(L, 2, "public_read", &opts.public_read);
   }
-  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
+  ud->streaming = rc == LC_OK;
   if (rc == LC_OK) {
     rc = ud->participant->get(ud->participant, output.sink, &opts, &result,
                               &error);
@@ -6839,8 +6836,8 @@ static int lcdc_outbox_participant_get_attachment(lua_State *L) {
   lua_pop(L, 1);
   lcdc_opt_boolean_field(L, 2, "public_read", &request.public_read);
   lc_error_init(&error);
-  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
+  ud->streaming = rc == LC_OK;
   if (rc == LC_OK) {
     rc = ud->participant->get_attachment(ud->participant, &request, output.sink,
                                          &result, &error);
@@ -6969,8 +6966,8 @@ static int lcdc_outbox_job_write_payload(lua_State *L) {
   if (ud->payload_streaming)
     return luaL_error(L, "outbox job payload cannot be streamed recursively");
   lc_error_init(&error);
-  ud->payload_streaming = 1;
   rc = lcdc_init_output(L, 2, &output, &error);
+  ud->payload_streaming = rc == LC_OK;
   if (rc == LC_OK) {
     rc = lc_outbox_job_write_payload(ud->job, output.sink, &output.written,
                                      &error);
