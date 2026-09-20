@@ -246,6 +246,9 @@ M.ERR_SERVER = core.ERR_SERVER
 M.ERR_TIMEOUT = core.ERR_TIMEOUT
 M.NACK_FAILURE = core.NACK_FAILURE
 M.NACK_DEFER = core.NACK_DEFER
+M.COMMAND_PENDING = core.COMMAND_PENDING
+M.COMMAND_COMPLETED = core.COMMAND_COMPLETED
+M.COMMAND_FAILED = core.COMMAND_FAILED
 
 function M.open(config)
   local client, err = core.open(config)
@@ -835,6 +838,14 @@ function Outbox:get_command_receipt(identity)
   return self._core:get_command_receipt(identity)
 end
 
+function Outbox:get_command_receipt_by_id(command_id)
+  return self._core:get_command_receipt_by_id(command_id)
+end
+
+function Outbox:wait_command(command_id, timeout_ms)
+  return self._core:wait_command(command_id, timeout_ms)
+end
+
 function Outbox:write_command_result(identity, sink)
   return self._core:write_command_result(identity, require_sink(sink,
     "outbox:write_command_result", "outbox:read_command_result"))
@@ -852,6 +863,18 @@ function Outbox:resume_command(identity)
   end
   if transaction == nil and type(receipt_or_err) ~= "table" then
     return nil, receipt_or_err
+  end
+  if transaction == nil then
+    return nil, receipt_or_err
+  end
+  return wrap_outbox_transaction(transaction), receipt_or_err
+end
+
+function Outbox:resume_command_by_id(command_id)
+  local transaction, receipt_or_err = self._core:resume_command_by_id(command_id)
+
+  if transaction == nil and receipt_or_err == nil then
+    return nil
   end
   if transaction == nil then
     return nil, receipt_or_err

@@ -124,6 +124,7 @@ typedef struct lc_outbox_record {
   char *effect_key;
   char *payload_digest;
   char *message_id;
+  char *command_id;
   char *causation_id;
   char *kind;
   char *schema_version;
@@ -197,6 +198,7 @@ static const lonejson_field lc_outbox_record_fields[] = {
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_outbox_record, payload_digest,
                                     "payload_digest"),
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_outbox_record, message_id, "message_id"),
+    LONEJSON_FIELD_STRING_ALLOC(lc_outbox_record, command_id, "command_id"),
     LONEJSON_FIELD_STRING_ALLOC(lc_outbox_record, causation_id, "causation_id"),
     LONEJSON_FIELD_STRING_ALLOC_REQ(lc_outbox_record, kind, "kind"),
     LONEJSON_FIELD_STRING_ALLOC(lc_outbox_record, schema_version,
@@ -494,6 +496,7 @@ struct lc_outbox_transaction_handle {
   size_t fresh_outbox_capacity;
   lc_outbox_participant_handle *participants;
   lc_lease *command_lease;
+  char *command_id;
   int command_causation_owned;
   char *causation_id;
   int command_terminal;
@@ -1510,6 +1513,39 @@ static int lc_outbox_command_key(const lc_command_identity *identity,
   return LC_OK;
 }
 
+static int lc_outbox_command_key_from_id(const char *command_id, char **out,
+                                         lc_error *error) {
+  const char *digest;
+  size_t index;
+  size_t key_length;
+  char *key;
+
+  if (command_id == NULL || strncmp(command_id, "cmd_", 4U) != 0 ||
+      strlen(command_id) != 47U) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "canonical command id is required", NULL, NULL, NULL);
+  }
+  digest = command_id + 4U;
+  for (index = 0U; index < 43U; ++index) {
+    unsigned char ch = (unsigned char)digest[index];
+
+    if (!((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+          (ch >= '0' && ch <= '9') || ch == '-' || ch == '_')) {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "canonical command id is required", NULL, NULL, NULL);
+    }
+  }
+  key_length = sizeof("__lockdc_io/v1/command/") - 1U + 43U + 1U;
+  key = (char *)malloc(key_length);
+  if (key == NULL)
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to allocate command receipt key", NULL, NULL,
+                        NULL);
+  snprintf(key, key_length, "__lockdc_io/v1/command/%s", digest);
+  *out = key;
+  return LC_OK;
+}
+
 typedef struct lc_outbox_headers_json_validation {
   int root_is_object;
 } lc_outbox_headers_json_validation;
@@ -1653,6 +1689,26 @@ static int lc_outbox_validate_command_request(const lc_client_handle *client,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "command request digest is required", NULL, NULL, NULL);
   }
+  if (request->generate_idempotency_key != 0 &&
+      request->generate_idempotency_key != 1) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "command idempotency-key generation flag is invalid",
+                        NULL, NULL, NULL);
+  }
+  if (request->generate_idempotency_key) {
+    if (request->identity.idempotency_key != NULL &&
+        request->identity.idempotency_key[0] != '\0') {
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "generated command idempotency key must be omitted",
+                          NULL, NULL, NULL);
+    }
+  } else if (request->identity.idempotency_key == NULL ||
+             request->identity.idempotency_key[0] == '\0') {
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "command idempotency key is required unless generation is enabled",
+        NULL, NULL, NULL);
+  }
   fields[0] = request->identity.scope;
   fields[1] = request->identity.command_type;
   fields[2] = request->identity.idempotency_key;
@@ -1660,6 +1716,31 @@ static int lc_outbox_validate_command_request(const lc_client_handle *client,
   fields[4] = request->operation_id;
   return lc_outbox_validate_receipt_fields(
       client, fields, sizeof(fields) / sizeof(fields[0]), "command", error);
+}
+
+static int lc_outbox_effective_command_request(
+    const lc_command_request *request, lc_command_request *effective,
+    char generated_key[LC_XID_STRING_SIZE], lc_error *error) {
+  if (request == NULL || effective == NULL || generated_key == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "command request and effective request are required",
+                        NULL, NULL, NULL);
+  *effective = *request;
+  if (request->generate_idempotency_key == 0)
+    return LC_OK;
+  if (request->generate_idempotency_key != 1 ||
+      (request->identity.idempotency_key != NULL &&
+       request->identity.idempotency_key[0] != '\0')) {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "generated command idempotency key must be explicitly "
+                        "requested without a supplied key",
+                        NULL, NULL, NULL);
+  }
+  if (lc_xid_new(generated_key, error) != LC_OK)
+    return error != NULL ? error->code : LC_ERR_TRANSPORT;
+  effective->identity.idempotency_key = generated_key;
+  effective->generate_idempotency_key = 0;
+  return LC_OK;
 }
 
 /* A terminal transition adds metadata to the durable command receipt. Validate
@@ -2336,6 +2417,7 @@ lc_outbox_transaction_set_command(lc_outbox_transaction_handle *transaction,
                                   lc_lease *lease, const char *command_id,
                                   lc_error *error) {
   char *cause;
+  char *retained_command_id;
 
   if (transaction->command_lease != NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
@@ -2352,6 +2434,18 @@ lc_outbox_transaction_set_command(lc_outbox_transaction_handle *transaction,
     transaction->causation_id = cause;
     transaction->command_causation_owned = 1;
   }
+  retained_command_id =
+      lc_client_strdup(transaction->outbox->client, command_id);
+  if (retained_command_id == NULL) {
+    if (transaction->command_causation_owned) {
+      lc_client_free(transaction->outbox->client, transaction->causation_id);
+      transaction->causation_id = NULL;
+      transaction->command_causation_owned = 0;
+    }
+    return lc_error_set(error, LC_ERR_NOMEM, 0L,
+                        "failed to retain command identity", NULL, NULL, NULL);
+  }
+  transaction->command_id = retained_command_id;
   transaction->command_lease = lease;
   return LC_OK;
 }
@@ -2363,6 +2457,8 @@ lc_outbox_transaction_clear_command(lc_outbox_transaction_handle *transaction,
     return;
   transaction->command_lease = NULL;
   transaction->command_terminal = 0;
+  lc_client_free(transaction->outbox->client, transaction->command_id);
+  transaction->command_id = NULL;
   if (transaction->command_causation_owned) {
     lc_client_free(transaction->outbox->client, transaction->causation_id);
     transaction->causation_id = NULL;
@@ -2491,7 +2587,8 @@ lc_outbox_stage_command_terminal(lc_outbox_transaction_handle *transaction,
 }
 
 static int lc_outbox_stage_outbox(lc_lease *lease, const lc_outbox_entry *entry,
-                                  lc_source *payload, lc_error *error) {
+                                  const char *command_id, lc_source *payload,
+                                  lc_error *error) {
   lc_outbox_record record;
   lc_attach_req attach;
   lc_attach_res attach_result;
@@ -2517,6 +2614,7 @@ static int lc_outbox_stage_outbox(lc_lease *lease, const lc_outbox_entry *entry,
     return rc;
   snprintf(message_id, sizeof(message_id), "msg_%s", message_digest);
   record.message_id = message_id;
+  record.command_id = (char *)command_id;
   record.causation_id = (char *)entry->causation_id;
   record.kind = (char *)entry->kind;
   record.schema_version = (char *)entry->schema_version;
@@ -2558,6 +2656,7 @@ static void lc_outbox_record_clear(lc_client_handle *client,
   lc_client_free(client, record->effect_key);
   lc_client_free(client, record->payload_digest);
   lc_client_free(client, record->message_id);
+  lc_client_free(client, record->command_id);
   lc_client_free(client, record->causation_id);
   lc_client_free(client, record->kind);
   lc_client_free(client, record->schema_version);
@@ -2790,6 +2889,8 @@ static int lc_outbox_record_copy(lc_client_handle *client,
            NULL) ||
       (src->message_id != NULL &&
        (dst->message_id = lc_client_strdup(client, src->message_id)) == NULL) ||
+      (src->command_id != NULL &&
+       (dst->command_id = lc_client_strdup(client, src->command_id)) == NULL) ||
       (src->causation_id != NULL && (dst->causation_id = lc_client_strdup(
                                          client, src->causation_id)) == NULL) ||
       (src->kind != NULL &&
@@ -2840,6 +2941,7 @@ static void lc_outbox_job_refresh(lc_outbox_job_handle *job) {
   job->pub.effect_id = job->record.effect_id;
   job->pub.effect_key = job->record.effect_key;
   job->pub.message_id = job->record.message_id;
+  job->pub.command_id = job->record.command_id;
   job->pub.causation_id = job->record.causation_id;
   job->pub.kind = job->record.kind;
   job->pub.schema_version = job->record.schema_version;
@@ -4657,6 +4759,8 @@ static int lc_outbox_transaction_accept_command_method(
   char command_id[48];
   char minted_txn_id[LC_XID_STRING_SIZE];
   lc_outbox_command_record record;
+  lc_command_request effective_request;
+  char generated_key[LC_XID_STRING_SIZE];
   int rc;
 
   if (transaction == NULL || transaction->terminal ||
@@ -4668,6 +4772,11 @@ static int lc_outbox_transaction_accept_command_method(
         "open transaction, one command request, and digest are required", NULL,
         NULL, NULL);
   }
+  rc = lc_outbox_effective_command_request(request, &effective_request,
+                                           generated_key, error);
+  if (rc != LC_OK)
+    return rc;
+  request = &effective_request;
   rc = lc_outbox_validate_command_request(transaction->outbox->client, request,
                                           error);
   if (rc != LC_OK)
@@ -4902,7 +5011,8 @@ static int lc_outbox_transaction_append_method(lc_outbox_transaction *self,
     free(key);
     return rc;
   }
-  rc = lc_outbox_stage_outbox(lease, &effective_entry, payload, error);
+  rc = lc_outbox_stage_outbox(lease, &effective_entry, transaction->command_id,
+                              payload, error);
   if (rc != LC_OK) {
     lc_outbox_transaction_abort_enrolled_lease(transaction, lease);
     free(key);
@@ -5218,6 +5328,7 @@ static void lc_outbox_transaction_close_method(lc_outbox_transaction *self) {
   lc_outbox_transaction_clear_fresh_outboxes(transaction);
   lc_client_free(outbox->client, transaction->leases);
   lc_client_free(outbox->client, transaction->causation_id);
+  lc_client_free(outbox->client, transaction->command_id);
   lc_client_free(outbox->client, transaction);
   lc_outbox_release(outbox);
 }
@@ -5324,7 +5435,7 @@ lc_outbox_append_method(lc_outbox *self, const lc_outbox_entry *entry,
     free(key);
     return rc;
   }
-  rc = lc_outbox_stage_outbox(lease, entry, payload, error);
+  rc = lc_outbox_stage_outbox(lease, entry, NULL, payload, error);
   if (rc != LC_OK) {
     lc_outbox_rollback_lease(lease);
     free(key);
@@ -5441,6 +5552,8 @@ static int lc_outbox_accept_command_method(lc_outbox *self,
   char *key;
   char command_id[48];
   char minted_txn_id[LC_XID_STRING_SIZE];
+  lc_command_request effective_request;
+  char generated_key[LC_XID_STRING_SIZE];
   int rc;
 
   if (outbox == NULL || request == NULL || out_txn == NULL || receipt == NULL ||
@@ -5452,6 +5565,11 @@ static int lc_outbox_accept_command_method(lc_outbox *self,
   }
   *out_txn = NULL;
   lc_command_receipt_cleanup(receipt);
+  rc = lc_outbox_effective_command_request(request, &effective_request,
+                                           generated_key, error);
+  if (rc != LC_OK)
+    return rc;
+  request = &effective_request;
   rc = lc_outbox_validate_command_request(outbox->client, request, error);
   if (rc != LC_OK)
     return rc;
@@ -5548,6 +5666,105 @@ static int lc_outbox_get_command_receipt_method(
                                     NULL, receipt, error);
   free(key);
   return rc;
+}
+
+static int lc_outbox_get_command_receipt_by_id_method(
+    lc_outbox *self, const char *command_id, lc_command_receipt *receipt,
+    lc_error *error) {
+  lc_outbox_handle *outbox = (lc_outbox_handle *)self;
+  lc_outbox_command_record record;
+  lc_get_opts options;
+  lc_get_res result;
+  lonejson *runtime;
+  char *key;
+  int rc;
+
+  if (outbox == NULL || receipt == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "outbox and command receipt output are required", NULL,
+                        NULL, NULL);
+  lc_command_receipt_cleanup(receipt);
+  memset(&record, 0, sizeof(record));
+  memset(&result, 0, sizeof(result));
+  runtime = NULL;
+  key = NULL;
+  rc = lc_outbox_command_key_from_id(command_id, &key, error);
+  if (rc != LC_OK)
+    return rc;
+  rc = lc_outbox_require_json_runtime(outbox->client, &runtime, error);
+  if (rc == LC_OK) {
+    lc_get_opts_init(&options);
+    options.public_read = 1;
+    rc = lc_load_in_namespace(&outbox->client->pub, outbox->ns, key,
+                              &lc_outbox_command_record_map, &record, &options,
+                              &result, error);
+  }
+  if (rc == LC_OK && result.no_content) {
+    rc = lc_error_set(error, LC_ERR_INVALID, 0L,
+                      "command receipt does not exist", NULL, NULL, NULL);
+  }
+  if (rc == LC_OK && (record.command_id == NULL ||
+                      strcmp(record.command_id, command_id) != 0)) {
+    rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                      "command receipt does not match command id", NULL, NULL,
+                      NULL);
+  }
+  if (rc == LC_OK)
+    rc = lc_outbox_command_receipt_from_record(&record, receipt, error);
+  if (runtime != NULL)
+    runtime->cleanup(runtime, &lc_outbox_command_record_map, &record);
+  lc_get_res_cleanup(&result);
+  free(key);
+  return rc;
+}
+
+static int lc_outbox_wait_command_method(lc_outbox *self,
+                                         const char *command_id,
+                                         long timeout_ms,
+                                         lc_command_receipt *receipt,
+                                         lc_error *error) {
+  struct timespec started;
+  struct timespec now;
+  long elapsed_ms;
+  long delay_ms;
+  int rc;
+
+  if (self == NULL || receipt == NULL || timeout_ms < -1L)
+    return lc_error_set(
+        error, LC_ERR_INVALID, 0L,
+        "outbox, receipt output, and valid timeout are required", NULL, NULL,
+        NULL);
+  if (clock_gettime(CLOCK_MONOTONIC, &started) != 0)
+    return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                        "failed to read command wait clock", NULL, NULL, NULL);
+  for (;;) {
+    rc = lc_outbox_get_command_receipt_by_id_method(self, command_id, receipt,
+                                                    error);
+    if (rc != LC_OK || receipt->state != LC_COMMAND_PENDING)
+      return rc;
+    if (timeout_ms == 0L)
+      return lc_error_set(error, LC_ERR_TIMEOUT, 0L, "command remains pending",
+                          NULL, NULL, NULL);
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+      return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                          "failed to read command wait clock", NULL, NULL,
+                          NULL);
+    elapsed_ms = (long)((now.tv_sec - started.tv_sec) * 1000L +
+                        (now.tv_nsec - started.tv_nsec) / 1000000L);
+    if (timeout_ms > 0L && elapsed_ms >= timeout_ms)
+      return lc_error_set(error, LC_ERR_TIMEOUT, 0L, "command remains pending",
+                          NULL, NULL, NULL);
+    delay_ms = 10L;
+    if (timeout_ms > 0L && timeout_ms - elapsed_ms < delay_ms)
+      delay_ms = timeout_ms - elapsed_ms;
+    if (delay_ms > 0L) {
+      struct timespec delay;
+
+      delay.tv_sec = delay_ms / 1000L;
+      delay.tv_nsec = (delay_ms % 1000L) * 1000000L;
+      (void)nanosleep(&delay, NULL);
+    }
+  }
 }
 
 static int lc_outbox_write_command_result_method(
@@ -5671,6 +5888,33 @@ static int lc_outbox_resume_command_method(lc_outbox *self,
   }
   *out_txn = transaction;
   return LC_OK;
+}
+
+static int lc_outbox_resume_command_by_id_method(
+    lc_outbox *self, const char *command_id, lc_outbox_transaction **out_txn,
+    lc_command_receipt *receipt, lc_error *error) {
+  lc_command_receipt current;
+  lc_command_identity identity;
+  int rc;
+
+  if (out_txn == NULL || receipt == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "transaction and command receipt outputs are required",
+                        NULL, NULL, NULL);
+  lc_command_receipt_init(&current);
+  rc = lc_outbox_get_command_receipt_by_id_method(self, command_id, &current,
+                                                  error);
+  if (rc != LC_OK) {
+    lc_command_receipt_cleanup(&current);
+    return rc;
+  }
+  identity.scope = current.scope;
+  identity.command_type = current.command_type;
+  identity.idempotency_key = current.idempotency_key;
+  rc =
+      lc_outbox_resume_command_method(self, &identity, out_txn, receipt, error);
+  lc_command_receipt_cleanup(&current);
+  return rc;
 }
 
 static int lc_outbox_next_method(lc_outbox *self, long timeout_ms,
@@ -6528,8 +6772,12 @@ static int lc_outbox_new(lc_client *self, const lc_outbox_config *config,
   outbox->pub.begin = lc_outbox_begin_method;
   outbox->pub.accept_command = lc_outbox_accept_command_method;
   outbox->pub.get_command_receipt = lc_outbox_get_command_receipt_method;
+  outbox->pub.get_command_receipt_by_id =
+      lc_outbox_get_command_receipt_by_id_method;
+  outbox->pub.wait_command = lc_outbox_wait_command_method;
   outbox->pub.write_command_result = lc_outbox_write_command_result_method;
   outbox->pub.resume_command = lc_outbox_resume_command_method;
+  outbox->pub.resume_command_by_id = lc_outbox_resume_command_by_id_method;
   outbox->pub.append = lc_outbox_append_method;
   outbox->pub.accept_inbox = lc_outbox_accept_inbox_method;
   outbox->pub.get_or_start_dispatcher =

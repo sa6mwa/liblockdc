@@ -420,6 +420,14 @@ durable work:
   body, `outbox:read_command_result(identity)` to materialize it, and
   `outbox:resume_command(identity)` to obtain a transaction for a pending
   command. A terminal command resumes as `nil, receipt`.
+  `outbox:get_command_receipt_by_id(command_id)` is suitable for an
+  authenticated status resource. `outbox:wait_command(command_id, timeout_ms)`
+  only waits for that durable receipt; it never runs a dispatcher handler or
+  starts a worker. On timeout it returns `receipt, error`, where receipt
+  remains pending and `error.code` is `ERR_TIMEOUT`. Set
+  `generate_idempotency_key = true` and omit
+  `idempotency_key` in `accept_command` only when returning the generated key
+  or status reference to the caller.
 - `outbox:transaction(fn)` provides a lazy transaction proxy. Its first
   participant may be `acquire`, `append`, `accept_inbox`, or
   `accept_command`; it commits on normal callback return and rolls back on an

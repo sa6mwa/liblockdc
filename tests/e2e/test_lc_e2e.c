@@ -4283,6 +4283,119 @@ static void test_pouch_direct_query_indexing_disabled_roundtrip(void **state) {
   cleanup_pouch_root(root);
 }
 
+static void test_pouch_direct_route_command_wait_roundtrip(void **state) {
+  char root[256], endpoint[512], command_id[48];
+  lc_client *client;
+  lc_outbox *outbox;
+  lc_outbox_dispatcher *dispatcher;
+  lc_outbox_transaction *transaction;
+  lc_outbox_job *job;
+  lc_command_request command;
+  lc_command_receipt receipt;
+  lc_command_result result;
+  lc_outbox_entry entry;
+  lc_outbox_receipt outbox_receipt;
+  lc_outbox_commit_result commit_result;
+  lc_source *payload;
+  lc_error error;
+
+  (void)state;
+  make_pouch_root("route-command-wait", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  client = NULL;
+  outbox = NULL;
+  dispatcher = NULL;
+  transaction = NULL;
+  job = NULL;
+  payload = NULL;
+  lc_error_init(&error);
+  lc_command_receipt_init(&receipt);
+  lc_outbox_receipt_init(&outbox_receipt);
+  lc_outbox_commit_result_init(&commit_result);
+  open_pouch_client(endpoint, &client, &error);
+  {
+    lc_outbox_config config;
+
+    lc_outbox_config_init(&config);
+    config.ns = "route-command";
+    config.owner = "route-command-owner";
+    assert_lc_ok(lc_client_new_outbox(client, &config, &outbox, &error),
+                 &error);
+  }
+  lc_command_request_init(&command);
+  command.identity.scope = "tenant-route";
+  command.identity.command_type = "orders.create.v1";
+  command.generate_idempotency_key = 1;
+  command.request_digest = "route-command-digest";
+  assert_lc_ok(lc_outbox_accept_command(outbox, &command, &transaction,
+                                        &receipt, &error),
+               &error);
+  assert_non_null(transaction);
+  assert_non_null(receipt.idempotency_key);
+  assert_int_equal(strlen(receipt.idempotency_key), LC_XID_STRING_LENGTH);
+  assert_true(
+      snprintf(command_id, sizeof(command_id), "%s", receipt.command_id) > 0);
+  lc_outbox_entry_init(&entry);
+  entry.operation_id = "route-operation";
+  entry.effect_id = "route-final-effect";
+  entry.effect_key = "route-final-effect-key";
+  entry.payload_digest = "sha256:route-final-effect";
+  entry.kind = "route-test";
+  entry.destination = "https://example.invalid/route-test";
+  assert_lc_ok(lc_source_from_memory("route", 5U, &payload, &error), &error);
+  assert_lc_ok(lc_outbox_transaction_append(transaction, &entry, payload,
+                                            &outbox_receipt, &error),
+               &error);
+  assert_lc_ok(
+      lc_outbox_transaction_commit(transaction, &commit_result, &error),
+      &error);
+  lc_outbox_commit_result_cleanup(&commit_result);
+  lc_outbox_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(
+      lc_outbox_wait_command(outbox, command_id, 0L, &receipt, &error),
+      LC_ERR_TIMEOUT);
+  assert_int_equal(receipt.state, LC_COMMAND_PENDING);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_lc_ok(lc_outbox_dispatcher_get_or_start(outbox, &dispatcher, &error),
+               &error);
+  assert_lc_ok(lc_outbox_dispatcher_next(dispatcher, 5000L, &job, &error),
+               &error);
+  assert_non_null(job);
+  assert_string_equal(job->command_id, command_id);
+  assert_lc_ok(lc_outbox_resume_command_by_id(outbox, job->command_id,
+                                              &transaction, &receipt, &error),
+               &error);
+  assert_non_null(transaction);
+  lc_command_result_init(&result);
+  result.result_code = "created";
+  result.result_reference = "route-resource";
+  assert_lc_ok(
+      lc_outbox_transaction_complete_command(transaction, &result, &error),
+      &error);
+  assert_lc_ok(
+      lc_outbox_transaction_commit(transaction, &commit_result, &error),
+      &error);
+  lc_outbox_commit_result_cleanup(&commit_result);
+  lc_outbox_transaction_close(transaction);
+  transaction = NULL;
+  assert_lc_ok(lc_outbox_job_complete(job, NULL, &error), &error);
+  job = NULL;
+  assert_lc_ok(
+      lc_outbox_wait_command(outbox, command_id, 1000L, &receipt, &error),
+      &error);
+  assert_int_equal(receipt.state, LC_COMMAND_COMPLETED);
+  lc_outbox_receipt_cleanup(&outbox_receipt);
+  lc_command_receipt_cleanup(&receipt);
+  lc_source_close(payload);
+  lc_outbox_dispatcher_close(dispatcher);
+  lc_outbox_close(outbox);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void test_pouch_direct_state_attachment_reopen_roundtrip(void **state) {
   lc_client *client;
   lc_client *reader;
@@ -6892,6 +7005,7 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_direct_transformed_metadata_replay_defers_body_materialization),
       cmocka_unit_test(test_pouch_direct_query_indexing_disabled_roundtrip),
+      cmocka_unit_test(test_pouch_direct_route_command_wait_roundtrip),
       cmocka_unit_test(test_pouch_direct_state_attachment_reopen_roundtrip),
       cmocka_unit_test(
           test_pouch_direct_lifecycle_maintenance_reopen_roundtrip),

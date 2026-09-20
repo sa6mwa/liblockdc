@@ -190,6 +190,41 @@ streaming_participant:close()
 streaming_txn:close()
 streaming_outbox:close()
 
+local command_txn, command_receipt = outbox:accept_command({
+  scope = "lua-command-status",
+  command_type = "orders.create.v1",
+  generate_idempotency_key = true,
+  request_digest = "sha256:lua-command-status",
+})
+if command_txn == nil or command_receipt == nil or
+    type(command_receipt.idempotency_key) ~= "string" or
+    #command_receipt.idempotency_key ~= 20 then
+  error("Lua generated command idempotency key was not returned")
+end
+assert_ok(command_txn:commit(), nil, "Lua generated command commit")
+command_txn:close()
+local pending_receipt, pending_err =
+    outbox:wait_command(command_receipt.command_id, 0)
+if pending_receipt == nil or pending_receipt.state ~= lockdc.COMMAND_PENDING or
+    pending_err == nil or pending_err.code ~= lockdc.ERR_TIMEOUT then
+  error("Lua command wait did not expose a pending timeout receipt")
+end
+local resumed_txn, resumed_receipt =
+    outbox:resume_command_by_id(command_receipt.command_id)
+if resumed_txn == nil or resumed_receipt == nil then
+  error("Lua command resume by id did not return a pending transaction")
+end
+assert_ok(resumed_txn:complete_command({ result_code = "created" }), nil,
+          "Lua command terminal result")
+assert_ok(resumed_txn:commit(), nil, "Lua command terminal commit")
+resumed_txn:close()
+local completed_receipt, completed_err =
+    outbox:wait_command(command_receipt.command_id, 0)
+if completed_receipt == nil or
+    completed_receipt.state ~= lockdc.COMMAND_COMPLETED or completed_err ~= nil then
+  error("Lua command wait did not expose the durable terminal receipt")
+end
+
 local function append_effect(effect_id, payload)
   local txn, receipt_or_err = outbox:append({
     operation_id = "lua-order-1",

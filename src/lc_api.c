@@ -417,6 +417,17 @@ int lc_outbox_get_command_receipt(lc_outbox *outbox,
                                   lc_command_receipt *out, lc_error *error) {
   return outbox->get_command_receipt(outbox, identity, out, error);
 }
+int lc_outbox_get_command_receipt_by_id(lc_outbox *outbox,
+                                        const char *command_id,
+                                        lc_command_receipt *out,
+                                        lc_error *error) {
+  return outbox->get_command_receipt_by_id(outbox, command_id, out, error);
+}
+int lc_outbox_wait_command(lc_outbox *outbox, const char *command_id,
+                           long timeout_ms, lc_command_receipt *out,
+                           lc_error *error) {
+  return outbox->wait_command(outbox, command_id, timeout_ms, out, error);
+}
 int lc_outbox_write_command_result(lc_outbox *outbox,
                                    const lc_command_identity *identity,
                                    lc_sink *dst, size_t *written,
@@ -428,6 +439,13 @@ int lc_outbox_resume_command(lc_outbox *outbox,
                              lc_outbox_transaction **out_txn,
                              lc_command_receipt *receipt, lc_error *error) {
   return outbox->resume_command(outbox, identity, out_txn, receipt, error);
+}
+int lc_outbox_resume_command_by_id(lc_outbox *outbox, const char *command_id,
+                                   lc_outbox_transaction **out_txn,
+                                   lc_command_receipt *receipt,
+                                   lc_error *error) {
+  return outbox->resume_command_by_id(outbox, command_id, out_txn, receipt,
+                                      error);
 }
 void lc_outbox_close(lc_outbox *outbox) {
   if (outbox != NULL)

@@ -1876,6 +1876,12 @@ typedef struct lc_command_identity {
 typedef struct lc_command_request {
   /** Required receipt identity. */
   lc_command_identity identity;
+  /**
+   * Generates an XID-backed idempotency key when non-zero. In this explicit
+   * mode `identity.idempotency_key` must be `NULL` or empty; the generated key
+   * is returned through the owned command receipt.
+   */
+  int generate_idempotency_key;
   /** Required opaque semantic request binding; never interpreted by liblockdc.
    */
   const char *request_digest;
@@ -2634,6 +2640,12 @@ struct lc_outbox_job {
   const char *effect_key;
   /** Component-generated stable transport message identity. */
   const char *message_id;
+  /**
+   * Optional component-generated command identity that owns this effect.
+   * It is set for an effect appended through a command-owning transaction and
+   * is independent of the caller-defined `causation_id`.
+   */
+  const char *command_id;
   /** Optional immediate durable command or source-message cause. */
   const char *causation_id;
   /** Borrowed caller-defined routing kind. */
@@ -2678,6 +2690,17 @@ struct lc_outbox {
   int (*get_command_receipt)(lc_outbox *self,
                              const lc_command_identity *identity,
                              lc_command_receipt *out, lc_error *error);
+  /** Reads a durable command receipt by its component-generated command id. */
+  int (*get_command_receipt_by_id)(lc_outbox *self, const char *command_id,
+                                   lc_command_receipt *out, lc_error *error);
+  /**
+   * Waits for a command receipt to become terminal without claiming work or
+   * invoking host code. `timeout_ms` is zero for a one-shot read, negative to
+   * wait without a deadline, or positive for a monotonic deadline. A timeout
+   * returns `LC_ERR_TIMEOUT` and the latest pending receipt in `out`.
+   */
+  int (*wait_command)(lc_outbox *self, const char *command_id, long timeout_ms,
+                      lc_command_receipt *out, lc_error *error);
   /** Streams a completed command's result attachment into `dst`, if present. */
   int (*write_command_result)(lc_outbox *self,
                               const lc_command_identity *identity, lc_sink *dst,
@@ -2690,6 +2713,14 @@ struct lc_outbox {
   int (*resume_command)(lc_outbox *self, const lc_command_identity *identity,
                         lc_outbox_transaction **out_txn,
                         lc_command_receipt *receipt, lc_error *error);
+  /**
+   * Resumes a pending command by its component-generated command id. This is
+   * intended for a claimed command-bound outbox job's supervisor. A terminal
+   * command returns `*out_txn == NULL` and its current receipt.
+   */
+  int (*resume_command_by_id)(lc_outbox *self, const char *command_id,
+                              lc_outbox_transaction **out_txn,
+                              lc_command_receipt *receipt, lc_error *error);
   /**
    * Stages one durable outbox effect and starts its lazy transaction.
    *
@@ -3839,6 +3870,18 @@ int lc_outbox_accept_command(lc_outbox *outbox,
 int lc_outbox_get_command_receipt(lc_outbox *outbox,
                                   const lc_command_identity *identity,
                                   lc_command_receipt *out, lc_error *error);
+/** Reads a durable command receipt by its component-generated command id. */
+int lc_outbox_get_command_receipt_by_id(lc_outbox *outbox,
+                                        const char *command_id,
+                                        lc_command_receipt *out,
+                                        lc_error *error);
+/**
+ * Waits for a command receipt to become terminal without performing dispatch.
+ * A timeout returns `LC_ERR_TIMEOUT` and the latest pending receipt in `out`.
+ */
+int lc_outbox_wait_command(lc_outbox *outbox, const char *command_id,
+                           long timeout_ms, lc_command_receipt *out,
+                           lc_error *error);
 /** Streams a completed command result attachment into `dst`, if it exists. */
 int lc_outbox_write_command_result(lc_outbox *outbox,
                                    const lc_command_identity *identity,
@@ -3853,6 +3896,11 @@ int lc_outbox_resume_command(lc_outbox *outbox,
                              const lc_command_identity *identity,
                              lc_outbox_transaction **out_txn,
                              lc_command_receipt *receipt, lc_error *error);
+/** Resumes a pending command by component-generated command id. */
+int lc_outbox_resume_command_by_id(lc_outbox *outbox, const char *command_id,
+                                   lc_outbox_transaction **out_txn,
+                                   lc_command_receipt *receipt,
+                                   lc_error *error);
 /** Creates a lazy outbox transaction with no durable marker until use. */
 int lc_outbox_begin(lc_outbox *outbox, lc_outbox_transaction **out,
                     lc_error *error);

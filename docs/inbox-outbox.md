@@ -803,6 +803,32 @@ the required status-resource primitive for long-running HTTP/RPC commands; it
 does not claim a dispatcher job, invoke user code, or perform a reconciliation
 query.
 
+`outbox->wait_command(command_id, timeout_ms, ...)` is the corresponding
+blocking observer for a synchronous route. It only rereads the receipt; it
+does not start a dispatcher, claim an effect, invoke a host callback, or change
+durable state. It returns `LC_OK` only after the receipt is `completed` or
+`failed`. On an elapsed deadline it returns `LC_ERR_TIMEOUT` with the latest
+owned `pending` receipt, which an HTTP host normally maps to `202 Accepted`
+and its own authenticated status URL. A terminal failure is a terminal receipt
+rather than a fabricated transport error.
+
+The supervisor receives `job->command_id` for effects appended through an
+accepted command, even when the application supplies a separate
+`causation_id`. When the application-defined final effect succeeds, it resumes
+that command by ID, persists the command's terminal result, commits, and only
+then completes the job. If it crashes after the command commit but before job
+completion, recovery sees the already-terminal command and can safely complete
+the idempotent job without repeating the foreign effect. The application,
+not liblockdc, decides which effect or fan-in is final.
+
+An idempotency key is normally caller-supplied. A host may explicitly set
+`generate_idempotency_key=1` while omitting the key; liblockdc mints an
+XID-backed key and returns it in the receipt. This is appropriate only when
+the returned receipt/status reference reaches the caller: a lost initial
+response cannot be deduplicated by a client that never received a generated
+key. Reserved durable keys are always length-prefixed SHA-256/base64url
+digests; source-supplied identity strings are never concatenated into paths.
+
 A command receipt without its associated domain/outbox transaction is not the
 feature's correctness goal. The public command-receipt API is endpoint-neutral
 and uses the same outbox composition for Pouch and remote lockd. This release

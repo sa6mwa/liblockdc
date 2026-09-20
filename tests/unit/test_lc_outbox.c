@@ -3682,6 +3682,14 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   assert_int_equal(receipt.state, LC_COMMAND_COMPLETED);
   assert_string_equal(receipt.result_code, "created");
   assert_true(receipt.has_result_body);
+  assert_int_equal(lc_outbox_get_command_receipt_by_id(
+                       outbox, receipt.command_id, &duplicate_receipt, &error),
+                   LC_OK);
+  assert_int_equal(duplicate_receipt.state, LC_COMMAND_COMPLETED);
+  assert_int_equal(lc_outbox_wait_command(outbox, receipt.command_id, 0L,
+                                          &duplicate_receipt, &error),
+                   LC_OK);
+  assert_int_equal(duplicate_receipt.state, LC_COMMAND_COMPLETED);
   sink = NULL;
   bytes = NULL;
   length = 0U;
@@ -3760,6 +3768,7 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   assert_int_equal(lc_outbox_next(outbox, 2000L, &job, &error), LC_OK);
   assert_non_null(job);
   assert_non_null(job->message_id);
+  assert_string_equal(job->command_id, receipt.command_id);
   assert_string_equal(job->causation_id, receipt.command_id);
   assert_string_equal(job->schema_version, "v1");
   lc_outbox_completion_init(&completion);
@@ -3778,6 +3787,83 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   lc_command_receipt_cleanup(&duplicate_receipt);
   lc_command_receipt_cleanup(&receipt);
   lc_source_close(payload);
+  lc_outbox_close(outbox);
+  lc_client_close(client);
+  lc_error_cleanup(&error);
+  lc_test_tmp_cleanup_path(root, OUTBOX_TMP_PREFIX);
+}
+
+static void test_pouch_generated_command_key_waits_by_id(void **state) {
+  char root[256], template_path[256], endpoint[320], command_id[48];
+  const char *endpoints[1];
+  lc_client_config client_config;
+  lc_outbox_config outbox_config;
+  lc_command_request command;
+  lc_command_receipt receipt;
+  lc_command_result result;
+  lc_outbox_transaction *transaction;
+  lc_client *client;
+  lc_outbox *outbox;
+  lc_error error;
+
+  (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       OUTBOX_TMP_PREFIX "command-generated-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  OUTBOX_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_error_init(&error);
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  client = NULL;
+  outbox = NULL;
+  transaction = NULL;
+  lc_command_receipt_init(&receipt);
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  lc_outbox_config_init(&outbox_config);
+  outbox_config.ns = "generated-command-outbox";
+  outbox_config.owner = "generated-command-owner";
+  assert_int_equal(
+      lc_client_new_outbox(client, &outbox_config, &outbox, &error), LC_OK);
+  lc_command_request_init(&command);
+  command.identity.scope = "tenant-a";
+  command.identity.command_type = "orders.create.v1";
+  command.generate_idempotency_key = 1;
+  command.request_digest = "generated-command-digest";
+  assert_int_equal(lc_outbox_accept_command(outbox, &command, &transaction,
+                                            &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  assert_true(lc_xid_is_valid(receipt.idempotency_key));
+  assert_true(
+      snprintf(command_id, sizeof(command_id), "%s", receipt.command_id) > 0);
+  assert_int_equal(lc_outbox_transaction_commit(transaction, &error), LC_OK);
+  lc_outbox_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(
+      lc_outbox_wait_command(outbox, command_id, 0L, &receipt, &error),
+      LC_ERR_TIMEOUT);
+  assert_int_equal(receipt.state, LC_COMMAND_PENDING);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_outbox_resume_command_by_id(
+                       outbox, command_id, &transaction, &receipt, &error),
+                   LC_OK);
+  assert_non_null(transaction);
+  lc_command_result_init(&result);
+  result.result_code = "created";
+  assert_int_equal(
+      lc_outbox_transaction_complete_command(transaction, &result, &error),
+      LC_OK);
+  assert_int_equal(lc_outbox_transaction_commit(transaction, &error), LC_OK);
+  lc_outbox_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(
+      lc_outbox_wait_command(outbox, command_id, 0L, &receipt, &error), LC_OK);
+  assert_int_equal(receipt.state, LC_COMMAND_COMPLETED);
+  lc_command_receipt_cleanup(&receipt);
   lc_outbox_close(outbox);
   lc_client_close(client);
   lc_error_cleanup(&error);
@@ -9179,6 +9265,7 @@ int main(void) {
           test_pouch_claim_recovery_allocation_failure_recovers_at_expiry),
       cmocka_unit_test(
           test_pouch_command_receipt_commits_with_outbox_and_result),
+      cmocka_unit_test(test_pouch_generated_command_key_waits_by_id),
       cmocka_unit_test(
           test_pouch_command_receipt_rejects_malformed_terminal_records),
       cmocka_unit_test(
