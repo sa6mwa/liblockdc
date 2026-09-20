@@ -17,7 +17,7 @@ wrong model for web runtimes and for processes that only produce effects.
 This cutover splits those roles:
 
 - an **outbox** is a threadless transactional producer and receipt reader;
-- a **outbox dispatcher** is an explicit, process-local durable-work
+- an **outbox dispatcher** is an explicit, process-local durable-work
   consumer; and
 - a host decides its process topology, scheduling, and language-runtime
   ownership.
@@ -567,6 +567,11 @@ pattern, not merely individual calls:
 5. completion, retry/reschedule, and dead-lettering are durable terminal
    decisions; and
 6. restart and reconciliation repair every missing wake.
+
+For a Vectis supervisor integration review, start with the self-contained
+[Vectis outbox integration handover](outbox-vectis-handover.md). It summarizes
+the required host topology, IPC, recovery, ownership, and Pouch deployment
+rules while this document remains the detailed architecture authority.
 
 Examples must include a direct liblockdc deployment with a producer process
 and a dedicated Lua dispatcher process, plus the Vectis-facing lifecycle
