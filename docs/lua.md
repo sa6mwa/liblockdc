@@ -105,6 +105,10 @@ The top-level module is:
 local lockdc = require("lockdc")
 ```
 
+`lockdc` is the supported package. `lockdc.core` is an internal native module
+used to implement it; applications must not require it or depend on its
+methods, result shapes, or convenience behavior.
+
 Primary entrypoints:
 
 - `lockdc.open(config)`
@@ -112,6 +116,7 @@ Primary entrypoints:
 - `lockdc.encode_json(value)`
 - `lockdc.decode_json(payload)`
 - `lockdc.json_null`
+- `lockdc.OK`, `lockdc.ERR_*`, and `lockdc.NACK_*` C status/intent constants
 
 Primary handle types:
 
@@ -125,6 +130,45 @@ Primary handle types:
 - `OutboxJob`
 - `HistoryConsumer`
 - `Service`
+
+## Byte sources, sinks, and explicit materialization
+
+The Lua façade keeps the C `lc_source`/`lc_sink` distinction visible. Methods
+that send bytes accept a source string, `{ bytes = ... }`, `{ path = ... }`,
+`{ fd = ... }`, or a callback source with `read(max_bytes)`, optional `reset`,
+and optional `close`. A callback source returns a byte string, `nil` at EOF,
+or `nil, message` on failure.
+
+Methods that receive bytes require a sink. A sink is a path string, file
+descriptor number, `{ path = ... }`, `{ fd = ... }`, or a callback table:
+
+```lua
+local streamed, written_or_err = job:write_payload({
+  write = function(chunk)
+    foreign_request:write(chunk) -- receives bounded chunks
+    return true                  -- nil/no return is also accepted
+  end,
+  close = function()
+    foreign_request:finish()
+  end,
+})
+assert(streamed == nil)
+assert(type(written_or_err) == "number")
+```
+
+`write` runs synchronously and must either accept the complete supplied chunk
+or return `false, message` / `nil, message` (or raise) to fail the operation.
+There are no partial writes. `close` is optional, runs once when liblockdc
+releases the sink, and cannot report an operation error. Do not call methods
+on the receiver that started a callback-sink operation; that receiver is
+deliberately protected against re-entry until streaming returns. In particular,
+terminal job methods are unavailable from a job payload sink.
+
+Streaming methods never silently buffer their output. Their first result is
+`nil` and their second result reports bytes written or operation metadata. The
+matching `read_*` method deliberately materializes bytes into a Lua string;
+`read_*_json` additionally decodes that string. Use a `read_*` method only
+when the value is deliberately bounded in process memory.
 
 ## Client API
 
@@ -198,9 +242,8 @@ Common client methods:
 - `client:acquire(req)`
 - `client:acquire_for_update(req, handler)`
 - `client:describe(req)`
-- `client:get_raw(req, dest)`
-- `client:get_json(req)`
-- `client:update_raw(req, body)`
+- `client:get(req, sink)` and `client:read(req)` / `client:read_json(req)`
+- `client:update(req, body)`
 - `client:update_json(req, value)`
 - `client:mutate(req)`
 - `client:metadata(req)`
@@ -209,7 +252,7 @@ Common client methods:
 - `client:release(req)`
 - `client:attach(req, body)`
 - `client:list_attachments(req)`
-- `client:get_attachment(req, dest)`
+- `client:get_attachment(req, sink)` and `client:read_attachment(req)`
 - `client:delete_attachment(req)`
 - `client:delete_all_attachments(req)`
 - `client:queue_stats(req)`
@@ -220,9 +263,9 @@ Common client methods:
 - `client:queue_ack(message_or_req)`
 - `client:queue_nack(req)`
 - `client:queue_extend(req)`
-- `client:query_raw(req, dest)` (`req.engine` and `req.refresh` may select the
-  query engine/refresh mode; document-query trailer metadata is returned as
-  `metadata_json`)
+- `client:query(req, sink)` and `client:read_query(req)` (`req.engine` and
+  `req.refresh` may select the query engine/refresh mode; document-query
+  trailer metadata is returned as `metadata_json`)
 - `client:query_keys(req, handler)` streams decoded key bytes to `handler`
 - `client:get_namespace_config(req)`
 - `client:update_namespace_config(req)`
@@ -281,7 +324,7 @@ read, query, and mutation paths never enumerate consumer records.
 ## Inbox/outboxes
 
 `client:new_outbox(config)` creates a threadless inbox/outbox producer. Its
-`namespace` (or `namespace_name`) contains both durable inbox and outbox keys.
+`namespace_name` contains both durable inbox and outbox keys.
 It never starts a dispatcher, claims a job, performs recovery, or invokes a
 foreign effect. Use `outbox:dispatcher()` only in the dedicated worker or
 service domain that owns delivery. The complete lifecycle and host-integration
@@ -291,7 +334,7 @@ contract is in [the outbox dispatch architecture](outbox-dispatch-architecture.m
 -- Request/producer domain: this is safe to construct without creating a
 -- background dispatcher.
 local outbox = assert(client:new_outbox({
-  namespace = "orders-outbox",
+  namespace_name = "orders-outbox",
   owner = "orders-api",
   max_attempts = 100,
 }))
@@ -303,7 +346,7 @@ local txn = assert(outbox:append({
   payload_digest = payload_digest,
   kind = "http",
   destination = "https://payments.example/charges",
-  headers = { ["idempotency-key"] = "charge:" .. order_id },
+  headers_json = lockdc.encode_json({ ["idempotency-key"] = "charge:" .. order_id }),
 }, payload_source))
 
 local order = assert(txn:acquire({ namespace_name = "orders", key = order_id }))
@@ -322,7 +365,7 @@ txn:close()
 -- must explicitly select the supported `single_writer=false` shared-root mode.
 local worker_client = assert(lockdc.open(worker_client_config))
 local worker_outbox = assert(worker_client:new_outbox({
-  namespace = "orders-outbox",
+  namespace_name = "orders-outbox",
   owner = "orders-api",
   max_attempts = 100,
 }))
@@ -337,9 +380,9 @@ assert(dispatcher:run({
 }))
 ```
 
-`headers` is the façade convenience form and is JSON-encoded into the durable
-`headers_json` envelope. Pass `headers_json` directly when it is already
-serialized; supplying both is an error. `outbox:accept_inbox(message)`
+`headers_json` is the durable serialized header envelope. Build it explicitly
+with `lockdc.encode_json` when the headers originate as a Lua table.
+`outbox:accept_inbox(message)`
 returns `nil, result` on an accepted duplicate, where `result.duplicate` is
 true. Otherwise it returns a `OutboxTransaction` and `result.accepted` is
 true.
@@ -364,10 +407,11 @@ durable work:
   message returns `nil, result` with `result.duplicate`.
 - `outbox:accept_command(request)` returns `txn, receipt`; a matching
   command returns `nil, receipt` with `receipt.duplicate`. Use
-  `outbox:command_receipt(identity)` for a direct durable status read,
-  `outbox:write_command_result(identity, destination)` to stream a completed
-  result body, and `outbox:resume_command(identity)` to obtain a transaction
-  for a pending command. A terminal command resumes as `nil, receipt`.
+  `outbox:get_command_receipt(identity)` for a direct durable status read,
+  `outbox:write_command_result(identity, sink)` to stream a completed result
+  body, `outbox:read_command_result(identity)` to materialize it, and
+  `outbox:resume_command(identity)` to obtain a transaction for a pending
+  command. A terminal command resumes as `nil, receipt`.
 - `outbox:transaction(fn)` provides a lazy transaction proxy. Its first
   participant may be `acquire`, `append`, `accept_inbox`, or
   `accept_command`; it commits on normal callback return and rolls back on an
@@ -411,9 +455,9 @@ durable work:
   `dispatcher:reconcile()` requests durable recovery.
 - `dispatcher:replay_dead_letter(outbox_key)` returns one dead-lettered effect
   to pending; `dispatcher:delete_dead_letter(outbox_key)` permanently deletes
-  it and its payload. `dispatcher:export_dead_letters(options, destination)` exports
-  envelopes as `"json"` or `"jsonl"`; omitting `destination` returns a
-  materialized Lua string, while file/fd destinations stream directly.
+  it and its payload. `dispatcher:export_dead_letters(options, sink)` exports
+  envelopes as `"json"` or `"jsonl"` to a required sink;
+  `dispatcher:read_dead_letters(options)` is the explicit materializer.
 - `outbox:close()` releases only the producer. `dispatcher:stop()` and
   `dispatcher:wait()` control the explicitly acquired dispatcher;
   `dispatcher:close()` releases a handle and does not stop shared work.
@@ -429,11 +473,13 @@ Transactions provide `acquire`, `append`, `accept_command`, `accept_inbox`,
 commit; it returns no fresh outbox key on failure or rollback.
 `txn:append()` may return an existing duplicate receipt, which is
 already safe to forward; fresh appended keys remain commit-published.
-Participants provide `info`, `describe`, `get_raw`, `get_json`, `update_raw`,
+Participants provide `info`, `describe`, `get`, `read`, `read_json`, `update`,
 `update_json`, `mutate`, `mutate_local`, `metadata`, `remove`, `keepalive`, and
-the full attachment surface. Jobs provide `info`, `write_payload` (also
-`payload`), `payload_json`, `renew`, `complete`, `retry`, `dead_letter`, and
-`close`.
+the full attachment surface. Jobs provide `info`, `write_payload`,
+`read_payload`, `read_payload_json`, `renew`, `complete`, `retry`,
+`dead_letter`, and `close`. `write_payload` requires a sink, including a
+callback sink; `read_payload_json` deliberately materializes and decodes the
+complete body, so use it only when that size is deliberately bounded.
 
 Participants deliberately have no release or terminal-decision method. Closing
 or deciding a transaction invalidates its participants, so close each view when
@@ -450,8 +496,8 @@ Inside a `dispatcher:run()` or `dispatcher:pump()` handler,
 construct an outcome that the façade applies after the handler returns. The
 same methods on a job returned by raw `dispatcher:next()` perform the direct
 terminal operation. `retry({ delay_seconds = n, diagnostic = message })`
-durably reschedules the job within the configured retry bounds.
-`retry("diagnostic")` is the shorthand form that uses the normal retry delay.
+durably reschedules the job within the configured retry bounds. `retry()` takes
+no argument or that options table; a diagnostic string by itself is invalid.
 
 ## Raw XA and transaction-coordinator APIs
 
@@ -491,7 +537,7 @@ non-negative integer range. Result lists are ordinary dense Lua arrays in
 `endpoints` or `backends`.
 
 `client:query_keys(req, handler)` has the same query request fields as
-`query_raw`, but sends each decoded key directly to Lua instead of materializing
+`client:query`, but sends each decoded key directly to Lua instead of materializing
 the query response. Selectors are optional, so `engine = "scan"` with a cursor
 can enumerate every key in a namespace. Pass either a function for key chunks
 or a table with a required `chunk(bytes)` function and optional `begin()` and
@@ -506,7 +552,7 @@ update, release outbox. The handler receives a context table with:
 - `state`
 - `state_meta`
 - `load_json()`
-- `update_raw(body, req)`
+- `update(body, req)`
 - `update_json(value, req)`
 - `mutate(req)`
 - `mutate_local(req)`
@@ -544,9 +590,8 @@ Common lease methods:
 - `lease:info()`
 - `lease:close()`
 - `lease:describe()`
-- `lease:get_raw(req, dest)`
-- `lease:get_json(req)`
-- `lease:update_raw(body, req)`
+- `lease:get(req, sink)` and `lease:read(req)` / `lease:read_json(req)`
+- `lease:update(body, req)`
 - `lease:update_json(value, req)`
 - `lease:mutate(req)`
 - `lease:mutate_local(req)`
@@ -556,7 +601,7 @@ Common lease methods:
 - `lease:release(req)`
 - `lease:attach(req, body)`
 - `lease:list_attachments()`
-- `lease:get_attachment(req, dest)`
+- `lease:get_attachment(req, sink)` and `lease:read_attachment(req)`
 - `lease:delete_attachment(selector)`
 - `lease:delete_all_attachments()`
 
@@ -574,8 +619,8 @@ Common message methods:
 - `message:extend(req)`
 - `message:state()`
 - `message:rewind_payload()`
-- `message:payload(dest)`
-- `message:payload_json()`
+- `message:write_payload(sink)`
+- `message:read_payload()` / `message:read_payload_json()`
 
 ## JSON helpers
 
@@ -585,9 +630,9 @@ Use:
 
 - `lockdc.encode_json(value)`
 - `lockdc.decode_json(payload)`
-- `lease:get_json()`
+- `lease:read_json()`
 - `lease:update_json(value, req)`
-- `message:payload_json()`
+- `message:read_payload_json()`
 
 These helpers are for idiomatic Lua outbox code. They do not replace the
 mapped `lonejson` APIs in the C SDK; those C APIs use caller-defined

@@ -46,10 +46,10 @@ if updated == nil then
 end
 assert(lease:release())
 
-local state, state_meta_or_err = client:get_json({ key = key })
+local state, state_meta_or_err = client:read_json({ key = key })
 if state == nil then
   client:close()
-  error(("client:get_json failed: %s"):format(state_meta_or_err.message))
+  error(("client:read_json failed: %s"):format(state_meta_or_err.message))
 end
 print(lockdc.encode_json(state))
 client:close()

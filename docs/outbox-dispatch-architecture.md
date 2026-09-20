@@ -394,7 +394,10 @@ assert(dispatcher:run({
   handlers = {
     ["order.webhook"] = function(job)
       local info = job:info()
-      local payload = assert(job:payload_json())
+      -- Convenience for this deliberately small JSON example. It materializes
+      -- the payload; a production transport path uses write_payload() to its
+      -- streaming destination instead.
+      local payload = assert(job:read_payload_json())
       local ok, err = deliver(payload, info.effect_key)
       if not ok then
         return job:retry({ diagnostic = err, delay_seconds = 30 })
@@ -474,10 +477,12 @@ outbox kind, and every value is a function. An
 unhandled kind leaves its claim for normal expiry recovery and returns a
 structured error; liblockdc does not invent a Vectis policy for it.
 
-A Lua handler receives a claimed job with the same streaming
-`job:write_payload(destination)` / `job:payload_json()` surface as raw pull.
+A Lua handler receives a claimed job with `job:write_payload(sink)` for true
+streaming to a path, file descriptor, or callback sink. `job:read_payload_json()`
+materializes and decodes the full JSON payload, so it is suitable only for
+intentionally bounded bodies.
 It may consume that payload only during the call and must not retain the job
-after returning. `job:complete()`, `job:retry(value)`, and
+after returning. `job:complete()`, `job:retry(options)`, and
 `job:dead_letter(diagnostic)` create typed outcomes; the façade applies the
 actual terminal mutation after the handler returns. An exception or a handler
 return without an outcome produces the configured retry outcome. A long foreign
@@ -485,9 +490,9 @@ operation must call `job:renew(ttl_seconds)` before its claim expires, exactly
 as raw C and raw Lua consumers do; the binding never races a Lua callback with
 a hidden concurrent lease operation.
 
-`retry("diagnostic")` is shorthand for a diagnostic with the normal retry
-policy. `retry({ delay_seconds = n, diagnostic = message })` supports a bounded
-reschedule delay and diagnostic. Both map to the existing durable retry policy;
+`retry()` accepts no argument or an options table.
+`retry({ delay_seconds = n, diagnostic = message })` supports a bounded
+reschedule delay and diagnostic. It maps to the existing durable retry policy;
 rescheduling is therefore a normal retry terminal outcome, not an in-memory
 timer.
 

@@ -161,10 +161,32 @@ if updated == nil then
 end
 assert(lease:release())
 
-local state, state_meta_or_err = client:get_json({ key = "state" })
+local state, state_meta_or_err = client:read_json({ key = "state" })
 if state == nil or state.source ~= "lua-pouch" or state.value ~= 1 then
   client:close()
   error(("Pouch state read failed: %s"):format(state_meta_or_err and state_meta_or_err.message or tostring(state_meta_or_err)))
+end
+local state_streamed_bytes = 0
+local state_streamed_chunks = 0
+local state_sink_closed = 0
+local streamed_state, state_meta = client:get({ key = "state" }, {
+  write = function(chunk)
+    state_streamed_chunks = state_streamed_chunks + 1
+    state_streamed_bytes = state_streamed_bytes + #chunk
+    local closed, close_err = pcall(function() client:close() end)
+    if closed or not tostring(close_err):find("not allowed while output is streaming", 1, true) then
+      error("Lua client callback closed its active streaming receiver")
+    end
+  end,
+  close = function()
+    state_sink_closed = state_sink_closed + 1
+  end,
+})
+if streamed_state ~= nil or type(state_meta) ~= "table" or
+    state_streamed_chunks == 0 or state_streamed_bytes == 0 or
+    state_sink_closed ~= 1 then
+  client:close()
+  error("Pouch client:get did not stream to the Lua callback sink")
 end
 
 local enqueued, enqueue_err = client:enqueue({
@@ -188,7 +210,7 @@ if message == nil then
   client:close()
   error(("Pouch dequeue failed: %s"):format(dequeue_err and dequeue_err.message or tostring(dequeue_err)))
 end
-local payload, written_or_err = message:payload_json()
+local payload, written_or_err = message:read_payload_json()
 if payload == nil or payload.source ~= "lua-pouch" or type(written_or_err) ~= "number" then
   message:close()
   client:close()
@@ -273,7 +295,7 @@ if replayed.state ~= "commit" then
   client:close()
   error("Lua raw XA replay did not preserve commit state")
 end
-local xa_state, xa_state_err = client:get_json({ key = raw_txn_participant.key })
+local xa_state, xa_state_err = client:read_json({ key = raw_txn_participant.key })
 if xa_state == nil or not xa_state.committed then
   client:close()
   error(("Lua raw XA state was not committed: %s"):format(
@@ -356,7 +378,7 @@ end
 
 local history_consumer_id = assert(lockdc.xid_new())
 local history, history_err = client:new_history_consumer({
-  namespace = namespace_name,
+  namespace_name = namespace_name,
   consumer_id = history_consumer_id,
   initial_acknowledged_index_seq = 0,
 })
@@ -634,7 +656,7 @@ local reopened, reopen_err = lockdc.open({
 if reopened == nil then
   error(("encrypted Pouch reopen failed: %s"):format(reopen_err and reopen_err.message or tostring(reopen_err)))
 end
-local reopened_state, reopened_meta_or_err = reopened:get_json({ key = "state" })
+local reopened_state, reopened_meta_or_err = reopened:read_json({ key = "state" })
 if reopened_state == nil or reopened_state.value ~= 1 then
   reopened:close()
   error(("encrypted Pouch persistence read failed: %s"):format(reopened_meta_or_err and reopened_meta_or_err.message or tostring(reopened_meta_or_err)))

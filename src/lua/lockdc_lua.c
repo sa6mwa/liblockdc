@@ -25,20 +25,24 @@
 
 typedef struct lcdc_client_ud {
   lc_client *client;
+  int streaming;
 } lcdc_client_ud;
 
 typedef struct lcdc_lease_ud {
   lc_lease *lease;
   int owner_ref;
+  int streaming;
 } lcdc_lease_ud;
 
 typedef struct lcdc_message_ud {
   lc_message *message;
+  int streaming;
 } lcdc_message_ud;
 
 typedef struct lcdc_outbox_ud {
   lc_outbox *outbox;
   int owner_ref;
+  int streaming;
 } lcdc_outbox_ud;
 
 typedef struct lcdc_outbox_dispatcher_binding {
@@ -60,6 +64,7 @@ typedef struct lcdc_outbox_dispatcher_ud {
   lc_outbox_dispatcher *dispatcher;
   int owner_ref;
   lcdc_outbox_dispatcher_binding *binding;
+  int streaming;
 } lcdc_outbox_dispatcher_ud;
 
 typedef struct lcdc_outbox_txn_ud {
@@ -81,6 +86,7 @@ typedef struct lcdc_outbox_participant_ud {
    * transactions become rollback-only when a participant staging operation
    * reports a structured failure that Lua code elects not to raise. */
   lcdc_outbox_txn_ud *transaction_ud;
+  int streaming;
 } lcdc_outbox_participant_ud;
 
 static void lcdc_outbox_txn_note_staging_failure(lcdc_outbox_txn_ud *ud);
@@ -93,6 +99,7 @@ typedef struct lcdc_outbox_job_ud {
   lc_outbox_job *job;
   int owner_ref;
   int handler_scoped;
+  int payload_streaming;
   int terminal_operation;
   int terminal_ref;
 } lcdc_outbox_job_ud;
@@ -114,6 +121,13 @@ typedef struct lcdc_lua_source {
   int close_ref;
 } lcdc_lua_source;
 
+typedef struct lcdc_lua_sink {
+  lc_sink pub;
+  lua_State *L;
+  int write_ref;
+  int close_ref;
+} lcdc_lua_sink;
+
 typedef struct lcdc_acquire_for_update_handler {
   lua_State *L;
   int handler_ref;
@@ -130,6 +144,9 @@ static size_t lcdc_lua_source_read(void *context, void *buffer, size_t count,
                                    lc_error *error);
 static int lcdc_lua_source_reset(void *context, lc_error *error);
 static void lcdc_lua_source_close(void *context);
+static int lcdc_lua_sink_write(lc_sink *self, const void *bytes, size_t count,
+                               lc_error *error);
+static void lcdc_lua_sink_close(lc_sink *self);
 static int lcdc_outbox_job_apply_terminal(lua_State *L, lcdc_outbox_job_ud *ud,
                                           int operation, int value_index,
                                           lc_error *error);
@@ -252,6 +269,9 @@ static lcdc_client_ud *lcdc_check_client(lua_State *L, int index) {
   ud = (lcdc_client_ud *)luaL_checkudata(L, index, LCDC_CLIENT_MT);
   luaL_argcheck(L, ud != NULL && ud->client != NULL, index,
                 "lockdc client is closed");
+  luaL_argcheck(
+      L, !ud->streaming, index,
+      "lockdc client operation is not allowed while output is streaming");
   return ud;
 }
 
@@ -278,6 +298,9 @@ static lcdc_lease_ud *lcdc_check_lease(lua_State *L, int index) {
   ud = (lcdc_lease_ud *)luaL_checkudata(L, index, LCDC_LEASE_MT);
   luaL_argcheck(L, ud != NULL && ud->lease != NULL, index,
                 "lockdc lease is closed");
+  luaL_argcheck(
+      L, !ud->streaming, index,
+      "lockdc lease operation is not allowed while output is streaming");
   return ud;
 }
 
@@ -287,6 +310,9 @@ static lcdc_message_ud *lcdc_check_message(lua_State *L, int index) {
   ud = (lcdc_message_ud *)luaL_checkudata(L, index, LCDC_MESSAGE_MT);
   luaL_argcheck(L, ud != NULL && ud->message != NULL, index,
                 "lockdc message is closed");
+  luaL_argcheck(
+      L, !ud->streaming, index,
+      "lockdc message operation is not allowed while output is streaming");
   return ud;
 }
 
@@ -295,6 +321,9 @@ static lcdc_outbox_ud *lcdc_check_outbox(lua_State *L, int index) {
       (lcdc_outbox_ud *)luaL_checkudata(L, index, LCDC_OUTBOX_MT);
   luaL_argcheck(L, ud != NULL && ud->outbox != NULL, index,
                 "lockdc outbox is closed");
+  luaL_argcheck(
+      L, !ud->streaming, index,
+      "lockdc outbox operation is not allowed while output is streaming");
   return ud;
 }
 
@@ -312,6 +341,9 @@ static lcdc_outbox_dispatcher_ud *lcdc_check_outbox_dispatcher(lua_State *L,
       L, index, LCDC_OUTBOX_DISPATCHER_MT);
   luaL_argcheck(L, ud != NULL && ud->dispatcher != NULL, index,
                 "lockdc outbox dispatcher is closed");
+  luaL_argcheck(L, !ud->streaming, index,
+                "lockdc outbox dispatcher operation is not allowed while "
+                "output is streaming");
   return ud;
 }
 
@@ -322,6 +354,9 @@ static lcdc_outbox_participant_ud *lcdc_check_outbox_participant(lua_State *L,
                                                     LCDC_OUTBOX_PARTICIPANT_MT);
   luaL_argcheck(L, ud != NULL && ud->participant != NULL, index,
                 "lockdc outbox participant is closed");
+  luaL_argcheck(L, !ud->streaming, index,
+                "lockdc outbox participant operation is not allowed while "
+                "output is streaming");
   return ud;
 }
 
@@ -589,6 +624,16 @@ static int lcdc_require_string_field(lua_State *L, int index, const char *name,
   return 1;
 }
 
+static void lcdc_reject_field(lua_State *L, int index, const char *name,
+                              const char *message) {
+  lua_getfield(L, index, name);
+  if (!lua_isnil(L, -1)) {
+    lua_pop(L, 1);
+    luaL_error(L, "%s", message);
+  }
+  lua_pop(L, 1);
+}
+
 static int lcdc_parse_string_array(lua_State *L, int index, const char *name,
                                    const char ***items_out, size_t *count_out) {
   const char **items;
@@ -634,50 +679,146 @@ static void lcdc_free_string_array(const char ***items) {
   }
 }
 
-static int lcdc_init_output(lua_State *L, int index, lcdc_output *output,
-                            lc_error *error) {
+static int lcdc_lua_sink_write(lc_sink *self, const void *bytes, size_t count,
+                               lc_error *error) {
+  lcdc_lua_sink *sink;
+  lua_State *L;
+  const char *message;
+  int failed;
+
+  sink = (lcdc_lua_sink *)self;
+  if (sink == NULL || sink->L == NULL || sink->write_ref == LUA_NOREF) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       "Lua sink is no longer available", NULL, NULL, NULL);
+    return 0;
+  }
+  L = sink->L;
+  lua_rawgeti(L, LUA_REGISTRYINDEX, sink->write_ref);
+  lua_pushlstring(L, (const char *)bytes, count);
+  if (lua_pcall(L, 1, 2, 0) != 0) {
+    message = lua_tostring(L, -1);
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       message != NULL ? message : "Lua sink write failed",
+                       NULL, NULL, NULL);
+    lua_pop(L, 1);
+    return 0;
+  }
+  failed = (!lua_isnil(L, -1) && (lua_isnil(L, -2) || !lua_toboolean(L, -2)));
+  if (failed) {
+    message = lua_tostring(L, -1);
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       message != NULL ? message : "Lua sink write failed",
+                       NULL, NULL, NULL);
+    lua_pop(L, 2);
+    return 0;
+  }
+  if (lua_isboolean(L, -2) && !lua_toboolean(L, -2)) {
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L, "Lua sink rejected chunk",
+                       NULL, NULL, NULL);
+    lua_pop(L, 2);
+    return 0;
+  }
+  lua_pop(L, 2);
+  return 1;
+}
+
+static void lcdc_lua_sink_close(lc_sink *self) {
+  lcdc_lua_sink *sink;
+  lua_State *L;
+
+  sink = (lcdc_lua_sink *)self;
+  if (sink == NULL)
+    return;
+  L = sink->L;
+  if (L != NULL && sink->close_ref != LUA_NOREF) {
+    lua_rawgeti(L, LUA_REGISTRYINDEX, sink->close_ref);
+    if (lua_pcall(L, 0, 0, 0) != 0)
+      lua_pop(L, 1);
+    luaL_unref(L, LUA_REGISTRYINDEX, sink->close_ref);
+  }
+  if (L != NULL && sink->write_ref != LUA_NOREF)
+    luaL_unref(L, LUA_REGISTRYINDEX, sink->write_ref);
+  free(sink);
+}
+
+static int lcdc_sink_from_value(lua_State *L, int index, lc_sink **out,
+                                lc_error *error) {
   const char *path;
   long fd;
-  int rc;
+  lcdc_lua_sink *sink;
 
-  output->sink = NULL;
-  output->memory = 1;
-  output->written = 0U;
-  if (lua_isnoneornil(L, index)) {
-    return lc_sink_to_memory(&output->sink, error);
+  *out = NULL;
+  if (index < 0)
+    index = lua_gettop(L) + index + 1;
+  if (lua_isnumber(L, index)) {
+    fd = (long)lua_tointeger(L, index);
+    return lc_sink_to_fd((int)fd, out, error);
   }
   if (lua_isstring(L, index)) {
     path = lua_tostring(L, index);
-    output->memory = 0;
-    return lc_sink_to_file(path, &output->sink, error);
-  }
-  if (lua_isnumber(L, index)) {
-    fd = (long)lua_tointeger(L, index);
-    output->memory = 0;
-    return lc_sink_to_fd((int)fd, &output->sink, error);
+    return lc_sink_to_file(path, out, error);
   }
   luaL_checktype(L, index, LUA_TTABLE);
   lua_getfield(L, index, "path");
   if (!lua_isnil(L, -1)) {
     path = luaL_checkstring(L, -1);
     lua_pop(L, 1);
-    output->memory = 0;
-    return lc_sink_to_file(path, &output->sink, error);
+    return lc_sink_to_file(path, out, error);
   }
   lua_pop(L, 1);
   lua_getfield(L, index, "fd");
   if (!lua_isnil(L, -1)) {
     fd = (long)luaL_checkinteger(L, -1);
     lua_pop(L, 1);
-    output->memory = 0;
-    return lc_sink_to_fd((int)fd, &output->sink, error);
+    return lc_sink_to_fd((int)fd, out, error);
   }
   lua_pop(L, 1);
-  rc = lc_sink_to_memory(&output->sink, error);
-  if (rc == LC_OK) {
-    output->memory = 1;
+  lua_getfield(L, index, "write");
+  if (lua_isnil(L, -1)) {
+    lua_pop(L, 1);
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "Lua sink requires path, fd, or write", NULL, NULL,
+                        NULL);
   }
-  return rc;
+  luaL_checktype(L, -1, LUA_TFUNCTION);
+  sink = (lcdc_lua_sink *)calloc(1U, sizeof(*sink));
+  if (sink == NULL) {
+    lua_pop(L, 1);
+    return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to allocate Lua sink",
+                        NULL, NULL, NULL);
+  }
+  sink->L = L;
+  sink->write_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  sink->close_ref = LUA_NOREF;
+  sink->pub.write = lcdc_lua_sink_write;
+  sink->pub.close = lcdc_lua_sink_close;
+  sink->pub.impl = sink;
+  lua_getfield(L, index, "close");
+  if (!lua_isnil(L, -1)) {
+    if (!lua_isfunction(L, -1)) {
+      lua_pop(L, 1);
+      lcdc_lua_sink_close(&sink->pub);
+      return lc_error_set(error, LC_ERR_INVALID, 0L,
+                          "Lua sink close must be a function", NULL, NULL,
+                          NULL);
+    }
+    sink->close_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  } else {
+    lua_pop(L, 1);
+  }
+  *out = &sink->pub;
+  return LC_OK;
+}
+
+static int lcdc_init_output(lua_State *L, int index, lcdc_output *output,
+                            lc_error *error) {
+  output->sink = NULL;
+  output->memory = 1;
+  output->written = 0U;
+  if (lua_isnoneornil(L, index))
+    return lc_sink_to_memory(&output->sink, error);
+  output->memory = 0;
+  return lcdc_sink_from_value(L, index, &output->sink, error);
 }
 
 static void lcdc_push_output(lua_State *L, lcdc_output *output) {
@@ -825,13 +966,13 @@ static int lcdc_source_from_value(lua_State *L, int index, lc_source **out,
   if (index < 0) {
     index = lua_gettop(L) + index + 1;
   }
-  if (lua_isstring(L, index)) {
-    bytes = lua_tolstring(L, index, &len);
-    return lc_source_from_memory(bytes, len, out, error);
-  }
   if (lua_isnumber(L, index)) {
     fd = (long)lua_tointeger(L, index);
     return lc_source_from_fd((int)fd, out, error);
+  }
+  if (lua_isstring(L, index)) {
+    bytes = lua_tolstring(L, index, &len);
+    return lc_source_from_memory(bytes, len, out, error);
   }
   luaL_checktype(L, index, LUA_TTABLE);
   lua_getfield(L, index, "bytes");
@@ -941,6 +1082,7 @@ static int lcdc_push_client(lua_State *L, lc_client *client) {
 
   ud = (lcdc_client_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->client = client;
+  ud->streaming = 0;
   luaL_getmetatable(L, LCDC_CLIENT_MT);
   lua_setmetatable(L, -2);
   return 1;
@@ -952,6 +1094,7 @@ static int lcdc_push_lease(lua_State *L, lc_lease *lease, int owner_index) {
   ud = (lcdc_lease_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->lease = lease;
   ud->owner_ref = LUA_NOREF;
+  ud->streaming = 0;
   if (owner_index != 0) {
     lua_pushvalue(L, owner_index);
     ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -966,6 +1109,7 @@ static int lcdc_push_message(lua_State *L, lc_message *message) {
 
   ud = (lcdc_message_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->message = message;
+  ud->streaming = 0;
   luaL_getmetatable(L, LCDC_MESSAGE_MT);
   lua_setmetatable(L, -2);
   return 1;
@@ -975,6 +1119,7 @@ static int lcdc_push_outbox(lua_State *L, lc_outbox *outbox, int owner_index) {
   lcdc_outbox_ud *ud = (lcdc_outbox_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->outbox = outbox;
   ud->owner_ref = LUA_NOREF;
+  ud->streaming = 0;
   if (owner_index != 0) {
     lua_pushvalue(L, owner_index);
     ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -1130,6 +1275,7 @@ static int lcdc_push_outbox_dispatcher(lua_State *L,
   ud->dispatcher = NULL;
   ud->owner_ref = LUA_NOREF;
   ud->binding = NULL;
+  ud->streaming = 0;
   rc = lcdc_outbox_dispatcher_binding_acquire(L, dispatcher, client_index,
                                               &ud->binding, error);
   if (rc != LC_OK) {
@@ -1178,6 +1324,7 @@ static int lcdc_push_outbox_participant(lua_State *L,
   ud->participant = participant;
   ud->owner_ref = LUA_NOREF;
   ud->transaction_ud = transaction_ud;
+  ud->streaming = 0;
   if (owner_index != 0) {
     lua_pushvalue(L, owner_index);
     ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);
@@ -1194,6 +1341,7 @@ static int lcdc_push_outbox_job(lua_State *L, lc_outbox_job *job,
   ud->job = job;
   ud->owner_ref = LUA_NOREF;
   ud->handler_scoped = 0;
+  ud->payload_streaming = 0;
   ud->terminal_operation = -1;
   ud->terminal_ref = LUA_NOREF;
   if (owner_index != 0) {
@@ -1826,7 +1974,10 @@ static int lcdc_client_info(lua_State *L) {
   return 1;
 }
 
-static int lcdc_client_close(lua_State *L) { return lcdc_client_gc(L); }
+static int lcdc_client_close(lua_State *L) {
+  (void)lcdc_check_client(L, 1);
+  return lcdc_client_gc(L);
+}
 
 static int lcdc_client_acquire(lua_State *L) {
   lcdc_client_ud *ud;
@@ -2092,8 +2243,10 @@ static int lcdc_client_get(lua_State *L) {
   luaL_checktype(L, 2, LUA_TTABLE);
   lcdc_require_string_field(L, 2, "key", &key);
   lcdc_opt_boolean_field(L, 2, "public_read", &opts.public_read);
+  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc != LC_OK) {
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
@@ -2103,11 +2256,13 @@ static int lcdc_client_get(lua_State *L) {
     if (output.sink != NULL) {
       lc_sink_close(output.sink);
     }
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
   lcdc_push_output(L, &output);
+  ud->streaming = 0;
   lua_newtable(L);
   lcdc_set_bool_field(L, "no_content", res.no_content);
   lcdc_set_string_field(L, "content_type", res.content_type);
@@ -2428,8 +2583,10 @@ static int lcdc_client_get_attachment(lua_State *L) {
   lcdc_parse_attachment_selector(L, -1, &req.selector);
   lua_pop(L, 1);
   lcdc_opt_boolean_field(L, 2, "public_read", &req.public_read);
+  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc != LC_OK) {
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
@@ -2439,11 +2596,13 @@ static int lcdc_client_get_attachment(lua_State *L) {
     if (output.sink != NULL) {
       lc_sink_close(output.sink);
     }
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
   lcdc_push_output(L, &output);
+  ud->streaming = 0;
   lua_newtable(L);
   lcdc_push_attachment_info(L, &res.attachment);
   lua_setfield(L, -2, "attachment");
@@ -2677,8 +2836,10 @@ static int lcdc_client_query(lua_State *L) {
   req.return_mode = lcdc_opt_string_field(L, 2, "return_mode");
   req.engine = lcdc_opt_string_field(L, 2, "engine");
   req.refresh = lcdc_opt_string_field(L, 2, "refresh");
+  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc != LC_OK) {
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
@@ -2688,11 +2849,13 @@ static int lcdc_client_query(lua_State *L) {
     if (output.sink != NULL) {
       lc_sink_close(output.sink);
     }
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
   lcdc_push_output(L, &output);
+  ud->streaming = 0;
   lua_newtable(L);
   lcdc_set_string_field(L, "cursor", res.cursor);
   lcdc_set_string_field(L, "return_mode", res.return_mode);
@@ -3680,7 +3843,10 @@ static int lcdc_lease_info(lua_State *L) {
   return 1;
 }
 
-static int lcdc_lease_close(lua_State *L) { return lcdc_lease_gc(L); }
+static int lcdc_lease_close(lua_State *L) {
+  (void)lcdc_check_lease(L, 1);
+  return lcdc_lease_gc(L);
+}
 
 static int lcdc_lease_describe(lua_State *L) {
   lcdc_lease_ud *ud;
@@ -3716,8 +3882,10 @@ static int lcdc_lease_get(lua_State *L) {
     luaL_checktype(L, 2, LUA_TTABLE);
     lcdc_opt_boolean_field(L, 2, "public_read", &opts.public_read);
   }
+  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc != LC_OK) {
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
@@ -3727,11 +3895,13 @@ static int lcdc_lease_get(lua_State *L) {
     if (output.sink != NULL) {
       lc_sink_close(output.sink);
     }
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
   lcdc_push_output(L, &output);
+  ud->streaming = 0;
   lua_newtable(L);
   lcdc_set_bool_field(L, "no_content", res.no_content);
   lcdc_set_string_field(L, "content_type", res.content_type);
@@ -4045,8 +4215,10 @@ static int lcdc_lease_get_attachment(lua_State *L) {
   lcdc_parse_attachment_selector(L, -1, &req.selector);
   lua_pop(L, 1);
   lcdc_opt_boolean_field(L, 2, "public_read", &req.public_read);
+  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc != LC_OK) {
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
@@ -4056,11 +4228,13 @@ static int lcdc_lease_get_attachment(lua_State *L) {
     if (output.sink != NULL) {
       lc_sink_close(output.sink);
     }
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
   lcdc_push_output(L, &output);
+  ud->streaming = 0;
   lua_newtable(L);
   lcdc_push_attachment_info(L, &res.attachment);
   lua_setfield(L, -2, "attachment");
@@ -4121,7 +4295,10 @@ static int lcdc_message_info(lua_State *L) {
   return 1;
 }
 
-static int lcdc_message_close(lua_State *L) { return lcdc_message_gc(L); }
+static int lcdc_message_close(lua_State *L) {
+  (void)lcdc_check_message(L, 1);
+  return lcdc_message_gc(L);
+}
 
 static int lcdc_message_ack(lua_State *L) {
   lcdc_message_ud *ud;
@@ -4226,8 +4403,10 @@ static int lcdc_message_payload(lua_State *L) {
 
   ud = lcdc_check_message(L, 1);
   lc_error_init(&error);
+  ud->streaming = 1;
   rc = lcdc_init_output(L, 2, &output, &error);
   if (rc != LC_OK) {
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
@@ -4238,11 +4417,13 @@ static int lcdc_message_payload(lua_State *L) {
     if (output.sink != NULL) {
       lc_sink_close(output.sink);
     }
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
   lcdc_push_output(L, &output);
+  ud->streaming = 0;
   lua_pushinteger(L, (lua_Integer)output.written);
   lc_error_cleanup(&error);
   return 2;
@@ -4252,6 +4433,8 @@ static void lcdc_parse_outbox_entry(lua_State *L, int index,
                                     lc_outbox_entry *entry) {
   lc_outbox_entry_init(entry);
   luaL_checktype(L, index, LUA_TTABLE);
+  lcdc_reject_field(L, index, "headers",
+                    "outbox entry uses headers_json; headers is not supported");
   lcdc_require_string_field(L, index, "operation_id", &entry->operation_id);
   lcdc_require_string_field(L, index, "effect_id", &entry->effect_id);
   lcdc_require_string_field(L, index, "effect_key", &entry->effect_key);
@@ -4434,10 +4617,10 @@ static int lcdc_client_new_outbox(lua_State *L) {
   lc_outbox_config_init(&config);
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_reject_field(
+      L, 2, "namespace",
+      "outbox config uses namespace_name; namespace is not supported");
   config.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
-  if (config.namespace_name == NULL) {
-    config.namespace_name = lcdc_opt_string_field(L, 2, "namespace");
-  }
   config.owner = lcdc_opt_string_field(L, 2, "owner");
   lcdc_opt_integer_field(L, 2, "transaction_ttl_seconds",
                          &config.transaction_ttl_seconds);
@@ -4509,10 +4692,10 @@ static int lcdc_client_new_history_consumer(lua_State *L) {
   lc_error_init(&error);
   consumer = NULL;
   luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_reject_field(L, 2, "namespace",
+                    "history consumer config uses namespace_name; namespace is "
+                    "not supported");
   config.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
-  if (config.namespace_name == NULL) {
-    config.namespace_name = lcdc_opt_string_field(L, 2, "namespace");
-  }
   lcdc_require_string_field(L, 2, "consumer_id", &config.consumer_id);
   has_initial_acknowledged_index_seq = 0;
   lua_getfield(L, 2, "initial_acknowledged_index_seq");
@@ -4624,7 +4807,10 @@ static int lcdc_history_consumer_close(lua_State *L) {
   return lcdc_history_consumer_gc(L);
 }
 
-static int lcdc_outbox_close(lua_State *L) { return lcdc_outbox_gc(L); }
+static int lcdc_outbox_close(lua_State *L) {
+  (void)lcdc_check_outbox(L, 1);
+  return lcdc_outbox_gc(L);
+}
 
 static int lcdc_outbox_append(lua_State *L) {
   lcdc_outbox_ud *ud = lcdc_check_outbox(L, 1);
@@ -4758,6 +4944,7 @@ static int lcdc_outbox_write_command_result(lua_State *L) {
 
   lcdc_parse_command_identity(L, 2, &identity);
   lc_error_init(&error);
+  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc == LC_OK) {
     rc = lc_outbox_write_command_result(ud->outbox, &identity, output.sink,
@@ -4766,11 +4953,13 @@ static int lcdc_outbox_write_command_result(lua_State *L) {
   if (rc != LC_OK) {
     if (output.sink != NULL)
       lc_sink_close(output.sink);
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
   lcdc_push_output(L, &output);
+  ud->streaming = 0;
   lua_pushinteger(L, (lua_Integer)written);
   lc_error_cleanup(&error);
   return 2;
@@ -5536,6 +5725,7 @@ static int lcdc_outbox_dispatcher_export_dead_letters(lua_State *L) {
       options.limit = (size_t)limit;
     }
   }
+  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc == LC_OK) {
     rc = lc_outbox_dispatcher_export_dead_letters(ud->dispatcher, &options,
@@ -5544,11 +5734,13 @@ static int lcdc_outbox_dispatcher_export_dead_letters(lua_State *L) {
   if (rc != LC_OK) {
     if (output.sink != NULL)
       lc_sink_close(output.sink);
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
   lcdc_push_output(L, &output);
+  ud->streaming = 0;
   lua_newtable(L);
   lcdc_set_integer_field(L, "exported", (long)result.exported);
   lc_error_cleanup(&error);
@@ -5634,6 +5826,7 @@ static int lcdc_outbox_dispatcher_wait(lua_State *L) {
 }
 
 static int lcdc_outbox_dispatcher_close(lua_State *L) {
+  (void)lcdc_check_outbox_dispatcher(L, 1);
   return lcdc_outbox_dispatcher_gc(L);
 }
 
@@ -5680,11 +5873,11 @@ static int lcdc_outbox_txn_acquire(lua_State *L) {
 
   lc_outbox_participant_request_init(&request);
   luaL_checktype(L, 2, LUA_TTABLE);
+  lcdc_reject_field(L, 2, "namespace",
+                    "outbox participant request uses namespace_name; namespace "
+                    "is not supported");
   request.acquire.namespace_name =
       lcdc_opt_string_field(L, 2, "namespace_name");
-  if (request.acquire.namespace_name == NULL) {
-    request.acquire.namespace_name = lcdc_opt_string_field(L, 2, "namespace");
-  }
   lcdc_require_string_field(L, 2, "key", &request.acquire.key);
   request.acquire.owner = lcdc_opt_string_field(L, 2, "owner");
   lcdc_opt_integer_field(L, 2, "ttl_seconds", &request.acquire.ttl_seconds);
@@ -5905,6 +6098,7 @@ static int lcdc_outbox_txn_rollback(lua_State *L) {
 }
 
 static int lcdc_outbox_participant_close(lua_State *L) {
+  (void)lcdc_check_outbox_participant(L, 1);
   return lcdc_outbox_participant_gc(L);
 }
 
@@ -5952,6 +6146,7 @@ static int lcdc_outbox_participant_get(lua_State *L) {
     luaL_checktype(L, 2, LUA_TTABLE);
     lcdc_opt_boolean_field(L, 2, "public_read", &opts.public_read);
   }
+  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc == LC_OK) {
     rc = ud->participant->get(ud->participant, output.sink, &opts, &result,
@@ -5960,12 +6155,14 @@ static int lcdc_outbox_participant_get(lua_State *L) {
   if (rc != LC_OK) {
     if (output.sink != NULL)
       lc_sink_close(output.sink);
+    ud->streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_get_res_cleanup(&result);
     lc_error_cleanup(&error);
     return 3;
   }
   lcdc_push_output(L, &output);
+  ud->streaming = 0;
   lua_newtable(L);
   lcdc_set_bool_field(L, "no_content", result.no_content);
   lcdc_set_string_field(L, "content_type", result.content_type);
@@ -6227,6 +6424,7 @@ static int lcdc_outbox_participant_get_attachment(lua_State *L) {
   lua_pop(L, 1);
   lcdc_opt_boolean_field(L, 2, "public_read", &request.public_read);
   lc_error_init(&error);
+  ud->streaming = 1;
   rc = lcdc_init_output(L, 3, &output, &error);
   if (rc == LC_OK) {
     rc = ud->participant->get_attachment(ud->participant, &request, output.sink,
@@ -6235,12 +6433,14 @@ static int lcdc_outbox_participant_get_attachment(lua_State *L) {
   if (rc != LC_OK) {
     if (output.sink != NULL)
       lc_sink_close(output.sink);
+    ud->streaming = 0;
     lc_attachment_get_res_cleanup(&result);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
   lcdc_push_output(L, &output);
+  ud->streaming = 0;
   lua_newtable(L);
   lcdc_push_attachment_info(L, &result.attachment);
   lua_setfield(L, -2, "attachment");
@@ -6324,6 +6524,9 @@ static int lcdc_outbox_participant_delete_all_attachments(lua_State *L) {
 static int lcdc_outbox_job_close(lua_State *L) {
   lcdc_outbox_job_ud *ud = lcdc_check_outbox_job(L, 1);
 
+  if (ud->payload_streaming)
+    return luaL_error(
+        L, "outbox job close is not allowed while payload is streaming");
   if (ud->handler_scoped) {
     return luaL_error(
         L, "outbox job close is not allowed inside its dispatcher handler");
@@ -6348,7 +6551,10 @@ static int lcdc_outbox_job_write_payload(lua_State *L) {
   lc_error error;
   int rc;
 
+  if (ud->payload_streaming)
+    return luaL_error(L, "outbox job payload cannot be streamed recursively");
   lc_error_init(&error);
+  ud->payload_streaming = 1;
   rc = lcdc_init_output(L, 2, &output, &error);
   if (rc == LC_OK) {
     rc = lc_outbox_job_write_payload(ud->job, output.sink, &output.written,
@@ -6357,11 +6563,13 @@ static int lcdc_outbox_job_write_payload(lua_State *L) {
   if (rc != LC_OK) {
     if (output.sink != NULL)
       lc_sink_close(output.sink);
+    ud->payload_streaming = 0;
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
   }
   lcdc_push_output(L, &output);
+  ud->payload_streaming = 0;
   lua_pushinteger(L, (lua_Integer)output.written);
   lc_error_cleanup(&error);
   return 2;
@@ -6373,6 +6581,9 @@ static int lcdc_outbox_job_renew(lua_State *L) {
   long ttl_seconds = lcdc_check_long(L, 2, "outbox renewal ttl");
   int rc;
 
+  if (ud->payload_streaming)
+    return luaL_error(
+        L, "outbox job renew is not allowed while payload is streaming");
   lc_error_init(&error);
   rc = lc_outbox_job_renew(ud->job, ttl_seconds, &error);
   if (rc != LC_OK) {
@@ -6437,6 +6648,9 @@ static int lcdc_outbox_job_terminal(lua_State *L, int operation) {
   lc_error error;
   int rc;
 
+  if (ud->payload_streaming)
+    return luaL_error(L, "outbox job terminal operation is not allowed while "
+                         "payload is streaming");
   if (ud->handler_scoped) {
     if (ud->terminal_operation >= 0)
       return luaL_error(L, "outbox handler selected more than one outcome");
@@ -6681,6 +6895,8 @@ int luaopen_lockdc_core(lua_State *L) {
   lua_setfield(L, -2, "ERR_PROTOCOL");
   lua_pushinteger(L, LC_ERR_SERVER);
   lua_setfield(L, -2, "ERR_SERVER");
+  lua_pushinteger(L, LC_ERR_TIMEOUT);
+  lua_setfield(L, -2, "ERR_TIMEOUT");
   lua_pushinteger(L, LC_NACK_INTENT_FAILURE);
   lua_setfield(L, -2, "NACK_FAILURE");
   lua_pushinteger(L, LC_NACK_INTENT_DEFER);

@@ -9,15 +9,24 @@ local client = assert(lockdc.open({
   pouch = { single_writer = false },
 }))
 local outbox = assert(client:new_outbox({
-  namespace = "outbox-example",
+  namespace_name = "outbox-example",
   owner = "outbox-example-producer",
 }))
 local dispatcher = assert(outbox:dispatcher())
 
 local handlers = {
   ["outbox-example"] = function(job)
-    local payload = assert(job:payload_json())
-    assert(payload.order_id == 1)
+    -- The callback sink receives bounded chunks and never materializes the
+    -- payload. A real handler would write each chunk to its foreign transport.
+    local bytes = 0
+    local streamed, written = job:write_payload({
+      write = function(chunk)
+        bytes = bytes + #chunk
+        return true
+      end,
+    })
+    assert(streamed == nil)
+    assert(bytes == written)
     print(("delivering %s"):format(job:info().effect_key))
     return job:complete()
   end,

@@ -78,7 +78,7 @@ if not saw_snapshot then
   error("acquire_for_update handler did not observe snapshot")
 end
 
-local final, final_meta_or_err = client:get_json({
+local final, final_meta_or_err = client:read_json({
   key = key,
   public_read = true,
 })
@@ -117,7 +117,7 @@ if rollback_err == nil or rollback_err.message ~= "intentional acquire_for_updat
   error(("unexpected rollback error: %s"):format(rollback_err and rollback_err.message or tostring(rollback_err)))
 end
 
-local after_rollback, after_rollback_meta_or_err = client:get_json({
+local after_rollback, after_rollback_meta_or_err = client:read_json({
   key = key,
   public_read = true,
 })
@@ -160,12 +160,12 @@ if cas_err.http_status ~= 409 then
     cas_err.message or ""
   ))
 end
-if cas_err.code == lockdc.core.ERR_INVALID then
+if cas_err.code == lockdc.ERR_INVALID then
   client:close()
   error("stale CAS handler error was collapsed to ERR_INVALID")
 end
 
-local after_cas, after_cas_meta_or_err = client:get_json({
+local after_cas, after_cas_meta_or_err = client:read_json({
   key = key,
   public_read = true,
 })

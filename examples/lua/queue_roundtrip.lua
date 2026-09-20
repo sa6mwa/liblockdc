@@ -49,11 +49,11 @@ if message == nil then
   error(("client:dequeue failed: %s"):format(dequeue_err.message))
 end
 
-local payload, written_or_err = message:payload_json()
+local payload, written_or_err = message:read_payload_json()
 if payload == nil then
   message:close()
   client:close()
-  error(("message:payload_json failed: %s"):format(written_or_err.message))
+  error(("message:read_payload_json failed: %s"):format(written_or_err.message))
 end
 
 print(("dequeued message %s attempts=%d op=%s"):format(

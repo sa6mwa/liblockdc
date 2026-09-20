@@ -115,16 +115,16 @@ for index, variant in ipairs(variants) do
     error(("lease:update_json failed for %s bundle source: %s"):format(variant.name, update_err and update_err.message or tostring(update_err)))
   end
 
-  local document, get_err = lease:get_json()
+  local document, get_err = lease:read_json()
   if document == nil then
     lease:close()
     client:close()
-    error(("lease:get_json failed for %s bundle source: %s"):format(variant.name, get_err and get_err.message or tostring(get_err)))
+    error(("lease:read_json failed for %s bundle source: %s"):format(variant.name, get_err and get_err.message or tostring(get_err)))
   end
   if type(document) ~= "table" or document.source ~= variant.name or document.index ~= index then
     lease:close()
     client:close()
-    error(("unexpected get_json payload for %s bundle source"):format(variant.name))
+    error(("unexpected read_json payload for %s bundle source"):format(variant.name))
   end
 
   lease:close()

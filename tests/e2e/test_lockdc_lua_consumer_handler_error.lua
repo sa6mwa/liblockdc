@@ -69,11 +69,11 @@ if message == nil then
   error(('expected redelivery after handler failure, dequeue failed: %s'):format(dequeue_err and dequeue_err.message or tostring(dequeue_err)))
 end
 
-local payload, payload_err = message:payload_json()
+local payload, payload_err = message:read_payload_json()
 if payload == nil then
   message:close()
   client:close()
-  error(('message:payload_json failed: %s'):format(payload_err and payload_err.message or tostring(payload_err)))
+  error(('message:read_payload_json failed: %s'):format(payload_err and payload_err.message or tostring(payload_err)))
 end
 if type(payload) ~= 'table' or payload.kind ~= 'lua-consumer-handler-error' or payload.attempt ~= 1 then
   message:close()

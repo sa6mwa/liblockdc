@@ -37,7 +37,15 @@ package.preload['lonejson'] = function()
 end
 
 local core_stub = {
+  OK = 0,
   ERR_INVALID = 42,
+  ERR_NOMEM = 43,
+  ERR_TRANSPORT = 44,
+  ERR_PROTOCOL = 45,
+  ERR_SERVER = 46,
+  ERR_TIMEOUT = 47,
+  NACK_FAILURE = 48,
+  NACK_DEFER = 49,
   version_string = function()
     return 'test-version'
   end,
@@ -67,6 +75,10 @@ end
 local function test_json_helpers()
   assert_eq(lockdc.version_string(), 'test-version', 'version_string should delegate to core')
   assert_eq(lockdc.xid_new(), '0123456789abcdefghijkl', 'xid_new should delegate to core')
+  assert_eq(lockdc.ERR_INVALID, core_stub.ERR_INVALID,
+      'public facade should expose C status constants without exposing core')
+  assert_eq(lockdc.ERR_TIMEOUT, core_stub.ERR_TIMEOUT,
+      'public facade should expose the timeout status constant')
   assert_eq(lockdc.encode_json('123'), '123', 'encode_json should strip wrapper envelope')
   assert_eq(lockdc.encode_json(nil), 'null', 'encode_json should preserve legacy top-level nil null')
   assert_eq(lockdc.decode_json('{"k":1}'), '{"k":1}', 'decode_json should unwrap envelope payload')
@@ -229,6 +241,8 @@ local function test_xa_and_transaction_coordinator_forwarding()
   end
 
   local client = assert(lockdc.open({}))
+  assert_eq(lockdc.core, nil,
+      "the native implementation must not be re-exported as public facade API")
   local decision = {
     txn_id = '00000000000000000001',
     participants = { { namespace_name = 'orders', key = 'order-1' } },
@@ -620,14 +634,58 @@ local function test_json_null_roundtrip_helpers()
   end
 
   local client = assert(lockdc.open({}))
-  local value, meta = client:get_json({ key = 'state-key' })
-  assert_eq(value, lockdc.json_null, 'client:get_json should preserve top-level JSON null')
-  assert_eq(meta.etag, 'etag-1', 'client:get_json should still return metadata')
+  local value, meta = client:read_json({ key = 'state-key' })
+  assert_eq(value, lockdc.json_null, 'client:read_json should preserve top-level JSON null')
+  assert_eq(meta.etag, 'etag-1', 'client:read_json should still return metadata')
 
   local message = assert(client:dequeue({ queue = 'jobs' }))
-  local payload, written = message:payload_json()
-  assert_eq(payload, lockdc.json_null, 'message:payload_json should preserve top-level JSON null')
-  assert_eq(written, 4, 'message:payload_json should preserve byte count')
+  local payload, written = message:read_payload_json()
+  assert_eq(payload, lockdc.json_null, 'message:read_payload_json should preserve top-level JSON null')
+  assert_eq(written, 4, 'message:read_payload_json should preserve byte count')
+end
+
+local function test_streaming_surface_requires_sink_and_materializers_are_named()
+  local calls = {}
+  local client_core = {
+    get = function(_, req, sink)
+      calls.get_sink = sink
+      if sink == nil then
+        return "state", { etag = "etag-1" }
+      end
+      return nil, 5
+    end,
+    query = function(_, req, sink)
+      calls.query_sink = sink
+      return nil, 2
+    end,
+    close = function() end,
+  }
+
+  core_stub.open = function()
+    return client_core
+  end
+
+  local client = assert(lockdc.open({}))
+  local ok, err = pcall(function()
+    client:get({ key = "state" })
+  end)
+  assert_eq(ok, false, "client:get must require a sink")
+  assert_truthy(tostring(err):find("client:read", 1, true),
+      "missing sink error should name the materializer")
+  assert_eq(client.get_raw, nil, "legacy get_raw alias must not remain public")
+  assert_eq(client.get_json, nil, "legacy get_json alias must not remain public")
+  assert_eq(client:read({ key = "state" }), "state",
+      "client:read should be the explicit materializer")
+  local sink = { write = function() end }
+  assert_eq(client:get({ key = "state" }, sink), nil,
+      "client:get should preserve streaming output semantics")
+  assert_eq(calls.get_sink, sink, "client:get should pass the supplied sink through")
+  assert_eq(client:query({ engine = "scan" }, sink), nil,
+      "client:query should preserve streaming output semantics")
+  assert_eq(calls.query_sink, sink,
+      "client:query should pass the supplied sink through")
+  assert_truthy(type(client.read_query) == "function",
+      "client:read_query should be public")
 end
 
 local function test_outbox_facade_lifecycle()
@@ -744,7 +802,7 @@ local function test_outbox_facade_lifecycle()
     write_command_result = function(_, identity, destination)
       captured.command_result_identity = identity
       captured.command_result_destination = destination
-      return 'result-bytes', 12
+      return nil, 12
     end,
     resume_command = function(_, identity)
       captured.resume_identity = identity
@@ -784,7 +842,7 @@ local function test_outbox_facade_lifecycle()
     export_dead_letters = function(_, options, dest)
       captured.export_options = options
       captured.export_dest = dest
-      return '[{"dispatch_state":"dead_letter"}]', { exported = 1 }
+      return nil, { exported = 1 }
     end,
     close = function(self) self.closed = true end,
   }
@@ -802,7 +860,7 @@ local function test_outbox_facade_lifecycle()
 
   local client = assert(lockdc.open({}))
   local outbox = assert(client:new_outbox({
-    namespace = 'outbox-ns',
+    namespace_name = 'outbox-ns',
     owner = 'lua-worker',
     recovery_interval_seconds = 7,
     shutdown_timeout_ms = 1234,
@@ -815,16 +873,15 @@ local function test_outbox_facade_lifecycle()
     payload_digest = 'sha256:payload',
     kind = 'http',
     destination = 'https://billing.test/charge',
-    headers = 'header-json',
+    headers_json = 'header-json',
   }, 'payload'))
 
-  assert_eq(captured.outbox_config.namespace, 'outbox-ns', 'new_outbox should pass config through')
+  assert_eq(captured.outbox_config.namespace_name, 'outbox-ns', 'new_outbox should pass config through')
   assert_eq(captured.outbox_config.shutdown_timeout_ms, 1234,
       'outbox shutdown timeout should pass through')
   assert_eq(captured.outbox_config.replay_dead_letters_on_startup, true,
       'outbox startup replay option should pass through')
-  assert_eq(captured.first_entry.headers_json, 'header-json', 'outbox should encode headers into headers_json')
-  assert_eq(captured.first_entry.headers, nil, 'outbox should not pass façade-only headers')
+  assert_eq(captured.first_entry.headers_json, 'header-json', 'outbox should preserve headers_json')
   assert_eq(captured.first_entry.payload_digest, 'sha256:payload',
       'outbox should preserve the immutable payload digest')
   assert_eq(captured.first_payload, 'payload', 'outbox should preserve arbitrary payload source')
@@ -835,7 +892,7 @@ local function test_outbox_facade_lifecycle()
   assert_eq(captured.acquire_req.key, 'order-1', 'transaction acquire should pass request through')
   assert_eq(captured.update_body, 'null', 'participant update_json should encode nil as JSON null')
   assert_eq(captured.update_opts.content_type, 'application/json', 'participant update_json should default content type')
-  assert_eq(participant:get_json(), lockdc.json_null, 'participant get_json should decode JSON null')
+  assert_eq(participant:read_json(), lockdc.json_null, 'participant read_json should decode JSON null')
   participant:metadata({ query_hidden = true })
   assert_eq(captured.metadata_req.query_hidden, true, 'participant metadata should delegate')
   participant:mutate({ mutations = { '/revision++' } })
@@ -876,14 +933,14 @@ local function test_outbox_facade_lifecycle()
       'command result should pass through')
   assert_truthy(command_txn:fail_command({ failure_code = 'declined' }),
       'command failure should delegate')
-  local status = assert(outbox:command_receipt({
+  local status = assert(outbox:get_command_receipt({
     scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
   }))
   assert_eq(status.result_code, 'created', 'command status should delegate')
-  local result_bytes, result_written = assert(outbox:write_command_result({
+  local result_bytes, result_written = outbox:write_command_result({
     scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
-  }, { path = '/tmp/command-result' }))
-  assert_eq(result_bytes, 'result-bytes', 'command result should preserve streamed output')
+  }, { path = '/tmp/command-result' })
+  assert_eq(result_bytes, nil, 'command result should not materialize streamed output')
   assert_eq(result_written, 12, 'command result should preserve byte count')
   local resumed_txn, resumed = outbox:resume_command({
     scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
@@ -894,7 +951,7 @@ local function test_outbox_facade_lifecycle()
   local dispatcher = assert(outbox:dispatcher())
   local job = assert(dispatcher:next(123))
   assert_eq(captured.next_timeout, 123, 'dispatcher next should pass its timeout')
-  assert_eq(job:payload_json(), lockdc.json_null, 'job payload_json should decode JSON null')
+  assert_eq(job:read_payload_json(), lockdc.json_null, 'job read_payload_json should decode JSON null')
   assert_truthy(job:renew(90), 'job renewal should delegate')
   assert_eq(captured.renew_ttl, 90, 'job renewal should preserve TTL')
   assert_truthy(job:complete({ delivery_reference = 'provider-1' }),
@@ -918,20 +975,22 @@ local function test_outbox_facade_lifecycle()
       'dead-letter delete should delegate')
   assert_eq(outbox_core.deleted_key, 'dead-key',
       'dead-letter delete key should pass through')
-  local exported, export_result = assert(dispatcher:export_dead_letters(
-      { format = 'jsonl', limit = 10 }, { path = '/tmp/dead-letter.jsonl' }))
+  local exported, export_result = dispatcher:export_dead_letters(
+      { format = 'jsonl', limit = 10 }, { path = '/tmp/dead-letter.jsonl' })
   assert_eq(export_result.exported, 1, 'dead-letter export result should delegate')
   assert_eq(captured.export_options.format, 'jsonl',
       'dead-letter export options should pass through')
   assert_eq(captured.export_dest.path, '/tmp/dead-letter.jsonl',
       'dead-letter export destination should pass through')
-  assert_truthy(exported:find('dead_letter', 1, true),
-      'dead-letter export should return the core output')
-  assert(dispatcher:export_dead_letters('/tmp/dead-letter.json'))
-  assert_eq(captured.export_options, nil,
-      'dead-letter export should allow a destination without options')
-  assert_eq(captured.export_dest, '/tmp/dead-letter.json',
-      'dead-letter export destination shorthand should pass through')
+  assert_eq(exported, nil,
+      'dead-letter export should not materialize streamed output')
+  local missing_sink, missing_sink_err = pcall(function()
+    dispatcher:export_dead_letters({ format = 'jsonl' })
+  end)
+  assert_eq(missing_sink, false,
+      'dead-letter export must require an explicit sink')
+  assert_truthy(tostring(missing_sink_err):find('read_dead_letters', 1, true),
+      'dead-letter export should point callers to its materializer')
 
   dispatcher:close()
   assert_truthy(outbox_core.closed, 'dispatcher close should close the core receiver')
@@ -949,4 +1008,5 @@ test_acquire_for_update_propagates_sdk_failure_shape()
 test_subscribe_with_state_and_service_lifecycle()
 test_watch_queue_change_detection()
 test_json_null_roundtrip_helpers()
+test_streaming_surface_requires_sink_and_materializers_are_named()
 test_outbox_facade_lifecycle()

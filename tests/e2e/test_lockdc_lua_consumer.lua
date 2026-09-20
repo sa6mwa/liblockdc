@@ -46,7 +46,7 @@ service = client:new_consumer_service({
     wait_seconds = 5,
   },
   MessageHandler = function(message, state)
-    local payload, payload_err = message:payload_json()
+    local payload, payload_err = message:read_payload_json()
     local document, meta
 
     if payload == nil then
@@ -56,11 +56,11 @@ service = client:new_consumer_service({
       return { message = "expected consumer state lease" }
     end
 
-    document, meta = state:get_json()
+    document, meta = state:read_json()
     if meta ~= nil and meta.no_content then
       document = {}
     elseif document == nil then
-      return { message = "state:get_json returned nil without no_content metadata" }
+      return { message = "state:read_json returned nil without no_content metadata" }
     end
 
     handled = handled + 1

@@ -31,7 +31,7 @@ local ok, consumer_err = client:start_consumer({
     wait_seconds = 5,
   },
   MessageHandler = function(message, state)
-    local payload, payload_err = message:payload_json()
+    local payload, payload_err = message:read_payload_json()
     local document, meta
 
     if payload == nil then
@@ -44,12 +44,12 @@ local ok, consumer_err = client:start_consumer({
     ))
 
     if state ~= nil then
-      document, meta = state:get_json()
+      document, meta = state:read_json()
       if meta ~= nil and meta.no_content then
         document = {}
       elseif document == nil then
         return {
-          message = "state:get_json returned nil without no_content metadata",
+          message = "state:read_json returned nil without no_content metadata",
         }
       end
 

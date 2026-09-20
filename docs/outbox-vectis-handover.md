@@ -290,15 +290,59 @@ observable properties without timing sleeps:
 - a large pending namespace is reconciled through bounded, paged recovery,
   without full payload materialization or unbounded candidate allocation.
 
-## Lua facade review boundary
+## Lua facade exposed by Vectis
 
-The Lua facade is feature-complete for ordinary Lua hosts: it exposes
-`client:new_outbox`, transaction and receipt methods, `outbox:dispatcher`, raw
-`dispatcher:next`, notification, reconciliation, job streaming/renewal/
-terminal decisions, and managed `run`/`pump` modes. Review [Lua bindings](lua.md)
-when Vectis packages or exposes that facade.
+Vectis may expose the public `require("lockdc")` package to application Lua.
+That package is the supported façade; `lockdc.core` is its native implementation
+detail and is not an application integration surface. The façade wraps the C
+receiver ownership model rather than creating a second outbox model:
 
-For the Vectis supervisor architecture, preserve the raw-C boundary above.
-Vectis owns Lua lane scheduling and invokes its chosen Lua state only after a
-raw C `next()` has returned a claimed job. That keeps liblockdc from owning
-Vectis handler maps or calling Lua from a private dispatcher thread.
+| Need | Lua façade | Contract |
+| --- | --- | --- |
+| Producer | `client:new_outbox(config[, { dispatcher = dispatcher }])` | Threadless. Use the C-shaped `namespace_name` field. |
+| Fresh durable work | `outbox:append`, `accept_command`, `accept_inbox`, `begin`, or `transaction` | Fresh keys appear only in successful `commit_result.outbox_receipts`. |
+| Command status/result | `outbox:get_command_receipt`, `write_command_result`, `read_command_result`, `resume_command` | C-shaped names retain the durable receipt/result distinction. |
+| Dispatcher signals | `outbox:dispatcher`, `dispatcher:notify_outbox_key`, `stats`, and `reconcile` | Same canonical-config, bounded-notification, and recovery rules as C. |
+| Raw claim | `dispatcher:next(timeout_ms)` | Returns an owned `OutboxJob` or `nil` when no work is immediately available. |
+| Managed Lua consumer | `dispatcher:run({ handlers = ... })` or bounded `pump(options)` | Valid for a standalone Lua-owned worker only; it cannot share that live dispatcher with raw pull mode. |
+| Claimed job | `info`, `write_payload`, `read_payload`, `read_payload_json`, `renew`, `complete`, `retry`, `dead_letter`, `close` | Terminal and ownership rules below apply unchanged. |
+
+The Lua package preserves the same Pouch typed root-open settings through
+`lockdc.open({ pouch = { ... } })`. A Vectis route worker and supervisor that
+share a Pouch root must both supply `pouch = { single_writer = false }`, and
+the supervisor's Lua-created outbox must use the same positive
+`recovery_interval_seconds` as the C configuration described above.
+
+`job:write_payload(sink)` is the façade's true streaming operation. It writes
+directly to a supplied path, file descriptor, or callback sink. Callback sinks
+receive bounded chunks and can fail the operation by returning `nil, message`
+or `false, message`. `job:read_payload_json()` first materializes the complete
+payload in Lua memory and then decodes it with lonejson; it is appropriate only
+for payloads whose bounded size is an intentional application decision. It
+must not be represented as a streaming foreign-effect path. The claimed job is
+not re-entrant while its callback sink is active: finish the stream before
+renewing, selecting an outcome, or closing it.
+
+For the Vectis supervisor architecture, preserve the raw-C pull boundary above.
+Vectis owns Lua-lane scheduling and invokes its chosen Lua state only after a
+raw C `next()` has returned a claimed job. Its C adapter can stream the payload
+into the foreign transport. Exposing `read_payload_json()` to application Lua does
+not change that operational path. In particular, Vectis must not call Lua
+`dispatcher:run()` or `dispatcher:pump()` on the dispatcher used by its raw-C
+supervisor router: first use permanently binds a live dispatcher to either raw
+pull or one Lua state/handler map.
+
+Within a Lua-managed `run`/`pump` handler, `complete`, `retry`, and
+`dead_letter` select a deferred outcome that the binding applies after the
+handler returns. On a job returned by raw `next`, they immediately attempt the
+native terminal mutation. `retry()` accepts no argument or a table such as
+`{ delay_seconds = 30, diagnostic = "temporary upstream failure" }`; it does
+not accept a diagnostic string shorthand. A handler exception or return without
+an outcome follows the configured durable retry path. A job must not outlive its
+handler invocation, and `stop`, `wait`, or `job:close()` are rejected from that
+handler while it owns the active claim.
+
+Review [Lua bindings](lua.md) with this guide when Vectis packages the façade.
+The integration tests must separately prove Lua producer receipt forwarding,
+the raw-C supervisor boundary, typed shared-Pouch opening, bounded JSON use,
+and the handler-mode/raw-pull exclusion.

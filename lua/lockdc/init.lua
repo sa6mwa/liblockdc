@@ -1,7 +1,7 @@
 local core = require("lockdc.core")
 local lonejson = require("lonejson")
 
-local M = { core = core }
+local M = {}
 
 local Client = {}
 Client.__index = Client
@@ -99,6 +99,13 @@ local function decode_json(payload)
   return lonejson.decode_json(payload)
 end
 
+local function require_sink(sink, method, materializer)
+  if sink == nil then
+    error(method .. " requires a sink; use " .. materializer .. " to materialize")
+  end
+  return sink
+end
+
 local function with_json_content_type(req)
   local next_req = {}
   local k, v
@@ -112,24 +119,6 @@ local function with_json_content_type(req)
     next_req.content_type = "application/json"
   end
   return next_req
-end
-
-local function normalize_outbox_entry(entry)
-  local next_entry = {}
-  local k, v
-
-  entry = entry or {}
-  for k, v in pairs(entry) do
-    next_entry[k] = v
-  end
-  if next_entry.headers ~= nil then
-    if next_entry.headers_json ~= nil then
-      error("outbox entry accepts either headers or headers_json, not both")
-    end
-    next_entry.headers_json = encode_json(next_entry.headers)
-    next_entry.headers = nil
-  end
-  return next_entry
 end
 
 local function unwrap_lease_ref(value)
@@ -221,6 +210,15 @@ function M.xid_new()
 end
 
 M.json_null = JSON_NULL
+M.OK = core.OK
+M.ERR_INVALID = core.ERR_INVALID
+M.ERR_NOMEM = core.ERR_NOMEM
+M.ERR_TRANSPORT = core.ERR_TRANSPORT
+M.ERR_PROTOCOL = core.ERR_PROTOCOL
+M.ERR_SERVER = core.ERR_SERVER
+M.ERR_TIMEOUT = core.ERR_TIMEOUT
+M.NACK_FAILURE = core.NACK_FAILURE
+M.NACK_DEFER = core.NACK_DEFER
 
 function M.open(config)
   local client, err = core.open(config)
@@ -310,8 +308,8 @@ function Client:acquire_for_update(req, handler)
       return decode_json(self.state), self.state_meta
     end
 
-    function af:update_raw(body, opts)
-      return lease:update_raw(body, opts)
+    function af:update(body, opts)
+      return lease:update(body, opts)
     end
 
     function af:update_json(value, opts)
@@ -360,12 +358,16 @@ function Client:describe(req)
   return self._core:describe(req)
 end
 
-function Client:get_raw(req, dest)
-  return self._core:get(req, dest)
+function Client:get(req, sink)
+  return self._core:get(req, require_sink(sink, "client:get", "client:read"))
 end
 
-function Client:get_json(req)
-  local payload, meta_or_err = self._core:get(req)
+function Client:read(req)
+  return self._core:get(req)
+end
+
+function Client:read_json(req)
+  local payload, meta_or_err = self:read(req)
 
   if payload == nil then
     return nil, meta_or_err
@@ -376,12 +378,12 @@ function Client:get_json(req)
   return decode_json(payload), meta_or_err
 end
 
-function Client:update_raw(req, body)
+function Client:update(req, body)
   return self._core:update(flatten_lease_request(req), body)
 end
 
 function Client:update_json(req, value)
-  return self:update_raw(with_json_content_type(req), encode_json(value))
+  return self:update(with_json_content_type(req), encode_json(value))
 end
 
 function Client:mutate(req)
@@ -412,8 +414,13 @@ function Client:list_attachments(req)
   return self._core:list_attachments(flatten_lease_request(req))
 end
 
-function Client:get_attachment(req, dest)
-  return self._core:get_attachment(flatten_lease_request(req), dest)
+function Client:get_attachment(req, sink)
+  return self._core:get_attachment(flatten_lease_request(req),
+    require_sink(sink, "client:get_attachment", "client:read_attachment"))
+end
+
+function Client:read_attachment(req)
+  return self._core:get_attachment(flatten_lease_request(req))
 end
 
 function Client:delete_attachment(req)
@@ -440,8 +447,13 @@ function Client:queue_extend(req)
   return self._core:queue_extend(flatten_message_request(req))
 end
 
-function Client:query_raw(req, dest)
-  return self._core:query(req, dest)
+function Client:query(req, sink)
+  return self._core:query(req,
+    require_sink(sink, "client:query", "client:read_query"))
+end
+
+function Client:read_query(req)
+  return self._core:query(req)
 end
 
 function Client:query_keys(req, handler)
@@ -566,12 +578,16 @@ function Lease:describe()
   return self._core:describe()
 end
 
-function Lease:get_raw(req, dest)
-  return self._core:get(req, dest)
+function Lease:get(opts, sink)
+  return self._core:get(opts, require_sink(sink, "lease:get", "lease:read"))
 end
 
-function Lease:get_json(req)
-  local payload, meta_or_err = self._core:get(req)
+function Lease:read(opts)
+  return self._core:get(opts)
+end
+
+function Lease:read_json(opts)
+  local payload, meta_or_err = self:read(opts)
 
   if payload == nil then
     return nil, meta_or_err
@@ -582,12 +598,12 @@ function Lease:get_json(req)
   return decode_json(payload), meta_or_err
 end
 
-function Lease:update_raw(body, req)
+function Lease:update(body, req)
   return self._core:update(body, req)
 end
 
 function Lease:update_json(value, req)
-  return self:update_raw(encode_json(value), with_json_content_type(req))
+  return self:update(encode_json(value), with_json_content_type(req))
 end
 
 function Lease:mutate(req)
@@ -627,8 +643,13 @@ function Lease:list_attachments()
   return self._core:list_attachments()
 end
 
-function Lease:get_attachment(req, dest)
-  return self._core:get_attachment(req, dest)
+function Lease:get_attachment(req, sink)
+  return self._core:get_attachment(req,
+    require_sink(sink, "lease:get_attachment", "lease:read_attachment"))
+end
+
+function Lease:read_attachment(req)
+  return self._core:get_attachment(req)
 end
 
 function Lease:delete_attachment(selector)
@@ -689,12 +710,17 @@ function Message:rewind_payload()
   return self._core:rewind_payload()
 end
 
-function Message:payload(dest)
-  return self._core:payload(dest)
+function Message:write_payload(sink)
+  return self._core:payload(
+    require_sink(sink, "message:write_payload", "message:read_payload"))
 end
 
-function Message:payload_json()
-  local payload, written_or_err = self._core:payload()
+function Message:read_payload()
+  return self._core:payload()
+end
+
+function Message:read_payload_json()
+  local payload, written_or_err = self:read_payload()
 
   if payload == nil then
     return nil, written_or_err
@@ -734,8 +760,7 @@ function Outbox:dispatcher()
 end
 
 function Outbox:append(entry, payload)
-  local transaction, receipt_or_err = self._core:append(
-    normalize_outbox_entry(entry), payload)
+  local transaction, receipt_or_err = self._core:append(entry, payload)
 
   if transaction == nil and receipt_or_err == nil then
     return nil
@@ -779,12 +804,17 @@ function Outbox:accept_command(request)
   return wrap_outbox_transaction(transaction), receipt_or_err
 end
 
-function Outbox:command_receipt(identity)
+function Outbox:get_command_receipt(identity)
   return self._core:get_command_receipt(identity)
 end
 
-function Outbox:write_command_result(identity, dest)
-  return self._core:write_command_result(identity, dest)
+function Outbox:write_command_result(identity, sink)
+  return self._core:write_command_result(identity, require_sink(sink,
+    "outbox:write_command_result", "outbox:read_command_result"))
+end
+
+function Outbox:read_command_result(identity)
+  return self._core:write_command_result(identity)
 end
 
 function Outbox:resume_command(identity)
@@ -905,13 +935,13 @@ function OutboxDispatcher:delete_dead_letter(outbox_key)
   return self._core:delete_dead_letter(outbox_key)
 end
 
-function OutboxDispatcher:export_dead_letters(options, dest)
-  if dest == nil and (type(options) == "string" or type(options) == "number" or
-      (type(options) == "table" and
-       (options.path ~= nil or options.fd ~= nil))) then
-    return self._core:export_dead_letters(nil, options)
-  end
-  return self._core:export_dead_letters(options, dest)
+function OutboxDispatcher:export_dead_letters(options, sink)
+  return self._core:export_dead_letters(options, require_sink(sink,
+    "dispatcher:export_dead_letters", "dispatcher:read_dead_letters"))
+end
+
+function OutboxDispatcher:read_dead_letters(options)
+  return self._core:export_dead_letters(options)
 end
 
 function OutboxDispatcher:stop(deadline_ms)
@@ -939,7 +969,7 @@ function OutboxTransaction:acquire(req)
 end
 
 function OutboxTransaction:append(entry, payload)
-  return self._core:append(normalize_outbox_entry(entry), payload)
+  return self._core:append(entry, payload)
 end
 
 function OutboxTransaction:accept_command(request)
@@ -991,12 +1021,17 @@ function OutboxParticipant:describe()
   return self._core:describe()
 end
 
-function OutboxParticipant:get_raw(opts, dest)
-  return self._core:get(opts, dest)
+function OutboxParticipant:get(opts, sink)
+  return self._core:get(opts, require_sink(sink,
+    "outbox participant:get", "outbox participant:read"))
 end
 
-function OutboxParticipant:get_json(opts)
-  local payload, meta_or_err = self._core:get(opts)
+function OutboxParticipant:read(opts)
+  return self._core:get(opts)
+end
+
+function OutboxParticipant:read_json(opts)
+  local payload, meta_or_err = self:read(opts)
 
   if payload == nil then
     return nil, meta_or_err
@@ -1007,12 +1042,12 @@ function OutboxParticipant:get_json(opts)
   return decode_json(payload), meta_or_err
 end
 
-function OutboxParticipant:update_raw(body, opts)
+function OutboxParticipant:update(body, opts)
   return self._core:update(body, opts)
 end
 
 function OutboxParticipant:update_json(value, opts)
-  return self:update_raw(encode_json(value), with_json_content_type(opts))
+  return self:update(encode_json(value), with_json_content_type(opts))
 end
 
 function OutboxParticipant:mutate(req)
@@ -1043,8 +1078,13 @@ function OutboxParticipant:list_attachments()
   return self._core:list_attachments()
 end
 
-function OutboxParticipant:get_attachment(req, dest)
-  return self._core:get_attachment(req, dest)
+function OutboxParticipant:get_attachment(req, sink)
+  return self._core:get_attachment(req, require_sink(sink,
+    "outbox participant:get_attachment", "outbox participant:read_attachment"))
+end
+
+function OutboxParticipant:read_attachment(req)
+  return self._core:get_attachment(req)
 end
 
 function OutboxParticipant:delete_attachment(selector)
@@ -1066,16 +1106,17 @@ function OutboxJob:close()
   end
 end
 
-function OutboxJob:write_payload(dest)
-  return self._core:write_payload(dest)
+function OutboxJob:write_payload(sink)
+  return self._core:write_payload(require_sink(sink,
+    "outbox job:write_payload", "outbox job:read_payload"))
 end
 
-function OutboxJob:payload(dest)
-  return self:write_payload(dest)
+function OutboxJob:read_payload()
+  return self._core:write_payload()
 end
 
-function OutboxJob:payload_json()
-  local payload, written_or_err = self:write_payload()
+function OutboxJob:read_payload_json()
+  local payload, written_or_err = self:read_payload()
 
   if payload == nil then
     return nil, written_or_err

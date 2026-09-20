@@ -478,7 +478,7 @@ second, callback-based outbox model. Its names may be idiomatic Lua, but its
 semantics must match the C surface:
 
 ```lua
-local outbox = client:new_outbox({ namespace = "app-outbox" })
+local outbox = client:new_outbox({ namespace_name = "app-outbox" })
 
 local command_txn, command = outbox:accept_command({
   scope = tenant_id,
@@ -488,9 +488,9 @@ local command_txn, command = outbox:accept_command({
   operation_id = order_operation_id,
 })
 if command_txn then
-  local order = command_txn:acquire({ namespace = "orders", key = order_id,
+  local order = command_txn:acquire({ namespace_name = "orders", key = order_id,
                                       owner = "orders-api", ttl_seconds = 30 })
-  order:update_raw(order_update_source)
+  order:update(order_update_source)
   command_txn:append(entry, payload_source)
   command_txn:complete_command({ result_code = "created",
                                   result_reference = order_id })
@@ -501,18 +501,18 @@ end
 
 local txn, duplicate = outbox:append(entry, payload_source)
 if txn then
-  local order = txn:acquire({ namespace = "orders", key = order_id,
+  local order = txn:acquire({ namespace_name = "orders", key = order_id,
                               owner = "orders-api", ttl_seconds = 30 })
-  order:update_raw(order_update_source)
+  order:update(order_update_source)
   local result = txn:commit() -- result.outbox_receipts are now safe to wake
 else
   -- duplicate is already committed and safe to notify, with no domain update.
 end
 
 local update_first = outbox:begin()
-local updated_order = update_first:acquire({ namespace = "orders", key = order_id,
+local updated_order = update_first:acquire({ namespace_name = "orders", key = order_id,
                                               owner = "orders-api", ttl_seconds = 30 })
-updated_order:update_raw(order_update_source)
+updated_order:update(order_update_source)
 update_first:append(entry, payload_source)
 local update_result = update_first:commit()
 
@@ -541,22 +541,25 @@ if job then
 end
 ```
 
-Lua receives explicit result values and normal `nil, error` failures. Payload
-objects retain the binding's streaming semantics. `dispatcher:next()` runs in
-the calling Lua context; the private native dispatcher never enters a Lua VM or
-invokes a Lua callback. This keeps the facility usable by any Lua host without
-assuming its scheduler, mailbox, or runtime-lifetime rules.
+Lua receives explicit result values and normal `nil, error` failures.
+`job:write_payload(sink)` streams to a path, file descriptor, or callback sink,
+while `job:read_payload_json()` is a separate convenience that materializes and
+decodes the complete payload in Lua memory. `dispatcher:next()` runs in the calling Lua
+context; the private native dispatcher never enters a Lua VM or invokes a Lua
+callback. This keeps the facility usable by any Lua host without assuming its
+scheduler, mailbox, or runtime-lifetime rules.
 
 The Lua dispatcher façade supplies the matching consumer operations as
 `dispatcher:stats()`, `dispatcher:reconcile()`,
 `dispatcher:replay_dead_letter(outbox_key)`,
 `dispatcher:delete_dead_letter(outbox_key)`, and
-`dispatcher:export_dead_letters(options, destination)`. `options.format` is
-`"json"` or `"jsonl"`; an omitted destination returns the bounded export as a
-Lua string, while the usual Lua file/fd destination forms stream directly.
+`dispatcher:export_dead_letters(options, sink)` and
+`dispatcher:read_dead_letters(options)`. `options.format` is `"json"` or
+`"jsonl"`; the former requires a sink and the latter deliberately materializes
+the bounded export as a Lua string.
 
 The command-receipt extension adds `outbox:accept_command(request)`,
-`outbox:command_receipt(identity)`, and
+`outbox:get_command_receipt(identity)`, and
 `outbox:resume_command(identity)`. Transactions add
 `txn:accept_command(request)`, `txn:complete_command(result)`, and
 `txn:fail_command(result)`. A receipt result body is exposed only by

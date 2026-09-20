@@ -28,7 +28,7 @@ if lease == nil then
   error(("client:acquire failed: %s"):format(acquire_err.message))
 end
 
-local state, meta = lease:get_json()
+local state, meta = lease:read_json()
 if meta ~= nil and meta.no_content then
   state = {
     kind = "lua-example",
@@ -38,7 +38,7 @@ if meta ~= nil and meta.no_content then
 elseif state == nil then
   lease:close()
   client:close()
-  error("lease:get_json returned nil without no_content metadata")
+  error("lease:read_json returned nil without no_content metadata")
 end
 
 state.status = "updated-via-lua"
