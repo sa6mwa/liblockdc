@@ -224,7 +224,7 @@ int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->namespace_name;
+  engine_req.ns = req->ns;
   engine_req.key = req->key;
   engine_req.owner = req->owner;
   engine_req.ttl_seconds = req->ttl_seconds;
@@ -246,8 +246,8 @@ int lc_client_acquire_method(lc_client *self, const lc_acquire_req *req,
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  *out = lc_lease_new(client, engine_res.namespace_name, engine_res.key,
-                      engine_res.owner, engine_res.lease_id, engine_res.txn_id,
+  *out = lc_lease_new(client, engine_res.ns, engine_res.key, engine_res.owner,
+                      engine_res.lease_id, engine_res.txn_id,
                       engine_res.fencing_token, engine_res.version,
                       engine_res.state_etag, NULL);
   if (*out == NULL) {
@@ -455,7 +455,7 @@ int lc_client_describe_method(lc_client *self, const lc_describe_req *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->namespace_name;
+  engine_req.ns = req->ns;
   engine_req.key = req->key;
   rc = lc_engine_client_describe(client->engine, &engine_req, &engine_res,
                                  &engine_error);
@@ -471,7 +471,7 @@ int lc_client_describe_method(lc_client *self, const lc_describe_req *req,
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->namespace_name = lc_strdup_local(engine_res.namespace_name);
+  out->ns = lc_strdup_local(engine_res.ns);
   out->key = lc_strdup_local(engine_res.key);
   out->owner = lc_strdup_local(engine_res.owner);
   out->lease_id = lc_strdup_local(engine_res.lease_id);
@@ -572,9 +572,8 @@ int lc_client_get_method(lc_client *self, const char *key,
 }
 
 static int lc_client_load_with_namespace_method(
-    lc_client *self, const char *namespace_name, const char *key,
-    const lonejson_map *map, void *dst, const lc_get_opts *opts,
-    lc_get_res *out, lc_error *error) {
+    lc_client *self, const char *ns, const char *key, const lonejson_map *map,
+    void *dst, const lc_get_opts *opts, lc_get_res *out, lc_error *error) {
   lc_client_handle *client;
   lc_engine_get_request engine_req;
   lc_engine_get_stream_response engine_res;
@@ -619,7 +618,7 @@ static int lc_client_load_with_namespace_method(
         error, rc, &load_state.parse.error,
         "failed to initialize mapped load parser");
   }
-  engine_req.namespace_name = namespace_name;
+  engine_req.ns = ns;
   engine_req.key = key;
   engine_req.public_read = opts != NULL ? opts->public_read : 0;
   rc = lc_engine_client_get_into(client->engine, &engine_req,
@@ -705,18 +704,17 @@ int lc_client_load_method(lc_client *self, const char *key,
                                               out, error);
 }
 
-int lc_client_load_in_namespace_method(lc_client *self,
-                                       const char *namespace_name,
+int lc_client_load_in_namespace_method(lc_client *self, const char *ns,
                                        const char *key, const lonejson_map *map,
                                        void *dst, const lc_get_opts *opts,
                                        lc_get_res *out, lc_error *error) {
-  if (namespace_name == NULL || namespace_name[0] == '\0') {
+  if (ns == NULL || ns[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "namespaced load requires a non-empty namespace", NULL,
                         NULL, NULL);
   }
-  return lc_client_load_with_namespace_method(self, namespace_name, key, map,
-                                              dst, opts, out, error);
+  return lc_client_load_with_namespace_method(self, ns, key, map, dst, opts,
+                                              out, error);
 }
 
 int lc_client_update_method(lc_client *self, const lc_update_req *req,
@@ -749,7 +747,7 @@ int lc_client_update_method(lc_client *self, const lc_update_req *req,
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
   bridge.source = src;
-  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.ns = req->lease.ns;
   engine_req.key = req->lease.key;
   engine_req.lease_id = req->lease.lease_id;
   engine_req.txn_id = req->lease.txn_id;
@@ -830,7 +828,7 @@ int lc_client_mutate_method(lc_client *self, const lc_mutate_op *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.ns = req->lease.ns;
   engine_req.key = req->lease.key;
   engine_req.lease_id = req->lease.lease_id;
   engine_req.txn_id = req->lease.txn_id;
@@ -909,7 +907,7 @@ int lc_client_metadata_method(lc_client *self, const lc_metadata_op *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.ns = req->lease.ns;
   engine_req.key = req->lease.key;
   engine_req.lease_id = req->lease.lease_id;
   engine_req.txn_id = req->lease.txn_id;
@@ -940,7 +938,7 @@ int lc_client_metadata_method(lc_client *self, const lc_metadata_op *req,
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->namespace_name = lc_strdup_local(engine_res.namespace_name);
+  out->ns = lc_strdup_local(engine_res.ns);
   out->key = lc_strdup_local(engine_res.key);
   out->version = engine_res.version;
   out->has_query_hidden = engine_res.has_query_hidden;
@@ -986,7 +984,7 @@ int lc_client_remove_method(lc_client *self, const lc_remove_op *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.ns = req->lease.ns;
   engine_req.key = req->lease.key;
   engine_req.lease_id = req->lease.lease_id;
   engine_req.txn_id = req->lease.txn_id;
@@ -1063,7 +1061,7 @@ int lc_client_keepalive_method(lc_client *self, const lc_keepalive_op *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.ns = req->lease.ns;
   engine_req.key = req->lease.key;
   engine_req.lease_id = req->lease.lease_id;
   engine_req.txn_id = req->lease.txn_id;
@@ -1130,7 +1128,7 @@ int lc_client_release_method(lc_client *self, const lc_release_op *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.ns = req->lease.ns;
   engine_req.key = req->lease.key;
   engine_req.lease_id = req->lease.lease_id;
   engine_req.txn_id = req->lease.txn_id;
@@ -1197,7 +1195,7 @@ int lc_client_attach_method(lc_client *self, const lc_attach_op *req,
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
   bridge.source = src;
-  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.ns = req->lease.ns;
   engine_req.key = req->lease.key;
   engine_req.lease_id = req->lease.lease_id;
   engine_req.txn_id = req->lease.txn_id;
@@ -1273,7 +1271,7 @@ int lc_client_list_attachments_method(lc_client *self,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.ns = req->lease.ns;
   engine_req.key = req->lease.key;
   engine_req.lease_id = req->lease.lease_id;
   engine_req.txn_id = req->lease.txn_id;
@@ -1356,7 +1354,7 @@ int lc_client_get_attachment_method(lc_client *self,
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
   bridge.sink = dst;
-  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.ns = req->lease.ns;
   engine_req.key = req->lease.key;
   engine_req.lease_id = req->lease.lease_id;
   engine_req.txn_id = req->lease.txn_id;
@@ -1426,7 +1424,7 @@ int lc_client_delete_attachment_method(lc_client *self,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.ns = req->lease.ns;
   engine_req.key = req->lease.key;
   engine_req.lease_id = req->lease.lease_id;
   engine_req.txn_id = req->lease.txn_id;
@@ -1493,7 +1491,7 @@ int lc_client_delete_all_attachments_method(
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->lease.namespace_name;
+  engine_req.ns = req->lease.ns;
   engine_req.key = req->lease.key;
   engine_req.lease_id = req->lease.lease_id;
   engine_req.txn_id = req->lease.txn_id;
@@ -1547,13 +1545,13 @@ int lc_client_queue_stats_method(lc_client *self, const lc_queue_stats_req *req,
     pslog_field fields[2];
 
     fields[0] = lc_log_str_field("queue", req->queue);
-    fields[1] = lc_log_str_field("ns", req->namespace_name);
+    fields[1] = lc_log_str_field("ns", req->ns);
     lc_log_trace(client->logger, "queue.stats.start", fields, 2U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->namespace_name;
+  engine_req.ns = req->ns;
   engine_req.queue = req->queue;
   rc = lc_engine_client_queue_stats(client->engine, &engine_req, &engine_res,
                                     &engine_error);
@@ -1563,14 +1561,14 @@ int lc_client_queue_stats_method(lc_client *self, const lc_queue_stats_req *req,
       pslog_field fields[2];
 
       fields[0] = lc_log_str_field("queue", req->queue);
-      fields[1] = lc_log_str_field("ns", req->namespace_name);
+      fields[1] = lc_log_str_field("ns", req->ns);
       lc_client_log_operation_error(client, PSLOG_LEVEL_WARN,
                                     "queue.stats.error", fields, 2U, error);
     }
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->namespace_name = lc_strdup_local(engine_res.namespace_name);
+  out->ns = lc_strdup_local(engine_res.ns);
   out->queue = lc_strdup_local(engine_res.queue);
   out->waiting_consumers = engine_res.waiting_consumers;
   out->pending_candidates = engine_res.pending_candidates;
@@ -1586,7 +1584,7 @@ int lc_client_queue_stats_method(lc_client *self, const lc_queue_stats_req *req,
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("queue", req->queue);
-    fields[1] = lc_log_str_field("ns", req->namespace_name);
+    fields[1] = lc_log_str_field("ns", req->ns);
     fields[2] = pslog_i64("available", (pslog_int64)engine_res.available);
     fields[3] = lc_log_str_field("head_msg_id", engine_res.head_message_id);
     fields[4] = lc_log_str_field("cid", engine_res.correlation_id);
@@ -1615,7 +1613,7 @@ int lc_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("queue", req->message.queue);
-    fields[1] = lc_log_str_field("ns", req->message.namespace_name);
+    fields[1] = lc_log_str_field("ns", req->message.ns);
     fields[2] = lc_log_str_field("msg_id", req->message.message_id);
     fields[3] = lc_log_str_field("lease_id", req->message.lease_id);
     fields[4] = lc_log_str_field("txn_id", req->message.txn_id);
@@ -1624,7 +1622,7 @@ int lc_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->message.namespace_name;
+  engine_req.ns = req->message.ns;
   engine_req.queue = req->message.queue;
   engine_req.message_id = req->message.message_id;
   engine_req.lease_id = req->message.lease_id;
@@ -1642,7 +1640,7 @@ int lc_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
       pslog_field fields[5];
 
       fields[0] = lc_log_str_field("queue", req->message.queue);
-      fields[1] = lc_log_str_field("ns", req->message.namespace_name);
+      fields[1] = lc_log_str_field("ns", req->message.ns);
       fields[2] = lc_log_str_field("msg_id", req->message.message_id);
       fields[3] = lc_log_str_field("lease_id", req->message.lease_id);
       fields[4] = lc_log_str_field("txn_id", req->message.txn_id);
@@ -1658,7 +1656,7 @@ int lc_client_queue_ack_method(lc_client *self, const lc_ack_op *req,
     pslog_field fields[6];
 
     fields[0] = lc_log_str_field("queue", req->message.queue);
-    fields[1] = lc_log_str_field("ns", req->message.namespace_name);
+    fields[1] = lc_log_str_field("ns", req->message.ns);
     fields[2] = lc_log_str_field("msg_id", req->message.message_id);
     fields[3] = lc_log_str_field("lease_id", req->message.lease_id);
     fields[4] = lc_log_bool_field("acked", engine_res.acked);
@@ -1694,7 +1692,7 @@ int lc_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
     pslog_field fields[6];
 
     fields[0] = lc_log_str_field("queue", req->message.queue);
-    fields[1] = lc_log_str_field("ns", req->message.namespace_name);
+    fields[1] = lc_log_str_field("ns", req->message.ns);
     fields[2] = lc_log_str_field("msg_id", req->message.message_id);
     fields[3] = lc_log_str_field("lease_id", req->message.lease_id);
     fields[4] = pslog_i64("delay_s", (pslog_int64)req->delay_seconds);
@@ -1705,7 +1703,7 @@ int lc_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->message.namespace_name;
+  engine_req.ns = req->message.ns;
   engine_req.queue = req->message.queue;
   engine_req.message_id = req->message.message_id;
   engine_req.lease_id = req->message.lease_id;
@@ -1726,7 +1724,7 @@ int lc_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
       pslog_field fields[6];
 
       fields[0] = lc_log_str_field("queue", req->message.queue);
-      fields[1] = lc_log_str_field("ns", req->message.namespace_name);
+      fields[1] = lc_log_str_field("ns", req->message.ns);
       fields[2] = lc_log_str_field("msg_id", req->message.message_id);
       fields[3] = lc_log_str_field("lease_id", req->message.lease_id);
       fields[4] = pslog_i64("delay_s", (pslog_int64)req->delay_seconds);
@@ -1745,7 +1743,7 @@ int lc_client_queue_nack_method(lc_client *self, const lc_nack_op *req,
     pslog_field fields[7];
 
     fields[0] = lc_log_str_field("queue", req->message.queue);
-    fields[1] = lc_log_str_field("ns", req->message.namespace_name);
+    fields[1] = lc_log_str_field("ns", req->message.ns);
     fields[2] = lc_log_str_field("msg_id", req->message.message_id);
     fields[3] = lc_log_str_field("lease_id", req->message.lease_id);
     fields[4] = lc_log_bool_field("requeued", engine_res.requeued);
@@ -1776,7 +1774,7 @@ int lc_client_queue_extend_method(lc_client *self, const lc_extend_op *req,
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("queue", req->message.queue);
-    fields[1] = lc_log_str_field("ns", req->message.namespace_name);
+    fields[1] = lc_log_str_field("ns", req->message.ns);
     fields[2] = lc_log_str_field("msg_id", req->message.message_id);
     fields[3] = lc_log_str_field("lease_id", req->message.lease_id);
     fields[4] = pslog_i64("extend_s", (pslog_int64)req->extend_by_seconds);
@@ -1785,7 +1783,7 @@ int lc_client_queue_extend_method(lc_client *self, const lc_extend_op *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->message.namespace_name;
+  engine_req.ns = req->message.ns;
   engine_req.queue = req->message.queue;
   engine_req.message_id = req->message.message_id;
   engine_req.lease_id = req->message.lease_id;
@@ -1803,7 +1801,7 @@ int lc_client_queue_extend_method(lc_client *self, const lc_extend_op *req,
       pslog_field fields[5];
 
       fields[0] = lc_log_str_field("queue", req->message.queue);
-      fields[1] = lc_log_str_field("ns", req->message.namespace_name);
+      fields[1] = lc_log_str_field("ns", req->message.ns);
       fields[2] = lc_log_str_field("msg_id", req->message.message_id);
       fields[3] = lc_log_str_field("lease_id", req->message.lease_id);
       fields[4] = pslog_i64("extend_s", (pslog_int64)req->extend_by_seconds);
@@ -1822,7 +1820,7 @@ int lc_client_queue_extend_method(lc_client *self, const lc_extend_op *req,
     pslog_field fields[7];
 
     fields[0] = lc_log_str_field("queue", req->message.queue);
-    fields[1] = lc_log_str_field("ns", req->message.namespace_name);
+    fields[1] = lc_log_str_field("ns", req->message.ns);
     fields[2] = lc_log_str_field("msg_id", req->message.message_id);
     fields[3] = lc_log_str_field("lease_id", req->message.lease_id);
     fields[4] = pslog_i64("lease_expires_at",
@@ -1856,7 +1854,7 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
   {
     pslog_field fields[4];
 
-    fields[0] = lc_log_str_field("ns", req->namespace_name);
+    fields[0] = lc_log_str_field("ns", req->ns);
     fields[1] = lc_log_str_field("return_mode", req->return_mode);
     fields[2] = lc_log_i64_field("limit", req->limit);
     fields[3] = lc_log_str_field("cursor", req->cursor);
@@ -1872,7 +1870,7 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
     return rc;
   }
   bridge.sink = dst;
-  engine_req.namespace_name = req->namespace_name;
+  engine_req.ns = req->ns;
   engine_req.selector_json =
       selector_json != NULL ? selector_json : req->selector_json;
   engine_req.limit = req->limit;
@@ -1889,7 +1887,7 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
     {
       pslog_field fields[4];
 
-      fields[0] = lc_log_str_field("ns", req->namespace_name);
+      fields[0] = lc_log_str_field("ns", req->ns);
       fields[1] = lc_log_str_field("return_mode", req->return_mode);
       fields[2] = lc_log_i64_field("limit", req->limit);
       fields[3] = lc_log_str_field("cursor", req->cursor);
@@ -1915,7 +1913,7 @@ int lc_client_query_method(lc_client *self, const lc_query_req *req,
   {
     pslog_field fields[5];
 
-    fields[0] = lc_log_str_field("ns", req->namespace_name);
+    fields[0] = lc_log_str_field("ns", req->ns);
     fields[1] = lc_log_str_field("return_mode", out->return_mode);
     fields[2] = lc_log_str_field("cursor", out->cursor);
     fields[3] = lc_log_u64_field("index_seq", out->index_seq);
@@ -2034,7 +2032,7 @@ int lc_client_query_keys_method(lc_client *self, const lc_query_req *req,
   {
     pslog_field fields[4];
 
-    fields[0] = lc_log_str_field("ns", req->namespace_name);
+    fields[0] = lc_log_str_field("ns", req->ns);
     fields[1] = lc_log_str_field("return_mode", "keys");
     fields[2] = lc_log_i64_field("limit", req->limit);
     fields[3] = lc_log_str_field("cursor", req->cursor);
@@ -2052,7 +2050,7 @@ int lc_client_query_keys_method(lc_client *self, const lc_query_req *req,
   }
   bridge.handler = handler;
   bridge.context = context;
-  engine_req.namespace_name = req->namespace_name;
+  engine_req.ns = req->ns;
   engine_req.selector_json =
       selector_json != NULL ? selector_json : req->selector_json;
   engine_req.limit = req->limit;
@@ -2068,7 +2066,7 @@ int lc_client_query_keys_method(lc_client *self, const lc_query_req *req,
     {
       pslog_field fields[4];
 
-      fields[0] = lc_log_str_field("ns", req->namespace_name);
+      fields[0] = lc_log_str_field("ns", req->ns);
       fields[1] = lc_log_str_field("return_mode", "keys");
       fields[2] = lc_log_i64_field("limit", req->limit);
       fields[3] = lc_log_str_field("cursor", req->cursor);
@@ -2094,7 +2092,7 @@ int lc_client_query_keys_method(lc_client *self, const lc_query_req *req,
   {
     pslog_field fields[5];
 
-    fields[0] = lc_log_str_field("ns", req->namespace_name);
+    fields[0] = lc_log_str_field("ns", req->ns);
     fields[1] = lc_log_str_field("return_mode", out->return_mode);
     fields[2] = lc_log_str_field("cursor", out->cursor);
     fields[3] = lc_log_u64_field("index_seq", out->index_seq);
@@ -2127,14 +2125,14 @@ int lc_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
     pslog_field fields[2];
 
     fields[0] = lc_log_str_field("queue", req->queue);
-    fields[1] = lc_log_str_field("ns", req->namespace_name);
+    fields[1] = lc_log_str_field("ns", req->ns);
     lc_log_info(client->logger, "queue.enqueue.begin", fields, 2U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
   bridge.source = src;
-  engine_req.namespace_name = req->namespace_name;
+  engine_req.ns = req->ns;
   engine_req.queue = req->queue;
   engine_req.delay_seconds = req->delay_seconds;
   engine_req.visibility_timeout_seconds = req->visibility_timeout_seconds;
@@ -2150,7 +2148,7 @@ int lc_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
       pslog_field fields[2];
 
       fields[0] = lc_log_str_field("queue", req->queue);
-      fields[1] = lc_log_str_field("ns", req->namespace_name);
+      fields[1] = lc_log_str_field("ns", req->ns);
       lc_client_log_operation_error(
           client,
           error != NULL && error->code == LC_ERR_TRANSPORT ? PSLOG_LEVEL_ERROR
@@ -2163,7 +2161,7 @@ int lc_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
     lc_engine_error_cleanup(&engine_error);
     return rc;
   }
-  out->namespace_name = lc_strdup_local(engine_res.namespace_name);
+  out->ns = lc_strdup_local(engine_res.ns);
   out->queue = lc_strdup_local(engine_res.queue);
   out->message_id = lc_strdup_local(engine_res.message_id);
   out->attempts = engine_res.attempts;
@@ -2177,7 +2175,7 @@ int lc_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
     pslog_field fields[6];
 
     fields[0] = lc_log_str_field("queue", req->queue);
-    fields[1] = lc_log_str_field("ns", req->namespace_name);
+    fields[1] = lc_log_str_field("ns", req->ns);
     fields[2] = lc_log_str_field("msg_id", engine_res.message_id);
     fields[3] =
         pslog_i64("payload_bytes", (pslog_int64)engine_res.payload_bytes);
@@ -2194,7 +2192,7 @@ int lc_client_enqueue_method(lc_client *self, const lc_enqueue_req *req,
 static void lc_delivery_meta_copy(lc_engine_dequeue_response *dst,
                                   const lc_engine_dequeue_response *src) {
   memset(dst, 0, sizeof(*dst));
-  dst->namespace_name = lc_strdup_local(src->namespace_name);
+  dst->ns = lc_strdup_local(src->ns);
   dst->queue = lc_strdup_local(src->queue);
   dst->message_id = lc_strdup_local(src->message_id);
   dst->attempts = src->attempts;
@@ -2319,7 +2317,7 @@ static int lc_client_dequeue_common(lc_client *self, const lc_dequeue_req *req,
     pslog_field fields[4];
 
     fields[0] = lc_log_str_field("queue", req->queue);
-    fields[1] = lc_log_str_field("ns", req->namespace_name);
+    fields[1] = lc_log_str_field("ns", req->ns);
     fields[2] = lc_log_str_field("owner", req->owner);
     fields[3] = lc_log_bool_field("with_state", with_state);
     lc_log_info(client->logger, "queue.dequeue.begin", fields, 4U);
@@ -2333,7 +2331,7 @@ static int lc_client_dequeue_common(lc_client *self, const lc_dequeue_req *req,
   bridge.batch = NULL;
   bridge.error = error;
   *out = NULL;
-  engine_req.namespace_name = req->namespace_name;
+  engine_req.ns = req->ns;
   engine_req.queue = req->queue;
   engine_req.owner = req->owner;
   engine_req.txn_id = req->txn_id;
@@ -2368,7 +2366,7 @@ static int lc_client_dequeue_common(lc_client *self, const lc_dequeue_req *req,
         pslog_field fields[4];
 
         fields[0] = lc_log_str_field("queue", req->queue);
-        fields[1] = lc_log_str_field("ns", req->namespace_name);
+        fields[1] = lc_log_str_field("ns", req->ns);
         fields[2] = lc_log_str_field("owner", req->owner);
         fields[3] = lc_log_bool_field("with_state", with_state);
         lc_client_log_operation_error(client, PSLOG_LEVEL_WARN,
@@ -2381,7 +2379,7 @@ static int lc_client_dequeue_common(lc_client *self, const lc_dequeue_req *req,
       pslog_field fields[4];
 
       fields[0] = lc_log_str_field("queue", req->queue);
-      fields[1] = lc_log_str_field("ns", req->namespace_name);
+      fields[1] = lc_log_str_field("ns", req->ns);
       fields[2] = lc_log_str_field("owner", req->owner);
       fields[3] = lc_log_bool_field("with_state", with_state);
       lc_client_log_operation_error(client, PSLOG_LEVEL_WARN,
@@ -2394,7 +2392,7 @@ static int lc_client_dequeue_common(lc_client *self, const lc_dequeue_req *req,
     pslog_field fields[6];
 
     fields[0] = lc_log_str_field("queue", req->queue);
-    fields[1] = lc_log_str_field("ns", req->namespace_name);
+    fields[1] = lc_log_str_field("ns", req->ns);
     fields[2] = lc_log_str_field("owner", req->owner);
     fields[3] = lc_log_str_field("msg_id", (*out)->message_id);
     fields[4] = pslog_i64("fencing_token", (pslog_int64)(*out)->fencing_token);
@@ -2425,7 +2423,7 @@ int lc_client_dequeue_batch_method(lc_client *self, const lc_dequeue_req *req,
     pslog_field fields[4];
 
     fields[0] = lc_log_str_field("queue", req->queue);
-    fields[1] = lc_log_str_field("ns", req->namespace_name);
+    fields[1] = lc_log_str_field("ns", req->ns);
     fields[2] = lc_log_str_field("owner", req->owner);
     fields[3] = pslog_i64(
         "page_size", (pslog_int64)(req->page_size > 0 ? req->page_size : 1));
@@ -2439,7 +2437,7 @@ int lc_client_dequeue_batch_method(lc_client *self, const lc_dequeue_req *req,
   bridge.batch = out;
   bridge.error = error;
   bridge.mode_batch = 1;
-  engine_req.namespace_name = req->namespace_name;
+  engine_req.ns = req->ns;
   engine_req.queue = req->queue;
   engine_req.owner = req->owner;
   engine_req.txn_id = req->txn_id;
@@ -2470,7 +2468,7 @@ int lc_client_dequeue_batch_method(lc_client *self, const lc_dequeue_req *req,
         pslog_field fields[3];
 
         fields[0] = lc_log_str_field("queue", req->queue);
-        fields[1] = lc_log_str_field("ns", req->namespace_name);
+        fields[1] = lc_log_str_field("ns", req->ns);
         fields[2] = lc_log_str_field("owner", req->owner);
         lc_client_log_operation_error(client, PSLOG_LEVEL_WARN,
                                       "queue.dequeue.error", fields, 3U, error);
@@ -2482,7 +2480,7 @@ int lc_client_dequeue_batch_method(lc_client *self, const lc_dequeue_req *req,
       pslog_field fields[3];
 
       fields[0] = lc_log_str_field("queue", req->queue);
-      fields[1] = lc_log_str_field("ns", req->namespace_name);
+      fields[1] = lc_log_str_field("ns", req->ns);
       fields[2] = lc_log_str_field("owner", req->owner);
       lc_client_log_operation_error(client, PSLOG_LEVEL_WARN,
                                     "queue.dequeue.error", fields, 3U, error);
@@ -2494,7 +2492,7 @@ int lc_client_dequeue_batch_method(lc_client *self, const lc_dequeue_req *req,
     pslog_field fields[4];
 
     fields[0] = lc_log_str_field("queue", req->queue);
-    fields[1] = lc_log_str_field("ns", req->namespace_name);
+    fields[1] = lc_log_str_field("ns", req->ns);
     fields[2] = lc_log_str_field("owner", req->owner);
     fields[3] = lc_log_u64_field("count", out->count);
     lc_log_info(client->logger, "queue.dequeue.success", fields, 4U);
@@ -2673,13 +2671,13 @@ static int lc_client_subscribe_common(lc_client *self,
     pslog_field fields[4];
 
     fields[0] = lc_log_str_field("queue", req->queue);
-    fields[1] = lc_log_str_field("ns", req->namespace_name);
+    fields[1] = lc_log_str_field("ns", req->ns);
     fields[2] = lc_log_str_field("owner", req->owner);
     fields[3] = lc_log_bool_field("with_state", with_state);
     lc_log_info(client->logger, "queue.subscribe.begin", fields, 4U);
   }
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->namespace_name;
+  engine_req.ns = req->ns;
   engine_req.queue = req->queue;
   engine_req.owner = req->owner;
   engine_req.txn_id = req->txn_id;
@@ -2718,7 +2716,7 @@ static int lc_client_subscribe_common(lc_client *self,
         pslog_field fields[4];
 
         fields[0] = lc_log_str_field("queue", req->queue);
-        fields[1] = lc_log_str_field("ns", req->namespace_name);
+        fields[1] = lc_log_str_field("ns", req->ns);
         fields[2] = lc_log_str_field("owner", req->owner);
         fields[3] = lc_log_bool_field("with_state", with_state);
         lc_client_log_operation_error(client, PSLOG_LEVEL_WARN,
@@ -2732,7 +2730,7 @@ static int lc_client_subscribe_common(lc_client *self,
       pslog_field fields[4];
 
       fields[0] = lc_log_str_field("queue", req->queue);
-      fields[1] = lc_log_str_field("ns", req->namespace_name);
+      fields[1] = lc_log_str_field("ns", req->ns);
       fields[2] = lc_log_str_field("owner", req->owner);
       fields[3] = lc_log_bool_field("with_state", with_state);
       lc_client_log_operation_error(client, PSLOG_LEVEL_WARN,
@@ -2745,7 +2743,7 @@ static int lc_client_subscribe_common(lc_client *self,
     pslog_field fields[4];
 
     fields[0] = lc_log_str_field("queue", req->queue);
-    fields[1] = lc_log_str_field("ns", req->namespace_name);
+    fields[1] = lc_log_str_field("ns", req->ns);
     fields[2] = lc_log_str_field("owner", req->owner);
     fields[3] = lc_log_bool_field("with_state", with_state);
     lc_log_info(client->logger, "queue.subscribe.complete", fields, 4U);
@@ -2777,7 +2775,7 @@ static int lc_watch_adapter(void *context,
   bridge = (lc_watch_bridge *)context;
   memset(&public_event, 0, sizeof(public_event));
   lc_error_init(&public_error);
-  public_event.namespace_name = lc_strdup_local(event->namespace_name);
+  public_event.ns = lc_strdup_local(event->ns);
   public_event.queue = lc_strdup_local(event->queue);
   public_event.available = event->available;
   public_event.head_message_id = lc_strdup_local(event->head_message_id);
@@ -2813,7 +2811,7 @@ int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
   memset(&engine_req, 0, sizeof(engine_req));
   bridge.handler = handler;
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->namespace_name;
+  engine_req.ns = req->ns;
   engine_req.queue = req->queue;
   rc = lc_engine_client_watch_queue(client->engine, &engine_req,
                                     lc_watch_adapter, &bridge, &engine_error);

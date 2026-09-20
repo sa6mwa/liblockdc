@@ -320,7 +320,7 @@ static void *wait_for_completion(void *context) {
 int main(void) {
   const char *endpoint;
   const char *client_pem;
-  const char *namespace_name;
+  const char *ns;
   const char *endpoints[1];
   char queue_name[96];
   lc_client_config client_config;
@@ -366,15 +366,15 @@ int main(void) {
 
   endpoint = getenv("LOCKDC_URL");
   client_pem = getenv("LOCKDC_CLIENT_PEM");
-  namespace_name = getenv("LOCKDC_NAMESPACE");
+  ns = getenv("LOCKDC_NAMESPACE");
   if (endpoint == NULL || endpoint[0] == '\0') {
     endpoint = EXAMPLE_ENDPOINT;
   }
   if (client_pem == NULL || client_pem[0] == '\0') {
     client_pem = EXAMPLE_CLIENT_PEM;
   }
-  if (namespace_name == NULL || namespace_name[0] == '\0') {
-    namespace_name = EXAMPLE_NAMESPACE;
+  if (ns == NULL || ns[0] == '\0') {
+    ns = EXAMPLE_NAMESPACE;
   }
 
   snprintf(queue_name, sizeof(queue_name), "%s-%ld", EXAMPLE_QUEUE_PREFIX,
@@ -384,7 +384,7 @@ int main(void) {
   lc_client_config_init(&client_config);
   client_config.endpoints = endpoints;
   client_config.endpoint_count = 1U;
-  client_config.default_namespace = namespace_name;
+  client_config.default_namespace = ns;
   client_config.logger = sdk_logger;
 
   lc_error_init(&error);
@@ -413,7 +413,7 @@ int main(void) {
 
   example_logger->infof(example_logger, "example.startconsumer.start",
                         "endpoint=%s client_pem=%s namespace=%s queue=%s",
-                        endpoint, client_pem, namespace_name, queue_name);
+                        endpoint, client_pem, ns, queue_name);
 
   rc = lc_source_from_file(client_pem, &client_bundle, &error);
   if (rc != LC_OK) {

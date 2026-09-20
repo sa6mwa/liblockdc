@@ -4,7 +4,7 @@ local root = assert(os.getenv("LOCKDC_POUCH_ROOT"), "LOCKDC_POUCH_ROOT is requir
 local endpoint = "pouch://" .. root
 local key_file = root .. "/pouch.key"
 local explicit_false_key_file = root .. "/explicit-false/pouch.key"
-local namespace_name = "lua-pouch"
+local namespace = "lua-pouch"
 
 local typed_invalid_client, typed_invalid_err = lockdc.open({
   endpoints = { endpoint .. "-typed-invalid" },
@@ -136,7 +136,7 @@ end
 
 local client, err = lockdc.open({
   endpoints = { endpoint },
-  default_namespace = namespace_name,
+  default_namespace = namespace,
   pouch = {
     crypto_key_file = key_file,
     crypto_generate_key_file = true,
@@ -556,7 +556,7 @@ local malformed_term_ok, malformed_term_err = pcall(function()
   client:txn_commit({
     txn_id = assert(lockdc.xid_new()),
     participants = {
-      { namespace_name = namespace_name, key = "invalid-term" },
+      { namespace = namespace, key = "invalid-term" },
     },
     tc_term = -1,
   })
@@ -568,7 +568,7 @@ end
 
 local raw_txn_id = assert(lockdc.xid_new())
 local raw_txn_participant = {
-  namespace_name = namespace_name,
+  namespace = namespace,
   key = "xa-state",
 }
 local raw_txn_lease = assert_ok("Lua raw XA acquire", client:acquire({
@@ -615,7 +615,7 @@ end
 local query_keys = {}
 local current_key
 local query_result = assert_ok("Lua query_keys", client:query_keys({
-  namespace_name = namespace_name,
+  namespace = namespace,
   selector_json = '{"eq":{"field":"/source","value":"lua-pouch-xa"}}',
   engine = "scan",
 }, {
@@ -641,7 +641,7 @@ repeat
   local current_page_key
   local selector_free_result = assert_ok("Lua selector-free query_keys",
                                          client:query_keys({
-    namespace_name = namespace_name,
+    namespace = namespace,
     engine = "scan",
     limit = 1,
     cursor = selector_free_cursor,
@@ -676,7 +676,7 @@ if #selector_free_keys < 2 or not found_raw_txn_key then
 end
 
 local conflicting_history, conflicting_history_err = client:new_history_consumer({
-  namespace_name = namespace_name,
+  namespace = namespace,
   consumer_id = "lua-history-invalid",
   initial_acknowledged_index_seq = 0,
   start_at_current = true,
@@ -689,7 +689,7 @@ end
 
 local history_consumer_id = assert(lockdc.xid_new())
 local history, history_err = client:new_history_consumer({
-  namespace_name = namespace_name,
+  namespace = namespace,
   consumer_id = history_consumer_id,
   initial_acknowledged_index_seq = 0,
 })
@@ -723,7 +723,7 @@ history:close()
 
 local reopened_history = assert_ok("Lua history consumer reopen",
                                    client:new_history_consumer({
-  namespace_name = namespace_name,
+  namespace = namespace,
   consumer_id = history_consumer_id,
   initial_acknowledged_index_seq = 0,
 }))
@@ -746,7 +746,7 @@ reopened_history:close()
 
 local current_history = assert_ok("Lua history consumer start current",
                                   client:new_history_consumer({
-  namespace_name = namespace_name,
+  namespace = namespace,
   consumer_id = assert(lockdc.xid_new()),
   start_at_current = true,
 }))
@@ -761,7 +761,7 @@ end
 assert_ok("Lua history consumer current unregister", current_history:unregister())
 current_history:close()
 local callback_result, callback_err = client:query_keys({
-  namespace_name = namespace_name,
+  namespace = namespace,
   selector_json = '{"eq":{"field":"/source","value":"lua-pouch-xa"}}',
   engine = "scan",
 }, function()
@@ -781,7 +781,7 @@ do
   retained_callbacks[1] = callback_payload
   local invalid_callback_ok, invalid_callback_err = pcall(function()
     client:query_keys({
-      namespace_name = namespace_name,
+      namespace = namespace,
       selector_json = '{"eq":{"field":"/source","value":"lua-pouch-xa"}}',
       engine = "scan",
     }, {
@@ -805,7 +805,7 @@ do
   retained_callbacks[2] = callback_payload
   local invalid_callback_ok, invalid_callback_err = pcall(function()
     client:query_keys({
-      namespace_name = namespace_name,
+      namespace = namespace,
       selector_json = '{"eq":{"field":"/source","value":"lua-pouch-xa"}}',
       engine = "scan",
     }, {
@@ -828,7 +828,7 @@ end
 
 local rollback_txn_id = assert(lockdc.xid_new())
 local rollback_participant = {
-  namespace_name = namespace_name,
+  namespace = namespace,
   key = "xa-rollback-state",
 }
 local rollback_lease = assert_ok("Lua raw XA rollback acquire", client:acquire({
@@ -919,7 +919,7 @@ if #unregistered.endpoints ~= 0 then
   error("Lua TC RM unregister did not remove its endpoint")
 end
 
-local flush, flush_err = client:flush_index({ namespace_name = namespace_name, mode = "wait" })
+local flush, flush_err = client:flush_index({ namespace = namespace, mode = "wait" })
 if flush == nil then
   client:close()
   error(("Pouch index flush failed: %s"):format(flush_err and flush_err.message or tostring(flush_err)))
@@ -954,9 +954,9 @@ if watch_close_client == nil then
 end
 local close_during_watch_request = setmetatable({ queue = "watch-close" }, {
   __index = function(_, key)
-    if key == "namespace_name" then
+    if key == "namespace" then
       watch_close_client:close()
-      return namespace_name
+      return namespace
     end
     return nil
   end,
@@ -983,7 +983,7 @@ end
 
 local reopened, reopen_err = lockdc.open({
   endpoints = { endpoint },
-  default_namespace = namespace_name,
+  default_namespace = namespace,
   pouch = { crypto_key_file = key_file, compression = "zlib" },
 })
 if reopened == nil then

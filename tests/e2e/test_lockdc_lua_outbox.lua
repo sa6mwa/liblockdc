@@ -13,7 +13,7 @@ end
 
 local oversized_attempts_ok = pcall(function()
   return client:new_outbox({
-    namespace_name = "lua-outbox-invalid-max-attempts",
+    namespace = "lua-outbox-invalid-max-attempts",
     max_attempts = 4294967296,
   })
 end)
@@ -24,7 +24,7 @@ end
 
 local negative_notification_capacity_ok = pcall(function()
   return client:new_outbox({
-    namespace_name = "lua-outbox-invalid-notification-capacity",
+    namespace = "lua-outbox-invalid-notification-capacity",
     notification_capacity = -1,
   })
 end)
@@ -35,7 +35,7 @@ end
 
 local oversized_queue_attempts_ok = pcall(function()
   return client:enqueue({
-    namespace_name = "lua-outbox-invalid-max-attempts",
+    namespace = "lua-outbox-invalid-max-attempts",
     queue = "invalid-attempts",
     max_attempts = 4294967296,
   }, "ignored")
@@ -46,15 +46,15 @@ if oversized_queue_attempts_ok then
 end
 
 local legacy_namespace_ok = pcall(function()
-  return client:new_outbox({ namespace = "lua-outbox-legacy-namespace" })
+  return client:new_outbox({ namespace_name = "lua-outbox-legacy-namespace" })
 end)
 if legacy_namespace_ok then
   client:close()
-  error("Lua outbox accepted the removed namespace compatibility field")
+  error("Lua outbox accepted the retired namespace_name field")
 end
 
 local outbox, outbox_err = client:new_outbox({
-  namespace_name = "lua-outbox-records",
+  namespace = "lua-outbox-records",
   owner = "lua-outbox-worker",
   transaction_ttl_seconds = 30,
   claim_ttl_seconds = 30,
@@ -130,7 +130,7 @@ local reentrant_entry = {
   content_type = "text/plain",
 }
 local streaming_outbox = assert_ok(client:new_outbox({
-  namespace_name = "lua-outbox-streaming-records",
+  namespace = "lua-outbox-streaming-records",
   owner = "lua-outbox-streaming-worker",
   transaction_ttl_seconds = 30,
 }), nil, "Lua streaming outbox creation")
@@ -144,7 +144,7 @@ reentrant_seed:close()
 local streaming_txn = assert_ok(streaming_outbox:begin(), nil,
                                 "Lua streaming transaction begin")
 local streaming_participant = assert_ok(streaming_txn:acquire({
-  namespace_name = "lua-outbox-streaming",
+  namespace = "lua-outbox-streaming",
   key = "state",
   owner = "lua-outbox-streaming",
 }), nil, "Lua streaming transaction acquire")
@@ -236,7 +236,7 @@ end
 
 local txn = append_effect("first", { sequence = 1 })
 local participant, participant_err = txn:acquire({
-  namespace_name = "lua-outbox-domain",
+  namespace = "lua-outbox-domain",
   key = "order-1",
   owner = "lua-outbox-worker",
   ttl_seconds = 30,
@@ -282,7 +282,7 @@ assert_ok(txn:commit(), nil, "Lua outbox transaction commit")
 txn:close()
 
 local state, state_err = client:read_json({
-  namespace_name = "lua-outbox-domain",
+  namespace = "lua-outbox-domain",
   key = "order-1",
 })
 if state == nil or state.status ~= "paid" or state.revision ~= 2 then
@@ -497,7 +497,7 @@ outbox:close()
 -- Handler mode has its own dispatcher.  It deliberately shares neither a
 -- wrapper nor consumption mode with the raw-pull dispatcher above.
 local handler_outbox, handler_outbox_err = client:new_outbox({
-  namespace_name = "lua-outbox-handler-records",
+  namespace = "lua-outbox-handler-records",
   owner = "lua-outbox-handler-worker",
   transaction_ttl_seconds = 30,
   claim_ttl_seconds = 30,
@@ -809,7 +809,7 @@ handler_outbox:close()
 -- A failed C terminal operation must release the handler-owned claim before
 -- pump returns. Dispatcher shutdown must not depend on a later Lua GC pass.
 local terminal_failure_outbox = assert_ok(client:new_outbox({
-  namespace_name = "lua-outbox-terminal-failure",
+  namespace = "lua-outbox-terminal-failure",
   recovery_interval_seconds = 0,
 }), nil, "Lua terminal-failure outbox creation")
 local terminal_failure_dispatcher = assert_ok(terminal_failure_outbox:dispatcher(), nil,
@@ -847,7 +847,7 @@ terminal_failure_outbox:close()
 -- A handler exception after selecting an outcome must release the registry
 -- reference, including a value that closes over the handler-owned job.
 local outcome_failure_outbox = assert_ok(client:new_outbox({
-  namespace_name = "lua-outbox-outcome-failure",
+  namespace = "lua-outbox-outcome-failure",
   recovery_interval_seconds = 0,
 }), nil, "Lua outcome-failure outbox creation")
 local outcome_failure_dispatcher = assert_ok(outcome_failure_outbox:dispatcher(), nil,
@@ -889,7 +889,7 @@ outcome_failure_dispatcher:close()
 outcome_failure_outbox:close()
 
 local missing_outbox, missing_outbox_err = client:new_outbox({
-  namespace_name = "lua-outbox-missing-handler-records",
+  namespace = "lua-outbox-missing-handler-records",
   owner = "lua-outbox-missing-handler-worker",
   transaction_ttl_seconds = 30,
   claim_ttl_seconds = 1,
@@ -937,7 +937,7 @@ missing_outbox:close()
 -- Separate façade wrappers for one native dispatcher must be able to reuse the
 -- same application handler table. The binding owns a stable wrapped map.
 local alias_outbox = assert_ok(client:new_outbox({
-  namespace_name = "lua-outbox-dispatcher-alias",
+  namespace = "lua-outbox-dispatcher-alias",
   owner = "lua-outbox-dispatcher-alias-worker",
   recovery_interval_seconds = 0,
 }), nil, "Lua dispatcher alias outbox creation")
@@ -1003,7 +1003,7 @@ alias_outbox:close()
 -- the shared binding in recursive-consumption state. A surviving alias owns
 -- the same native dispatcher and must continue with the same handler map.
 local closing_alias_outbox = assert_ok(client:new_outbox({
-  namespace_name = "lua-outbox-dispatcher-close-alias",
+  namespace = "lua-outbox-dispatcher-close-alias",
   owner = "lua-outbox-dispatcher-close-alias-worker",
   recovery_interval_seconds = 0,
 }), nil, "Lua closing dispatcher alias outbox creation")
@@ -1058,7 +1058,7 @@ closing_alias_outbox:close()
 -- Options-table metamethod failures happen before consumption begins. After a
 -- caller catches the Lua error, a valid handler mode must still be usable.
 local options_failure_outbox = assert_ok(client:new_outbox({
-  namespace_name = "lua-outbox-dispatcher-options-failure",
+  namespace = "lua-outbox-dispatcher-options-failure",
   recovery_interval_seconds = 0,
 }), nil, "Lua dispatcher options-failure outbox creation")
 local options_failure_dispatcher = assert_ok(options_failure_outbox:dispatcher(), nil,
@@ -1092,7 +1092,7 @@ options_failure_outbox:close()
 -- The scoped callback owns transaction completion. Explicit close is rejected
 -- so the binding cannot commit or roll back a freed native transaction.
 local callback_outbox = assert_ok(client:new_outbox({
-  namespace_name = "lua-outbox-callback-close",
+  namespace = "lua-outbox-callback-close",
 }), nil, "Lua callback outbox creation")
 local callback_close_ok, callback_close_err = pcall(function()
   callback_outbox:transaction(function(callback_txn)
@@ -1150,7 +1150,7 @@ end
 -- outbox namespace through a fresh lease, which also proves the state was
 -- committed rather than merely remaining visible to the callback participant.
 local callback_participant_reader = assert_ok(client:acquire({
-  namespace_name = "lua-outbox-callback-close",
+  namespace = "lua-outbox-callback-close",
   key = "callback-successful-participant-domain",
   owner = "lua-callback-successful-participant-reader",
   ttl_seconds = 30,
@@ -1219,7 +1219,7 @@ if callback_rollback ~= nil or callback_rollback_err == nil then
 end
 local callback_rollback_state, callback_rollback_meta =
     client:read_json({
-      namespace_name = "lua-outbox-callback-close",
+      namespace = "lua-outbox-callback-close",
       key = "callback-conflicting-outbox-domain",
       public_read = true,
     })
@@ -1258,7 +1258,7 @@ if callback_command_rollback ~= nil or callback_command_rollback_err == nil then
   error("Lua callback committed after a command result source failure")
 end
 local callback_command_state, callback_command_meta = client:read_json({
-  namespace_name = "lua-outbox-callback-close",
+  namespace = "lua-outbox-callback-close",
   key = "callback-command-source-failure-domain",
   public_read = true,
 })
@@ -1272,7 +1272,7 @@ callback_outbox:close()
 -- or handler metatable must be a normal structured failure, never a native
 -- use-after-free.
 local close_dispatcher_outbox = assert_ok(client:new_outbox({
-  namespace_name = "lua-outbox-reentrant-dispatcher-close",
+  namespace = "lua-outbox-reentrant-dispatcher-close",
 }), nil, "Lua reentrant dispatcher-close outbox creation")
 local close_dispatcher = assert_ok(close_dispatcher_outbox:dispatcher(), nil,
                                    "Lua reentrant dispatcher creation")
@@ -1319,7 +1319,7 @@ end
 -- ownership boundary.  A hostile completion-table metatable must not close
 -- the native claim below its terminal call; it follows the normal retry path.
 local outcome_close_outbox = assert_ok(client:new_outbox({
-  namespace_name = "lua-outbox-reentrant-outcome-close",
+  namespace = "lua-outbox-reentrant-outcome-close",
 }), nil, "Lua reentrant outcome-close outbox creation")
 local outcome_close_dispatcher = assert_ok(outcome_close_outbox:dispatcher(), nil,
                                            "Lua reentrant outcome-close dispatcher")
@@ -1398,7 +1398,7 @@ end
 -- A reconciliation scan can rediscover a key already handed to the local
 -- notification queue. That is a no-op, not an overflow or an eager retry.
 local duplicate_outbox = assert_ok(client:new_outbox({
-  namespace_name = "lua-outbox-duplicate-notification",
+  namespace = "lua-outbox-duplicate-notification",
   recovery_interval_seconds = 0,
 }), nil, "Lua duplicate notification outbox creation")
 local duplicate_dispatcher = assert_ok(duplicate_outbox:dispatcher(), nil,
@@ -1435,7 +1435,7 @@ duplicate_outbox:close()
 -- Replacing a stopped attachment on one producer must release the old
 -- attachment before starting the replacement dispatcher.
 local restart_outbox = assert_ok(client:new_outbox({
-  namespace_name = "lua-outbox-dispatcher-restart",
+  namespace = "lua-outbox-dispatcher-restart",
   recovery_interval_seconds = 0,
 }), nil, "Lua restart outbox creation")
 for restart_index = 1, 3 do
@@ -1452,7 +1452,7 @@ local binding_client = assert_ok(lockdc.open({
   endpoints = { "pouch://" .. root .. "-binding-close" },
 }), nil, "Lua binding-close client creation")
 local binding_outbox = assert_ok(binding_client:new_outbox({
-  namespace_name = "lua-outbox-binding-close",
+  namespace = "lua-outbox-binding-close",
   recovery_interval_seconds = 0,
 }), nil, "Lua binding-close outbox creation")
 local binding_dispatcher = assert_ok(binding_outbox:dispatcher(), nil,
@@ -1490,7 +1490,7 @@ do
   }), nil, "Lua binding-gc client creation")
   weak_clients[1] = collected_client
   local collected_outbox = assert_ok(collected_client:new_outbox({
-    namespace_name = "lua-outbox-binding-gc",
+    namespace = "lua-outbox-binding-gc",
     recovery_interval_seconds = 0,
   }), nil, "Lua binding-gc outbox creation")
   local collected_dispatcher = assert_ok(collected_outbox:dispatcher(), nil,
@@ -1514,7 +1514,7 @@ do
   }), nil, "Lua captured-client binding creation")
   captured_clients[1] = captured_client
   local captured_outbox = assert_ok(captured_client:new_outbox({
-    namespace_name = "lua-outbox-binding-captured-client",
+    namespace = "lua-outbox-binding-captured-client",
     recovery_interval_seconds = 0,
   }), nil, "Lua captured-client outbox creation")
   local captured_dispatcher = assert_ok(captured_outbox:dispatcher(), nil,
@@ -1542,7 +1542,7 @@ do
     endpoints = { "pouch://" .. root .. "-binding-captured-dispatcher" },
   }), nil, "Lua captured-dispatcher client creation")
   local captured_dispatcher_outbox = assert_ok(captured_dispatcher_client:new_outbox({
-    namespace_name = "lua-outbox-binding-captured-dispatcher",
+    namespace = "lua-outbox-binding-captured-dispatcher",
     recovery_interval_seconds = 0,
   }), nil, "Lua captured-dispatcher outbox creation")
   local captured_dispatcher = assert_ok(captured_dispatcher_outbox:dispatcher(), nil,
@@ -1570,7 +1570,7 @@ local coroutine_client = assert_ok(lockdc.open({
 }), nil, "Lua coroutine binding client creation")
 local coroutine_ok, coroutine_dispatcher = coroutine.resume(coroutine.create(function()
   local coroutine_outbox = assert_ok(coroutine_client:new_outbox({
-    namespace_name = "lua-outbox-binding-coroutine",
+    namespace = "lua-outbox-binding-coroutine",
     recovery_interval_seconds = 0,
   }), nil, "Lua coroutine outbox creation")
   local dispatcher = assert_ok(coroutine_outbox:dispatcher(), nil,
@@ -1601,7 +1601,7 @@ local callback_close_client = assert_ok(lockdc.open({
   endpoints = { "pouch://" .. root .. "-query-callback-close" },
 }), nil, "Lua query callback-close client creation")
 local callback_close_lease = assert_ok(callback_close_client:acquire({
-  namespace_name = "lua-query-callback-close",
+  namespace = "lua-query-callback-close",
   key = "callback-close-key",
   owner = "lua-query-callback-close-owner",
   ttl_seconds = 30,
@@ -1612,7 +1612,7 @@ assert_ok(callback_close_lease:release(), nil,
           "Lua query callback-close lease release")
 local callback_close_seen = false
 local callback_close_result, callback_close_err = callback_close_client:query_keys({
-  namespace_name = "lua-query-callback-close",
+  namespace = "lua-query-callback-close",
   engine = "scan",
 }, function(key)
   if key ~= "callback-close-key" then
@@ -1628,7 +1628,7 @@ end
 -- Client close must stop its private worker, but not wait on the durable job
 -- handed to the caller. The retained job remains safely closable afterwards.
 local shutdown_outbox = assert_ok(client:new_outbox({
-  namespace_name = "lua-outbox-client-close-active-job",
+  namespace = "lua-outbox-client-close-active-job",
   owner = "lua-outbox-client-close-worker",
   recovery_interval_seconds = 0,
 }), nil, "Lua client-close outbox creation")

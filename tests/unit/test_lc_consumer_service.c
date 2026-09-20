@@ -569,7 +569,7 @@ lc_message *__wrap_lc_message_new(lc_client_handle *client,
   message->pub.rewind_payload = fake_delivery_message_rewind;
   message->pub.write_payload = fake_delivery_message_write_payload;
   message->pub.close = fake_delivery_message_close;
-  message->pub.namespace_name = delivery->namespace_name;
+  message->pub.ns = delivery->ns;
   message->pub.queue = delivery->queue;
   message->pub.message_id = delivery->message_id;
   message->pub.attempts = delivery->attempts;
@@ -833,7 +833,7 @@ static int fake_subscribe(lc_consumer_service_handle *service,
              (unsigned long)subscribe_call,
              (unsigned long)(delivery_index + 1U));
     memset(&delivery, 0, sizeof(delivery));
-    delivery.namespace_name = (char *)request->namespace_name;
+    delivery.ns = (char *)request->ns;
     delivery.queue = (char *)request->queue;
     delivery.message_id = message_id;
     delivery.payload_content_type = "application/json";
@@ -1005,7 +1005,7 @@ wrap_consumer_engine_subscribe(const lc_engine_dequeue_request *request,
     return LC_ENGINE_ERROR_INVALID_ARGUMENT;
   }
   memset(&public_request, 0, sizeof(public_request));
-  public_request.namespace_name = request->namespace_name;
+  public_request.ns = request->ns;
   public_request.queue = request->queue;
   public_request.owner = request->owner;
   public_request.txn_id = request->txn_id;

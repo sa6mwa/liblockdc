@@ -172,7 +172,7 @@ static int extract_bundle_material(const char *bundle_path, char *cert_path,
 int main(void) {
   const char *endpoint;
   const char *client_pem;
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *owner;
   const char *fetch_url;
@@ -233,7 +233,7 @@ int main(void) {
 
   endpoint = getenv("LOCKDC_URL");
   client_pem = getenv("LOCKDC_CLIENT_PEM");
-  namespace_name = getenv("LOCKDC_NAMESPACE");
+  ns = getenv("LOCKDC_NAMESPACE");
   key = getenv("LOCKDC_KEY");
   owner = getenv("LOCKDC_OWNER");
   fetch_url = getenv("FETCH_URL");
@@ -247,8 +247,8 @@ int main(void) {
   if (client_pem == NULL || client_pem[0] == '\0') {
     client_pem = EXAMPLE_CLIENT_PEM;
   }
-  if (namespace_name == NULL || namespace_name[0] == '\0') {
-    namespace_name = EXAMPLE_NAMESPACE;
+  if (ns == NULL || ns[0] == '\0') {
+    ns = EXAMPLE_NAMESPACE;
   }
   if (key == NULL || key[0] == '\0') {
     key = EXAMPLE_KEY;
@@ -269,8 +269,8 @@ int main(void) {
   example_logger->infof(example_logger, "example.curl_fetch_into_lockd.start",
                         "endpoint=%s client_pem=%s namespace=%s key=%s "
                         "owner=%s fetch_url=%s fetch_ca_pem=%s",
-                        endpoint, client_pem, namespace_name, key, owner,
-                        fetch_url, fetch_ca_pem);
+                        endpoint, client_pem, ns, key, owner, fetch_url,
+                        fetch_ca_pem);
 
   curl = NULL;
   fetch_file = NULL;
@@ -415,7 +415,7 @@ int main(void) {
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
-  config.default_namespace = namespace_name;
+  config.default_namespace = ns;
   config.logger = sdk_logger;
 
   lc_error_init(&error);

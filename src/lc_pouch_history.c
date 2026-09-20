@@ -15,7 +15,7 @@
 struct lc_history_consumer_handle {
   lc_history_consumer pub;
   lc_client_handle *client;
-  char *namespace_name;
+  char *ns;
   char *consumer_id;
   int registered;
 };
@@ -34,9 +34,8 @@ typedef struct lc_pouch_history_operation_context {
   lc_history_consumer_position *out;
 } lc_pouch_history_operation_context;
 
-static int lc_pouch_history_directory(lc_pouch *pouch,
-                                      const char *namespace_name, int create,
-                                      char **out, lc_error *error) {
+static int lc_pouch_history_directory(lc_pouch *pouch, const char *ns,
+                                      int create, char **out, lc_error *error) {
   char *control_directory;
   char *history_directory;
   char *namespace_leaf;
@@ -51,7 +50,7 @@ static int lc_pouch_history_directory(lc_pouch *pouch,
           ? lc_pouch_path_join(&pouch->allocator, control_directory,
                                "history-consumers")
           : NULL;
-  namespace_leaf = lc_pouch_path_escape_name(&pouch->allocator, namespace_name);
+  namespace_leaf = lc_pouch_path_escape_name(&pouch->allocator, ns);
   namespace_directory =
       history_directory != NULL && namespace_leaf != NULL
           ? lc_pouch_path_join(&pouch->allocator, history_directory,
@@ -105,8 +104,7 @@ static int lc_pouch_history_directory(lc_pouch *pouch,
   return LC_OK;
 }
 
-static int lc_pouch_history_file_path(lc_pouch *pouch,
-                                      const char *namespace_name,
+static int lc_pouch_history_file_path(lc_pouch *pouch, const char *ns,
                                       const char *consumer_id, int create,
                                       char **directory_out, char **path_out,
                                       lc_error *error) {
@@ -117,8 +115,7 @@ static int lc_pouch_history_file_path(lc_pouch *pouch,
 
   *directory_out = NULL;
   *path_out = NULL;
-  rc = lc_pouch_history_directory(pouch, namespace_name, create, directory_out,
-                                  error);
+  rc = lc_pouch_history_directory(pouch, ns, create, directory_out, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -428,24 +425,21 @@ static int lc_pouch_history_write(lc_pouch *pouch, const char *directory,
   return rc;
 }
 
-static int lc_pouch_history_current_locked(lc_pouch *pouch,
-                                           const char *namespace_name,
+static int lc_pouch_history_current_locked(lc_pouch *pouch, const char *ns,
                                            lc_index_seq *out, lc_error *error) {
   lc_pouch_generation current_index_seq;
   int rc;
 
   *out = 0U;
   current_index_seq = 0U;
-  rc = lc_pouch_state_index_seq(pouch, namespace_name, &current_index_seq,
-                                error);
+  rc = lc_pouch_state_index_seq(pouch, ns, &current_index_seq, error);
   if (rc == LC_OK) {
     *out = (lc_index_seq)current_index_seq;
   }
   return rc;
 }
 
-int lc_pouch_history_oldest_acknowledged(lc_pouch *pouch,
-                                         const char *namespace_name,
+int lc_pouch_history_oldest_acknowledged(lc_pouch *pouch, const char *ns,
                                          int *has_consumers,
                                          lc_pouch_generation *out,
                                          lc_error *error) {
@@ -454,8 +448,8 @@ int lc_pouch_history_oldest_acknowledged(lc_pouch *pouch,
   struct dirent *entry;
   int rc;
 
-  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      has_consumers == NULL || out == NULL) {
+  if (pouch == NULL || ns == NULL || ns[0] == '\0' || has_consumers == NULL ||
+      out == NULL) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch history acknowledgement requires namespace and "
                         "outputs",
@@ -464,7 +458,7 @@ int lc_pouch_history_oldest_acknowledged(lc_pouch *pouch,
   *has_consumers = 0;
   *out = 0U;
   directory = NULL;
-  rc = lc_pouch_history_directory(pouch, namespace_name, 0, &directory, error);
+  rc = lc_pouch_history_directory(pouch, ns, 0, &directory, error);
   if (rc != LC_OK) {
     return rc;
   }
@@ -554,14 +548,13 @@ static int lc_pouch_history_operation_locked(void *opaque, lc_error *error) {
   current_index_seq = 0U;
   acknowledged_index_seq = 0U;
   found = 0;
-  rc = lc_pouch_history_current_locked(consumer->client->pouch,
-                                       consumer->namespace_name,
+  rc = lc_pouch_history_current_locked(consumer->client->pouch, consumer->ns,
                                        &current_index_seq, error);
   if (rc == LC_OK) {
     rc = lc_pouch_history_file_path(
-        consumer->client->pouch, consumer->namespace_name,
-        consumer->consumer_id, context->operation == LC_POUCH_HISTORY_REGISTER,
-        &directory, &path, error);
+        consumer->client->pouch, consumer->ns, consumer->consumer_id,
+        context->operation == LC_POUCH_HISTORY_REGISTER, &directory, &path,
+        error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_history_staging_cleanup(consumer->client->pouch, directory,
@@ -606,8 +599,8 @@ static int lc_pouch_history_operation_locked(void *opaque, lc_error *error) {
                         NULL, NULL, "pouch");
     } else if (context->requested_acknowledged_index_seq >
                acknowledged_index_seq) {
-      rc = lc_pouch_compaction_note_history_advanced(
-          consumer->client->pouch, consumer->namespace_name, error);
+      rc = lc_pouch_compaction_note_history_advanced(consumer->client->pouch,
+                                                     consumer->ns, error);
       if (rc == LC_OK) {
         acknowledged_index_seq = context->requested_acknowledged_index_seq;
         rc = lc_pouch_history_write(consumer->client->pouch, directory, path,
@@ -623,8 +616,8 @@ static int lc_pouch_history_operation_locked(void *opaque, lc_error *error) {
   }
   if (rc == LC_OK && context->operation == LC_POUCH_HISTORY_UNREGISTER) {
     if (found) {
-      rc = lc_pouch_compaction_note_history_advanced(
-          consumer->client->pouch, consumer->namespace_name, error);
+      rc = lc_pouch_compaction_note_history_advanced(consumer->client->pouch,
+                                                     consumer->ns, error);
       if (rc == LC_OK && unlink(path) != 0 && errno != ENOENT) {
         rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
                           "failed to remove pouch history consumer record",
@@ -672,8 +665,8 @@ static int lc_history_consumer_run(lc_history_consumer_handle *consumer,
   context.requested_acknowledged_index_seq = acknowledged_index_seq;
   context.out = out;
   return lc_pouch_state_with_namespace_lock(
-      consumer->client->pouch, consumer->namespace_name,
-      lc_pouch_history_operation_locked, &context, error);
+      consumer->client->pouch, consumer->ns, lc_pouch_history_operation_locked,
+      &context, error);
 }
 
 static int
@@ -722,7 +715,7 @@ static void lc_history_consumer_close_method(lc_history_consumer *self) {
   if (client != NULL) {
     allocator = client->allocator;
   }
-  lc_free_with_allocator(&allocator, consumer->namespace_name);
+  lc_free_with_allocator(&allocator, consumer->ns);
   lc_free_with_allocator(&allocator, consumer->consumer_id);
   lc_free_with_allocator(&allocator, consumer);
   if (client != NULL) {
@@ -761,9 +754,9 @@ int lc_pouch_client_new_history_consumer_method(
   lc_history_consumer_position position;
   int rc;
 
-  if (self == NULL || config == NULL || out == NULL ||
-      config->namespace_name == NULL || config->namespace_name[0] == '\0' ||
-      config->consumer_id == NULL || config->consumer_id[0] == '\0') {
+  if (self == NULL || config == NULL || out == NULL || config->ns == NULL ||
+      config->ns[0] == '\0' || config->consumer_id == NULL ||
+      config->consumer_id[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "new_history_consumer requires namespace and consumer "
                         "identity",
@@ -784,10 +777,10 @@ int lc_pouch_client_new_history_consumer_method(
                         NULL);
   }
   consumer->client = client;
-  consumer->namespace_name = lc_client_strdup(client, config->namespace_name);
+  consumer->ns = lc_client_strdup(client, config->ns);
   consumer->consumer_id = lc_client_strdup(client, config->consumer_id);
-  if (consumer->namespace_name == NULL || consumer->consumer_id == NULL) {
-    lc_client_free(client, consumer->namespace_name);
+  if (consumer->ns == NULL || consumer->consumer_id == NULL) {
+    lc_client_free(client, consumer->ns);
     lc_client_free(client, consumer->consumer_id);
     lc_client_free(client, consumer);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,

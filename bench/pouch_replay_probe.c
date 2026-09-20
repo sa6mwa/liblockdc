@@ -149,7 +149,7 @@ int main(int argc, char **argv) {
              (unsigned long)(i % keys), (unsigned long)generation);
     lc_acquire_req_init(&acquire);
     acquire.key = key;
-    acquire.namespace_name = ns;
+    acquire.ns = ns;
     acquire.owner = "replay-probe";
     acquire.ttl_seconds = 60;
     check(client->acquire(client, &acquire, &lease, &error));
@@ -188,7 +188,7 @@ int main(int argc, char **argv) {
     lc_source *source = NULL;
     lc_acquire_req_init(&acquire);
     acquire.key = "pending";
-    acquire.namespace_name = "namespace-0";
+    acquire.ns = "namespace-0";
     acquire.owner = "interrupted-writer";
     acquire.ttl_seconds = 86400;
     check(client->acquire(client, &acquire, &lease, &error));

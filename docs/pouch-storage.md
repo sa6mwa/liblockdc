@@ -946,7 +946,7 @@ the public API or durable format.
   the resulting projection and Pouch can reclaim its obsolete segments.
 
   `lc_client_new_history_consumer()` adds an explicit durable retention pin for
-  a Pouch namespace. Its `(namespace_name, consumer_id)` identity and
+  a Pouch namespace. Its `(ns, consumer_id)` identity and
   acknowledgement are stored under `.lockd/history-consumers/`; acknowledge
   positions are monotonic and bounded by the current namespace sequence.
   Cursor replacements stage beneath that namespace's private `.staging/`

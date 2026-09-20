@@ -594,7 +594,7 @@ static int lockdc_bench_seed(lc_client *client, long rows, lc_error *error) {
     snprintf(key, sizeof(key), "doc/%08ld", i);
     lease = NULL;
     lc_acquire_req_init(&acquire_req);
-    acquire_req.namespace_name = "bench";
+    acquire_req.ns = "bench";
     acquire_req.key = key;
     acquire_req.owner = "pouch-query-bench";
     acquire_req.ttl_seconds = 60L;
@@ -628,7 +628,7 @@ static int lockdc_bench_flush(lc_client *client, lc_error *error) {
 
   lc_index_flush_req_init(&req);
   memset(&res, 0, sizeof(res));
-  req.namespace_name = "bench";
+  req.ns = "bench";
   req.mode = "wait";
   rc = client->flush_index(client, &req, &res, error);
   lc_index_flush_res_cleanup(&res);
@@ -989,7 +989,7 @@ static int lockdc_bench_queue_roundtrip(lc_client *client, long messages,
     }
     lc_enqueue_req_init(&enqueue_req);
     memset(&enqueue_res, 0, sizeof(enqueue_res));
-    enqueue_req.namespace_name = "bench";
+    enqueue_req.ns = "bench";
     enqueue_req.queue = "production";
     enqueue_req.visibility_timeout_seconds = 30L;
     enqueue_req.ttl_seconds = 3600L;
@@ -1019,7 +1019,7 @@ static int lockdc_bench_queue_roundtrip(lc_client *client, long messages,
 
     lc_dequeue_req_init(&dequeue_req);
     memset(&batch, 0, sizeof(batch));
-    dequeue_req.namespace_name = "bench";
+    dequeue_req.ns = "bench";
     dequeue_req.queue = "production";
     dequeue_req.owner = "pouch-production-bench";
     dequeue_req.visibility_timeout_seconds = 30L;
@@ -1241,7 +1241,7 @@ static int lockdc_bench_query(lc_client *client, const char *scenario,
 
   lc_query_req_init(&req);
   memset(&res, 0, sizeof(res));
-  req.namespace_name = "bench";
+  req.ns = "bench";
   req.selector_lql = lockdc_bench_selector_lql(scenario);
   req.engine = engine;
   req.limit = limit > 0L ? limit : 1L;
@@ -1380,7 +1380,7 @@ lockdc_bench_concurrency_write(lockdc_bench_concurrency_worker *worker,
   lease = NULL;
   source = NULL;
   lc_acquire_req_init(&acquire_req);
-  acquire_req.namespace_name = "bench";
+  acquire_req.ns = "bench";
   acquire_req.key = key;
   acquire_req.owner = owner;
   acquire_req.ttl_seconds = 60L;
@@ -1928,7 +1928,7 @@ int lockdc_pouch_bench_production_run(long rows, long updates_per_key,
 
     snprintf(key, sizeof(key), "doc/%08ld", row);
     lc_acquire_req_init(&acquire_req);
-    acquire_req.namespace_name = "bench";
+    acquire_req.ns = "bench";
     acquire_req.key = key;
     acquire_req.owner = "pouch-production-bench";
     acquire_req.ttl_seconds = 120L;
@@ -2430,7 +2430,7 @@ int lockdc_pouch_bench_compaction_run(
   if (scheduled == 0) {
     memset(&maintenance_options, 0, sizeof(maintenance_options));
     memset(&maintenance_result, 0, sizeof(maintenance_result));
-    maintenance_options.namespace_name = "bench";
+    maintenance_options.ns = "bench";
     maintenance_options.force = 1;
     phase_start = lockdc_bench_now_ns();
     rc = lc_pouch_maintenance_run(pouch, &maintenance_options,

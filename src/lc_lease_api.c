@@ -173,7 +173,7 @@ int lc_lease_describe_method(lc_lease *self, lc_error *error) {
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   rc = lc_engine_client_describe(lease->client->engine, &engine_req,
                                  &engine_res, &engine_error);
@@ -255,7 +255,7 @@ int lc_lease_get_method(lc_lease *self, lc_sink *dst, const lc_get_opts *opts,
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
   bridge.sink = dst;
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.fencing_token = lease->fencing_token;
@@ -382,7 +382,7 @@ int lc_lease_load_method(lc_lease *self, const lonejson_map *map, void *dst,
         error, rc, &load_state.parse.error,
         "failed to initialize mapped lease load parser");
   }
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.fencing_token = lease->fencing_token;
@@ -505,7 +505,7 @@ int lc_lease_save_method(lc_lease *self, const lonejson_map *map,
   lc_engine_error_init(&engine_error);
   memset(&update_opts, 0, sizeof(update_opts));
   update_opts.content_type = "application/json";
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.txn_id = lease->txn_id;
@@ -592,7 +592,7 @@ int lc_lease_update_method(lc_lease *self, lc_source *src,
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
   bridge.source = src;
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.txn_id = lease->txn_id;
@@ -675,7 +675,7 @@ int lc_lease_mutate_method(lc_lease *self, const lc_mutate_req *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.txn_id = lease->txn_id;
@@ -759,7 +759,7 @@ int lc_lease_metadata_method(lc_lease *self, const lc_metadata_req *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.txn_id = lease->txn_id;
@@ -841,7 +841,7 @@ int lc_lease_remove_method(lc_lease *self, const lc_remove_req *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.txn_id = lease->txn_id;
@@ -923,7 +923,7 @@ int lc_lease_keepalive_method(lc_lease *self, const lc_keepalive_req *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.txn_id = lease->txn_id;
@@ -996,7 +996,7 @@ int lc_lease_release_method(lc_lease *self, const lc_release_req *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.txn_id = lease->txn_id;
@@ -1065,7 +1065,7 @@ int lc_lease_attach_method(lc_lease *self, const lc_attach_req *req,
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
   bridge.source = src;
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.txn_id = lease->txn_id;
@@ -1144,7 +1144,7 @@ int lc_lease_list_attachments_method(lc_lease *self, lc_attachment_list *out,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.txn_id = lease->txn_id;
@@ -1231,7 +1231,7 @@ int lc_lease_get_attachment_method(lc_lease *self,
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
   bridge.sink = dst;
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.txn_id = lease->txn_id;
@@ -1308,7 +1308,7 @@ int lc_lease_delete_attachment_method(lc_lease *self,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.txn_id = lease->txn_id;
@@ -1381,7 +1381,7 @@ int lc_lease_delete_all_attachments_method(lc_lease *self, int *deleted_count,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = lease->namespace_name;
+  engine_req.ns = lease->ns;
   engine_req.key = lease->key;
   engine_req.lease_id = lease->lease_id;
   engine_req.txn_id = lease->txn_id;
@@ -1430,7 +1430,7 @@ void lc_lease_close_method(lc_lease *self) {
     return;
   }
   lease = (lc_lease_handle *)self;
-  lc_client_free(lease->client, lease->namespace_name);
+  lc_client_free(lease->client, lease->ns);
   lc_client_free(lease->client, lease->key);
   lc_client_free(lease->client, lease->owner);
   lc_client_free(lease->client, lease->lease_id);

@@ -174,7 +174,7 @@ typedef struct canceling_subscribe_capture {
 
 typedef struct watch_capture {
   int event_count;
-  char namespace_name[64];
+  char ns[64];
   char queue[64];
   char head_message_id[64];
   char correlation_id[64];
@@ -375,9 +375,8 @@ static int watch_capture_sink(void *context,
   (void)error;
   capture = (watch_capture *)context;
   capture->event_count += 1;
-  if (event->namespace_name != NULL) {
-    snprintf(capture->namespace_name, sizeof(capture->namespace_name), "%s",
-             event->namespace_name);
+  if (event->ns != NULL) {
+    snprintf(capture->ns, sizeof(capture->ns), "%s", event->ns);
   }
   if (event->queue != NULL) {
     snprintf(capture->queue, sizeof(capture->queue), "%s", event->queue);
@@ -1831,7 +1830,7 @@ static void test_state_transport_honors_client_cancel(void **state) {
   assert_int_equal(lc_engine_client_open(&config, &client, &error),
                    LC_ENGINE_OK);
   lc_engine_client_set_cancel_check(client, test_delayed_cancel_check, &cancel);
-  request.namespace_name = "cancel-test";
+  request.ns = "cancel-test";
   request.key = "key";
   request.owner = "owner";
   request.ttl_seconds = 30L;
@@ -2183,7 +2182,7 @@ static void test_state_transport_paths_use_mtls(void **state) {
 
   memset(&get_req, 0, sizeof(get_req));
   memset(&get_res, 0, sizeof(get_res));
-  get_req.namespace_name = "transport-ns";
+  get_req.ns = "transport-ns";
   get_req.key = "resource/1";
   get_req.public_read = 1;
   rc = lc_engine_client_get(client, &get_req, &get_res, &error);
@@ -2287,7 +2286,7 @@ test_state_transport_parses_buffered_typed_json_response(void **state) {
   req.key = "resource/1";
   rc = lc_engine_client_describe(client, &req, &res, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
-  assert_string_equal(res.namespace_name, "transport-ns");
+  assert_string_equal(res.ns, "transport-ns");
   assert_string_equal(res.key, "resource/1");
   assert_string_equal(res.owner, "owner-a");
   assert_string_equal(res.lease_id, "lease-1");
@@ -2349,7 +2348,7 @@ static void test_management_transport_paths_use_mtls(void **state) {
 
   memset(&ns_req, 0, sizeof(ns_req));
   memset(&ns_res, 0, sizeof(ns_res));
-  ns_req.namespace_name = "team-a";
+  ns_req.ns = "team-a";
   ns_req.preferred_engine = "index";
   ns_req.fallback_engine = "scan";
   ns_req.if_etag = "\"config-etag\"";
@@ -2623,13 +2622,13 @@ test_watch_stream_filters_events_and_finishes_trailing_event(void **state) {
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
 
-  watch_req.namespace_name = "transport-ns";
+  watch_req.ns = "transport-ns";
   watch_req.queue = "jobs";
   rc = lc_engine_client_watch_queue(client, &watch_req, watch_capture_sink,
                                     &capture, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
   assert_int_equal(capture.event_count, 1);
-  assert_string_equal(capture.namespace_name, "transport-ns");
+  assert_string_equal(capture.ns, "transport-ns");
   assert_string_equal(capture.queue, "jobs");
   assert_string_equal(capture.head_message_id, "msg-1");
   assert_string_equal(capture.correlation_id, "corr-watch-header");
@@ -2683,7 +2682,7 @@ static void test_watch_stream_rejects_malformed_selected_event(void **state) {
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
 
-  watch_req.namespace_name = "transport-ns";
+  watch_req.ns = "transport-ns";
   watch_req.queue = "jobs";
   rc = lc_engine_client_watch_queue(client, &watch_req, watch_capture_sink,
                                     &capture, &error);
@@ -2744,7 +2743,7 @@ static void test_watch_stream_rejects_oversized_line(void **state) {
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
 
-  watch_req.namespace_name = "transport-ns";
+  watch_req.ns = "transport-ns";
   watch_req.queue = "jobs";
   rc = lc_engine_client_watch_queue(client, &watch_req, watch_capture_sink,
                                     &capture, &error);
@@ -2809,7 +2808,7 @@ test_watch_stream_rejects_oversized_event_data_after_prior_event(void **state) {
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
 
-  watch_req.namespace_name = "transport-ns";
+  watch_req.ns = "transport-ns";
   watch_req.queue = "jobs";
   rc = lc_engine_client_watch_queue(client, &watch_req, watch_capture_sink,
                                     &capture, &error);
@@ -4382,7 +4381,7 @@ test_public_attachment_get_preserves_i64_timestamp_headers(void **state) {
 
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
-  req.lease.namespace_name = "transport-ns";
+  req.lease.ns = "transport-ns";
   req.lease.key = "resource/1";
   req.selector.name = "blob.txt";
   req.public_read = 1;
@@ -4586,7 +4585,7 @@ test_public_client_update_rejects_non_rewindable_retry_source(void **state) {
   rc = test_enqueue_source_new_non_rewindable("{\"value\":2}", 11U, 0U, &src,
                                               &src_state, &error);
   assert_int_equal(rc, LC_OK);
-  update_req.lease.namespace_name = "transport-ns";
+  update_req.lease.ns = "transport-ns";
   update_req.lease.key = "resource/1";
   update_req.lease.lease_id = "lease-1";
   update_req.lease.txn_id = "txn-acquire";
@@ -4824,7 +4823,7 @@ test_enqueue_from_retries_node_passive_and_cleans_parser_state(void **state) {
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
 
-  req.namespace_name = "transport-ns";
+  req.ns = "transport-ns";
   req.queue = "jobs";
   req.payload_content_type = "application/json";
   rc = lc_engine_client_enqueue_from(client, &req, NULL, NULL, &res, &error);
@@ -4838,7 +4837,7 @@ test_enqueue_from_retries_node_passive_and_cleans_parser_state(void **state) {
              server.handled_count);
   }
   assert_int_equal(rc, LC_ENGINE_OK);
-  assert_string_equal(res.namespace_name, "transport-ns");
+  assert_string_equal(res.ns, "transport-ns");
   assert_string_equal(res.queue, "jobs");
   assert_string_equal(res.message_id, "msg-enqueue-passive-2");
   assert_string_equal(res.correlation_id, "corr-enqueue-passive-2");
@@ -4904,7 +4903,7 @@ static void test_enqueue_from_checks_public_metadata_range(void **state) {
   rc = lc_engine_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_ENGINE_OK);
 
-  req.namespace_name = "transport-ns";
+  req.ns = "transport-ns";
   req.queue = "jobs";
   req.payload_content_type = "application/json";
   rc = lc_engine_client_enqueue_from(client, &req, NULL, NULL, &res, &error);
@@ -4992,7 +4991,7 @@ test_enqueue_from_rejects_non_rewindable_retry_source(void **state) {
   rc = test_enqueue_source_new_non_rewindable("hello world", 11U, 0U, &src,
                                               &src_state, NULL);
   assert_int_equal(rc, LC_OK);
-  req.namespace_name = "transport-ns";
+  req.ns = "transport-ns";
   req.queue = "jobs";
   req.payload_content_type = "application/json";
   bridge.source = src;
@@ -5161,7 +5160,7 @@ static void test_public_management_methods_emit_logs(void **state) {
   rc = lc_client_open(&config, &client, &error);
   assert_int_equal(rc, LC_OK);
 
-  ns_req.namespace_name = "team-a";
+  ns_req.ns = "team-a";
   rc = lc_get_namespace_config(client, &ns_req, &ns_res, &error);
   assert_int_equal(rc, LC_OK);
 
@@ -5630,7 +5629,7 @@ static void test_public_query_stream_captures_headers_and_body(void **state) {
   rc = lc_sink_to_memory(&sink, &error);
   assert_int_equal(rc, LC_OK);
 
-  req.namespace_name = "transport-ns";
+  req.ns = "transport-ns";
   req.selector_json = "{\"owner\":\"owner-a\"}";
   req.limit = 2L;
   req.cursor = "cursor-0";
@@ -5716,7 +5715,7 @@ static void test_public_query_keys_streams_chunks_and_headers(void **state) {
   handler.begin = capture_query_key_begin;
   handler.chunk = capture_query_key_chunk;
   handler.end = capture_query_key_end;
-  req.namespace_name = "transport-ns";
+  req.ns = "transport-ns";
   req.selector_lql = "eq{field=/owner,value=owner-a}";
   req.limit = 2L;
   req.engine = "index&scan/fast+safe";

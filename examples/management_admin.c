@@ -20,7 +20,7 @@ static int fail_with_error(pslog_logger *logger, const char *step,
 int main(void) {
   const char *endpoint;
   const char *client_pem;
-  const char *namespace_name;
+  const char *ns;
   const char *preferred_env;
   const char *fallback_env;
   const char *flush_mode_env;
@@ -63,7 +63,7 @@ int main(void) {
 
   endpoint = getenv("LOCKDC_URL");
   client_pem = getenv("LOCKDC_CLIENT_PEM");
-  namespace_name = getenv("LOCKDC_NAMESPACE");
+  ns = getenv("LOCKDC_NAMESPACE");
   preferred_env = getenv("LOCKDC_PREFERRED_ENGINE");
   fallback_env = getenv("LOCKDC_FALLBACK_ENGINE");
   flush_mode_env = getenv("LOCKDC_FLUSH_MODE");
@@ -73,20 +73,20 @@ int main(void) {
   if (client_pem == NULL || client_pem[0] == '\0') {
     client_pem = EXAMPLE_CLIENT_PEM;
   }
-  if (namespace_name == NULL || namespace_name[0] == '\0') {
-    namespace_name = EXAMPLE_NAMESPACE;
+  if (ns == NULL || ns[0] == '\0') {
+    ns = EXAMPLE_NAMESPACE;
   }
 
   endpoints[0] = endpoint;
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
-  config.default_namespace = namespace_name;
+  config.default_namespace = ns;
   config.logger = sdk_logger;
 
   example_logger->infof(example_logger, "example.management_admin.start",
                         "endpoint=%s client_pem=%s namespace=%s flush_mode=%s",
-                        endpoint, client_pem, namespace_name,
+                        endpoint, client_pem, ns,
                         flush_mode_env != NULL ? flush_mode_env : "wait");
 
   lc_error_init(&error);
@@ -114,7 +114,7 @@ int main(void) {
     return rc;
   }
 
-  ns_req.namespace_name = config.default_namespace;
+  ns_req.ns = config.default_namespace;
   rc = client->get_namespace_config(client, &ns_req, &ns_res, &error);
   if (rc != LC_OK) {
     rc =
@@ -129,7 +129,7 @@ int main(void) {
   example_logger->infof(
       example_logger, "example.management_admin.namespace_config",
       "namespace=%s preferred=%s fallback=%s",
-      ns_res.namespace_name != NULL ? ns_res.namespace_name : "",
+      ns_res.ns != NULL ? ns_res.ns : "",
       ns_res.preferred_engine != NULL ? ns_res.preferred_engine : "",
       ns_res.fallback_engine != NULL ? ns_res.fallback_engine : "");
   lc_namespace_config_res_cleanup(&ns_res);
@@ -151,13 +151,13 @@ int main(void) {
     example_logger->infof(
         example_logger, "example.management_admin.namespace_updated",
         "namespace=%s preferred=%s fallback=%s",
-        ns_res.namespace_name != NULL ? ns_res.namespace_name : "",
+        ns_res.ns != NULL ? ns_res.ns : "",
         ns_res.preferred_engine != NULL ? ns_res.preferred_engine : "",
         ns_res.fallback_engine != NULL ? ns_res.fallback_engine : "");
     lc_namespace_config_res_cleanup(&ns_res);
   }
 
-  flush_req.namespace_name = config.default_namespace;
+  flush_req.ns = config.default_namespace;
   flush_req.mode = flush_mode_env != NULL ? flush_mode_env : "wait";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   if (rc != LC_OK) {

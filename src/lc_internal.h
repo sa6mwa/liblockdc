@@ -174,7 +174,7 @@ int lc_engine_load_bundle(lc_engine_client *client, lc_source *bundle_source,
 void lc_engine_free_bundle(lc_engine_tls_bundle *bundle);
 
 const char *lc_engine_effective_namespace(lc_engine_client *client,
-                                          const char *namespace_name);
+                                          const char *ns);
 char *lc_engine_url_encode(const char *value);
 
 #endif

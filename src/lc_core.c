@@ -915,7 +915,7 @@ int lc_engine_write_bridge(void *context, const void *bytes, size_t count,
   return rc;
 }
 
-lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
+lc_lease *lc_lease_new(lc_client_handle *client, const char *ns,
                        const char *key, const char *owner, const char *lease_id,
                        const char *txn_id, long fencing_token,
                        lc_version version, const char *state_etag,
@@ -944,7 +944,7 @@ lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
   lease->pub.delete_all_attachments = lc_lease_delete_all_attachments_method;
   lease->pub.close = lc_lease_close_method;
   lease->client = client;
-  lease->namespace_name = lc_client_strdup(client, namespace_name);
+  lease->ns = lc_client_strdup(client, ns);
   lease->key = lc_client_strdup(client, key);
   lease->owner = lc_client_strdup(client, owner);
   lease->lease_id = lc_client_strdup(client, lease_id);
@@ -956,7 +956,7 @@ lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
   lease->queue_state_etag = lc_client_strdup(client, queue_state_etag);
   lease->has_query_hidden = 0;
   lease->query_hidden = 0;
-  lease->pub.namespace_name = lease->namespace_name;
+  lease->pub.ns = lease->ns;
   lease->pub.key = lease->key;
   lease->pub.owner = lease->owner;
   lease->pub.lease_id = lease->lease_id;
@@ -1017,7 +1017,7 @@ lc_message *lc_message_new(lc_client_handle *client,
   message->pub.write_payload = lc_message_write_payload_method;
   message->pub.close = lc_message_close_method;
   message->client = client;
-  message->namespace_name = lc_client_strdup(client, engine->namespace_name);
+  message->ns = lc_client_strdup(client, engine->ns);
   message->queue = lc_client_strdup(client, engine->queue);
   message->message_id = lc_client_strdup(client, engine->message_id);
   message->attempts = engine->attempts;
@@ -1046,12 +1046,12 @@ lc_message *lc_message_new(lc_client_handle *client,
     state_key =
         lc_queue_state_key_new(client, engine->queue, engine->message_id);
     message->state_lease =
-        lc_lease_new(client, engine->namespace_name, state_key, NULL,
+        lc_lease_new(client, engine->ns, state_key, NULL,
                      engine->state_lease_id, engine->state_txn_id,
                      engine->state_fencing_token, 0L, NULL, engine->state_etag);
     lc_client_free(client, state_key);
   }
-  message->pub.namespace_name = message->namespace_name;
+  message->pub.ns = message->ns;
   message->pub.queue = message->queue;
   message->pub.message_id = message->message_id;
   message->pub.attempts = message->attempts;
@@ -2963,7 +2963,7 @@ void lc_describe_res_cleanup(lc_describe_res *response) {
   if (response == NULL) {
     return;
   }
-  free(response->namespace_name);
+  free(response->ns);
   free(response->key);
   free(response->owner);
   free(response->lease_id);
@@ -3006,7 +3006,7 @@ void lc_metadata_res_cleanup(lc_metadata_res *response) {
   if (response == NULL) {
     return;
   }
-  free(response->namespace_name);
+  free(response->ns);
   free(response->key);
   free(response->correlation_id);
   memset(response, 0, sizeof(*response));
@@ -3065,7 +3065,7 @@ void lc_namespace_config_res_cleanup(lc_namespace_config_res *response) {
   if (response == NULL) {
     return;
   }
-  free(response->namespace_name);
+  free(response->ns);
   free(response->preferred_engine);
   free(response->fallback_engine);
   free(response->etag);
@@ -3077,7 +3077,7 @@ void lc_index_flush_res_cleanup(lc_index_flush_res *response) {
   if (response == NULL) {
     return;
   }
-  free(response->namespace_name);
+  free(response->ns);
   free(response->mode);
   free(response->flush_id);
   free(response->correlation_id);
@@ -3180,7 +3180,7 @@ void lc_enqueue_res_cleanup(lc_enqueue_res *response) {
   if (response == NULL) {
     return;
   }
-  free(response->namespace_name);
+  free(response->ns);
   free(response->queue);
   free(response->message_id);
   free(response->correlation_id);
@@ -3191,7 +3191,7 @@ void lc_queue_stats_res_cleanup(lc_queue_stats_res *response) {
   if (response == NULL) {
     return;
   }
-  free(response->namespace_name);
+  free(response->ns);
   free(response->queue);
   free(response->head_message_id);
   free(response->correlation_id);
@@ -3240,7 +3240,7 @@ void lc_watch_event_cleanup(lc_watch_event *event) {
   if (event == NULL) {
     return;
   }
-  free(event->namespace_name);
+  free(event->ns);
   free(event->queue);
   free(event->head_message_id);
   free(event->correlation_id);

@@ -1010,6 +1010,18 @@ if(LOCKDC_BUILD_TESTS)
     )
     set_tests_properties(c_only_configure_test PROPERTIES RUN_SERIAL TRUE)
 
+    add_test(NAME cpp_public_header_test
+        COMMAND ${CMAKE_COMMAND}
+            -DLOCKDC_BINARY_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}
+            -DLOCKDC_C_COMPILER=${CMAKE_C_COMPILER}
+            -DLOCKDC_NM=${CMAKE_NM}
+            -DLOCKDC_SYSROOT=${CMAKE_SYSROOT}
+            -DLOCKDC_EXTERNAL_ROOT=${LOCKDC_EXTERNAL_ROOT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp_public_header_test.cmake
+    )
+    set_tests_properties(cpp_public_header_test PROPERTIES RUN_SERIAL TRUE)
+
     add_test(NAME deferred_vendored_install_manifest_test
         COMMAND ${CMAKE_COMMAND}
             -DLOCKDC_ROOT=${CMAKE_CURRENT_SOURCE_DIR}

@@ -65,7 +65,7 @@ int main(void) {
     goto fail;
 
   lc_outbox_config_init(&outbox_config);
-  outbox_config.namespace_name = OUTBOX_EXAMPLE_NAMESPACE;
+  outbox_config.ns = OUTBOX_EXAMPLE_NAMESPACE;
   outbox_config.owner = OUTBOX_EXAMPLE_OWNER;
   rc = client->new_outbox(client, &outbox_config, &outbox, &error);
   if (rc != LC_OK)

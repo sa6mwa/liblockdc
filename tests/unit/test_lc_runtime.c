@@ -424,7 +424,7 @@ test_management_cleanup_helpers_release_nested_allocations(void **state) {
   cluster.endpoints.items[1] = dup_cstr("tcp://b");
   cluster.correlation_id = dup_cstr("corr-cluster");
 
-  ns.namespace_name = dup_cstr("default");
+  ns.ns = dup_cstr("default");
   ns.preferred_engine = dup_cstr("index");
   ns.fallback_engine = dup_cstr("scan");
   ns.correlation_id = dup_cstr("corr-ns");
@@ -439,7 +439,7 @@ test_management_cleanup_helpers_release_nested_allocations(void **state) {
   assert_null(cluster.endpoints.items);
   assert_int_equal(cluster.endpoints.count, 0U);
   assert_null(cluster.correlation_id);
-  assert_null(ns.namespace_name);
+  assert_null(ns.ns);
   assert_null(ns.preferred_engine);
   assert_null(ns.fallback_engine);
   assert_null(ns.correlation_id);
@@ -640,7 +640,7 @@ test_list_attachments_response_parses_with_thread_runtime(void **state) {
       "corr-list", &response, &error);
 
   assert_int_equal(rc, LC_ENGINE_OK);
-  assert_string_equal(response.namespace_name, "transport-ns");
+  assert_string_equal(response.ns, "transport-ns");
   assert_string_equal(response.key, "resource/1");
   assert_int_equal(response.attachment_count, 1U);
   assert_string_equal(response.attachments[0].id, "att-1");

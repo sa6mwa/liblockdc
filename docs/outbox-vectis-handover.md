@@ -300,7 +300,7 @@ receiver ownership model rather than creating a second outbox model:
 
 | Need | Lua façade | Contract |
 | --- | --- | --- |
-| Producer | `client:new_outbox(config[, { dispatcher = dispatcher }])` | Threadless. Use the C-shaped `namespace_name` field. |
+| Producer | `client:new_outbox(config[, { dispatcher = dispatcher }])` | Threadless. Use the Lua `namespace` field. |
 | Fresh durable work | `outbox:append`, `accept_command`, `accept_inbox`, `begin`, or `transaction` | Fresh keys appear only in successful `commit_result.outbox_receipts`. |
 | Command status/result | `outbox:get_command_receipt`, `write_command_result`, `read_command_result`, `resume_command` | C-shaped names retain the durable receipt/result distinction. |
 | Dispatcher signals | `outbox:dispatcher`, `dispatcher:notify_outbox_key`, `stats`, and `reconcile` | Same canonical-config, bounded-notification, and recovery rules as C. |

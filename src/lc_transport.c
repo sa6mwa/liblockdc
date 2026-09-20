@@ -153,7 +153,7 @@ void lc_engine_acquire_response_cleanup(lc_engine_acquire_response *response) {
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->namespace_name);
+  lc_engine_free_string(&response->ns);
   lc_engine_free_string(&response->lease_id);
   lc_engine_free_string(&response->txn_id);
   lc_engine_free_string(&response->key);
@@ -205,7 +205,7 @@ void lc_engine_enqueue_response_cleanup(lc_engine_enqueue_response *response) {
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->namespace_name);
+  lc_engine_free_string(&response->ns);
   lc_engine_free_string(&response->queue);
   lc_engine_free_string(&response->message_id);
   lc_engine_free_string(&response->correlation_id);
@@ -216,7 +216,7 @@ void lc_engine_dequeue_response_cleanup(lc_engine_dequeue_response *response) {
   if (response == NULL) {
     return;
   }
-  lc_engine_free_string(&response->namespace_name);
+  lc_engine_free_string(&response->ns);
   lc_engine_free_string(&response->queue);
   lc_engine_free_string(&response->message_id);
   lc_engine_free_string(&response->payload_content_type);
@@ -1745,9 +1745,9 @@ void lc_engine_free_bundle(lc_engine_tls_bundle *bundle) {
 }
 
 const char *lc_engine_effective_namespace(lc_engine_client *client,
-                                          const char *namespace_name) {
-  if (namespace_name != NULL && namespace_name[0] != '\0') {
-    return namespace_name;
+                                          const char *ns) {
+  if (ns != NULL && ns[0] != '\0') {
+    return ns;
   }
   if (client != NULL && client->default_namespace != NULL &&
       client->default_namespace[0] != '\0') {

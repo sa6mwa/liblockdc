@@ -3,7 +3,7 @@ local lockdc = require("lockdc")
 local endpoint = os.getenv("LOCKDC_URL") or "https://localhost:19441"
 local client_pem = os.getenv("LOCKDC_CLIENT_PEM")
   or "./devenv/volumes/lockd-disk-a-config/client.pem"
-local namespace_name = os.getenv("LOCKDC_NAMESPACE") or "default"
+local namespace = os.getenv("LOCKDC_NAMESPACE") or "default"
 local owner = os.getenv("LOCKDC_OWNER") or "tests-lua-bundle-sources"
 local key_prefix = os.getenv("LOCKDC_KEY_PREFIX") or "tests/lua/bundle-sources"
 
@@ -80,7 +80,7 @@ for index, variant in ipairs(variants) do
   local client, err = lockdc.open({
     endpoints = { endpoint },
     client_bundle_source = source,
-    default_namespace = namespace_name,
+    default_namespace = namespace,
   })
 
   if client == nil then
@@ -92,7 +92,7 @@ for index, variant in ipairs(variants) do
 
   local key = ("%s/%s/%d/%d"):format(key_prefix, variant.name, os.time(), index)
   local lease, acquire_err = client:acquire({
-    namespace_name = namespace_name,
+    namespace = namespace,
     key = key,
     owner = owner .. "-" .. variant.name,
     ttl_seconds = 60,

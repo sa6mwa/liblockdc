@@ -55,7 +55,7 @@ static int consume_message(void *context, lc_message *message,
 int main(void) {
   const char *endpoint;
   const char *client_pem;
-  const char *namespace_name;
+  const char *ns;
   const char *queue;
   const char *owner;
   const char *endpoints[1];
@@ -94,7 +94,7 @@ int main(void) {
 
   endpoint = getenv("LOCKDC_URL");
   client_pem = getenv("LOCKDC_CLIENT_PEM");
-  namespace_name = getenv("LOCKDC_NAMESPACE");
+  ns = getenv("LOCKDC_NAMESPACE");
   queue = getenv("LOCKDC_QUEUE");
   owner = getenv("LOCKDC_OWNER");
   if (endpoint == NULL || endpoint[0] == '\0') {
@@ -103,8 +103,8 @@ int main(void) {
   if (client_pem == NULL || client_pem[0] == '\0') {
     client_pem = EXAMPLE_CLIENT_PEM;
   }
-  if (namespace_name == NULL || namespace_name[0] == '\0') {
-    namespace_name = EXAMPLE_NAMESPACE;
+  if (ns == NULL || ns[0] == '\0') {
+    ns = EXAMPLE_NAMESPACE;
   }
   if (queue == NULL || queue[0] == '\0') {
     queue = EXAMPLE_QUEUE;
@@ -117,13 +117,13 @@ int main(void) {
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
-  config.default_namespace = namespace_name;
+  config.default_namespace = ns;
   config.logger = sdk_logger;
 
   example_logger->infof(
       example_logger, "example.queue_subscribe_stream.start",
       "endpoint=%s client_pem=%s namespace=%s queue=%s owner=%s", endpoint,
-      client_pem, namespace_name, queue, owner);
+      client_pem, ns, queue, owner);
 
   lc_error_init(&error);
   client = NULL;

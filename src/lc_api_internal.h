@@ -183,7 +183,7 @@ struct lc_client_handle {
 struct lc_lease_handle {
   lc_lease pub;
   lc_client_handle *client;
-  char *namespace_name;
+  char *ns;
   char *key;
   char *owner;
   char *lease_id;
@@ -205,7 +205,7 @@ struct lc_lease_handle {
 struct lc_message_handle {
   lc_message pub;
   lc_client_handle *client;
-  char *namespace_name;
+  char *ns;
   char *queue;
   char *message_id;
   int attempts;
@@ -320,7 +320,7 @@ int lc_source_is_resettable(const lc_source *source);
 int lc_source_memory_view(const lc_source *source,
                           const unsigned char **bytes_out, size_t *length_out);
 void lc_source_memory_consume(lc_source *source);
-lc_lease *lc_lease_new(lc_client_handle *client, const char *namespace_name,
+lc_lease *lc_lease_new(lc_client_handle *client, const char *ns,
                        const char *key, const char *owner, const char *lease_id,
                        const char *txn_id, long fencing_token,
                        lc_version version, const char *state_etag,
@@ -346,8 +346,7 @@ int lc_pouch_client_load_method(lc_client *self, const char *key,
                                 const lonejson_map *map, void *dst,
                                 const lc_get_opts *opts, lc_get_res *out,
                                 lc_error *error);
-int lc_pouch_client_load_in_namespace(lc_client *self,
-                                      const char *namespace_name,
+int lc_pouch_client_load_in_namespace(lc_client *self, const char *ns,
                                       const char *key, const lonejson_map *map,
                                       void *dst, const lc_get_opts *opts,
                                       lc_get_res *out, lc_error *error);
@@ -531,8 +530,7 @@ int lc_client_load_method(lc_client *self, const char *key,
                           const lonejson_map *map, void *dst,
                           const lc_get_opts *opts, lc_get_res *out,
                           lc_error *error);
-int lc_client_load_in_namespace_method(lc_client *self,
-                                       const char *namespace_name,
+int lc_client_load_in_namespace_method(lc_client *self, const char *ns,
                                        const char *key, const lonejson_map *map,
                                        void *dst, const lc_get_opts *opts,
                                        lc_get_res *out, lc_error *error);

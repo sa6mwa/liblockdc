@@ -154,7 +154,7 @@ local function flatten_lease_request(req)
     next_req[k] = v
   end
   lease_ref = req.lease
-  if lease_ref ~= nil and next_req.namespace_name == nil then
+  if lease_ref ~= nil and next_req.namespace == nil then
     if type(lease_ref) == "table" and getmetatable(lease_ref) == Lease then
       lease_ref = lease_ref:info()
     end
@@ -183,7 +183,7 @@ local function flatten_message_request(req)
     next_req[k] = v
   end
   message_ref = req.message
-  if message_ref ~= nil and next_req.namespace_name == nil then
+  if message_ref ~= nil and next_req.namespace == nil then
     if type(message_ref) == "table" and getmetatable(message_ref) == Message then
       message_ref = message_ref:info()
     end

@@ -3,13 +3,13 @@ local lockdc = require("lockdc")
 local endpoint = os.getenv("LOCKDC_URL") or "https://localhost:19441"
 local client_pem = os.getenv("LOCKDC_CLIENT_PEM")
   or "./devenv/volumes/lockd-disk-a-config/client.pem"
-local namespace_name = os.getenv("LOCKDC_NAMESPACE") or "default"
+local namespace = os.getenv("LOCKDC_NAMESPACE") or "default"
 local flush_mode = os.getenv("LOCKDC_FLUSH_MODE") or "wait"
 
 local client, err = lockdc.open({
   endpoints = { endpoint },
   client_bundle_source = { path = client_pem },
-  default_namespace = namespace_name,
+  default_namespace = namespace,
 })
 
 if client == nil then
@@ -17,7 +17,7 @@ if client == nil then
 end
 
 local config, config_err = client:get_namespace_config({
-  namespace_name = namespace_name,
+  namespace = namespace,
 })
 
 if config == nil then
@@ -26,13 +26,13 @@ if config == nil then
 end
 
 print(("namespace=%s preferred_engine=%s fallback_engine=%s"):format(
-  config.namespace_name,
+  config.namespace,
   tostring(config.preferred_engine),
   tostring(config.fallback_engine)
 ))
 
 local flush, flush_err = client:flush_index({
-  namespace_name = namespace_name,
+  namespace = namespace,
   mode = flush_mode,
 })
 

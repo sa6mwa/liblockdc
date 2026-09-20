@@ -48,7 +48,7 @@ assert(request_client ~= nil, request_err and request_err.message)
 local key_lookups = 0
 local participant = setmetatable({}, {
   __index = function(_, field)
-    if field == "namespace_name" then
+    if field == "namespace" then
       return "lua-xa-parser"
     end
     if field == "key" then

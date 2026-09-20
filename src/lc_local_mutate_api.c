@@ -112,7 +112,7 @@ int lc_lease_mutate_local_method(lc_lease *self, const lc_mutate_local_req *req,
                         strerror(errno), NULL, NULL);
   }
 
-  get_req.namespace_name = lease->namespace_name;
+  get_req.ns = lease->ns;
   get_req.key = lease->key;
   get_req.lease_id = lease->lease_id;
   get_req.fencing_token = lease->fencing_token;

@@ -38,7 +38,7 @@ typedef struct lc_pouch_migration_cursor {
 } lc_pouch_migration_cursor;
 
 typedef struct lc_pouch_migration_lease {
-  char *namespace_name;
+  char *ns;
   char *key;
   char *owner;
   char *lease_id;
@@ -51,7 +51,7 @@ typedef struct lc_pouch_migration_lease {
 } lc_pouch_migration_lease;
 
 typedef struct lc_pouch_migration_participant {
-  char *namespace_name;
+  char *ns;
   char *key;
   char *backend_hash;
   unsigned char vote;
@@ -69,7 +69,7 @@ typedef struct lc_pouch_migration_txn {
 
 typedef struct lc_pouch_migration_namespace {
   lc_pouch *pouch;
-  const char *namespace_name;
+  const char *ns;
   int legacy_control_error;
   int incomplete;
 } lc_pouch_migration_namespace;
@@ -243,7 +243,7 @@ static void lc_pouch_migration_lease_cleanup(lc_pouch_migration_lease *lease) {
   if (lease == NULL) {
     return;
   }
-  lc_free_with_allocator(NULL, lease->namespace_name);
+  lc_free_with_allocator(NULL, lease->ns);
   lc_free_with_allocator(NULL, lease->key);
   lc_free_with_allocator(NULL, lease->owner);
   lc_free_with_allocator(NULL, lease->lease_id);
@@ -277,8 +277,7 @@ static int lc_pouch_migration_parse_lease_v1(const unsigned char *bytes,
                       NULL, "pouch");
   }
   if (rc == LC_OK) {
-    rc = lc_pouch_migration_cursor_string(&cursor, &lease->namespace_name,
-                                          error);
+    rc = lc_pouch_migration_cursor_string(&cursor, &lease->ns, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_migration_cursor_string(&cursor, &lease->key, error);
@@ -331,9 +330,9 @@ static int lc_pouch_migration_parse_lease_v1(const unsigned char *bytes,
                       "pouch control migration lease has trailing bytes", NULL,
                       NULL, "pouch");
   }
-  if (rc == LC_OK && (lease->namespace_name == NULL || lease->key == NULL ||
-                      lease->owner == NULL || lease->lease_id == NULL ||
-                      lease->txn_id == NULL)) {
+  if (rc == LC_OK &&
+      (lease->ns == NULL || lease->key == NULL || lease->owner == NULL ||
+       lease->lease_id == NULL || lease->txn_id == NULL)) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch control migration lease is incomplete", NULL, NULL,
                       "pouch");
@@ -359,7 +358,7 @@ static int lc_pouch_migration_build_lease_current(
   rc = lc_pouch_migration_buffer_append(
       buffer, LC_POUCH_MIGRATION_LEASE_MAGIC_CURRENT, 4U, error);
   if (rc == LC_OK) {
-    rc = lc_pouch_migration_buffer_string(buffer, lease->namespace_name, error);
+    rc = lc_pouch_migration_buffer_string(buffer, lease->ns, error);
   }
   if (rc == LC_OK) {
     rc = lc_pouch_migration_buffer_string(buffer, lease->key, error);
@@ -400,7 +399,7 @@ static void lc_pouch_migration_txn_cleanup(lc_pouch_migration_txn *txn) {
   lc_free_with_allocator(NULL, txn->state);
   lc_free_with_allocator(NULL, txn->target_backend_hash);
   for (i = 0U; i < txn->participant_count; ++i) {
-    lc_free_with_allocator(NULL, txn->participants[i].namespace_name);
+    lc_free_with_allocator(NULL, txn->participants[i].ns);
     lc_free_with_allocator(NULL, txn->participants[i].key);
     lc_free_with_allocator(NULL, txn->participants[i].backend_hash);
   }
@@ -408,9 +407,10 @@ static void lc_pouch_migration_txn_cleanup(lc_pouch_migration_txn *txn) {
   memset(txn, 0, sizeof(*txn));
 }
 
-static int lc_pouch_migration_txn_append_participant(
-    lc_pouch_migration_txn *txn, char *namespace_name, char *key,
-    char *backend_hash, unsigned char vote, lc_error *error) {
+static int
+lc_pouch_migration_txn_append_participant(lc_pouch_migration_txn *txn, char *ns,
+                                          char *key, char *backend_hash,
+                                          unsigned char vote, lc_error *error) {
   lc_pouch_migration_participant *next;
   size_t capacity;
 
@@ -440,7 +440,7 @@ static int lc_pouch_migration_txn_append_participant(
     txn->participants = next;
     txn->participant_capacity = capacity;
   }
-  txn->participants[txn->participant_count].namespace_name = namespace_name;
+  txn->participants[txn->participant_count].ns = ns;
   txn->participants[txn->participant_count].key = key;
   txn->participants[txn->participant_count].backend_hash = backend_hash;
   txn->participants[txn->participant_count].vote = vote;
@@ -504,12 +504,12 @@ static int lc_pouch_migration_parse_txn_legacy(const unsigned char *bytes,
     }
   }
   while (rc == LC_OK && count > 0U) {
-    char *namespace_name = NULL;
+    char *ns = NULL;
     char *key = NULL;
     char *backend_hash = NULL;
     unsigned char vote = 0U;
 
-    rc = lc_pouch_migration_cursor_string(&cursor, &namespace_name, error);
+    rc = lc_pouch_migration_cursor_string(&cursor, &ns, error);
     if (rc == LC_OK) {
       rc = lc_pouch_migration_cursor_string(&cursor, &key, error);
     }
@@ -525,15 +525,15 @@ static int lc_pouch_migration_parse_txn_legacy(const unsigned char *bytes,
       }
     }
     if (rc == LC_OK) {
-      rc = lc_pouch_migration_txn_append_participant(txn, namespace_name, key,
-                                                     backend_hash, vote, error);
+      rc = lc_pouch_migration_txn_append_participant(txn, ns, key, backend_hash,
+                                                     vote, error);
       if (rc == LC_OK) {
-        namespace_name = NULL;
+        ns = NULL;
         key = NULL;
         backend_hash = NULL;
       }
     }
-    lc_free_with_allocator(NULL, namespace_name);
+    lc_free_with_allocator(NULL, ns);
     lc_free_with_allocator(NULL, key);
     lc_free_with_allocator(NULL, backend_hash);
     count -= 1U;
@@ -600,8 +600,8 @@ static int lc_pouch_migration_build_txn_current(
                              ? txn->participants[i].vote
                              : lc_pouch_migration_v1_vote(txn->state);
 
-    rc = lc_pouch_migration_buffer_string(
-        buffer, txn->participants[i].namespace_name, error);
+    rc = lc_pouch_migration_buffer_string(buffer, txn->participants[i].ns,
+                                          error);
     if (rc == LC_OK) {
       rc = lc_pouch_migration_buffer_string(buffer, txn->participants[i].key,
                                             error);
@@ -727,8 +727,8 @@ static int lc_pouch_migration_txn_visit(const lc_pouch_state_visit_entry *entry,
   legacy_candidate = 0;
   magic_length = 0U;
   source_has_votes = 0;
-  rc = lc_pouch_state_read(migration->pouch, migration->namespace_name,
-                           entry->key, &result, error);
+  rc = lc_pouch_state_read(migration->pouch, migration->ns, entry->key, &result,
+                           error);
   if (rc == LC_OK && !result.found) {
     rc = LC_OK;
   }
@@ -785,9 +785,8 @@ static int lc_pouch_migration_txn_visit(const lc_pouch_state_visit_entry *entry,
     options.suppress_query_index = 1;
     options.has_expected_version = 1;
     options.expected_version = result.version;
-    rc = lc_pouch_state_write(migration->pouch, migration->namespace_name,
-                              entry->key, source, &options, &write_result,
-                              error);
+    rc = lc_pouch_state_write(migration->pouch, migration->ns, entry->key,
+                              source, &options, &write_result, error);
   }
 
 cleanup:
@@ -891,9 +890,8 @@ lc_pouch_migration_lease_visit(const lc_pouch_state_visit_entry *entry,
   txn_explicit = 0;
   rc = lc_pouch_migration_parse_lease_v1(entry->metadata,
                                          entry->metadata_length, &lease, error);
-  if (rc == LC_OK &&
-      (strcmp(lease.namespace_name, migration->namespace_name) != 0 ||
-       strcmp(lease.key, entry->key) != 0)) {
+  if (rc == LC_OK && (strcmp(lease.ns, migration->ns) != 0 ||
+                      strcmp(lease.key, entry->key) != 0)) {
     rc = lc_error_set(error, LC_ERR_INVALID, 0L,
                       "pouch control migration lease identity is invalid", NULL,
                       NULL, "pouch");
@@ -923,9 +921,9 @@ lc_pouch_migration_lease_visit(const lc_pouch_state_visit_entry *entry,
     options.metadata_length = output.length;
     options.has_query_hidden = 1;
     options.query_hidden = entry->query_hidden;
-    rc = lc_pouch_state_update_metadata(migration->pouch,
-                                        migration->namespace_name, entry->key,
-                                        &options, &write_result, error);
+    rc = lc_pouch_state_update_metadata(migration->pouch, migration->ns,
+                                        entry->key, &options, &write_result,
+                                        error);
   }
   if (rc != LC_OK) {
     migration->legacy_control_error = 1;
@@ -978,8 +976,7 @@ static int lc_pouch_migration_sync_file(lc_pouch *pouch, const char *directory,
   return rc;
 }
 
-static int lc_pouch_migration_sync_namespace(lc_pouch *pouch,
-                                             const char *namespace_name,
+static int lc_pouch_migration_sync_namespace(lc_pouch *pouch, const char *ns,
                                              lc_error *error) {
   lc_pouch_namespace_manifest manifest;
   char *segments;
@@ -988,9 +985,8 @@ static int lc_pouch_migration_sync_namespace(lc_pouch *pouch,
   int rc;
 
   memset(&manifest, 0, sizeof(manifest));
-  rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path,
-                                        namespace_name, &manifest, NULL, NULL,
-                                        error);
+  rc = lc_pouch_namespace_manifest_open(&pouch->allocator, pouch->root_path, ns,
+                                        &manifest, NULL, NULL, error);
   if (rc != LC_OK) {
     lc_pouch_namespace_manifest_cleanup(&pouch->allocator, &manifest);
     return rc;
@@ -1036,33 +1032,31 @@ static int lc_pouch_migration_sync_namespace(lc_pouch *pouch,
   return rc;
 }
 
-static int lc_pouch_migration_scan_namespace(lc_pouch *pouch,
-                                             const char *namespace_name,
+static int lc_pouch_migration_scan_namespace(lc_pouch *pouch, const char *ns,
                                              int *incomplete, lc_error *error) {
   lc_pouch_migration_namespace migration;
   int rc;
 
   memset(&migration, 0, sizeof(migration));
   migration.pouch = pouch;
-  migration.namespace_name = namespace_name;
-  if (strcmp(namespace_name, LC_POUCH_MIGRATION_TXN_NAMESPACE) == 0) {
-    rc = lc_pouch_state_visit(pouch, namespace_name,
-                              lc_pouch_migration_txn_visit, &migration, error);
+  migration.ns = ns;
+  if (strcmp(ns, LC_POUCH_MIGRATION_TXN_NAMESPACE) == 0) {
+    rc = lc_pouch_state_visit(pouch, ns, lc_pouch_migration_txn_visit,
+                              &migration, error);
     rc = lc_pouch_migration_defer_unrelated_protocol_error(&migration, rc,
                                                            error);
   } else {
     rc = LC_OK;
   }
   if (rc == LC_OK) {
-    rc =
-        lc_pouch_state_visit(pouch, namespace_name,
-                             lc_pouch_migration_lease_visit, &migration, error);
+    rc = lc_pouch_state_visit(pouch, ns, lc_pouch_migration_lease_visit,
+                              &migration, error);
     rc = lc_pouch_migration_defer_unrelated_protocol_error(&migration, rc,
                                                            error);
   }
   *incomplete |= migration.incomplete;
   if (rc == LC_OK && !migration.incomplete) {
-    rc = lc_pouch_migration_sync_namespace(pouch, namespace_name, error);
+    rc = lc_pouch_migration_sync_namespace(pouch, ns, error);
   }
   return rc;
 }
@@ -1201,7 +1195,7 @@ int lc_pouch_control_migration_run(lc_pouch *pouch, lc_error *error) {
   } else {
     rc = LC_OK;
     while (rc == LC_OK) {
-      char *namespace_name;
+      char *ns;
 
       errno = 0;
       entry = readdir(directory);
@@ -1216,17 +1210,15 @@ int lc_pouch_control_migration_run(lc_pouch *pouch, lc_error *error) {
       if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
         continue;
       }
-      namespace_name =
-          lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
-      if (namespace_name == NULL) {
+      ns = lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
+      if (ns == NULL) {
         rc = lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to decode pouch migration namespace", NULL,
                           NULL, "pouch");
         break;
       }
-      rc = lc_pouch_migration_scan_namespace(pouch, namespace_name, &incomplete,
-                                             error);
-      lc_free_with_allocator(&pouch->allocator, namespace_name);
+      rc = lc_pouch_migration_scan_namespace(pouch, ns, &incomplete, error);
+      lc_free_with_allocator(&pouch->allocator, ns);
     }
     if (closedir(directory) != 0 && rc == LC_OK) {
       rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,

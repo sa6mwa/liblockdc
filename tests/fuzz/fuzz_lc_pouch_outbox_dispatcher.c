@@ -59,7 +59,7 @@ static void outbox_fuzz_run(const uint8_t *data, size_t size,
   outbox_fuzz_require(lc_client_open(&client_config, &client, &error), &error,
                       "open");
   lc_outbox_config_init(&outbox_config);
-  outbox_config.namespace_name = "outbox-fuzz";
+  outbox_config.ns = "outbox-fuzz";
   outbox_config.owner = "outbox-fuzz-owner";
   outbox_config.notification_capacity = 1U + (knobs & 3U);
   outbox_config.recovery_interval_seconds = 0L;

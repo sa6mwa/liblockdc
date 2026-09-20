@@ -549,7 +549,7 @@ lc_consumer_runtime_message_wrap(lc_consumer_delivery_bridge *bridge,
   runtime_message->pub.write_payload =
       lc_consumer_runtime_message_write_payload;
   runtime_message->pub.close = lc_consumer_runtime_message_close;
-  runtime_message->pub.namespace_name = inner->namespace_name;
+  runtime_message->pub.ns = inner->ns;
   runtime_message->pub.queue = inner->queue;
   runtime_message->pub.message_id = inner->message_id;
   runtime_message->pub.attempts = inner->attempts;
@@ -575,7 +575,7 @@ static void lc_consumer_request_cleanup(const lc_allocator *allocator,
   if (request == NULL) {
     return;
   }
-  lc_free_with_allocator(allocator, (char *)request->namespace_name);
+  lc_free_with_allocator(allocator, (char *)request->ns);
   lc_free_with_allocator(allocator, (char *)request->queue);
   lc_free_with_allocator(allocator, (char *)request->owner);
   lc_free_with_allocator(allocator, (char *)request->txn_id);
@@ -747,7 +747,7 @@ lc_consumer_log_subscribe_event(lc_consumer_service_handle *service,
 
   fields[0] = lc_log_str_field("consumer", config->name);
   fields[1] = lc_log_str_field("queue", config->request.queue);
-  fields[2] = lc_log_str_field("ns", config->request.namespace_name);
+  fields[2] = lc_log_str_field("ns", config->request.ns);
   fields[3] = lc_log_str_field("owner", config->request.owner);
   fields[4] = lc_log_bool_field("with_state", config->with_state);
   lc_log_info(service->logger, message, fields, 5U);
@@ -761,7 +761,7 @@ lc_consumer_log_subscribe_error(lc_consumer_service_handle *service,
 
   fields[0] = lc_log_str_field("consumer", config->name);
   fields[1] = lc_log_str_field("queue", config->request.queue);
-  fields[2] = lc_log_str_field("ns", config->request.namespace_name);
+  fields[2] = lc_log_str_field("ns", config->request.ns);
   fields[3] = lc_log_str_field("owner", config->request.owner);
   fields[4] = lc_log_bool_field("with_state", config->with_state);
   fields[5] = lc_log_code_field(error);
@@ -878,18 +878,16 @@ static int lc_consumer_copy_request(lc_dequeue_req *dst,
                                     const lc_allocator *allocator,
                                     lc_error *error) {
   memset(dst, 0, sizeof(*dst));
-  dst->namespace_name =
-      lc_strdup_with_allocator(allocator, src->namespace_name);
-  if (src->namespace_name != NULL && dst->namespace_name == NULL) {
+  dst->ns = lc_strdup_with_allocator(allocator, src->ns);
+  if (src->ns != NULL && dst->ns == NULL) {
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to copy consumer namespace", NULL, NULL, NULL);
   }
-  if ((dst->namespace_name == NULL || dst->namespace_name[0] == '\0') &&
-      default_namespace != NULL && default_namespace[0] != '\0') {
-    lc_free_with_allocator(allocator, (char *)dst->namespace_name);
-    dst->namespace_name =
-        lc_strdup_with_allocator(allocator, default_namespace);
-    if (dst->namespace_name == NULL) {
+  if ((dst->ns == NULL || dst->ns[0] == '\0') && default_namespace != NULL &&
+      default_namespace[0] != '\0') {
+    lc_free_with_allocator(allocator, (char *)dst->ns);
+    dst->ns = lc_strdup_with_allocator(allocator, default_namespace);
+    if (dst->ns == NULL) {
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to default consumer namespace", NULL, NULL,
                           NULL);
@@ -1321,7 +1319,7 @@ static void
 lc_consumer_delivery_meta_copy(lc_engine_dequeue_response *dst,
                                const lc_engine_dequeue_response *src) {
   memset(dst, 0, sizeof(*dst));
-  dst->namespace_name = lc_strdup_local(src->namespace_name);
+  dst->ns = lc_strdup_local(src->ns);
   dst->queue = lc_strdup_local(src->queue);
   dst->message_id = lc_strdup_local(src->message_id);
   dst->attempts = src->attempts;
@@ -1364,8 +1362,7 @@ lc_consumer_delivery_begin(void *context,
 
     fields[0] = lc_log_str_field("consumer", bridge->worker->config.name);
     fields[1] = lc_log_str_field("queue", bridge->worker->config.request.queue);
-    fields[2] =
-        lc_log_str_field("ns", bridge->worker->config.request.namespace_name);
+    fields[2] = lc_log_str_field("ns", bridge->worker->config.request.ns);
     fields[3] = lc_log_str_field("msg_id", delivery->message_id);
     fields[4] = pslog_i64("attempts", (pslog_int64)delivery->attempts);
     fields[5] = pslog_i64("failures", (pslog_int64)delivery->failure_attempts);
@@ -1602,8 +1599,7 @@ static int lc_consumer_delivery_end(void *context,
 
     fields[0] = lc_log_str_field("consumer", bridge->worker->config.name);
     fields[1] = lc_log_str_field("queue", bridge->worker->config.request.queue);
-    fields[2] =
-        lc_log_str_field("ns", bridge->worker->config.request.namespace_name);
+    fields[2] = lc_log_str_field("ns", bridge->worker->config.request.ns);
     fields[3] = lc_log_str_field(
         "message_id", delivery != NULL ? delivery->message_id : NULL);
     fields[4] = lc_log_bool_field(
@@ -1632,8 +1628,7 @@ lc_consumer_delivery_begin_message(lc_consumer_delivery_bridge *bridge,
 
     fields[0] = lc_log_str_field("consumer", bridge->worker->config.name);
     fields[1] = lc_log_str_field("queue", bridge->worker->config.request.queue);
-    fields[2] =
-        lc_log_str_field("ns", bridge->worker->config.request.namespace_name);
+    fields[2] = lc_log_str_field("ns", bridge->worker->config.request.ns);
     fields[3] = lc_log_str_field("msg_id", inner->message_id);
     fields[4] = pslog_i64("attempts", (pslog_int64)inner->attempts);
     fields[5] = pslog_i64("failures", (pslog_int64)inner->failure_attempts);
@@ -1778,7 +1773,7 @@ static int lc_consumer_process_pouch_message(lc_consumer_worker_state *worker,
 
     fields[0] = lc_log_str_field("consumer", worker->config.name);
     fields[1] = lc_log_str_field("queue", worker->config.request.queue);
-    fields[2] = lc_log_str_field("ns", worker->config.request.namespace_name);
+    fields[2] = lc_log_str_field("ns", worker->config.request.ns);
     fields[3] = lc_log_str_field("msg_id", NULL);
     fields[4] = lc_log_bool_field(
         "terminal", lc_consumer_delivery_state_is_terminal(bridge.state));
@@ -2135,7 +2130,7 @@ static void *lc_consumer_worker_main(void *context) {
   }
 
   memset(&request, 0, sizeof(request));
-  request.namespace_name = worker->config.request.namespace_name;
+  request.ns = worker->config.request.ns;
   request.queue = worker->config.request.queue;
   request.owner = worker->config.request.owner;
   request.txn_id = worker->config.request.txn_id;

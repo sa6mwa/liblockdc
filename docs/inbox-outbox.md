@@ -478,7 +478,7 @@ second, callback-based outbox model. Its names may be idiomatic Lua, but its
 semantics must match the C surface:
 
 ```lua
-local outbox = client:new_outbox({ namespace_name = "app-outbox" })
+local outbox = client:new_outbox({ namespace = "app-outbox" })
 
 local command_txn, command = outbox:accept_command({
   scope = tenant_id,
@@ -488,7 +488,7 @@ local command_txn, command = outbox:accept_command({
   operation_id = order_operation_id,
 })
 if command_txn then
-  local order = command_txn:acquire({ namespace_name = "orders", key = order_id,
+  local order = command_txn:acquire({ namespace = "orders", key = order_id,
                                       owner = "orders-api", ttl_seconds = 30 })
   order:update(order_update_source)
   command_txn:append(entry, payload_source)
@@ -501,7 +501,7 @@ end
 
 local txn, duplicate = outbox:append(entry, payload_source)
 if txn then
-  local order = txn:acquire({ namespace_name = "orders", key = order_id,
+  local order = txn:acquire({ namespace = "orders", key = order_id,
                               owner = "orders-api", ttl_seconds = 30 })
   order:update(order_update_source)
   local result = txn:commit() -- result.outbox_receipts are now safe to wake
@@ -510,7 +510,7 @@ else
 end
 
 local update_first = outbox:begin()
-local updated_order = update_first:acquire({ namespace_name = "orders", key = order_id,
+local updated_order = update_first:acquire({ namespace = "orders", key = order_id,
                                               owner = "orders-api", ttl_seconds = 30 })
 updated_order:update(order_update_source)
 update_first:append(entry, payload_source)

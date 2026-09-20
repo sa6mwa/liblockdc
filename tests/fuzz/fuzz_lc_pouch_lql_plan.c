@@ -161,7 +161,7 @@ static int fuzz_seed_store(lc_client *client, lc_error *error) {
 
   lc_index_flush_req_init(&flush_req);
   memset(&flush_res, 0, sizeof(flush_res));
-  flush_req.namespace_name = "fuzz";
+  flush_req.ns = "fuzz";
   flush_req.mode = "wait";
   rc = client->flush_index(client, &flush_req, &flush_res, error);
   lc_index_flush_res_cleanup(&flush_res);
@@ -187,7 +187,7 @@ static int fuzz_install_snapshot(const char *root,
   }
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
   if (rc == LC_OK) {
-    maintenance_options.namespace_name = "fuzz";
+    maintenance_options.ns = "fuzz";
     maintenance_options.force = 1;
     rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                   &maintenance_result, error);
@@ -429,7 +429,7 @@ static int fuzz_query_keys(lc_client *client, const char *selector,
   handler.begin = fuzz_key_begin;
   handler.chunk = fuzz_key_chunk;
   handler.end = fuzz_key_end;
-  req.namespace_name = "fuzz";
+  req.ns = "fuzz";
   if (selector_is_lql) {
     req.selector_lql = selector;
   } else {

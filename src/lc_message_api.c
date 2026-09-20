@@ -17,7 +17,7 @@ int lc_message_ack_method(lc_message *self, lc_error *error) {
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("queue", message->queue);
-    fields[1] = lc_log_str_field("ns", message->namespace_name);
+    fields[1] = lc_log_str_field("ns", message->ns);
     fields[2] = lc_log_str_field("msg_id", message->message_id);
     fields[3] = lc_log_str_field("lease_id", message->lease_id);
     fields[4] = lc_log_str_field("txn_id", message->txn_id);
@@ -26,7 +26,7 @@ int lc_message_ack_method(lc_message *self, lc_error *error) {
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = message->namespace_name;
+  engine_req.ns = message->ns;
   engine_req.queue = message->queue;
   engine_req.message_id = message->message_id;
   engine_req.lease_id = message->lease_id;
@@ -44,7 +44,7 @@ int lc_message_ack_method(lc_message *self, lc_error *error) {
       pslog_field fields[8];
 
       fields[0] = lc_log_str_field("queue", message->queue);
-      fields[1] = lc_log_str_field("ns", message->namespace_name);
+      fields[1] = lc_log_str_field("ns", message->ns);
       fields[2] = lc_log_str_field("msg_id", message->message_id);
       fields[3] = lc_log_str_field("lease_id", message->lease_id);
       fields[4] = lc_log_str_field("txn_id", message->txn_id);
@@ -60,7 +60,7 @@ int lc_message_ack_method(lc_message *self, lc_error *error) {
     pslog_field fields[6];
 
     fields[0] = lc_log_str_field("queue", message->queue);
-    fields[1] = lc_log_str_field("ns", message->namespace_name);
+    fields[1] = lc_log_str_field("ns", message->ns);
     fields[2] = lc_log_str_field("msg_id", message->message_id);
     fields[3] = lc_log_str_field("lease_id", message->lease_id);
     fields[4] = lc_log_bool_field("acked", engine_res.acked);
@@ -101,7 +101,7 @@ int lc_message_nack_method(lc_message *self, const lc_nack_req *req,
     pslog_field fields[6];
 
     fields[0] = lc_log_str_field("queue", message->queue);
-    fields[1] = lc_log_str_field("ns", message->namespace_name);
+    fields[1] = lc_log_str_field("ns", message->ns);
     fields[2] = lc_log_str_field("msg_id", message->message_id);
     fields[3] = lc_log_str_field("lease_id", message->lease_id);
     fields[4] = pslog_i64("delay_s", (pslog_int64)req->delay_seconds);
@@ -112,7 +112,7 @@ int lc_message_nack_method(lc_message *self, const lc_nack_req *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = message->namespace_name;
+  engine_req.ns = message->ns;
   engine_req.queue = message->queue;
   engine_req.message_id = message->message_id;
   engine_req.lease_id = message->lease_id;
@@ -133,7 +133,7 @@ int lc_message_nack_method(lc_message *self, const lc_nack_req *req,
       pslog_field fields[9];
 
       fields[0] = lc_log_str_field("queue", message->queue);
-      fields[1] = lc_log_str_field("ns", message->namespace_name);
+      fields[1] = lc_log_str_field("ns", message->ns);
       fields[2] = lc_log_str_field("msg_id", message->message_id);
       fields[3] = lc_log_str_field("lease_id", message->lease_id);
       fields[4] = pslog_i64("delay_s", (pslog_int64)req->delay_seconds);
@@ -151,7 +151,7 @@ int lc_message_nack_method(lc_message *self, const lc_nack_req *req,
     pslog_field fields[7];
 
     fields[0] = lc_log_str_field("queue", message->queue);
-    fields[1] = lc_log_str_field("ns", message->namespace_name);
+    fields[1] = lc_log_str_field("ns", message->ns);
     fields[2] = lc_log_str_field("msg_id", message->message_id);
     fields[3] = lc_log_str_field("lease_id", message->lease_id);
     fields[4] = lc_log_bool_field("requeued", engine_res.requeued);
@@ -188,7 +188,7 @@ int lc_message_extend_method(lc_message *self, const lc_extend_req *req,
     pslog_field fields[5];
 
     fields[0] = lc_log_str_field("queue", message->queue);
-    fields[1] = lc_log_str_field("ns", message->namespace_name);
+    fields[1] = lc_log_str_field("ns", message->ns);
     fields[2] = lc_log_str_field("msg_id", message->message_id);
     fields[3] = lc_log_str_field("lease_id", message->lease_id);
     fields[4] = pslog_i64("extend_s", (pslog_int64)req->extend_by_seconds);
@@ -197,7 +197,7 @@ int lc_message_extend_method(lc_message *self, const lc_extend_req *req,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = message->namespace_name;
+  engine_req.ns = message->ns;
   engine_req.queue = message->queue;
   engine_req.message_id = message->message_id;
   engine_req.lease_id = message->lease_id;
@@ -215,7 +215,7 @@ int lc_message_extend_method(lc_message *self, const lc_extend_req *req,
       pslog_field fields[8];
 
       fields[0] = lc_log_str_field("queue", message->queue);
-      fields[1] = lc_log_str_field("ns", message->namespace_name);
+      fields[1] = lc_log_str_field("ns", message->ns);
       fields[2] = lc_log_str_field("msg_id", message->message_id);
       fields[3] = lc_log_str_field("lease_id", message->lease_id);
       fields[4] = pslog_i64("extend_s", (pslog_int64)req->extend_by_seconds);
@@ -245,7 +245,7 @@ int lc_message_extend_method(lc_message *self, const lc_extend_req *req,
     pslog_field fields[7];
 
     fields[0] = lc_log_str_field("queue", message->queue);
-    fields[1] = lc_log_str_field("ns", message->namespace_name);
+    fields[1] = lc_log_str_field("ns", message->ns);
     fields[2] = lc_log_str_field("msg_id", message->message_id);
     fields[3] = lc_log_str_field("lease_id", message->lease_id);
     fields[4] = pslog_i64("lease_expires_at",
@@ -330,7 +330,7 @@ void lc_message_close_method(lc_message *self) {
     return;
   }
   message = (lc_message_handle *)self;
-  lc_client_free(message->client, message->namespace_name);
+  lc_client_free(message->client, message->ns);
   lc_client_free(message->client, message->queue);
   lc_client_free(message->client, message->message_id);
   lc_client_free(message->client, message->payload_content_type);

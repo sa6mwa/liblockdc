@@ -375,7 +375,7 @@ Lua mirrors the ownership split exactly.
 ```lua
 -- Producer or request domain: no dispatcher thread is created.
 local outbox = assert(client:new_outbox({
-  namespace_name = "myapp.orders",
+  namespace = "myapp.orders",
   max_attempts = 12,
 }))
 
@@ -386,7 +386,7 @@ end)
 -- Worker/service domain, normally a distinct process with its own client.
 local worker_client = assert(lockdc.open(worker_client_config))
 local worker_outbox = assert(worker_client:new_outbox({
-  namespace_name = "myapp.orders",
+  namespace = "myapp.orders",
   max_attempts = 12,
 }))
 local dispatcher = assert(worker_outbox:dispatcher())

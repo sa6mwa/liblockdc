@@ -9,7 +9,7 @@ local client = assert(lockdc.open({
   pouch = { single_writer = false },
 }))
 local outbox = assert(client:new_outbox({
-  namespace_name = "outbox-example",
+  namespace = "outbox-example",
   owner = "outbox-example-producer",
 }))
 local dispatcher = assert(outbox:dispatcher())

@@ -105,8 +105,7 @@ lc_copy_txn_participants(const lc_txn_decision_req *req,
     return 0;
   }
   for (index = 0U; index < req->participant_count; ++index) {
-    participants[index].namespace_name =
-        req->participants[index].namespace_name;
+    participants[index].ns = req->participants[index].ns;
     participants[index].key = req->participants[index].key;
     participants[index].backend_hash = req->participants[index].backend_hash;
   }
@@ -145,12 +144,12 @@ static int lc_copy_namespace_config_res(
     lc_namespace_config_res *out,
     const lc_engine_namespace_config_response *engine) {
   memset(out, 0, sizeof(*out));
-  out->namespace_name = lc_strdup_local(engine->namespace_name);
+  out->ns = lc_strdup_local(engine->ns);
   out->preferred_engine = lc_strdup_local(engine->preferred_engine);
   out->fallback_engine = lc_strdup_local(engine->fallback_engine);
   out->etag = lc_strdup_local(engine->etag);
   out->correlation_id = lc_strdup_local(engine->correlation_id);
-  if ((engine->namespace_name != NULL && out->namespace_name == NULL) ||
+  if ((engine->ns != NULL && out->ns == NULL) ||
       (engine->preferred_engine != NULL && out->preferred_engine == NULL) ||
       (engine->fallback_engine != NULL && out->fallback_engine == NULL) ||
       (engine->etag != NULL && out->etag == NULL) ||
@@ -165,7 +164,7 @@ static int
 lc_copy_index_flush_res(lc_index_flush_res *out,
                         const lc_engine_index_flush_response *engine) {
   memset(out, 0, sizeof(*out));
-  out->namespace_name = lc_strdup_local(engine->namespace_name);
+  out->ns = lc_strdup_local(engine->ns);
   out->mode = lc_strdup_local(engine->mode);
   out->flush_id = lc_strdup_local(engine->flush_id);
   out->accepted = engine->accepted;
@@ -173,7 +172,7 @@ lc_copy_index_flush_res(lc_index_flush_res *out,
   out->pending = engine->pending;
   out->index_seq = engine->index_seq;
   out->correlation_id = lc_strdup_local(engine->correlation_id);
-  if ((engine->namespace_name != NULL && out->namespace_name == NULL) ||
+  if ((engine->ns != NULL && out->ns == NULL) ||
       (engine->mode != NULL && out->mode == NULL) ||
       (engine->flush_id != NULL && out->flush_id == NULL) ||
       (engine->correlation_id != NULL && out->correlation_id == NULL)) {
@@ -316,19 +315,19 @@ int lc_client_get_namespace_config_method(lc_client *self,
   {
     pslog_field fields[1];
 
-    fields[0] = lc_log_str_field("ns", req->namespace_name);
+    fields[0] = lc_log_str_field("ns", req->ns);
     lc_log_trace(client->logger, "namespace.get.start", fields, 1U);
   }
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  rc = lc_engine_client_get_namespace_config(
-      client->engine, req->namespace_name, &engine_res, &engine_error);
+  rc = lc_engine_client_get_namespace_config(client->engine, req->ns,
+                                             &engine_res, &engine_error);
   if (rc != LC_ENGINE_OK) {
     rc = lc_error_from_engine(error, &engine_error);
     {
       pslog_field fields[1];
 
-      fields[0] = lc_log_str_field("ns", req->namespace_name);
+      fields[0] = lc_log_str_field("ns", req->ns);
       lc_client_log_management_error(
           client,
           error != NULL && error->code == LC_ERR_TRANSPORT ? PSLOG_LEVEL_ERROR
@@ -351,7 +350,7 @@ int lc_client_get_namespace_config_method(lc_client *self,
   {
     pslog_field fields[4];
 
-    fields[0] = lc_log_str_field("ns", out->namespace_name);
+    fields[0] = lc_log_str_field("ns", out->ns);
     fields[1] = lc_log_str_field("preferred_engine", out->preferred_engine);
     fields[2] = lc_log_str_field("fallback_engine", out->fallback_engine);
     fields[3] = lc_log_str_field("cid", out->correlation_id);
@@ -381,7 +380,7 @@ int lc_client_update_namespace_config_method(lc_client *self,
   {
     pslog_field fields[3];
 
-    fields[0] = lc_log_str_field("ns", req->namespace_name);
+    fields[0] = lc_log_str_field("ns", req->ns);
     fields[1] = lc_log_str_field("preferred_engine", req->preferred_engine);
     fields[2] = lc_log_str_field("fallback_engine", req->fallback_engine);
     lc_log_trace(client->logger, "namespace.set.start", fields, 3U);
@@ -389,7 +388,7 @@ int lc_client_update_namespace_config_method(lc_client *self,
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->namespace_name;
+  engine_req.ns = req->ns;
   engine_req.preferred_engine = req->preferred_engine;
   engine_req.fallback_engine = req->fallback_engine;
   engine_req.if_etag = req->if_etag;
@@ -400,7 +399,7 @@ int lc_client_update_namespace_config_method(lc_client *self,
     {
       pslog_field fields[3];
 
-      fields[0] = lc_log_str_field("ns", req->namespace_name);
+      fields[0] = lc_log_str_field("ns", req->ns);
       fields[1] = lc_log_str_field("preferred_engine", req->preferred_engine);
       fields[2] = lc_log_str_field("fallback_engine", req->fallback_engine);
       lc_client_log_management_error(
@@ -425,7 +424,7 @@ int lc_client_update_namespace_config_method(lc_client *self,
   {
     pslog_field fields[4];
 
-    fields[0] = lc_log_str_field("ns", out->namespace_name);
+    fields[0] = lc_log_str_field("ns", out->ns);
     fields[1] = lc_log_str_field("preferred_engine", out->preferred_engine);
     fields[2] = lc_log_str_field("fallback_engine", out->fallback_engine);
     fields[3] = lc_log_str_field("cid", out->correlation_id);
@@ -453,14 +452,14 @@ int lc_client_flush_index_method(lc_client *self, const lc_index_flush_req *req,
   {
     pslog_field fields[2];
 
-    fields[0] = lc_log_str_field("ns", req->namespace_name);
+    fields[0] = lc_log_str_field("ns", req->ns);
     fields[1] = lc_log_str_field("mode", req->mode);
     lc_log_trace(client->logger, "index.flush.start", fields, 2U);
   }
   memset(&engine_req, 0, sizeof(engine_req));
   memset(&engine_res, 0, sizeof(engine_res));
   lc_engine_error_init(&engine_error);
-  engine_req.namespace_name = req->namespace_name;
+  engine_req.ns = req->ns;
   engine_req.mode = req->mode;
   rc = lc_engine_client_index_flush(client->engine, &engine_req, &engine_res,
                                     &engine_error);
@@ -469,7 +468,7 @@ int lc_client_flush_index_method(lc_client *self, const lc_index_flush_req *req,
     {
       pslog_field fields[2];
 
-      fields[0] = lc_log_str_field("ns", req->namespace_name);
+      fields[0] = lc_log_str_field("ns", req->ns);
       fields[1] = lc_log_str_field("mode", req->mode);
       lc_client_log_management_error(
           client,
@@ -493,7 +492,7 @@ int lc_client_flush_index_method(lc_client *self, const lc_index_flush_req *req,
   {
     pslog_field fields[5];
 
-    fields[0] = lc_log_str_field("ns", out->namespace_name);
+    fields[0] = lc_log_str_field("ns", out->ns);
     fields[1] = lc_log_str_field("mode", out->mode);
     fields[2] = lc_log_bool_field("accepted", out->accepted);
     fields[3] = lc_log_bool_field("flushed", out->flushed);

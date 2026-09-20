@@ -5,8 +5,9 @@
  * @file lc/lc.h
  * @brief Public C API for remote lockd and local Pouch clients.
  *
- * The API is C89-compatible and uses receiver-style handles for normal
- * operations. Initialize transparent request/config structs with their
+ * The API is C89-compatible, supports C++98-or-later consumers through C
+ * linkage, and uses receiver-style handles for normal operations. Initialize
+ * transparent request/config structs with their
  * matching `*_init()` function, then call methods such as
  * `client->acquire(client, ...)` and `lease->update(lease, ...)`.
  *
@@ -36,6 +37,10 @@
 #include <pslog.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /** Default maximum bytes accepted while parsing a typed JSON HTTP response. */
 #define LC_HTTP_JSON_RESPONSE_LIMIT_DEFAULT (100UL * 1024UL * 1024UL)
@@ -360,7 +365,7 @@ typedef struct lc_client_config {
   lc_source *client_bundle_source;
   /** Deprecated compatibility path to the combined PEM bundle. */
   const char *client_bundle_path;
-  /** Namespace used when a request leaves `namespace_name` unset. */
+  /** Namespace used when a request leaves `ns` unset. */
   const char *default_namespace;
   /**
    * Whole-request timeout in milliseconds.
@@ -512,7 +517,7 @@ typedef struct lc_file_value_resolver {
 /** Request used to acquire a new lease. */
 typedef struct lc_acquire_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Lease key to acquire. */
   const char *key;
   /** Non-empty logical owner identifier required for lease acquisition. */
@@ -544,7 +549,7 @@ typedef struct lc_acquire_res {
  * token; an empty reference is never an unfenced write request. */
 typedef struct lc_lease_ref {
   /** Namespace of the existing lease. */
-  const char *namespace_name;
+  const char *ns;
   /** Key of the existing lease. */
   const char *key;
   /** Server-issued lease identifier, required for every mutation. */
@@ -558,7 +563,7 @@ typedef struct lc_lease_ref {
 /** Request used to describe a lease or state object. */
 typedef struct lc_describe_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Key to describe. */
   const char *key;
 } lc_describe_req;
@@ -566,7 +571,7 @@ typedef struct lc_describe_req {
 /** Lease description returned by describe operations. */
 typedef struct lc_describe_res {
   /** Namespace of the described key. */
-  char *namespace_name;
+  char *ns;
   /** Described key. */
   char *key;
   /** Current lease owner, when a lease is active. */
@@ -748,7 +753,7 @@ typedef struct lc_metadata_op {
 /** Metadata returned by a successful metadata update. */
 typedef struct lc_metadata_res {
   /** Namespace of the updated key. */
-  char *namespace_name;
+  char *ns;
   /** Updated key. */
   char *key;
   /** State version after the metadata update. */
@@ -846,7 +851,7 @@ typedef struct lc_release_res {
 /** Streamed query request. Query result rows are written into a sink. */
 typedef struct lc_query_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** JSON selector expression used by the query engine. */
   const char *selector_json;
   /** Maximum number of rows to return in this page. */
@@ -912,13 +917,13 @@ typedef struct lc_query_key_handler {
 /**
  * Creates or reopens one durable history-retention consumer.
  *
- * The `(namespace_name, consumer_id)` pair is durable identity. A consumer
+ * The `(ns, consumer_id)` pair is durable identity. A consumer
  * pins Pouch log history until it advances its acknowledged sequence or is
  * explicitly unregistered. It does not itself deliver history records.
  */
 typedef struct lc_history_consumer_config {
   /** Namespace whose durable history this consumer retains. */
-  const char *namespace_name;
+  const char *ns;
   /** Stable, nonempty application-defined consumer identity. */
   const char *consumer_id;
   /**
@@ -948,7 +953,7 @@ typedef struct lc_string_list {
 /** Request used to read or update namespace configuration. */
 typedef struct lc_namespace_config_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Preferred query engine, for example `index` or `scan`. */
   const char *preferred_engine;
   /** Fallback query engine, for example `scan`. */
@@ -960,7 +965,7 @@ typedef struct lc_namespace_config_req {
 /** Namespace configuration returned by get or update operations. */
 typedef struct lc_namespace_config_res {
   /** Namespace whose config was returned. */
-  char *namespace_name;
+  char *ns;
   /** Preferred query engine. */
   char *preferred_engine;
   /** Fallback query engine. */
@@ -974,7 +979,7 @@ typedef struct lc_namespace_config_res {
 /** Request used to flush an index for a namespace. */
 typedef struct lc_index_flush_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Flush mode, for example `wait` for synchronous freshness. */
   const char *mode;
 } lc_index_flush_req;
@@ -982,7 +987,7 @@ typedef struct lc_index_flush_req {
 /** Result returned by an index flush request. */
 typedef struct lc_index_flush_res {
   /** Namespace whose index was flushed. */
-  char *namespace_name;
+  char *ns;
   /** Flush mode applied by the engine. */
   char *mode;
   /** Engine-generated flush identifier, when present. */
@@ -1005,7 +1010,7 @@ typedef struct lc_index_flush_res {
  * whitespace-only nonempty values are invalid. */
 typedef struct lc_txn_participant {
   /** Participant namespace. */
-  const char *namespace_name;
+  const char *ns;
   /** Participant key. */
   const char *key;
   /** Target backend hash or compatibility wildcard. */
@@ -1214,7 +1219,7 @@ typedef struct lc_tc_rm_list_res {
 /** Request used to enqueue a streamed queue payload. */
 typedef struct lc_enqueue_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Queue name. */
   const char *queue;
   /** Initial delivery delay in seconds. The resulting Unix timestamp must fit
@@ -1235,7 +1240,7 @@ typedef struct lc_enqueue_req {
 /** Result returned by a successful queue enqueue operation. */
 typedef struct lc_enqueue_res {
   /** Owned namespace containing the message. */
-  char *namespace_name;
+  char *ns;
   /** Owned queue name. */
   char *queue;
   /** Owned server-issued message identifier. */
@@ -1259,7 +1264,7 @@ typedef struct lc_enqueue_res {
 /** Request used to dequeue queue messages. */
 typedef struct lc_dequeue_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Queue name. */
   const char *queue;
   /**
@@ -1283,7 +1288,7 @@ typedef struct lc_dequeue_req {
 /** Request used to fetch queue-level statistics. */
 typedef struct lc_queue_stats_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Queue name. */
   const char *queue;
 } lc_queue_stats_req;
@@ -1291,7 +1296,7 @@ typedef struct lc_queue_stats_req {
 /** Queue-level metrics and head-of-line metadata. */
 typedef struct lc_queue_stats_res {
   /** Namespace containing the queue. */
-  char *namespace_name;
+  char *ns;
   /** Queue name. */
   char *queue;
   /** Number of consumers currently waiting. */
@@ -1333,7 +1338,7 @@ typedef struct lc_dequeue_batch_res {
 /** Stable queue message identity used by client-level queue operations. */
 typedef struct lc_message_ref {
   /** Namespace of the message. */
-  const char *namespace_name;
+  const char *ns;
   /** Queue containing the message. */
   const char *queue;
   /** Server-issued message identifier. */
@@ -1491,7 +1496,7 @@ typedef struct lc_extend_res {
 /** Request used to watch queue availability changes. */
 typedef struct lc_watch_queue_req {
   /** Target namespace, or `NULL` to use `client->default_namespace`. */
-  const char *namespace_name;
+  const char *ns;
   /** Queue name. */
   const char *queue;
 } lc_watch_queue_req;
@@ -1499,7 +1504,7 @@ typedef struct lc_watch_queue_req {
 /** Event delivered to queue watch handlers. */
 typedef struct lc_watch_event {
   /** Namespace containing the watched queue. */
-  char *namespace_name;
+  char *ns;
   /** Queue name. */
   char *queue;
   /** Non-zero when a message is available. */
@@ -1646,7 +1651,7 @@ typedef struct lc_consumer_lifecycle_event {
  * One managed consumer loop configuration used by `lc_consumer_service`.
  *
  * The service will default `request.owner` when it is empty, default
- * `request.namespace_name` from the client when it is empty, and then run a
+ * `request.ns` from the client when it is empty, and then run a
  * long-lived streaming subscribe loop that calls `handle()` once per
  * delivery.
  */
@@ -1712,7 +1717,7 @@ typedef struct lc_consumer_service_config {
 
 /** Settings for one inbox/outbox namespace.
  *
- * `namespace_name` is required. All zero duration/count fields use the
+ * `ns` is required. All zero duration/count fields use the
  * documented defaults; negative values, invalid retry ranges, and claim TTLs
  * that cannot produce an `lc_unix_seconds` deadline are rejected during
  * `lc_client_new_outbox()`. Dispatcher resources are created only by
@@ -1720,7 +1725,7 @@ typedef struct lc_consumer_service_config {
  */
 typedef struct lc_outbox_config {
   /** Required namespace that contains both inbox and outbox records. */
-  const char *namespace_name;
+  const char *ns;
   /** Optional lease owner for component-owned records and claims. Defaults to
    * `"lockdc-outbox"`. */
   const char *owner;
@@ -2276,7 +2281,7 @@ struct lc_lease {
   void (*close)(lc_lease *self);
 
   /** Namespace of the bound lease. */
-  const char *namespace_name;
+  const char *ns;
   /** Key of the bound lease. */
   const char *key;
   /** Current recorded owner of the lease. */
@@ -2368,7 +2373,7 @@ struct lc_message {
   void (*close)(lc_message *self);
 
   /** Namespace containing the queue message. */
-  const char *namespace_name;
+  const char *ns;
   /** Queue name. */
   const char *queue;
   /** Server-issued message identifier. */
@@ -2578,7 +2583,7 @@ struct lc_outbox_participant {
   /** Releases this view; it cannot make a terminal transaction decision. */
   void (*close)(lc_outbox_participant *self);
   /** Borrowed namespace name; valid until this view is closed. */
-  const char *namespace_name;
+  const char *ns;
   /** Borrowed state key; valid until this view is closed. */
   const char *key;
   /** Borrowed transaction id; valid until this view is closed. */
@@ -2832,8 +2837,8 @@ struct lc_client {
    * `lc_client` receiver shell must provide this method when they support
    * `lc_load_in_namespace()`.
    */
-  int (*load_in_namespace)(lc_client *self, const char *namespace_name,
-                           const char *key, const lonejson_map *map, void *dst,
+  int (*load_in_namespace)(lc_client *self, const char *ns, const char *key,
+                           const lonejson_map *map, void *dst,
                            const lc_get_opts *opts, lc_get_res *out,
                            lc_error *error);
   /** Updates an existing, credentialed lease reference from a streamed JSON
@@ -3009,7 +3014,7 @@ struct lc_client {
    */
   void (*close)(lc_client *self);
 
-  /** Default namespace applied when request structs leave `namespace_name`
+  /** Default namespace applied when request structs leave `ns`
    * unset. */
   const char *default_namespace;
   /** Private implementation pointer; callers must not inspect or modify it. */
@@ -3527,8 +3532,8 @@ int lc_load(lc_client *client, const char *key, const lonejson_map *map,
  * component records that deliberately live outside the client's default
  * namespace.
  */
-int lc_load_in_namespace(lc_client *client, const char *namespace_name,
-                         const char *key, const lonejson_map *map, void *dst,
+int lc_load_in_namespace(lc_client *client, const char *ns, const char *key,
+                         const lonejson_map *map, void *dst,
                          const lc_get_opts *opts, lc_get_res *out,
                          lc_error *error);
 /** Updates an existing, credentialed lease reference from a streamed source. */
@@ -3975,5 +3980,9 @@ void lc_outbox_transaction_close(lc_outbox_transaction *transaction);
 void lc_outbox_participant_close(lc_outbox_participant *participant);
 /** Releases a history-consumer handle without unregistering it. */
 void lc_history_consumer_close(lc_history_consumer *consumer);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

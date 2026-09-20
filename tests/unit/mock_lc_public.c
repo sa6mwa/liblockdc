@@ -400,8 +400,7 @@ static int mock_client_load(lc_client *self, const char *key,
   return mock->rc;
 }
 
-static int mock_client_load_in_namespace(lc_client *self,
-                                         const char *namespace_name,
+static int mock_client_load_in_namespace(lc_client *self, const char *ns,
                                          const char *key,
                                          const lonejson_map *map, void *dst,
                                          const lc_get_opts *opts,
@@ -409,8 +408,8 @@ static int mock_client_load_in_namespace(lc_client *self,
   lc_public_mock_client *mock;
 
   mock = (lc_public_mock_client *)self;
-  lc_public_mock_record(&mock->load_in_namespace_call, self, namespace_name,
-                        key, map, dst, opts);
+  lc_public_mock_record(&mock->load_in_namespace_call, self, ns, key, map, dst,
+                        opts);
   mock->load_in_namespace_call.arg6 = out;
   (void)error;
   return mock->rc;

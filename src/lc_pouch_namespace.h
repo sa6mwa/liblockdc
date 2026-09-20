@@ -6,15 +6,13 @@
 #include <stdint.h>
 
 int lc_pouch_namespace_ensure(const lc_allocator *allocator,
-                              const char *root_path, const char *namespace_name,
+                              const char *root_path, const char *ns,
                               lc_error *error);
 int lc_pouch_namespace_ensure_layout(const lc_allocator *allocator,
-                                     const char *root_path,
-                                     const char *namespace_name,
+                                     const char *root_path, const char *ns,
                                      lc_error *error);
 char *lc_pouch_namespace_path(const lc_allocator *allocator,
-                              const char *root_path,
-                              const char *namespace_name);
+                              const char *root_path, const char *ns);
 
 typedef struct lc_pouch_namespace_manifest {
   char *namespace_path;
@@ -73,18 +71,17 @@ char *lc_pouch_namespace_snapshot_leaf(const lc_allocator *allocator,
 int lc_pouch_namespace_parse_segment_leaf(const char *leaf,
                                           uint64_t *segment_id);
 int lc_pouch_namespace_manifest_open(const lc_allocator *allocator,
-                                     const char *root_path,
-                                     const char *namespace_name,
+                                     const char *root_path, const char *ns,
                                      lc_pouch_namespace_manifest *out,
                                      unsigned long *cleanup_deleted_count,
                                      unsigned long *cleanup_pending_count,
                                      lc_error *error);
 int lc_pouch_namespace_manifest_rotate(const lc_allocator *allocator,
-                                       const char *namespace_name,
+                                       const char *ns,
                                        lc_pouch_namespace_manifest *manifest,
                                        uint64_t segment_id, lc_error *error);
 int lc_pouch_namespace_manifest_install_snapshot(
-    const lc_allocator *allocator, const char *namespace_name,
+    const lc_allocator *allocator, const char *ns,
     lc_pouch_namespace_manifest *manifest, const char *snapshot_leaf,
     uint64_t snapshot_segment_id, lc_error *error);
 int lc_pouch_namespace_manifest_mark_obsolete_segment(
@@ -94,11 +91,11 @@ int lc_pouch_namespace_manifest_mark_obsolete_snapshot(
     const lc_allocator *allocator, lc_pouch_namespace_manifest *manifest,
     const char *snapshot_leaf, uint64_t marked_at_unix, lc_error *error);
 int lc_pouch_namespace_manifest_save(const lc_allocator *allocator,
-                                     const char *namespace_name,
+                                     const char *ns,
                                      lc_pouch_namespace_manifest *manifest,
                                      lc_error *error);
 int lc_pouch_namespace_manifest_cleanup_obsolete(
-    const lc_allocator *allocator, const char *namespace_name,
+    const lc_allocator *allocator, const char *ns,
     lc_pouch_namespace_manifest *manifest, uint64_t now_unix,
     uint64_t delete_grace_seconds, unsigned long *deleted_count,
     unsigned long *pending_count, lc_error *error);

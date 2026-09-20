@@ -1,7 +1,7 @@
 local lockdc = require("lockdc")
 
 local root = os.getenv("LOCKDC_POUCH_ROOT") or "/var/lib/lockdc-lua"
-local namespace_name = os.getenv("LOCKDC_NAMESPACE") or "default"
+local namespace = os.getenv("LOCKDC_NAMESPACE") or "default"
 local key = os.getenv("LOCKDC_KEY") or "examples/lua/pouch-local-storage"
 local owner = os.getenv("LOCKDC_OWNER") or "lua-pouch-example"
 local key_file = os.getenv("LOCKDC_POUCH_KEY_FILE") or (root .. "/pouch.key")
@@ -13,7 +13,7 @@ end
 
 local client, err = lockdc.open({
   endpoints = { "pouch://" .. root },
-  default_namespace = namespace_name,
+  default_namespace = namespace,
   pouch = {
     crypto_key_file = key_file,
     crypto_generate_key_file = true,

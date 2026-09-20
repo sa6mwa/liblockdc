@@ -692,6 +692,15 @@ static const char *lcdc_opt_string_field(lua_State *L, int index,
   if (!lua_istable(L, index)) {
     return NULL;
   }
+  if (strcmp(name, "namespace") == 0) {
+    lua_pushliteral(L, "namespace_name");
+    lua_rawget(L, index);
+    if (!lua_isnil(L, -1)) {
+      lua_pop(L, 1);
+      luaL_error(L, "namespace_name is not supported; use namespace");
+    }
+    lua_pop(L, 1);
+  }
   lua_getfield(L, index, name);
   if (lua_isnil(L, -1)) {
     lua_pop(L, 1);
@@ -706,6 +715,15 @@ static int lcdc_require_string_field(lua_State *L, int index, const char *name,
                                      const char **out) {
   if (!lua_istable(L, index)) {
     luaL_error(L, "expected request table");
+  }
+  if (strcmp(name, "namespace") == 0) {
+    lua_pushliteral(L, "namespace_name");
+    lua_rawget(L, index);
+    if (!lua_isnil(L, -1)) {
+      lua_pop(L, 1);
+      luaL_error(L, "namespace_name is not supported; use namespace");
+    }
+    lua_pop(L, 1);
   }
   lua_getfield(L, index, name);
   if (out != NULL) {
@@ -1136,7 +1154,7 @@ static int lcdc_source_from_value(lua_State *L, int index, lc_source **out,
 
 static void lcdc_push_lease_info(lua_State *L, lc_lease *lease) {
   lua_newtable(L);
-  lcdc_set_string_field(L, "namespace_name", lease->namespace_name);
+  lcdc_set_string_field(L, "namespace", lease->ns);
   lcdc_set_string_field(L, "key", lease->key);
   lcdc_set_string_field(L, "owner", lease->owner);
   lcdc_set_string_field(L, "lease_id", lease->lease_id);
@@ -1152,7 +1170,7 @@ static void lcdc_push_lease_info(lua_State *L, lc_lease *lease) {
 
 static void lcdc_push_message_info(lua_State *L, lc_message *message) {
   lua_newtable(L);
-  lcdc_set_string_field(L, "namespace_name", message->namespace_name);
+  lcdc_set_string_field(L, "namespace", message->ns);
   lcdc_set_string_field(L, "queue", message->queue);
   lcdc_set_string_field(L, "message_id", message->message_id);
   lcdc_set_integer_field(L, "attempts", message->attempts);
@@ -1506,9 +1524,9 @@ static int lcdc_push_cloned_lease(lua_State *L, const lc_lease *lease) {
     return 1;
   }
   lease_handle = (const lc_lease_handle *)lease;
-  lease_copy = lc_lease_new(lease_handle->client, lease->namespace_name,
-                            lease->key, lease->owner, lease->lease_id,
-                            lease->txn_id, lease->fencing_token, lease->version,
+  lease_copy = lc_lease_new(lease_handle->client, lease->ns, lease->key,
+                            lease->owner, lease->lease_id, lease->txn_id,
+                            lease->fencing_token, lease->version,
                             lease->state_etag, lease_handle->queue_state_etag);
   if (lease_copy == NULL) {
     return luaL_error(L, "failed to clone message state lease");
@@ -1523,7 +1541,7 @@ static void lcdc_parse_lease_ref(lua_State *L, int index, lc_lease_ref *lease) {
   if (luaL_testudata(L, index, LCDC_LEASE_MT) != NULL) {
     lease_ud = (lcdc_lease_ud *)luaL_checkudata(L, index, LCDC_LEASE_MT);
     luaL_argcheck(L, lease_ud->lease != NULL, index, "lease is closed");
-    lease->namespace_name = lease_ud->lease->namespace_name;
+    lease->ns = lease_ud->lease->ns;
     lease->key = lease_ud->lease->key;
     lease->lease_id = lease_ud->lease->lease_id;
     lease->txn_id = lease_ud->lease->txn_id;
@@ -1531,7 +1549,7 @@ static void lcdc_parse_lease_ref(lua_State *L, int index, lc_lease_ref *lease) {
     return;
   }
   luaL_checktype(L, index, LUA_TTABLE);
-  lcdc_require_string_field(L, index, "namespace_name", &lease->namespace_name);
+  lcdc_require_string_field(L, index, "namespace", &lease->ns);
   lcdc_require_string_field(L, index, "key", &lease->key);
   lcdc_require_string_field(L, index, "lease_id", &lease->lease_id);
   lease->txn_id = lcdc_opt_string_field(L, index, "txn_id");
@@ -1546,7 +1564,7 @@ static void lcdc_parse_message_ref(lua_State *L, int index,
   if (luaL_testudata(L, index, LCDC_MESSAGE_MT) != NULL) {
     message_ud = (lcdc_message_ud *)luaL_checkudata(L, index, LCDC_MESSAGE_MT);
     luaL_argcheck(L, message_ud->message != NULL, index, "message is closed");
-    message->namespace_name = message_ud->message->namespace_name;
+    message->ns = message_ud->message->ns;
     message->queue = message_ud->message->queue;
     message->message_id = message_ud->message->message_id;
     message->lease_id = message_ud->message->lease_id;
@@ -1556,8 +1574,7 @@ static void lcdc_parse_message_ref(lua_State *L, int index,
     return;
   }
   luaL_checktype(L, index, LUA_TTABLE);
-  lcdc_require_string_field(L, index, "namespace_name",
-                            &message->namespace_name);
+  lcdc_require_string_field(L, index, "namespace", &message->ns);
   lcdc_require_string_field(L, index, "queue", &message->queue);
   lcdc_require_string_field(L, index, "message_id", &message->message_id);
   lcdc_require_string_field(L, index, "lease_id", &message->lease_id);
@@ -2216,7 +2233,7 @@ static int lcdc_client_acquire(lua_State *L) {
   lc_error_init(&error);
   lease = NULL;
   luaL_checktype(L, 2, LUA_TTABLE);
-  req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  req.ns = lcdc_opt_string_field(L, 2, "namespace");
   lcdc_require_string_field(L, 2, "key", &req.key);
   lcdc_require_string_field(L, 2, "owner", &req.owner);
   lcdc_opt_integer_field(L, 2, "ttl_seconds", &req.ttl_seconds);
@@ -2405,7 +2422,7 @@ static int lcdc_client_acquire_for_update(lua_State *L) {
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
   luaL_checktype(L, 3, LUA_TFUNCTION);
-  req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  req.ns = lcdc_opt_string_field(L, 2, "namespace");
   lcdc_require_string_field(L, 2, "key", &req.key);
   lcdc_require_string_field(L, 2, "owner", &req.owner);
   lcdc_opt_integer_field(L, 2, "ttl_seconds", &req.ttl_seconds);
@@ -2440,7 +2457,7 @@ static int lcdc_client_describe(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  req.ns = lcdc_opt_string_field(L, 2, "namespace");
   lcdc_require_string_field(L, 2, "key", &req.key);
   rc = lc_describe(ud->client, &req, &res, &error);
   if (rc != LC_OK) {
@@ -2449,7 +2466,7 @@ static int lcdc_client_describe(lua_State *L) {
     return 3;
   }
   lua_newtable(L);
-  lcdc_set_string_field(L, "namespace_name", res.namespace_name);
+  lcdc_set_string_field(L, "namespace", res.ns);
   lcdc_set_string_field(L, "key", res.key);
   lcdc_set_string_field(L, "owner", res.owner);
   lcdc_set_version_field(L, "version", res.version);
@@ -2624,7 +2641,7 @@ static int lcdc_client_metadata(lua_State *L) {
     return 3;
   }
   lua_newtable(L);
-  lcdc_set_string_field(L, "namespace_name", res.namespace_name);
+  lcdc_set_string_field(L, "namespace", res.ns);
   lcdc_set_string_field(L, "key", res.key);
   lcdc_set_version_field(L, "version", res.version);
   lcdc_set_bool_field(L, "has_query_hidden", res.has_query_hidden);
@@ -2913,7 +2930,7 @@ static int lcdc_client_queue_stats(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  req.ns = lcdc_opt_string_field(L, 2, "namespace");
   lcdc_require_string_field(L, 2, "queue", &req.queue);
   rc = lc_queue_stats(ud->client, &req, &res, &error);
   if (rc != LC_OK) {
@@ -2922,7 +2939,7 @@ static int lcdc_client_queue_stats(lua_State *L) {
     return 3;
   }
   lua_newtable(L);
-  lcdc_set_string_field(L, "namespace_name", res.namespace_name);
+  lcdc_set_string_field(L, "namespace", res.ns);
   lcdc_set_string_field(L, "queue", res.queue);
   lcdc_set_integer_field(L, "waiting_consumers", res.waiting_consumers);
   lcdc_set_integer_field(L, "pending_candidates", res.pending_candidates);
@@ -3061,7 +3078,7 @@ static int lcdc_client_query(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  req.ns = lcdc_opt_string_field(L, 2, "namespace");
   req.selector_lql = lcdc_opt_string_field(L, 2, "selector_lql");
   req.selector_json = lcdc_opt_string_field(L, 2, "selector_json");
   if ((req.selector_lql == NULL || req.selector_lql[0] == '\0') &&
@@ -3226,7 +3243,7 @@ static int lcdc_client_query_keys(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  req.ns = lcdc_opt_string_field(L, 2, "namespace");
   req.selector_lql = lcdc_opt_string_field(L, 2, "selector_lql");
   req.selector_json = lcdc_opt_string_field(L, 2, "selector_json");
   lcdc_opt_integer_field(L, 2, "limit", &req.limit);
@@ -3297,7 +3314,7 @@ static int lcdc_client_get_namespace_config(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_require_string_field(L, 2, "namespace_name", &req.namespace_name);
+  lcdc_require_string_field(L, 2, "namespace", &req.ns);
   rc = lc_get_namespace_config(ud->client, &req, &res, &error);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
@@ -3305,7 +3322,7 @@ static int lcdc_client_get_namespace_config(lua_State *L) {
     return 3;
   }
   lua_newtable(L);
-  lcdc_set_string_field(L, "namespace_name", res.namespace_name);
+  lcdc_set_string_field(L, "namespace", res.ns);
   lcdc_set_string_field(L, "preferred_engine", res.preferred_engine);
   lcdc_set_string_field(L, "fallback_engine", res.fallback_engine);
   lcdc_set_string_field(L, "etag", res.etag);
@@ -3327,7 +3344,7 @@ static int lcdc_client_update_namespace_config(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_require_string_field(L, 2, "namespace_name", &req.namespace_name);
+  lcdc_require_string_field(L, 2, "namespace", &req.ns);
   req.preferred_engine = lcdc_opt_string_field(L, 2, "preferred_engine");
   req.fallback_engine = lcdc_opt_string_field(L, 2, "fallback_engine");
   req.if_etag = lcdc_opt_string_field(L, 2, "if_etag");
@@ -3338,7 +3355,7 @@ static int lcdc_client_update_namespace_config(lua_State *L) {
     return 3;
   }
   lua_newtable(L);
-  lcdc_set_string_field(L, "namespace_name", res.namespace_name);
+  lcdc_set_string_field(L, "namespace", res.ns);
   lcdc_set_string_field(L, "preferred_engine", res.preferred_engine);
   lcdc_set_string_field(L, "fallback_engine", res.fallback_engine);
   lcdc_set_string_field(L, "etag", res.etag);
@@ -3360,7 +3377,7 @@ static int lcdc_client_flush_index(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_require_string_field(L, 2, "namespace_name", &req.namespace_name);
+  lcdc_require_string_field(L, 2, "namespace", &req.ns);
   req.mode = lcdc_opt_string_field(L, 2, "mode");
   rc = lc_flush_index(ud->client, &req, &res, &error);
   if (rc != LC_OK) {
@@ -3369,7 +3386,7 @@ static int lcdc_client_flush_index(lua_State *L) {
     return 3;
   }
   lua_newtable(L);
-  lcdc_set_string_field(L, "namespace_name", res.namespace_name);
+  lcdc_set_string_field(L, "namespace", res.ns);
   lcdc_set_string_field(L, "mode", res.mode);
   lcdc_set_string_field(L, "flush_id", res.flush_id);
   lcdc_set_bool_field(L, "accepted", res.accepted);
@@ -3431,9 +3448,9 @@ static void lcdc_parse_txn_participants(lua_State *L, int index,
     lua_rawgeti(L, participants_index, (lua_Integer)(i + 1U));
     luaL_checktype(L, -1, LUA_TTABLE);
     lua_createtable(L, 0, 3);
-    lcdc_require_string_field(L, -2, "namespace_name", &value);
+    lcdc_require_string_field(L, -2, "namespace", &value);
     lua_pushstring(L, value);
-    lua_setfield(L, -2, "namespace_name");
+    lua_setfield(L, -2, "namespace");
     lcdc_require_string_field(L, -2, "key", &value);
     lua_pushstring(L, value);
     lua_setfield(L, -2, "key");
@@ -3451,8 +3468,8 @@ static void lcdc_parse_txn_participants(lua_State *L, int index,
   }
   for (i = 0U; i < count; ++i) {
     lua_rawgeti(L, normalized_index, (lua_Integer)(i + 1U));
-    lua_getfield(L, -1, "namespace_name");
-    participants[i].namespace_name = lua_tostring(L, -1);
+    lua_getfield(L, -1, "namespace");
+    participants[i].ns = lua_tostring(L, -1);
     lua_pop(L, 1);
     lua_getfield(L, -1, "key");
     participants[i].key = lua_tostring(L, -1);
@@ -3950,7 +3967,7 @@ static int lcdc_client_enqueue(lua_State *L) {
   lc_error_init(&error);
   src = NULL;
   luaL_checktype(L, 2, LUA_TTABLE);
-  req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  req.ns = lcdc_opt_string_field(L, 2, "namespace");
   lcdc_require_string_field(L, 2, "queue", &req.queue);
   lcdc_opt_integer_field(L, 2, "delay_seconds", &req.delay_seconds);
   lcdc_opt_integer_field(L, 2, "visibility_timeout_seconds",
@@ -3972,7 +3989,7 @@ static int lcdc_client_enqueue(lua_State *L) {
     return 3;
   }
   lua_newtable(L);
-  lcdc_set_string_field(L, "namespace_name", res.namespace_name);
+  lcdc_set_string_field(L, "namespace", res.ns);
   lcdc_set_string_field(L, "queue", res.queue);
   lcdc_set_string_field(L, "message_id", res.message_id);
   lcdc_set_integer_field(L, "attempts", res.attempts);
@@ -3994,7 +4011,7 @@ static void lcdc_parse_dequeue_req(lua_State *L, int index,
   long page_size;
 
   lc_dequeue_req_init(req);
-  req->namespace_name = lcdc_opt_string_field(L, index, "namespace_name");
+  req->ns = lcdc_opt_string_field(L, index, "namespace");
   lcdc_require_string_field(L, index, "queue", &req->queue);
   req->owner = lcdc_opt_string_field(L, index, "owner");
   req->txn_id = lcdc_opt_string_field(L, index, "txn_id");
@@ -4177,7 +4194,7 @@ static int lcdc_lua_watch_handle(void *context, const lc_watch_event *event,
   top = lua_gettop(handler->L);
   lua_rawgeti(handler->L, LUA_REGISTRYINDEX, handler->handler_ref);
   lua_newtable(handler->L);
-  lcdc_set_string_field(handler->L, "namespace_name", event->namespace_name);
+  lcdc_set_string_field(handler->L, "namespace", event->ns);
   lcdc_set_string_field(handler->L, "queue", event->queue);
   lcdc_set_bool_field(handler->L, "available", event->available);
   lcdc_set_string_field(handler->L, "head_message_id", event->head_message_id);
@@ -4224,7 +4241,7 @@ static int lcdc_client_watch_queue(lua_State *L) {
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
   luaL_checktype(L, 3, LUA_TFUNCTION);
-  req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  req.ns = lcdc_opt_string_field(L, 2, "namespace");
   req.queue = lcdc_opt_string_field(L, 2, "queue");
   rc = lcdc_client_revalidate(ud, &client, &error);
   if (rc != LC_OK) {
@@ -4961,7 +4978,7 @@ static void lcdc_push_inbox_result(lua_State *L,
 static int lcdc_push_outbox_participant_info(
     lua_State *L, const lc_outbox_participant *participant, lc_error *error) {
   lua_newtable(L);
-  lcdc_set_string_field(L, "namespace_name", participant->namespace_name);
+  lcdc_set_string_field(L, "namespace", participant->ns);
   lcdc_set_string_field(L, "key", participant->key);
   lcdc_set_string_field(L, "txn_id", participant->txn_id);
   lcdc_set_integer_field(L, "fencing_token", participant->fencing_token);
@@ -5076,10 +5093,7 @@ static int lcdc_client_new_outbox(lua_State *L) {
   lc_outbox_config_init(&config);
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_reject_field(
-      L, 2, "namespace",
-      "outbox config uses namespace_name; namespace is not supported");
-  config.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  config.ns = lcdc_opt_string_field(L, 2, "namespace");
   config.owner = lcdc_opt_string_field(L, 2, "owner");
   lcdc_opt_integer_field(L, 2, "transaction_ttl_seconds",
                          &config.transaction_ttl_seconds);
@@ -5151,10 +5165,7 @@ static int lcdc_client_new_history_consumer(lua_State *L) {
   lc_error_init(&error);
   consumer = NULL;
   luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_reject_field(L, 2, "namespace",
-                    "history consumer config uses namespace_name; namespace is "
-                    "not supported");
-  config.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  config.ns = lcdc_opt_string_field(L, 2, "namespace");
   lcdc_require_string_field(L, 2, "consumer_id", &config.consumer_id);
   has_initial_acknowledged_index_seq = 0;
   lua_getfield(L, 2, "initial_acknowledged_index_seq");
@@ -6340,11 +6351,7 @@ static int lcdc_outbox_txn_acquire(lua_State *L) {
 
   lc_outbox_participant_request_init(&request);
   luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_reject_field(L, 2, "namespace",
-                    "outbox participant request uses namespace_name; namespace "
-                    "is not supported");
-  request.acquire.namespace_name =
-      lcdc_opt_string_field(L, 2, "namespace_name");
+  request.acquire.ns = lcdc_opt_string_field(L, 2, "namespace");
   lcdc_require_string_field(L, 2, "key", &request.acquire.key);
   request.acquire.owner = lcdc_opt_string_field(L, 2, "owner");
   lcdc_opt_integer_field(L, 2, "ttl_seconds", &request.acquire.ttl_seconds);

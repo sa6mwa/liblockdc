@@ -308,7 +308,7 @@ the application remains responsible for obtaining and applying records through
 its own replication, backup, or resume protocol. Remote lockd clients reject
 this Pouch-only operation.
 
-`config.namespace_name` and `config.consumer_id` form the
+`config.namespace` and `config.consumer_id` form the
 stable durable identity. A new identity begins at
 `initial_acknowledged_index_seq` (zero by default), or set
 `start_at_current = true` to retain only future history. Existing identities
@@ -332,7 +332,7 @@ read, query, and mutation paths never enumerate consumer records.
 ## Inbox/outboxes
 
 `client:new_outbox(config)` creates a threadless inbox/outbox producer. Its
-`namespace_name` contains both durable inbox and outbox keys.
+`namespace` contains both durable inbox and outbox keys.
 It never starts a dispatcher, claims a job, performs recovery, or invokes a
 foreign effect. Use `outbox:dispatcher()` only in the dedicated worker or
 service domain that owns delivery. The complete lifecycle and host-integration
@@ -342,7 +342,7 @@ contract is in [the outbox dispatch architecture](outbox-dispatch-architecture.m
 -- Request/producer domain: this is safe to construct without creating a
 -- background dispatcher.
 local outbox = assert(client:new_outbox({
-  namespace_name = "orders-outbox",
+  namespace = "orders-outbox",
   owner = "orders-api",
   max_attempts = 100,
 }))
@@ -357,7 +357,7 @@ local txn = assert(outbox:append({
   headers_json = lockdc.encode_json({ ["idempotency-key"] = "charge:" .. order_id }),
 }, payload_source))
 
-local order = assert(txn:acquire({ namespace_name = "orders", key = order_id }))
+local order = assert(txn:acquire({ namespace = "orders", key = order_id }))
 assert(order:update_json({ status = "payment_pending" }))
 order:close()
 local commit = assert(txn:commit())
@@ -373,7 +373,7 @@ txn:close()
 -- must explicitly select the supported `single_writer=false` shared-root mode.
 local worker_client = assert(lockdc.open(worker_client_config))
 local worker_outbox = assert(worker_client:new_outbox({
-  namespace_name = "orders-outbox",
+  namespace = "orders-outbox",
   owner = "orders-api",
   max_attempts = 100,
 }))
@@ -518,13 +518,13 @@ Use `lockdc.xid_new()` to mint a valid transaction identifier for raw XA work.
 
 `txn_prepare`, `txn_commit`, and `txn_rollback` accept a table with `txn_id`,
 `participants`, optional `expires_at_unix`, optional `tc_term`, and optional
-`target_backend_hash`. Each participant has `namespace_name`, `key`, and an
+`target_backend_hash`. Each participant has `namespace`, `key`, and an
 optional `backend_hash`. `txn_replay` accepts `{ txn_id = ... }`. Decision and
 replay results include `txn_id`, `state`, and `correlation_id`.
 
 ```lua
 local txn_id = assert(lockdc.xid_new())
-local participant = { namespace_name = "orders", key = "order-42" }
+local participant = { namespace = "orders", key = "order-42" }
 
 assert(client:txn_prepare({
   txn_id = txn_id,
@@ -678,7 +678,7 @@ blocking consumer at a time:
 ```lua
 local service = assert(client:new_consumer_service({
   name = "orders-worker",
-  request = { namespace_name = "orders", queue = "events", owner = "orders-worker" },
+  request = { namespace = "orders", queue = "events", owner = "orders-worker" },
   with_state = true,
   handle = function(message, state)
     -- Return normally to acknowledge. Return nil, err (or false, err) to nack.

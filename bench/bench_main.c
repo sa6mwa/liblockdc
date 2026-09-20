@@ -43,7 +43,7 @@ typedef struct bench_pouch_perf_fixture {
 typedef struct bench_outbox_fixture {
   lc_client *client;
   char root[512];
-  char namespace_name[128];
+  char ns[128];
   char key_prefix[96];
   long pouch_segment_target_bytes;
   int is_pouch;
@@ -274,8 +274,8 @@ static void bench_pouch_perf_fixture_close(bench_pouch_perf_fixture *fixture) {
 static int bench_outbox_remote_client_open(const char *endpoint,
                                            const char *failover_endpoint,
                                            const char *bundle_path,
-                                           const char *namespace_name,
-                                           lc_client **out, lc_error *error) {
+                                           const char *ns, lc_client **out,
+                                           lc_error *error) {
   const char *endpoints[2];
   lc_client_config config;
   lc_source *bundle_source;
@@ -291,7 +291,7 @@ static int bench_outbox_remote_client_open(const char *endpoint,
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = failover_endpoint == NULL ? 1U : 2U;
-  config.default_namespace = namespace_name;
+  config.default_namespace = ns;
   config.timeout_ms = 30000L;
   config.client_bundle_source = bundle_source;
   config.insecure_skip_verify = 1;
@@ -300,8 +300,7 @@ static int bench_outbox_remote_client_open(const char *endpoint,
   return rc;
 }
 
-static int bench_outbox_flush_index(lc_client *client,
-                                    const char *namespace_name,
+static int bench_outbox_flush_index(lc_client *client, const char *ns,
                                     const char *mode, lc_error *error) {
   lc_index_flush_req request;
   lc_index_flush_res result;
@@ -309,17 +308,16 @@ static int bench_outbox_flush_index(lc_client *client,
 
   lc_index_flush_req_init(&request);
   memset(&result, 0, sizeof(result));
-  request.namespace_name = namespace_name;
+  request.ns = ns;
   request.mode = mode;
   rc = lc_flush_index(client, &request, &result, error);
   lc_index_flush_res_cleanup(&result);
   return rc;
 }
 
-static int bench_outbox_remote_probe(lc_client *client,
-                                     const char *namespace_name,
+static int bench_outbox_remote_probe(lc_client *client, const char *ns,
                                      lc_error *error) {
-  return bench_outbox_flush_index(client, namespace_name, "wait", error);
+  return bench_outbox_flush_index(client, ns, "wait", error);
 }
 
 static int bench_outbox_fixture_client_open(const bench_outbox_fixture *fixture,
@@ -362,7 +360,7 @@ static int bench_outbox_fixture_client_open(const bench_outbox_fixture *fixture,
     lc_client_config_init(&config);
     config.endpoints = endpoints;
     config.endpoint_count = 1U;
-    config.default_namespace = fixture->namespace_name;
+    config.default_namespace = fixture->ns;
     config.timeout_ms = 30000L;
     return lc_client_open(&config, out, error);
   }
@@ -379,8 +377,7 @@ static int bench_outbox_fixture_client_open(const bench_outbox_fixture *fixture,
     bundle_path = "./devenv/volumes/lockd-disk-a-config/client.pem";
   }
   return bench_outbox_remote_client_open(endpoint, failover_endpoint,
-                                         bundle_path, fixture->namespace_name,
-                                         out, error);
+                                         bundle_path, fixture->ns, out, error);
 }
 
 static int bench_outbox_fixture_compact(bench_outbox_fixture *fixture,
@@ -404,7 +401,7 @@ static int bench_outbox_fixture_compact(bench_outbox_fixture *fixture,
   memset(stats, 0, sizeof(*stats));
   memset(&options, 0, sizeof(options));
   memset(&result, 0, sizeof(result));
-  options.namespace_name = fixture->namespace_name;
+  options.ns = fixture->ns;
   options.force = 1;
   started = bench_now_seconds();
   rc = lc_pouch_maintenance_run(client->pouch, &options, &result, error);
@@ -428,7 +425,7 @@ static int bench_outbox_fixture_open(bench_outbox_fixture *fixture,
   const char *endpoint;
   const char *failover_endpoint;
   const char *bundle_path;
-  const char *namespace_name;
+  const char *ns;
   const char *endpoints[1];
   char root_path[sizeof(fixture->root)];
   lc_client_config config;
@@ -454,13 +451,12 @@ static int bench_outbox_fixture_open(bench_outbox_fixture *fixture,
   }
   endpoint = getenv("LOCKDC_OUTBOX_BENCH_ENDPOINT");
   failover_endpoint = getenv("LOCKDC_OUTBOX_BENCH_FAILOVER_ENDPOINT");
-  namespace_name = getenv("LOCKDC_OUTBOX_BENCH_NAMESPACE");
+  ns = getenv("LOCKDC_OUTBOX_BENCH_NAMESPACE");
   lc_client_config_init(&config);
   config.timeout_ms = 30000L;
   if (endpoint == NULL || endpoint[0] == '\0') {
-    if (snprintf(fixture->namespace_name, sizeof(fixture->namespace_name),
-                 "outbox-bench-%ld-%ld", (long)getpid(),
-                 (long)now.tv_nsec) < 0) {
+    if (snprintf(fixture->ns, sizeof(fixture->ns), "outbox-bench-%ld-%ld",
+                 (long)getpid(), (long)now.tv_nsec) < 0) {
       return 1;
     }
     if (bench_pouch_root_path(fixture->root, sizeof(fixture->root), "outbox") !=
@@ -475,11 +471,10 @@ static int bench_outbox_fixture_open(bench_outbox_fixture *fixture,
     endpoints[0] = fixture->root;
     fixture->is_pouch = 1;
   } else {
-    if (namespace_name == NULL || namespace_name[0] == '\0') {
-      namespace_name = "default";
+    if (ns == NULL || ns[0] == '\0') {
+      ns = "default";
     }
-    if (snprintf(fixture->namespace_name, sizeof(fixture->namespace_name), "%s",
-                 namespace_name) < 0) {
+    if (snprintf(fixture->ns, sizeof(fixture->ns), "%s", ns) < 0) {
       return 1;
     }
     bundle_path = getenv("LOCKDC_OUTBOX_BENCH_CLIENT_BUNDLE");
@@ -489,12 +484,10 @@ static int bench_outbox_fixture_open(bench_outbox_fixture *fixture,
     selected_endpoint = NULL;
     selected_failover_endpoint = NULL;
     for (attempt = 0; attempt < 30; ++attempt) {
-      rc = bench_outbox_remote_client_open(endpoint, NULL, bundle_path,
-                                           fixture->namespace_name,
-                                           &fixture->client, error);
+      rc = bench_outbox_remote_client_open(
+          endpoint, NULL, bundle_path, fixture->ns, &fixture->client, error);
       if (rc == LC_OK) {
-        rc = bench_outbox_remote_probe(fixture->client, fixture->namespace_name,
-                                       error);
+        rc = bench_outbox_remote_probe(fixture->client, fixture->ns, error);
         if (rc == LC_OK) {
           selected_endpoint = endpoint;
           selected_failover_endpoint = failover_endpoint;
@@ -508,12 +501,11 @@ static int bench_outbox_fixture_open(bench_outbox_fixture *fixture,
       if (failover_endpoint != NULL && failover_endpoint[0] != '\0') {
         lc_error_cleanup(error);
         lc_error_init(error);
-        rc = bench_outbox_remote_client_open(
-            failover_endpoint, NULL, bundle_path, fixture->namespace_name,
-            &fixture->client, error);
+        rc = bench_outbox_remote_client_open(failover_endpoint, NULL,
+                                             bundle_path, fixture->ns,
+                                             &fixture->client, error);
         if (rc == LC_OK) {
-          rc = bench_outbox_remote_probe(fixture->client,
-                                         fixture->namespace_name, error);
+          rc = bench_outbox_remote_probe(fixture->client, fixture->ns, error);
           if (rc == LC_OK) {
             selected_endpoint = failover_endpoint;
             selected_failover_endpoint = endpoint;
@@ -535,14 +527,14 @@ static int bench_outbox_fixture_open(bench_outbox_fixture *fixture,
       return rc;
     }
     return bench_outbox_remote_client_open(
-        selected_endpoint, selected_failover_endpoint, bundle_path,
-        fixture->namespace_name, &fixture->client, error);
+        selected_endpoint, selected_failover_endpoint, bundle_path, fixture->ns,
+        &fixture->client, error);
   }
   if (fixture->is_pouch) {
     return bench_outbox_fixture_client_open(fixture, pouch_shared_writer,
                                             &fixture->client, error);
   }
-  config.default_namespace = fixture->namespace_name;
+  config.default_namespace = fixture->ns;
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
   return lc_client_open(&config, &fixture->client, error);
@@ -575,11 +567,10 @@ static int bench_outbox_fixture_reopen(bench_outbox_fixture *fixture,
   return bench_outbox_fixture_client_open(fixture, 0, &fixture->client, error);
 }
 
-static int bench_outbox_seed_record(lc_client *client,
-                                    const char *namespace_name, const char *key,
-                                    const char *dispatch_state, long generation,
-                                    const char *payload, size_t payload_length,
-                                    lc_error *error) {
+static int bench_outbox_seed_record(lc_client *client, const char *ns,
+                                    const char *key, const char *dispatch_state,
+                                    long generation, const char *payload,
+                                    size_t payload_length, lc_error *error) {
   char state[512];
   char payload_digest[72];
   lc_acquire_req acquire;
@@ -613,7 +604,7 @@ static int bench_outbox_seed_record(lc_client *client,
   payload_source = NULL;
   memset(&attach_result, 0, sizeof(attach_result));
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = namespace_name;
+  acquire.ns = ns;
   acquire.key = key;
   acquire.owner = "outbox-benchmark-seed";
   acquire.ttl_seconds = 60L;
@@ -718,8 +709,8 @@ static int bench_outbox_reconcile_case(long iterations, int index_mode) {
       rc = 1;
       break;
     }
-    rc = bench_outbox_seed_record(fixture.client, fixture.namespace_name, key,
-                                  "completed", 0L, NULL, 0U, &error);
+    rc = bench_outbox_seed_record(fixture.client, fixture.ns, key, "completed",
+                                  0L, NULL, 0U, &error);
   }
   for (index = 0U; rc == LC_OK && index < (size_t)churn_updates; ++index) {
     size_t terminal_index;
@@ -733,9 +724,9 @@ static int bench_outbox_reconcile_case(long iterations, int index_mode) {
         rc = 1;
         break;
       }
-      rc = bench_outbox_seed_record(fixture.client, fixture.namespace_name, key,
-                                    "completed", (long)index + 1L, NULL, 0U,
-                                    &error);
+      rc =
+          bench_outbox_seed_record(fixture.client, fixture.ns, key, "completed",
+                                   (long)index + 1L, NULL, 0U, &error);
       if (rc != LC_OK) {
         break;
       }
@@ -749,16 +740,14 @@ static int bench_outbox_reconcile_case(long iterations, int index_mode) {
       rc = 1;
       break;
     }
-    rc = bench_outbox_seed_record(fixture.client, fixture.namespace_name, key,
-                                  "pending", 0L, payload, (size_t)payload_bytes,
-                                  &error);
+    rc = bench_outbox_seed_record(fixture.client, fixture.ns, key, "pending",
+                                  0L, payload, (size_t)payload_bytes, &error);
   }
   if (rc != LC_OK) {
     goto done;
   }
   if (index_mode != 0) {
-    rc = bench_outbox_flush_index(fixture.client, fixture.namespace_name,
-                                  "sync", &error);
+    rc = bench_outbox_flush_index(fixture.client, fixture.ns, "sync", &error);
     if (rc != LC_OK) {
       goto done;
     }
@@ -776,7 +765,7 @@ static int bench_outbox_reconcile_case(long iterations, int index_mode) {
     }
   }
   lc_outbox_config_init(&config);
-  config.namespace_name = fixture.namespace_name;
+  config.ns = fixture.ns;
   config.owner = "outbox-benchmark-dispatcher";
   config.notification_capacity = (size_t)page_capacity;
   config.recovery_interval_seconds = 0L;
@@ -948,7 +937,7 @@ static int bench_outbox_dispatcher_child(const bench_outbox_fixture *fixture,
   if (rc == LC_OK) {
     result.failure_stage = 4;
     lc_outbox_config_init(&config);
-    config.namespace_name = fixture->namespace_name;
+    config.ns = fixture->ns;
     config.owner = owner;
     config.notification_capacity = (size_t)page_capacity;
     config.recovery_interval_seconds = 1L;
@@ -1103,8 +1092,8 @@ static int bench_outbox_reconcile_multi_case(long iterations,
       rc = LC_ERR_INVALID;
       break;
     }
-    rc = bench_outbox_seed_record(fixture.client, fixture.namespace_name, key,
-                                  "completed", 0L, NULL, 0U, &error);
+    rc = bench_outbox_seed_record(fixture.client, fixture.ns, key, "completed",
+                                  0L, NULL, 0U, &error);
   }
   for (index = 0U; rc == LC_OK && index < (size_t)churn_updates; ++index) {
     size_t terminal_index;
@@ -1118,9 +1107,9 @@ static int bench_outbox_reconcile_multi_case(long iterations,
         rc = LC_ERR_INVALID;
         break;
       }
-      rc = bench_outbox_seed_record(fixture.client, fixture.namespace_name, key,
-                                    "completed", (long)index + 1L, NULL, 0U,
-                                    &error);
+      rc =
+          bench_outbox_seed_record(fixture.client, fixture.ns, key, "completed",
+                                   (long)index + 1L, NULL, 0U, &error);
       if (rc != LC_OK) {
         break;
       }
@@ -1134,13 +1123,11 @@ static int bench_outbox_reconcile_multi_case(long iterations,
       rc = LC_ERR_INVALID;
       break;
     }
-    rc = bench_outbox_seed_record(fixture.client, fixture.namespace_name, key,
-                                  "pending", 0L, payload, (size_t)payload_bytes,
-                                  &error);
+    rc = bench_outbox_seed_record(fixture.client, fixture.ns, key, "pending",
+                                  0L, payload, (size_t)payload_bytes, &error);
   }
   if (rc == LC_OK) {
-    rc = bench_outbox_flush_index(fixture.client, fixture.namespace_name,
-                                  "sync", &error);
+    rc = bench_outbox_flush_index(fixture.client, fixture.ns, "sync", &error);
   }
   if (rc == LC_OK && compact_before_fork) {
     rc = bench_outbox_fixture_compact(&fixture, &maintenance, &error);
@@ -1429,7 +1416,7 @@ static int bench_pouch_seed_update(lc_client *client, const char *key,
   lc_acquire_req_init(&acquire_req);
   lc_release_req_init(&release_req);
   lc_update_opts_init(&update_opts);
-  acquire_req.namespace_name = "bench";
+  acquire_req.ns = "bench";
   acquire_req.key = key;
   acquire_req.owner = "lockdc-bench";
   acquire_req.ttl_seconds = 30L;
@@ -1491,7 +1478,7 @@ static int bench_pouch_perf_flush(lc_client *client, lc_error *error) {
 
   lc_index_flush_req_init(&req);
   memset(&res, 0, sizeof(res));
-  req.namespace_name = "bench";
+  req.ns = "bench";
   req.mode = "wait";
   rc = client->flush_index(client, &req, &res, error);
   lc_index_flush_res_cleanup(&res);
@@ -1507,7 +1494,7 @@ static int bench_pouch_perf_query(lc_client *client, const char *selector_lql,
 
   lc_query_req_init(&req);
   memset(&res, 0, sizeof(res));
-  req.namespace_name = "bench";
+  req.ns = "bench";
   req.selector_lql = selector_lql;
   req.engine = engine;
   req.limit = limit > 0L ? limit : 1L;
@@ -1856,7 +1843,7 @@ static int bench_pouch_query_once(lc_client *client,
 
   memset(&res, 0, sizeof(res));
   lc_query_req_init(&req);
-  req.namespace_name = "bench";
+  req.ns = "bench";
   req.selector_json = query_case->selector_json;
   req.selector_lql = query_case->selector_lql;
   req.engine = query_case->engine;
@@ -1977,10 +1964,10 @@ static int bench_pouch_namespace(long iterations) {
     goto done;
   }
   for (i = 0; i < iterations; ++i) {
-    char namespace_name[64];
+    char ns[64];
 
-    snprintf(namespace_name, sizeof(namespace_name), "bench/%ld", i);
-    if (lc_pouch_ensure_namespace(pouch, namespace_name, &error) != LC_OK) {
+    snprintf(ns, sizeof(ns), "bench/%ld", i);
+    if (lc_pouch_ensure_namespace(pouch, ns, &error) != LC_OK) {
       rc = 1;
       goto done;
     }

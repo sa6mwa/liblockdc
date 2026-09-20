@@ -812,7 +812,7 @@ static void test_disk_lease_state_roundtrip(void **state) {
   rc = lease->describe(lease, &error);
   assert_lc_ok(rc, &error);
   assert_string_equal(lease->key, key);
-  assert_string_equal(lease->namespace_name, "default");
+  assert_string_equal(lease->ns, "default");
   assert_non_null(lease->owner);
   assert_true(lease->owner[0] != '\0');
   assert_non_null(lease->lease_id);
@@ -1342,7 +1342,7 @@ static void test_s3_lease_state_roundtrip(void **state) {
   rc = lease->describe(lease, &error);
   assert_lc_ok(rc, &error);
   assert_string_equal(lease->key, key);
-  assert_string_equal(lease->namespace_name, "default");
+  assert_string_equal(lease->ns, "default");
   assert_non_null(lease->owner);
   assert_true(lease->owner[0] != '\0');
   assert_non_null(lease->lease_id);
@@ -4068,7 +4068,7 @@ test_pouch_direct_migrates_legacy_lease_before_client_open(void **state) {
   assert_lc_ok(rc, &error);
   assert_non_null(lease);
 
-  keepalive.lease.namespace_name = "default";
+  keepalive.lease.ns = "default";
   keepalive.lease.key = "state/extended-legacy-control";
   keepalive.lease.lease_id = "legacy-lease";
   keepalive.lease.fencing_token = 4L;
@@ -4233,7 +4233,7 @@ static void test_pouch_direct_query_indexing_disabled_roundtrip(void **state) {
   lc_error_cleanup(&error);
   lc_error_init(&error);
 
-  flush_req.namespace_name = "default";
+  flush_req.ns = "default";
   flush_req.mode = "sync";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   assert_int_equal(rc, LC_ERR_INVALID);
@@ -4340,7 +4340,7 @@ static void test_pouch_direct_state_attachment_reopen_roundtrip(void **state) {
 
   reader = NULL;
   open_pouch_client(endpoint, &reader, &error);
-  list_req.lease.namespace_name = lease->namespace_name;
+  list_req.lease.ns = lease->ns;
   list_req.lease.key = lease->key;
   list_req.lease.lease_id = lease->lease_id;
   list_req.lease.txn_id = lease->txn_id;
@@ -4395,10 +4395,9 @@ static void test_pouch_direct_state_attachment_reopen_roundtrip(void **state) {
   cleanup_pouch_root(root);
 }
 
-static void pouch_e2e_run_maintenance(const char *root,
-                                      const char *namespace_name, int force,
-                                      int cleanup_only, long retention_cutoff,
-                                      lc_error *error) {
+static void pouch_e2e_run_maintenance(const char *root, const char *ns,
+                                      int force, int cleanup_only,
+                                      long retention_cutoff, lc_error *error) {
   lc_pouch *pouch;
   lc_pouch_open_options open_options;
   lc_pouch_maintenance_options maintenance_options;
@@ -4411,7 +4410,7 @@ static void pouch_e2e_run_maintenance(const char *root,
   memset(&maintenance_result, 0, sizeof(maintenance_result));
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
   assert_lc_ok(rc, error);
-  maintenance_options.namespace_name = namespace_name;
+  maintenance_options.ns = ns;
   maintenance_options.force = force;
   maintenance_options.cleanup_only = cleanup_only;
   maintenance_options.retention_updated_before_unix = retention_cutoff;
@@ -4428,8 +4427,7 @@ static void pouch_e2e_run_maintenance(const char *root,
   lc_pouch_close(pouch);
 }
 
-static size_t pouch_e2e_query_key_count(lc_client *client,
-                                        const char *namespace_name,
+static size_t pouch_e2e_query_key_count(lc_client *client, const char *ns,
                                         const char *selector_json,
                                         lc_error *error) {
   lc_query_key_handler handler;
@@ -4445,7 +4443,7 @@ static size_t pouch_e2e_query_key_count(lc_client *client,
   handler.begin = pouch_e2e_key_begin;
   handler.chunk = pouch_e2e_key_chunk;
   handler.end = pouch_e2e_key_end;
-  query_req.namespace_name = namespace_name;
+  query_req.ns = ns;
   query_req.selector_json = selector_json;
   query_req.engine = "index";
   query_req.limit = 512L;
@@ -4456,7 +4454,7 @@ static size_t pouch_e2e_query_key_count(lc_client *client,
 }
 
 static void pouch_e2e_write_segmented_docs_direct(const char *root,
-                                                  const char *namespace_name,
+                                                  const char *ns,
                                                   const char *kind,
                                                   size_t doc_count,
                                                   lc_error *error) {
@@ -4500,8 +4498,8 @@ static void pouch_e2e_write_segmented_docs_direct(const char *root,
     assert_true(written > 0 && (size_t)written < sizeof(body));
     rc = lc_source_from_memory(body, strlen(body), &source, error);
     assert_lc_ok(rc, error);
-    rc = lc_pouch_state_write(pouch, namespace_name, key, source,
-                              &write_options, &write_result, error);
+    rc = lc_pouch_state_write(pouch, ns, key, source, &write_options,
+                              &write_result, error);
     lc_source_close(source);
     source = NULL;
     assert_lc_ok(rc, error);
@@ -4510,8 +4508,9 @@ static void pouch_e2e_write_segmented_docs_direct(const char *root,
   lc_pouch_close(pouch);
 }
 
-static void pouch_e2e_force_maintenance_expect_segments(
-    const char *root, const char *namespace_name, lc_error *error) {
+static void pouch_e2e_force_maintenance_expect_segments(const char *root,
+                                                        const char *ns,
+                                                        lc_error *error) {
   lc_pouch *pouch;
   lc_pouch_open_options open_options;
   lc_pouch_maintenance_options maintenance_options;
@@ -4524,7 +4523,7 @@ static void pouch_e2e_force_maintenance_expect_segments(
   memset(&maintenance_result, 0, sizeof(maintenance_result));
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
   assert_lc_ok(rc, error);
-  maintenance_options.namespace_name = namespace_name;
+  maintenance_options.ns = ns;
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, error);
@@ -4536,10 +4535,10 @@ static void pouch_e2e_force_maintenance_expect_segments(
   lc_pouch_close(pouch);
 }
 
-static void
-pouch_e2e_reclaim_one_active_churn_segment(const char *root,
-                                           const char *namespace_name,
-                                           const char *kind, lc_error *error) {
+static void pouch_e2e_reclaim_one_active_churn_segment(const char *root,
+                                                       const char *ns,
+                                                       const char *kind,
+                                                       lc_error *error) {
   lc_pouch *pouch;
   lc_pouch_open_options open_options;
   lc_pouch_maintenance_options maintenance_options;
@@ -4569,8 +4568,8 @@ pouch_e2e_reclaim_one_active_churn_segment(const char *root,
                          "{\"kind\":\"%s\",\"ordinal\":%zu}", kind, index) > 0);
     rc = lc_source_from_memory(body, strlen(body), &source, error);
     assert_lc_ok(rc, error);
-    rc = lc_pouch_state_write(pouch, namespace_name, key, source, NULL,
-                              &write_result, error);
+    rc = lc_pouch_state_write(pouch, ns, key, source, NULL, &write_result,
+                              error);
     lc_source_close(source);
     source = NULL;
     assert_lc_ok(rc, error);
@@ -4578,12 +4577,11 @@ pouch_e2e_reclaim_one_active_churn_segment(const char *root,
   }
   for (index = 0U; index < 255U; ++index) {
     assert_true(snprintf(key, sizeof(key), "pouch/churn/%03zu", index) > 0);
-    rc = lc_pouch_state_delete(pouch, namespace_name, key, NULL, &write_result,
-                               error);
+    rc = lc_pouch_state_delete(pouch, ns, key, NULL, &write_result, error);
     assert_lc_ok(rc, error);
     lc_pouch_state_write_result_cleanup(NULL, &write_result);
   }
-  maintenance_options.namespace_name = namespace_name;
+  maintenance_options.ns = ns;
   maintenance_options.terminal_reclaim = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, error);
@@ -4707,7 +4705,7 @@ static int pouch_e2e_shared_churn_child(const char *root,
     memset(&write_result, 0, sizeof(write_result));
   }
   result->stage = 3;
-  maintenance_options.namespace_name = "hardening-churn";
+  maintenance_options.ns = "hardening-churn";
   maintenance_options.terminal_reclaim = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -4773,7 +4771,7 @@ static int pouch_e2e_shared_churn_child(const char *root,
   }
   result->stage = 5;
   memset(&maintenance_options, 0, sizeof(maintenance_options));
-  maintenance_options.namespace_name = "hardening-multi";
+  maintenance_options.ns = "hardening-multi";
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, &error);
@@ -4917,7 +4915,7 @@ static void pouch_e2e_write_released_hardening_state(lc_client *client,
   assert_true(snprintf(body, sizeof(body),
                        "{\"kind\":\"pouch-hardening-expired\",\"ordinal\":%zu}",
                        index) > 0);
-  acquire.namespace_name = "hardening-retention";
+  acquire.ns = "hardening-retention";
   acquire.key = key;
   acquire.owner = "pouch-hardening-retention";
   acquire.ttl_seconds = 60L;
@@ -4928,8 +4926,7 @@ static void pouch_e2e_write_released_hardening_state(lc_client *client,
   assert_lc_ok(rc, error);
 }
 
-static void pouch_e2e_run_shared_maintenance(const char *root,
-                                             const char *namespace_name,
+static void pouch_e2e_run_shared_maintenance(const char *root, const char *ns,
                                              int cleanup_only,
                                              long retention_cutoff,
                                              lc_error *error) {
@@ -4951,7 +4948,7 @@ static void pouch_e2e_run_shared_maintenance(const char *root,
   open_options.single_writer = 0;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
   assert_lc_ok(rc, error);
-  maintenance_options.namespace_name = namespace_name;
+  maintenance_options.ns = ns;
   maintenance_options.cleanup_only = cleanup_only;
   maintenance_options.retention_updated_before_unix = retention_cutoff;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
@@ -4969,8 +4966,9 @@ static void pouch_e2e_run_shared_maintenance(const char *root,
   lc_pouch_close(pouch);
 }
 
-static void pouch_e2e_force_shared_multi_segment_compaction(
-    const char *root, const char *namespace_name, lc_error *error) {
+static void pouch_e2e_force_shared_multi_segment_compaction(const char *root,
+                                                            const char *ns,
+                                                            lc_error *error) {
   lc_pouch *pouch;
   lc_pouch_open_options open_options;
   lc_pouch_maintenance_options maintenance_options;
@@ -4990,7 +4988,7 @@ static void pouch_e2e_force_shared_multi_segment_compaction(
   open_options.single_writer = 0;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
   assert_lc_ok(rc, error);
-  maintenance_options.namespace_name = namespace_name;
+  maintenance_options.ns = ns;
   maintenance_options.force = 1;
   rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
                                 &maintenance_result, error);
@@ -5001,8 +4999,7 @@ static void pouch_e2e_force_shared_multi_segment_compaction(
   lc_pouch_close(pouch);
 }
 
-static size_t pouch_e2e_count_shared_payloads(const char *root,
-                                              const char *namespace_name,
+static size_t pouch_e2e_count_shared_payloads(const char *root, const char *ns,
                                               const char *key_prefix,
                                               lc_error *error) {
   lc_pouch *pouch;
@@ -5020,8 +5017,8 @@ static size_t pouch_e2e_count_shared_payloads(const char *root,
   count.key_prefix = key_prefix;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
   assert_lc_ok(rc, error);
-  rc = lc_pouch_state_visit(pouch, namespace_name, pouch_e2e_count_state_entry,
-                            &count, error);
+  rc = lc_pouch_state_visit(pouch, ns, pouch_e2e_count_state_entry, &count,
+                            error);
   assert_lc_ok(rc, error);
   lc_pouch_close(pouch);
   return count.count;
@@ -5086,7 +5083,7 @@ test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(void **state) {
   snprintf(queue_name, sizeof(queue_name), "pouch-life-%s", kind);
 
   open_pouch_client(endpoint, &client, &error);
-  acquire_req.namespace_name = "life";
+  acquire_req.ns = "life";
   acquire_req.key = keep_key;
   acquire_req.owner = "lc-e2e-pouch-life";
   acquire_req.ttl_seconds = 60L;
@@ -5112,7 +5109,7 @@ test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   lease = NULL;
 
-  acquire_req.namespace_name = "life-retention";
+  acquire_req.ns = "life-retention";
   acquire_req.key = expired_key;
   rc = client->acquire(client, &acquire_req, &lease, &error);
   assert_lc_ok(rc, &error);
@@ -5128,7 +5125,7 @@ test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   lease = NULL;
 
-  enqueue_req.namespace_name = "life";
+  enqueue_req.ns = "life";
   enqueue_req.queue = queue_name;
   enqueue_req.content_type = "text/plain";
   enqueue_req.visibility_timeout_seconds = 30L;
@@ -5160,7 +5157,7 @@ test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(void **state) {
                                    expired_selector_json, &error);
   assert_int_equal(rows, 0U);
 
-  acquire_req.namespace_name = "life";
+  acquire_req.ns = "life";
   acquire_req.key = keep_key;
   acquire_req.owner = "lc-e2e-pouch-life-reader";
   rc = reader->acquire(reader, &acquire_req, &lease, &error);
@@ -5173,7 +5170,7 @@ test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   lease = NULL;
 
-  dequeue_req.namespace_name = "life";
+  dequeue_req.ns = "life";
   dequeue_req.queue = queue_name;
   dequeue_req.owner = "lc-e2e-pouch-life-worker";
   dequeue_req.visibility_timeout_seconds = 30L;
@@ -5222,7 +5219,7 @@ test_pouch_direct_large_namespace_segmented_index_reopen(void **state) {
   pouch_e2e_write_segmented_docs_direct(root, "large", kind, doc_count, &error);
 
   open_pouch_client(endpoint, &client, &error);
-  flush_req.namespace_name = "large";
+  flush_req.ns = "large";
   flush_req.mode = "wait";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   assert_lc_ok(rc, &error);
@@ -5390,7 +5387,7 @@ test_pouch_shared_hardening_churn_dispatch_and_maintenance(void **state) {
 
   rc = lc_client_open(&config, &client, &error);
   assert_lc_ok(rc, &error);
-  outbox_config.namespace_name = "hardening-outbox";
+  outbox_config.ns = "hardening-outbox";
   outbox_config.owner = "pouch-hardening-dispatcher";
   outbox_config.notification_capacity = POUCH_E2E_HARDENING_OUTBOX_EFFECTS;
   rc = lc_client_new_outbox(client, &outbox_config, &outbox, &error);
@@ -5534,7 +5531,7 @@ test_pouch_shared_hardening_churn_dispatch_and_maintenance(void **state) {
   dispatcher = NULL;
   lc_outbox_close(outbox);
   outbox = NULL;
-  flush_req.namespace_name = "hardening-churn";
+  flush_req.ns = "hardening-churn";
   flush_req.mode = "sync";
   rc = reader->flush_index(reader, &flush_req, &flush_res, &error);
   assert_lc_ok(rc, &error);
@@ -5547,7 +5544,7 @@ test_pouch_shared_hardening_churn_dispatch_and_maintenance(void **state) {
   query_handler.begin = query_keys_e2e_begin;
   query_handler.chunk = query_keys_e2e_chunk;
   query_handler.end = query_keys_e2e_end;
-  query_req.namespace_name = "hardening-churn";
+  query_req.ns = "hardening-churn";
   query_req.selector_json = survivor_selector;
   query_req.engine = "index";
   query_req.limit = 512L;
@@ -5556,7 +5553,7 @@ test_pouch_shared_hardening_churn_dispatch_and_maintenance(void **state) {
   assert_lc_ok(rc, &error);
   assert_int_equal(query_capture.end_calls, 1U);
   lc_query_res_cleanup(&query_res);
-  flush_req.namespace_name = "hardening-multi";
+  flush_req.ns = "hardening-multi";
   rc = reader->flush_index(reader, &flush_req, &flush_res, &error);
   assert_lc_ok(rc, &error);
   assert_true(flush_res.flushed);
@@ -5618,7 +5615,7 @@ test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot(void **state) {
                                         &error);
 
   open_pouch_client(endpoint, &client, &error);
-  flush_req.namespace_name = "repair";
+  flush_req.ns = "repair";
   flush_req.mode = "wait";
   rc = client->flush_index(client, &flush_req, &flush_res, &error);
   assert_lc_ok(rc, &error);
@@ -5832,7 +5829,7 @@ static void test_disk_outbox_implicit_xa_roundtrip(void **state) {
   memset(&get_result, 0, sizeof(get_result));
   open_tcp_client(endpoint, bundle_path, &client, &error);
   lc_outbox_config_init(&config);
-  config.namespace_name = "default";
+  config.ns = "default";
   config.owner = "outbox-e2e";
   rc = lc_client_new_outbox(client, &config, &outbox, &error);
   assert_lc_ok(rc, &error);
@@ -5852,7 +5849,7 @@ static void test_disk_outbox_implicit_xa_roundtrip(void **state) {
   assert_lc_ok(rc, &error);
   assert_non_null(transaction);
   lc_outbox_participant_request_init(&participant_request);
-  participant_request.acquire.namespace_name = "default";
+  participant_request.acquire.ns = "default";
   participant_request.acquire.key = domain_key;
   participant_request.acquire.owner = "outbox-e2e";
   participant_request.acquire.ttl_seconds = 30L;
@@ -5974,7 +5971,7 @@ test_disk_outbox_dispatcher_uses_internal_json_limit(void **state) {
   open_tcp_client_with_json_response_limit(endpoint, bundle_path, 1024U,
                                            &client, &error);
   lc_outbox_config_init(&config);
-  config.namespace_name = "default";
+  config.ns = "default";
   config.owner = "outbox-response-limit-e2e";
   rc = lc_client_new_outbox(client, &config, &outbox, &error);
   assert_lc_ok(rc, &error);
@@ -6051,7 +6048,7 @@ static void test_disk_outbox_retry_redelivery(void **state) {
   lc_error_init(&error);
   open_tcp_client(endpoint, bundle_path, &client, &error);
   lc_outbox_config_init(&config);
-  config.namespace_name = "default";
+  config.ns = "default";
   config.owner = "outbox-retry-e2e";
   rc = lc_client_new_outbox(client, &config, &outbox, &error);
   assert_lc_ok(rc, &error);
@@ -6186,7 +6183,7 @@ static void test_disk_outbox_startup_recovery(void **state) {
   lc_error_init(&error);
   open_tcp_client(endpoint, bundle_path, &client, &error);
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = "default";
+  acquire.ns = "default";
   acquire.key = key;
   acquire.owner = "outbox-recovery-e2e";
   acquire.ttl_seconds = 30L;
@@ -6215,7 +6212,7 @@ static void test_disk_outbox_startup_recovery(void **state) {
   assert_lc_ok(rc, &error);
   lease = NULL;
   lc_outbox_config_init(&config);
-  config.namespace_name = "default";
+  config.ns = "default";
   config.owner = "outbox-recovery-e2e";
   config.notification_capacity = 1U;
   rc = lc_client_new_outbox(client, &config, &outbox, &error);

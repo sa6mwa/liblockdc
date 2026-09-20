@@ -304,7 +304,7 @@ struct lc_outbox_handle {
   lc_outbox pub;
   lc_client_handle *client;
   lc_client_handle *dispatcher_client;
-  char *namespace_name;
+  char *ns;
   char *owner;
   long transaction_ttl_seconds;
   long claim_ttl_seconds;
@@ -407,7 +407,7 @@ static int lc_outbox_dispatcher_configuration_matches(
   if (outbox == NULL || dispatcher == NULL || dispatcher->core == NULL)
     return 0;
   core = dispatcher->core;
-  return strcmp(outbox->namespace_name, core->namespace_name) == 0 &&
+  return strcmp(outbox->ns, core->ns) == 0 &&
          strcmp(outbox->owner, core->owner) == 0 &&
          outbox->transaction_ttl_seconds == core->transaction_ttl_seconds &&
          outbox->claim_ttl_seconds == core->claim_ttl_seconds &&
@@ -2110,7 +2110,7 @@ static int lc_outbox_existing_outbox(lc_outbox_handle *outbox, lc_lease *lease,
     rc = lc_lease_load(lease, &lc_outbox_record_map, &record, NULL, &result,
                        error);
   } else {
-    rc = lc_load_in_namespace(&outbox->client->pub, outbox->namespace_name, key,
+    rc = lc_load_in_namespace(&outbox->client->pub, outbox->ns, key,
                               &lc_outbox_record_map, &record, &options, &result,
                               error);
   }
@@ -2179,7 +2179,7 @@ static int lc_outbox_existing_inbox(lc_outbox_handle *outbox, lc_lease *lease,
     rc = lc_lease_load(lease, &lc_outbox_inbox_record_map, &record, NULL,
                        &load_result, error);
   } else {
-    rc = lc_load_in_namespace(&outbox->client->pub, outbox->namespace_name, key,
+    rc = lc_load_in_namespace(&outbox->client->pub, outbox->ns, key,
                               &lc_outbox_inbox_record_map, &record, &options,
                               &load_result, error);
   }
@@ -2232,7 +2232,7 @@ static int lc_outbox_existing_command(lc_outbox_handle *outbox, lc_lease *lease,
     rc = lc_lease_load(lease, &lc_outbox_command_record_map, &record, NULL,
                        &load_result, error);
   } else {
-    rc = lc_load_in_namespace(&outbox->client->pub, outbox->namespace_name, key,
+    rc = lc_load_in_namespace(&outbox->client->pub, outbox->ns, key,
                               &lc_outbox_command_record_map, &record, &options,
                               &load_result, error);
   }
@@ -2300,7 +2300,7 @@ static int lc_outbox_probe_duplicate_barrier(lc_outbox_handle *outbox,
     lc_error_init(error);
   }
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = outbox->namespace_name;
+  acquire.ns = outbox->ns;
   acquire.key = key;
   acquire.owner = outbox->owner;
   acquire.ttl_seconds = outbox->transaction_ttl_seconds;
@@ -2595,7 +2595,7 @@ static int lc_outbox_publish_claim_deadline(lc_outbox_job_handle *job,
   if (rc != LC_OK)
     return rc;
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = job->outbox->namespace_name;
+  acquire.ns = job->outbox->ns;
   acquire.key = key;
   acquire.owner = job->outbox->owner;
   acquire.ttl_seconds = job->outbox->transaction_ttl_seconds;
@@ -2744,10 +2744,9 @@ static lc_unix_seconds lc_outbox_effective_claim_deadline(
   runtime = lc_outbox_json_runtime(outbox->dispatcher_client);
   rc = runtime == NULL
            ? LC_ERR_NOMEM
-           : lc_load_in_namespace(&outbox->dispatcher_client->pub,
-                                  outbox->namespace_name, key,
-                                  &lc_outbox_claim_deadline_record_map, &record,
-                                  &options, &result, &error);
+           : lc_load_in_namespace(&outbox->dispatcher_client->pub, outbox->ns,
+                                  key, &lc_outbox_claim_deadline_record_map,
+                                  &record, &options, &result, &error);
   if (rc == LC_OK && !result.no_content && record.record_type != NULL &&
       strcmp(record.record_type, "lockdc.outbox-claim-deadline.v1") == 0) {
     fallback =
@@ -3184,9 +3183,9 @@ static int lc_outbox_pouch_shared_live_claim(lc_outbox_handle *outbox,
     lc_error_cleanup(&load_error);
     return 0;
   }
-  rc = lc_load_in_namespace(&client->pub, outbox->namespace_name, key,
-                            &lc_outbox_record_map, &record, &options, &result,
-                            &load_error);
+  rc =
+      lc_load_in_namespace(&client->pub, outbox->ns, key, &lc_outbox_record_map,
+                           &record, &options, &result, &load_error);
   now = time(NULL);
   if (rc == LC_OK && !result.no_content && record.record_type != NULL &&
       strcmp(record.record_type, "lockdc.outbox.v1") == 0 &&
@@ -3237,11 +3236,11 @@ static void lc_outbox_schedule_conflicted_claim_recovery(
   options.public_read = 1;
   lc_error_init(&load_error);
   runtime = lc_outbox_json_runtime(outbox->dispatcher_client);
-  rc = runtime == NULL ? LC_ERR_NOMEM
-                       : lc_load_in_namespace(&outbox->dispatcher_client->pub,
-                                              outbox->namespace_name, key,
-                                              &lc_outbox_record_map, &record,
-                                              &options, &result, &load_error);
+  rc = runtime == NULL
+           ? LC_ERR_NOMEM
+           : lc_load_in_namespace(&outbox->dispatcher_client->pub, outbox->ns,
+                                  key, &lc_outbox_record_map, &record, &options,
+                                  &result, &load_error);
   if (rc == LC_OK && !result.no_content && record.record_type != NULL &&
       record.dispatch_state != NULL &&
       strcmp(record.record_type, "lockdc.outbox.v1") == 0 &&
@@ -3330,7 +3329,7 @@ static int lc_outbox_claim_outbox(lc_outbox_handle *outbox, const char *key,
 
   *out = NULL;
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = outbox->namespace_name;
+  acquire.ns = outbox->ns;
   acquire.key = key;
   acquire.owner = outbox->owner;
   acquire.ttl_seconds = outbox->claim_ttl_seconds;
@@ -3708,10 +3707,9 @@ static int lc_outbox_recovery_key_end(void *context, lc_error *error) {
                           "outbox recovery JSON runtime is unavailable", NULL,
                           NULL, NULL);
     }
-    rc = lc_load_in_namespace(&capture->outbox->dispatcher_client->pub,
-                              capture->outbox->namespace_name, capture->key,
-                              &lc_outbox_record_map, &record, &options, &result,
-                              error);
+    rc = lc_load_in_namespace(
+        &capture->outbox->dispatcher_client->pub, capture->outbox->ns,
+        capture->key, &lc_outbox_record_map, &record, &options, &result, error);
     no_content = result.no_content;
     if (rc == LC_OK && !result.no_content)
       rc = lc_outbox_validate_durable_outbox_record(&record, error);
@@ -3840,7 +3838,7 @@ static int lc_outbox_reconcile_pending(lc_outbox_handle *outbox,
    * Pouch roots have no index boundary; their explicitly selected scan is
    * already current and remains a supported outbox recovery path. */
   if (use_index && outbox->recovery_cursor == NULL) {
-    flush_request.namespace_name = outbox->namespace_name;
+    flush_request.ns = outbox->ns;
     flush_request.mode = "wait";
     rc = lc_flush_index(&outbox->dispatcher_client->pub, &flush_request,
                         &flush_result, error);
@@ -3854,7 +3852,7 @@ static int lc_outbox_reconcile_pending(lc_outbox_handle *outbox,
       return rc;
     }
   }
-  request.namespace_name = outbox->namespace_name;
+  request.ns = outbox->ns;
   request.selector_json =
       scan_mode == LC_OUTBOX_RECOVERY_SCAN_CLAIMS
           ? claimed_selector
@@ -4268,7 +4266,7 @@ static void lc_outbox_participant_refresh(lc_outbox_participant_handle *p) {
   if (p->lease == NULL) {
     return;
   }
-  p->pub.namespace_name = p->lease->namespace_name;
+  p->pub.ns = p->lease->ns;
   p->pub.key = p->lease->key;
   p->pub.txn_id = p->lease->txn_id;
   p->pub.fencing_token = p->lease->fencing_token;
@@ -4282,7 +4280,7 @@ static void lc_outbox_participant_invalidate(lc_outbox_participant_handle *p) {
   p->transaction = NULL;
   p->lease = NULL;
   p->next = NULL;
-  p->pub.namespace_name = NULL;
+  p->pub.ns = NULL;
   p->pub.key = NULL;
   p->pub.txn_id = NULL;
   p->pub.fencing_token = 0L;
@@ -4577,8 +4575,8 @@ static int lc_outbox_transaction_acquire_method(
                                          &acquire.txn_id, error);
   if (rc != LC_OK)
     return rc;
-  if (acquire.namespace_name == NULL)
-    acquire.namespace_name = transaction->outbox->namespace_name;
+  if (acquire.ns == NULL)
+    acquire.ns = transaction->outbox->ns;
   if (acquire.owner == NULL || acquire.owner[0] == '\0')
     acquire.owner = transaction->outbox->owner;
   if (acquire.ttl_seconds == 0L)
@@ -4669,7 +4667,7 @@ static int lc_outbox_transaction_accept_command_method(
   if (rc != LC_OK)
     return rc;
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = transaction->outbox->namespace_name;
+  acquire.ns = transaction->outbox->ns;
   acquire.key = key;
   acquire.owner = transaction->outbox->owner;
   acquire.ttl_seconds = transaction->outbox->transaction_ttl_seconds;
@@ -4768,7 +4766,7 @@ static int lc_outbox_transaction_accept_inbox_method(
   if (rc != LC_OK)
     return rc;
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = transaction->outbox->namespace_name;
+  acquire.ns = transaction->outbox->ns;
   acquire.key = key;
   acquire.owner = transaction->outbox->owner;
   acquire.ttl_seconds = transaction->outbox->transaction_ttl_seconds;
@@ -4864,7 +4862,7 @@ static int lc_outbox_transaction_append_method(lc_outbox_transaction *self,
   if (rc != LC_OK)
     return rc;
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = transaction->outbox->namespace_name;
+  acquire.ns = transaction->outbox->ns;
   acquire.key = key;
   acquire.owner = transaction->outbox->owner;
   acquire.ttl_seconds = transaction->outbox->transaction_ttl_seconds;
@@ -5288,7 +5286,7 @@ lc_outbox_append_method(lc_outbox *self, const lc_outbox_entry *entry,
   if (rc != LC_OK)
     return rc;
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = outbox->namespace_name;
+  acquire.ns = outbox->ns;
   acquire.key = key;
   acquire.owner = outbox->owner;
   acquire.ttl_seconds = outbox->transaction_ttl_seconds;
@@ -5367,7 +5365,7 @@ static int lc_outbox_accept_inbox_method(lc_outbox *self,
   if (rc != LC_OK)
     return rc;
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = outbox->namespace_name;
+  acquire.ns = outbox->ns;
   acquire.key = key;
   acquire.owner = outbox->owner;
   acquire.ttl_seconds = outbox->transaction_ttl_seconds;
@@ -5451,7 +5449,7 @@ static int lc_outbox_accept_command_method(lc_outbox *self,
   if (rc != LC_OK)
     return rc;
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = outbox->namespace_name;
+  acquire.ns = outbox->ns;
   acquire.key = key;
   acquire.owner = outbox->owner;
   acquire.ttl_seconds = outbox->transaction_ttl_seconds;
@@ -5561,7 +5559,7 @@ static int lc_outbox_write_command_result_method(
     return rc;
   lc_attachment_get_op_init(&request);
   memset(&result, 0, sizeof(result));
-  request.lease.namespace_name = outbox->namespace_name;
+  request.lease.ns = outbox->ns;
   request.lease.key = key;
   request.selector.name = "result";
   request.public_read = 1;
@@ -5608,7 +5606,7 @@ static int lc_outbox_resume_command_method(lc_outbox *self,
     return rc;
   }
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = outbox->namespace_name;
+  acquire.ns = outbox->ns;
   acquire.key = key;
   acquire.owner = outbox->owner;
   acquire.ttl_seconds = outbox->transaction_ttl_seconds;
@@ -5765,7 +5763,7 @@ lc_outbox_open_dead_letter(lc_outbox_handle *outbox, lc_client_handle *client,
   memset(record, 0, sizeof(*record));
   memset(&result, 0, sizeof(result));
   lc_acquire_req_init(&acquire);
-  acquire.namespace_name = outbox->namespace_name;
+  acquire.ns = outbox->ns;
   acquire.key = outbox_key;
   acquire.owner = outbox->owner;
   acquire.ttl_seconds = outbox->transaction_ttl_seconds;
@@ -5958,7 +5956,7 @@ static int lc_outbox_replay_dead_letters_on_startup(lc_outbox_handle *outbox,
   if (use_index && !outbox->startup_dead_letter_replay_flushed) {
     lc_index_flush_req_init(&flush_request);
     memset(&flush_result, 0, sizeof(flush_result));
-    flush_request.namespace_name = outbox->namespace_name;
+    flush_request.ns = outbox->ns;
     flush_request.mode = "wait";
     rc = lc_flush_index(&outbox->dispatcher_client->pub, &flush_request,
                         &flush_result, error);
@@ -5979,7 +5977,7 @@ static int lc_outbox_replay_dead_letters_on_startup(lc_outbox_handle *outbox,
                         NULL, NULL);
   }
   capture.key_capacity = outbox->notification_capacity;
-  request.namespace_name = outbox->namespace_name;
+  request.ns = outbox->ns;
   request.selector_json = selector;
   request.limit = (long)outbox->notification_capacity;
   request.engine = use_index ? "index" : "scan";
@@ -6050,7 +6048,7 @@ static int lc_outbox_delete_dead_letter_method(lc_outbox *self,
     lc_acquire_req acquire;
 
     lc_acquire_req_init(&acquire);
-    acquire.namespace_name = outbox->namespace_name;
+    acquire.ns = outbox->ns;
     acquire.key = deadline_key;
     acquire.owner = outbox->owner;
     acquire.ttl_seconds = outbox->transaction_ttl_seconds;
@@ -6250,7 +6248,7 @@ static int lc_outbox_export_dead_letters_method(
    * deletion can still change a selected record before it is read; that
    * benign stale-key race is ignored by the key visitor above. */
   if (use_index) {
-    flush_request.namespace_name = outbox->namespace_name;
+    flush_request.ns = outbox->ns;
     flush_request.mode = "wait";
     rc = lc_flush_index(&outbox->dispatcher_client->pub, &flush_request,
                         &flush_result, error);
@@ -6258,7 +6256,7 @@ static int lc_outbox_export_dead_letters_method(
     if (rc != LC_OK)
       return rc;
   }
-  request.namespace_name = outbox->namespace_name;
+  request.ns = outbox->ns;
   request.selector_json = selector;
   request.limit = (long)limit;
   request.engine = use_index ? "index" : "scan";
@@ -6295,7 +6293,7 @@ static void lc_outbox_destroy(lc_outbox_handle *outbox) {
     pthread_cond_destroy(&outbox->notification_cond);
   if (outbox->notification_mutex_initialized)
     pthread_mutex_destroy(&outbox->notification_mutex);
-  lc_client_free(client, outbox->namespace_name);
+  lc_client_free(client, outbox->ns);
   lc_client_free(client, outbox->owner);
   if (outbox->dispatcher_client != NULL) {
     lc_client_handle_release(outbox->dispatcher_client);
@@ -6401,8 +6399,8 @@ static int lc_outbox_new(lc_client *self, const lc_outbox_config *config,
   int rc;
   if (out != NULL)
     *out = NULL;
-  if (self == NULL || config == NULL || out == NULL ||
-      config->namespace_name == NULL || config->namespace_name[0] == '\0')
+  if (self == NULL || config == NULL || out == NULL || config->ns == NULL ||
+      config->ns[0] == '\0')
     return lc_error_set(
         error, LC_ERR_INVALID, 0L,
         "new_outbox requires client, namespace config, and output", NULL, NULL,
@@ -6423,12 +6421,12 @@ static int lc_outbox_new(lc_client *self, const lc_outbox_config *config,
                         NULL, NULL, NULL);
   }
   outbox->client = client;
-  outbox->namespace_name = lc_client_strdup(client, config->namespace_name);
+  outbox->ns = lc_client_strdup(client, config->ns);
   outbox->owner =
       lc_client_strdup(client, config->owner != NULL && config->owner[0] != '\0'
                                    ? config->owner
                                    : "lockdc-outbox");
-  if (outbox->namespace_name == NULL || outbox->owner == NULL) {
+  if (outbox->ns == NULL || outbox->owner == NULL) {
     lc_outbox_close_method(&outbox->pub);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
                         "failed to copy outbox configuration", NULL, NULL,
@@ -7102,7 +7100,7 @@ static int lc_outbox_get_or_start_dispatcher_method(lc_outbox *self,
   }
   pthread_mutex_unlock(&outbox->client->lifecycle_mutex);
   lc_outbox_config_init(&config);
-  config.namespace_name = outbox->namespace_name;
+  config.ns = outbox->ns;
   config.owner = outbox->owner;
   config.transaction_ttl_seconds = outbox->transaction_ttl_seconds;
   config.claim_ttl_seconds = outbox->claim_ttl_seconds;

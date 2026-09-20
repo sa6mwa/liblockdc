@@ -75,7 +75,7 @@ static lc_pouch_writer_root_lock_entry *lc_pouch_writer_root_locks;
 #define LC_POUCH_DEFAULT_INDEXER_FLUSH_INTERVAL_SECONDS 10U
 
 struct lc_pouch_indexer_pending_namespace {
-  char *namespace_name;
+  char *ns;
   uint64_t write_count;
   struct lc_pouch_indexer_pending_namespace *next;
 };
@@ -621,14 +621,13 @@ static void lc_pouch_compaction_deadline(lc_pouch *pouch,
   }
 }
 
-static int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
-                                               const char *namespace_name,
+static int lc_pouch_compaction_track_namespace(lc_pouch *pouch, const char *ns,
                                                int terminal, int *queued,
                                                lc_error *error) {
   char *name_copy;
   size_t index;
 
-  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+  if (pouch == NULL || ns == NULL || ns[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch compaction namespace requires inputs", NULL,
                         NULL, "pouch");
@@ -641,7 +640,7 @@ static int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
   }
   pthread_mutex_lock(&pouch->compaction_mutex);
   for (index = 0U; index < pouch->compaction_namespace_count; ++index) {
-    if (strcmp(pouch->compaction_namespaces[index], namespace_name) == 0) {
+    if (strcmp(pouch->compaction_namespaces[index], ns) == 0) {
       if (terminal) {
         pouch->compaction_namespace_terminal[index] = 1U;
       }
@@ -681,7 +680,7 @@ static int lc_pouch_compaction_track_namespace(lc_pouch *pouch,
     pthread_mutex_unlock(&pouch->compaction_mutex);
     return LC_OK;
   }
-  name_copy = lc_strdup_with_allocator(&pouch->allocator, namespace_name);
+  name_copy = lc_strdup_with_allocator(&pouch->allocator, ns);
   if (name_copy == NULL) {
     pthread_mutex_unlock(&pouch->compaction_mutex);
     return lc_error_set(error, LC_ERR_NOMEM, 0L,
@@ -739,9 +738,9 @@ static int lc_pouch_terminal_reclaim_directory(lc_pouch *pouch, int create,
 }
 
 static int lc_pouch_terminal_reclaim_marker_path(lc_pouch *pouch,
-                                                 const char *namespace_name,
-                                                 int create, char **directory,
-                                                 char **path, lc_error *error) {
+                                                 const char *ns, int create,
+                                                 char **directory, char **path,
+                                                 lc_error *error) {
   char *leaf;
   int rc;
 
@@ -751,7 +750,7 @@ static int lc_pouch_terminal_reclaim_marker_path(lc_pouch *pouch,
   if (rc != LC_OK) {
     return rc;
   }
-  leaf = lc_pouch_path_escape_name(&pouch->allocator, namespace_name);
+  leaf = lc_pouch_path_escape_name(&pouch->allocator, ns);
   if (leaf == NULL) {
     lc_free_with_allocator(&pouch->allocator, *directory);
     *directory = NULL;
@@ -772,7 +771,7 @@ static int lc_pouch_terminal_reclaim_marker_path(lc_pouch *pouch,
 }
 
 static int lc_pouch_terminal_reclaim_marker_write(lc_pouch *pouch,
-                                                  const char *namespace_name,
+                                                  const char *ns,
                                                   lc_error *error) {
   char *directory;
   char *path;
@@ -781,8 +780,8 @@ static int lc_pouch_terminal_reclaim_marker_write(lc_pouch *pouch,
 
   directory = NULL;
   path = NULL;
-  rc = lc_pouch_terminal_reclaim_marker_path(pouch, namespace_name, 1,
-                                             &directory, &path, error);
+  rc = lc_pouch_terminal_reclaim_marker_path(pouch, ns, 1, &directory, &path,
+                                             error);
   if (rc == LC_OK) {
     fd = open(path, O_WRONLY | O_CREAT, 0666);
     if (fd < 0) {
@@ -812,8 +811,7 @@ static int lc_pouch_terminal_reclaim_marker_write(lc_pouch *pouch,
   return rc;
 }
 
-static int lc_pouch_terminal_reclaim_marker_take(lc_pouch *pouch,
-                                                 char **namespace_name,
+static int lc_pouch_terminal_reclaim_marker_take(lc_pouch *pouch, char **ns,
                                                  lc_error *error) {
   char *directory;
   char *after_cursor_leaf;
@@ -824,7 +822,7 @@ static int lc_pouch_terminal_reclaim_marker_take(lc_pouch *pouch,
   struct dirent *entry;
   int rc;
 
-  *namespace_name = NULL;
+  *ns = NULL;
   directory = NULL;
   first_leaf = NULL;
   first_namespace = NULL;
@@ -905,14 +903,14 @@ static int lc_pouch_terminal_reclaim_marker_take(lc_pouch *pouch,
   }
   if (rc == LC_OK) {
     if (after_cursor_namespace != NULL) {
-      *namespace_name = after_cursor_namespace;
+      *ns = after_cursor_namespace;
       after_cursor_namespace = NULL;
       lc_free_with_allocator(&pouch->allocator,
                              pouch->terminal_reclaim_marker_cursor);
       pouch->terminal_reclaim_marker_cursor = after_cursor_leaf;
       after_cursor_leaf = NULL;
     } else if (first_namespace != NULL) {
-      *namespace_name = first_namespace;
+      *ns = first_namespace;
       first_namespace = NULL;
       lc_free_with_allocator(&pouch->allocator,
                              pouch->terminal_reclaim_marker_cursor);
@@ -928,8 +926,7 @@ static int lc_pouch_terminal_reclaim_marker_take(lc_pouch *pouch,
   return rc;
 }
 
-int lc_pouch_terminal_reclaim_marker_remove(lc_pouch *pouch,
-                                            const char *namespace_name,
+int lc_pouch_terminal_reclaim_marker_remove(lc_pouch *pouch, const char *ns,
                                             lc_error *error) {
   char *directory;
   char *path;
@@ -937,8 +934,8 @@ int lc_pouch_terminal_reclaim_marker_remove(lc_pouch *pouch,
 
   directory = NULL;
   path = NULL;
-  rc = lc_pouch_terminal_reclaim_marker_path(pouch, namespace_name, 0,
-                                             &directory, &path, error);
+  rc = lc_pouch_terminal_reclaim_marker_path(pouch, ns, 0, &directory, &path,
+                                             error);
   if (rc == LC_OK) {
     if (unlink(path) != 0 && errno != ENOENT) {
       rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -958,7 +955,7 @@ int lc_pouch_terminal_reclaim_marker_remove(lc_pouch *pouch,
 static int lc_pouch_compaction_take_namespace(lc_pouch *pouch,
                                               char **out_namespace,
                                               int *terminal_out) {
-  char *namespace_name;
+  char *ns;
 
   *out_namespace = NULL;
   *terminal_out = 0;
@@ -967,7 +964,7 @@ static int lc_pouch_compaction_take_namespace(lc_pouch *pouch,
     pthread_mutex_unlock(&pouch->compaction_mutex);
     return LC_OK;
   }
-  namespace_name = pouch->compaction_namespaces[0];
+  ns = pouch->compaction_namespaces[0];
   *terminal_out = pouch->compaction_namespace_terminal[0] != 0U;
   if (pouch->compaction_namespace_count > 1U) {
     memmove(pouch->compaction_namespaces, pouch->compaction_namespaces + 1U,
@@ -980,7 +977,7 @@ static int lc_pouch_compaction_take_namespace(lc_pouch *pouch,
   }
   --pouch->compaction_namespace_count;
   pthread_mutex_unlock(&pouch->compaction_mutex);
-  *out_namespace = namespace_name;
+  *out_namespace = ns;
   return LC_OK;
 }
 
@@ -995,7 +992,7 @@ static int lc_pouch_compaction_take_marker_turn(lc_pouch *pouch) {
 }
 
 static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
-  char *namespace_name;
+  char *ns;
   int terminal_reclaim;
   int marker_turn;
   lc_error error;
@@ -1006,23 +1003,22 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
     return;
   }
   lc_error_init(&error);
-  namespace_name = NULL;
+  ns = NULL;
   terminal_reclaim = 0;
   rc = LC_OK;
   marker_turn = lc_pouch_compaction_take_marker_turn(pouch);
   if (marker_turn) {
-    rc = lc_pouch_terminal_reclaim_marker_take(pouch, &namespace_name, &error);
-    if (rc == LC_OK && namespace_name != NULL) {
+    rc = lc_pouch_terminal_reclaim_marker_take(pouch, &ns, &error);
+    if (rc == LC_OK && ns != NULL) {
       terminal_reclaim = 1;
     }
   }
-  if (rc == LC_OK && namespace_name == NULL) {
-    rc = lc_pouch_compaction_take_namespace(pouch, &namespace_name,
-                                            &terminal_reclaim);
+  if (rc == LC_OK && ns == NULL) {
+    rc = lc_pouch_compaction_take_namespace(pouch, &ns, &terminal_reclaim);
   }
-  if (!marker_turn && rc == LC_OK && namespace_name == NULL) {
-    rc = lc_pouch_terminal_reclaim_marker_take(pouch, &namespace_name, &error);
-    if (rc == LC_OK && namespace_name != NULL) {
+  if (!marker_turn && rc == LC_OK && ns == NULL) {
+    rc = lc_pouch_terminal_reclaim_marker_take(pouch, &ns, &error);
+    if (rc == LC_OK && ns != NULL) {
       terminal_reclaim = 1;
     }
   }
@@ -1037,7 +1033,7 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
     return;
   }
   lc_error_cleanup(&error);
-  if (namespace_name != NULL) {
+  if (ns != NULL) {
     lc_pouch_maintenance_options options;
     lc_pouch_maintenance_result result;
     lc_error maintenance_error;
@@ -1046,32 +1042,31 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
       lc_error marker_error;
 
       lc_error_init(&marker_error);
-      rc = lc_pouch_terminal_reclaim_marker_write(pouch, namespace_name,
-                                                  &marker_error);
+      rc = lc_pouch_terminal_reclaim_marker_write(pouch, ns, &marker_error);
       if (rc != LC_OK) {
         pslog_field fields[3];
 
-        fields[0] = lc_log_str_field("ns", namespace_name);
+        fields[0] = lc_log_str_field("ns", ns);
         fields[1] = lc_log_error_field("error", &marker_error);
         fields[2] = lc_log_code_field(&marker_error);
         lc_log_warn(pouch->logger, "compaction.terminal.marker.error", fields,
                     3U);
         lc_error_cleanup(&marker_error);
-        lc_free_with_allocator(&pouch->allocator, namespace_name);
+        lc_free_with_allocator(&pouch->allocator, ns);
         return;
       }
       lc_error_cleanup(&marker_error);
     }
     memset(&options, 0, sizeof(options));
     memset(&result, 0, sizeof(result));
-    options.namespace_name = namespace_name;
+    options.ns = ns;
     options.terminal_reclaim = terminal_reclaim;
     lc_error_init(&maintenance_error);
     rc = lc_pouch_maintenance_run(pouch, &options, &result, &maintenance_error);
     if (rc != LC_OK) {
       pslog_field fields[3];
 
-      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[0] = lc_log_str_field("ns", ns);
       fields[1] = lc_log_error_field("error", &maintenance_error);
       fields[2] = lc_log_code_field(&maintenance_error);
       lc_log_warn(pouch->logger, "compaction.background.error", fields, 3U);
@@ -1081,12 +1076,11 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
 
       lc_error_init(&queue_error);
       queued = 0;
-      if (lc_pouch_compaction_track_namespace(pouch, namespace_name,
-                                              terminal_reclaim, &queued,
-                                              &queue_error) != LC_OK) {
+      if (lc_pouch_compaction_track_namespace(pouch, ns, terminal_reclaim,
+                                              &queued, &queue_error) != LC_OK) {
         pslog_field fields[3];
 
-        fields[0] = lc_log_str_field("ns", namespace_name);
+        fields[0] = lc_log_str_field("ns", ns);
         fields[1] = lc_log_error_field("error", &queue_error);
         fields[2] = lc_log_code_field(&queue_error);
         lc_log_warn(pouch->logger, "compaction.background.queue.error", fields,
@@ -1096,7 +1090,7 @@ static void lc_pouch_compaction_run_pass(lc_pouch *pouch) {
     }
     lc_error_cleanup(&maintenance_error);
     lc_pouch_maintenance_result_cleanup(&pouch->allocator, &result);
-    lc_free_with_allocator(&pouch->allocator, namespace_name);
+    lc_free_with_allocator(&pouch->allocator, ns);
   }
 }
 
@@ -1267,13 +1261,12 @@ static void lc_pouch_compaction_worker_close(lc_pouch *pouch) {
   pouch->compaction_namespace_capacity = 0U;
 }
 
-void lc_pouch_compaction_note_mutation(lc_pouch *pouch,
-                                       const char *namespace_name,
+void lc_pouch_compaction_note_mutation(lc_pouch *pouch, const char *ns,
                                        int terminal) {
   lc_error error;
   int queued;
 
-  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+  if (pouch == NULL || ns == NULL || ns[0] == '\0') {
     return;
   }
   lc_error_init(&error);
@@ -1284,20 +1277,20 @@ void lc_pouch_compaction_note_mutation(lc_pouch *pouch,
     lc_error_cleanup(&error);
     return;
   }
-  if (lc_pouch_compaction_track_namespace(pouch, namespace_name, terminal,
-                                          &queued, &error) != LC_OK) {
+  if (lc_pouch_compaction_track_namespace(pouch, ns, terminal, &queued,
+                                          &error) != LC_OK) {
     pslog_field fields[3];
 
-    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[0] = lc_log_str_field("ns", ns);
     fields[1] = lc_log_error_field("error", &error);
     fields[2] = lc_log_code_field(&error);
     lc_log_warn(pouch->logger, "compaction.background.queue.error", fields, 3U);
   } else if (terminal && !queued &&
-             lc_pouch_terminal_reclaim_marker_write(pouch, namespace_name,
-                                                    &error) != LC_OK) {
+             lc_pouch_terminal_reclaim_marker_write(pouch, ns, &error) !=
+                 LC_OK) {
     pslog_field fields[3];
 
-    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[0] = lc_log_str_field("ns", ns);
     fields[1] = lc_log_error_field("error", &error);
     fields[2] = lc_log_code_field(&error);
     lc_log_warn(pouch->logger, "compaction.terminal.marker.error", fields, 3U);
@@ -1309,20 +1302,19 @@ void lc_pouch_compaction_note_mutation(lc_pouch *pouch,
   pthread_mutex_unlock(&pouch->compaction_mutex);
 }
 
-int lc_pouch_compaction_note_history_advanced(lc_pouch *pouch,
-                                              const char *namespace_name,
+int lc_pouch_compaction_note_history_advanced(lc_pouch *pouch, const char *ns,
                                               lc_error *error) {
   int rc;
 
-  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+  if (pouch == NULL || ns == NULL || ns[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "history compaction notification requires pouch and "
                         "namespace",
                         NULL, NULL, "pouch");
   }
-  rc = lc_pouch_terminal_reclaim_marker_write(pouch, namespace_name, error);
+  rc = lc_pouch_terminal_reclaim_marker_write(pouch, ns, error);
   if (rc == LC_OK) {
-    lc_pouch_compaction_note_mutation(pouch, namespace_name, 1);
+    lc_pouch_compaction_note_mutation(pouch, ns, 1);
   }
   return rc;
 }
@@ -1357,8 +1349,8 @@ static void lc_pouch_indexer_cap_deadline_for_operation_expiry_locked(
        entry = entry->next) {
     lc_pouch_unix_seconds expires_at_unix;
 
-    expires_at_unix = lc_pouch_query_index_next_operation_expiry_locked(
-        pouch, entry->namespace_name);
+    expires_at_unix =
+        lc_pouch_query_index_next_operation_expiry_locked(pouch, entry->ns);
     if (expires_at_unix <= 0L || (lc_u64)expires_at_unix > (lc_u64)LONG_MAX) {
       continue;
     }
@@ -1382,19 +1374,19 @@ static void lc_pouch_indexer_pending_namespaces_cleanup(
     lc_pouch_indexer_pending_namespace *next;
 
     next = namespaces->next;
-    lc_free_with_allocator(&pouch->allocator, namespaces->namespace_name);
+    lc_free_with_allocator(&pouch->allocator, namespaces->ns);
     lc_free_with_allocator(&pouch->allocator, namespaces);
     namespaces = next;
   }
 }
 
 static int lc_pouch_indexer_queue_namespace_locked(lc_pouch *pouch,
-                                                   const char *namespace_name) {
+                                                   const char *ns) {
   lc_pouch_indexer_pending_namespace *entry;
 
   for (entry = pouch->indexer_pending_namespaces; entry != NULL;
        entry = entry->next) {
-    if (strcmp(entry->namespace_name, namespace_name) == 0) {
+    if (strcmp(entry->ns, ns) == 0) {
       if (entry->write_count != LC_U64_MAX) {
         ++entry->write_count;
       }
@@ -1406,9 +1398,8 @@ static int lc_pouch_indexer_queue_namespace_locked(lc_pouch *pouch,
   if (entry == NULL) {
     return LC_ERR_NOMEM;
   }
-  entry->namespace_name =
-      lc_strdup_with_allocator(&pouch->allocator, namespace_name);
-  if (entry->namespace_name == NULL) {
+  entry->ns = lc_strdup_with_allocator(&pouch->allocator, ns);
+  if (entry->ns == NULL) {
     lc_free_with_allocator(&pouch->allocator, entry);
     return LC_ERR_NOMEM;
   }
@@ -1418,21 +1409,21 @@ static int lc_pouch_indexer_queue_namespace_locked(lc_pouch *pouch,
   return LC_OK;
 }
 
-static int lc_pouch_indexer_namespace_flush_limit_reached_locked(
-    lc_pouch *pouch, const char *namespace_name) {
+static int
+lc_pouch_indexer_namespace_flush_limit_reached_locked(lc_pouch *pouch,
+                                                      const char *ns) {
   lc_pouch_indexer_pending_namespace *entry;
 
-  if (pouch == NULL || namespace_name == NULL ||
-      pouch->indexer_flush_docs == 0U) {
+  if (pouch == NULL || ns == NULL || pouch->indexer_flush_docs == 0U) {
     return 0;
   }
   for (entry = pouch->indexer_pending_namespaces; entry != NULL;
        entry = entry->next) {
-    if (strcmp(entry->namespace_name, namespace_name) == 0) {
+    if (strcmp(entry->ns, ns) == 0) {
       return entry->write_count >= pouch->indexer_flush_docs &&
              (!lc_pouch_single_writer_enabled(pouch) ||
               lc_pouch_query_index_pending_document_limit_reached_locked(
-                  pouch, namespace_name, pouch->indexer_flush_docs));
+                  pouch, ns, pouch->indexer_flush_docs));
     }
   }
   return 0;
@@ -1442,11 +1433,10 @@ static int lc_pouch_indexer_namespace_flush_limit_reached_locked(
  * then establish their own debounce window while publication runs. A failed
  * or deferred attempt requeues this entry under the same mutex. */
 static lc_pouch_indexer_pending_namespace *
-lc_pouch_indexer_take_namespace_locked(lc_pouch *pouch,
-                                       const char *namespace_name) {
+lc_pouch_indexer_take_namespace_locked(lc_pouch *pouch, const char *ns) {
   lc_pouch_indexer_pending_namespace **link;
 
-  if (pouch == NULL || namespace_name == NULL) {
+  if (pouch == NULL || ns == NULL) {
     return NULL;
   }
   link = &pouch->indexer_pending_namespaces;
@@ -1454,7 +1444,7 @@ lc_pouch_indexer_take_namespace_locked(lc_pouch *pouch,
     lc_pouch_indexer_pending_namespace *entry;
 
     entry = *link;
-    if (strcmp(entry->namespace_name, namespace_name) == 0) {
+    if (strcmp(entry->ns, ns) == 0) {
       *link = entry->next;
       entry->next = NULL;
       return entry;
@@ -1476,8 +1466,8 @@ static int lc_pouch_indexer_flush_limit_reached_locked(lc_pouch *pouch) {
   }
   for (entry = pouch->indexer_pending_namespaces; entry != NULL;
        entry = entry->next) {
-    if (lc_pouch_indexer_namespace_flush_limit_reached_locked(
-            pouch, entry->namespace_name)) {
+    if (lc_pouch_indexer_namespace_flush_limit_reached_locked(pouch,
+                                                              entry->ns)) {
       return 1;
     }
   }
@@ -1493,13 +1483,13 @@ static void lc_pouch_indexer_requeue(lc_pouch *pouch,
     next = list->next;
     for (entry = pouch->indexer_pending_namespaces; entry != NULL;
          entry = entry->next) {
-      if (strcmp(entry->namespace_name, list->namespace_name) == 0) {
+      if (strcmp(entry->ns, list->ns) == 0) {
         if (entry->write_count > LC_U64_MAX - list->write_count) {
           entry->write_count = LC_U64_MAX;
         } else {
           entry->write_count += list->write_count;
         }
-        lc_free_with_allocator(&pouch->allocator, list->namespace_name);
+        lc_free_with_allocator(&pouch->allocator, list->ns);
         lc_free_with_allocator(&pouch->allocator, list);
         list = next;
         break;
@@ -1535,28 +1525,27 @@ lc_pouch_indexer_run_batch(lc_pouch *pouch,
     state_index_seq = 0UL;
     deferred_for_active_operation = 0;
     lc_error_init(&error);
-    rc = lc_pouch_state_query_index_seq(pouch, entry->namespace_name,
-                                        &state_index_seq, &error);
+    rc = lc_pouch_state_query_index_seq(pouch, entry->ns, &state_index_seq,
+                                        &error);
     if (rc == LC_OK) {
       if (lc_pouch_single_writer_enabled(pouch)) {
         /* An exclusive worker must preserve the same final-version-only
          * boundary as foreground threshold publication. A zero result with a
          * nonzero public sequence means active keys deferred this batch. */
-        rc = lc_pouch_query_index_flush_threshold(pouch, entry->namespace_name,
-                                                  state_index_seq,
-                                                  &flush_result, &error);
+        rc = lc_pouch_query_index_flush_threshold(
+            pouch, entry->ns, state_index_seq, &flush_result, &error);
         deferred_for_active_operation = rc == LC_OK && state_index_seq != 0UL &&
                                         flush_result.index_seq == 0UL;
       } else {
-        rc = lc_pouch_query_index_flush(pouch, entry->namespace_name,
-                                        state_index_seq, &flush_result, &error);
+        rc = lc_pouch_query_index_flush(pouch, entry->ns, state_index_seq,
+                                        &flush_result, &error);
       }
     }
     if (rc != LC_OK || deferred_for_active_operation) {
       if (rc != LC_OK) {
         pslog_field fields[3];
 
-        fields[0] = lc_log_str_field("ns", entry->namespace_name);
+        fields[0] = lc_log_str_field("ns", entry->ns);
         fields[1] = lc_log_error_field("error", &error);
         fields[2] = lc_log_code_field(&error);
         lc_log_warn(pouch->logger, "index.background.error", fields, 3U);
@@ -1564,7 +1553,7 @@ lc_pouch_indexer_run_batch(lc_pouch *pouch,
       entry->next = failed;
       failed = entry;
     } else {
-      lc_free_with_allocator(&pouch->allocator, entry->namespace_name);
+      lc_free_with_allocator(&pouch->allocator, entry->ns);
       lc_free_with_allocator(&pouch->allocator, entry);
     }
     lc_error_cleanup(&error);
@@ -1675,8 +1664,7 @@ static void lc_pouch_indexer_worker_close(lc_pouch *pouch) {
   }
 }
 
-static int lc_pouch_indexer_publish_threshold(lc_pouch *pouch,
-                                              const char *namespace_name) {
+static int lc_pouch_indexer_publish_threshold(lc_pouch *pouch, const char *ns) {
   lc_pouch_query_index_flush_result flush_result;
   lc_pouch_generation state_index_seq;
   lc_error error;
@@ -1691,11 +1679,10 @@ static int lc_pouch_indexer_publish_threshold(lc_pouch *pouch,
   state_index_seq = 0UL;
   published = 0;
   lc_error_init(&error);
-  rc = lc_pouch_state_query_index_seq(pouch, namespace_name, &state_index_seq,
-                                      &error);
+  rc = lc_pouch_state_query_index_seq(pouch, ns, &state_index_seq, &error);
   if (rc == LC_OK) {
-    rc = lc_pouch_query_index_flush_threshold(
-        pouch, namespace_name, state_index_seq, &flush_result, &error);
+    rc = lc_pouch_query_index_flush_threshold(pouch, ns, state_index_seq,
+                                              &flush_result, &error);
   }
   if (rc == LC_OK && flush_result.index_seq != 0UL) {
     published = 1;
@@ -1703,7 +1690,7 @@ static int lc_pouch_indexer_publish_threshold(lc_pouch *pouch,
   if (rc != LC_OK) {
     pslog_field fields[3];
 
-    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[0] = lc_log_str_field("ns", ns);
     fields[1] = lc_log_error_field("error", &error);
     fields[2] = lc_log_code_field(&error);
     lc_log_warn(pouch->logger, "index.threshold.error", fields, 3U);
@@ -1712,18 +1699,16 @@ static int lc_pouch_indexer_publish_threshold(lc_pouch *pouch,
   return published;
 }
 
-void lc_pouch_indexer_note_mutation(lc_pouch *pouch,
-                                    const char *namespace_name) {
+void lc_pouch_indexer_note_mutation(lc_pouch *pouch, const char *ns) {
   int rc;
 
-  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      pouch->aborted || !pouch->indexer_thread_started) {
+  if (pouch == NULL || ns == NULL || ns[0] == '\0' || pouch->aborted ||
+      !pouch->indexer_thread_started) {
     return;
   }
   pthread_mutex_lock(&pouch->indexer_mutex);
-  rc = pouch->indexer_stop
-           ? LC_ERR_INVALID
-           : lc_pouch_indexer_queue_namespace_locked(pouch, namespace_name);
+  rc = pouch->indexer_stop ? LC_ERR_INVALID
+                           : lc_pouch_indexer_queue_namespace_locked(pouch, ns);
   if (rc == LC_OK) {
     pthread_cond_signal(&pouch->indexer_cond);
   }
@@ -1731,21 +1716,20 @@ void lc_pouch_indexer_note_mutation(lc_pouch *pouch,
   if (rc != LC_OK && rc != LC_ERR_INVALID) {
     pslog_field fields[1];
 
-    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[0] = lc_log_str_field("ns", ns);
     lc_log_warn(pouch->logger, "index.background.queue.error", fields, 1U);
   }
 }
 
-void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch,
-                                              const char *namespace_name,
+void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch, const char *ns,
                                               const char *key,
                                               const char *operation_id) {
   lc_pouch_indexer_pending_namespace *threshold_batch;
   int eager_publish;
   int published;
 
-  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0' ||
-      key == NULL || key[0] == '\0' || pouch->aborted || operation_id == NULL ||
+  if (pouch == NULL || ns == NULL || ns[0] == '\0' || key == NULL ||
+      key[0] == '\0' || pouch->aborted || operation_id == NULL ||
       operation_id[0] == '\0' || !pouch->indexer_thread_started) {
     return;
   }
@@ -1753,20 +1737,19 @@ void lc_pouch_indexer_note_operation_complete(lc_pouch *pouch,
   threshold_batch = NULL;
   pthread_mutex_lock(&pouch->indexer_mutex);
   if (!pouch->indexer_stop && lc_pouch_single_writer_enabled(pouch)) {
-    if (lc_pouch_query_index_pending_operation_complete_locked(
-            pouch, namespace_name, key, operation_id)) {
-      eager_publish = lc_pouch_indexer_namespace_flush_limit_reached_locked(
-          pouch, namespace_name);
+    if (lc_pouch_query_index_pending_operation_complete_locked(pouch, ns, key,
+                                                               operation_id)) {
+      eager_publish =
+          lc_pouch_indexer_namespace_flush_limit_reached_locked(pouch, ns);
       if (eager_publish) {
-        threshold_batch =
-            lc_pouch_indexer_take_namespace_locked(pouch, namespace_name);
+        threshold_batch = lc_pouch_indexer_take_namespace_locked(pouch, ns);
         eager_publish = threshold_batch != NULL;
       }
     }
   }
   pthread_mutex_unlock(&pouch->indexer_mutex);
   if (eager_publish) {
-    published = lc_pouch_indexer_publish_threshold(pouch, namespace_name);
+    published = lc_pouch_indexer_publish_threshold(pouch, ns);
     if (published) {
       lc_pouch_indexer_pending_namespaces_cleanup(pouch, threshold_batch);
     } else {
@@ -1849,7 +1832,7 @@ int lc_pouch_fsync_commit(lc_pouch *pouch, int fd, lc_error *error) {
   return LC_OK;
 }
 
-int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *ns,
                               const char *queue, uint64_t timeout_ms) {
 #if defined(__linux__)
   char *namespace_path;
@@ -1877,12 +1860,11 @@ int lc_pouch_queue_watch_wait(lc_pouch *pouch, const char *namespace_name,
   int clock_started;
 
   if (pouch == NULL || !pouch->queue_watch_enabled || pouch->aborted ||
-      namespace_name == NULL || namespace_name[0] == '\0' || queue == NULL ||
-      queue[0] == '\0') {
+      ns == NULL || ns[0] == '\0' || queue == NULL || queue[0] == '\0') {
     return -1;
   }
-  namespace_path = lc_pouch_namespace_path(&pouch->allocator, pouch->root_path,
-                                           namespace_name);
+  namespace_path =
+      lc_pouch_namespace_path(&pouch->allocator, pouch->root_path, ns);
   notify_dir = namespace_path != NULL
                    ? lc_pouch_path_join(&pouch->allocator, namespace_path,
                                         "queue-notify")
@@ -1987,7 +1969,7 @@ cleanup:
   return result;
 #else
   (void)pouch;
-  (void)namespace_name;
+  (void)ns;
   (void)queue;
   (void)timeout_ms;
   return -1;
@@ -2492,7 +2474,7 @@ static int lc_pouch_warm_open_namespaces(lc_pouch *pouch, lc_error *error) {
     lc_log_debug(pouch->logger, "cache.load.start", fields, 2U);
   }
   while (rc == LC_OK) {
-    char *namespace_name;
+    char *ns;
     lc_error warm_error;
     int index_rc;
     int state_rc;
@@ -2506,18 +2488,16 @@ static int lc_pouch_warm_open_namespaces(lc_pouch *pouch, lc_error *error) {
     if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
       continue;
     }
-    namespace_name =
-        lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
-    if (namespace_name == NULL) {
+    ns = lc_pouch_path_unescape_name(&pouch->allocator, entry->d_name);
+    if (ns == NULL) {
       continue;
     }
     lc_error_init(&warm_error);
-    state_rc =
-        lc_pouch_state_warm_namespace(pouch, namespace_name, &warm_error);
+    state_rc = lc_pouch_state_warm_namespace(pouch, ns, &warm_error);
     if (state_rc != LC_OK) {
       pslog_field fields[3];
 
-      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[0] = lc_log_str_field("ns", ns);
       fields[1] = lc_log_error_field("error", &warm_error);
       fields[2] = lc_log_code_field(&warm_error);
       lc_log_warn(pouch->logger, "cache.load.state.error", fields, 3U);
@@ -2526,13 +2506,12 @@ static int lc_pouch_warm_open_namespaces(lc_pouch *pouch, lc_error *error) {
     lc_error_init(&warm_error);
     index_rc = LC_OK;
     if (pouch->query_indexing_enabled) {
-      index_rc = lc_pouch_query_index_warm_namespace(pouch, namespace_name,
-                                                     &warm_error);
+      index_rc = lc_pouch_query_index_warm_namespace(pouch, ns, &warm_error);
     }
     if (index_rc != LC_OK) {
       pslog_field fields[3];
 
-      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[0] = lc_log_str_field("ns", ns);
       fields[1] = lc_log_error_field("error", &warm_error);
       fields[2] = lc_log_code_field(&warm_error);
       lc_log_warn(pouch->logger, "cache.load.index.error", fields, 3U);
@@ -2541,13 +2520,13 @@ static int lc_pouch_warm_open_namespaces(lc_pouch *pouch, lc_error *error) {
     {
       pslog_field fields[3];
 
-      fields[0] = lc_log_str_field("ns", namespace_name);
+      fields[0] = lc_log_str_field("ns", ns);
       fields[1] = lc_log_bool_field("state_ok", state_rc == LC_OK);
       fields[2] = lc_log_bool_field("index_ok", index_rc == LC_OK);
       lc_log_debug(pouch->logger, "cache.load.namespace", fields, 3U);
     }
     namespace_count++;
-    lc_free_with_allocator(&pouch->allocator, namespace_name);
+    lc_free_with_allocator(&pouch->allocator, ns);
   }
   if (closedir(dir) != 0 && rc == LC_OK) {
     rc = lc_error_set(error, LC_ERR_TRANSPORT, 0L,
@@ -4378,7 +4357,7 @@ void lc_pouch_status_cleanup(const lc_allocator *allocator,
   memset(status, 0, sizeof(*status));
 }
 
-int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *namespace_name,
+int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *ns,
                               lc_error *error) {
   int rc;
 
@@ -4387,27 +4366,27 @@ int lc_pouch_ensure_namespace(lc_pouch *pouch, const char *namespace_name,
                         "lc_pouch_ensure_namespace requires pouch", NULL, NULL,
                         NULL);
   }
-  rc = lc_pouch_namespace_ensure(&pouch->allocator, pouch->root_path,
-                                 namespace_name, error);
+  rc =
+      lc_pouch_namespace_ensure(&pouch->allocator, pouch->root_path, ns, error);
   if (rc != LC_OK) {
     pslog_field fields[3];
 
-    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[0] = lc_log_str_field("ns", ns);
     fields[1] = lc_log_error_field("error", error);
     fields[2] = lc_log_code_field(error);
     lc_log_error(pouch->logger, "manifest.ensure_namespace.error", fields, 3U);
     return rc;
   }
-  rc = lc_pouch_state_recover_staged_decisions(pouch, namespace_name, error);
+  rc = lc_pouch_state_recover_staged_decisions(pouch, ns, error);
   if (rc == LC_OK) {
     pslog_field fields[1];
 
-    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[0] = lc_log_str_field("ns", ns);
     lc_log_trace(pouch->logger, "manifest.ensure_namespace", fields, 1U);
   } else {
     pslog_field fields[3];
 
-    fields[0] = lc_log_str_field("ns", namespace_name);
+    fields[0] = lc_log_str_field("ns", ns);
     fields[1] = lc_log_error_field("error", error);
     fields[2] = lc_log_code_field(error);
     lc_log_error(pouch->logger, "manifest.recover_staged.error", fields, 3U);

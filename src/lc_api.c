@@ -28,11 +28,11 @@ int lc_load(lc_client *client, const char *key, const lonejson_map *map,
   return client->load(client, key, map, dst, opts, out, error);
 }
 
-int lc_load_in_namespace(lc_client *client, const char *namespace_name,
-                         const char *key, const lonejson_map *map, void *dst,
+int lc_load_in_namespace(lc_client *client, const char *ns, const char *key,
+                         const lonejson_map *map, void *dst,
                          const lc_get_opts *opts, lc_get_res *out,
                          lc_error *error) {
-  if (client == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+  if (client == NULL || ns == NULL || ns[0] == '\0') {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "namespaced load requires client and namespace", NULL,
                         NULL, NULL);
@@ -42,8 +42,7 @@ int lc_load_in_namespace(lc_client *client, const char *namespace_name,
                         "client does not implement namespaced load", NULL, NULL,
                         NULL);
   }
-  return client->load_in_namespace(client, namespace_name, key, map, dst, opts,
-                                   out, error);
+  return client->load_in_namespace(client, ns, key, map, dst, opts, out, error);
 }
 
 int lc_update(lc_client *client, const lc_update_req *req, lc_source *src,

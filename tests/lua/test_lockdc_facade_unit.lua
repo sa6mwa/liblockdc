@@ -102,7 +102,7 @@ end
 
 local function test_request_flattening_and_default_content_type()
   local lease_info = {
-    namespace_name = 'default',
+    namespace = 'default',
     key = 'lease-key',
     owner = 'lease-owner',
   }
@@ -151,7 +151,7 @@ local function test_request_flattening_and_default_content_type()
   local ok = client:update_json({ lease = lease, if_match = 'etag-1' }, '17')
   assert_truthy(ok, 'update_json should return underlying success')
   assert_eq(captured.update_body, '17', 'update_json should encode JSON body')
-  assert_eq(captured.update_req.namespace_name, 'default', 'update_json should flatten lease namespace')
+  assert_eq(captured.update_req.namespace, 'default', 'update_json should flatten lease namespace')
   assert_eq(captured.update_req.key, 'lease-key', 'update_json should flatten lease key')
   assert_eq(captured.update_req.owner, 'lease-owner', 'update_json should flatten lease owner')
   assert_eq(captured.update_req.if_match, 'etag-1', 'update_json should preserve explicit request fields')
@@ -161,7 +161,7 @@ local function test_request_flattening_and_default_content_type()
   message_core = {
     info = function()
       return {
-        namespace_name = 'default',
+        namespace = 'default',
         queue = 'jobs',
         message_id = 'msg-1',
       }
@@ -171,7 +171,7 @@ local function test_request_flattening_and_default_content_type()
   local wrapped_message = assert(client:dequeue({ queue = 'jobs' }))
 
   client:queue_nack({ message = wrapped_message, intent = 'failure' })
-  assert_eq(captured.queue_nack_req.namespace_name, 'default', 'queue_nack should flatten message namespace')
+  assert_eq(captured.queue_nack_req.namespace, 'default', 'queue_nack should flatten message namespace')
   assert_eq(captured.queue_nack_req.queue, 'jobs', 'queue_nack should flatten message queue')
   assert_eq(captured.queue_nack_req.message_id, 'msg-1', 'queue_nack should flatten message id')
   assert_eq(captured.queue_nack_req.intent, 'failure', 'queue_nack should preserve explicit intent')
@@ -260,7 +260,7 @@ local function test_xa_and_transaction_coordinator_forwarding()
       "the native implementation must not be re-exported as public facade API")
   local decision = {
     txn_id = '00000000000000000001',
-    participants = { { namespace_name = 'orders', key = 'order-1' } },
+    participants = { { namespace = 'orders', key = 'order-1' } },
     tc_term = 1,
   }
 
@@ -463,7 +463,7 @@ local function test_subscribe_with_state_and_service_lifecycle()
   service = client:new_consumer_service({
     name = 'worker-1',
     request = {
-      namespace_name = 'default',
+      namespace = 'default',
       queue = 'jobs',
     },
     handle = function(msg)
@@ -510,7 +510,7 @@ local function test_subscribe_with_state_and_service_lifecycle()
   local explicitly_acking_service
   explicitly_acking_service = client:new_consumer_service({
     name = 'explicitly-acking-worker',
-    request = { namespace_name = 'default', queue = 'explicitly-acked-jobs' },
+    request = { namespace = 'default', queue = 'explicitly-acked-jobs' },
     handle = function(message)
       assert_truthy(message:ack(), 'handler should be able to acknowledge directly')
       explicitly_acking_service:stop()
@@ -553,7 +553,7 @@ local function test_subscribe_with_state_and_service_lifecycle()
   end
   local failing_service = client:new_consumer_service({
     name = 'failing-worker',
-    request = { namespace_name = 'default', queue = 'failed-jobs' },
+    request = { namespace = 'default', queue = 'failed-jobs' },
     handle = function()
       return nil, { message = 'expected handler failure' }
     end,
@@ -596,7 +596,7 @@ local function test_watch_queue_change_detection()
   local client = assert(lockdc.open({}))
   local handler = function() end
   local ok, err = client:watch_queue({
-    namespace_name = 'default',
+    namespace = 'default',
     queue = 'jobs',
   }, handler)
 
@@ -615,7 +615,7 @@ local function test_json_null_roundtrip_helpers()
       return {
         info = function()
           return {
-            namespace_name = 'default',
+            namespace = 'default',
             queue = 'jobs',
             message_id = 'msg-1',
           }
@@ -860,7 +860,7 @@ local function test_outbox_facade_lifecycle()
 
   local client = assert(lockdc.open({}))
   local outbox = assert(client:new_outbox({
-    namespace_name = 'outbox-ns',
+    namespace = 'outbox-ns',
     owner = 'lua-worker',
     recovery_interval_seconds = 7,
     shutdown_timeout_ms = 1234,
@@ -876,7 +876,7 @@ local function test_outbox_facade_lifecycle()
     headers_json = 'header-json',
   }, 'payload'))
 
-  assert_eq(captured.outbox_config.namespace_name, 'outbox-ns', 'new_outbox should pass config through')
+  assert_eq(captured.outbox_config.namespace, 'outbox-ns', 'new_outbox should pass config through')
   assert_eq(captured.outbox_config.shutdown_timeout_ms, 1234,
       'outbox shutdown timeout should pass through')
   assert_eq(captured.outbox_config.replay_dead_letters_on_startup, true,
@@ -887,7 +887,7 @@ local function test_outbox_facade_lifecycle()
   assert_eq(captured.first_payload, 'payload', 'outbox should preserve arbitrary payload source')
   assert_eq(receipt.outbox_key, 'first-key', 'outbox should return the durable receipt')
 
-  local participant = assert(txn:acquire({ namespace_name = 'orders', key = 'order-1' }))
+  local participant = assert(txn:acquire({ namespace = 'orders', key = 'order-1' }))
   participant:update_json(nil, { if_version = 1 })
   assert_eq(captured.acquire_req.key, 'order-1', 'transaction acquire should pass request through')
   assert_eq(captured.update_body, 'null', 'participant update_json should encode nil as JSON null')

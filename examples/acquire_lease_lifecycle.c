@@ -22,7 +22,7 @@ static int fail_with_error(pslog_logger *logger, const char *step,
 int main(void) {
   const char *endpoint;
   const char *client_pem;
-  const char *namespace_name;
+  const char *ns;
   const char *key;
   const char *owner;
   const char *endpoints[1];
@@ -63,7 +63,7 @@ int main(void) {
 
   endpoint = getenv("LOCKDC_URL");
   client_pem = getenv("LOCKDC_CLIENT_PEM");
-  namespace_name = getenv("LOCKDC_NAMESPACE");
+  ns = getenv("LOCKDC_NAMESPACE");
   key = getenv("LOCKDC_KEY");
   owner = getenv("LOCKDC_OWNER");
   if (endpoint == NULL || endpoint[0] == '\0') {
@@ -72,8 +72,8 @@ int main(void) {
   if (client_pem == NULL || client_pem[0] == '\0') {
     client_pem = EXAMPLE_CLIENT_PEM;
   }
-  if (namespace_name == NULL || namespace_name[0] == '\0') {
-    namespace_name = EXAMPLE_NAMESPACE;
+  if (ns == NULL || ns[0] == '\0') {
+    ns = EXAMPLE_NAMESPACE;
   }
   if (key == NULL || key[0] == '\0') {
     key = EXAMPLE_KEY;
@@ -86,13 +86,13 @@ int main(void) {
   lc_client_config_init(&config);
   config.endpoints = endpoints;
   config.endpoint_count = 1U;
-  config.default_namespace = namespace_name;
+  config.default_namespace = ns;
   config.logger = sdk_logger;
 
   example_logger->infof(
       example_logger, "example.acquire_lease_lifecycle.start",
       "endpoint=%s client_pem=%s namespace=%s key=%s owner=%s", endpoint,
-      client_pem, namespace_name, key, owner);
+      client_pem, ns, key, owner);
 
   lc_error_init(&error);
   client = NULL;
@@ -120,7 +120,7 @@ int main(void) {
     return rc;
   }
 
-  acquire.namespace_name = NULL;
+  acquire.ns = NULL;
   acquire.key = key;
   acquire.owner = owner;
   acquire.ttl_seconds = 60L;
