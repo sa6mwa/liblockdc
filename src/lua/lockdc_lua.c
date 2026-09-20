@@ -771,6 +771,17 @@ static void lcdc_normalize_string_field(lua_State *L, int source_index,
   lua_pop(L, 1);
 }
 
+static const char *lcdc_normalized_string_value(lua_State *L, int index,
+                                                const char *name) {
+  const char *value;
+
+  index = lua_absindex(L, index);
+  lua_getfield(L, index, name);
+  value = lua_tostring(L, -1);
+  lua_pop(L, 1);
+  return value;
+}
+
 static void lcdc_reject_field(lua_State *L, int index, const char *name,
                               const char *message) {
   lua_getfield(L, index, name);
@@ -3679,14 +3690,18 @@ static int lcdc_client_tc_lease_acquire(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_require_string_field(L, 2, "candidate_id", &req.candidate_id);
-  lcdc_require_string_field(L, 2, "candidate_endpoint",
-                            &req.candidate_endpoint);
+  lua_createtable(L, 0, 2);
+  lcdc_normalize_string_field(L, 2, -1, "candidate_id", 1);
+  lcdc_normalize_string_field(L, 2, -1, "candidate_endpoint", 1);
   lcdc_opt_uint64_field(L, 2, "term", &req.term);
   lcdc_opt_integer_field(L, 2, "ttl_ms", &req.ttl_ms);
+  req.candidate_id = lcdc_normalized_string_value(L, -1, "candidate_id");
+  req.candidate_endpoint =
+      lcdc_normalized_string_value(L, -1, "candidate_endpoint");
   rc = lcdc_client_revalidate(ud, &client, &error);
   if (rc == LC_OK)
     rc = lc_tc_lease_acquire(client, &req, &res, &error);
+  lua_pop(L, 1);
   if (rc == LC_OK) {
     rc = lcdc_push_tc_lease_res(
         L, "granted", res.granted, res.leader_id, res.leader_endpoint, res.term,
@@ -3715,12 +3730,15 @@ static int lcdc_client_tc_lease_renew(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_require_string_field(L, 2, "leader_id", &req.leader_id);
+  lua_createtable(L, 0, 1);
+  lcdc_normalize_string_field(L, 2, -1, "leader_id", 1);
   lcdc_opt_uint64_field(L, 2, "term", &req.term);
   lcdc_opt_integer_field(L, 2, "ttl_ms", &req.ttl_ms);
+  req.leader_id = lcdc_normalized_string_value(L, -1, "leader_id");
   rc = lcdc_client_revalidate(ud, &client, &error);
   if (rc == LC_OK)
     rc = lc_tc_lease_renew(client, &req, &res, &error);
+  lua_pop(L, 1);
   if (rc == LC_OK) {
     rc = lcdc_push_tc_lease_res(
         L, "renewed", res.renewed, res.leader_id, res.leader_endpoint, res.term,
@@ -3749,11 +3767,14 @@ static int lcdc_client_tc_lease_release(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_require_string_field(L, 2, "leader_id", &req.leader_id);
+  lua_createtable(L, 0, 1);
+  lcdc_normalize_string_field(L, 2, -1, "leader_id", 1);
   lcdc_opt_uint64_field(L, 2, "term", &req.term);
+  req.leader_id = lcdc_normalized_string_value(L, -1, "leader_id");
   rc = lcdc_client_revalidate(ud, &client, &error);
   if (rc == LC_OK)
     rc = lc_tc_lease_release(client, &req, &res, &error);
+  lua_pop(L, 1);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -4064,11 +4085,16 @@ static void lcdc_parse_dequeue_req(lua_State *L, int index,
                                    lc_dequeue_req *req) {
   long page_size;
 
+  index = lua_absindex(L, index);
   lc_dequeue_req_init(req);
-  req->ns = lcdc_opt_string_field(L, index, "namespace");
-  lcdc_require_string_field(L, index, "queue", &req->queue);
-  req->owner = lcdc_opt_string_field(L, index, "owner");
-  req->txn_id = lcdc_opt_string_field(L, index, "txn_id");
+  /* The caller retains this root through dequeue callbacks: the source table
+   * may be mutated or collected by application code during delivery. */
+  lua_createtable(L, 0, 5);
+  lcdc_normalize_string_field(L, index, -1, "namespace", 0);
+  lcdc_normalize_string_field(L, index, -1, "queue", 1);
+  lcdc_normalize_string_field(L, index, -1, "owner", 0);
+  lcdc_normalize_string_field(L, index, -1, "txn_id", 0);
+  lcdc_normalize_string_field(L, index, -1, "start_after", 0);
   lcdc_opt_integer_field(L, index, "visibility_timeout_seconds",
                          &req->visibility_timeout_seconds);
   lcdc_opt_integer_field(L, index, "wait_seconds", &req->wait_seconds);
@@ -4076,7 +4102,11 @@ static void lcdc_parse_dequeue_req(lua_State *L, int index,
   if (lcdc_opt_integer_field(L, index, "page_size", &page_size)) {
     req->page_size = (int)page_size;
   }
-  req->start_after = lcdc_opt_string_field(L, index, "start_after");
+  req->ns = lcdc_normalized_string_value(L, -1, "namespace");
+  req->queue = lcdc_normalized_string_value(L, -1, "queue");
+  req->owner = lcdc_normalized_string_value(L, -1, "owner");
+  req->txn_id = lcdc_normalized_string_value(L, -1, "txn_id");
+  req->start_after = lcdc_normalized_string_value(L, -1, "start_after");
 }
 
 static int lcdc_client_dequeue_common(lua_State *L, int with_state) {
@@ -4096,6 +4126,7 @@ static int lcdc_client_dequeue_common(lua_State *L, int with_state) {
   } else {
     rc = lc_dequeue(ud->client, &req, &message, &error);
   }
+  lua_pop(L, 1);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -4218,6 +4249,7 @@ static int lcdc_client_subscribe_common(lua_State *L, int with_state) {
   }
   ud->callback_active = callback_active;
   luaL_unref(L, LUA_REGISTRYINDEX, handler.handler_ref);
+  lua_pop(L, 1);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -4342,6 +4374,7 @@ static int lcdc_client_dequeue_batch(lua_State *L) {
   luaL_checktype(L, 2, LUA_TTABLE);
   lcdc_parse_dequeue_req(L, 2, &req);
   rc = lc_dequeue_batch(ud->client, &req, &res, &error);
+  lua_pop(L, 1);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);

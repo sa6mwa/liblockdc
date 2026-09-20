@@ -338,6 +338,55 @@ if retained_ok or retained_delivery:is_open() then
   error("Lua retained a direct-subscription delivery beyond its native callback")
 end
 
+-- A subscribe request is only borrowed by native code.  It must nevertheless
+-- remain valid when its own handler drops the request and collects between
+-- deliveries from the same page.
+do
+  local rooted_subscription_request = {
+    queue = "lua-rooted-subscribe-" .. assert(lockdc.xid_new()),
+    owner = "lua-rooted-owner-" .. assert(lockdc.xid_new()),
+    visibility_timeout_seconds = 30,
+    wait_seconds = 0,
+    page_size = 2,
+  }
+  local rooted_queue = rooted_subscription_request.queue
+  for index = 1, 2 do
+    local rooted_enqueued, rooted_enqueue_err = client:enqueue({
+      queue = rooted_queue,
+      content_type = "application/json",
+      visibility_timeout_seconds = 30,
+      ttl_seconds = 30,
+    }, lockdc.encode_json({ source = "lua-rooted-subscribe", index = index }))
+    if rooted_enqueued == nil then
+      client:close()
+      error(("Lua rooted subscription enqueue failed: %s"):format(
+        rooted_enqueue_err and rooted_enqueue_err.message or
+        tostring(rooted_enqueue_err)))
+    end
+  end
+  rooted_queue = nil
+  local rooted_subscription_calls = 0
+  local rooted_subscription_ok, rooted_subscription_err = client:subscribe(
+    rooted_subscription_request, function(delivery)
+      rooted_subscription_calls = rooted_subscription_calls + 1
+      if rooted_subscription_calls == 1 then
+        rooted_subscription_request.queue = nil
+        rooted_subscription_request.owner = nil
+        collectgarbage("collect")
+        collectgarbage("collect")
+      end
+      assert(delivery:ack())
+      return true
+    end)
+  if rooted_subscription_ok ~= true or rooted_subscription_calls ~= 2 or
+      rooted_subscription_err ~= nil then
+    client:close()
+    error(("Lua rooted subscription did not process its page safely " ..
+      "(ok=%s calls=%d error=%s)"):format(tostring(rooted_subscription_ok),
+      rooted_subscription_calls, tostring(rooted_subscription_err)))
+  end
+end
+
 local subscribed_state, subscribe_state_err = client:enqueue({
   queue = "direct-subscribe-state",
   content_type = "application/json",
@@ -876,18 +925,26 @@ if rolled_back.state ~= "rollback" then
   error("Lua raw XA rollback did not return rollback state")
 end
 
-local tc_lease = assert_ok("Lua TC lease acquire", client:tc_lease_acquire({
-  candidate_id = "lua-pouch-node",
-  candidate_endpoint = "pouch://lua-pouch-node",
-  term = 1,
-  ttl_ms = 60000,
-}))
+local tc_lease = assert_ok("Lua TC lease acquire", client:tc_lease_acquire(
+  setmetatable({ term = 1, ttl_ms = 60000 }, {
+    __index = function(_, key)
+      if key == "candidate_id" then
+        return assert(lockdc.xid_new())
+      end
+      if key == "candidate_endpoint" then
+        collectgarbage("collect")
+        collectgarbage("collect")
+        return "pouch://lua-pouch-node-" .. assert(lockdc.xid_new())
+      end
+      return nil
+    end,
+  })))
 if not tc_lease.granted then
   client:close()
   error("Lua TC lease was not granted")
 end
 local tc_renewed = assert_ok("Lua TC lease renew", client:tc_lease_renew({
-  leader_id = "lua-pouch-node",
+  leader_id = tc_lease.leader_id,
   term = tc_lease.term,
   ttl_ms = 60000,
 }))
@@ -896,12 +953,12 @@ if not tc_renewed.renewed then
   error("Lua TC lease was not renewed")
 end
 local tc_leader = assert_ok("Lua TC leader", client:tc_leader())
-if tc_leader.leader_id ~= "lua-pouch-node" then
+if tc_leader.leader_id ~= tc_lease.leader_id then
   client:close()
   error("Lua TC leader did not return the current leader")
 end
 assert_ok("Lua TC lease release", client:tc_lease_release({
-  leader_id = "lua-pouch-node",
+  leader_id = tc_lease.leader_id,
   term = tc_renewed.term,
 }))
 
