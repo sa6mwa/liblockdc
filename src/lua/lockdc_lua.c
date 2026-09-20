@@ -5546,6 +5546,12 @@ static int lcdc_outbox_dispatcher_bind_handlers(lua_State *L,
   if (!binding->handler_mode) {
     binding->handler_mode = 1;
     lcdc_outbox_dispatcher_set_handlers(L, ud, 1, -1);
+    /* `lockdc` constructs this plain options table for its public façade.
+     * Mark it only after the immutable native binding exists, allowing that
+     * layer to retain its adapter map without treating rejected options as an
+     * activation.  This is deliberately private to the two Lua layers. */
+    lua_pushboolean(L, 1);
+    lua_setfield(L, options_index, "_lockdc_facade_handlers_bound");
     lua_pop(L, 1);
     return LC_OK;
   }
@@ -5562,6 +5568,8 @@ static int lcdc_outbox_dispatcher_bind_handlers(lua_State *L,
                         "dispatcher handlers cannot change after activation",
                         NULL, NULL, NULL);
   }
+  lua_pushboolean(L, 1);
+  lua_setfield(L, options_index, "_lockdc_facade_handlers_bound");
   return LC_OK;
 }
 

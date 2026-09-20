@@ -34,10 +34,31 @@ local Service = {}
 Service.__index = Service
 
 local JSON_NULL = lonejson.json_null
--- Native dispatcher bindings are shared by aliases. Keep the Lua adapter map
--- keyed by the application handler table so aliases pass the same native table
--- and preserve the binding's immutable-handler invariant.
-local dispatcher_handler_maps = setmetatable({}, { __mode = "k" })
+-- Native dispatcher bindings are shared by aliases. Keep an adapter map keyed
+-- by the application handler table only after native code has bound it, so
+-- aliases pass the same native table without rejected options preserving a
+-- stale snapshot of an application handler.
+local dispatcher_handler_maps = setmetatable({}, { __mode = "kv" })
+local dispatcher_handler_sources = setmetatable({}, { __mode = "kv" })
+
+local function release_dispatcher_handler_map(self)
+  local handlers = self._handler_source
+  local cached_handlers = self._handler_cache
+
+  self._handler_source = nil
+  self._handler_core_map = nil
+  self._handler_cache = nil
+  if cached_handlers == nil then
+    return
+  end
+  cached_handlers.wrapper_count = cached_handlers.wrapper_count - 1
+  if cached_handlers.wrapper_count == 0 then
+    if handlers ~= nil and dispatcher_handler_maps[handlers] == cached_handlers then
+      dispatcher_handler_maps[handlers] = nil
+    end
+    dispatcher_handler_sources[cached_handlers] = nil
+  end
+end
 
 local function wrap_client(core_client)
   return setmetatable({ _core = core_client }, Client)
@@ -852,8 +873,7 @@ function OutboxDispatcher:close()
   -- A Lua handler binding lasts while at least one dispatcher wrapper is
   -- reachable. This wrapper no longer needs to retain its adapter map once it
   -- has surrendered its receiver reference.
-  self._handler_source = nil
-  self._handler_core_map = nil
+  release_dispatcher_handler_map(self)
 end
 
 function OutboxDispatcher:next(timeout_ms)
@@ -872,6 +892,8 @@ local function dispatcher_handler_options(self, options)
   local core_options
   local core_handlers
   local cached_handlers
+  local activate_map
+  local retain_map
 
   if type(options) ~= "table" then
     return options
@@ -893,38 +915,76 @@ local function dispatcher_handler_options(self, options)
     return options
   end
   cached_handlers = dispatcher_handler_maps[handlers]
+  activate_map = function()
+    local source = dispatcher_handler_sources[cached_handlers]
+    if source ~= nil then
+      dispatcher_handler_maps[source] = cached_handlers
+    end
+  end
+  retain_map = function()
+    activate_map()
+    if self._closed then
+      return
+    end
+    if self._handler_cache ~= cached_handlers then
+      release_dispatcher_handler_map(self)
+      cached_handlers.wrapper_count = cached_handlers.wrapper_count + 1
+    end
+    self._handler_source = handlers
+    self._handler_core_map = cached_handlers.core_handlers
+    self._handler_cache = cached_handlers
+  end
   if cached_handlers == nil then
     core_handlers = {}
     for key, handler in pairs(handlers) do
       local handler_function = handler
 
       core_handlers[key] = function(core_job)
+        -- This wrapper is entered only after native code has accepted this
+        -- exact map. Promote before application code can recurse through an
+        -- alias while the first pump/run invocation remains active.
+        activate_map()
         return handler_function(wrap_outbox_job(core_job))
       end
     end
-    cached_handlers = { core_handlers = core_handlers }
-    dispatcher_handler_maps[handlers] = cached_handlers
+    cached_handlers = { core_handlers = core_handlers, wrapper_count = 0 }
   end
-  -- Keep the facade adapter on every valid call. The native binding, which is
-  -- the authority on whether it is already active, rejects a conflicting map.
-  -- Recording a candidate before that call succeeds would let a rejected pump
-  -- make the next valid handler bypass this adapter.
-  self._handler_source = handlers
-  self._handler_core_map = cached_handlers.core_handlers
+  dispatcher_handler_sources[cached_handlers] = handlers
   core_options = {}
   for key, handler in pairs(options) do
     core_options[key] = handler
   end
-  core_options.handlers = self._handler_core_map
-  return core_options
+  core_options.handlers = cached_handlers.core_handlers
+  -- The native layer changes this only after it has accepted this exact
+  -- adapter as the dispatcher's immutable handler map.
+  core_options._lockdc_facade_handlers_bound = false
+  return core_options, retain_map
+end
+
+local function dispatcher_handler_call(self, options, method)
+  local core_options
+  local retain_map
+  local result
+  local error_result
+  local status
+
+  core_options, retain_map = dispatcher_handler_options(self, options)
+  if retain_map == nil then
+    return method(self._core, core_options)
+  end
+  result, error_result, status = method(self._core, core_options)
+  if core_options._lockdc_facade_handlers_bound then
+    retain_map()
+  end
+  return result, error_result, status
 end
 
 function OutboxDispatcher:pump(options)
-  return self._core:pump(dispatcher_handler_options(self, options))
+  return dispatcher_handler_call(self, options, self._core.pump)
 end
 
 function OutboxDispatcher:run(options)
-  return self._core:run(dispatcher_handler_options(self, options))
+  return dispatcher_handler_call(self, options, self._core.run)
 end
 
 function OutboxDispatcher:notify_outbox_key(outbox_key)

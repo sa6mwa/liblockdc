@@ -960,6 +960,81 @@ local function test_outbox_facade_lifecycle()
   client:close()
 end
 
+local function test_dispatcher_handler_cache_follows_native_activation()
+  local calls = {}
+  local dispatcher_core = {
+    pump = function(_, options)
+      if options.max_jobs == 0 then
+        error('dispatcher pump limits are invalid')
+      end
+      if calls.bound_handlers == nil then
+        calls.bound_handlers = options.handlers
+      else
+        assert_eq(options.handlers, calls.bound_handlers,
+            'a handler reentry must reuse the native immutable map')
+      end
+      options._lockdc_facade_handlers_bound = true
+      if options.reentrant then
+        calls.reentrant = (calls.reentrant or 0) + 1
+        return 0
+      end
+      options.handlers.http({})
+      return 1
+    end,
+    close = function() end,
+  }
+  local outbox_core = {
+    dispatcher = function()
+      return dispatcher_core
+    end,
+    close = function() end,
+  }
+  local client_core = {
+    new_outbox = function()
+      return outbox_core
+    end,
+    close = function() end,
+  }
+
+  core_stub.open = function()
+    return client_core
+  end
+
+  local client = assert(lockdc.open({}))
+  local outbox = assert(client:new_outbox({}))
+  local dispatcher = assert(outbox:dispatcher())
+  local alias = assert(outbox:dispatcher())
+  local handlers = {
+    http = function()
+      calls.old = (calls.old or 0) + 1
+    end,
+  }
+  local ok, err = pcall(function()
+    dispatcher:pump({ handlers = handlers, max_jobs = 0 })
+  end)
+  assert_eq(ok, false,
+      'a rejected native pump option must not activate Lua handlers')
+  assert_truthy(tostring(err):find('pump limits are invalid', 1, true),
+      'the native pump validation error should be preserved')
+  handlers.http = function()
+    calls.new = (calls.new or 0) + 1
+    assert_eq(alias:pump({ handlers = handlers, max_jobs = 1, reentrant = true }),
+        0, 'a handler should reuse its map during the first activation')
+  end
+  assert_eq(dispatcher:pump({ handlers = handlers, max_jobs = 1 }), 1,
+      'a corrected handler map should activate successfully')
+  assert_eq(calls.old, nil,
+      'a rejected activation must not retain stale handler functions')
+  assert_eq(calls.new, 1,
+      'the successful retry must invoke the corrected handler function')
+  assert_eq(calls.reentrant, 1,
+      'the first handler invocation must expose its map to dispatcher aliases')
+  alias:close()
+  dispatcher:close()
+  outbox:close()
+  client:close()
+end
+
 test_json_helpers()
 test_request_flattening_and_default_content_type()
 test_pouch_open_config_passthrough()
@@ -971,3 +1046,4 @@ test_watch_queue_change_detection()
 test_json_null_roundtrip_helpers()
 test_streaming_surface_requires_sink_and_materializers_are_named()
 test_outbox_facade_lifecycle()
+test_dispatcher_handler_cache_follows_native_activation()

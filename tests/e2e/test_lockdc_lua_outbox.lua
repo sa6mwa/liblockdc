@@ -458,8 +458,14 @@ end
 
 -- A valid Lua handler map must not be remembered until native option
 -- validation has accepted the pump.  Otherwise a rejected call would make the
--- following valid call hand raw core jobs to Lua handlers.
-local rejected_handler_map = { http = function() end }
+-- following valid call invoke a stale snapshot rather than the corrected
+-- application handler.
+local handler_calls = {}
+local rejected_handler_map = {
+  http = function()
+    handler_calls.stale_after_rejection = true
+  end,
+}
 local rejected_pump_ok, rejected_pump_err = pcall(function()
   return handler_dispatcher:pump({
     handlers = rejected_handler_map,
@@ -473,10 +479,8 @@ if rejected_pump_ok or not tostring(rejected_pump_err):find("pump limits are inv
   error("Lua dispatcher accepted an invalid native pump option")
 end
 
-local handler_calls = {}
-local handlers
-handlers = {
-  http = function(handler_job)
+local handlers = rejected_handler_map
+handlers.http = function(handler_job)
     local handler_info = handler_job:info()
     handler_calls.started = (handler_calls.started or 0) + 1
     local payload, payload_err = handler_job:read_payload_json()
@@ -538,8 +542,7 @@ handlers = {
     end
     assert_ok(handler_job:complete({ delivery_reference = "lua-handler" }), nil,
               "Lua handler completion")
-  end,
-}
+end
 
 append_handler_effect("complete", "http", {
   effect = "lua-handler-effect:complete",
@@ -550,7 +553,8 @@ local pumped = assert_ok(handler_dispatcher:pump({
   max_jobs = 1,
   timeout_ms = 3000,
 }), nil, "Lua handler completion pump")
-if pumped ~= 1 or handler_calls["lua-handler-effect:complete"] ~= 1 then
+if pumped ~= 1 or handler_calls["lua-handler-effect:complete"] ~= 1 or
+    handler_calls.stale_after_rejection then
   error("Lua handler completion did not execute exactly once")
 end
 
