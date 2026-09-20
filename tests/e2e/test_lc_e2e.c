@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -110,12 +111,48 @@ typedef struct query_keys_e2e_capture {
   size_t total_bytes;
   char current[160];
   size_t current_length;
-  unsigned char seen[512];
+  unsigned char seen[2048];
 } query_keys_e2e_capture;
 
 typedef struct pouch_e2e_key_count {
   size_t rows;
 } pouch_e2e_key_count;
+
+typedef struct pouch_e2e_state_entry_count {
+  const char *key_prefix;
+  size_t count;
+} pouch_e2e_state_entry_count;
+
+enum {
+  POUCH_E2E_HARDENING_CHURN_ROWS = 1024,
+  POUCH_E2E_HARDENING_MULTI_SEGMENT_ROWS = 128,
+  POUCH_E2E_HARDENING_OUTBOX_EFFECTS = 32,
+  POUCH_E2E_HARDENING_RETENTION_ROWS = 16
+};
+
+#define POUCH_E2E_HARDENING_SEGMENT_BYTES (64UL * 1024UL * 1024UL)
+#define POUCH_E2E_HARDENING_MULTI_SEGMENT_BYTES 4096UL
+
+typedef struct pouch_e2e_churn_child_result {
+  int rc;
+  int stage;
+  int compacted;
+  unsigned long candidate_segment_count;
+  int multi_segment_compacted;
+  unsigned long multi_segment_candidate_count;
+  char error_message[256];
+} pouch_e2e_churn_child_result;
+
+typedef struct pouch_e2e_dispatcher_hold {
+  lc_outbox_dispatcher *dispatcher;
+  pthread_mutex_t mutex;
+  pthread_cond_t cond;
+  int claimed;
+  int release;
+  int completed;
+  int rc;
+  char error_message[256];
+} pouch_e2e_dispatcher_hold;
 
 static int query_keys_e2e_begin(void *context, lc_error *error) {
   query_keys_e2e_capture *capture;
@@ -192,6 +229,19 @@ static int pouch_e2e_key_end(void *context, lc_error *error) {
   count = (pouch_e2e_key_count *)context;
   count->rows++;
   return 1;
+}
+
+static int pouch_e2e_count_state_entry(const lc_pouch_state_visit_entry *entry,
+                                       void *context, lc_error *error) {
+  pouch_e2e_state_entry_count *count;
+
+  (void)error;
+  count = (pouch_e2e_state_entry_count *)context;
+  if (entry->has_payload &&
+      strncmp(entry->key, count->key_prefix, strlen(count->key_prefix)) == 0) {
+    count->count++;
+  }
+  return LC_OK;
 }
 
 static int acquire_for_update_e2e_handler(void *context,
@@ -4544,6 +4594,439 @@ pouch_e2e_reclaim_one_active_churn_segment(const char *root,
   lc_pouch_close(pouch);
 }
 
+static int pouch_e2e_write_exact(int fd, const void *bytes, size_t length) {
+  const unsigned char *cursor;
+
+  cursor = (const unsigned char *)bytes;
+  while (length != 0U) {
+    ssize_t written;
+
+    written = write(fd, cursor, length);
+    if (written > 0) {
+      cursor += (size_t)written;
+      length -= (size_t)written;
+      continue;
+    }
+    if (written < 0 && errno == EINTR)
+      continue;
+    return 0;
+  }
+  return 1;
+}
+
+static int pouch_e2e_read_exact(int fd, void *bytes, size_t length) {
+  unsigned char *cursor;
+
+  cursor = (unsigned char *)bytes;
+  while (length != 0U) {
+    ssize_t received;
+
+    received = read(fd, cursor, length);
+    if (received > 0) {
+      cursor += (size_t)received;
+      length -= (size_t)received;
+      continue;
+    }
+    if (received < 0 && errno == EINTR)
+      continue;
+    return 0;
+  }
+  return 1;
+}
+
+static int pouch_e2e_shared_churn_child(const char *root,
+                                        pouch_e2e_churn_child_result *result) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_source *source;
+  lc_error error;
+  char body[320];
+  char key[96];
+  char pad[128];
+  size_t index;
+  int rc;
+
+  pouch = NULL;
+  source = NULL;
+  memset(result, 0, sizeof(*result));
+  result->rc = LC_ERR_INVALID;
+  result->stage = 1;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(pad, 'x', sizeof(pad) - 1U);
+  pad[sizeof(pad) - 1U] = '\0';
+  lc_error_init(&error);
+
+  open_options.segment_target_bytes = POUCH_E2E_HARDENING_SEGMENT_BYTES;
+  open_options.terminal_reclaim_min_bytes = 1U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 1;
+  open_options.compaction_interval_seconds = 3600U;
+  open_options.single_writer_set = 1;
+  open_options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  if (rc != LC_OK)
+    goto done;
+  result->stage = 2;
+  for (index = 0U; index < POUCH_E2E_HARDENING_CHURN_ROWS; ++index) {
+    if (snprintf(key, sizeof(key), "state/churn/%04zu", index) < 0 ||
+        snprintf(body, sizeof(body),
+                 "{\"kind\":\"pouch-hardening-survivor\",\"ordinal\":%zu,"
+                 "\"pad\":\"%s\"}",
+                 index, pad) < 0) {
+      rc = LC_ERR_INVALID;
+      goto done;
+    }
+    rc = lc_source_from_memory(body, strlen(body), &source, &error);
+    if (rc != LC_OK)
+      goto done;
+    rc = lc_pouch_state_write(pouch, "hardening-churn", key, source, NULL,
+                              &write_result, &error);
+    lc_source_close(source);
+    source = NULL;
+    if (rc != LC_OK)
+      goto done;
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+    memset(&write_result, 0, sizeof(write_result));
+  }
+  for (index = 0U; index + 1U < POUCH_E2E_HARDENING_CHURN_ROWS; ++index) {
+    if (snprintf(key, sizeof(key), "state/churn/%04zu", index) < 0) {
+      rc = LC_ERR_INVALID;
+      goto done;
+    }
+    rc = lc_pouch_state_delete(pouch, "hardening-churn", key, NULL,
+                               &write_result, &error);
+    if (rc != LC_OK)
+      goto done;
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+    memset(&write_result, 0, sizeof(write_result));
+  }
+  result->stage = 3;
+  maintenance_options.namespace_name = "hardening-churn";
+  maintenance_options.terminal_reclaim = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  if (rc == LC_OK) {
+    result->compacted = maintenance_result.compacted;
+    result->candidate_segment_count =
+        maintenance_result.candidate_segment_count;
+    if (!result->compacted || result->candidate_segment_count != 1UL)
+      rc = LC_ERR_INVALID;
+  }
+  if (rc != LC_OK)
+    goto done;
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  result->stage = 4;
+  memset(&open_options, 0, sizeof(open_options));
+  open_options.segment_target_bytes = 4096U;
+  open_options.compaction_min_segment_count = 2UL;
+  open_options.compaction_min_reclaimable_bytes = 1U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 0;
+  open_options.single_writer_set = 1;
+  open_options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  if (rc != LC_OK)
+    goto done;
+  for (index = 0U; index < POUCH_E2E_HARDENING_MULTI_SEGMENT_ROWS; ++index) {
+    if (snprintf(key, sizeof(key), "state/multi/%04zu", index) < 0 ||
+        snprintf(body, sizeof(body),
+                 "{\"kind\":\"pouch-hardening-multi-survivor\","
+                 "\"ordinal\":%zu,\"pad\":\"%s\"}",
+                 index, pad) < 0) {
+      rc = LC_ERR_INVALID;
+      goto done;
+    }
+    rc = lc_source_from_memory(body, strlen(body), &source, &error);
+    if (rc != LC_OK)
+      goto done;
+    rc = lc_pouch_state_write(pouch, "hardening-multi", key, source, NULL,
+                              &write_result, &error);
+    lc_source_close(source);
+    source = NULL;
+    if (rc != LC_OK)
+      goto done;
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+    memset(&write_result, 0, sizeof(write_result));
+  }
+  for (index = 0U; index + 1U < POUCH_E2E_HARDENING_MULTI_SEGMENT_ROWS;
+       ++index) {
+    if (snprintf(key, sizeof(key), "state/multi/%04zu", index) < 0) {
+      rc = LC_ERR_INVALID;
+      goto done;
+    }
+    rc = lc_pouch_state_delete(pouch, "hardening-multi", key, NULL,
+                               &write_result, &error);
+    if (rc != LC_OK)
+      goto done;
+    lc_pouch_state_write_result_cleanup(NULL, &write_result);
+    memset(&write_result, 0, sizeof(write_result));
+  }
+  result->stage = 5;
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  maintenance_options.namespace_name = "hardening-multi";
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  if (rc == LC_OK) {
+    result->multi_segment_compacted = maintenance_result.compacted;
+    result->multi_segment_candidate_count =
+        maintenance_result.candidate_segment_count;
+    if (!result->multi_segment_compacted ||
+        result->multi_segment_candidate_count <= 1UL) {
+      rc = LC_ERR_INVALID;
+    }
+  }
+
+done:
+  if (source != NULL)
+    lc_source_close(source);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  if (pouch != NULL)
+    lc_pouch_close(pouch);
+  result->rc = rc;
+  if (rc != LC_OK && error.message != NULL) {
+    (void)snprintf(result->error_message, sizeof(result->error_message), "%s",
+                   error.message);
+  }
+  lc_error_cleanup(&error);
+  return rc == LC_OK;
+}
+
+static void *pouch_e2e_dispatcher_hold_worker(void *context) {
+  pouch_e2e_dispatcher_hold *hold;
+  lc_outbox_job *job;
+  lc_error error;
+  int rc;
+
+  hold = (pouch_e2e_dispatcher_hold *)context;
+  job = NULL;
+  lc_error_init(&error);
+  rc = lc_outbox_dispatcher_next(hold->dispatcher, 0L, &job, &error);
+  assert_int_equal(pthread_mutex_lock(&hold->mutex), 0);
+  hold->rc = rc;
+  if (error.message != NULL) {
+    (void)snprintf(hold->error_message, sizeof(hold->error_message), "%s",
+                   error.message);
+  }
+  hold->claimed = 1;
+  assert_int_equal(pthread_cond_broadcast(&hold->cond), 0);
+  while (!hold->release) {
+    assert_int_equal(pthread_cond_wait(&hold->cond, &hold->mutex), 0);
+  }
+  assert_int_equal(pthread_mutex_unlock(&hold->mutex), 0);
+
+  if (rc == LC_OK && job != NULL) {
+    rc = lc_outbox_job_complete(job, NULL, &error);
+    if (rc == LC_OK)
+      job = NULL;
+  }
+  if (job != NULL)
+    lc_outbox_job_close(job);
+
+  assert_int_equal(pthread_mutex_lock(&hold->mutex), 0);
+  hold->rc = rc;
+  if (rc != LC_OK && error.message != NULL) {
+    (void)snprintf(hold->error_message, sizeof(hold->error_message), "%s",
+                   error.message);
+  }
+  hold->completed = 1;
+  assert_int_equal(pthread_cond_broadcast(&hold->cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&hold->mutex), 0);
+  lc_error_cleanup(&error);
+  return NULL;
+}
+
+static void pouch_e2e_append_hardening_effect(lc_outbox *outbox, size_t index,
+                                              lc_error *error) {
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_outbox_commit_result commit_result;
+  lc_outbox_transaction *transaction;
+  lc_source *payload;
+  char operation_id[96];
+  char effect_id[96];
+  char effect_key[96];
+  char payload_digest[112];
+  char payload_bytes[96];
+  int rc;
+
+  transaction = NULL;
+  payload = NULL;
+  lc_outbox_entry_init(&entry);
+  lc_outbox_receipt_init(&receipt);
+  lc_outbox_commit_result_init(&commit_result);
+  assert_true(snprintf(operation_id, sizeof(operation_id),
+                       "pouch-hardening-operation-%04zu", index) > 0);
+  assert_true(snprintf(effect_id, sizeof(effect_id), "effect-%04zu", index) >
+              0);
+  assert_true(snprintf(effect_key, sizeof(effect_key),
+                       "pouch-hardening-key-%04zu", index) > 0);
+  assert_true(snprintf(payload_digest, sizeof(payload_digest),
+                       "sha256:pouch-hardening-%04zu", index) > 0);
+  assert_true(snprintf(payload_bytes, sizeof(payload_bytes),
+                       "{\"effect\":%zu,\"kind\":\"pouch-hardening\"}",
+                       index) > 0);
+  entry.operation_id = operation_id;
+  entry.effect_id = effect_id;
+  entry.effect_key = effect_key;
+  entry.payload_digest = payload_digest;
+  entry.kind = "pouch-hardening";
+  entry.destination = "test://pouch-hardening";
+  entry.content_type = "application/json";
+  rc = lc_source_from_memory(payload_bytes, strlen(payload_bytes), &payload,
+                             error);
+  assert_lc_ok(rc, error);
+  rc = lc_outbox_append(outbox, &entry, payload, &transaction, &receipt, error);
+  lc_source_close(payload);
+  payload = NULL;
+  assert_lc_ok(rc, error);
+  assert_non_null(transaction);
+  rc = lc_outbox_transaction_commit(transaction, &commit_result, error);
+  assert_lc_ok(rc, error);
+  assert_int_equal(commit_result.outbox_receipt_count, 1U);
+  lc_outbox_transaction_close(transaction);
+  lc_outbox_commit_result_cleanup(&commit_result);
+  lc_outbox_receipt_cleanup(&receipt);
+}
+
+static void pouch_e2e_write_released_hardening_state(lc_client *client,
+                                                     size_t index,
+                                                     lc_error *error) {
+  lc_acquire_req acquire;
+  lc_release_req release;
+  lc_lease *lease;
+  char body[128];
+  char key[96];
+  int rc;
+
+  lease = NULL;
+  lc_acquire_req_init(&acquire);
+  lc_release_req_init(&release);
+  assert_true(snprintf(key, sizeof(key), "state/retention/%04zu", index) > 0);
+  assert_true(snprintf(body, sizeof(body),
+                       "{\"kind\":\"pouch-hardening-expired\",\"ordinal\":%zu}",
+                       index) > 0);
+  acquire.namespace_name = "hardening-retention";
+  acquire.key = key;
+  acquire.owner = "pouch-hardening-retention";
+  acquire.ttl_seconds = 60L;
+  rc = lc_acquire(client, &acquire, &lease, error);
+  assert_lc_ok(rc, error);
+  save_json_text_or_die(lease, body, error);
+  rc = lc_lease_release(lease, &release, error);
+  assert_lc_ok(rc, error);
+}
+
+static void pouch_e2e_run_shared_maintenance(const char *root,
+                                             const char *namespace_name,
+                                             int cleanup_only,
+                                             long retention_cutoff,
+                                             lc_error *error) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  int rc;
+
+  pouch = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  open_options.segment_target_bytes = POUCH_E2E_HARDENING_SEGMENT_BYTES;
+  open_options.terminal_reclaim_min_bytes = 1U;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 0;
+  open_options.single_writer_set = 1;
+  open_options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
+  assert_lc_ok(rc, error);
+  maintenance_options.namespace_name = namespace_name;
+  maintenance_options.cleanup_only = cleanup_only;
+  maintenance_options.retention_updated_before_unix = retention_cutoff;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, error);
+  assert_lc_ok(rc, error);
+  if (retention_cutoff > 0L) {
+    assert_string_equal(maintenance_result.diagnostic, "retention-complete");
+    assert_int_equal(maintenance_result.retention_failed_count, 0UL);
+    assert_true(maintenance_result.retention_deleted_state_count > 0UL);
+  } else {
+    assert_true(maintenance_result.skipped);
+    assert_string_equal(maintenance_result.diagnostic, "cleanup-complete");
+  }
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
+}
+
+static void pouch_e2e_force_shared_multi_segment_compaction(
+    const char *root, const char *namespace_name, lc_error *error) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  int rc;
+
+  pouch = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  open_options.segment_target_bytes = POUCH_E2E_HARDENING_MULTI_SEGMENT_BYTES;
+  open_options.compaction_min_segment_count = 2UL;
+  open_options.compaction_min_reclaimable_bytes = 1UL;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 0;
+  open_options.single_writer_set = 1;
+  open_options.single_writer = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
+  assert_lc_ok(rc, error);
+  maintenance_options.namespace_name = namespace_name;
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, error);
+  assert_lc_ok(rc, error);
+  assert_true(maintenance_result.compacted);
+  assert_true(maintenance_result.candidate_segment_count > 1UL);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
+}
+
+static size_t pouch_e2e_count_shared_payloads(const char *root,
+                                              const char *namespace_name,
+                                              const char *key_prefix,
+                                              lc_error *error) {
+  lc_pouch *pouch;
+  lc_pouch_open_options open_options;
+  pouch_e2e_state_entry_count count;
+  int rc;
+
+  pouch = NULL;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&count, 0, sizeof(count));
+  open_options.single_writer_set = 1;
+  open_options.single_writer = 0;
+  open_options.background_compaction_enabled_set = 1;
+  open_options.background_compaction_enabled = 0;
+  count.key_prefix = key_prefix;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, error);
+  assert_lc_ok(rc, error);
+  rc = lc_pouch_state_visit(pouch, namespace_name, pouch_e2e_count_state_entry,
+                            &count, error);
+  assert_lc_ok(rc, error);
+  lc_pouch_close(pouch);
+  return count.count;
+}
+
 static void
 test_pouch_direct_lifecycle_maintenance_reopen_roundtrip(void **state) {
   lc_client *client;
@@ -4794,6 +5277,299 @@ static void test_pouch_terminal_reclaim_one_segment_churn_reopen(void **state) {
   rows = pouch_e2e_query_key_count(client, "churn", selector_json, &error);
   assert_int_equal(rows, 1U);
   lc_client_close(client);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void
+test_pouch_shared_hardening_churn_dispatch_and_maintenance(void **state) {
+  lc_client_config config;
+  lc_pouch_settings settings;
+  lc_outbox_config outbox_config;
+  lc_outbox_dispatcher *dispatcher;
+  lc_outbox_stats dispatcher_stats;
+  lc_outbox *outbox;
+  lc_client *client;
+  lc_client *reader;
+  lc_index_flush_req flush_req;
+  lc_index_flush_res flush_res;
+  lc_query_key_handler query_handler;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_error error;
+  pouch_e2e_churn_child_result child_result;
+  pouch_e2e_dispatcher_hold hold;
+  pthread_t worker;
+  int start_pipe[2];
+  int result_pipe[2];
+  pid_t child;
+  int child_status;
+  char start;
+  char root[256];
+  char endpoint[320];
+  const char *endpoints[1];
+  static const char survivor_selector[] =
+      "{\"eq\":{\"field\":\"/kind\","
+      "\"value\":\"pouch-hardening-survivor\"}}";
+  static const char expired_selector[] =
+      "{\"eq\":{\"field\":\"/kind\","
+      "\"value\":\"pouch-hardening-expired\"}}";
+  static const char multi_survivor_selector[] =
+      "{\"eq\":{\"field\":\"/kind\","
+      "\"value\":\"pouch-hardening-multi-survivor\"}}";
+  size_t index;
+  size_t delivered;
+  size_t rows;
+  query_keys_e2e_capture query_capture;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  reader = NULL;
+  outbox = NULL;
+  dispatcher = NULL;
+  child = -1;
+  memset(&dispatcher_stats, 0, sizeof(dispatcher_stats));
+  memset(&flush_res, 0, sizeof(flush_res));
+  memset(&query_handler, 0, sizeof(query_handler));
+  lc_query_req_init(&query_req);
+  memset(&query_res, 0, sizeof(query_res));
+  memset(&query_capture, 0, sizeof(query_capture));
+  memset(&hold, 0, sizeof(hold));
+  memset(&child_result, 0, sizeof(child_result));
+  lc_error_init(&error);
+  lc_client_config_init(&config);
+  lc_pouch_settings_init(&settings);
+  lc_outbox_config_init(&outbox_config);
+  lc_index_flush_req_init(&flush_req);
+  make_pouch_root("shared-hardening", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+
+  /* Use the typed surface to make shared-root and bounded reclaim policy
+   * explicit. The child independently opens the same root with equivalent
+   * shared-writer and reclaim settings, so this is a cross-process
+   * shared-writer test. */
+  settings.set_mask = LC_POUCH_SETTING_SINGLE_WRITER |
+                      LC_POUCH_SETTING_SEGMENT_TARGET_BYTES |
+                      LC_POUCH_SETTING_BACKGROUND_COMPACTION |
+                      LC_POUCH_SETTING_TERMINAL_RECLAIM_MIN_BYTES;
+  settings.single_writer = 0;
+  settings.segment_target_bytes = POUCH_E2E_HARDENING_MULTI_SEGMENT_BYTES;
+  settings.background_compaction_enabled = 0;
+  settings.terminal_reclaim_min_bytes = 1U;
+  endpoints[0] = endpoint;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_settings = &settings;
+
+  assert_int_equal(pipe(start_pipe), 0);
+  assert_int_equal(pipe(result_pipe), 0);
+  child = fork();
+  assert_true(child >= 0);
+  if (child == 0) {
+    char child_start;
+    int child_ok;
+
+    (void)close(start_pipe[1]);
+    (void)close(result_pipe[0]);
+    child_ok = pouch_e2e_read_exact(start_pipe[0], &child_start, 1U) &&
+               child_start == 's';
+    if (child_ok)
+      child_ok = pouch_e2e_shared_churn_child(root, &child_result);
+    if (!child_ok && child_result.rc == LC_OK)
+      child_result.rc = LC_ERR_INVALID;
+    child_ok = pouch_e2e_write_exact(result_pipe[1], &child_result,
+                                     sizeof(child_result));
+    (void)close(start_pipe[0]);
+    (void)close(result_pipe[1]);
+    _exit(child_ok ? 0 : 1);
+  }
+  assert_int_equal(close(start_pipe[0]), 0);
+  assert_int_equal(close(result_pipe[1]), 0);
+
+  rc = lc_client_open(&config, &client, &error);
+  assert_lc_ok(rc, &error);
+  outbox_config.namespace_name = "hardening-outbox";
+  outbox_config.owner = "pouch-hardening-dispatcher";
+  outbox_config.notification_capacity = POUCH_E2E_HARDENING_OUTBOX_EFFECTS;
+  rc = lc_client_new_outbox(client, &outbox_config, &outbox, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_outbox_dispatcher_get_or_start(outbox, &dispatcher, &error);
+  assert_lc_ok(rc, &error);
+
+  /* Queue one known-ready effect before the worker calls next(0). This proves
+   * the dispatcher is actively holding a real claim without a timeout race. */
+  pouch_e2e_append_hardening_effect(outbox, 0U, &error);
+  hold.dispatcher = dispatcher;
+  assert_int_equal(pthread_mutex_init(&hold.mutex, NULL), 0);
+  assert_int_equal(pthread_cond_init(&hold.cond, NULL), 0);
+  assert_int_equal(
+      pthread_create(&worker, NULL, pouch_e2e_dispatcher_hold_worker, &hold),
+      0);
+  assert_int_equal(pthread_mutex_lock(&hold.mutex), 0);
+  while (!hold.claimed) {
+    assert_int_equal(pthread_cond_wait(&hold.cond, &hold.mutex), 0);
+  }
+  assert_int_equal(hold.rc, LC_OK);
+  assert_int_equal(pthread_mutex_unlock(&hold.mutex), 0);
+
+  /* The child now churns one active segment while this dispatcher claim stays
+   * live. Meanwhile the parent continues to write terminal domain state and
+   * outbox work through the independent shared-root client. */
+  start = 's';
+  assert_true(pouch_e2e_write_exact(start_pipe[1], &start, 1U));
+  assert_int_equal(close(start_pipe[1]), 0);
+  for (index = 0U; index < POUCH_E2E_HARDENING_RETENTION_ROWS; ++index) {
+    pouch_e2e_write_released_hardening_state(client, index, &error);
+  }
+  for (index = 1U; index < POUCH_E2E_HARDENING_OUTBOX_EFFECTS; ++index) {
+    pouch_e2e_append_hardening_effect(outbox, index, &error);
+  }
+
+  assert_true(pouch_e2e_read_exact(result_pipe[0], &child_result,
+                                   sizeof(child_result)));
+  assert_int_equal(close(result_pipe[0]), 0);
+  assert_int_equal(waitpid(child, &child_status, 0), child);
+  child = -1;
+  assert_true(WIFEXITED(child_status));
+  assert_int_equal(WEXITSTATUS(child_status), 0);
+  if (child_result.rc != LC_OK) {
+    print_message("shared churn child failed at stage %d: %s "
+                  "(single=%d/%lu multi=%d/%lu)\n",
+                  child_result.stage, child_result.error_message,
+                  child_result.compacted, child_result.candidate_segment_count,
+                  child_result.multi_segment_compacted,
+                  child_result.multi_segment_candidate_count);
+  }
+  assert_int_equal(child_result.rc, LC_OK);
+  assert_true(child_result.compacted);
+  assert_int_equal(child_result.candidate_segment_count, 1UL);
+  assert_true(child_result.multi_segment_compacted);
+  assert_true(child_result.multi_segment_candidate_count > 1UL);
+  assert_int_equal(pouch_e2e_count_shared_payloads(root, "hardening-churn",
+                                                   "state/churn/", &error),
+                   1U);
+  assert_int_equal(pouch_e2e_count_shared_payloads(root, "hardening-multi",
+                                                   "state/multi/", &error),
+                   1U);
+
+  /* The explicit janitor pass and whole-document retention sweep run while
+   * the dispatcher still owns its claimed job and the remaining work is
+   * pending. Neither maintenance pass may disturb dispatch state. */
+  pouch_e2e_run_shared_maintenance(root, "hardening-retention", 1, 0L, &error);
+  pouch_e2e_run_shared_maintenance(root, "hardening-retention", 0, 2147483647L,
+                                   &error);
+
+  assert_int_equal(pthread_mutex_lock(&hold.mutex), 0);
+  hold.release = 1;
+  assert_int_equal(pthread_cond_broadcast(&hold.cond), 0);
+  assert_int_equal(pthread_mutex_unlock(&hold.mutex), 0);
+  assert_int_equal(pthread_join(worker, NULL), 0);
+  assert_int_equal(hold.rc, LC_OK);
+  assert_true(hold.completed);
+  assert_int_equal(pthread_cond_destroy(&hold.cond), 0);
+  assert_int_equal(pthread_mutex_destroy(&hold.mutex), 0);
+
+  delivered = 1U;
+  while (delivered < POUCH_E2E_HARDENING_OUTBOX_EFFECTS) {
+    lc_outbox_job *job;
+
+    job = NULL;
+    rc = lc_outbox_dispatcher_next(dispatcher, 0L, &job, &error);
+    assert_lc_ok(rc, &error);
+    assert_non_null(job);
+    rc = lc_outbox_job_complete(job, NULL, &error);
+    assert_lc_ok(rc, &error);
+    ++delivered;
+  }
+  rc = lc_outbox_dispatcher_get_stats(dispatcher, &dispatcher_stats, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(dispatcher_stats.running);
+  assert_true(dispatcher_stats.direct_notifications >=
+              POUCH_E2E_HARDENING_OUTBOX_EFFECTS);
+  lc_outbox_stats_cleanup(&dispatcher_stats);
+
+  /* Leave one real effect durable, then force a multi-segment shared-root
+   * compaction. A new dispatcher has no local index state to lean on: it must
+   * rebuild the retired derived index from canonical state before it can
+   * recover and claim this effect. */
+  pouch_e2e_append_hardening_effect(outbox, POUCH_E2E_HARDENING_OUTBOX_EFFECTS,
+                                    &error);
+
+  lc_outbox_dispatcher_close(dispatcher);
+  dispatcher = NULL;
+  lc_outbox_close(outbox);
+  outbox = NULL;
+  lc_client_close(client);
+  client = NULL;
+
+  pouch_e2e_force_shared_multi_segment_compaction(root, "hardening-outbox",
+                                                  &error);
+
+  rc = lc_client_open(&config, &reader, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_client_new_outbox(reader, &outbox_config, &outbox, &error);
+  assert_lc_ok(rc, &error);
+  rc = lc_outbox_dispatcher_get_or_start(outbox, &dispatcher, &error);
+  assert_lc_ok(rc, &error);
+  {
+    lc_outbox_job *job;
+
+    job = NULL;
+    /* An explicit reconciliation is the documented producer-side request;
+     * zero-timeout next() intentionally remains an in-memory probe. The
+     * bounded wait observes completion of that requested cold recovery rather
+     * than racing a timer or sleeping for an arbitrary interval. */
+    rc = lc_outbox_dispatcher_reconcile(dispatcher, &error);
+    assert_lc_ok(rc, &error);
+    rc = lc_outbox_dispatcher_next(dispatcher, 5000L, &job, &error);
+    assert_lc_ok(rc, &error);
+    assert_non_null(job);
+    assert_string_equal(job->effect_key, "pouch-hardening-key-0032");
+    rc = lc_outbox_job_complete(job, NULL, &error);
+    assert_lc_ok(rc, &error);
+  }
+  lc_outbox_dispatcher_close(dispatcher);
+  dispatcher = NULL;
+  lc_outbox_close(outbox);
+  outbox = NULL;
+  flush_req.namespace_name = "hardening-churn";
+  flush_req.mode = "sync";
+  rc = reader->flush_index(reader, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+  assert_string_equal(flush_res.flush_id, "pouch-query-index-repair");
+  lc_index_flush_res_cleanup(&flush_res);
+  query_capture.key_prefix = "state/churn/";
+  query_capture.key_prefix_len = strlen(query_capture.key_prefix);
+  query_capture.expected_count = POUCH_E2E_HARDENING_CHURN_ROWS;
+  query_handler.begin = query_keys_e2e_begin;
+  query_handler.chunk = query_keys_e2e_chunk;
+  query_handler.end = query_keys_e2e_end;
+  query_req.namespace_name = "hardening-churn";
+  query_req.selector_json = survivor_selector;
+  query_req.engine = "index";
+  query_req.limit = 512L;
+  rc = reader->query_keys(reader, &query_req, &query_handler, &query_capture,
+                          &query_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_int_equal(query_capture.end_calls, 1U);
+  lc_query_res_cleanup(&query_res);
+  flush_req.namespace_name = "hardening-multi";
+  rc = reader->flush_index(reader, &flush_req, &flush_res, &error);
+  assert_lc_ok(rc, &error);
+  assert_true(flush_res.flushed);
+  assert_string_equal(flush_res.flush_id, "pouch-query-index-repair");
+  lc_index_flush_res_cleanup(&flush_res);
+  rows = pouch_e2e_query_key_count(reader, "hardening-multi",
+                                   multi_survivor_selector, &error);
+  assert_int_equal(rows, 1U);
+  rows = pouch_e2e_query_key_count(reader, "hardening-retention",
+                                   expired_selector, &error);
+  assert_int_equal(rows, 0U);
+
+  lc_client_close(reader);
   lc_error_cleanup(&error);
   cleanup_pouch_root(root);
 }
@@ -5495,6 +6271,8 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_direct_large_namespace_segmented_index_reopen),
       cmocka_unit_test(test_pouch_terminal_reclaim_one_segment_churn_reopen),
+      cmocka_unit_test(
+          test_pouch_shared_hardening_churn_dispatch_and_maintenance),
       cmocka_unit_test(
           test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot),
       cmocka_unit_test(test_pouch_direct_consumer_service_with_state)};

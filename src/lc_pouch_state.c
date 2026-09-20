@@ -11392,6 +11392,25 @@ static int lc_pouch_state_compact_namespace(
                                               &snapshot_cache);
     return LC_OK;
   }
+  /* An exclusive writer carries a complete in-memory index capture across
+   * each mutation, so its current manifest remains coupled to canonical
+   * state. A shared root accepts peer-owned asynchronous publications. Once
+   * compaction replaces its state topology, retire that derived manifest and
+   * let the next query rebuild from canonical state. */
+  if (!lc_pouch_single_writer_enabled(pouch)) {
+    rc =
+        lc_pouch_query_index_invalidate_namespace(pouch, namespace_name, error);
+    if (rc != LC_OK) {
+      if (abort_diagnostic != NULL) {
+        *abort_diagnostic = "query-index-invalidation-aborted";
+      }
+      lc_pouch_state_compaction_capture_cleanup(pouch, &capture);
+      lc_free_with_allocator(&pouch->allocator, snapshot_cache.namespace_name);
+      lc_pouch_namespace_logstore_clear_records(&pouch->allocator,
+                                                &snapshot_cache);
+      return rc;
+    }
+  }
   rc = lc_pouch_state_compaction_capture_records(pouch, &capture,
                                                  &snapshot_cache, error);
   if (rc != LC_OK) {

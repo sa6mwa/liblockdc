@@ -16451,25 +16451,18 @@ int lc_pouch_client_flush_index_method(lc_client *self,
     rc = lc_pouch_query_index_flush_validated(client->pouch, namespace_name,
                                               index_seq, &index_result, error);
   } else {
-    lc_pouch_generation manifest_seq;
-
     rc = lc_pouch_state_query_index_seq(client->pouch, namespace_name,
                                         &index_seq, error);
     if (rc != LC_OK) {
       return rc;
     }
-    manifest_seq = 0UL;
-    rc = lc_pouch_query_index_manifest_seq(client->pouch, namespace_name,
-                                           &manifest_seq, error);
-    if (rc != LC_OK) {
-      return rc;
-    }
-    if (manifest_seq == index_seq) {
-      index_result.index_seq = index_seq;
-    } else {
-      rc = lc_pouch_query_index_flush(client->pouch, namespace_name, index_seq,
-                                      &index_result, error);
-    }
+    /* A shared-writer compaction can deliberately retire an index manifest:
+     * canonical state remains valid, but a newly opened dispatcher must repair
+     * that derived view before using it as a recovery boundary. The ordinary
+     * current-manifest path remains a cheap trusted-sequence check; this does
+     * not turn wait into synchronous artifact validation. */
+    rc = lc_pouch_query_index_ensure_current(
+        client->pouch, namespace_name, index_seq, 0, &index_result, error);
   }
   if (rc != LC_OK) {
     return rc;

@@ -894,6 +894,9 @@ static void lc_pouch_query_index_manifest_trust_remember(
 static int lc_pouch_query_index_manifest_trust_snapshot(
     lc_pouch *pouch, const char *namespace_name, lc_pouch_generation index_seq,
     lc_pouch_query_index_manifest *out);
+static void
+lc_pouch_query_index_manifest_trust_forget(lc_pouch *pouch,
+                                           const char *namespace_name);
 static int lc_pouch_query_index_append_generation_posting(
     const lc_allocator *allocator, char kind, unsigned long count,
     unsigned long max_doc_id, unsigned long payload_length,
@@ -12321,7 +12324,8 @@ static int lc_pouch_query_index_flush_segmented(
    * leave only an unreferenced artifact, which the next publish replaces or
    * reclaims. Rebuilds that may replace a current generation keep rename
    * publication so concurrent readers never observe an in-place rewrite. */
-  packed_path_unpublished = manifest.present && manifest.valid &&
+  packed_path_unpublished = !full_rebuild && manifest.present &&
+                            manifest.valid &&
                             manifest.index_seq < state_index_seq;
   /* The first manifest cannot reference stale artifacts. Do not turn its
    * foreground publication into a directory sweep; a later validated repair
@@ -13600,6 +13604,83 @@ static int lc_pouch_query_index_manifest_trust_snapshot(
   }
   pthread_mutex_unlock(&pouch->indexer_mutex);
   return found;
+}
+
+static void
+lc_pouch_query_index_manifest_trust_forget(lc_pouch *pouch,
+                                           const char *namespace_name) {
+  lc_pouch_query_index_manifest_trust_entry *entry;
+  lc_pouch_query_index_manifest_trust_entry *previous;
+
+  if (pouch == NULL || !pouch->indexer_mutex_initialized ||
+      namespace_name == NULL || namespace_name[0] == '\0') {
+    return;
+  }
+  pthread_mutex_lock(&pouch->indexer_mutex);
+  previous = NULL;
+  entry = pouch->query_manifest_trust;
+  while (entry != NULL) {
+    if (entry->namespace_name != NULL &&
+        strcmp(entry->namespace_name, namespace_name) == 0) {
+      if (previous != NULL) {
+        previous->next = entry->next;
+      } else {
+        pouch->query_manifest_trust = entry->next;
+      }
+      lc_pouch_query_index_manifest_trust_entry_cleanup(&pouch->allocator,
+                                                        entry);
+      lc_free_with_allocator(&pouch->allocator, entry);
+      break;
+    }
+    previous = entry;
+    entry = entry->next;
+  }
+  pthread_mutex_unlock(&pouch->indexer_mutex);
+}
+
+int lc_pouch_query_index_invalidate_namespace(lc_pouch *pouch,
+                                              const char *namespace_name,
+                                              lc_error *error) {
+  char *manifest_path;
+  int manifest_present;
+  int rc;
+
+  if (pouch == NULL || namespace_name == NULL || namespace_name[0] == '\0') {
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "pouch query-index invalidation requires pouch and "
+                        "namespace",
+                        NULL, NULL, NULL);
+  }
+  if (!pouch->query_indexing_enabled) {
+    return LC_OK;
+  }
+  rc = lc_pouch_query_index_flush_lock(pouch, error);
+  if (rc != LC_OK) {
+    return rc;
+  }
+  lc_pouch_query_index_manifest_trust_forget(pouch, namespace_name);
+  manifest_path =
+      lc_pouch_query_index_manifest_path(pouch, namespace_name, error);
+  manifest_present = 0;
+  if (manifest_path == NULL) {
+    rc = error != NULL && error->code != LC_OK ? error->code : LC_ERR_NOMEM;
+  } else if (access(manifest_path, F_OK) == 0) {
+    manifest_present = 1;
+    rc = LC_OK;
+  } else if (errno == ENOENT) {
+    rc = LC_OK;
+  } else {
+    rc = lc_error_set(error, LC_ERR_TRANSPORT, errno,
+                      "failed to inspect pouch query-index manifest",
+                      strerror(errno), NULL, "pouch");
+  }
+  if (rc == LC_OK && manifest_present) {
+    rc = lc_pouch_path_write_text_file_relaxed(manifest_path, "invalid\n",
+                                               error);
+  }
+  lc_free_with_allocator(&pouch->allocator, manifest_path);
+  lc_pouch_query_index_flush_unlock(pouch);
+  return rc;
 }
 
 void lc_pouch_query_index_cache_cleanup(lc_pouch *pouch) {

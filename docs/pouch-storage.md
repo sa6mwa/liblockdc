@@ -1781,6 +1781,14 @@ Indexed query requirements:
 - a successful manifest sequence read records per-client manifest trust for
   that namespace/index sequence. A later non-validating ensure-current call may
   skip rereading the manifest when the state index sequence is unchanged;
+- shared-writer compaction replaces canonical-state topology under the
+  namespace write authority and first retires its derived query manifest. The
+  next foreground `flush_index` (including the outbox recovery `wait`
+  boundary) rebuilds from the installed snapshot, publishes its replacement
+  atomically, and reclaims the now-unreferenced artifacts.
+  This is a cold maintenance boundary for peer-owned asynchronous publication;
+  exclusive-writer compaction retains its complete in-memory index capture and
+  does not add a query rebuild to its normal compaction path;
 - indexed document queries with a discard sink may bulk-count exact candidates
   only when there is no input cursor and all matches fit below the requested
   limit, so cursor behavior and candidate verification semantics remain
@@ -2021,7 +2029,11 @@ Benchmarks must include realistic and abusive workloads:
 - staged state promotion;
 - compaction over many default-sized segments;
 - reopen and multi-segment replay;
-- overcapacity patterns with churn, deletes, updates, and stale history.
+- overcapacity patterns with churn, deletes, updates, and stale history;
+- shared-root single-segment terminal reclaim and forced multi-segment
+  compaction while an outbox dispatcher holds a real claim, followed by
+  retention cleanup, reopen, exact survivor assertions, and cold outbox
+  recovery after a forced multi-segment compaction.
 
 Document-returning production query metrics measure steady-state public API
 throughput. The benchmark first runs the same document query once outside the

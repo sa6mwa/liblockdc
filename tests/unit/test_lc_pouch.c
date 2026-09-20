@@ -18751,8 +18751,10 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
   lc_pouch_generation query_seq_before;
   lc_pouch_generation query_seq_after;
   lc_pouch_generation state_seq;
+  lc_pouch_generation indexed_seq;
   lc_error error;
   char root[512];
+  size_t query_rows;
   int rc;
 
   (void)state;
@@ -18762,6 +18764,8 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
   query_seq_before = 0UL;
   query_seq_after = 0UL;
   state_seq = 0UL;
+  indexed_seq = 0UL;
+  query_rows = 0U;
   memset(&open_options, 0, sizeof(open_options));
   memset(&maintenance_options, 0, sizeof(maintenance_options));
   memset(&maintenance_result, 0, sizeof(maintenance_result));
@@ -18775,6 +18779,8 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
   cleanup_root(root);
 
   open_options.segment_target_bytes = 1U;
+  open_options.single_writer_set = 1;
+  open_options.single_writer = 0;
   rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
   assert_int_equal(rc, LC_OK);
   rc = lc_source_from_memory("{\"kind\":\"gone\"}",
@@ -18803,6 +18809,15 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
   assert_int_equal(rc, LC_OK);
   assert_true(query_seq_before > initial_query_seq);
   assert_int_equal(query_seq_before, delete_result.index_seq);
+  /* Publish the tombstone before compaction so the test proves shared
+   * compaction retires a current derived projection rather than merely
+   * catching a naturally stale manifest. */
+  rc = lc_pouch_query_index_flush(pouch, "docs/query-freshness",
+                                  query_seq_before, &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(flush_result.index_seq, query_seq_before);
+  assert_true(flush_result.repaired);
+  memset(&flush_result, 0, sizeof(flush_result));
 
   /* Internal records advance state ordering but are not query candidates.
    * This distinguishes the durable query high water from generic state
@@ -18840,10 +18855,21 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
                                       &query_seq_after, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(query_seq_after, query_seq_before);
-  rc = lc_pouch_query_index_flush(pouch, "docs/query-freshness",
-                                  query_seq_after, &flush_result, &error);
+  /* Shared compaction explicitly retires the derived manifest. A wait-style
+   * caller must repair that derived view from canonical state, without
+   * accepting the stale pre-compaction index. */
+  rc = lc_pouch_query_index_ensure_current(
+      pouch, "docs/query-freshness", query_seq_after, 0, &flush_result, &error);
   assert_int_equal(rc, LC_OK);
   assert_int_equal(flush_result.index_seq, query_seq_before);
+  assert_true(flush_result.repaired);
+  query_rows = 0U;
+  rc = lc_pouch_query_index_visit(pouch, "docs/query-freshness",
+                                  pouch_query_index_count_row, &query_rows,
+                                  &indexed_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(indexed_seq, query_seq_before);
+  assert_int_equal(query_rows, 0U);
 
   lc_pouch_state_write_result_cleanup(NULL, &internal_result);
   lc_pouch_state_write_result_cleanup(NULL, &delete_result);
