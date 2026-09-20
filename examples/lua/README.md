@@ -93,10 +93,15 @@ are in one process.
 
 The Lua consumer path is intentionally simple and single-threaded.
 
-- `client:start_consumer(...)` is blocking
-- `client:new_consumer_service(...):run()` is blocking
-- `client:new_consumer_service(...):start()` is also blocking
-- each blocking Lua consumer service takes exactly one consumer config
+- `client:subscribe(req, handler)` and `client:subscribe_with_state(req, handler)`
+  directly use the C streaming subscriptions; handlers must terminalize each
+  borrowed message before returning
+- `client:watch_queue(req, handler)` directly uses the C streaming queue watch
+- `client:new_consumer_service(config):run()` is the single-consumer, blocking
+  Lua-managed adaptation; a normal handler return acknowledges, while
+  `nil, err`, `false, err`, or an exception nacks and stops it
+- each Lua managed service takes exactly one C-shaped config with `name`,
+  `request`, optional `with_state`, and `handle`
 - one message is consumed at a time
 - the Lua handler runs to completion on the calling Lua state
 - after the handler completes, the next message is consumed
@@ -107,7 +112,7 @@ multiple native threads would be unsafe.
 
 In practical terms, the intended Lua DX is:
 
-1. start one blocking consumer loop
+1. construct one blocking consumer service or subscription
 2. handle one message
 3. update state or attachments if needed
 4. ack or nack

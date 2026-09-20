@@ -59,8 +59,7 @@ end
 
 local typed_root = root .. "-typed"
 local typed_client, typed_err = lockdc.open({
-  endpoints = { "pouch://" .. typed_root .. "?compression=zlib&query_indexing=true" },
-  pouch_compression = "zlib",
+  endpoints = { "pouch://" .. typed_root },
   pouch = {
     single_writer = false,
     durable_sync = false,
@@ -86,12 +85,12 @@ local typed_manifest = assert(io.open(typed_root .. "/manifest", "rb"))
 local typed_manifest_text = assert(typed_manifest:read("*a"))
 typed_manifest:close()
 if not typed_manifest_text:match("compression=none") then
-  error("nested typed Pouch compression did not override compatibility configuration")
+  error("typed Pouch compression was not recorded in the manifest")
 end
 
 local invalid_client, invalid_err = lockdc.open({
   endpoints = { endpoint },
-  pouch_compression = "invalid",
+  pouch = { compression = "invalid" },
 })
 if invalid_client ~= nil then
   invalid_client:close()
@@ -102,27 +101,47 @@ if type(invalid_err) ~= "table" or not (invalid_err.message or ""):match("compre
 end
 
 local disabled_generation_client, disabled_generation_err = lockdc.open({
-  endpoints = {
-    endpoint .. "?crypto_key_file=" .. explicit_false_key_file
-      .. "&crypto_generate_key_file=true",
+  endpoints = { endpoint },
+  pouch = {
+    crypto_key_file = explicit_false_key_file,
+    crypto_generate_key_file = false,
   },
-  pouch_crypto_generate_key_file = false,
 })
 if disabled_generation_client ~= nil or disabled_generation_err == nil then
-  error("explicit Lua false did not override endpoint key-file generation")
+  error("explicit Lua false did not prevent Pouch key-file generation")
 end
 local explicit_false_key = io.open(explicit_false_key_file, "rb")
 if explicit_false_key ~= nil then
   explicit_false_key:close()
-  error("endpoint key-file generation ignored explicit Lua false")
+  error("Pouch key-file generation ignored explicit Lua false")
+end
+
+local legacy_open_ok, legacy_open_err = pcall(function()
+  return lockdc.open({
+    endpoints = { endpoint },
+    pouch_compression = "zlib",
+  })
+end)
+if legacy_open_ok or not tostring(legacy_open_err):find("pouch.compression", 1, true) then
+  error("Lua lockdc.open accepted the removed Pouch compatibility field")
+end
+
+local legacy_endpoint, legacy_endpoint_err = lockdc.open({
+  endpoints = { endpoint .. "?compression=zlib" },
+})
+if legacy_endpoint ~= nil or
+    not tostring(legacy_endpoint_err and legacy_endpoint_err.message):find("Pouch endpoint options", 1, true) then
+  error("Lua lockdc.open accepted Pouch endpoint options")
 end
 
 local client, err = lockdc.open({
   endpoints = { endpoint },
   default_namespace = namespace_name,
-  pouch_crypto_key_file = key_file,
-  pouch_crypto_generate_key_file = true,
-  pouch_compression = "zlib",
+  pouch = {
+    crypto_key_file = key_file,
+    crypto_generate_key_file = true,
+    compression = "zlib",
+  },
 })
 if client == nil then
   error(("encrypted Pouch open failed: %s"):format(err and err.message or tostring(err)))
@@ -130,8 +149,7 @@ end
 
 local second_client, second_err = lockdc.open({
   endpoints = { endpoint },
-  pouch_crypto_key_file = key_file,
-  pouch_compression = "zlib",
+  pouch = { crypto_key_file = key_file, compression = "zlib" },
 })
 if second_client ~= nil then
   second_client:close()
@@ -217,6 +235,93 @@ if payload == nil or payload.source ~= "lua-pouch" or type(written_or_err) ~= "n
   error("Pouch queue payload did not round-trip through the Lua facade")
 end
 assert(message:ack())
+
+local subscribed, subscribe_err = client:enqueue({
+  queue = "direct-subscribe",
+  content_type = "application/json",
+  visibility_timeout_seconds = 30,
+  ttl_seconds = 30,
+}, lockdc.encode_json({ source = "lua-direct-subscribe" }))
+if subscribed == nil then
+  client:close()
+  error(("direct subscription enqueue failed: %s"):format(
+    subscribe_err and subscribe_err.message or tostring(subscribe_err)))
+end
+local subscription_calls = 0
+local retained_delivery
+local subscription_ok, subscription_err = client:subscribe({
+  queue = "direct-subscribe",
+  owner = "lua-direct-subscribe",
+  visibility_timeout_seconds = 30,
+  wait_seconds = 0,
+}, function(delivery)
+  subscription_calls = subscription_calls + 1
+  retained_delivery = delivery
+  assert(type(client:info()) == "table")
+  local closed, close_err = pcall(function()
+    client:close()
+  end)
+  assert(not closed and tostring(close_err):find(
+    "cannot close during a native callback", 1, true))
+  assert(delivery:ack())
+  return false, "stop direct subscription after its asserted delivery"
+end)
+if subscription_ok ~= nil or subscription_calls ~= 1 or
+    type(subscription_err) ~= "table" or
+    not tostring(subscription_err.message):find("stop direct subscription", 1, true) then
+  client:close()
+  error(("Lua direct subscription failed (ok=%s calls=%d error=%s)"):format(
+    tostring(subscription_ok), subscription_calls,
+    tostring(subscription_err and subscription_err.message)))
+end
+local retained_ok = pcall(function()
+  retained_delivery:ack()
+end)
+if retained_ok then
+  client:close()
+  error("Lua retained a direct-subscription delivery beyond its native callback")
+end
+
+local subscribed_state, subscribe_state_err = client:enqueue({
+  queue = "direct-subscribe-state",
+  content_type = "application/json",
+  visibility_timeout_seconds = 30,
+  ttl_seconds = 30,
+}, lockdc.encode_json({ source = "lua-direct-subscribe-state" }))
+if subscribed_state == nil then
+  client:close()
+  error(("direct state subscription enqueue failed: %s"):format(
+    subscribe_state_err and subscribe_state_err.message or tostring(subscribe_state_err)))
+end
+local state_subscription_calls = 0
+local retained_state
+local state_subscription_ok, state_subscription_err = client:subscribe_with_state({
+  queue = "direct-subscribe-state",
+  owner = "lua-direct-subscribe-state",
+  visibility_timeout_seconds = 30,
+  wait_seconds = 0,
+}, function(delivery, state)
+  state_subscription_calls = state_subscription_calls + 1
+  retained_state = state
+  assert(type(state:info()) == "table")
+  assert(delivery:ack())
+  return false, "stop direct state subscription after its asserted delivery"
+end)
+if state_subscription_ok ~= nil or state_subscription_calls ~= 1 or
+    type(state_subscription_err) ~= "table" or
+    not tostring(state_subscription_err.message):find("stop direct state subscription", 1, true) then
+  client:close()
+  error(("Lua direct state subscription failed (ok=%s calls=%d error=%s)"):format(
+    tostring(state_subscription_ok), state_subscription_calls,
+    tostring(state_subscription_err and state_subscription_err.message)))
+end
+local retained_state_ok = pcall(function()
+  retained_state:info()
+end)
+if retained_state_ok then
+  client:close()
+  error("Lua retained a direct-subscription state lease beyond its native callback")
+end
 
 local function assert_ok(operation, value, value_err)
   if value == nil then
@@ -636,8 +741,7 @@ client:close()
 
 local missing_key_client, missing_key_err = lockdc.open({
   endpoints = { endpoint },
-  pouch_crypto_key_file = root .. "/missing.key",
-  pouch_compression = "zlib",
+  pouch = { crypto_key_file = root .. "/missing.key", compression = "zlib" },
 })
 if missing_key_client ~= nil then
   missing_key_client:close()
@@ -650,8 +754,7 @@ end
 local reopened, reopen_err = lockdc.open({
   endpoints = { endpoint },
   default_namespace = namespace_name,
-  pouch_crypto_key_file = key_file,
-  pouch_compression = "zlib",
+  pouch = { crypto_key_file = key_file, compression = "zlib" },
 })
 if reopened == nil then
   error(("encrypted Pouch reopen failed: %s"):format(reopen_err and reopen_err.message or tostring(reopen_err)))

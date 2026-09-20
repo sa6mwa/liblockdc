@@ -89,10 +89,11 @@ pouch.single_writer = 0;
 config.pouch_settings = &pouch;
 ```
 
-The default remains exclusive `single_writer=true`. Do not use an endpoint
-query string in new code; `?single_writer=false` remains only a compatibility
-input. Shared-root mode is correct for this topology but has lower throughput
-than the exclusive-writer performance path, so use it only when the processes
+The default remains exclusive `single_writer=true`. Lua configuration must use
+`pouch = { single_writer = false }` for this topology; it deliberately rejects
+Pouch endpoint query strings. The C compatibility input `?single_writer=false`
+remains outside that Lua surface. Shared-root mode has lower throughput than
+the exclusive-writer performance path, so use it only when the processes
 really share one Pouch root.
 
 One application namespace has one canonical `lc_outbox_config`. Each process

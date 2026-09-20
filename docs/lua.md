@@ -117,6 +117,9 @@ Primary entrypoints:
 - `lockdc.decode_json(payload)`
 - `lockdc.json_null`
 - `lockdc.OK`, `lockdc.ERR_*`, and `lockdc.NACK_*` C status/intent constants
+- `lockdc.pouch_crypto_generate_key()`
+- `lockdc.pouch_crypto_default_key_file()`
+- `lockdc.pouch_crypto_generate_key_file(path[, overwrite])`
 
 Primary handle types:
 
@@ -197,18 +200,17 @@ local client, err = lockdc.open({
 })
 ```
 
-`client_bundle_path` remains available for compatibility, but new Lua code
-should prefer `client_bundle_source`.
+`client_bundle_path` is not a Lua API. Use `client_bundle_source` for every
+Lua configuration, including a path-shaped source.
 
 ### Local Pouch storage
 
-Use exactly one absolute `pouch://` endpoint for local storage. New Lua code
-should put root-open policy in the nested `pouch` table; it includes crypto,
+Use exactly one absolute, option-free `pouch://` endpoint for local storage.
+Put all root-open policy in the nested `pouch` table; it includes crypto,
 compression, writer, durability, maintenance, queue-watch, and query-index
-settings. Presence is significant: `false` and `0` deliberately override an
-endpoint option. The compatibility top-level fields `pouch_crypto_key`,
-`pouch_crypto_key_file`, `pouch_crypto_generate_key_file`, and
-`pouch_compression` remain accepted, but a matching nested `pouch` value wins.
+settings. Presence is significant: `false` and `0` are explicit settings.
+Top-level `pouch_crypto_*`/`pouch_compression` fields and Pouch endpoint query
+options are not accepted by the Lua façade.
 
 ```lua
 local client, err = lockdc.open({
@@ -226,14 +228,21 @@ local client, err = lockdc.open({
 
 The supported compression values are `"none"` and `"zlib"`. Pouch remains
 exclusive single-writer by default; opening another writer for the same root
-returns the normal structured `lockdc.open` error. Endpoint query options stay
-supported for compatibility, including `?single_writer=false` where shared
-writers are explicitly required.
+returns the normal structured `lockdc.open` error. Set
+`pouch = { single_writer = false }` where shared writers are explicitly
+required.
 
 Typed Pouch settings are local-only: supplying a non-empty `pouch` table to a
 remote or Unix-socket client returns the normal structured open error. See
 [typed Pouch open settings](pouch-open-settings-api.md) for every key and its
 precedence rule.
+
+The explicit Pouch crypto helpers mirror the safe C utility workflows:
+`lockdc.pouch_crypto_generate_key()` returns a new key string,
+`lockdc.pouch_crypto_default_key_file()` returns the platform default path, and
+`lockdc.pouch_crypto_generate_key_file(path[, overwrite])` creates a mode-0600
+key file and returns its generated key. Treat returned keys as secrets and use
+the nested `pouch.crypto_key_file` setting for long-lived process configuration.
 
 Common client methods:
 
@@ -286,11 +295,9 @@ Common client methods:
 - `client:tc_rm_list()`
 - `client:new_outbox(config)`
 - `client:new_history_consumer(config)`
-- `client:subscribe(req, handler)`
-- `client:subscribe_with_state(req, handler)`
+- `client:subscribe(req, handler)` and `client:subscribe_with_state(req, handler)`
 - `client:watch_queue(req, handler)`
-- `client:new_consumer_service(...)`
-- `client:start_consumer(...)`
+- `client:new_consumer_service(config)`
 
 ## Pouch durable-history consumers
 
@@ -300,7 +307,7 @@ the application remains responsible for obtaining and applying records through
 its own replication, backup, or resume protocol. Remote lockd clients reject
 this Pouch-only operation.
 
-`config.namespace` (or `namespace_name`) and `config.consumer_id` form the
+`config.namespace_name` and `config.consumer_id` form the
 stable durable identity. A new identity begins at
 `initial_acknowledged_index_seq` (zero by default), or set
 `start_at_current = true` to retain only future history. Existing identities
@@ -646,26 +653,48 @@ JSON `null` payloads distinct from the binding's existing `nil, err` and
 
 ## Consumer model
 
-The Lua consumer API is intentionally blocking and single-threaded.
+`client:subscribe(req, handler)` and `client:subscribe_with_state(req, handler)`
+are direct bindings to the C streaming subscription operations. Their handlers
+run synchronously on the calling Lua state. A subscription handler must
+explicitly `ack()` or `nack()` its borrowed message before returning; returning
+`false, message`, `nil, message`, or raising stops the subscription with a
+structured error. A message (and the optional state lease) is invalid once its
+handler returns, even if Lua retains the wrapper. The client remains usable in
+the handler, matching C subscription semantics, but it cannot be closed until
+the native callback returns.
 
-- handlers run on the calling Lua state
-- one message is processed at a time
-- after the handler completes, the next dequeue happens
-- the binding does not expose native threaded callback dispatch into a shared
-  Lua VM
+`client:watch_queue(req, handler)` is likewise a direct C queue watch, not a
+polling loop. The handler receives a borrowed event table; return `false` to
+stop cleanly, return `nil, message` or `false, message` to fail, and otherwise
+return normally to continue.
 
-This is deliberate. Native worker threads calling back into the same Lua state
-would require a separate synchronization and dispatch model.
+`client:new_consumer_service(config)` is the Lua-specific threadless managed
+consumer adaptation. Native `lc_consumer_service` workers cannot invoke a Lua
+state from their private threads, so this surface deliberately supports one
+blocking consumer at a time:
 
-The supported Lua consumer paths are:
+```lua
+local service = assert(client:new_consumer_service({
+  name = "orders-worker",
+  request = { namespace_name = "orders", queue = "events", owner = "orders-worker" },
+  with_state = true,
+  handle = function(message, state)
+    -- Return normally to acknowledge. Return nil, err (or false, err) to nack.
+    return nil
+  end,
+}))
+assert(service:run())
+```
 
-- `client:start_consumer(...)`
-- `client:new_consumer_service(...):run()`
-- `client:new_consumer_service(...):start()`
-
-`Service:start()` is a blocking alias for `run()`.
-Each blocking Lua consumer service supports exactly one consumer config. Start
-separate blocking consumers if you need to consume separate queues from Lua.
+It uses the C-shaped `name`, `request`, and `with_state` configuration fields.
+`handle` is the necessary Lua callback spelling. `run()` blocks; `stop()` is
+safe from that handler and `wait()` reports after `run()` returns, whether it
+succeeded or failed. There is no Lua
+`start()` or `start_consumer()` alias and no multi-worker/multi-config service
+because neither can safely call one Lua VM concurrently. Start separate Lua
+states or processes when concurrency is needed. A normal handler return
+acknowledges an open message. `nil, err`, `false, err`, or a raised error nacks
+it and returns that failure from `run()`; a failed nack is returned instead.
 
 ## Examples
 

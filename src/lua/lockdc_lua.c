@@ -26,17 +26,20 @@
 typedef struct lcdc_client_ud {
   lc_client *client;
   int streaming;
+  int callback_active;
 } lcdc_client_ud;
 
 typedef struct lcdc_lease_ud {
   lc_lease *lease;
   int owner_ref;
   int streaming;
+  int borrowed;
 } lcdc_lease_ud;
 
 typedef struct lcdc_message_ud {
   lc_message *message;
   int streaming;
+  int borrowed;
 } lcdc_message_ud;
 
 typedef struct lcdc_outbox_ud {
@@ -139,6 +142,17 @@ typedef struct lcdc_query_keys_handler {
   int chunk_ref;
   int finish_ref;
 } lcdc_query_keys_handler;
+
+typedef struct lcdc_consumer_handler {
+  lua_State *L;
+  int handler_ref;
+  int with_state;
+} lcdc_consumer_handler;
+
+typedef struct lcdc_watch_handler {
+  lua_State *L;
+  int handler_ref;
+} lcdc_watch_handler;
 
 static size_t lcdc_lua_source_read(void *context, void *buffer, size_t count,
                                    lc_error *error);
@@ -536,7 +550,7 @@ static int lcdc_opt_size_field(lua_State *L, int index, const char *name,
   lua_Integer value;
 
   if (!lua_istable(L, index))
-    return 0;
+    return LC_ERR_INVALID;
   lua_getfield(L, index, name);
   if (lua_isnil(L, -1)) {
     lua_pop(L, 1);
@@ -1083,6 +1097,7 @@ static int lcdc_push_client(lua_State *L, lc_client *client) {
   ud = (lcdc_client_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->client = client;
   ud->streaming = 0;
+  ud->callback_active = 0;
   luaL_getmetatable(L, LCDC_CLIENT_MT);
   lua_setmetatable(L, -2);
   return 1;
@@ -1095,10 +1110,28 @@ static int lcdc_push_lease(lua_State *L, lc_lease *lease, int owner_index) {
   ud->lease = lease;
   ud->owner_ref = LUA_NOREF;
   ud->streaming = 0;
+  ud->borrowed = 0;
   if (owner_index != 0) {
     lua_pushvalue(L, owner_index);
     ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);
   }
+  luaL_getmetatable(L, LCDC_LEASE_MT);
+  lua_setmetatable(L, -2);
+  return 1;
+}
+
+static int lcdc_push_borrowed_lease(lua_State *L, lc_lease *lease) {
+  lcdc_lease_ud *ud;
+
+  if (lease == NULL) {
+    lua_pushnil(L);
+    return 1;
+  }
+  ud = (lcdc_lease_ud *)lua_newuserdata(L, sizeof(*ud));
+  ud->lease = lease;
+  ud->owner_ref = LUA_NOREF;
+  ud->streaming = 0;
+  ud->borrowed = 1;
   luaL_getmetatable(L, LCDC_LEASE_MT);
   lua_setmetatable(L, -2);
   return 1;
@@ -1110,6 +1143,19 @@ static int lcdc_push_message(lua_State *L, lc_message *message) {
   ud = (lcdc_message_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->message = message;
   ud->streaming = 0;
+  ud->borrowed = 0;
+  luaL_getmetatable(L, LCDC_MESSAGE_MT);
+  lua_setmetatable(L, -2);
+  return 1;
+}
+
+static int lcdc_push_borrowed_message(lua_State *L, lc_message *message) {
+  lcdc_message_ud *ud;
+
+  ud = (lcdc_message_ud *)lua_newuserdata(L, sizeof(*ud));
+  ud->message = message;
+  ud->streaming = 0;
+  ud->borrowed = 1;
   luaL_getmetatable(L, LCDC_MESSAGE_MT);
   lua_setmetatable(L, -2);
   return 1;
@@ -1474,7 +1520,7 @@ static int lcdc_lease_gc(lua_State *L) {
 
   ud = (lcdc_lease_ud *)luaL_checkudata(L, 1, LCDC_LEASE_MT);
   if (ud->lease != NULL) {
-    if (ud->owner_ref == LUA_NOREF) {
+    if (ud->owner_ref == LUA_NOREF && !ud->borrowed) {
       lc_lease_close(ud->lease);
     }
     ud->lease = NULL;
@@ -1490,7 +1536,7 @@ static int lcdc_message_gc(lua_State *L) {
   lcdc_message_ud *ud;
 
   ud = (lcdc_message_ud *)luaL_checkudata(L, 1, LCDC_MESSAGE_MT);
-  if (ud->message != NULL) {
+  if (ud->message != NULL && !ud->borrowed) {
     lc_message_close(ud->message);
     ud->message = NULL;
   }
@@ -1848,6 +1894,21 @@ static int lcdc_open(lua_State *L) {
   endpoints = NULL;
   endpoint_count = 0U;
   luaL_checktype(L, 1, LUA_TTABLE);
+  lcdc_reject_field(L, 1, "client_bundle_path",
+                    "lockdc.open uses client_bundle_source; "
+                    "client_bundle_path is not supported");
+  lcdc_reject_field(L, 1, "pouch_crypto_key",
+                    "lockdc.open uses pouch.crypto_key; "
+                    "pouch_crypto_key is not supported");
+  lcdc_reject_field(L, 1, "pouch_crypto_key_file",
+                    "lockdc.open uses pouch.crypto_key_file; "
+                    "pouch_crypto_key_file is not supported");
+  lcdc_reject_field(L, 1, "pouch_crypto_generate_key_file",
+                    "lockdc.open uses pouch.crypto_generate_key_file; "
+                    "pouch_crypto_generate_key_file is not supported");
+  lcdc_reject_field(L, 1, "pouch_compression",
+                    "lockdc.open uses pouch.compression; "
+                    "pouch_compression is not supported");
   lua_getfield(L, 1, "endpoints");
   if (!lua_isnil(L, -1)) {
     luaL_checktype(L, -1, LUA_TTABLE);
@@ -1861,6 +1922,18 @@ static int lcdc_open(lua_State *L) {
       for (i = 0U; i < endpoint_count; ++i) {
         lua_rawgeti(L, -1, (lua_Integer)(i + 1U));
         endpoints[i] = luaL_checkstring(L, -1);
+        if (strncmp(endpoints[i], "pouch://", 8U) == 0 &&
+            strchr(endpoints[i], '?') != NULL) {
+          lua_pop(L, 2);
+          free(endpoints);
+          lc_error_set(&error, LC_ERR_INVALID, 0L,
+                       "Pouch endpoint options are not supported by Lua; "
+                       "use the pouch settings table",
+                       NULL, NULL, "endpoints");
+          lcdc_push_status_error(L, LC_ERR_INVALID, &error);
+          lc_error_cleanup(&error);
+          return 3;
+        }
         lua_pop(L, 1);
       }
       config.endpoints = endpoints;
@@ -1869,7 +1942,6 @@ static int lcdc_open(lua_State *L) {
   }
   lua_pop(L, 1);
   config.unix_socket_path = lcdc_opt_string_field(L, 1, "unix_socket_path");
-  config.client_bundle_path = lcdc_opt_string_field(L, 1, "client_bundle_path");
   lua_getfield(L, 1, "client_bundle_source");
   if (!lua_isnil(L, -1)) {
     rc = lcdc_source_from_value(L, -1, &client_bundle_source, &error);
@@ -1891,13 +1963,6 @@ static int lcdc_open(lua_State *L) {
   lcdc_opt_boolean_field(L, 1, "prefer_http_2", &config.prefer_http_2);
   lcdc_opt_boolean_field(L, 1, "disable_logger_sys_field",
                          &config.disable_logger_sys_field);
-  config.pouch_crypto_key = lcdc_opt_string_field(L, 1, "pouch_crypto_key");
-  config.pouch_crypto_key_file =
-      lcdc_opt_string_field(L, 1, "pouch_crypto_key_file");
-  config.pouch_crypto_generate_key_file_set =
-      lcdc_opt_boolean_field(L, 1, "pouch_crypto_generate_key_file",
-                             &config.pouch_crypto_generate_key_file);
-  config.pouch_compression = lcdc_opt_string_field(L, 1, "pouch_compression");
   lua_getfield(L, 1, "pouch");
   if (!lua_isnil(L, -1)) {
     if (!lua_istable(L, -1)) {
@@ -1965,6 +2030,67 @@ static int lcdc_xid_new(lua_State *L) {
   return 1;
 }
 
+static int lcdc_pouch_crypto_generate_key(lua_State *L) {
+  char *key_string;
+  lc_error error;
+  int rc;
+
+  key_string = NULL;
+  lc_error_init(&error);
+  rc = lc_pouch_crypto_generate_key_string(&key_string, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushstring(L, key_string);
+  lc_pouch_crypto_key_string_free(key_string);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_pouch_crypto_default_key_file(lua_State *L) {
+  char *path;
+  lc_error error;
+  int rc;
+
+  path = NULL;
+  lc_error_init(&error);
+  rc = lc_pouch_crypto_default_key_file(&path, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushstring(L, path);
+  lc_pouch_crypto_key_string_free(path);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_pouch_crypto_generate_key_file(lua_State *L) {
+  const char *path;
+  char *key_string;
+  lc_error error;
+  int overwrite;
+  int rc;
+
+  path = luaL_checkstring(L, 1);
+  overwrite = lua_toboolean(L, 2);
+  key_string = NULL;
+  lc_error_init(&error);
+  rc = lc_pouch_crypto_generate_key_file(path, overwrite, &key_string, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushstring(L, key_string);
+  lc_pouch_crypto_key_string_free(key_string);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
 static int lcdc_client_info(lua_State *L) {
   lcdc_client_ud *ud;
 
@@ -1975,7 +2101,11 @@ static int lcdc_client_info(lua_State *L) {
 }
 
 static int lcdc_client_close(lua_State *L) {
-  (void)lcdc_check_client(L, 1);
+  lcdc_client_ud *ud;
+
+  ud = lcdc_check_client(L, 1);
+  luaL_argcheck(L, !ud->callback_active, 1,
+                "lockdc client cannot close during a native callback");
   return lcdc_client_gc(L);
 }
 
@@ -3803,6 +3933,194 @@ static int lcdc_client_dequeue(lua_State *L) {
 
 static int lcdc_client_dequeue_with_state(lua_State *L) {
   return lcdc_client_dequeue_common(L, 1);
+}
+
+static int lcdc_lua_consumer_handle(void *context, lc_message *message,
+                                    lc_error *error) {
+  lcdc_consumer_handler *handler;
+  lcdc_message_ud *message_ud;
+  lcdc_lease_ud *state_ud;
+  lc_lease *state;
+  const char *message_text;
+  int top;
+  int failed;
+  int message_ref;
+  int state_ref;
+
+  handler = (lcdc_consumer_handler *)context;
+  top = lua_gettop(handler->L);
+  message_ud = NULL;
+  state_ud = NULL;
+  message_ref = LUA_NOREF;
+  state_ref = LUA_NOREF;
+  lua_rawgeti(handler->L, LUA_REGISTRYINDEX, handler->handler_ref);
+  lcdc_push_borrowed_message(handler->L, message);
+  message_ud =
+      (lcdc_message_ud *)luaL_checkudata(handler->L, -1, LCDC_MESSAGE_MT);
+  lua_pushvalue(handler->L, -1);
+  message_ref = luaL_ref(handler->L, LUA_REGISTRYINDEX);
+  if (handler->with_state) {
+    state = lc_message_state(message);
+    lcdc_push_borrowed_lease(handler->L, state);
+    if (state != NULL) {
+      state_ud =
+          (lcdc_lease_ud *)luaL_checkudata(handler->L, -1, LCDC_LEASE_MT);
+      lua_pushvalue(handler->L, -1);
+      state_ref = luaL_ref(handler->L, LUA_REGISTRYINDEX);
+    }
+  }
+  if (lua_pcall(handler->L, handler->with_state ? 2 : 1, 2, 0) != 0) {
+    message_text = lua_tostring(handler->L, -1);
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       message_text != NULL ? message_text
+                                            : "Lua subscribe handler failed",
+                       NULL, NULL, NULL);
+    lua_settop(handler->L, top);
+    message_ud->message = NULL;
+    if (state_ud != NULL)
+      state_ud->lease = NULL;
+    luaL_unref(handler->L, LUA_REGISTRYINDEX, message_ref);
+    if (state_ref != LUA_NOREF)
+      luaL_unref(handler->L, LUA_REGISTRYINDEX, state_ref);
+    return LC_ERR_INVALID;
+  }
+  failed = (lua_isboolean(handler->L, -2) && !lua_toboolean(handler->L, -2)) ||
+           (lua_isnil(handler->L, -2) && !lua_isnil(handler->L, -1));
+  if (failed) {
+    message_text = lcdc_lua_error_message(handler->L, -1);
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       message_text != NULL ? message_text
+                                            : "Lua subscribe handler failed",
+                       NULL, NULL, NULL);
+  }
+  lua_settop(handler->L, top);
+  message_ud->message = NULL;
+  if (state_ud != NULL)
+    state_ud->lease = NULL;
+  luaL_unref(handler->L, LUA_REGISTRYINDEX, message_ref);
+  if (state_ref != LUA_NOREF)
+    luaL_unref(handler->L, LUA_REGISTRYINDEX, state_ref);
+  return failed ? LC_ERR_INVALID : LC_OK;
+}
+
+static int lcdc_client_subscribe_common(lua_State *L, int with_state) {
+  lcdc_client_ud *ud;
+  lc_consumer consumer;
+  lc_dequeue_req req;
+  lcdc_consumer_handler handler;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  lc_consumer_init(&consumer);
+  lc_dequeue_req_init(&req);
+  lc_error_init(&error);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  luaL_checktype(L, 3, LUA_TFUNCTION);
+  lcdc_parse_dequeue_req(L, 2, &req);
+  handler.L = L;
+  handler.with_state = with_state;
+  lua_pushvalue(L, 3);
+  handler.handler_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  consumer.handle = lcdc_lua_consumer_handle;
+  consumer.context = &handler;
+  ud->callback_active = 1;
+  if (with_state) {
+    rc = lc_subscribe_with_state(ud->client, &req, &consumer, &error);
+  } else {
+    rc = lc_subscribe(ud->client, &req, &consumer, &error);
+  }
+  ud->callback_active = 0;
+  luaL_unref(L, LUA_REGISTRYINDEX, handler.handler_ref);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushboolean(L, 1);
+  lc_error_cleanup(&error);
+  return 1;
+}
+
+static int lcdc_client_subscribe(lua_State *L) {
+  return lcdc_client_subscribe_common(L, 0);
+}
+
+static int lcdc_client_subscribe_with_state(lua_State *L) {
+  return lcdc_client_subscribe_common(L, 1);
+}
+
+static int lcdc_lua_watch_handle(void *context, const lc_watch_event *event,
+                                 lc_error *error) {
+  lcdc_watch_handler *handler;
+  const char *message;
+  int top;
+  int failed;
+  int stop;
+
+  handler = (lcdc_watch_handler *)context;
+  top = lua_gettop(handler->L);
+  lua_rawgeti(handler->L, LUA_REGISTRYINDEX, handler->handler_ref);
+  lua_newtable(handler->L);
+  lcdc_set_string_field(handler->L, "namespace_name", event->namespace_name);
+  lcdc_set_string_field(handler->L, "queue", event->queue);
+  lcdc_set_bool_field(handler->L, "available", event->available);
+  lcdc_set_string_field(handler->L, "head_message_id", event->head_message_id);
+  lcdc_set_integer_field(handler->L, "changed_at_unix", event->changed_at_unix);
+  lcdc_set_string_field(handler->L, "correlation_id", event->correlation_id);
+  if (lua_pcall(handler->L, 1, 2, 0) != 0) {
+    message = lua_tostring(handler->L, -1);
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       message != NULL ? message : "Lua queue watch failed",
+                       NULL, NULL, NULL);
+    lua_settop(handler->L, top);
+    return 0;
+  }
+  failed = lua_isnil(handler->L, -2) && !lua_isnil(handler->L, -1);
+  stop = lua_isboolean(handler->L, -2) && !lua_toboolean(handler->L, -2);
+  if (failed) {
+    message = lcdc_lua_error_message(handler->L, -1);
+    (void)lc_error_set(error, LC_ERR_INVALID, 0L,
+                       message != NULL ? message : "Lua queue watch failed",
+                       NULL, NULL, NULL);
+  }
+  lua_settop(handler->L, top);
+  return !failed && !stop;
+}
+
+static int lcdc_client_watch_queue(lua_State *L) {
+  lcdc_client_ud *ud;
+  lc_watch_queue_req req;
+  lc_watch_handler watch;
+  lcdc_watch_handler handler;
+  lc_error error;
+  int rc;
+
+  ud = lcdc_check_client(L, 1);
+  lc_watch_queue_req_init(&req);
+  lc_watch_handler_init(&watch);
+  lc_error_init(&error);
+  luaL_checktype(L, 2, LUA_TTABLE);
+  luaL_checktype(L, 3, LUA_TFUNCTION);
+  req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
+  req.queue = lcdc_opt_string_field(L, 2, "queue");
+  handler.L = L;
+  lua_pushvalue(L, 3);
+  handler.handler_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  watch.handle = lcdc_lua_watch_handle;
+  watch.context = &handler;
+  ud->streaming = 1;
+  rc = lc_watch_queue(ud->client, &req, &watch, &error);
+  ud->streaming = 0;
+  luaL_unref(L, LUA_REGISTRYINDEX, handler.handler_ref);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
+  lua_pushboolean(L, 1);
+  lc_error_cleanup(&error);
+  return 1;
 }
 
 static int lcdc_client_dequeue_batch(lua_State *L) {
@@ -6738,6 +7056,9 @@ static const luaL_Reg lcdc_client_methods[] = {
     {"dequeue", lcdc_client_dequeue},
     {"dequeue_batch", lcdc_client_dequeue_batch},
     {"dequeue_with_state", lcdc_client_dequeue_with_state},
+    {"subscribe", lcdc_client_subscribe},
+    {"subscribe_with_state", lcdc_client_subscribe_with_state},
+    {"watch_queue", lcdc_client_watch_queue},
     {NULL, NULL}};
 
 static const luaL_Reg lcdc_lease_methods[] = {
@@ -6861,6 +7182,9 @@ int luaopen_lockdc_core(lua_State *L) {
       {"open", lcdc_open},
       {"version_string", lcdc_version_string},
       {"xid_new", lcdc_xid_new},
+      {"pouch_crypto_generate_key", lcdc_pouch_crypto_generate_key},
+      {"pouch_crypto_default_key_file", lcdc_pouch_crypto_default_key_file},
+      {"pouch_crypto_generate_key_file", lcdc_pouch_crypto_generate_key_file},
       {NULL, NULL}};
 
   lcdc_create_metatable(L, LCDC_CLIENT_MT, lcdc_client_methods, lcdc_client_gc);

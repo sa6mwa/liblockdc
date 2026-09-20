@@ -36,16 +36,16 @@ local handled = 0
 local service
 
 service = client:new_consumer_service({
-  Name = owner,
-  Queue = queue,
-  WithState = true,
-  Options = {
+  name = owner,
+  request = {
     namespace_name = namespace_name,
+    queue = queue,
     owner = owner,
     visibility_timeout_seconds = 30,
     wait_seconds = 5,
   },
-  MessageHandler = function(message, state)
+  with_state = true,
+  handle = function(message, state)
     local payload, payload_err = message:read_payload_json()
     local document, meta
 
@@ -80,11 +80,11 @@ service = client:new_consumer_service({
   end,
 })
 
-local ok, service_err = service:start()
+local ok, service_err = service:run()
 
 if ok == nil then
   client:close()
-  error(("service:start failed: %s"):format(service_err.message or tostring(service_err)))
+  error(("service:run failed: %s"):format(service_err.message or tostring(service_err)))
 end
 
 if handled ~= 1 then

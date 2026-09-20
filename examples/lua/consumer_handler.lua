@@ -20,17 +20,17 @@ if client == nil then
   error(("lockdc.open failed: %s"):format(err.message))
 end
 
-local ok, consumer_err = client:start_consumer({
-  Name = "lua-example-consumer",
-  Queue = queue,
-  WithState = true,
-  Options = {
+local service = assert(client:new_consumer_service({
+  name = "lua-example-consumer",
+  request = {
     namespace_name = namespace_name,
+    queue = queue,
     owner = owner,
     visibility_timeout_seconds = 30,
     wait_seconds = 5,
   },
-  MessageHandler = function(message, state)
+  with_state = true,
+  handle = function(message, state)
     local payload, payload_err = message:read_payload_json()
     local document, meta
 
@@ -69,11 +69,12 @@ local ok, consumer_err = client:start_consumer({
 
     return nil
   end,
-})
+}))
+local ok, consumer_err = service:run()
 
 if ok == nil then
   client:close()
-  error(("client:start_consumer failed: %s"):format(consumer_err.message or tostring(consumer_err)))
+  error(("consumer service failed: %s"):format(consumer_err.message or tostring(consumer_err)))
 end
 
 client:close()

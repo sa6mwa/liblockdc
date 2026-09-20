@@ -69,14 +69,14 @@ types are rejected. Backend and value failures return the normal structured
 Each field resolves once during client construction, in this order:
 
 1. a selected field in `lc_pouch_settings` / the Lua `pouch` table;
-2. legacy dedicated `lc_client_config` crypto and compression fields (and their
-   Lua top-level aliases);
+2. legacy dedicated `lc_client_config` crypto and compression fields;
 3. the equivalent `pouch://` endpoint query option;
 4. the established Pouch default.
 
-The selected typed setting always wins. For example, nested Lua
-`pouch.compression = "none"` overrides both `pouch_compression = "zlib"` and
-`?compression=zlib`. No caller-owned settings pointer is retained after
+The selected typed setting always wins. For C callers,
+`pouch_settings.compression = "none"` overrides both the legacy dedicated
+field and `?compression=zlib`. Lua exposes only its nested `pouch` table and
+rejects those legacy inputs. No caller-owned settings pointer is retained after
 opening, and no settings precedence is evaluated in Pouch mutation, replay,
 query, compaction, or dispatcher paths.
 
@@ -89,6 +89,7 @@ They are also not durable namespace preferences, which remain managed through
 nor create a remote lockd configuration protocol.
 
 Legacy endpoint query options and `lc_pouch_endpoint_build()` remain supported
-for deployment compatibility. New C and Lua application code should prefer the
-typed settings API because it is discoverable, type-checked, and makes the
+for C deployment compatibility. Lua deliberately rejects Pouch endpoint query
+options and exposes only the typed settings table, which is discoverable,
+type-checked, and makes the
 local-only boundary explicit.

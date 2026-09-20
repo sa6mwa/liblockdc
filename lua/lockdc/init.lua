@@ -209,6 +209,18 @@ function M.xid_new()
   return core.xid_new()
 end
 
+function M.pouch_crypto_generate_key()
+  return core.pouch_crypto_generate_key()
+end
+
+function M.pouch_crypto_default_key_file()
+  return core.pouch_crypto_default_key_file()
+end
+
+function M.pouch_crypto_generate_key_file(path, overwrite)
+  return core.pouch_crypto_generate_key_file(path, overwrite)
+end
+
 M.json_null = JSON_NULL
 M.OK = core.OK
 M.ERR_INVALID = core.ERR_INVALID
@@ -1158,18 +1170,7 @@ function OutboxJob:dead_letter(diagnostic)
   return ok, err
 end
 
-local function should_continue(err_handler, err)
-  if err_handler == nil then
-    return false, err
-  end
-  return err_handler(err) == nil, err
-end
-
-local function sleep_seconds(seconds)
-  os.execute(string.format("sleep %.3f", seconds))
-end
-
-local function run_subscribe(client, req, with_state, handler, should_stop)
+local function run_threadless_service(client, req, with_state, handler, should_stop)
   local dequeue_fn
 
   if with_state then
@@ -1184,7 +1185,7 @@ local function run_subscribe(client, req, with_state, handler, should_stop)
     end
 
     local message, err = dequeue_fn(client, req)
-    local ok, handler_err
+    local ok, handler_result, handler_err
     local state
 
     if should_stop ~= nil and should_stop() then
@@ -1194,91 +1195,70 @@ local function run_subscribe(client, req, with_state, handler, should_stop)
       return nil, err
     end
     state = with_state and message:state() or nil
-    ok, handler_err = pcall(handler, message, state)
+    ok, handler_result, handler_err = pcall(handler, message, state)
     if state ~= nil then
       state:close()
       state = nil
     end
-    if ok and handler_err == nil and message:is_open() then
+    if ok and (handler_result == nil and handler_err == nil or
+        handler_result == true) and message:is_open() then
       local ack_ok, ack_err = message:ack()
 
       if ack_ok == nil then
         return nil, ack_err
       end
-    elseif not ok then
-      if message:is_open() then
-        message:nack({ intent = "failure" })
+    else
+      local failure = handler_err or handler_result
+
+      if not ok then
+        failure = handler_result
       end
-      return nil, handler_err
-    elseif message:is_open() then
-      message:nack({ intent = "failure" })
-      return nil, handler_err
+      if failure == nil or failure == false then
+        failure = {
+          code = core.ERR_INVALID,
+          message = "Lua consumer handler returned false",
+        }
+      elseif type(failure) ~= "table" then
+        failure = {
+          code = core.ERR_INVALID,
+          message = tostring(failure),
+        }
+      end
+      if message:is_open() then
+        local nack_ok, nack_err = message:nack({ intent = "failure" })
+
+        if nack_ok == nil then
+          return nil, nack_err
+        end
+      end
+      return nil, failure
     end
   end
 end
 
 function Client:subscribe(req, handler)
-  return run_subscribe(self, req, false, handler)
+  return self._core:subscribe(req, handler)
 end
 
 function Client:subscribe_with_state(req, handler)
-  return run_subscribe(self, req, true, handler)
+  return self._core:subscribe_with_state(req, handler)
 end
 
 function Client:watch_queue(req, handler)
-  local last_signature
-  local interval
-
-  interval = tonumber((req or {}).poll_interval_seconds or 1) or 1
-  while true do
-    local stats, err = self:queue_stats(req)
-    local signature
-
-    if stats == nil then
-      return nil, err
-    end
-    signature = table.concat({
-      tostring(stats.available),
-      stats.head_message_id or "",
-    }, "|")
-    if signature ~= last_signature then
-      local ok, callback_err = pcall(handler, {
-        namespace_name = req.namespace_name,
-        queue = req.queue,
-        available = stats.available,
-        head_message_id = stats.head_message_id,
-        changed_at_unix = os.time(),
-        correlation_id = stats.correlation_id,
-      })
-
-      if not ok then
-        return nil, callback_err
-      end
-      last_signature = signature
-    end
-    sleep_seconds(interval)
-  end
+  return self._core:watch_queue(req, handler)
 end
 
-function Client:new_consumer_service(...)
+function Client:new_consumer_service(config)
   return setmetatable({
     _client = self,
-    _configs = { ... },
+    _config = config,
     _stop_requested = false,
   }, Service)
-end
-
-function Client:start_consumer(...)
-  return self:new_consumer_service(...):run()
 end
 
 function Service:stop()
   self._stop_requested = true
   return true
-end
-
-function Service:start()
-  return self:run()
 end
 
 function Service:wait()
@@ -1287,64 +1267,52 @@ function Service:wait()
   end
   return nil, {
     code = core.ERR_INVALID,
-    message = "lockdc Lua consumer service wait() only becomes meaningful after start()/run() completes",
+    message = "lockdc Lua consumer service wait() only becomes meaningful after run() completes",
   }
 end
 
 function Service:run()
-  local configs = self._configs
-  local i
+  local config = self._config
+  local req = {}
+  local k, v
 
-  if #configs == 0 then
+  if type(config) ~= "table" then
     return nil, {
       code = core.ERR_INVALID,
-      message = "lockdc Lua consumer service requires exactly one consumer config",
+      message = "lockdc Lua consumer service requires one config table",
     }
   end
-  if #configs ~= 1 then
+  if type(config.request) ~= "table" then
     return nil, {
       code = core.ERR_INVALID,
-      message = "lockdc Lua consumer service supports exactly one consumer config per blocking service; start separate consumers for separate queues",
+      message = "lockdc Lua consumer service config requires request",
     }
   end
-
-  for i = 1, #configs do
-    local config = configs[i]
-    local req = {}
-    local k, v
-
-    for k, v in pairs(config.Options or {}) do
-      req[k] = v
-    end
-    if config.Namespace ~= nil and req.namespace_name == nil then
-      req.namespace_name = config.Namespace
-    end
-    req.queue = config.Queue or req.queue
-    req.owner = req.owner or config.Name or config.Queue
-    if config.WithState then
-      local ok, err = run_subscribe(self._client, req, true, function(message, state)
-        return config.MessageHandler(message, state)
-      end, function()
-        return self._stop_requested
-      end)
-
-      if ok == nil then
-        return nil, err
-      end
-    else
-      local ok, err = run_subscribe(self._client, req, false, function(message)
-        return config.MessageHandler(message)
-      end, function()
-        return self._stop_requested
-      end)
-
-      if ok == nil then
-        return nil, err
-      end
-    end
+  if type(config.handle) ~= "function" then
+    return nil, {
+      code = core.ERR_INVALID,
+      message = "lockdc Lua consumer service config requires handle",
+    }
+  end
+  for k, v in pairs(config.request) do
+    req[k] = v
+  end
+  req.owner = req.owner or config.name or req.queue
+  local ok, err = run_threadless_service(self._client, req,
+    config.with_state == true, config.handle, function()
+      return self._stop_requested
+    end)
+  if ok == nil then
+    self._completed = true
+    return nil, err
   end
   self._completed = true
   return true
+end
+
+function Service:close()
+  self:stop()
+  self._completed = true
 end
 
 return M

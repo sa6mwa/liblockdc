@@ -33,23 +33,23 @@ if enqueued == nil then
 end
 
 local service = client:new_consumer_service({
-  Name = owner,
-  Queue = queue,
-  Options = {
+  name = owner,
+  request = {
     namespace_name = namespace_name,
+    queue = queue,
     owner = owner,
     visibility_timeout_seconds = 30,
     wait_seconds = 5,
   },
-  MessageHandler = function(_message)
-    return { message = 'expected consumer failure' }
+  handle = function(_message)
+    return nil, { message = 'expected consumer failure' }
   end,
 })
 
-local ok, service_err = service:start()
+local ok, service_err = service:run()
 if ok ~= nil then
   client:close()
-  error('service:start unexpectedly succeeded for failing handler')
+  error('service:run unexpectedly succeeded for failing handler')
 end
 if type(service_err) ~= 'table' or service_err.message ~= 'expected consumer failure' then
   client:close()

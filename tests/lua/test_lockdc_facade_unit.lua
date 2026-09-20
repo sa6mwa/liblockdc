@@ -52,6 +52,15 @@ local core_stub = {
   xid_new = function()
     return '0123456789abcdefghijkl'
   end,
+  pouch_crypto_generate_key = function()
+    return 'lc-pouch-key-v1:test-key'
+  end,
+  pouch_crypto_default_key_file = function()
+    return '/tmp/lockdc/pouch.key'
+  end,
+  pouch_crypto_generate_key_file = function(path, overwrite)
+    return path .. ':' .. tostring(overwrite)
+  end,
 }
 
 package.preload['lockdc.core'] = function()
@@ -79,6 +88,12 @@ local function test_json_helpers()
       'public facade should expose C status constants without exposing core')
   assert_eq(lockdc.ERR_TIMEOUT, core_stub.ERR_TIMEOUT,
       'public facade should expose the timeout status constant')
+  assert_eq(lockdc.pouch_crypto_generate_key(), 'lc-pouch-key-v1:test-key',
+      'Pouch key generation should delegate to the C helper')
+  assert_eq(lockdc.pouch_crypto_default_key_file(), '/tmp/lockdc/pouch.key',
+      'Pouch default key-file lookup should delegate to the C helper')
+  assert_eq(lockdc.pouch_crypto_generate_key_file('/tmp/key', true),
+      '/tmp/key:true', 'Pouch key-file generation should delegate to the C helper')
   assert_eq(lockdc.encode_json('123'), '123', 'encode_json should strip wrapper envelope')
   assert_eq(lockdc.encode_json(nil), 'null', 'encode_json should preserve legacy top-level nil null')
   assert_eq(lockdc.decode_json('{"k":1}'), '{"k":1}', 'decode_json should unwrap envelope payload')
@@ -181,11 +196,11 @@ local function test_pouch_open_config_passthrough()
 
   local client = assert(lockdc.open({
     endpoints = { 'pouch:///var/lib/lockdc-lua-unit' },
-    pouch_crypto_key = 'lc-pouch-key-v1:test-key',
-    pouch_crypto_key_file = '/var/lib/lockdc-lua-unit/root.key',
-    pouch_crypto_generate_key_file = true,
-    pouch_compression = 'zlib',
     pouch = {
+      crypto_key = 'lc-pouch-key-v1:test-key',
+      crypto_key_file = '/var/lib/lockdc-lua-unit/root.key',
+      crypto_generate_key_file = true,
+      compression = 'zlib',
       query_indexing = false,
       query_engine = 'scan',
       indexer_flush_docs = 64,
@@ -193,10 +208,10 @@ local function test_pouch_open_config_passthrough()
   }))
 
   assert_eq(captured.config.endpoints[1], 'pouch:///var/lib/lockdc-lua-unit', 'pouch endpoint should pass through')
-  assert_eq(captured.config.pouch_crypto_key, 'lc-pouch-key-v1:test-key', 'pouch_crypto_key should pass through')
-  assert_eq(captured.config.pouch_crypto_key_file, '/var/lib/lockdc-lua-unit/root.key', 'pouch_crypto_key_file should pass through')
-  assert_eq(captured.config.pouch_crypto_generate_key_file, true, 'pouch key-file generation should pass through')
-  assert_eq(captured.config.pouch_compression, 'zlib', 'pouch compression should pass through')
+  assert_eq(captured.config.pouch.crypto_key, 'lc-pouch-key-v1:test-key', 'typed pouch crypto key should pass through')
+  assert_eq(captured.config.pouch.crypto_key_file, '/var/lib/lockdc-lua-unit/root.key', 'typed pouch key file should pass through')
+  assert_eq(captured.config.pouch.crypto_generate_key_file, true, 'typed pouch key-file generation should pass through')
+  assert_eq(captured.config.pouch.compression, 'zlib', 'typed pouch compression should pass through')
   assert_eq(captured.config.pouch.query_indexing, false, 'typed pouch false should pass through')
   assert_eq(captured.config.pouch.query_engine, 'scan', 'typed pouch engine should pass through')
   assert_eq(captured.config.pouch.indexer_flush_docs, 64, 'typed pouch numeric setting should pass through')
@@ -285,90 +300,39 @@ local function test_xa_and_transaction_coordinator_forwarding()
 end
 
 local function test_subscribe_ack_and_error_paths()
-  local function new_message()
-    local msg = {
-      closed = false,
-      ack_count = 0,
-      nack_count = 0,
-    }
-
-    function msg:ack()
-      self.ack_count = self.ack_count + 1
-      self.closed = true
+  local captured = {}
+  local client_core = {
+    close = function() end,
+    subscribe = function(_, req, handler)
+      captured.subscribe_req = req
+      captured.subscribe_handler = handler
       return true
-    end
-
-    function msg:nack(req)
-      self.nack_count = self.nack_count + 1
-      self.last_nack_req = req
-      self.closed = true
+    end,
+    subscribe_with_state = function(_, req, handler)
+      captured.subscribe_with_state_req = req
+      captured.subscribe_with_state_handler = handler
       return true
-    end
+    end,
+  }
+  local handler = function() end
 
-    function msg:close()
-      self.closed = true
-    end
-
-    function msg:state()
-      return nil
-    end
-
-    return msg
+  core_stub.open = function()
+    return client_core
   end
 
-  local function open_client_for_messages(messages)
-local client_core = {
-      close = function() end,
-    }
-
-    client_core.dequeue = function()
-      local next_value = table.remove(messages, 1)
-      if next_value == nil then
-        return nil, { message = 'queue drained' }
-      end
-      return next_value
-    end
-
-    core_stub.open = function()
-      return client_core
-    end
-
-    return assert(lockdc.open({}))
-  end
-
-  local success_message = new_message()
-  local client = open_client_for_messages({ success_message })
-  local ok, err = client:subscribe({ queue = 'jobs' }, function(message)
-    assert_truthy(message:is_open(), 'message should be open before implicit ack')
-    return nil
-  end)
-  assert_eq(ok, nil, 'subscribe should stop on empty queue after success')
-  assert_eq(err.message, 'queue drained', 'subscribe should surface empty queue after draining in this unit stub')
-  assert_eq(success_message.ack_count, 1, 'successful handler should trigger implicit ack')
-  assert_eq(success_message.nack_count, 0, 'successful handler should not nack')
-
-  local explicit_ack_message = new_message()
-  client = open_client_for_messages({ explicit_ack_message })
-  ok, err = client:subscribe({ queue = 'jobs' }, function(message)
-    local ack_ok = message:ack()
-    assert_truthy(ack_ok, 'explicit ack inside handler should succeed')
-    return nil
-  end)
-  assert_eq(ok, nil, 'subscribe should stop on empty queue after explicit ack success')
-  assert_eq(err.message, 'queue drained', 'explicit ack path should drain queue in this unit stub')
-  assert_eq(explicit_ack_message.ack_count, 1, 'explicit ack should not be repeated implicitly')
-  assert_eq(explicit_ack_message.nack_count, 0, 'explicit ack success should not nack')
-
-  local failure_message = new_message()
-  client = open_client_for_messages({ failure_message })
-  ok, err = client:subscribe({ queue = 'jobs' }, function(_message)
-    error('handler exploded')
-  end)
-  assert_eq(ok, nil, 'handler exception should fail subscribe')
-  assert_truthy(type(err) == 'string' and err:match('handler exploded'), 'handler exception should surface pcall error string')
-  assert_eq(failure_message.ack_count, 0, 'failed handler should not ack')
-  assert_eq(failure_message.nack_count, 1, 'failed handler should nack once')
-  assert_eq(failure_message.last_nack_req.intent, 'failure', 'failed handler should nack with failure intent')
+  local client = assert(lockdc.open({}))
+  assert_truthy(client:subscribe({ queue = 'jobs' }, handler),
+      'subscribe should delegate to the native C streaming operation')
+  assert_eq(captured.subscribe_req.queue, 'jobs',
+      'subscribe should preserve the C dequeue request')
+  assert_eq(captured.subscribe_handler, handler,
+      'subscribe should preserve the Lua callback identity')
+  assert_truthy(client:subscribe_with_state({ queue = 'state-jobs' }, handler),
+      'subscribe_with_state should delegate to the native C streaming operation')
+  assert_eq(captured.subscribe_with_state_req.queue, 'state-jobs',
+      'subscribe_with_state should preserve the C dequeue request')
+  assert_eq(captured.subscribe_with_state_handler, handler,
+      'subscribe_with_state should preserve the Lua callback identity')
 end
 
 local function test_acquire_for_update_propagates_sdk_failure_shape()
@@ -421,63 +385,6 @@ local function test_acquire_for_update_propagates_sdk_failure_shape()
 end
 
 local function test_subscribe_with_state_and_service_lifecycle()
-  local state_lease = {
-    closed = false,
-    info = function()
-      return { namespace_name = 'default', key = 'state-key' }
-    end,
-    close = function(self)
-      self.closed = true
-    end,
-  }
-  local message = {
-    closed = false,
-    ack_count = 0,
-  }
-  function message:ack()
-    self.ack_count = self.ack_count + 1
-    self.closed = true
-    return true
-  end
-  function message:nack(req)
-    self.closed = true
-    self.last_nack_req = req
-    return true
-  end
-  function message:close()
-    self.closed = true
-  end
-  function message:state()
-    return state_lease
-  end
-
-  local dequeue_calls = 0
-  local client_core = {
-    dequeue_with_state = function()
-      dequeue_calls = dequeue_calls + 1
-      if dequeue_calls == 1 then
-        return message
-      end
-      return nil, { message = 'unexpected extra dequeue' }
-    end,
-    close = function() end,
-  }
-  core_stub.open = function()
-    return client_core
-  end
-
-  local client = assert(lockdc.open({}))
-  local seen_state
-  local ok, err = client:subscribe_with_state({ queue = 'jobs' }, function(_message, state)
-    seen_state = state
-    return nil
-  end)
-  assert_eq(ok, nil, 'subscribe_with_state should stop on empty queue in this unit stub')
-  assert_eq(err.message, 'unexpected extra dequeue', 'subscribe_with_state should surface empty queue after draining in this unit stub')
-  assert_truthy(seen_state ~= nil, 'subscribe_with_state should pass wrapped state lease')
-  assert_eq(seen_state:info().key, 'state-key', 'wrapped state lease should expose info')
-  assert_eq(message.ack_count, 1, 'subscribe_with_state success should ack message')
-
   local service_message = {
     closed = false,
     ack_count = 0,
@@ -500,6 +407,7 @@ local function test_subscribe_with_state_and_service_lifecycle()
   end
 
   local service_dequeues = 0
+  local client_core = { close = function() end }
   client_core.dequeue = function()
     service_dequeues = service_dequeues + 1
     if service_dequeues == 1 then
@@ -508,14 +416,18 @@ local function test_subscribe_with_state_and_service_lifecycle()
     return nil, { message = 'service should stop before another dequeue' }
   end
 
+  core_stub.open = function()
+    return client_core
+  end
+  local client = assert(lockdc.open({}))
   local service
   service = client:new_consumer_service({
-    Name = 'worker-1',
-    Queue = 'jobs',
-    Options = {
+    name = 'worker-1',
+    request = {
       namespace_name = 'default',
+      queue = 'jobs',
     },
-    MessageHandler = function(msg)
+    handle = function(msg)
       assert_truthy(msg:is_open(), 'service handler should receive open message')
       service:stop()
       return nil
@@ -526,51 +438,73 @@ local function test_subscribe_with_state_and_service_lifecycle()
   assert_eq(wait_ok, nil, 'wait before run should fail')
   assert_eq(wait_err.code, core_stub.ERR_INVALID, 'wait before run should return ERR_INVALID')
 
-  ok, err = service:start()
-  assert_truthy(ok, 'service:start should alias run and succeed')
-  assert_eq(err, nil, 'service:start success should not return error')
+  local ok, err = service:run()
+  assert_truthy(ok, 'service:run should succeed')
+  assert_eq(err, nil, 'service:run success should not return error')
   assert_eq(service_message.ack_count, 1, 'service handler success should ack message')
   assert_truthy(service:wait(), 'wait after completed run should succeed')
 
-  local multi_service = client:new_consumer_service({
-    Name = 'worker-1',
-    Queue = 'jobs-a',
-    MessageHandler = function()
-      error('first multi-config handler should not run')
-    end,
-  }, {
-    Name = 'worker-2',
-    Queue = 'jobs-b',
-    MessageHandler = function()
-      error('second multi-config handler should not run')
+  local failed_message = {
+    closed = false,
+    ack_count = 0,
+    nack_count = 0,
+  }
+  function failed_message:ack()
+    self.ack_count = self.ack_count + 1
+    self.closed = true
+    return true
+  end
+  function failed_message:nack(req)
+    self.nack_count = self.nack_count + 1
+    self.last_nack_req = req
+    self.closed = true
+    return true
+  end
+  function failed_message:close()
+    self.closed = true
+  end
+  function failed_message:state()
+    return nil
+  end
+
+  client_core.dequeue = function()
+    return failed_message
+  end
+  local failing_service = client:new_consumer_service({
+    name = 'failing-worker',
+    request = { namespace_name = 'default', queue = 'failed-jobs' },
+    handle = function()
+      return nil, { message = 'expected handler failure' }
     end,
   })
+  ok, err = failing_service:run()
+  assert_eq(ok, nil, 'nil, err handler result should stop the service')
+  assert_eq(err.message, 'expected handler failure',
+      'service should preserve the handler failure')
+  assert_eq(failed_message.ack_count, 0,
+      'failed service handler must not acknowledge its message')
+  assert_eq(failed_message.nack_count, 1,
+      'failed service handler should nack exactly once')
+  assert_eq(failed_message.last_nack_req.intent, 'failure',
+      'failed service handler should use the failure nack intent')
+  assert_truthy(failing_service:wait(),
+      'wait after a failed synchronous run should observe completion')
 
-  ok, err = multi_service:start()
-  assert_eq(ok, nil, 'service:start should reject multiple blocking consumer configs')
-  assert_eq(err.code, core_stub.ERR_INVALID, 'multiple consumer configs should return ERR_INVALID')
-  assert_truthy(
-    err.message:match('exactly one consumer config'),
-    'multiple consumer configs should return actionable error'
-  )
+  local invalid_service = client:new_consumer_service({ request = {} })
+  ok, err = invalid_service:run()
+  assert_eq(ok, nil, 'service:run should require a Lua handler')
+  assert_eq(err.code, core_stub.ERR_INVALID, 'missing handler should return ERR_INVALID')
+  assert_truthy(err.message:match('requires handle'),
+      'missing handler should return actionable error')
 end
 
 local function test_watch_queue_change_detection()
-  local queue_stats_plan = {
-    { available = 0, head_message_id = 'a', correlation_id = 'one' },
-    { available = 0, head_message_id = 'a', correlation_id = 'two' },
-    { available = 1, head_message_id = 'b', correlation_id = 'two' },
-  }
-  local captured_events = {}
-  local sleep_calls = 0
-  local original_execute = os.execute
+  local captured = {}
   local client_core = {
-    queue_stats = function()
-      local next_stats = table.remove(queue_stats_plan, 1)
-      if next_stats == nil then
-        return nil, { message = 'done' }
-      end
-      return next_stats
+    watch_queue = function(_, req, handler)
+      captured.request = req
+      captured.handler = handler
+      return true
     end,
     close = function() end,
   }
@@ -578,32 +512,17 @@ local function test_watch_queue_change_detection()
     return client_core
   end
 
-  os.execute = function(cmd)
-    sleep_calls = sleep_calls + 1
-    assert_truthy(cmd:match('^sleep '), 'watch_queue should sleep between polls')
-    return true
-  end
-
   local client = assert(lockdc.open({}))
+  local handler = function() end
   local ok, err = client:watch_queue({
     namespace_name = 'default',
     queue = 'jobs',
-    poll_interval_seconds = 0.01,
-  }, function(event)
-    captured_events[#captured_events + 1] = event
-    if #captured_events == 2 then
-      error('stop after second event')
-    end
-  end)
+  }, handler)
 
-  os.execute = original_execute
-
-  assert_eq(ok, nil, 'watch_queue callback error should fail watch')
-  assert_truthy(type(err) == 'string' and err:match('stop after second event'), 'watch_queue should surface callback failure')
-  assert_eq(#captured_events, 2, 'watch_queue should emit only when queue signature changes')
-  assert_eq(captured_events[1].available, 0, 'watch_queue should emit initial state')
-  assert_eq(captured_events[2].available, 1, 'watch_queue should emit changed state')
-  assert_truthy(sleep_calls >= 1, 'watch_queue should sleep between polls')
+  assert_truthy(ok, 'watch_queue should delegate to the native C streaming watch')
+  assert_eq(err, nil, 'watch_queue success should not return an error')
+  assert_eq(captured.request.queue, 'jobs', 'watch_queue should preserve the C request')
+  assert_eq(captured.handler, handler, 'watch_queue should preserve the Lua callback identity')
 end
 
 local function test_json_null_roundtrip_helpers()
