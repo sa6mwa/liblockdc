@@ -764,7 +764,7 @@ do
 end
 
 do
-  local rooted_query_body, rooted_query_meta = client:query(
+  local rooted_query_body, rooted_query_meta = client:read_query(
     setmetatable({ namespace = namespace, engine = "scan" }, {
       __index = function(_, key)
         if key == "selector_json" then
@@ -778,10 +778,10 @@ do
         end
         return nil
       end,
-    }), { write = function() end })
-  if rooted_query_body ~= nil or type(rooted_query_meta) ~= "table" then
+    }))
+  if type(rooted_query_body) ~= "string" or type(rooted_query_meta) ~= "table" then
     client:close()
-    error(("Lua rooted query did not safely stream an empty result " ..
+    error(("Lua rooted query did not safely materialize an empty result " ..
       "(body=%s metadata=%s)"):format(tostring(rooted_query_body),
       tostring(rooted_query_meta and rooted_query_meta.message or
       rooted_query_meta)))

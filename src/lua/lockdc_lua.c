@@ -3135,6 +3135,10 @@ static int lcdc_client_query(lua_State *L) {
   memset(&res, 0, sizeof(res));
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
+  /* Reserve the optional destination slot before adding internal roots: an
+   * omitted third argument must remain distinct from our stack-owned table. */
+  if (lua_isnone(L, 3))
+    lua_pushnil(L);
   lcdc_parse_query_req(L, 2, &req);
   if ((req.selector_lql == NULL || req.selector_lql[0] == '\0') &&
       (req.selector_json == NULL || req.selector_json[0] == '\0')) {
