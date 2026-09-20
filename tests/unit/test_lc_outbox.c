@@ -9092,14 +9092,38 @@ static void test_pouch_outbox_completion_evidence_is_bounded(void **state) {
 }
 
 static void test_outbox_public_rejections_clear_handle_outputs(void **state) {
+  char endpoint[PATH_MAX];
+  const char *endpoints[1];
+  char root[PATH_MAX];
+  char template_path[PATH_MAX];
+  lc_client_config client_config;
   lc_outbox_config config;
+  lc_client *client;
   lc_outbox *outbox;
   lc_outbox_dispatcher *dispatcher;
   lc_error error;
 
   (void)state;
+  assert_true(snprintf(template_path, sizeof(template_path),
+                       OUTBOX_TMP_PREFIX "receiver-output-XXXXXX") > 0);
+  assert_true(lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
+                                  OUTBOX_TMP_PREFIX));
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
   lc_error_init(&error);
   lc_outbox_config_init(&config);
+  client = NULL;
+  lc_client_config_init(&client_config);
+  client_config.endpoints = endpoints;
+  client_config.endpoint_count = 1U;
+  assert_int_equal(lc_client_open(&client_config, &client, &error), LC_OK);
+  outbox = (lc_outbox *)(uintptr_t)1U;
+  assert_int_equal(client->new_outbox_with_dispatcher(client, &config, NULL,
+                                                      &outbox, &error),
+                   LC_ERR_INVALID);
+  assert_null(outbox);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
   outbox = (lc_outbox *)(uintptr_t)1U;
   assert_int_equal(outbox_public_new(NULL, &config, &outbox, &error),
                    LC_ERR_INVALID);
@@ -9118,6 +9142,8 @@ static void test_outbox_public_rejections_clear_handle_outputs(void **state) {
                    LC_ERR_INVALID);
   assert_null(dispatcher);
   lc_error_cleanup(&error);
+  lc_client_close(client);
+  lc_test_tmp_cleanup_path(root, OUTBOX_TMP_PREFIX);
 }
 
 int main(void) {

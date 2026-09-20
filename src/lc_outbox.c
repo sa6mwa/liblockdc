@@ -7236,6 +7236,8 @@ int lc_client_new_outbox_with_dispatcher_method(
   lc_outbox_handle *outbox;
   int rc;
 
+  if (out != NULL)
+    *out = NULL;
   if (dispatcher == NULL || handle->client != (lc_client_handle *)self) {
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "outbox dispatcher is not compatible with client", NULL,

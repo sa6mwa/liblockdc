@@ -566,6 +566,33 @@ if malformed_term_ok or not tostring(malformed_term_err):match("tc_term") then
   error("Lua XA validation did not reject a negative coordinator term")
 end
 
+-- Metamethod-backed XA request strings must stay rooted while later fields are
+-- resolved. The transaction is intentionally unknown; this asserts a normal
+-- structured decision error instead of a stale string dereference.
+do
+  local rooted_request_result, rooted_request_err = client:txn_commit(
+    setmetatable({}, {
+      __index = function(_, field)
+        if field == "txn_id" then
+          return assert(lockdc.xid_new())
+        end
+        if field == "tc_term" then
+          collectgarbage("collect")
+          collectgarbage("collect")
+          return 1
+        end
+        if field == "participants" then
+          return {}
+        end
+        return nil
+      end,
+    }))
+  if rooted_request_result == nil and type(rooted_request_err) ~= "table" then
+    client:close()
+    error("Lua XA request parsing did not retain metamethod-backed strings")
+  end
+end
+
 local raw_txn_id = assert(lockdc.xid_new())
 local raw_txn_participant = {
   namespace = namespace,

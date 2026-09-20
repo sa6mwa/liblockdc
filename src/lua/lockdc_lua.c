@@ -737,6 +737,40 @@ static int lcdc_require_string_field(lua_State *L, int index, const char *name,
   return 1;
 }
 
+/* Copies a string field into a plain, caller-owned Lua table without ever
+ * exposing an unrooted C string pointer. This is for request parsers that
+ * retain pointers while resolving later metatable-backed fields. */
+static void lcdc_normalize_string_field(lua_State *L, int source_index,
+                                        int destination_index, const char *name,
+                                        int required) {
+  source_index = lua_absindex(L, source_index);
+  destination_index = lua_absindex(L, destination_index);
+  if (!lua_istable(L, source_index))
+    luaL_error(L, "expected request table");
+  if (strcmp(name, "namespace") == 0) {
+    lua_pushliteral(L, "namespace_name");
+    lua_rawget(L, source_index);
+    if (!lua_isnil(L, -1)) {
+      lua_pop(L, 1);
+      luaL_error(L, "namespace_name is not supported; use namespace");
+    }
+    lua_pop(L, 1);
+  }
+  lua_getfield(L, source_index, name);
+  if (lua_isnil(L, -1)) {
+    if (required)
+      (void)luaL_checkstring(L, -1);
+    lua_pop(L, 1);
+    return;
+  }
+  (void)luaL_checkstring(L, -1);
+  /* Keep the source value on the stack until its duplicate is established in
+   * the normalized table. `lua_setfield` may allocate and collect. */
+  lua_pushvalue(L, -1);
+  lua_setfield(L, destination_index, name);
+  lua_pop(L, 1);
+}
+
 static void lcdc_reject_field(lua_State *L, int index, const char *name,
                               const char *message) {
   lua_getfield(L, index, name);
@@ -3448,22 +3482,12 @@ static void lcdc_parse_txn_participants(lua_State *L, int index,
   lua_createtable(L, (int)count, 0);
   normalized_index = lua_absindex(L, -1);
   for (i = 0U; i < count; ++i) {
-    const char *value;
-
     lua_rawgeti(L, participants_index, (lua_Integer)(i + 1U));
     luaL_checktype(L, -1, LUA_TTABLE);
     lua_createtable(L, 0, 3);
-    lcdc_require_string_field(L, -2, "namespace", &value);
-    lua_pushstring(L, value);
-    lua_setfield(L, -2, "namespace");
-    lcdc_require_string_field(L, -2, "key", &value);
-    lua_pushstring(L, value);
-    lua_setfield(L, -2, "key");
-    value = lcdc_opt_string_field(L, -2, "backend_hash");
-    if (value != NULL) {
-      lua_pushstring(L, value);
-      lua_setfield(L, -2, "backend_hash");
-    }
+    lcdc_normalize_string_field(L, -2, -1, "namespace", 1);
+    lcdc_normalize_string_field(L, -2, -1, "key", 1);
+    lcdc_normalize_string_field(L, -2, -1, "backend_hash", 0);
     lua_rawseti(L, normalized_index, (lua_Integer)(i + 1U));
     lua_pop(L, 1);
   }
@@ -3484,7 +3508,10 @@ static void lcdc_parse_txn_participants(lua_State *L, int index,
     lua_pop(L, 1);
     lua_pop(L, 1);
   }
-  lua_pop(L, 2);
+  /* Keep the normalized table on the stack. The decision parser retains it in
+   * its request root so pointers in the C participant array stay valid until
+   * the native operation has completed. */
+  lua_remove(L, participants_index);
   *out = participants;
   *count_out = count;
 }
@@ -3492,13 +3519,29 @@ static void lcdc_parse_txn_participants(lua_State *L, int index,
 static void lcdc_parse_txn_decision_req(lua_State *L, int index,
                                         lc_txn_decision_req *req,
                                         lc_txn_participant **participants) {
+  int root_index;
+
+  index = lua_absindex(L, index);
   lc_txn_decision_req_init(req);
-  lcdc_require_string_field(L, index, "txn_id", &req->txn_id);
+  /* Metamethod-backed request fields can return a string with no other Lua
+   * owner. Normalize every pointer-bearing value into this private request
+   * root before a later lookup can collect it. The caller pops the root only
+   * after the native decision call has finished. */
+  lua_createtable(L, 0, 3);
+  root_index = lua_absindex(L, -1);
+  lcdc_normalize_string_field(L, index, root_index, "txn_id", 1);
   lcdc_opt_int64_field(L, index, "expires_at_unix", &req->expires_at_unix);
   lcdc_opt_uint64_field(L, index, "tc_term", &req->tc_term);
-  req->target_backend_hash =
-      lcdc_opt_string_field(L, index, "target_backend_hash");
+  lcdc_normalize_string_field(L, index, root_index, "target_backend_hash", 0);
   lcdc_parse_txn_participants(L, index, participants, &req->participant_count);
+  if (*participants != NULL)
+    lua_setfield(L, root_index, "participants");
+  lua_getfield(L, root_index, "txn_id");
+  req->txn_id = lua_tostring(L, -1);
+  lua_pop(L, 1);
+  lua_getfield(L, root_index, "target_backend_hash");
+  req->target_backend_hash = lua_tostring(L, -1);
+  lua_pop(L, 1);
   req->participants = *participants;
 }
 
@@ -3568,6 +3611,7 @@ static int lcdc_client_txn_decision(lua_State *L, int operation) {
     rc = lc_txn_rollback(client, &req, &res, &error);
   }
   lcdc_free_txn_participants(&participants);
+  lua_pop(L, 1);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
