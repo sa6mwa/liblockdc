@@ -51,15 +51,16 @@ if(NOT clean_result EQUAL 0)
     "stdout:\n${clean_stdout}\nstderr:\n${clean_stderr}")
 endif()
 
-# The default log is deliberately outside build/, so a lifecycle clean keeps
-# the enclosing timer's record. Run an isolated copy because this test must
-# not remove the real build directory.
+# The default log is deliberately in the system temporary area, so a lifecycle
+# clean keeps the enclosing timer's record. Run an isolated copy because this
+# test must not remove the real build directory.
 set(default_root "${test_root}/default-root")
 set(default_script_dir "${default_root}/scripts")
 file(MAKE_DIRECTORY "${default_script_dir}")
 file(COPY_FILE "${run_timed}" "${default_script_dir}/run_timed.sh")
 execute_process(
   COMMAND env -u LOCKDC_TIMING_DIR -u LOCKDC_TIMING_LOG -u LOCKDC_TIMING_DEPTH
+    "TMPDIR=${default_root}/tmp"
     bash "${default_script_dir}/run_timed.sh" "timing-default-clean"
       bash -c "rm -rf \"$PWD/build\"; exit 0"
   WORKING_DIRECTORY "${default_root}"
@@ -72,7 +73,7 @@ if(NOT default_result EQUAL 0)
     "run_timed.sh default timing clean failed\n"
     "stdout:\n${default_stdout}\nstderr:\n${default_stderr}")
 endif()
-file(GLOB default_logs "${default_root}/.cache/timings/*.tsv")
+file(GLOB default_logs "${default_root}/tmp/liblockdc-timings/*.tsv")
 list(LENGTH default_logs default_log_count)
 if(NOT default_log_count EQUAL 1)
   message(FATAL_ERROR
