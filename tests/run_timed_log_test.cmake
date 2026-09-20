@@ -51,6 +51,34 @@ if(NOT clean_result EQUAL 0)
     "stdout:\n${clean_stdout}\nstderr:\n${clean_stderr}")
 endif()
 
+# A pre-existing directory can be searchable but not writable. Initial timing
+# log creation is diagnostic only and must not prevent the wrapped command.
+set(unwritable_timing_dir "${test_root}/timing-unwritable")
+set(unwritable_marker "${test_root}/timing-unwritable-command-ran")
+file(MAKE_DIRECTORY "${unwritable_timing_dir}")
+execute_process(COMMAND chmod 500 "${unwritable_timing_dir}"
+  RESULT_VARIABLE chmod_result)
+if(NOT chmod_result EQUAL 0)
+  message(FATAL_ERROR "failed to make timing directory unwritable")
+endif()
+execute_process(
+  COMMAND "${CMAKE_COMMAND}" -E env
+    "LOCKDC_TIMING_DIR=${unwritable_timing_dir}"
+    "LOCKDC_TIMING_LOG="
+    "LOCKDC_TIMING_DEPTH=0"
+    bash "${run_timed}" "timing-unwritable-contract"
+      "${CMAKE_COMMAND}" -E touch "${unwritable_marker}"
+  RESULT_VARIABLE unwritable_result
+  OUTPUT_VARIABLE unwritable_stdout
+  ERROR_VARIABLE unwritable_stderr
+)
+execute_process(COMMAND chmod 700 "${unwritable_timing_dir}")
+if(NOT unwritable_result EQUAL 0 OR NOT EXISTS "${unwritable_marker}")
+  message(FATAL_ERROR
+    "run_timed.sh did not run a command with an unwritable timing directory\n"
+    "stdout:\n${unwritable_stdout}\nstderr:\n${unwritable_stderr}")
+endif()
+
 # The default log is deliberately in the system temporary area, so a lifecycle
 # clean keeps the enclosing timer's record. Run an isolated copy because this
 # test must not remove the real build directory.

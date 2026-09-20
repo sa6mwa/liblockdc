@@ -23,8 +23,12 @@ if [ -z "$timing_log" ]; then
     timing_dir=${LOCKDC_TIMING_DIR:-"${TMPDIR:-/tmp}/liblockdc-timings"}
     if mkdir -p "$timing_dir" 2>/dev/null; then
         timing_log="$timing_dir/run-$(date -u +%Y%m%dT%H%M%SZ)-$$.tsv"
-        printf 'started_at\tfinished_at\tlabel\telapsed_seconds\tstatus\tdepth\n' > "$timing_log"
-        timing_root=1
+        if printf 'started_at\tfinished_at\tlabel\telapsed_seconds\tstatus\tdepth\n' > "$timing_log"; then
+            timing_root=1
+        else
+            printf '[timing] unable to create timing log: %s\n' "$timing_log" >&2
+            timing_log=""
+        fi
     else
         timing_log=""
         printf '[timing] unable to create timing log directory: %s\n' "$timing_dir" >&2

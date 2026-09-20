@@ -120,7 +120,28 @@ end
 -- Participant source/sink callbacks can re-enter the explicit transaction.
 -- They must not be allowed to release the lease that the suspended native I/O
 -- operation still owns.
-local streaming_txn = assert_ok(outbox:begin(), nil,
+local reentrant_entry = {
+  operation_id = "lua-streaming-duplicate",
+  effect_id = "lua-streaming-duplicate",
+  effect_key = "lua-streaming-duplicate",
+  payload_digest = "sha256:lua-streaming-duplicate",
+  kind = "http",
+  destination = "https://example.test/lua-streaming-duplicate",
+  content_type = "text/plain",
+}
+local streaming_outbox = assert_ok(client:new_outbox({
+  namespace_name = "lua-outbox-streaming-records",
+  owner = "lua-outbox-streaming-worker",
+  transaction_ttl_seconds = 30,
+}), nil, "Lua streaming outbox creation")
+local reentrant_seed, reentrant_seed_receipt = streaming_outbox:append(
+    reentrant_entry, "seed")
+reentrant_seed = assert_ok(reentrant_seed, reentrant_seed_receipt,
+                           "Lua streaming duplicate seed")
+assert_ok(reentrant_seed:commit(), nil,
+          "Lua streaming duplicate seed commit")
+reentrant_seed:close()
+local streaming_txn = assert_ok(streaming_outbox:begin(), nil,
                                 "Lua streaming transaction begin")
 local streaming_participant = assert_ok(streaming_txn:acquire({
   namespace_name = "lua-outbox-streaming",
@@ -135,6 +156,12 @@ local function assert_streaming_terminal_guard()
     if terminal_ok or not tostring(terminal_err):find("participant I/O is streaming", 1, true) then
       error("Lua transaction terminal operation escaped a participant streaming callback")
     end
+  end
+  local staged_ok, staged_err = pcall(function()
+    return streaming_txn:append(reentrant_entry, "duplicate")
+  end)
+  if staged_ok or not tostring(staged_err):find("participant I/O is streaming", 1, true) then
+    error("Lua transaction staging escaped a participant streaming callback")
   end
 end
 local source_sent = false
@@ -161,6 +188,7 @@ assert_ok(streaming_txn:rollback(), nil,
           "Lua streaming transaction rollback after read")
 streaming_participant:close()
 streaming_txn:close()
+streaming_outbox:close()
 
 local function append_effect(effect_id, payload)
   local txn, receipt_or_err = outbox:append({

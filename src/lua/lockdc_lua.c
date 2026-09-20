@@ -416,6 +416,9 @@ static lcdc_outbox_txn_ud *lcdc_check_outbox_txn(lua_State *L, int index) {
       (lcdc_outbox_txn_ud *)luaL_checkudata(L, index, LCDC_OUTBOX_TXN_MT);
   luaL_argcheck(L, ud != NULL && ud->transaction != NULL, index,
                 "lockdc outbox transaction is closed");
+  luaL_argcheck(L, ud->streaming_count == 0U, index,
+                "outbox transaction operation is not allowed while participant "
+                "I/O is streaming");
   return ud;
 }
 
@@ -441,6 +444,12 @@ static lcdc_outbox_participant_ud *lcdc_check_outbox_participant(lua_State *L,
   luaL_argcheck(L, !ud->streaming, index,
                 "lockdc outbox participant operation is not allowed while "
                 "output is streaming");
+  luaL_argcheck(L,
+                ud->transaction_ud == NULL ||
+                    ud->transaction_ud->streaming_count == 0U,
+                index,
+                "outbox transaction operation is not allowed while participant "
+                "I/O is streaming");
   return ud;
 }
 
@@ -6291,11 +6300,6 @@ static int lcdc_outbox_dispatcher_close(lua_State *L) {
 static int lcdc_outbox_txn_close(lua_State *L) {
   lcdc_outbox_txn_ud *ud = lcdc_check_outbox_txn(L, 1);
 
-  if (ud->streaming_count != 0U) {
-    return luaL_error(
-        L, "outbox transaction close is not allowed while participant I/O is "
-           "streaming");
-  }
   if (ud->callback_scoped) {
     return luaL_error(
         L, "outbox transaction close is not allowed inside its callback");
@@ -6532,11 +6536,6 @@ static int lcdc_outbox_txn_terminal(lua_State *L, int rollback) {
   lc_outbox_commit_result commit_result;
   int rc;
 
-  if (ud->streaming_count != 0U) {
-    return luaL_error(
-        L, "outbox transaction terminal decisions are not allowed while "
-           "participant I/O is streaming");
-  }
   if (ud->callback_scoped) {
     return luaL_error(
         L, "outbox transaction terminal decisions are not allowed inside its "
