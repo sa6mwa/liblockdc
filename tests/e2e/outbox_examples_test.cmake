@@ -15,6 +15,7 @@ endif()
 
 set(lockdc_outbox_root
   "${LOCKDC_BINARY_DIR}/outbox-example-e2e/lc_e2e_outbox_examples")
+file(MAKE_DIRECTORY "${lockdc_outbox_root}")
 file(REAL_PATH "${LOCKDC_BINARY_DIR}" lockdc_binary_dir)
 file(REAL_PATH "${lockdc_outbox_root}" lockdc_outbox_root BASE_DIRECTORY
   "${LOCKDC_BINARY_DIR}")

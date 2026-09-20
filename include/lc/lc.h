@@ -323,7 +323,8 @@ void lc_pouch_settings_init(lc_pouch_settings *settings);
  * `pouch:///var/lib/app/lockd-root`. Local Pouch storage defaults to exclusive
  * single-writer mode. A second default writer for the same root fails at open;
  * callers that intentionally need multiple active local writers must opt in
- * with `?single_writer=false`.
+ * with `LC_POUCH_SETTING_SINGLE_WRITER` set to zero in `pouch_settings`, or
+ * through the legacy `?single_writer=false` endpoint option.
  *
  * Endpoint query options are copied at open and use the same C-native Pouch
  * storage engine as direct Pouch callers. Supported options include

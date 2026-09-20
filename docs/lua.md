@@ -119,9 +119,11 @@ Primary handle types:
 - `Lease`
 - `Message`
 - `Outbox`
+- `OutboxDispatcher`
 - `OutboxTransaction`
 - `OutboxParticipant`
 - `OutboxJob`
+- `HistoryConsumer`
 - `Service`
 
 ## Client API
@@ -401,6 +403,10 @@ durable work:
   `stop()` or `wait()` while it owns the active job. It must return its terminal
   outcome before another job is consumed. Neither should run foreign effects in
   an HTTP route.
+- `dispatcher:notify_outbox_key(outbox_key)` accepts a key from a successful
+  commit receipt as a bounded, process-local latency hint. It does not query
+  the durable namespace; duplicate, unavailable, and overflowed hints are
+  repaired by ordinary durable reconciliation.
 - `dispatcher:stats()` returns process-local counters;
   `dispatcher:reconcile()` requests durable recovery.
 - `dispatcher:replay_dead_letter(outbox_key)` returns one dead-lettered effect

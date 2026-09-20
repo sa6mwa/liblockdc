@@ -312,6 +312,9 @@ struct lc_outbox_transaction {
   int (*accept_command)(lc_outbox_transaction *self,
                         const lc_command_request *request,
                         lc_command_receipt *receipt, lc_error *error);
+  int (*accept_inbox)(lc_outbox_transaction *self,
+                      const lc_inbox_message *message,
+                      lc_inbox_accept_result *result, lc_error *error);
   int (*acquire)(lc_outbox_transaction *self,
                  const lc_outbox_participant_request *request,
                  lc_outbox_participant **out, lc_error *error);
@@ -1116,18 +1119,21 @@ dispatcher before returning to normal pending/retry reconciliation. The option
 is appropriate for an operator-controlled restart, not a substitute for a
 foreign system's idempotency contract.
 
-The dispatcher uses `lc_query_keys()` against the outbox namespace with the
-indexed query engine and a bounded page size. Its portable indexed predicate
-selects dispatchable `pending` and `retry_wait` states; direct-key claim then
-rereads and validates the full envelope, `record_type`, timing, and active
-lease authority before it can hand work to a host. It receives keys only and
-does not load payload attachments during discovery.
+The dispatcher uses `lc_query_keys()` against the outbox namespace with a
+bounded page size. Its predicate selects dispatchable `pending` and
+`retry_wait` states; direct-key claim then rereads and validates the full
+envelope, `record_type`, timing, and active lease authority before it can hand
+work to a host. It receives keys only and does not load payload attachments
+during discovery.
 
-Every new sweep establishes one explicit durable index boundary, then paginates
-that same sweep without flushing per page. It uses the backend's indexed-query
-freshness policy, including `refresh=wait_for`, so a restart can observe
-committed state. Its performance and freshness are an implementation acceptance
-gate, not an assumption.
+For normal roots, every new sweep establishes one explicit durable index
+boundary and then paginates it without flushing per page. It uses the backend's
+indexed-query freshness policy, including `refresh=wait_for`, so a restart can
+observe committed state. On a Pouch root opened with `query_indexing=false`,
+the dispatcher instead uses its explicit bounded scan path and never invokes
+`flush_index` or re-enables index maintenance. Both paths retain the same
+bounded cursor and candidate-queue contract; performance and freshness are
+implementation acceptance gates, not assumptions.
 
 In a one-process local Pouch deployment where every writer uses this component,
 startup recovery and direct key notification can avoid a routine reconciliation

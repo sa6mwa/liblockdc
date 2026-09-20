@@ -4,8 +4,9 @@ local root = assert(os.getenv("LOCKDC_POUCH_ROOT"), "LOCKDC_POUCH_ROOT is requir
 local once = os.getenv("LOCKDC_OUTBOX_ONCE") == "1"
 
 local client = assert(lockdc.open({
-  endpoints = { "pouch://" .. root .. "?single_writer=false" },
+  endpoints = { "pouch://" .. root },
   default_namespace = "outbox-example",
+  pouch = { single_writer = false },
 }))
 local outbox = assert(client:new_outbox({
   namespace = "outbox-example",

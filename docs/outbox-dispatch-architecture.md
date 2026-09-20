@@ -40,7 +40,7 @@ liblockdc owns durable outbox semantics:
 - transaction enrollment and terminal decisions;
 - command receipts, inbox deduplication, immutable outbox records and payloads;
 - claims, renewals, retry scheduling, terminal completion, dead letters, and
-  indexed recovery;
+  bounded durable recovery;
 - bounded direct-key notification and process-local dispatcher coordination.
 
 liblockdc does **not** own a generic supervisor, process manager, IPC router,
@@ -494,9 +494,8 @@ timer.
 ## Vectis integration contract
 
 Vectis is not implemented in this repository. Its required liblockdc contract
-is nevertheless explicit. This section restates the outbox behavior in
-[`stash/supervisor-outbox-spec.md`](../stash/supervisor-outbox-spec.md);
-it does not redefine Vectis supervisor ownership or lifecycle policy:
+is nevertheless explicit. This section defines only the liblockdc outbox
+contract; it does not redefine Vectis supervisor ownership or lifecycle policy:
 
 ```text
 route worker                         supervisor process

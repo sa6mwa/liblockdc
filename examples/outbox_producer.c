@@ -18,6 +18,7 @@ int main(void) {
   const char *effect_key;
   const char *endpoints[1];
   lc_client_config client_config;
+  lc_pouch_settings pouch_settings;
   lc_outbox_config outbox_config;
   lc_outbox_entry entry;
   lc_outbox_receipt duplicate;
@@ -39,8 +40,8 @@ int main(void) {
   effect_key = getenv("LOCKDC_OUTBOX_EFFECT_KEY");
   if (effect_key == NULL || effect_key[0] == '\0')
     effect_key = "outbox-example:order-1";
-  if (snprintf(endpoint, sizeof(endpoint), "pouch://%s?single_writer=false",
-               root) >= (int)sizeof(endpoint)) {
+  if (snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) >=
+      (int)sizeof(endpoint)) {
     (void)fprintf(stderr, "LOCKDC_POUCH_ROOT is too long\n");
     return 2;
   }
@@ -51,10 +52,14 @@ int main(void) {
   payload = NULL;
   lc_error_init(&error);
   lc_client_config_init(&client_config);
+  lc_pouch_settings_init(&pouch_settings);
+  pouch_settings.set_mask = LC_POUCH_SETTING_SINGLE_WRITER;
+  pouch_settings.single_writer = 0;
   endpoints[0] = endpoint;
   client_config.endpoints = endpoints;
   client_config.endpoint_count = 1U;
   client_config.default_namespace = OUTBOX_EXAMPLE_NAMESPACE;
+  client_config.pouch_settings = &pouch_settings;
   rc = lc_client_open(&client_config, &client, &error);
   if (rc != LC_OK)
     goto fail;

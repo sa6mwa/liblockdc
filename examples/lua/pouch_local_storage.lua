@@ -14,9 +14,11 @@ end
 local client, err = lockdc.open({
   endpoints = { "pouch://" .. root },
   default_namespace = namespace_name,
-  pouch_crypto_key_file = key_file,
-  pouch_crypto_generate_key_file = true,
-  pouch_compression = compression,
+  pouch = {
+    crypto_key_file = key_file,
+    crypto_generate_key_file = true,
+    compression = compression,
+  },
 })
 
 if client == nil then

@@ -71,7 +71,7 @@ make dev-up
   read namespace engine configuration and trigger an index flush
 - `pouch_local_storage.lua`
   open encrypted, compressed local Pouch storage with first-run key generation
-  through Lua's `pouch_*` client configuration fields
+  through Lua's typed `pouch` configuration table
 - `consumer_handler.lua`
   run a stateful queue consumer with explicit message and lease handling
 - `../outbox_producer.c` and `outbox_dispatcher.lua`
