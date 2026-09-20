@@ -459,8 +459,9 @@ incorrect deployment for foreign-effect dispatch because it puts effect latency
 on the request path.
 
 `pump(options)` defaults to one job and a zero wait. Its `max_jobs` must be a
-small positive bounded integer and its `timeout_ms` is bounded by the
-dispatcher shutdown/request limit. It returns the number of handler outcomes
+small positive bounded integer and its `timeout_ms` is a non-negative value no
+greater than the configured dispatcher shutdown timeout. It returns the number
+of handler outcomes
 processed and never starts a second Lua owner loop. A host schedules another
 pump when it is ready; liblockdc does not create an event-loop thread.
 

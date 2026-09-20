@@ -551,6 +551,20 @@ if rejected_pump_ok or not tostring(rejected_pump_err):find("pump limits are inv
   client:close()
   error("Lua dispatcher accepted an invalid native pump option")
 end
+local infinite_pump_ok, infinite_pump_err = pcall(function()
+  return handler_dispatcher:pump({
+    handlers = rejected_handler_map,
+    max_jobs = 1,
+    timeout_ms = -1,
+  })
+end)
+if infinite_pump_ok or
+    not tostring(infinite_pump_err):find("pump limits are invalid", 1, true) then
+  handler_dispatcher:close()
+  handler_outbox:close()
+  client:close()
+  error("Lua dispatcher accepted an unbounded pump timeout")
+end
 
 local handlers = rejected_handler_map
 handlers.http = function(handler_job)
@@ -985,15 +999,32 @@ if alias_pumped ~= 0 then
   error("Lua second dispatcher alias unexpectedly consumed another job")
 end
 alias_dispatcher_again:close()
+alias_handlers.http = function(alias_job)
+  alias_calls = alias_calls + 1
+  assert_ok(alias_job:complete(), nil, "Lua replacement alias handler completion")
+end
+alias_txn, alias_receipt_or_err = alias_outbox:append({
+  operation_id = "lua-alias-rebound-order",
+  effect_id = "alias-rebound",
+  effect_key = "lua-alias-rebound-effect",
+  payload_digest = "sha256:lua-alias-rebound",
+  kind = "http",
+  destination = "https://example.test/alias-rebound",
+}, "alias-rebound-payload")
+alias_txn = assert_ok(alias_txn, alias_receipt_or_err,
+                      "Lua replacement dispatcher alias append")
+assert_ok(alias_txn:commit(), nil,
+          "Lua replacement dispatcher alias transaction commit")
+alias_txn:close()
 local alias_reopened = assert_ok(alias_outbox:dispatcher(), nil,
                                  "Lua reopened dispatcher alias")
 local alias_rebound, alias_rebound_err = alias_reopened:pump({
-  handlers = { http = function() end },
+  handlers = alias_handlers,
   max_jobs = 1,
-  timeout_ms = 0,
+  timeout_ms = 3000,
 })
-if alias_rebound ~= 0 or alias_rebound_err ~= nil then
-  error("Lua dispatcher did not release handler ownership after every wrapper closed")
+if alias_rebound ~= 1 or alias_rebound_err ~= nil or alias_calls ~= 2 then
+  error("Lua dispatcher retained a stale handler after every wrapper closed")
 end
 assert_ok(alias_reopened:stop(-1), nil, "Lua dispatcher alias stop")
 alias_reopened:close()

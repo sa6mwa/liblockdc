@@ -54,6 +54,7 @@ typedef struct lcdc_outbox_ud {
 
 typedef struct lcdc_outbox_dispatcher_binding {
   lc_outbox_dispatcher *dispatcher;
+  uint64_t binding_id;
   lc_client *client;
   lua_State *owner;
   int handler_mode;
@@ -178,6 +179,7 @@ static int lcdc_outbox_job_apply_terminal(lua_State *L, lcdc_outbox_job_ud *ud,
 static pthread_mutex_t lcdc_outbox_dispatcher_bindings_mutex =
     PTHREAD_MUTEX_INITIALIZER;
 static lcdc_outbox_dispatcher_binding *lcdc_outbox_dispatcher_bindings;
+static uint64_t lcdc_outbox_dispatcher_next_binding_id = 1U;
 static const char lcdc_outbox_dispatcher_handler_owners_key;
 static const char lcdc_outbox_dispatcher_wrappers_key;
 
@@ -1309,6 +1311,9 @@ static int lcdc_outbox_dispatcher_binding_acquire(
                         NULL);
   }
   binding->dispatcher = dispatcher;
+  binding->binding_id = lcdc_outbox_dispatcher_next_binding_id++;
+  if (lcdc_outbox_dispatcher_next_binding_id == 0U)
+    lcdc_outbox_dispatcher_next_binding_id = 1U;
   binding->client =
       ((lcdc_client_ud *)luaL_checkudata(L, client_index, LCDC_CLIENT_MT))
           ->client;
@@ -5989,7 +5994,8 @@ static int lcdc_outbox_dispatcher_pump(lua_State *L) {
   timeout_ms = 0L;
   lcdc_opt_integer_field(L, 2, "max_jobs", &max_jobs);
   lcdc_opt_integer_field(L, 2, "timeout_ms", &timeout_ms);
-  if (max_jobs < 1L || max_jobs > 1024L || timeout_ms < -1L) {
+  if (max_jobs < 1L || max_jobs > 1024L || timeout_ms < 0L ||
+      timeout_ms > lc_outbox_dispatcher_pump_timeout(ud->dispatcher)) {
     return luaL_error(L, "dispatcher pump limits are invalid");
   }
   lc_error_init(&error);
@@ -6089,6 +6095,17 @@ static int lcdc_outbox_dispatcher_next(lua_State *L) {
     return 1;
   }
   return lcdc_push_outbox_job(L, job, 1);
+}
+
+/* Private facade identity. It lets the Lua layer share handler adapters among
+ * aliases without retaining an adapter after the native binding retires. */
+static int lcdc_outbox_dispatcher_binding_id(lua_State *L) {
+  lcdc_outbox_dispatcher_ud *ud = lcdc_check_outbox_dispatcher(L, 1);
+
+  if (ud->binding == NULL)
+    return luaL_error(L, "outbox dispatcher is closed");
+  lua_pushinteger(L, (lua_Integer)ud->binding->binding_id);
+  return 1;
 }
 
 static int lcdc_outbox_dispatcher_stats(lua_State *L) {
@@ -7277,6 +7294,7 @@ static const luaL_Reg lcdc_outbox_methods[] = {
 static const luaL_Reg lcdc_outbox_dispatcher_methods[] = {
     {"close", lcdc_outbox_dispatcher_close},
     {"next", lcdc_outbox_dispatcher_next},
+    {"_binding_id", lcdc_outbox_dispatcher_binding_id},
     {"pump", lcdc_outbox_dispatcher_pump},
     {"run", lcdc_outbox_dispatcher_run},
     {"notify_outbox_key", lcdc_outbox_dispatcher_notify_outbox_key},

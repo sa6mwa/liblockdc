@@ -447,7 +447,9 @@ durable work:
   consumers and claims only on that demand. `dispatcher:next(0)` is strictly an
   in-memory, non-query probe; a blocking call may request durable recovery.
   `dispatcher:run({handlers = ...})` is the blocking dedicated worker loop;
-  bounded `dispatcher:pump(options)` is for hosts that own their event loop.
+  bounded `dispatcher:pump(options)` is for hosts that own their event loop;
+  its `timeout_ms` is non-negative and no greater than the configured
+  `shutdown_timeout_ms`.
   The first consumption choice binds a dispatcher to either raw pull or its
   caller Lua state's handler table; the other mode, another handler table, or
   another Lua state is rejected. A handler cannot recursively call `pump()` or

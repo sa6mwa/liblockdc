@@ -820,6 +820,9 @@ local function test_outbox_facade_lifecycle()
     dispatcher = function(self)
       return self
     end,
+    _binding_id = function()
+      return 1
+    end,
     next = function(_, timeout)
       captured.next_timeout = timeout
       return job_core
@@ -1001,7 +1004,11 @@ end
 
 local function test_dispatcher_handler_cache_follows_native_activation()
   local calls = {}
+  local binding_id = 1
   local dispatcher_core = {
+    _binding_id = function()
+      return binding_id
+    end,
     pump = function(_, options)
       if options.max_jobs == 0 then
         error('dispatcher pump limits are invalid')
@@ -1072,6 +1079,17 @@ local function test_dispatcher_handler_cache_follows_native_activation()
   assert_eq(alias:pump({ handlers = handlers, max_jobs = 1, reentrant = true }),
       0, 'a surviving alias must retain the activated handler map')
   alias:close()
+  handlers.http = function()
+    calls.rebound = (calls.rebound or 0) + 1
+  end
+  binding_id = 2
+  calls.bound_handlers = nil
+  local rebound = assert(outbox:dispatcher())
+  assert_eq(rebound:pump({ handlers = handlers, max_jobs = 1 }), 1,
+      'a replacement native binding must build a fresh handler adapter')
+  assert_eq(calls.rebound, 1,
+      'a retired binding must not retain the prior handler function')
+  rebound:close()
   outbox:close()
   client:close()
 end

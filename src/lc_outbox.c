@@ -379,6 +379,17 @@ struct lc_outbox_dispatcher_handle {
   lc_outbox_dispatcher_handle *registry_next;
 };
 
+long lc_outbox_dispatcher_pump_timeout(const lc_outbox_dispatcher *dispatcher) {
+  const lc_outbox_dispatcher_handle *handle;
+
+  if (dispatcher == NULL || dispatcher->impl == NULL)
+    return 0L;
+  handle = (const lc_outbox_dispatcher_handle *)dispatcher->impl;
+  if (handle->core == NULL)
+    return 0L;
+  return handle->core->shutdown_timeout_ms;
+}
+
 static void
 lc_outbox_dispatcher_retain(lc_outbox_dispatcher_handle *dispatcher);
 static void lc_outbox_dispatcher_close_method(lc_outbox_dispatcher *self);
@@ -7144,6 +7155,7 @@ static int lc_outbox_get_or_start_dispatcher_method(lc_outbox *self,
   ((lc_outbox_handle *)core)->dispatcher = dispatcher;
   /* The initial reference becomes the registry's reference when published. */
   dispatcher->ref_count = 1U;
+  dispatcher->pub.impl = dispatcher;
   dispatcher->pub.next = lc_outbox_dispatcher_next_method;
   dispatcher->pub.notify_outbox_key =
       lc_outbox_dispatcher_notify_outbox_key_method;

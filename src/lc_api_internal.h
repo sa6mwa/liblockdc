@@ -26,6 +26,8 @@ typedef struct lc_stream_pipe lc_stream_pipe;
 
 typedef struct lc_client_handle lc_client_handle;
 typedef struct lc_outbox_dispatcher_handle lc_outbox_dispatcher_handle;
+
+long lc_outbox_dispatcher_pump_timeout(const lc_outbox_dispatcher *dispatcher);
 typedef struct lc_lease_handle lc_lease_handle;
 typedef struct lc_message_handle lc_message_handle;
 typedef struct lc_consumer_service_handle lc_consumer_service_handle;
