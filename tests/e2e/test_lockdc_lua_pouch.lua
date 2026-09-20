@@ -305,6 +305,12 @@ local state_subscription_ok, state_subscription_err = client:subscribe_with_stat
   retained_state = state
   assert(type(state:info()) == "table")
   assert(delivery:ack())
+  local state_after_ack_ok = pcall(function()
+    state:info()
+  end)
+  if state_after_ack_ok then
+    error("callback state lease remained usable after its delivery was acknowledged")
+  end
   return false, "stop direct state subscription after its asserted delivery"
 end)
 if state_subscription_ok ~= nil or state_subscription_calls ~= 1 or
@@ -321,6 +327,92 @@ end)
 if retained_state_ok then
   client:close()
   error("Lua retained a direct-subscription state lease beyond its native callback")
+end
+
+local subscribed_nack_state, subscribe_nack_state_err = client:enqueue({
+  queue = "direct-subscribe-state-nack",
+  content_type = "application/json",
+  visibility_timeout_seconds = 30,
+  ttl_seconds = 30,
+}, lockdc.encode_json({ source = "lua-direct-subscribe-state-nack" }))
+if subscribed_nack_state == nil then
+  client:close()
+  error(("direct state subscription nack enqueue failed: %s"):format(
+    subscribe_nack_state_err and subscribe_nack_state_err.message or tostring(subscribe_nack_state_err)))
+end
+local nack_state_ok, nack_state_err = client:subscribe_with_state({
+  queue = "direct-subscribe-state-nack",
+  owner = "lua-direct-subscribe-state-nack",
+  visibility_timeout_seconds = 30,
+  wait_seconds = 0,
+}, function(delivery, state)
+  assert(type(state:info()) == "table")
+  assert(delivery:nack({ intent = "defer", delay_seconds = 1 }))
+  local state_after_nack_ok = pcall(function()
+    state:info()
+  end)
+  if state_after_nack_ok then
+    error("callback state lease remained usable after its delivery was negatively acknowledged")
+  end
+  return false, "stop direct state subscription after its asserted nack"
+end)
+if nack_state_ok ~= nil or type(nack_state_err) ~= "table" or
+    not tostring(nack_state_err.message):find("stop direct state subscription", 1, true) then
+  client:close()
+  error(("Lua direct state nack subscription failed (ok=%s error=%s)"):format(
+    tostring(nack_state_ok), tostring(nack_state_err and nack_state_err.message)))
+end
+
+local nested_subscribe_message, nested_subscribe_enqueue_err = client:enqueue({
+  queue = "direct-subscribe-nested-guard",
+  content_type = "application/json",
+  visibility_timeout_seconds = 30,
+  ttl_seconds = 30,
+}, lockdc.encode_json({ source = "lua-direct-subscribe-nested-guard" }))
+if nested_subscribe_message == nil then
+  client:close()
+  error(("nested subscribe enqueue failed: %s"):format(
+    nested_subscribe_enqueue_err and nested_subscribe_enqueue_err.message or tostring(nested_subscribe_enqueue_err)))
+end
+local nested_guard_ok, nested_guard_err = client:subscribe({
+  queue = "direct-subscribe-nested-guard",
+  owner = "lua-direct-subscribe-nested-guard",
+  visibility_timeout_seconds = 30,
+  wait_seconds = 0,
+}, function(delivery)
+  local nested_ok, nested_err = client:subscribe({
+    queue = "",
+    owner = "lua-direct-subscribe-nested-invalid",
+    wait_seconds = 0,
+  }, function() end)
+  if nested_ok ~= nil or type(nested_err) ~= "table" then
+    error("nested invalid subscription did not report its validation failure")
+  end
+  local closed, close_err = pcall(function()
+    client:close()
+  end)
+  if closed or not tostring(close_err):find("cannot close during a native callback", 1, true) then
+    error("nested subscription cleared the outer callback close guard")
+  end
+  assert(delivery:ack())
+  return false, "stop direct nested guard subscription after its asserted delivery"
+end)
+if nested_guard_ok ~= nil or type(nested_guard_err) ~= "table" or
+    not tostring(nested_guard_err.message):find("stop direct nested guard subscription", 1, true) then
+  client:close()
+  error(("Lua nested guard subscription failed (ok=%s error=%s)"):format(
+    tostring(nested_guard_ok), tostring(nested_guard_err and nested_guard_err.message)))
+end
+
+local watch_stop_ok, watch_stop_err = client:watch_queue({
+  queue = "direct-watch-clean-stop",
+}, function()
+  return false
+end)
+if watch_stop_ok ~= true or watch_stop_err ~= nil then
+  client:close()
+  error(("Lua queue watch did not treat an intentional stop as success (ok=%s error=%s)"):format(
+    tostring(watch_stop_ok), tostring(watch_stop_err and watch_stop_err.message)))
 end
 
 local function assert_ok(operation, value, value_err)

@@ -38,6 +38,10 @@ typedef struct lcdc_lease_ud {
 
 typedef struct lcdc_message_ud {
   lc_message *message;
+  /* A subscription-with-state callback borrows this lease from message.  The
+   * delivery can consume message before the callback returns, so invalidate
+   * the Lua lease wrapper together with the delivery wrapper. */
+  lcdc_lease_ud *borrowed_state;
   int streaming;
   int borrowed;
 } lcdc_message_ud;
@@ -153,6 +157,7 @@ typedef struct lcdc_consumer_handler {
 typedef struct lcdc_watch_handler {
   lua_State *L;
   int handler_ref;
+  int stopped;
 } lcdc_watch_handler;
 
 static size_t lcdc_lua_source_read(void *context, void *buffer, size_t count,
@@ -1203,6 +1208,7 @@ static int lcdc_push_message(lua_State *L, lc_message *message) {
 
   ud = (lcdc_message_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->message = message;
+  ud->borrowed_state = NULL;
   ud->streaming = 0;
   ud->borrowed = 0;
   luaL_getmetatable(L, LCDC_MESSAGE_MT);
@@ -1215,6 +1221,7 @@ static int lcdc_push_borrowed_message(lua_State *L, lc_message *message) {
 
   ud = (lcdc_message_ud *)lua_newuserdata(L, sizeof(*ud));
   ud->message = message;
+  ud->borrowed_state = NULL;
   ud->streaming = 0;
   ud->borrowed = 1;
   luaL_getmetatable(L, LCDC_MESSAGE_MT);
@@ -1594,10 +1601,18 @@ static int lcdc_lease_gc(lua_State *L) {
   return 0;
 }
 
+static void lcdc_message_invalidate_borrowed_state(lcdc_message_ud *ud) {
+  if (ud->borrowed_state != NULL) {
+    ud->borrowed_state->lease = NULL;
+    ud->borrowed_state = NULL;
+  }
+}
+
 static int lcdc_message_gc(lua_State *L) {
   lcdc_message_ud *ud;
 
   ud = (lcdc_message_ud *)luaL_checkudata(L, 1, LCDC_MESSAGE_MT);
+  lcdc_message_invalidate_borrowed_state(ud);
   if (ud->message != NULL && !ud->borrowed) {
     lc_message_close(ud->message);
     ud->message = NULL;
@@ -4027,6 +4042,7 @@ static int lcdc_lua_consumer_handle(void *context, lc_message *message,
     if (state != NULL) {
       state_ud =
           (lcdc_lease_ud *)luaL_checkudata(handler->L, -1, LCDC_LEASE_MT);
+      message_ud->borrowed_state = state_ud;
       lua_pushvalue(handler->L, -1);
       state_ref = luaL_ref(handler->L, LUA_REGISTRYINDEX);
     }
@@ -4039,8 +4055,7 @@ static int lcdc_lua_consumer_handle(void *context, lc_message *message,
                        NULL, NULL, NULL);
     lua_settop(handler->L, top);
     message_ud->message = NULL;
-    if (state_ud != NULL)
-      state_ud->lease = NULL;
+    lcdc_message_invalidate_borrowed_state(message_ud);
     luaL_unref(handler->L, LUA_REGISTRYINDEX, message_ref);
     if (state_ref != LUA_NOREF)
       luaL_unref(handler->L, LUA_REGISTRYINDEX, state_ref);
@@ -4057,8 +4072,7 @@ static int lcdc_lua_consumer_handle(void *context, lc_message *message,
   }
   lua_settop(handler->L, top);
   message_ud->message = NULL;
-  if (state_ud != NULL)
-    state_ud->lease = NULL;
+  lcdc_message_invalidate_borrowed_state(message_ud);
   luaL_unref(handler->L, LUA_REGISTRYINDEX, message_ref);
   if (state_ref != LUA_NOREF)
     luaL_unref(handler->L, LUA_REGISTRYINDEX, state_ref);
@@ -4071,6 +4085,7 @@ static int lcdc_client_subscribe_common(lua_State *L, int with_state) {
   lc_dequeue_req req;
   lcdc_consumer_handler handler;
   lc_error error;
+  int callback_active;
   int rc;
 
   ud = lcdc_check_client(L, 1);
@@ -4086,13 +4101,14 @@ static int lcdc_client_subscribe_common(lua_State *L, int with_state) {
   handler.handler_ref = luaL_ref(L, LUA_REGISTRYINDEX);
   consumer.handle = lcdc_lua_consumer_handle;
   consumer.context = &handler;
+  callback_active = ud->callback_active;
   ud->callback_active = 1;
   if (with_state) {
     rc = lc_subscribe_with_state(ud->client, &req, &consumer, &error);
   } else {
     rc = lc_subscribe(ud->client, &req, &consumer, &error);
   }
-  ud->callback_active = 0;
+  ud->callback_active = callback_active;
   luaL_unref(L, LUA_REGISTRYINDEX, handler.handler_ref);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
@@ -4146,6 +4162,9 @@ static int lcdc_lua_watch_handle(void *context, const lc_watch_event *event,
                        message != NULL ? message : "Lua queue watch failed",
                        NULL, NULL, NULL);
   }
+  if (stop) {
+    handler->stopped = 1;
+  }
   lua_settop(handler->L, top);
   return !failed && !stop;
 }
@@ -4167,6 +4186,7 @@ static int lcdc_client_watch_queue(lua_State *L) {
   req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
   req.queue = lcdc_opt_string_field(L, 2, "queue");
   handler.L = L;
+  handler.stopped = 0;
   lua_pushvalue(L, 3);
   handler.handler_ref = luaL_ref(L, LUA_REGISTRYINDEX);
   watch.handle = lcdc_lua_watch_handle;
@@ -4175,6 +4195,11 @@ static int lcdc_client_watch_queue(lua_State *L) {
   rc = lc_watch_queue(ud->client, &req, &watch, &error);
   ud->streaming = 0;
   luaL_unref(L, LUA_REGISTRYINDEX, handler.handler_ref);
+  if (handler.stopped) {
+    lua_pushboolean(L, 1);
+    lc_error_cleanup(&error);
+    return 1;
+  }
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -4693,6 +4718,7 @@ static int lcdc_message_ack(lua_State *L) {
     lc_error_cleanup(&error);
     return 3;
   }
+  lcdc_message_invalidate_borrowed_state(ud);
   ud->message = NULL;
   lua_pushboolean(L, 1);
   lc_error_cleanup(&error);
@@ -4720,6 +4746,7 @@ static int lcdc_message_nack(lua_State *L) {
     lc_error_cleanup(&error);
     return 3;
   }
+  lcdc_message_invalidate_borrowed_state(ud);
   ud->message = NULL;
   lua_pushboolean(L, 1);
   lc_error_cleanup(&error);
