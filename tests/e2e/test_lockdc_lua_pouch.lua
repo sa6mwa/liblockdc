@@ -525,6 +525,32 @@ if watch_stop_ok ~= true or watch_stop_err ~= nil then
     tostring(watch_stop_ok), tostring(watch_stop_err and watch_stop_err.message)))
 end
 
+-- A watch callback may discard its own dynamically allocated request fields.
+-- The binding retains private values until the native watch returns.
+do
+  local rooted_watch_request = {
+    namespace = "lua-rooted-watch-" .. assert(lockdc.xid_new()),
+    queue = "queue-" .. assert(lockdc.xid_new()),
+  }
+  local rooted_watch_calls = 0
+  local rooted_watch_ok, rooted_watch_err = client:watch_queue(
+    rooted_watch_request, function()
+      rooted_watch_calls = rooted_watch_calls + 1
+      rooted_watch_request.namespace = nil
+      rooted_watch_request.queue = nil
+      collectgarbage("collect")
+      collectgarbage("collect")
+      return false
+    end)
+  if rooted_watch_ok ~= true or rooted_watch_err ~= nil or
+      rooted_watch_calls ~= 1 then
+    client:close()
+    error(("Lua rooted queue watch did not stop safely (ok=%s calls=%d " ..
+      "error=%s)"):format(tostring(rooted_watch_ok), rooted_watch_calls,
+      tostring(rooted_watch_err)))
+  end
+end
+
 local watch_failure_ok, watch_failure_err = client:watch_queue({
   queue = "direct-watch-handler-failure",
 }, function()
@@ -761,6 +787,30 @@ if conflicting_history ~= nil or type(conflicting_history_err) ~= "table" or
     not tostring(conflicting_history_err.message):match("cannot both be supplied") then
   client:close()
   error("Lua history consumer accepted conflicting initial positions")
+end
+
+-- The constructor parses numerical settings after its strings.  A metatable
+-- may collect a dynamically generated namespace during the next field lookup.
+do
+  local rooted_history, rooted_history_err = client:new_history_consumer(
+    setmetatable({}, {
+      __index = function(_, key)
+        if key == "namespace" then
+          return "lua-rooted-history-" .. assert(lockdc.xid_new())
+        end
+        if key == "consumer_id" then
+          collectgarbage("collect")
+          collectgarbage("collect")
+          return "consumer-" .. assert(lockdc.xid_new())
+        end
+        return nil
+      end,
+    }))
+  rooted_history = assert_ok("Lua rooted history consumer create",
+                             rooted_history, rooted_history_err)
+  assert_ok("Lua rooted history consumer unregister",
+            rooted_history:unregister())
+  rooted_history:close()
 end
 
 local history_consumer_id = assert(lockdc.xid_new())

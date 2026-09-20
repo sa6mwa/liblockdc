@@ -4327,10 +4327,17 @@ static int lcdc_client_watch_queue(lua_State *L) {
   lc_error_init(&error);
   luaL_checktype(L, 2, LUA_TTABLE);
   luaL_checktype(L, 3, LUA_TFUNCTION);
-  req.ns = lcdc_opt_string_field(L, 2, "namespace");
-  req.queue = lcdc_opt_string_field(L, 2, "queue");
+  /* A watch invokes Lua before it stops using this request on later polls.
+   * Keep private copies rather than borrowing strings from the callback's
+   * mutable request table. */
+  lua_createtable(L, 0, 2);
+  lcdc_normalize_string_field(L, 2, -1, "namespace", 0);
+  lcdc_normalize_string_field(L, 2, -1, "queue", 0);
+  req.ns = lcdc_normalized_string_value(L, -1, "namespace");
+  req.queue = lcdc_normalized_string_value(L, -1, "queue");
   rc = lcdc_client_revalidate(ud, &client, &error);
   if (rc != LC_OK) {
+    lua_pop(L, 1);
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
     return 3;
@@ -4345,6 +4352,7 @@ static int lcdc_client_watch_queue(lua_State *L) {
   rc = lc_watch_queue(client, &req, &watch, &error);
   ud->streaming = 0;
   luaL_unref(L, LUA_REGISTRYINDEX, handler.handler_ref);
+  lua_pop(L, 1);
   if (handler.stopped) {
     lua_pushboolean(L, 1);
     lc_error_cleanup(&error);
@@ -5252,8 +5260,11 @@ static int lcdc_client_new_history_consumer(lua_State *L) {
   lc_error_init(&error);
   consumer = NULL;
   luaL_checktype(L, 2, LUA_TTABLE);
-  config.ns = lcdc_opt_string_field(L, 2, "namespace");
-  lcdc_require_string_field(L, 2, "consumer_id", &config.consumer_id);
+  /* Metatable-backed fields may collect while later config is parsed. Keep
+   * plain private values alive until the native constructor has copied them. */
+  lua_createtable(L, 0, 2);
+  lcdc_normalize_string_field(L, 2, -1, "namespace", 0);
+  lcdc_normalize_string_field(L, 2, -1, "consumer_id", 1);
   has_initial_acknowledged_index_seq = 0;
   lua_getfield(L, 2, "initial_acknowledged_index_seq");
   if (!lua_isnil(L, -1)) {
@@ -5265,6 +5276,7 @@ static int lcdc_client_new_history_consumer(lua_State *L) {
   start_at_current = 0;
   (void)lcdc_opt_boolean_field(L, 2, "start_at_current", &start_at_current);
   if (start_at_current && has_initial_acknowledged_index_seq) {
+    lua_pop(L, 1);
     lc_error_set(&error, LC_ERR_INVALID, 0L,
                  "start_at_current and initial_acknowledged_index_seq cannot "
                  "both be supplied",
@@ -5277,8 +5289,11 @@ static int lcdc_client_new_history_consumer(lua_State *L) {
     config.initial_acknowledged_index_seq =
         LC_HISTORY_CONSUMER_START_AT_CURRENT;
   }
+  config.ns = lcdc_normalized_string_value(L, -1, "namespace");
+  config.consumer_id = lcdc_normalized_string_value(L, -1, "consumer_id");
   rc = lc_client_new_history_consumer(client_ud->client, &config, &consumer,
                                       &error);
+  lua_pop(L, 1);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
