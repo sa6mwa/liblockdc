@@ -35,29 +35,14 @@ Service.__index = Service
 
 local JSON_NULL = lonejson.json_null
 -- Native dispatcher bindings are shared by aliases. Keep an adapter map keyed
--- by the application handler table only after native code has bound it, so
--- aliases pass the same native table without rejected options preserving a
--- stale snapshot of an application handler.
-local dispatcher_handler_maps = setmetatable({}, { __mode = "kv" })
-local dispatcher_handler_sources = setmetatable({}, { __mode = "kv" })
+-- weakly by the application handler table only after native code has bound it,
+-- so aliases pass the same native table without rejected options preserving a
+-- stale snapshot of an application handler. A live handler table keeps its
+-- adapter available for an alias that has not itself consumed work yet.
+local dispatcher_handler_maps = setmetatable({}, { __mode = "k" })
 
 local function release_dispatcher_handler_map(self)
-  local handlers = self._handler_source
-  local cached_handlers = self._handler_cache
-
-  self._handler_source = nil
   self._handler_core_map = nil
-  self._handler_cache = nil
-  if cached_handlers == nil then
-    return
-  end
-  cached_handlers.wrapper_count = cached_handlers.wrapper_count - 1
-  if cached_handlers.wrapper_count == 0 then
-    if handlers ~= nil and dispatcher_handler_maps[handlers] == cached_handlers then
-      dispatcher_handler_maps[handlers] = nil
-    end
-    dispatcher_handler_sources[cached_handlers] = nil
-  end
 end
 
 local function wrap_client(core_client)
@@ -892,6 +877,7 @@ local function dispatcher_handler_options(self, options)
   local core_options
   local core_handlers
   local cached_handlers
+  local activation
   local activate_map
   local retain_map
 
@@ -915,24 +901,26 @@ local function dispatcher_handler_options(self, options)
     return options
   end
   cached_handlers = dispatcher_handler_maps[handlers]
+  activation = { handlers = handlers, cached_handlers = cached_handlers }
   activate_map = function()
-    local source = dispatcher_handler_sources[cached_handlers]
-    if source ~= nil then
-      dispatcher_handler_maps[source] = cached_handlers
+    local source = activation.handlers
+
+    if source == nil then
+      return
     end
+    dispatcher_handler_maps[source] = activation.cached_handlers
+    -- The adapter callbacks retain this closure after binding. Drop the
+    -- application table as soon as the adapter is published so a fully closed
+    -- dispatcher does not keep the caller's handler map alive.
+    activation.handlers = nil
+    activation.cached_handlers = nil
   end
   retain_map = function()
     activate_map()
     if self._closed then
       return
     end
-    if self._handler_cache ~= cached_handlers then
-      release_dispatcher_handler_map(self)
-      cached_handlers.wrapper_count = cached_handlers.wrapper_count + 1
-    end
-    self._handler_source = handlers
     self._handler_core_map = cached_handlers.core_handlers
-    self._handler_cache = cached_handlers
   end
   if cached_handlers == nil then
     core_handlers = {}
@@ -947,9 +935,9 @@ local function dispatcher_handler_options(self, options)
         return handler_function(wrap_outbox_job(core_job))
       end
     end
-    cached_handlers = { core_handlers = core_handlers, wrapper_count = 0 }
+    cached_handlers = { core_handlers = core_handlers }
+    activation.cached_handlers = cached_handlers
   end
-  dispatcher_handler_sources[cached_handlers] = handlers
   core_options = {}
   for key, handler in pairs(options) do
     core_options[key] = handler

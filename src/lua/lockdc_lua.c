@@ -57,6 +57,7 @@ typedef struct lcdc_outbox_dispatcher_binding {
   int consuming;
   int stopped;
   size_t wrapper_count;
+  size_t wrapper_sequence;
   /* A pump/run frame pins this shared binding even when its handler closes
    * the wrapper that entered the frame. */
   size_t consumption_count;
@@ -169,6 +170,7 @@ static pthread_mutex_t lcdc_outbox_dispatcher_bindings_mutex =
     PTHREAD_MUTEX_INITIALIZER;
 static lcdc_outbox_dispatcher_binding *lcdc_outbox_dispatcher_bindings;
 static const char lcdc_outbox_dispatcher_handler_owners_key;
+static const char lcdc_outbox_dispatcher_wrappers_key;
 
 static lua_State *lcdc_lua_main_thread(lua_State *L) {
   lua_State *main_thread;
@@ -199,11 +201,54 @@ static void lcdc_push_outbox_dispatcher_handler_owners(lua_State *L) {
               (const void *)&lcdc_outbox_dispatcher_handler_owners_key);
 }
 
-static void lcdc_outbox_dispatcher_clear_handlers(
-    lua_State *L, const lcdc_outbox_dispatcher_binding *binding) {
+/* Track aliases weakly so installing a handler can give every live alias the
+ * same userdata-owned map. The registry never roots a dispatcher cycle. */
+static void lcdc_push_outbox_dispatcher_wrappers(lua_State *L) {
+  lua_rawgetp(L, LUA_REGISTRYINDEX,
+              (const void *)&lcdc_outbox_dispatcher_wrappers_key);
+  if (!lua_isnil(L, -1))
+    return;
+  lua_pop(L, 1);
+  lua_newtable(L);
+  lua_pushvalue(L, -1);
+  lua_rawsetp(L, LUA_REGISTRYINDEX,
+              (const void *)&lcdc_outbox_dispatcher_wrappers_key);
+}
+
+static void lcdc_outbox_dispatcher_binding_register_wrapper(
+    lua_State *L, lcdc_outbox_dispatcher_binding *binding,
+    int dispatcher_index) {
+  dispatcher_index = lua_absindex(L, dispatcher_index);
+  lcdc_push_outbox_dispatcher_wrappers(L);
+  lua_pushlightuserdata(L, binding->dispatcher);
+  lua_rawget(L, -2);
+  if (lua_isnil(L, -1)) {
+    lua_pop(L, 1);
+    lua_newtable(L);
+    lua_newtable(L);
+    lua_pushstring(L, "v");
+    lua_setfield(L, -2, "__mode");
+    lua_setmetatable(L, -2);
+    lua_pushlightuserdata(L, binding->dispatcher);
+    lua_pushvalue(L, -2);
+    lua_rawset(L, -4);
+  }
+  lua_pushvalue(L, dispatcher_index);
+  lua_rawseti(L, -2, (lua_Integer)++binding->wrapper_sequence);
+  lua_pop(L, 2);
+}
+
+static void
+lcdc_outbox_dispatcher_clear_handlers(lua_State *L,
+                                      lcdc_outbox_dispatcher_binding *binding) {
   if (binding == NULL)
     return;
   lcdc_push_outbox_dispatcher_handler_owners(L);
+  lua_pushlightuserdata(L, binding->dispatcher);
+  lua_pushnil(L);
+  lua_rawset(L, -3);
+  lua_pop(L, 1);
+  lcdc_push_outbox_dispatcher_wrappers(L);
   lua_pushlightuserdata(L, binding->dispatcher);
   lua_pushnil(L);
   lua_rawset(L, -3);
@@ -241,6 +286,22 @@ static void lcdc_outbox_dispatcher_set_handlers(lua_State *L,
   lua_pushvalue(L, handlers_index);
   lua_rawset(L, -3);
   lua_pop(L, 1);
+  if (ud->binding != NULL) {
+    lcdc_push_outbox_dispatcher_wrappers(L);
+    lua_pushlightuserdata(L, ud->binding->dispatcher);
+    lua_rawget(L, -2);
+    if (lua_istable(L, -1)) {
+      lua_pushnil(L);
+      while (lua_next(L, -2) != 0) {
+        if (lua_isuserdata(L, -1)) {
+          lua_pushvalue(L, handlers_index);
+          lua_setiuservalue(L, -2, 1);
+        }
+        lua_pop(L, 1);
+      }
+    }
+    lua_pop(L, 2);
+  }
 }
 
 static int lcdc_push_error(lua_State *L, const lc_error *error) {
@@ -1329,6 +1390,7 @@ static int lcdc_push_outbox_dispatcher(lua_State *L,
     return rc;
   }
   ud->dispatcher = dispatcher;
+  lcdc_outbox_dispatcher_binding_register_wrapper(L, ud->binding, -1);
   if (owner_index != 0) {
     lua_pushvalue(L, owner_index);
     ud->owner_ref = luaL_ref(L, LUA_REGISTRYINDEX);

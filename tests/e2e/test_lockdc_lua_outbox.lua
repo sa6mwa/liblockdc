@@ -899,6 +899,10 @@ local alias_pumped = assert_ok(alias_dispatcher:pump({
 if alias_pumped ~= 1 or alias_calls ~= 1 then
   error("Lua first dispatcher alias did not run its shared handler")
 end
+alias_dispatcher:close()
+alias_dispatcher = nil
+collectgarbage("collect")
+collectgarbage("collect")
 alias_pumped = assert_ok(alias_dispatcher_again:pump({
   handlers = alias_handlers,
   max_jobs = 1,
@@ -907,7 +911,6 @@ alias_pumped = assert_ok(alias_dispatcher_again:pump({
 if alias_pumped ~= 0 then
   error("Lua second dispatcher alias unexpectedly consumed another job")
 end
-alias_dispatcher:close()
 alias_dispatcher_again:close()
 local alias_reopened = assert_ok(alias_outbox:dispatcher(), nil,
                                  "Lua reopened dispatcher alias")

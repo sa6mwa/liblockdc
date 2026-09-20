@@ -1029,8 +1029,10 @@ local function test_dispatcher_handler_cache_follows_native_activation()
       'the successful retry must invoke the corrected handler function')
   assert_eq(calls.reentrant, 1,
       'the first handler invocation must expose its map to dispatcher aliases')
-  alias:close()
   dispatcher:close()
+  assert_eq(alias:pump({ handlers = handlers, max_jobs = 1, reentrant = true }),
+      0, 'a surviving alias must retain the activated handler map')
+  alias:close()
   outbox:close()
   client:close()
 end
