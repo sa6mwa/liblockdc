@@ -230,6 +230,47 @@ if enqueued == nil then
   error(("Pouch enqueue failed: %s"):format(enqueue_err and enqueue_err.message or tostring(enqueue_err)))
 end
 
+-- Numeric-looking Lua strings are payload bytes, never file descriptors.
+local numeric_enqueued, numeric_enqueue_err = client:enqueue({
+  queue = "numeric-payload",
+  visibility_timeout_seconds = 30,
+  ttl_seconds = 30,
+}, "123")
+if numeric_enqueued == nil then
+  client:close()
+  error(("Pouch numeric payload enqueue failed: %s"):format(
+    numeric_enqueue_err and numeric_enqueue_err.message or tostring(numeric_enqueue_err)))
+end
+local numeric_message, numeric_dequeue_err = client:dequeue({
+  queue = "numeric-payload",
+  owner = "lua-pouch-numeric-payload",
+  visibility_timeout_seconds = 30,
+  wait_seconds = 0,
+})
+if numeric_message == nil then
+  client:close()
+  error(("Pouch numeric payload dequeue failed: %s"):format(
+    numeric_dequeue_err and numeric_dequeue_err.message or tostring(numeric_dequeue_err)))
+end
+local numeric_sink_path = "9037712049"
+os.remove(numeric_sink_path)
+local numeric_sink_result, numeric_written_or_err = numeric_message:write_payload(numeric_sink_path)
+if numeric_sink_result ~= nil or type(numeric_written_or_err) ~= "number" then
+  numeric_message:close()
+  client:close()
+  error("Pouch numeric Lua string sink did not write its payload")
+end
+local numeric_sink_file = assert(io.open(numeric_sink_path, "rb"))
+local numeric_payload = assert(numeric_sink_file:read("*a"))
+numeric_sink_file:close()
+os.remove(numeric_sink_path)
+if numeric_payload ~= "123" then
+  numeric_message:close()
+  client:close()
+  error("Pouch numeric Lua string payload did not round-trip as bytes")
+end
+assert(numeric_message:ack())
+
 local message, dequeue_err = client:dequeue({
   queue = "work",
   owner = "lua-pouch-e2e",
@@ -319,6 +360,11 @@ local state_subscription_ok, state_subscription_err = client:subscribe_with_stat
   state_subscription_calls = state_subscription_calls + 1
   retained_state = state
   assert(type(state:info()) == "table")
+  local state_release, state_release_err = state:release()
+  if state_release ~= nil or type(state_release_err) ~= "table" or
+      not tostring(state_release_err.message):find("owned by its delivery", 1, true) then
+    error("callback state lease was allowed to release its delivery-owned lease")
+  end
   assert(delivery:ack())
   local state_after_ack_ok = pcall(function()
     state:info()
@@ -857,6 +903,30 @@ if close_during_request_result ~= nil or type(close_during_request_err) ~= "tabl
   error("Lua transaction replay did not reject a client closed by request parsing")
 end
 client:close()
+
+local watch_close_client, watch_close_open_err = lockdc.open({
+  endpoints = { endpoint .. "-watch-close" },
+})
+if watch_close_client == nil then
+  error(("Lua watch close regression client failed to open: %s"):format(
+    watch_close_open_err and watch_close_open_err.message or tostring(watch_close_open_err)))
+end
+local close_during_watch_request = setmetatable({ queue = "watch-close" }, {
+  __index = function(_, key)
+    if key == "namespace_name" then
+      watch_close_client:close()
+      return namespace_name
+    end
+    return nil
+  end,
+})
+local watch_close_result, watch_close_err = watch_close_client:watch_queue(
+  close_during_watch_request, function() return false end)
+if watch_close_result ~= nil or type(watch_close_err) ~= "table" or
+    not tostring(watch_close_err.message):find("closed while preparing request", 1, true) then
+  error("Lua queue watch did not reject a client closed by request parsing")
+end
+watch_close_client:close()
 
 local missing_key_client, missing_key_err = lockdc.open({
   endpoints = { endpoint },

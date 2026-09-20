@@ -830,7 +830,7 @@ static int lcdc_sink_from_value(lua_State *L, int index, lc_sink **out,
   *out = NULL;
   if (index < 0)
     index = lua_gettop(L) + index + 1;
-  if (lua_isnumber(L, index)) {
+  if (lua_type(L, index) == LUA_TNUMBER) {
     fd = (long)lua_tointeger(L, index);
     return lc_sink_to_fd((int)fd, out, error);
   }
@@ -853,6 +853,9 @@ static int lcdc_sink_from_value(lua_State *L, int index, lc_sink **out,
     return lc_sink_to_fd((int)fd, out, error);
   }
   lua_pop(L, 1);
+  /* Resolve every user callback before allocating or retaining either one.
+   * A table __index metamethod may throw; after a Lua longjmp there is no C
+   * cleanup frame for a partially constructed sink. */
   lua_getfield(L, index, "write");
   if (lua_isnil(L, -1)) {
     lua_pop(L, 1);
@@ -861,31 +864,27 @@ static int lcdc_sink_from_value(lua_State *L, int index, lc_sink **out,
                         NULL);
   }
   luaL_checktype(L, -1, LUA_TFUNCTION);
+  lua_getfield(L, index, "close");
+  if (!lua_isnil(L, -1))
+    luaL_checktype(L, -1, LUA_TFUNCTION);
   sink = (lcdc_lua_sink *)calloc(1U, sizeof(*sink));
   if (sink == NULL) {
-    lua_pop(L, 1);
+    lua_pop(L, 2);
     return lc_error_set(error, LC_ERR_NOMEM, 0L, "failed to allocate Lua sink",
                         NULL, NULL, NULL);
   }
   sink->L = L;
-  sink->write_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  sink->write_ref = LUA_NOREF;
   sink->close_ref = LUA_NOREF;
   sink->pub.write = lcdc_lua_sink_write;
   sink->pub.close = lcdc_lua_sink_close;
   sink->pub.impl = sink;
-  lua_getfield(L, index, "close");
   if (!lua_isnil(L, -1)) {
-    if (!lua_isfunction(L, -1)) {
-      lua_pop(L, 1);
-      lcdc_lua_sink_close(&sink->pub);
-      return lc_error_set(error, LC_ERR_INVALID, 0L,
-                          "Lua sink close must be a function", NULL, NULL,
-                          NULL);
-    }
     sink->close_ref = luaL_ref(L, LUA_REGISTRYINDEX);
   } else {
     lua_pop(L, 1);
   }
+  sink->write_ref = luaL_ref(L, LUA_REGISTRYINDEX);
   *out = &sink->pub;
   return LC_OK;
 }
@@ -1046,7 +1045,7 @@ static int lcdc_source_from_value(lua_State *L, int index, lc_source **out,
   if (index < 0) {
     index = lua_gettop(L) + index + 1;
   }
-  if (lua_isnumber(L, index)) {
+  if (lua_type(L, index) == LUA_TNUMBER) {
     fd = (long)lua_tointeger(L, index);
     return lc_source_from_fd((int)fd, out, error);
   }
@@ -1078,31 +1077,36 @@ static int lcdc_source_from_value(lua_State *L, int index, lc_source **out,
   lua_pop(L, 1);
   lua_getfield(L, index, "read");
   if (!lua_isnil(L, -1)) {
+    /* Inspect all callback fields before retaining one. A later __index
+     * failure must not leak a registry reference across Lua's longjmp. */
     luaL_checktype(L, -1, LUA_TFUNCTION);
+    lua_getfield(L, index, "reset");
+    if (!lua_isnil(L, -1))
+      luaL_checktype(L, -1, LUA_TFUNCTION);
+    lua_getfield(L, index, "close");
+    if (!lua_isnil(L, -1))
+      luaL_checktype(L, -1, LUA_TFUNCTION);
     lua_source = (lcdc_lua_source *)calloc(1U, sizeof(*lua_source));
     if (lua_source == NULL) {
-      lua_pop(L, 1);
+      lua_pop(L, 3);
       return lc_error_set(error, LC_ERR_NOMEM, 0L,
                           "failed to allocate Lua source", NULL, NULL, NULL);
     }
     lua_source->L = L;
     lua_source->reset_ref = LUA_NOREF;
     lua_source->close_ref = LUA_NOREF;
-    lua_source->read_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    lua_getfield(L, index, "reset");
+    lua_source->read_ref = LUA_NOREF;
     if (!lua_isnil(L, -1)) {
-      luaL_checktype(L, -1, LUA_TFUNCTION);
-      lua_source->reset_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-    } else {
-      lua_pop(L, 1);
-    }
-    lua_getfield(L, index, "close");
-    if (!lua_isnil(L, -1)) {
-      luaL_checktype(L, -1, LUA_TFUNCTION);
       lua_source->close_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     } else {
       lua_pop(L, 1);
     }
+    if (!lua_isnil(L, -1)) {
+      lua_source->reset_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    } else {
+      lua_pop(L, 1);
+    }
+    lua_source->read_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     rc =
         lc_source_from_callbacks(lcdc_lua_source_read, lcdc_lua_source_reset,
                                  lcdc_lua_source_close, lua_source, out, error);
@@ -4078,6 +4082,7 @@ static int lcdc_lua_consumer_handle(void *context, lc_message *message,
 
 static int lcdc_client_subscribe_common(lua_State *L, int with_state) {
   lcdc_client_ud *ud;
+  lc_client *client;
   lc_consumer consumer;
   lc_dequeue_req req;
   lcdc_consumer_handler handler;
@@ -4092,6 +4097,12 @@ static int lcdc_client_subscribe_common(lua_State *L, int with_state) {
   luaL_checktype(L, 2, LUA_TTABLE);
   luaL_checktype(L, 3, LUA_TFUNCTION);
   lcdc_parse_dequeue_req(L, 2, &req);
+  rc = lcdc_client_revalidate(ud, &client, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
   handler.L = L;
   handler.with_state = with_state;
   lua_pushvalue(L, 3);
@@ -4101,9 +4112,9 @@ static int lcdc_client_subscribe_common(lua_State *L, int with_state) {
   callback_active = ud->callback_active;
   ud->callback_active = 1;
   if (with_state) {
-    rc = lc_subscribe_with_state(ud->client, &req, &consumer, &error);
+    rc = lc_subscribe_with_state(client, &req, &consumer, &error);
   } else {
-    rc = lc_subscribe(ud->client, &req, &consumer, &error);
+    rc = lc_subscribe(client, &req, &consumer, &error);
   }
   ud->callback_active = callback_active;
   luaL_unref(L, LUA_REGISTRYINDEX, handler.handler_ref);
@@ -4171,6 +4182,7 @@ static int lcdc_lua_watch_handle(void *context, const lc_watch_event *event,
 
 static int lcdc_client_watch_queue(lua_State *L) {
   lcdc_client_ud *ud;
+  lc_client *client;
   lc_watch_queue_req req;
   lc_watch_handler watch;
   lcdc_watch_handler handler;
@@ -4185,6 +4197,12 @@ static int lcdc_client_watch_queue(lua_State *L) {
   luaL_checktype(L, 3, LUA_TFUNCTION);
   req.namespace_name = lcdc_opt_string_field(L, 2, "namespace_name");
   req.queue = lcdc_opt_string_field(L, 2, "queue");
+  rc = lcdc_client_revalidate(ud, &client, &error);
+  if (rc != LC_OK) {
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
   handler.L = L;
   handler.stopped = 0;
   lua_pushvalue(L, 3);
@@ -4192,7 +4210,7 @@ static int lcdc_client_watch_queue(lua_State *L) {
   watch.handle = lcdc_lua_watch_handle;
   watch.context = &handler;
   ud->streaming = 1;
-  rc = lc_watch_queue(ud->client, &req, &watch, &error);
+  rc = lc_watch_queue(client, &req, &watch, &error);
   ud->streaming = 0;
   luaL_unref(L, LUA_REGISTRYINDEX, handler.handler_ref);
   if (handler.stopped) {
@@ -4509,6 +4527,14 @@ static int lcdc_lease_release(lua_State *L) {
   ud = lcdc_check_lease(L, 1);
   lc_release_req_init(&req);
   lc_error_init(&error);
+  if (ud->borrowed) {
+    rc = lc_error_set(&error, LC_ERR_INVALID, 0L,
+                      "a subscription state lease is owned by its delivery",
+                      NULL, NULL, NULL);
+    lcdc_push_status_error(L, rc, &error);
+    lc_error_cleanup(&error);
+    return 3;
+  }
   if (!lua_isnoneornil(L, 2)) {
     luaL_checktype(L, 2, LUA_TTABLE);
     lcdc_opt_boolean_field(L, 2, "rollback", &req.rollback);

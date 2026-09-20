@@ -68,4 +68,52 @@ assert(protected, prepared)
 assert(key_lookups == 1)
 assert(prepared == nil)
 assert(type(prepare_err) == "table")
+
+-- Resolve every sink callback before retaining any of them. A later
+-- metamethod error must not root the write callback through the C registry.
+local sink_capture = { marker = "sink-setup-registry-leak" }
+local sink_weak = setmetatable({ sink_capture }, { __mode = "v" })
+local sink = setmetatable({
+  write = function()
+    return sink_capture
+  end,
+}, {
+  __index = function(_, field)
+    if field == "close" then
+      error("intentional Lua sink close lookup failure")
+    end
+  end,
+})
+local sink_ok = pcall(function()
+  request_client:get({ key = "sink-setup-registry-leak" }, sink)
+end)
+assert(not sink_ok)
+sink = nil
+sink_capture = nil
+collectgarbage("collect")
+collectgarbage("collect")
+assert(sink_weak[1] == nil, "Lua sink setup failure retained its write callback")
+
+local source_capture = { marker = "source-setup-registry-leak" }
+local source_weak = setmetatable({ source_capture }, { __mode = "v" })
+local source = setmetatable({
+  read = function()
+    return source_capture
+  end,
+}, {
+  __index = function(_, field)
+    if field == "close" then
+      error("intentional Lua source close lookup failure")
+    end
+  end,
+})
+local source_ok = pcall(function()
+  request_client:enqueue({ queue = "source-setup-registry-leak" }, source)
+end)
+assert(not source_ok)
+source = nil
+source_capture = nil
+collectgarbage("collect")
+collectgarbage("collect")
+assert(source_weak[1] == nil, "Lua source setup failure retained its read callback")
 request_client:close()
