@@ -13577,9 +13577,6 @@ int lc_pouch_query_index_invalidate_namespace(lc_pouch *pouch, const char *ns,
                         "namespace",
                         NULL, NULL, NULL);
   }
-  if (!pouch->query_indexing_enabled) {
-    return LC_OK;
-  }
   rc = lc_pouch_query_index_flush_lock(pouch, error);
   if (rc != LC_OK) {
     return rc;

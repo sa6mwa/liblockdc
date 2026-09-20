@@ -18868,6 +18868,102 @@ test_query_freshness_delete_survives_compaction_reopen(void **state) {
 }
 
 static void
+test_query_indexing_opt_out_invalidates_before_compaction(void **state) {
+  static const char ns[] = "docs/query-indexing-opt-out";
+  lc_pouch *pouch;
+  lc_source *body;
+  lc_pouch_open_options open_options;
+  lc_pouch_maintenance_options maintenance_options;
+  lc_pouch_maintenance_result maintenance_result;
+  lc_pouch_state_write_result write_result;
+  lc_pouch_state_write_result delete_result;
+  lc_pouch_query_index_flush_result flush_result;
+  lc_pouch_generation query_seq;
+  lc_pouch_generation indexed_seq;
+  lc_error error;
+  char root[512];
+  size_t query_rows;
+  int rc;
+
+  (void)state;
+  pouch = NULL;
+  body = NULL;
+  query_seq = 0UL;
+  indexed_seq = 0UL;
+  query_rows = 0U;
+  memset(&open_options, 0, sizeof(open_options));
+  memset(&maintenance_options, 0, sizeof(maintenance_options));
+  memset(&maintenance_result, 0, sizeof(maintenance_result));
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&delete_result, 0, sizeof(delete_result));
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_error_init(&error);
+  make_root("query-indexing-opt-out-compaction", root, sizeof(root));
+  cleanup_root(root);
+
+  open_options.segment_target_bytes = 1U;
+  open_options.single_writer_set = 1;
+  open_options.single_writer = 1;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory("{\"kind\":\"gone\"}",
+                             strlen("{\"kind\":\"gone\"}"), &body, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, ns, "doc/gone", body, NULL, &write_result,
+                            &error);
+  lc_source_close(body);
+  body = NULL;
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_query_index_seq(pouch, ns, &query_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(query_seq > 0UL);
+  rc = lc_pouch_query_index_flush(pouch, ns, query_seq, &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  memset(&flush_result, 0, sizeof(flush_result));
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_options.query_indexing_enabled_set = 1;
+  open_options.query_indexing_enabled = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_delete(pouch, ns, "doc/gone", NULL, &delete_result,
+                             &error);
+  assert_int_equal(rc, LC_OK);
+  maintenance_options.ns = ns;
+  maintenance_options.force = 1;
+  rc = lc_pouch_maintenance_run(pouch, &maintenance_options,
+                                &maintenance_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(maintenance_result.compacted);
+  lc_pouch_maintenance_result_cleanup(NULL, &maintenance_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  open_options.query_indexing_enabled_set = 0;
+  rc = lc_pouch_open(root, NULL, &open_options, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_query_index_seq(pouch, ns, &query_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_query_index_ensure_current(pouch, ns, query_seq, 0,
+                                           &flush_result, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(flush_result.repaired);
+  memset(&flush_result, 0, sizeof(flush_result));
+  rc = lc_pouch_query_index_visit(pouch, ns, pouch_query_index_count_row,
+                                  &query_rows, &indexed_seq, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_int_equal(indexed_seq, query_seq);
+  assert_int_equal(query_rows, 0U);
+
+  lc_pouch_state_write_result_cleanup(NULL, &delete_result);
+  lc_pouch_state_write_result_cleanup(NULL, &write_result);
+  lc_pouch_close(pouch);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
+static void
 test_query_watermark_waits_for_exclusive_namespace_mutation(void **state) {
   static const char ns[] = "docs/query-watermark-lock";
   pouch_query_watermark_overlap overlap;
@@ -36024,6 +36120,8 @@ int main(int argc, char **argv) {
       cmocka_unit_test(test_compaction_reclaims_expired_obsolete_files),
       cmocka_unit_test(test_snapshot_high_water_survives_compaction_reopen),
       cmocka_unit_test(test_query_freshness_delete_survives_compaction_reopen),
+      cmocka_unit_test(
+          test_query_indexing_opt_out_invalidates_before_compaction),
       cmocka_unit_test(
           test_query_watermark_waits_for_exclusive_namespace_mutation),
       cmocka_unit_test(test_state_metadata_survives_snapshot_compaction),

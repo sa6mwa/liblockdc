@@ -67,9 +67,9 @@ int lc_pouch_query_index_flush_validated(lc_pouch *pouch, const char *ns,
                                          lc_pouch_generation state_index_seq,
                                          lc_pouch_query_index_flush_result *out,
                                          lc_error *error);
-/* Retires a shared-root namespace's derived query manifest after canonical
- * topology replacement. The next foreground flush rebuilds the projection;
- * callers must already hold namespace write authority. */
+/* Retires a namespace's derived query manifest before canonical topology can
+ * discard mutations it did not capture. The next foreground flush rebuilds
+ * the projection; callers must already hold namespace write authority. */
 int lc_pouch_query_index_invalidate_namespace(lc_pouch *pouch, const char *ns,
                                               lc_error *error);
 /** Returns whether the durable state sequence is newer than its index

@@ -11325,12 +11325,14 @@ static int lc_pouch_state_compact_namespace(
                                               &snapshot_cache);
     return LC_OK;
   }
-  /* An exclusive writer carries a complete in-memory index capture across
-   * each mutation, so its current manifest remains coupled to canonical
-   * state. A shared root accepts peer-owned asynchronous publications. Once
-   * compaction replaces its state topology, retire that derived manifest and
-   * let the next query rebuild from canonical state. */
-  if (!lc_pouch_single_writer_enabled(pouch)) {
+  /* An exclusive writer with live index maintenance carries a complete
+   * in-memory capture across each mutation, so its current manifest remains
+   * coupled to canonical state. A shared root, or any root opened with index
+   * maintenance disabled, can discard mutations that an existing manifest has
+   * not observed. Retire that derived manifest before compaction replaces the
+   * topology, so a later indexed reopen rebuilds from canonical state. */
+  if (!lc_pouch_single_writer_enabled(pouch) ||
+      !pouch->query_indexing_enabled) {
     rc = lc_pouch_query_index_invalidate_namespace(pouch, ns, error);
     if (rc != LC_OK) {
       if (abort_diagnostic != NULL) {
