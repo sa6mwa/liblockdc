@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <setjmp.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -127,7 +128,10 @@ enum {
   POUCH_E2E_HARDENING_CHURN_ROWS = 1024,
   POUCH_E2E_HARDENING_MULTI_SEGMENT_ROWS = 128,
   POUCH_E2E_HARDENING_OUTBOX_EFFECTS = 32,
-  POUCH_E2E_HARDENING_RETENTION_ROWS = 16
+  POUCH_E2E_HARDENING_RETENTION_ROWS = 16,
+  /* Keep this below one machine word: child results encode exactly-once
+   * terminal delivery as a compact bit set sent through a pipe. */
+  POUCH_E2E_SHARED_OUTBOX_ROWS = 24
 };
 
 #define POUCH_E2E_HARDENING_SEGMENT_BYTES (64UL * 1024UL * 1024UL)
@@ -153,6 +157,23 @@ typedef struct pouch_e2e_dispatcher_hold {
   int rc;
   char error_message[256];
 } pouch_e2e_dispatcher_hold;
+
+typedef struct pouch_e2e_outbox_child_result {
+  unsigned long delivered_mask;
+  size_t delivered;
+  int rc;
+  int stage;
+  char error_message[256];
+} pouch_e2e_outbox_child_result;
+
+typedef struct pouch_e2e_outbox_child {
+  pid_t pid;
+  int ready_read;
+  int start_write;
+  int result_read;
+  int claimed_read;
+  int release_write;
+} pouch_e2e_outbox_child;
 
 static int query_keys_e2e_begin(void *context, lc_error *error) {
   query_keys_e2e_capture *capture;
@@ -4898,6 +4919,615 @@ static void pouch_e2e_append_hardening_effect(lc_outbox *outbox, size_t index,
   lc_outbox_receipt_cleanup(&receipt);
 }
 
+static int pouch_e2e_outbox_effect_key(char *buffer, size_t capacity,
+                                       const char *label, size_t index) {
+  int written;
+
+  written = snprintf(buffer, capacity, "pouch-e2e-%s-key-%04zu", label, index);
+  return written > 0 && (size_t)written < capacity;
+}
+
+static int pouch_e2e_open_shared_client(const char *root, lc_client **out,
+                                        lc_error *error) {
+  lc_client_config config;
+  lc_pouch_settings settings;
+  const char *endpoints[1];
+  char endpoint[320];
+  int rc;
+
+  if (snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) < 0 ||
+      strlen(endpoint) >= sizeof(endpoint))
+    return LC_ERR_INVALID;
+  lc_client_config_init(&config);
+  lc_pouch_settings_init(&settings);
+  /* A small, explicitly shared layout makes every scenario span multiple
+   * segments. It keeps the process topology production-shaped while ensuring
+   * that cross-segment replay and writer coordination are exercised too. */
+  settings.set_mask =
+      LC_POUCH_SETTING_SINGLE_WRITER | LC_POUCH_SETTING_SEGMENT_TARGET_BYTES;
+  settings.single_writer = 0;
+  settings.segment_target_bytes = 4096U;
+  endpoints[0] = endpoint;
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.pouch_settings = &settings;
+  rc = lc_client_open(&config, out, error);
+  return rc;
+}
+
+static int pouch_e2e_append_shared_outbox_effect(lc_outbox *outbox,
+                                                 const char *label,
+                                                 size_t index,
+                                                 lc_error *error) {
+  lc_outbox_entry entry;
+  lc_outbox_receipt receipt;
+  lc_outbox_commit_result commit_result;
+  lc_outbox_transaction *transaction;
+  lc_source *payload;
+  char operation_id[128];
+  char effect_id[128];
+  char effect_key[128];
+  char payload_digest[160];
+  char payload_bytes[160];
+  int rc;
+
+  transaction = NULL;
+  payload = NULL;
+  lc_outbox_entry_init(&entry);
+  lc_outbox_receipt_init(&receipt);
+  lc_outbox_commit_result_init(&commit_result);
+  if (snprintf(operation_id, sizeof(operation_id), "pouch-e2e-%s-op-%04zu",
+               label, index) < 0 ||
+      snprintf(effect_id, sizeof(effect_id), "pouch-e2e-%s-effect-%04zu", label,
+               index) < 0 ||
+      !pouch_e2e_outbox_effect_key(effect_key, sizeof(effect_key), label,
+                                   index) ||
+      snprintf(payload_digest, sizeof(payload_digest),
+               "sha256:pouch-e2e-%s-%04zu", label, index) < 0 ||
+      snprintf(payload_bytes, sizeof(payload_bytes),
+               "{\"effect\":%zu,\"scenario\":\"%s\"}", index, label) < 0) {
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  entry.operation_id = operation_id;
+  entry.effect_id = effect_id;
+  entry.effect_key = effect_key;
+  entry.payload_digest = payload_digest;
+  entry.kind = "pouch-e2e";
+  entry.destination = "test://pouch-e2e";
+  entry.content_type = "application/json";
+  rc = lc_source_from_memory(payload_bytes, strlen(payload_bytes), &payload,
+                             error);
+  if (rc != LC_OK)
+    goto done;
+  rc = lc_outbox_append(outbox, &entry, payload, &transaction, &receipt, error);
+  if (rc != LC_OK)
+    goto done;
+  rc = lc_outbox_transaction_commit(transaction, &commit_result, error);
+  if (rc == LC_OK && commit_result.outbox_receipt_count != 1U)
+    rc = LC_ERR_INVALID;
+
+done:
+  if (transaction != NULL)
+    lc_outbox_transaction_close(transaction);
+  if (payload != NULL)
+    lc_source_close(payload);
+  lc_outbox_commit_result_cleanup(&commit_result);
+  lc_outbox_receipt_cleanup(&receipt);
+  return rc;
+}
+
+static void pouch_e2e_seed_shared_outbox(const char *root, const char *ns,
+                                         const char *label, size_t count,
+                                         lc_error *error) {
+  lc_client *client;
+  lc_outbox *outbox;
+  lc_outbox_config config;
+  size_t index;
+  int rc;
+
+  client = NULL;
+  outbox = NULL;
+  lc_outbox_config_init(&config);
+  rc = pouch_e2e_open_shared_client(root, &client, error);
+  assert_lc_ok(rc, error);
+  config.ns = ns;
+  config.owner = "pouch-e2e-shared-producer";
+  config.notification_capacity = count;
+  config.recovery_interval_seconds = 1L;
+  rc = lc_client_new_outbox(client, &config, &outbox, error);
+  assert_lc_ok(rc, error);
+  for (index = 0U; index < count; ++index) {
+    rc = pouch_e2e_append_shared_outbox_effect(outbox, label, index, error);
+    assert_lc_ok(rc, error);
+  }
+  lc_outbox_close(outbox);
+  lc_client_close(client);
+}
+
+static int pouch_e2e_outbox_effect_index(const char *effect_key,
+                                         const char *label, size_t count,
+                                         size_t *out) {
+  char expected[128];
+  size_t index;
+
+  if (effect_key == NULL || out == NULL)
+    return 0;
+  for (index = 0U; index < count; ++index) {
+    if (!pouch_e2e_outbox_effect_key(expected, sizeof(expected), label, index))
+      return 0;
+    if (strcmp(effect_key, expected) == 0) {
+      *out = index;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int pouch_e2e_shared_outbox_child(
+    const char *root, const char *ns, const char *owner, const char *label,
+    size_t total_count, size_t delivery_count, long claim_ttl_seconds,
+    int ready_fd, int start_fd, int claimed_fd, int release_fd,
+    pouch_e2e_outbox_child_result *result) {
+  lc_client *client;
+  lc_outbox *outbox;
+  lc_outbox_config config;
+  lc_outbox_dispatcher *dispatcher;
+  lc_error error;
+  size_t delivered;
+  char start;
+  int held;
+  int rc;
+
+  client = NULL;
+  outbox = NULL;
+  dispatcher = NULL;
+  delivered = 0U;
+  held = 0;
+  rc = LC_ERR_INVALID;
+  memset(result, 0, sizeof(*result));
+  result->rc = LC_ERR_INVALID;
+  result->stage = 1;
+  lc_error_init(&error);
+  lc_outbox_config_init(&config);
+  rc = pouch_e2e_open_shared_client(root, &client, &error);
+  if (rc != LC_OK)
+    goto done;
+  config.ns = ns;
+  config.owner = owner;
+  config.claim_ttl_seconds = claim_ttl_seconds;
+  config.notification_capacity = total_count;
+  /* A shared root intentionally has a positive periodic recovery cadence;
+   * the first blocking demand below still requests immediate startup repair. */
+  config.recovery_interval_seconds = 1L;
+  rc = lc_client_new_outbox(client, &config, &outbox, &error);
+  if (rc != LC_OK)
+    goto done;
+  rc = lc_outbox_dispatcher_get_or_start(outbox, &dispatcher, &error);
+  if (rc != LC_OK)
+    goto done;
+  result->stage = 2;
+  start = '\0';
+  if (!pouch_e2e_write_exact(ready_fd, "r", 1U) ||
+      !pouch_e2e_read_exact(start_fd, &start, 1U) || start != 's') {
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  held = 0;
+  result->stage = 3;
+  while (delivered < delivery_count) {
+    lc_outbox_job *job;
+    size_t index;
+
+    job = NULL;
+    rc = lc_outbox_dispatcher_next(dispatcher, -1L, &job, &error);
+    if (rc != LC_OK || job == NULL)
+      goto done;
+    if (!pouch_e2e_outbox_effect_index(job->effect_key, label, total_count,
+                                       &index) ||
+        (result->delivered_mask & (1UL << index)) != 0UL) {
+      lc_outbox_job_close(job);
+      rc = LC_ERR_INVALID;
+      goto done;
+    }
+    if (claimed_fd >= 0 && !held) {
+      char release;
+
+      if (!pouch_e2e_write_exact(claimed_fd, "c", 1U) ||
+          !pouch_e2e_read_exact(release_fd, &release, 1U) || release != 'q') {
+        lc_outbox_job_close(job);
+        rc = LC_ERR_INVALID;
+        goto done;
+      }
+      held = 1;
+    }
+    rc = lc_outbox_job_complete(job, NULL, &error);
+    if (rc != LC_OK) {
+      lc_outbox_job_close(job);
+      goto done;
+    }
+    result->delivered_mask |= 1UL << index;
+    ++delivered;
+  }
+  result->delivered = delivered;
+  result->stage = 4;
+
+done:
+  if (dispatcher != NULL)
+    lc_outbox_dispatcher_close(dispatcher);
+  if (outbox != NULL)
+    lc_outbox_close(outbox);
+  if (client != NULL)
+    lc_client_close(client);
+  result->rc = rc;
+  if (rc != LC_OK && error.message != NULL) {
+    (void)snprintf(result->error_message, sizeof(result->error_message), "%s",
+                   error.message);
+  }
+  lc_error_cleanup(&error);
+  return rc == LC_OK;
+}
+
+static void pouch_e2e_outbox_child_init(pouch_e2e_outbox_child *child) {
+  memset(child, 0, sizeof(*child));
+  child->pid = -1;
+  child->ready_read = -1;
+  child->start_write = -1;
+  child->result_read = -1;
+  child->claimed_read = -1;
+  child->release_write = -1;
+}
+
+static int pouch_e2e_launch_shared_outbox_child(
+    const char *root, const char *ns, const char *owner, const char *label,
+    size_t total_count, size_t delivery_count, long claim_ttl_seconds,
+    int hold_first, pouch_e2e_outbox_child *child) {
+  int ready_pipe[2];
+  int start_pipe[2];
+  int result_pipe[2];
+  int claimed_pipe[2];
+  int release_pipe[2];
+  pid_t pid;
+
+  ready_pipe[0] = ready_pipe[1] = -1;
+  start_pipe[0] = start_pipe[1] = -1;
+  result_pipe[0] = result_pipe[1] = -1;
+  claimed_pipe[0] = claimed_pipe[1] = -1;
+  release_pipe[0] = release_pipe[1] = -1;
+  pouch_e2e_outbox_child_init(child);
+  if (pipe(ready_pipe) != 0 || pipe(start_pipe) != 0 ||
+      pipe(result_pipe) != 0 ||
+      (hold_first && (pipe(claimed_pipe) != 0 || pipe(release_pipe) != 0)))
+    goto failed;
+  pid = fork();
+  if (pid < 0)
+    goto failed;
+  if (pid == 0) {
+    pouch_e2e_outbox_child_result result;
+    int ok;
+
+    (void)close(ready_pipe[0]);
+    (void)close(start_pipe[1]);
+    (void)close(result_pipe[0]);
+    if (hold_first) {
+      (void)close(claimed_pipe[0]);
+      (void)close(release_pipe[1]);
+    }
+    ok = pouch_e2e_shared_outbox_child(
+        root, ns, owner, label, total_count, delivery_count, claim_ttl_seconds,
+        ready_pipe[1], start_pipe[0], hold_first ? claimed_pipe[1] : -1,
+        hold_first ? release_pipe[0] : -1, &result);
+    (void)pouch_e2e_write_exact(result_pipe[1], &result, sizeof(result));
+    (void)close(ready_pipe[1]);
+    (void)close(start_pipe[0]);
+    (void)close(result_pipe[1]);
+    if (hold_first) {
+      (void)close(claimed_pipe[1]);
+      (void)close(release_pipe[0]);
+    }
+    _exit(ok ? 0 : 1);
+  }
+  (void)close(ready_pipe[1]);
+  (void)close(start_pipe[0]);
+  (void)close(result_pipe[1]);
+  child->pid = pid;
+  child->ready_read = ready_pipe[0];
+  child->start_write = start_pipe[1];
+  child->result_read = result_pipe[0];
+  if (hold_first) {
+    (void)close(claimed_pipe[1]);
+    (void)close(release_pipe[0]);
+    child->claimed_read = claimed_pipe[0];
+    child->release_write = release_pipe[1];
+  }
+  return LC_OK;
+
+failed:
+  if (ready_pipe[0] >= 0)
+    (void)close(ready_pipe[0]);
+  if (ready_pipe[1] >= 0)
+    (void)close(ready_pipe[1]);
+  if (start_pipe[0] >= 0)
+    (void)close(start_pipe[0]);
+  if (start_pipe[1] >= 0)
+    (void)close(start_pipe[1]);
+  if (result_pipe[0] >= 0)
+    (void)close(result_pipe[0]);
+  if (result_pipe[1] >= 0)
+    (void)close(result_pipe[1]);
+  if (claimed_pipe[0] >= 0)
+    (void)close(claimed_pipe[0]);
+  if (claimed_pipe[1] >= 0)
+    (void)close(claimed_pipe[1]);
+  if (release_pipe[0] >= 0)
+    (void)close(release_pipe[0]);
+  if (release_pipe[1] >= 0)
+    (void)close(release_pipe[1]);
+  return LC_ERR_INVALID;
+}
+
+static void
+pouch_e2e_wait_shared_outbox_child_ready(pouch_e2e_outbox_child *child) {
+  char ready;
+  pouch_e2e_outbox_child_result result;
+  int status;
+
+  if (!pouch_e2e_read_exact(child->ready_read, &ready, 1U)) {
+    memset(&result, 0, sizeof(result));
+    (void)pouch_e2e_read_exact(child->result_read, &result, sizeof(result));
+    (void)close(child->ready_read);
+    child->ready_read = -1;
+    (void)close(child->result_read);
+    child->result_read = -1;
+    (void)waitpid(child->pid, &status, 0);
+    child->pid = -1;
+    print_message("shared outbox child failed before ready at stage %d: %s\n",
+                  result.stage, result.error_message);
+    assert_int_equal(result.rc, LC_OK);
+  }
+  assert_int_equal(ready, 'r');
+  assert_int_equal(close(child->ready_read), 0);
+  child->ready_read = -1;
+}
+
+static void pouch_e2e_start_shared_outbox_child(pouch_e2e_outbox_child *child) {
+  assert_true(pouch_e2e_write_exact(child->start_write, "s", 1U));
+  assert_int_equal(close(child->start_write), 0);
+  child->start_write = -1;
+}
+
+static void
+pouch_e2e_release_shared_outbox_child(pouch_e2e_outbox_child *child) {
+  assert_true(pouch_e2e_write_exact(child->release_write, "q", 1U));
+  assert_int_equal(close(child->release_write), 0);
+  child->release_write = -1;
+}
+
+static pouch_e2e_outbox_child_result
+pouch_e2e_collect_shared_outbox_child(pouch_e2e_outbox_child *child) {
+  pouch_e2e_outbox_child_result result;
+  int status;
+
+  memset(&result, 0, sizeof(result));
+  assert_true(
+      pouch_e2e_read_exact(child->result_read, &result, sizeof(result)));
+  assert_int_equal(close(child->result_read), 0);
+  child->result_read = -1;
+  assert_int_equal(waitpid(child->pid, &status, 0), child->pid);
+  child->pid = -1;
+  assert_true(WIFEXITED(status));
+  if (result.rc != LC_OK) {
+    print_message("shared outbox child failed at stage %d: %s\n", result.stage,
+                  result.error_message);
+  }
+  assert_int_equal(result.rc, LC_OK);
+  assert_int_equal(WEXITSTATUS(status), 0);
+  return result;
+}
+
+static unsigned long pouch_e2e_shared_outbox_full_mask(size_t count) {
+  assert_true(count < sizeof(unsigned long) * 8U);
+  return (1UL << count) - 1UL;
+}
+
+static void test_pouch_shared_outbox_competing_instances(void **state) {
+  lc_error error;
+  pouch_e2e_outbox_child first;
+  pouch_e2e_outbox_child second;
+  pouch_e2e_outbox_child_result first_result;
+  pouch_e2e_outbox_child_result second_result;
+  char root[256];
+  char endpoint[320];
+  unsigned long full_mask;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  make_pouch_root("outbox-competing", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  /* The producer is a normal transaction producer, not a test-only record
+   * writer. It closes before either independently started worker opens its
+   * own Pouch session, which also proves startup reconciliation. */
+  pouch_e2e_seed_shared_outbox(root, "outbox-shared", "competing",
+                               POUCH_E2E_SHARED_OUTBOX_ROWS, &error);
+  rc = pouch_e2e_launch_shared_outbox_child(
+      root, "outbox-shared", "pouch-e2e-instance-a", "competing",
+      POUCH_E2E_SHARED_OUTBOX_ROWS, POUCH_E2E_SHARED_OUTBOX_ROWS / 2U, 0, 0,
+      &first);
+  assert_int_equal(rc, LC_OK);
+  rc = pouch_e2e_launch_shared_outbox_child(
+      root, "outbox-shared", "pouch-e2e-instance-b", "competing",
+      POUCH_E2E_SHARED_OUTBOX_ROWS, POUCH_E2E_SHARED_OUTBOX_ROWS / 2U, 0, 0,
+      &second);
+  assert_int_equal(rc, LC_OK);
+  pouch_e2e_wait_shared_outbox_child_ready(&first);
+  pouch_e2e_wait_shared_outbox_child_ready(&second);
+  pouch_e2e_start_shared_outbox_child(&first);
+  pouch_e2e_start_shared_outbox_child(&second);
+  first_result = pouch_e2e_collect_shared_outbox_child(&first);
+  second_result = pouch_e2e_collect_shared_outbox_child(&second);
+  full_mask = pouch_e2e_shared_outbox_full_mask(POUCH_E2E_SHARED_OUTBOX_ROWS);
+  assert_int_equal(first_result.delivered, POUCH_E2E_SHARED_OUTBOX_ROWS / 2U);
+  assert_int_equal(second_result.delivered, POUCH_E2E_SHARED_OUTBOX_ROWS / 2U);
+  assert_int_equal(first_result.delivered_mask & second_result.delivered_mask,
+                   0UL);
+  assert_int_equal(first_result.delivered_mask | second_result.delivered_mask,
+                   full_mask);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_shared_outbox_independent_namespaces(void **state) {
+  const size_t rows_per_namespace = POUCH_E2E_SHARED_OUTBOX_ROWS / 2U;
+  lc_error error;
+  pouch_e2e_outbox_child alpha;
+  pouch_e2e_outbox_child beta;
+  pouch_e2e_outbox_child_result alpha_result;
+  pouch_e2e_outbox_child_result beta_result;
+  char root[256];
+  char endpoint[320];
+  unsigned long full_mask;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  make_pouch_root("outbox-namespaces", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  pouch_e2e_seed_shared_outbox(root, "outbox-alpha", "alpha",
+                               rows_per_namespace, &error);
+  pouch_e2e_seed_shared_outbox(root, "outbox-beta", "beta", rows_per_namespace,
+                               &error);
+  rc = pouch_e2e_launch_shared_outbox_child(
+      root, "outbox-alpha", "pouch-e2e-alpha", "alpha", rows_per_namespace,
+      rows_per_namespace, 0L, 0, &alpha);
+  assert_int_equal(rc, LC_OK);
+  rc = pouch_e2e_launch_shared_outbox_child(
+      root, "outbox-beta", "pouch-e2e-beta", "beta", rows_per_namespace,
+      rows_per_namespace, 0L, 0, &beta);
+  assert_int_equal(rc, LC_OK);
+  pouch_e2e_wait_shared_outbox_child_ready(&alpha);
+  pouch_e2e_wait_shared_outbox_child_ready(&beta);
+  pouch_e2e_start_shared_outbox_child(&alpha);
+  pouch_e2e_start_shared_outbox_child(&beta);
+  alpha_result = pouch_e2e_collect_shared_outbox_child(&alpha);
+  beta_result = pouch_e2e_collect_shared_outbox_child(&beta);
+  full_mask = pouch_e2e_shared_outbox_full_mask(rows_per_namespace);
+  assert_int_equal(alpha_result.delivered, rows_per_namespace);
+  assert_int_equal(beta_result.delivered, rows_per_namespace);
+  assert_int_equal(alpha_result.delivered_mask, full_mask);
+  assert_int_equal(beta_result.delivered_mask, full_mask);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_shared_outbox_rolling_handoff(void **state) {
+  lc_error error;
+  pouch_e2e_outbox_child old_instance;
+  pouch_e2e_outbox_child new_instance;
+  pouch_e2e_outbox_child_result old_result;
+  pouch_e2e_outbox_child_result new_result;
+  char claimed;
+  char root[256];
+  char endpoint[320];
+  unsigned long full_mask;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  make_pouch_root("outbox-rolling", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  pouch_e2e_seed_shared_outbox(root, "outbox-rolling", "rolling",
+                               POUCH_E2E_SHARED_OUTBOX_ROWS, &error);
+
+  /* The old instance owns a real durable claim while the new instance opens
+   * and drains its half. No sleep or race is used to manufacture overlap. */
+  rc = pouch_e2e_launch_shared_outbox_child(
+      root, "outbox-rolling", "pouch-e2e-old", "rolling",
+      POUCH_E2E_SHARED_OUTBOX_ROWS, POUCH_E2E_SHARED_OUTBOX_ROWS / 2U, 0L, 1,
+      &old_instance);
+  assert_int_equal(rc, LC_OK);
+  pouch_e2e_wait_shared_outbox_child_ready(&old_instance);
+  pouch_e2e_start_shared_outbox_child(&old_instance);
+  assert_true(pouch_e2e_read_exact(old_instance.claimed_read, &claimed, 1U));
+  assert_int_equal(claimed, 'c');
+  assert_int_equal(close(old_instance.claimed_read), 0);
+  old_instance.claimed_read = -1;
+
+  rc = pouch_e2e_launch_shared_outbox_child(
+      root, "outbox-rolling", "pouch-e2e-new", "rolling",
+      POUCH_E2E_SHARED_OUTBOX_ROWS, POUCH_E2E_SHARED_OUTBOX_ROWS / 2U, 0L, 0,
+      &new_instance);
+  assert_int_equal(rc, LC_OK);
+  pouch_e2e_wait_shared_outbox_child_ready(&new_instance);
+  pouch_e2e_start_shared_outbox_child(&new_instance);
+  pouch_e2e_release_shared_outbox_child(&old_instance);
+  old_result = pouch_e2e_collect_shared_outbox_child(&old_instance);
+  new_result = pouch_e2e_collect_shared_outbox_child(&new_instance);
+  full_mask = pouch_e2e_shared_outbox_full_mask(POUCH_E2E_SHARED_OUTBOX_ROWS);
+  assert_int_equal(old_result.delivered, POUCH_E2E_SHARED_OUTBOX_ROWS / 2U);
+  assert_int_equal(new_result.delivered, POUCH_E2E_SHARED_OUTBOX_ROWS / 2U);
+  assert_int_equal(old_result.delivered_mask & new_result.delivered_mask, 0UL);
+  assert_int_equal(old_result.delivered_mask | new_result.delivered_mask,
+                   full_mask);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void test_pouch_shared_outbox_abandoned_claim_recovers(void **state) {
+  lc_error error;
+  pouch_e2e_outbox_child failed_instance;
+  pouch_e2e_outbox_child recovering_instance;
+  pouch_e2e_outbox_child_result recovered;
+  char claimed;
+  char root[256];
+  char endpoint[320];
+  int status;
+  int rc;
+
+  (void)state;
+  lc_error_init(&error);
+  make_pouch_root("outbox-abandoned", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  pouch_e2e_seed_shared_outbox(root, "outbox-abandoned", "abandoned", 1U,
+                               &error);
+  rc = pouch_e2e_launch_shared_outbox_child(root, "outbox-abandoned",
+                                            "pouch-e2e-failed", "abandoned", 1U,
+                                            1U, 1L, 1, &failed_instance);
+  assert_int_equal(rc, LC_OK);
+  pouch_e2e_wait_shared_outbox_child_ready(&failed_instance);
+  pouch_e2e_start_shared_outbox_child(&failed_instance);
+  assert_true(pouch_e2e_read_exact(failed_instance.claimed_read, &claimed, 1U));
+  assert_int_equal(claimed, 'c');
+  assert_int_equal(close(failed_instance.claimed_read), 0);
+  failed_instance.claimed_read = -1;
+
+  /* Simulate an ungraceful instance replacement after the durable claim has
+   * been handed to its foreign-effect owner. The next instance must recover
+   * that record at its documented one-second claim deadline. */
+  assert_int_equal(kill(failed_instance.pid, SIGKILL), 0);
+  assert_int_equal(waitpid(failed_instance.pid, &status, 0),
+                   failed_instance.pid);
+  failed_instance.pid = -1;
+  assert_true(WIFSIGNALED(status));
+  assert_int_equal(WTERMSIG(status), SIGKILL);
+  assert_int_equal(close(failed_instance.result_read), 0);
+  failed_instance.result_read = -1;
+  assert_int_equal(close(failed_instance.release_write), 0);
+  failed_instance.release_write = -1;
+
+  rc = pouch_e2e_launch_shared_outbox_child(
+      root, "outbox-abandoned", "pouch-e2e-recovering", "abandoned", 1U, 1U, 1L,
+      0, &recovering_instance);
+  assert_int_equal(rc, LC_OK);
+  pouch_e2e_wait_shared_outbox_child_ready(&recovering_instance);
+  pouch_e2e_start_shared_outbox_child(&recovering_instance);
+  recovered = pouch_e2e_collect_shared_outbox_child(&recovering_instance);
+  assert_int_equal(recovered.delivered, 1U);
+  assert_int_equal(recovered.delivered_mask, 1UL);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
 static void pouch_e2e_write_released_hardening_state(lc_client *client,
                                                      size_t index,
                                                      lc_error *error) {
@@ -6273,6 +6903,16 @@ int main(void) {
       cmocka_unit_test(
           test_pouch_direct_marker_damage_and_index_rebuild_after_snapshot),
       cmocka_unit_test(test_pouch_direct_consumer_service_with_state)};
+  return cmocka_run_group_tests(tests, setup_pouch_e2e_group,
+                                teardown_pouch_e2e_group);
+}
+#elif defined(LC_E2E_GROUP_POUCH_SHARED_OUTBOX)
+int main(void) {
+  const struct CMUnitTest tests[] = {
+      cmocka_unit_test(test_pouch_shared_outbox_competing_instances),
+      cmocka_unit_test(test_pouch_shared_outbox_independent_namespaces),
+      cmocka_unit_test(test_pouch_shared_outbox_rolling_handoff),
+      cmocka_unit_test(test_pouch_shared_outbox_abandoned_claim_recovers)};
   return cmocka_run_group_tests(tests, setup_pouch_e2e_group,
                                 teardown_pouch_e2e_group);
 }

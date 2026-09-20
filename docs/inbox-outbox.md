@@ -1162,6 +1162,16 @@ must use Pouch's shared-writer mode. It is a supported recovery/distribution
 path, not the expected hot path. Remote lockd follows the same component
 semantics without changing the direct-key notification model.
 
+`lc_e2e_pouch_shared_outbox` proves this boundary with real transactional
+append/commit producers and independently opened Pouch clients, using a small
+multi-segment root. Its scenarios cover two dispatchers competing for one
+outbox namespace, two independent namespaces on one root, an overlapping
+rolling handoff while the old instance holds a durable claim, and replacement
+after an ungraceful claimed-job exit. Each test checks the exact terminal key
+set, not merely the number of successful calls. The claim-expiry scenario uses
+the configured one-second lease deadline; the other coordination is pipe
+driven and has no timing sleep.
+
 ## Ordering
 
 V1 makes no ordering guarantee and exposes no `ordering_key`. A client that
@@ -1395,6 +1405,12 @@ preflushed-index, persisted-after-reopen, compacted, shared-writer, and
 shared-writer-compacted reconciliation cases serially under the same bounded
 timeout. The shared-writer cases use two dispatchers by default; set
 `OUTBOX_BENCH_HARDENING_DISPATCHERS` to change that deliberately.
+
+Those shared-writer benchmark cases intentionally make the dispatchers compete
+for one namespace and one pending-key set. They measure contention and bounded
+recovery work, not throughput for two independent outboxes. Use separate
+namespaces on the same root to model independent rolling services; the shared
+outbox E2E suite above proves that topology's survival behavior.
 
 Timing is reported rather than enforced as a universal pass/fail threshold:
 storage media, remote TLS, and lockd deployment topology materially affect the

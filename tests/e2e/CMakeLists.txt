@@ -76,6 +76,7 @@ endfunction()
 
 lc_add_e2e_shard(lc_e2e_disk_direct LC_E2E_GROUP_DISK_DIRECT)
 lc_add_e2e_shard(lc_e2e_pouch_direct LC_E2E_GROUP_POUCH_DIRECT)
+lc_add_e2e_shard(lc_e2e_pouch_shared_outbox LC_E2E_GROUP_POUCH_SHARED_OUTBOX)
 lc_add_e2e_shard(lc_e2e_s3_direct LC_E2E_GROUP_S3_DIRECT)
 lc_add_e2e_shard(lc_e2e_mem_direct LC_E2E_GROUP_MEM_DIRECT)
 lc_add_e2e_shard(lc_e2e_disk_consumer LC_E2E_GROUP_DISK_CONSUMER)
@@ -267,6 +268,7 @@ endif()
 set(lockdc_e2e_test_targets
   lc_e2e_disk_direct
   lc_e2e_pouch_direct
+  lc_e2e_pouch_shared_outbox
   lc_e2e_s3_direct
   lc_e2e_mem_direct
   lc_e2e_disk_consumer

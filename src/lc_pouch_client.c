@@ -12010,30 +12010,50 @@ static int lc_pouch_txn_apply_participants(lc_client_handle *client,
 static int lc_pouch_txn_delete_recovered_record(lc_client_handle *client,
                                                 const char *key,
                                                 lc_error *error) {
+  enum { LC_POUCH_TXN_RECOVERY_DELETE_ATTEMPTS = 3 };
   lc_pouch_state_read_result read_result;
   lc_pouch_state_write_options options;
   lc_pouch_state_write_result result;
+  size_t attempt;
   int rc;
 
-  memset(&read_result, 0, sizeof(read_result));
-  memset(&options, 0, sizeof(options));
-  memset(&result, 0, sizeof(result));
-  rc = lc_pouch_state_read(client->pouch, LC_POUCH_TXN_NAMESPACE, key,
-                           &read_result, error);
-  if (rc != LC_OK) {
-    return rc;
-  }
-  if (!read_result.found) {
+  /* Every Pouch client recovers durable transaction decisions at open. Two
+   * rolling instances can therefore observe the same completed record. The
+   * delete is deliberately CAS-protected, but losing that cleanup race means
+   * another recovery made equivalent progress, not that opening the second
+   * shared-writer client is unsafe. Re-read and retry a bounded number of
+   * times so a genuinely changing record still reports its real error. */
+  for (attempt = 0U; attempt < LC_POUCH_TXN_RECOVERY_DELETE_ATTEMPTS;
+       ++attempt) {
+    memset(&read_result, 0, sizeof(read_result));
+    memset(&options, 0, sizeof(options));
+    memset(&result, 0, sizeof(result));
+    rc = lc_pouch_state_read(client->pouch, LC_POUCH_TXN_NAMESPACE, key,
+                             &read_result, error);
+    if (rc != LC_OK)
+      return rc;
+    if (!read_result.found) {
+      lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
+      return LC_OK;
+    }
+    options.has_expected_version = 1;
+    options.expected_version = read_result.version;
+    options.object_record = 1;
     lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
-    return LC_OK;
+    rc = lc_pouch_state_delete(client->pouch, LC_POUCH_TXN_NAMESPACE, key,
+                               &options, &result, error);
+    lc_pouch_state_write_result_cleanup(&client->allocator, &result);
+    if (rc == LC_OK || error == NULL || error->code != LC_ERR_INVALID ||
+        error->message == NULL ||
+        strcmp(error->message,
+               "pouch state delete version precondition failed") != 0) {
+      return rc;
+    }
+    if (attempt + 1U == LC_POUCH_TXN_RECOVERY_DELETE_ATTEMPTS)
+      return rc;
+    lc_error_cleanup(error);
+    lc_error_init(error);
   }
-  options.has_expected_version = 1;
-  options.expected_version = read_result.version;
-  lc_pouch_state_read_result_cleanup(&client->allocator, &read_result);
-  options.object_record = 1;
-  rc = lc_pouch_state_delete(client->pouch, LC_POUCH_TXN_NAMESPACE, key,
-                             &options, &result, error);
-  lc_pouch_state_write_result_cleanup(&client->allocator, &result);
   return rc;
 }
 
