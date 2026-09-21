@@ -4679,7 +4679,8 @@ static int lc_pouch_query_scan_summary_visit(
   matched = context->selector == NULL ? 1 : 0;
   if (context->selector != NULL || context->emit_documents) {
     rc = lc_pouch_state_scan_summary_read_body(
-        context->client->pouch, context->ns, entry, &read_result, error);
+        context->client->pouch, context->ns, entry,
+        context->any_text_contains_needle != NULL, &read_result, error);
     if (rc != LC_OK) {
       return rc;
     }
@@ -4734,7 +4735,16 @@ static int lc_pouch_query_run_scan_predicate(lc_pouch_query_scan_context *scan,
   if (scan->selector != NULL) {
     rc = lc_pouch_query_index_plan_from_selector(scan->runtime, scan->selector,
                                                  &plan, error);
-    if (rc == LC_OK && lc_pouch_query_scan_scalar_plan_supported(&plan)) {
+    if (rc == LC_OK && plan.contains && plan.value_count == 1U &&
+        plan.field != NULL && strcmp(plan.field, "/...") == 0) {
+      /* An any-text selector must consume the complete JSON document. Besides
+       * avoiding LQL's general matcher for this common scan, that guarantee
+       * lets scan summaries safely warm their bounded transformed-body cache.
+       */
+      scan->any_text_contains_needle = plan.values[0];
+      scan->any_text_contains_ignore_case = plan.ignore_case;
+    } else if (rc == LC_OK &&
+               lc_pouch_query_scan_scalar_plan_supported(&plan)) {
       /* The scalar body matcher is a bounded streaming scan optimization, not
        * a query-index feature. In particular, non-query Pouch roots must use
        * it for outbox's durable envelope predicates: routing those simple
@@ -4786,6 +4796,8 @@ static int lc_pouch_query_run_scan_predicate(lc_pouch_query_scan_context *scan,
         &scan->client->pouch->allocator, &page);
   }
   lc_free_with_allocator(&scan->client->pouch->allocator, owned_start_after);
+  scan->any_text_contains_needle = NULL;
+  scan->any_text_contains_ignore_case = 0;
   scan->scan_scalar_plan = NULL;
   lc_pouch_query_index_plan_cleanup(&plan);
   return rc;

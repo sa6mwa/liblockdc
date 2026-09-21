@@ -159,12 +159,13 @@ static void outbox_fuzz_run(const uint8_t *data, size_t size,
     if (transaction == NULL || command_receipt.state != LC_COMMAND_PENDING)
       abort();
     lc_command_result_init(&command_result);
-    command_result.result_code = "fuzz-terminal";
     if ((knobs & 16U) != 0U) {
+      command_result.failure_code = "fuzz-terminal";
       outbox_fuzz_require(lc_outbox_transaction_fail_command(
                               transaction, &command_result, &error),
                           &error, "fail-command");
     } else {
+      command_result.result_code = "fuzz-terminal";
       outbox_fuzz_require(lc_outbox_transaction_complete_command(
                               transaction, &command_result, &error),
                           &error, "complete-command");

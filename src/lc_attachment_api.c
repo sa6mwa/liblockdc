@@ -787,6 +787,8 @@ static int lc_engine_perform_streaming(
     long request_timeout_ms;
 
     if (!lc_engine_client_attempt_timeout_ms(client, &request_timeout_ms)) {
+      curl_slist_free_all(headers);
+      lc_engine_stream_state_cleanup(state);
       return lc_engine_set_transport_error(state->error,
                                            "request deadline elapsed");
     }
@@ -825,6 +827,8 @@ static int lc_engine_perform_streaming(
     url_length = strlen(client->endpoints[endpoint_index]) + strlen(path) + 1U;
     url = (char *)malloc(url_length);
     if (url == NULL) {
+      curl_slist_free_all(headers);
+      lc_engine_stream_state_cleanup(state);
       return lc_engine_set_client_error(state->error, LC_ENGINE_ERROR_NO_MEMORY,
                                         "failed to allocate request URL");
     }
@@ -833,6 +837,8 @@ static int lc_engine_perform_streaming(
     curl = curl_easy_init();
     if (curl == NULL) {
       free(url);
+      curl_slist_free_all(headers);
+      lc_engine_stream_state_cleanup(state);
       return lc_engine_set_transport_error(state->error,
                                            "failed to initialize curl");
     }
@@ -971,6 +977,8 @@ static int lc_engine_perform_streaming(
     lc_engine_stream_state_cleanup(state);
   }
 
+  curl_slist_free_all(headers);
+  lc_engine_stream_state_cleanup(state);
   return lc_engine_set_transport_error(state->error,
                                        "all endpoints rejected the request");
 }

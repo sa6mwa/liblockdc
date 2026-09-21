@@ -4008,7 +4008,7 @@ static int lc_pouch_state_scan_body_snapshot_append(
 
 static int lc_pouch_state_scan_body_snapshot_open_result(
     lc_pouch *pouch, const char *ns,
-    lc_pouch_state_scan_body_snapshot *snapshot,
+    lc_pouch_state_scan_body_snapshot *snapshot, int cache_completed_body,
     lc_pouch_state_read_result *out, lc_error *error) {
   lc_pouch_state_cache_guard cache_guard;
   lc_pouch_namespace_logstore *cache;
@@ -4059,8 +4059,13 @@ static int lc_pouch_state_scan_body_snapshot_open_result(
                           NULL, NULL);
     }
   }
+  /* Most scan predicates stop as soon as their selector is decided. Do not
+   * allocate a cache tee for those paths: it would retain a partial body that
+   * cannot be reused, turning a scan larger than the bounded cache into
+   * repeated allocation, crypto setup, and eviction. The caller may opt in
+   * only when it will consume the complete body, such as an any-text scan. */
   memset(&cache_guard, 0, sizeof(cache_guard));
-  if (rc == LC_OK && out->body == NULL &&
+  if (rc == LC_OK && out->body == NULL && cache_completed_body &&
       snapshot->bytes <= LC_POUCH_STATE_BODY_CACHE_RECORD_MAX_BYTES) {
     rc = lc_pouch_state_cache_guard_lock(pouch, ns, &cache_guard, error);
     if (rc == LC_OK) {
@@ -16324,7 +16329,7 @@ int lc_pouch_state_read_many_metadata(lc_pouch *pouch, const char *ns,
 
 int lc_pouch_state_scan_summary_read_body(
     lc_pouch *pouch, const char *ns,
-    const lc_pouch_state_scan_summary_entry *entry,
+    const lc_pouch_state_scan_summary_entry *entry, int cache_completed_body,
     lc_pouch_state_read_result *out, lc_error *error) {
   lc_pouch_state_scan_body_snapshot *snapshot;
 
@@ -16334,8 +16339,8 @@ int lc_pouch_state_scan_summary_read_body(
                         NULL, NULL, "pouch");
   }
   snapshot = (lc_pouch_state_scan_body_snapshot *)entry->opaque;
-  return lc_pouch_state_scan_body_snapshot_open_result(pouch, ns, snapshot, out,
-                                                       error);
+  return lc_pouch_state_scan_body_snapshot_open_result(
+      pouch, ns, snapshot, cache_completed_body, out, error);
 }
 
 void lc_pouch_state_scan_summaries_result_cleanup(

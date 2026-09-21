@@ -13,6 +13,23 @@
 static const char *LC_ENGINE_VERSION_STRING = LC_VERSION_STRING;
 #define LC_ENGINE_HTTP_ERROR_BODY_LIMIT_DEFAULT (8U * 1024U)
 
+#ifdef LOCKDC_TEST_BUILD
+int (*lc_transport_test_clock_gettime)(clockid_t clock_id, struct timespec *out,
+                                       void *context) = NULL;
+void *lc_transport_test_clock_context = NULL;
+
+static int lc_transport_clock_gettime(clockid_t clock_id,
+                                      struct timespec *out) {
+  if (lc_transport_test_clock_gettime != NULL) {
+    return lc_transport_test_clock_gettime(clock_id, out,
+                                           lc_transport_test_clock_context);
+  }
+  return clock_gettime(clock_id, out);
+}
+#else
+#define lc_transport_clock_gettime clock_gettime
+#endif
+
 static size_t lc_engine_lonejson_curl_upload_read_callback(char *ptr,
                                                            size_t size,
                                                            size_t nmemb,
@@ -117,7 +134,7 @@ int lc_engine_client_attempt_timeout_ms(const lc_engine_client *client,
     *out = configured;
     return 1;
   }
-  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+  if (lc_transport_clock_gettime(CLOCK_MONOTONIC, &now) != 0)
     return 0;
   if (now.tv_sec > client->request_deadline.tv_sec ||
       (now.tv_sec == client->request_deadline.tv_sec &&

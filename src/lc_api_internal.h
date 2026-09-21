@@ -35,6 +35,13 @@ typedef struct lc_message_handle lc_message_handle;
 typedef struct lc_consumer_service_handle lc_consumer_service_handle;
 typedef struct lc_history_consumer_handle lc_history_consumer_handle;
 
+/* Test-build-only transport clock seam. The test library defines these when
+ * LOCKDC_BUILD_TESTS is enabled; production code never references them. */
+extern int (*lc_transport_test_clock_gettime)(clockid_t clock_id,
+                                              struct timespec *out,
+                                              void *context);
+extern void *lc_transport_test_clock_context;
+
 #ifdef LOCKDC_TEST_BUILD
 typedef void (*lc_outbox_test_after_reconcile_query_hook_fn)(void *context);
 extern lc_outbox_test_after_reconcile_query_hook_fn

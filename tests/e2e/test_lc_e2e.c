@@ -271,6 +271,22 @@ static int query_keys_e2e_end(void *context, lc_error *error) {
   return 1;
 }
 
+/* A synchronous Pouch index boundary may bootstrap an absent derived view or
+ * repair a manifest retired by shared-root compaction.  Both outcomes make
+ * the exact same current-index guarantee; callers must not infer a stronger
+ * lifecycle distinction from this diagnostic. */
+static void
+pouch_e2e_assert_current_index_flush(lc_index_flush_res *flush_res) {
+  int current;
+
+  current = flush_res != NULL && flush_res->accepted && flush_res->flushed &&
+            !flush_res->pending && flush_res->flush_id != NULL &&
+            (strcmp(flush_res->flush_id, "pouch-query-index-flush") == 0 ||
+             strcmp(flush_res->flush_id, "pouch-query-index-repair") == 0);
+  lc_index_flush_res_cleanup(flush_res);
+  assert_true(current);
+}
+
 static int pouch_e2e_key_begin(void *context, lc_error *error) {
   (void)context;
   (void)error;
@@ -7185,9 +7201,7 @@ test_pouch_shared_hardening_churn_dispatch_and_maintenance(void **state) {
   flush_req.mode = "sync";
   rc = reader->flush_index(reader, &flush_req, &flush_res, &error);
   assert_lc_ok(rc, &error);
-  assert_true(flush_res.flushed);
-  assert_string_equal(flush_res.flush_id, "pouch-query-index-repair");
-  lc_index_flush_res_cleanup(&flush_res);
+  pouch_e2e_assert_current_index_flush(&flush_res);
   query_capture.key_prefix = "state/churn/";
   query_capture.key_prefix_len = strlen(query_capture.key_prefix);
   query_capture.expected_count = POUCH_E2E_HARDENING_CHURN_ROWS;
@@ -7206,9 +7220,7 @@ test_pouch_shared_hardening_churn_dispatch_and_maintenance(void **state) {
   flush_req.ns = "hardening-multi";
   rc = reader->flush_index(reader, &flush_req, &flush_res, &error);
   assert_lc_ok(rc, &error);
-  assert_true(flush_res.flushed);
-  assert_string_equal(flush_res.flush_id, "pouch-query-index-repair");
-  lc_index_flush_res_cleanup(&flush_res);
+  pouch_e2e_assert_current_index_flush(&flush_res);
   rows = pouch_e2e_query_key_count(reader, "hardening-multi",
                                    multi_survivor_selector, &error);
   assert_int_equal(rows, 1U);

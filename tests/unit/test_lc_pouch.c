@@ -182,6 +182,8 @@ typedef struct pouch_fail_allocator_state {
   size_t calls;
   size_t fail_at;
   size_t free_calls;
+  size_t large_allocation_minimum;
+  size_t large_allocations;
 } pouch_fail_allocator_state;
 
 typedef struct pouch_acquire_poll_hook_state {
@@ -1503,6 +1505,10 @@ static void *pouch_fail_malloc(void *context, size_t size) {
 
   state = (pouch_fail_allocator_state *)context;
   state->calls += 1U;
+  if (state->large_allocation_minimum > 0U &&
+      size >= state->large_allocation_minimum) {
+    state->large_allocations += 1U;
+  }
   if (state->fail_at != 0U && state->calls == state->fail_at) {
     return NULL;
   }
@@ -1514,6 +1520,10 @@ static void *pouch_fail_realloc(void *context, void *ptr, size_t size) {
 
   state = (pouch_fail_allocator_state *)context;
   state->calls += 1U;
+  if (state->large_allocation_minimum > 0U &&
+      size >= state->large_allocation_minimum) {
+    state->large_allocations += 1U;
+  }
   if (state->fail_at != 0U && state->calls == state->fail_at) {
     return NULL;
   }
@@ -32501,6 +32511,137 @@ test_query_documents_scan_matches_escaped_pointer_paths(void **state) {
   lc_error_cleanup(&error);
 }
 
+static void
+test_query_scan_body_cache_warms_only_full_consumption(void **state) {
+  static const char ns[] = "docs/query-scan-discard-no-warm";
+  static const char prefix[] = "{\"status\":\"matched\",\"payload\":\"";
+  static const char suffix[] = "\"}";
+  pouch_fail_allocator_state allocator_state;
+  lc_allocator allocator;
+  lc_client_config config;
+  lc_client *client;
+  lc_error error;
+  lc_pouch *pouch;
+  lc_pouch_state_write_result write_result;
+  lc_query_req query_req;
+  lc_query_res query_res;
+  lc_sink *sink;
+  lc_source *source;
+  const char *endpoints[1];
+  char endpoint[640];
+  char root[512];
+  char *body;
+  size_t body_length;
+  int rc;
+
+  (void)state;
+  memset(&allocator_state, 0, sizeof(allocator_state));
+  pouch_fail_allocator_init(&allocator, &allocator_state);
+  client = NULL;
+  pouch = NULL;
+  sink = NULL;
+  source = NULL;
+  body = NULL;
+  memset(&write_result, 0, sizeof(write_result));
+  memset(&query_res, 0, sizeof(query_res));
+  lc_query_req_init(&query_req);
+  lc_error_init(&error);
+  make_root("query-scan-discard-no-warm", root, sizeof(root));
+  cleanup_root(root);
+
+  body_length = (sizeof(prefix) - 1U) + 192U * 1024U + (sizeof(suffix) - 1U);
+  body = (char *)malloc(body_length + 1U);
+  assert_non_null(body);
+  memcpy(body, prefix, sizeof(prefix) - 1U);
+  memset(body + sizeof(prefix) - 1U, 'x', 192U * 1024U);
+  memcpy(body + sizeof(prefix) - 1U + 192U * 1024U, suffix,
+         sizeof(suffix) - 1U);
+  body[body_length] = '\0';
+
+  rc = lc_pouch_open(root, &allocator, NULL, &pouch, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_source_from_memory(body, body_length, &source, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = lc_pouch_state_write(pouch, ns, "doc/large", source, NULL, &write_result,
+                            &error);
+  lc_source_close(source);
+  source = NULL;
+  assert_int_equal(rc, LC_OK);
+  lc_pouch_state_write_result_cleanup(&allocator, &write_result);
+  lc_pouch_close(pouch);
+  pouch = NULL;
+
+  assert_true(snprintf(endpoint, sizeof(endpoint), "pouch://%s", root) > 0);
+  endpoints[0] = endpoint;
+  lc_client_config_init(&config);
+  config.endpoints = endpoints;
+  config.endpoint_count = 1U;
+  config.allocator = allocator;
+  rc = lc_client_open(&config, &client, &error);
+  assert_int_equal(rc, LC_OK);
+
+  /* A scan with a discard sink decides at /status and must not allocate a
+   * full transformed-body cache entry for the 192 KiB payload it never reads.
+   */
+  allocator_state.large_allocation_minimum = 128U * 1024U;
+  allocator_state.large_allocations = 0U;
+  query_req.ns = ns;
+  query_req.engine = "scan";
+  query_req.selector_json =
+      "{\"eq\":{\"field\":\"/status\",\"value\":\"matched\"}}";
+  query_req.limit = 1L;
+  rc = lc_sink_to_discard(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_matches\":1"));
+  assert_int_equal(allocator_state.large_allocations, 0U);
+
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+  memset(&query_res, 0, sizeof(query_res));
+
+  /* An any-text predicate must consume the complete JSON document. It may
+   * therefore warm the bounded transformed-body cache, and the next scan must
+   * reuse that complete entry instead of decrypting the large body again. */
+  allocator_state.large_allocations = 0U;
+  query_req.selector_json = NULL;
+  query_req.selector_lql = "icontains{field=/...,value=matched}";
+  rc = lc_sink_to_discard(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_matches\":1"));
+  assert_int_equal(allocator_state.large_allocations, 1U);
+
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+  memset(&query_res, 0, sizeof(query_res));
+  allocator_state.large_allocations = 0U;
+  rc = lc_sink_to_discard(&sink, &error);
+  assert_int_equal(rc, LC_OK);
+  rc = client->query(client, &query_req, sink, &query_res, &error);
+  assert_int_equal(rc, LC_OK);
+  assert_true(bytes_contain_text(query_res.metadata_json,
+                                 strlen(query_res.metadata_json),
+                                 "\"query_matches\":1"));
+  assert_int_equal(allocator_state.large_allocations, 0U);
+
+  lc_sink_close(sink);
+  sink = NULL;
+  lc_query_res_cleanup(&query_res);
+  lc_client_close(client);
+  free(body);
+  cleanup_root(root);
+  lc_error_cleanup(&error);
+}
+
 static void test_query_documents_scan_streams_rows(void **state) {
   static const char selector[] =
       "{\"eq\":{\"field\":\"/category\",\"value\":\"planning\"}}";
@@ -36434,6 +36575,7 @@ int main(int argc, char **argv) {
           test_query_keys_index_recursive_exists_uses_container_presence),
       cmocka_unit_test(test_query_keys_index_rejects_wildcard_exists_selectors),
       cmocka_unit_test(test_query_documents_scan_matches_escaped_pointer_paths),
+      cmocka_unit_test(test_query_scan_body_cache_warms_only_full_consumption),
       cmocka_unit_test(test_query_documents_scan_streams_rows),
       cmocka_unit_test(test_query_documents_index_uses_scalar_postings),
       cmocka_unit_test(test_flush_index_reports_projection_high_water),

@@ -3156,6 +3156,23 @@ test_state_transport_rejects_invalid_numeric_headers_as_protocol(void **state) {
   https_tls_material_cleanup(&material);
 }
 
+typedef struct test_deadline_clock {
+  unsigned int calls;
+} test_deadline_clock;
+
+static int test_deadline_clock_gettime(clockid_t clock_id, struct timespec *out,
+                                       void *context) {
+  test_deadline_clock *clock;
+
+  if (clock_id != CLOCK_MONOTONIC || out == NULL || context == NULL) {
+    return -1;
+  }
+  clock = (test_deadline_clock *)context;
+  out->tv_sec = clock->calls++ == 0U ? 1000 : 1001;
+  out->tv_nsec = 0L;
+  return 0;
+}
+
 /* A bounded higher-level operation can use a one-shot transport clone. Its
  * absolute deadline must cover node-passive failover rather than resetting for
  * the second endpoint. The old per-attempt limit returned the 200 response. */
@@ -3177,41 +3194,45 @@ test_engine_request_deadline_bounds_node_passive_failover(void **state) {
   lc_engine_get_response response;
   lc_engine_error error;
   struct timespec deadline;
+  test_deadline_clock clock;
   int rc;
 
   (void)state;
   client = NULL;
   memset(&request, 0, sizeof(request));
   memset(&response, 0, sizeof(response));
+  memset(&clock, 0, sizeof(clock));
   lc_engine_error_init(&error);
   assert_true(https_tls_material_init(&material, 1));
   assert_true(
       https_testserver_start(&server, &material, expectations,
                              sizeof(expectations) / sizeof(expectations[0])));
-  /* Each response is individually below the deadline; together they are not. */
-  server.response_delay_ms = 80L;
-  server.allow_response_write_failure = 1;
   init_client_config_two_endpoints(&config, server.port,
                                    material.client_bundle_path);
   assert_int_equal(lc_engine_client_open(&config, &client, &error),
                    LC_ENGINE_OK);
-  assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &deadline), 0);
-  deadline.tv_nsec += 100L * 1000000L;
-  if (deadline.tv_nsec >= 1000000000L) {
-    ++deadline.tv_sec;
-    deadline.tv_nsec -= 1000000000L;
-  }
+  /* The first endpoint deterministically sees one second of budget and
+   * returns node_passive. The second attempt observes the same absolute
+   * deadline as elapsed, without relying on scheduler or TLS timing. */
+  deadline.tv_sec = 1001;
+  deadline.tv_nsec = 0L;
   lc_engine_client_set_request_deadline(client, &deadline);
+  lc_transport_test_clock_gettime = test_deadline_clock_gettime;
+  lc_transport_test_clock_context = &clock;
   request.key = "resource/1";
   request.public_read = 1;
   rc = lc_engine_client_get(client, &request, &response, &error);
+  lc_transport_test_clock_gettime = NULL;
+  lc_transport_test_clock_context = NULL;
   assert_int_equal(rc, LC_ENGINE_ERROR_TRANSPORT);
-  assert_non_null(error.message);
+  assert_string_equal(error.message, "request deadline elapsed");
+  assert_int_equal(clock.calls, 2U);
 
   lc_engine_get_response_cleanup(&response);
   lc_engine_client_close(client);
   https_testserver_stop_early(&server);
-  assert_server_ok(&server);
+  assert_int_equal(server.handled_count, 1U);
+  assert_true(server.failure_message[0] == '\0');
   lc_engine_error_cleanup(&error);
   https_tls_material_cleanup(&material);
 }

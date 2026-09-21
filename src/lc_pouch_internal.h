@@ -533,7 +533,7 @@ int lc_pouch_state_scan_summaries(lc_pouch *pouch, const char *ns,
                                   lc_error *error);
 int lc_pouch_state_scan_summary_read_body(
     lc_pouch *pouch, const char *ns,
-    const lc_pouch_state_scan_summary_entry *entry,
+    const lc_pouch_state_scan_summary_entry *entry, int cache_completed_body,
     lc_pouch_state_read_result *out, lc_error *error);
 void lc_pouch_state_scan_summaries_result_cleanup(
     const lc_allocator *allocator,
