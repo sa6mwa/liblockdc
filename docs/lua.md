@@ -423,11 +423,15 @@ durable work:
   `outbox:get_command_receipt_by_id(command_id)` is suitable for an
   authenticated status resource. `outbox:wait_command(command_id, timeout_ms)`
   only waits for that durable receipt; it never runs a dispatcher handler or
-  starts a worker. On timeout it returns `receipt, error`, where receipt
+  starts a worker. Use `0` for one read, `-1` for no deadline, or a positive
+  monotonic deadline that also bounds each remote receipt read. On timeout it
+  returns `receipt, error`, where receipt
   remains pending and `error.code` is `ERR_TIMEOUT`. Set
   `generate_idempotency_key = true` and omit
   `idempotency_key` in `accept_command` only when returning the generated key
   or status reference to the caller.
+  Invalid or unknown command IDs use the normal Lua failure result
+  `nil, error, code`; only a timeout has a pending receipt to return.
 - `outbox:transaction(fn)` provides a lazy transaction proxy. Its first
   participant may be `acquire`, `append`, `accept_inbox`, or
   `accept_command`; it commits on normal callback return and rolls back on an

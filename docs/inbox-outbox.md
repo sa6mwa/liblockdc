@@ -264,6 +264,11 @@ struct lc_outbox {
   int (*get_command_receipt)(lc_outbox *self,
                              const lc_command_identity *identity,
                              lc_command_receipt *out, lc_error *error);
+  int (*get_command_receipt_by_id)(lc_outbox *self, const char *command_id,
+                                   lc_command_receipt *out, lc_error *error);
+  int (*wait_command)(lc_outbox *self, const char *command_id,
+                      long timeout_ms, lc_command_receipt *out,
+                      lc_error *error);
   int (*write_command_result)(lc_outbox *self,
                               const lc_command_identity *identity,
                               lc_sink *dst, size_t *written, lc_error *error);
@@ -271,6 +276,9 @@ struct lc_outbox {
                         const lc_command_identity *identity,
                         lc_outbox_transaction **out,
                         lc_command_receipt *receipt, lc_error *error);
+  int (*resume_command_by_id)(lc_outbox *self, const char *command_id,
+                              lc_outbox_transaction **out,
+                              lc_command_receipt *receipt, lc_error *error);
   int (*begin)(lc_outbox *self, lc_outbox_transaction **out,
                lc_error *error);
   int (*append)(lc_outbox *self, const lc_outbox_entry *entry,
@@ -350,6 +358,7 @@ struct lc_command_identity {
 
 struct lc_command_request {
   lc_command_identity identity;
+  int generate_idempotency_key; /* explicit XID generation; key must be empty */
   const char *request_digest;
   const char *operation_id; /* optional correlation identity */
 };
@@ -807,7 +816,9 @@ query.
 blocking observer for a synchronous route. It only rereads the receipt; it
 does not start a dispatcher, claim an effect, invoke a host callback, or change
 durable state. It returns `LC_OK` only after the receipt is `completed` or
-`failed`. On an elapsed deadline it returns `LC_ERR_TIMEOUT` with the latest
+`failed`. A timeout of `0` performs one read, `-1` waits without a deadline,
+and a positive timeout uses a monotonic deadline that also bounds each remote
+receipt read. On an elapsed deadline it returns `LC_ERR_TIMEOUT` with the latest
 owned `pending` receipt, which an HTTP host normally maps to `202 Accepted`
 and its own authenticated status URL. A terminal failure is a terminal receipt
 rather than a fabricated transport error.
@@ -1335,7 +1346,9 @@ uses Pouch, as documented in
    dispatcher through bounded durable reconciliation (an indexed query when
    index maintenance is enabled, otherwise the explicit bounded scan path).
 10. A crash after the foreign effect and before completion redelivers the same
-   `effect_key`.
+   `effect_key`. The foreign recipient must therefore be idempotent; the Pouch
+   process E2E fixture models that recipient with a durable one-time effect
+   marker before allowing the recovered supervisor to terminalize the command.
 11. Stale completion, retry, and dead-letter operations cannot alter a later
    claim.
 12. Retry scheduling, retry-budget exhaustion, dead-lettering, and replay are
@@ -1349,7 +1362,19 @@ uses Pouch, as documented in
     recover abandoned claims. The future remote equivalent must not assert
     identical public visibility of a live `claimed` envelope across the two
     backends.
-15. The regression baseline seeds 256 pending records with a 16-key shared
+15. Command-bound effects survive two competing shared-root supervisors, a
+    crash after the foreign-effect boundary while the receipt remains pending,
+    and a crash after the terminal receipt commit before job completion. The
+    final case must complete recovery without a second foreign effect.
+16. `wait_command()` is only an observer: process E2E waits prove both `-1`
+    and a positive deadline block after a pending reread until separate
+    supervisors terminalize their command-bound effects. It never starts a
+    dispatcher or performs a foreign effect itself.
+17. C and Lua test malformed and canonical-but-unknown command IDs, explicit
+    generated-key validation, pending timeout receipts, completed receipts,
+    and terminal failure receipts. Lua returns a receipt only for a timeout;
+    other lookup failures use its normal structured error result.
+18. The regression baseline seeds 256 pending records with a 16-key shared
     candidate bound and proves paged reconciliation delivers every record
     through deterministic query-page, candidate, and claim counts. It proves
     that a full candidate budget retains a resumable cursor rather than
@@ -1411,6 +1436,7 @@ The reproducible entry points are:
 
 ```sh
 make benchmark-outbox-pouch
+make benchmark-outbox-command-wait
 make benchmark-outbox-hardening
 make benchmark-outbox-remote
 ```
@@ -1425,6 +1451,12 @@ post-run inspection. Both commands default to the
 `OUTBOX_BENCH_ROWS`, `OUTBOX_BENCH_TERMINAL_ROWS`,
 `OUTBOX_BENCH_CHURN_UPDATES`, `OUTBOX_BENCH_PAYLOAD_BYTES`, and
 `OUTBOX_BENCH_PAGE_CAPACITY` to characterize a deployment-sized profile.
+
+`benchmark-outbox-command-wait` measures a bounded set of terminal command
+receipt reads through the same public `wait_command(command_id, 0, ...)`
+observer used by a synchronous route. It does not start a dispatcher, run an
+effect handler, or include polling delay: it isolates the durable receipt-read
+cost. Set `OUTBOX_COMMAND_WAIT_BENCH_ROWS` to alter the default 64 receipts.
 
 `benchmark-outbox-hardening` is the local Pouch hardening lane. It runs the
 preflushed-index, persisted-after-reopen, compacted, shared-writer, and

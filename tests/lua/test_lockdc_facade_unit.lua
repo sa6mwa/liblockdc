@@ -799,6 +799,15 @@ local function test_outbox_facade_lifecycle()
       captured.command_identity = identity
       return { command_id = 'cmd-1', state = 2, result_code = 'created' }
     end,
+    get_command_receipt_by_id = function(_, command_id)
+      captured.command_id = command_id
+      return { command_id = command_id, state = 2, result_code = 'created' }
+    end,
+    wait_command = function(_, command_id, timeout_ms)
+      captured.wait_command_id = command_id
+      captured.wait_timeout_ms = timeout_ms
+      return { command_id = command_id, state = 2, result_code = 'created' }
+    end,
     write_command_result = function(_, identity, destination)
       captured.command_result_identity = identity
       captured.command_result_destination = destination
@@ -807,6 +816,10 @@ local function test_outbox_facade_lifecycle()
     resume_command = function(_, identity)
       captured.resume_identity = identity
       return nil, { command_id = 'cmd-1', state = 2, duplicate = true }
+    end,
+    resume_command_by_id = function(_, command_id)
+      captured.resume_command_id = command_id
+      return nil, { command_id = command_id, state = 2, duplicate = true }
     end,
     append = function(_, entry, payload)
       captured.first_entry = entry
@@ -940,6 +953,17 @@ local function test_outbox_facade_lifecycle()
     scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
   }))
   assert_eq(status.result_code, 'created', 'command status should delegate')
+  local status_by_id = assert(outbox:get_command_receipt_by_id('cmd-1'))
+  assert_eq(status_by_id.command_id, 'cmd-1',
+      'command status by id should delegate')
+  assert_eq(captured.command_id, 'cmd-1',
+      'command status by id should preserve the component id')
+  local waited = assert(outbox:wait_command('cmd-1', 250))
+  assert_eq(waited.command_id, 'cmd-1', 'command wait should delegate')
+  assert_eq(captured.wait_command_id, 'cmd-1',
+      'command wait should preserve the component id')
+  assert_eq(captured.wait_timeout_ms, 250,
+      'command wait should preserve the timeout')
   local result_bytes, result_written = outbox:write_command_result({
     scope = 'tenant-a', command_type = 'orders.create.v1', idempotency_key = 'request-1',
   }, { path = '/tmp/command-result' })
@@ -950,6 +974,13 @@ local function test_outbox_facade_lifecycle()
   })
   assert_eq(resumed_txn, nil, 'terminal command resume should not expose a transaction')
   assert_eq(resumed.duplicate, true, 'terminal command resume should return receipt')
+  local resumed_by_id_txn, resumed_by_id = outbox:resume_command_by_id('cmd-1')
+  assert_eq(resumed_by_id_txn, nil,
+      'terminal command resume by id should not expose a transaction')
+  assert_eq(resumed_by_id.duplicate, true,
+      'terminal command resume by id should return its receipt')
+  assert_eq(captured.resume_command_id, 'cmd-1',
+      'command resume by id should preserve the component id')
 
   local dispatcher = assert(outbox:dispatcher())
   local job = assert(dispatcher:next(123))

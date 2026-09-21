@@ -137,6 +137,15 @@ work, or block on supervisor capacity.
 6. Return from the route. Receipt forwarding is an optional wake, not effect
    execution and not a condition for accepting the request.
 
+For a synchronous route, the worker may instead wait on the committed command
+receipt with `lc_outbox_wait_command(command_id, timeout_ms, ...)`. This is an
+observer only: it neither obtains a dispatcher nor runs a handler. `LC_OK`
+means the receipt is terminal (`completed` or `failed`); `LC_ERR_TIMEOUT`
+returns the latest owned pending receipt. A route can map that timeout to its
+normal `202 Accepted` status resource, or map a terminal command result to its
+own final response. The bounded wait never changes supervisor ownership or the
+foreign-effect ordering described below.
+
 A duplicate receipt from an append/command/inbox call denotes already durable
 work. It can be forwarded as a harmless latency hint, but it is not a fresh
 commit receipt. A failed, rolled-back, or indeterminate commit returns no
@@ -223,6 +232,8 @@ as a recovery mechanism.
 | A handler fails before a terminal decision | Close the local job or let its claim expire; do not report a false completion. | The durable claim expires and recovery makes it eligible again. |
 | Foreign operation runs longer than claim TTL | Renew before expiry; if renewal fails, stop assuming exclusive ownership and follow the durable error path. | A claim is never silently extended in memory. |
 | Terminal mutation fails | Retry the same terminal mutation while the job remains claimed, or relinquish it for expiry recovery. | No terminal state is assumed until durable success. |
+| Process dies after a foreign effect but before its terminal receipt commit | Reclaim after lease expiry and repeat only with the same immutable `effect_key` at the foreign recipient. | Recipient idempotency makes at-least-once recovery safe; the command stays pending until a terminal receipt commits. |
+| Process dies after terminal receipt commit but before `job_complete()` | Reclaim the job, observe the terminal command by `job->command_id`, and complete the job without repeating the foreign effect. | The terminal command decision survives; only the durable job acknowledgement remains. |
 | Supervisor is stopping | Stop accepting new lane work, finish or relinquish handed-out jobs, then call dispatcher stop/wait according to the host shutdown deadline. | Unfinished work remains recoverable. |
 
 At-least-once delivery is intentional. `effect_key` is immutable and must be
@@ -289,7 +300,12 @@ observable properties without timing sleeps:
   every process, while a single-process deployment retains the exclusive
   default; and
 - a large pending namespace is reconciled through bounded, paged recovery,
-  without full payload materialization or unbounded candidate allocation.
+  without full payload materialization or unbounded candidate allocation;
+- an infinite and a bounded command wait both observe terminal state only after
+  a separate supervisor commits it, and neither wait executes a handler; and
+- a shared-Pouch command effect survives a pre-terminal crash through recipient
+  `effect_key` idempotency, while a post-terminal/pre-complete crash recovers
+  without a second foreign effect.
 
 ## Lua facade exposed by Vectis
 
@@ -302,7 +318,7 @@ receiver ownership model rather than creating a second outbox model:
 | --- | --- | --- |
 | Producer | `client:new_outbox(config[, { dispatcher = dispatcher }])` | Threadless. Use the Lua `namespace` field. |
 | Fresh durable work | `outbox:append`, `accept_command`, `accept_inbox`, `begin`, or `transaction` | Fresh keys appear only in successful `commit_result.outbox_receipts`. |
-| Command status/result | `outbox:get_command_receipt`, `write_command_result`, `read_command_result`, `resume_command` | C-shaped names retain the durable receipt/result distinction. |
+| Command status/result | `outbox:get_command_receipt`, `get_command_receipt_by_id`, `wait_command`, `write_command_result`, `read_command_result`, `resume_command`, `resume_command_by_id` | C-shaped names retain the durable receipt/result distinction. `wait_command` observes only; it never dispatches. |
 | Dispatcher signals | `outbox:dispatcher`, `dispatcher:notify_outbox_key`, `stats`, and `reconcile` | Same canonical-config, bounded-notification, and recovery rules as C. |
 | Raw claim | `dispatcher:next(timeout_ms)` | Returns an owned `OutboxJob` or `nil` when no work is immediately available. |
 | Managed Lua consumer | `dispatcher:run({ handlers = ... })` or bounded `pump(options)` | Valid for a standalone Lua-owned worker only; it cannot share that live dispatcher with raw pull mode. |

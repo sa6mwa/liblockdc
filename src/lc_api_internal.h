@@ -13,8 +13,10 @@
 #define LONEJSON_WITH_CURL
 #endif
 #include "lc/lc.h"
+
 #include "lc_engine_api.h"
 #include "lc_pouch.h"
+#include <time.h>
 
 #include <pslog.h>
 #include <pthread.h>
@@ -63,6 +65,9 @@ extern lc_outbox_test_hook_fn lc_outbox_test_before_dispatcher_wait_hook;
 extern void *lc_outbox_test_before_dispatcher_wait_context;
 extern lc_outbox_test_hook_fn lc_outbox_test_before_next_wait_hook;
 extern void *lc_outbox_test_before_next_wait_context;
+extern lc_outbox_test_hook_fn
+    lc_outbox_test_after_command_wait_pending_read_hook;
+extern void *lc_outbox_test_after_command_wait_pending_read_context;
 extern lc_outbox_test_hook_fn lc_outbox_test_before_next_release_hook;
 extern void *lc_outbox_test_before_next_release_context;
 extern lc_outbox_test_hook_fn lc_outbox_test_after_dispatcher_core_retain_hook;
@@ -660,6 +665,7 @@ int lc_pouch_client_new_history_consumer_method(
     lc_client *self, const lc_history_consumer_config *config,
     lc_history_consumer **out, lc_error *error);
 int lc_client_clone_remote_for_outbox(lc_client_handle *source, long timeout_ms,
+                                      const struct timespec *request_deadline,
                                       lc_client **out, lc_error *error);
 int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
                                  const lc_watch_handler *handler,

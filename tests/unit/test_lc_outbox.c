@@ -579,6 +579,8 @@ static void outbox_reset_allocation_failures(void) {
   lc_outbox_test_before_dispatcher_wait_context = NULL;
   lc_outbox_test_before_next_wait_hook = NULL;
   lc_outbox_test_before_next_wait_context = NULL;
+  lc_outbox_test_after_command_wait_pending_read_hook = NULL;
+  lc_outbox_test_after_command_wait_pending_read_context = NULL;
   lc_outbox_test_before_next_release_hook = NULL;
   lc_outbox_test_before_next_release_context = NULL;
   lc_outbox_test_after_dispatcher_core_retain_hook = NULL;
@@ -3682,6 +3684,16 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
   assert_int_equal(receipt.state, LC_COMMAND_COMPLETED);
   assert_string_equal(receipt.result_code, "created");
   assert_true(receipt.has_result_body);
+  /* The input id may alias the receipt output being replaced. Both direct
+   * receipt reads and command waits must preserve it before cleanup. */
+  assert_int_equal(lc_outbox_get_command_receipt_by_id(
+                       outbox, receipt.command_id, &receipt, &error),
+                   LC_OK);
+  assert_int_equal(receipt.state, LC_COMMAND_COMPLETED);
+  assert_int_equal(
+      lc_outbox_wait_command(outbox, receipt.command_id, 0L, &receipt, &error),
+      LC_OK);
+  assert_int_equal(receipt.state, LC_COMMAND_COMPLETED);
   assert_int_equal(lc_outbox_get_command_receipt_by_id(
                        outbox, receipt.command_id, &duplicate_receipt, &error),
                    LC_OK);
@@ -3794,7 +3806,8 @@ test_pouch_command_receipt_commits_with_outbox_and_result(void **state) {
 }
 
 static void test_pouch_generated_command_key_waits_by_id(void **state) {
-  char root[256], template_path[256], endpoint[320], command_id[48];
+  char root[256], template_path[256], endpoint[320], command_id[48],
+      unknown_command_id[48];
   const char *endpoints[1];
   lc_client_config client_config;
   lc_outbox_config outbox_config;
@@ -3832,6 +3845,14 @@ static void test_pouch_generated_command_key_waits_by_id(void **state) {
   command.identity.command_type = "orders.create.v1";
   command.generate_idempotency_key = 1;
   command.request_digest = "generated-command-digest";
+  command.identity.idempotency_key = "must-not-be-supplied";
+  assert_int_equal(lc_outbox_accept_command(outbox, &command, &transaction,
+                                            &receipt, &error),
+                   LC_ERR_INVALID);
+  assert_null(transaction);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  command.identity.idempotency_key = NULL;
   assert_int_equal(lc_outbox_accept_command(outbox, &command, &transaction,
                                             &receipt, &error),
                    LC_OK);
@@ -3863,6 +3884,38 @@ static void test_pouch_generated_command_key_waits_by_id(void **state) {
   assert_int_equal(
       lc_outbox_wait_command(outbox, command_id, 0L, &receipt, &error), LC_OK);
   assert_int_equal(receipt.state, LC_COMMAND_COMPLETED);
+  assert_int_equal(lc_outbox_get_command_receipt_by_id(outbox, "cmd_invalid",
+                                                       &receipt, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(
+      lc_outbox_wait_command(outbox, "cmd_invalid", 0L, &receipt, &error),
+      LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_outbox_resume_command_by_id(
+                       outbox, "cmd_invalid", &transaction, &receipt, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  memcpy(unknown_command_id, "cmd_", 4U);
+  memset(unknown_command_id + 4U, 'A', 43U);
+  unknown_command_id[47] = '\0';
+  assert_int_equal(lc_outbox_get_command_receipt_by_id(
+                       outbox, unknown_command_id, &receipt, &error),
+                   LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(
+      lc_outbox_wait_command(outbox, unknown_command_id, 0L, &receipt, &error),
+      LC_ERR_INVALID);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_int_equal(lc_outbox_resume_command_by_id(outbox, unknown_command_id,
+                                                  &transaction, &receipt,
+                                                  &error),
+                   LC_ERR_INVALID);
   lc_command_receipt_cleanup(&receipt);
   lc_outbox_close(outbox);
   lc_client_close(client);

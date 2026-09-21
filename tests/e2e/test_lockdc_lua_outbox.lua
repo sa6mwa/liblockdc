@@ -4,11 +4,43 @@ local root = assert(os.getenv("LOCKDC_POUCH_ROOT"), "LOCKDC_POUCH_ROOT is requir
 local client, open_err = lockdc.open({
   endpoints = { "pouch://" .. root },
   default_namespace = "lua-outbox-domain",
+  pouch = {
+    single_writer = false,
+    segment_target_bytes = 4096,
+  },
 })
 
 if client == nil then
   error(("Pouch outbox client open failed: %s"):format(
     open_err and open_err.message or tostring(open_err)))
+end
+
+-- A settings table may synthesize strings through __index.  The native parser
+-- must retain the selected key while a later lookup runs collection.
+do
+  local settings_root = root .. "/settings-gc"
+  local generated_key = lockdc.pouch_crypto_generate_key()
+  local settings = setmetatable({}, {
+    __index = function(_, name)
+      if name == "crypto_key" then
+        return generated_key
+      end
+      if name == "crypto_key_file" then
+        collectgarbage("collect")
+      end
+      return nil
+    end,
+  })
+  local settings_client, settings_err = lockdc.open({
+    endpoints = { "pouch://" .. settings_root },
+    pouch = settings,
+  })
+  if settings_client == nil then
+    client:close()
+    error(("metatable-backed Pouch settings failed: %s"):format(
+      settings_err and settings_err.message or tostring(settings_err)))
+  end
+  settings_client:close()
 end
 
 local oversized_attempts_ok = pcall(function()
@@ -214,7 +246,11 @@ local resumed_txn, resumed_receipt =
 if resumed_txn == nil or resumed_receipt == nil then
   error("Lua command resume by id did not return a pending transaction")
 end
-assert_ok(resumed_txn:complete_command({ result_code = "created" }), nil,
+assert_ok(resumed_txn:complete_command({
+  result_code = "created",
+  content_type = "text/plain",
+  body = "lua command result",
+}), nil,
           "Lua command terminal result")
 assert_ok(resumed_txn:commit(), nil, "Lua command terminal commit")
 resumed_txn:close()
@@ -223,6 +259,110 @@ local completed_receipt, completed_err =
 if completed_receipt == nil or
     completed_receipt.state ~= lockdc.COMMAND_COMPLETED or completed_err ~= nil then
   error("Lua command wait did not expose the durable terminal receipt")
+end
+local completed_body, completed_written = outbox:read_command_result({
+  scope = "lua-command-status",
+  command_type = "orders.create.v1",
+  idempotency_key = command_receipt.idempotency_key,
+})
+if completed_body ~= "lua command result" or
+    completed_written ~= #"lua command result" then
+  error("Lua command result read did not materialize the durable result")
+end
+
+do
+local generated_with_key_txn, generated_with_key_err = outbox:accept_command({
+  scope = "lua-command-status",
+  command_type = "orders.create.v1",
+  idempotency_key = "must-not-be-supplied",
+  generate_idempotency_key = true,
+  request_digest = "sha256:lua-command-status-invalid",
+})
+if generated_with_key_txn ~= nil or generated_with_key_err == nil or
+    generated_with_key_err.code ~= lockdc.ERR_INVALID then
+  error("Lua generated command key validation accepted a supplied key")
+end
+local invalid_wait_receipt, invalid_wait_err = outbox:wait_command("cmd_invalid", 0)
+if invalid_wait_receipt ~= nil or invalid_wait_err == nil or
+    invalid_wait_err.code ~= lockdc.ERR_INVALID then
+  error("Lua command wait accepted an invalid command id")
+end
+
+local invalid_resume_txn, invalid_resume_err = outbox:resume_command_by_id("cmd_invalid")
+if invalid_resume_txn ~= nil or invalid_resume_err == nil or
+    invalid_resume_err.code ~= lockdc.ERR_INVALID then
+  error("Lua command resume accepted an invalid command id")
+end
+local unknown_command_id = "cmd_" .. string.rep("A", 43)
+local unknown_receipt, unknown_err = outbox:get_command_receipt_by_id(unknown_command_id)
+if unknown_receipt ~= nil or unknown_err == nil or
+    unknown_err.code ~= lockdc.ERR_INVALID then
+  error("Lua command status accepted an unknown command id")
+end
+local unknown_wait_receipt, unknown_wait_err = outbox:wait_command(unknown_command_id, 0)
+if unknown_wait_receipt ~= nil or unknown_wait_err == nil or
+    unknown_wait_err.code ~= lockdc.ERR_INVALID then
+  error("Lua command wait accepted an unknown command id")
+end
+local unknown_resume_txn, unknown_resume_err =
+    outbox:resume_command_by_id(unknown_command_id)
+if unknown_resume_txn ~= nil or unknown_resume_err == nil or
+    unknown_resume_err.code ~= lockdc.ERR_INVALID then
+  error("Lua command resume accepted an unknown command id")
+end
+
+-- Two independently opened Lua clients deliberately share the configured
+-- Pouch root.  The second supervisor owns terminalization while the route
+-- client observes the durable failure receipt.
+local supervisor_client = assert_ok(lockdc.open({
+  endpoints = { "pouch://" .. root },
+  pouch = {
+    single_writer = false,
+    segment_target_bytes = 4096,
+  },
+}), nil, "Lua shared command supervisor client creation")
+local supervisor_outbox = assert_ok(supervisor_client:new_outbox({
+  namespace = "lua-outbox-records",
+  owner = "lua-command-supervisor",
+  claim_ttl_seconds = 30,
+  recovery_interval_seconds = 0,
+}), nil, "Lua shared command supervisor outbox creation")
+local failed_command_txn, failed_command_receipt = outbox:accept_command({
+  scope = "lua-command-status",
+  command_type = "orders.create.v1",
+  idempotency_key = "lua-command-failure",
+  request_digest = "sha256:lua-command-failure",
+})
+if failed_command_txn == nil or failed_command_receipt == nil then
+  error("Lua failed command acceptance did not return a transaction")
+end
+assert_ok(failed_command_txn:commit(), nil, "Lua failed command commit")
+failed_command_txn:close()
+local observed_pending = assert_ok(
+    supervisor_outbox:get_command_receipt_by_id(failed_command_receipt.command_id),
+    nil, "Lua shared command pending receipt")
+if observed_pending.state ~= lockdc.COMMAND_PENDING then
+  error("Lua shared command observer did not see the pending receipt")
+end
+local failed_resume_txn, failed_resume_receipt =
+    supervisor_outbox:resume_command_by_id(failed_command_receipt.command_id)
+if failed_resume_txn == nil or failed_resume_receipt == nil then
+  error("Lua shared command supervisor did not resume the pending receipt")
+end
+assert_ok(failed_resume_txn:fail_command({
+  failure_code = "declined",
+  failure_message = "route request was declined",
+}), nil, "Lua shared command terminal failure")
+assert_ok(failed_resume_txn:commit(), nil, "Lua shared command failure commit")
+failed_resume_txn:close()
+local failed_receipt, failed_err =
+    outbox:wait_command(failed_command_receipt.command_id, 0)
+if failed_receipt == nil or failed_receipt.state ~= lockdc.COMMAND_FAILED or
+    failed_receipt.failure_code ~= "declined" or failed_err ~= nil then
+  error("Lua command wait did not expose the durable terminal failure receipt")
+end
+supervisor_outbox:close()
+supervisor_client:close()
 end
 
 local function append_effect(effect_id, payload)
@@ -1306,6 +1446,62 @@ local callback_rollback_state, callback_rollback_meta =
 if callback_rollback_state ~= nil or callback_rollback_meta == nil or
     not callback_rollback_meta.no_content then
   error("Lua callback staging failure persisted prior domain state")
+end
+
+do
+  -- A validation exception can be caught by user code. It is nevertheless a
+  -- failed staging operation, so the callback remains rollback-only and cannot
+  -- commit the earlier domain participant without its required outbox effect.
+  local callback_validation_rollback, callback_validation_rollback_err =
+      callback_outbox:transaction(function(callback_txn)
+  local participant = assert_ok(callback_txn:acquire({
+    key = "callback-caught-validation-domain",
+    owner = "lua-callback-caught-validation",
+    ttl_seconds = 30,
+  }), nil, "Lua callback caught-validation acquire")
+  assert_ok(participant:update_json({ committed = false }), nil,
+            "Lua callback caught-validation update")
+  participant:close()
+  local caught = pcall(function()
+    callback_txn:append({}, "ignored")
+  end)
+  if caught then
+    error("Lua callback malformed append unexpectedly succeeded")
+  end
+  end)
+  if callback_validation_rollback ~= nil or
+      callback_validation_rollback_err == nil then
+    error("Lua callback committed after a caught validation error")
+  end
+  local callback_validation_state, callback_validation_meta = client:read_json({
+    namespace = "lua-outbox-callback-close",
+    key = "callback-caught-validation-domain",
+    public_read = true,
+  })
+  if callback_validation_state ~= nil or callback_validation_meta == nil or
+      not callback_validation_meta.no_content then
+    error("Lua callback validation error persisted prior domain state")
+  end
+
+  -- Metatable-backed inbox fields may allocate and collect while subsequent
+  -- fields are resolved. The binding roots every normalized value until native
+  -- acceptance returns.
+  local rooted_inbox_txn = assert_ok(callback_outbox:begin(), nil,
+                                     "Lua rooted inbox transaction begin")
+  local rooted_inbox_request = setmetatable({}, {
+  __index = function(_, field)
+    collectgarbage("collect")
+    if field == "consumer_id" then return string.rep("consumer-", 32) end
+    if field == "source_kind" then return string.rep("kind-", 32) end
+    if field == "source_id" then return string.rep("source-", 32) end
+    if field == "message_id" then return string.rep("message-", 32) end
+    return nil
+  end,
+  })
+  assert_ok(rooted_inbox_txn:accept_inbox(rooted_inbox_request), nil,
+            "Lua rooted inbox acceptance")
+  assert_ok(rooted_inbox_txn:commit(), nil, "Lua rooted inbox commit")
+  rooted_inbox_txn:close()
 end
 
 local callback_command_rollback, callback_command_rollback_err =

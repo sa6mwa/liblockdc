@@ -20928,6 +20928,7 @@ test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout(
   lc_dequeue_req dequeue_req;
   lc_message *message;
   lc_error error;
+  pouch_queue_test_clock clock;
   const void *bytes;
   size_t length;
   char root[512];
@@ -20946,10 +20947,15 @@ test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout(
   memset(&stats_res, 0, sizeof(stats_res));
   lc_dequeue_req_init(&dequeue_req);
   lc_error_init(&error);
+  memset(&clock, 0, sizeof(clock));
+  clock.wall.tv_sec = 1000L;
+  clock.monotonic.tv_sec = 1000L;
   make_root("client-queue-redelivery", root, sizeof(root));
   cleanup_root(root);
 
   open_pouch_client(root, &client, &error);
+  lc_pouch_test_queue_time_context = &clock;
+  lc_pouch_test_queue_clock_gettime = pouch_queue_test_gettime;
   enqueue_req.queue = "jobs";
   rc = lc_source_from_memory("abandoned", strlen("abandoned"), &source, &error);
   assert_int_equal(rc, LC_OK);
@@ -20976,7 +20982,11 @@ test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout(
   assert_int_equal(stats_res.pending_candidates, 1);
   lc_queue_stats_res_cleanup(&stats_res);
 
-  sleep(2U);
+  /* Advance the same injected wall clock used by queue visibility and lease
+   * validation. This proves redelivery without racing a real one-second
+   * boundary or delaying the test suite. */
+  clock.wall.tv_sec += 2L;
+  clock.monotonic.tv_sec += 2L;
   rc = client->dequeue(client, &dequeue_req, &message, &error);
   assert_int_equal(rc, LC_OK);
   assert_non_null(message);
@@ -21004,6 +21014,7 @@ test_client_queue_redelivers_abandoned_inflight_after_visibility_timeout(
 
   lc_queue_stats_res_cleanup(&stats_res);
   lc_enqueue_res_cleanup(&enqueue_res);
+  (void)teardown_pouch_queue_test_clock(NULL);
   lc_client_close(client);
   cleanup_root(root);
   lc_error_cleanup(&error);

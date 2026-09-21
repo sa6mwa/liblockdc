@@ -151,6 +151,7 @@ typedef struct https_testserver {
   size_t handled_count;
   long response_delay_ms;
   int allow_response_write_failure;
+  volatile sig_atomic_t stop_requested;
   char failure_message[1024];
 } https_testserver;
 
@@ -1290,6 +1291,8 @@ static void *https_testserver_main(void *context) {
     client_fd =
         accept(server->listener_fd, (struct sockaddr *)&addr, &addr_len);
     if (client_fd < 0) {
+      if (server->stop_requested)
+        break;
       set_failure(server, "accept failed: %s", strerror(errno));
       break;
     }
@@ -1620,6 +1623,17 @@ static void https_testserver_stop(https_testserver *server) {
   if (server->ssl_ctx != NULL) {
     SSL_CTX_free(server->ssl_ctx);
   }
+}
+
+/* A deadline test can intentionally stop before the fixture's next expected
+ * connection. Wake its blocking accept without classifying that designed early
+ * stop as a server failure. */
+static void https_testserver_stop_early(https_testserver *server) {
+  if (server->listener_fd >= 0) {
+    server->stop_requested = 1;
+    (void)shutdown(server->listener_fd, SHUT_RDWR);
+  }
+  https_testserver_stop(server);
 }
 
 static void init_client_config(lc_engine_client_config *config,
@@ -3137,6 +3151,66 @@ test_state_transport_rejects_invalid_numeric_headers_as_protocol(void **state) {
   lc_engine_get_response_cleanup(&res);
   lc_engine_client_close(client);
   https_testserver_stop(&server);
+  assert_server_ok(&server);
+  lc_engine_error_cleanup(&error);
+  https_tls_material_cleanup(&material);
+}
+
+/* A bounded higher-level operation can use a one-shot transport clone. Its
+ * absolute deadline must cover node-passive failover rather than resetting for
+ * the second endpoint. The old per-attempt limit returned the 200 response. */
+static void
+test_engine_request_deadline_bounds_node_passive_failover(void **state) {
+  static const char *json_headers[] = {"Content-Type: application/json"};
+  static const https_expectation expectations[] = {
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 503, json_headers, 1U, "{\"error\":\"node_passive\"}",
+       "liblockdc test client"},
+      {"GET", "/v1/get?key=resource%2F1&namespace=transport-ns&public=1", NULL,
+       0U, NULL, 0U, 1, 200, json_headers, 1U, "{\"value\":1}",
+       "liblockdc test client"}};
+  https_tls_material material;
+  https_testserver server;
+  lc_engine_client_config config;
+  lc_engine_client *client;
+  lc_engine_get_request request;
+  lc_engine_get_response response;
+  lc_engine_error error;
+  struct timespec deadline;
+  int rc;
+
+  (void)state;
+  client = NULL;
+  memset(&request, 0, sizeof(request));
+  memset(&response, 0, sizeof(response));
+  lc_engine_error_init(&error);
+  assert_true(https_tls_material_init(&material, 1));
+  assert_true(
+      https_testserver_start(&server, &material, expectations,
+                             sizeof(expectations) / sizeof(expectations[0])));
+  /* Each response is individually below the deadline; together they are not. */
+  server.response_delay_ms = 80L;
+  server.allow_response_write_failure = 1;
+  init_client_config_two_endpoints(&config, server.port,
+                                   material.client_bundle_path);
+  assert_int_equal(lc_engine_client_open(&config, &client, &error),
+                   LC_ENGINE_OK);
+  assert_int_equal(clock_gettime(CLOCK_MONOTONIC, &deadline), 0);
+  deadline.tv_nsec += 100L * 1000000L;
+  if (deadline.tv_nsec >= 1000000000L) {
+    ++deadline.tv_sec;
+    deadline.tv_nsec -= 1000000000L;
+  }
+  lc_engine_client_set_request_deadline(client, &deadline);
+  request.key = "resource/1";
+  request.public_read = 1;
+  rc = lc_engine_client_get(client, &request, &response, &error);
+  assert_int_equal(rc, LC_ENGINE_ERROR_TRANSPORT);
+  assert_non_null(error.message);
+
+  lc_engine_get_response_cleanup(&response);
+  lc_engine_client_close(client);
+  https_testserver_stop_early(&server);
   assert_server_ok(&server);
   lc_engine_error_cleanup(&error);
   https_tls_material_cleanup(&material);
@@ -7801,6 +7875,10 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
   cmocka_unit_test(                                                            \
       test_public_lease_attach_retries_node_passive_and_cleans_parser_state)
 #elif defined(                                                                 \
+    LC_HTTPS_CASE_ENGINE_REQUEST_DEADLINE_BOUNDS_NODE_PASSIVE_FAILOVER)
+#define LC_HTTPS_UNIT_TESTS                                                    \
+  cmocka_unit_test(test_engine_request_deadline_bounds_node_passive_failover)
+#elif defined(                                                                 \
     LC_HTTPS_CASE_PUBLIC_ATTACHMENT_GET_PRESERVES_I64_TIMESTAMP_HEADERS)
 #define LC_HTTPS_UNIT_TESTS                                                    \
   cmocka_unit_test(test_public_attachment_get_preserves_i64_timestamp_headers)
@@ -8008,6 +8086,8 @@ static void test_public_query_stream_rejects_invalid_index_seq(void **state) {
           test_public_lease_attach_rejects_malformed_json_response),              \
       cmocka_unit_test(                                                           \
           test_public_lease_attach_retries_node_passive_and_cleans_parser_state), \
+      cmocka_unit_test(                                                           \
+          test_engine_request_deadline_bounds_node_passive_failover),             \
       cmocka_unit_test(                                                           \
           test_public_attachment_get_preserves_i64_timestamp_headers),            \
       cmocka_unit_test(                                                           \

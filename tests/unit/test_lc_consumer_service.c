@@ -2823,7 +2823,7 @@ test_outbox_dispatcher_clone_uses_standard_json_response_limit(void **state) {
   g_consumer_test_state = &runtime_state;
 
   assert_int_equal(lc_client_clone_remote_for_outbox(
-                       &client, 456L, &dispatcher_client, &error),
+                       &client, 456L, NULL, &dispatcher_client, &error),
                    LC_OK);
   assert_non_null(dispatcher_client);
   assert_int_equal(runtime_state.last_client_open_json_limit,

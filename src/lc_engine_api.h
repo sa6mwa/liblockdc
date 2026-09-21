@@ -13,6 +13,7 @@
 
 #include <pslog.h>
 #include <stddef.h>
+#include <time.h>
 
 typedef struct lc_engine_client lc_engine_client;
 typedef struct lc_engine_error lc_engine_error;
@@ -726,6 +727,10 @@ const char *lc_engine_version_string(void);
 void lc_engine_client_config_init(lc_engine_client_config *config);
 void lc_engine_error_init(lc_engine_error *error);
 void lc_engine_error_cleanup(lc_engine_error *error);
+/* Applies one absolute monotonic deadline to every endpoint attempt made by
+ * this private, one-shot client. A NULL value clears that constraint. */
+void lc_engine_client_set_request_deadline(lc_engine_client *client,
+                                           const struct timespec *deadline);
 void lc_engine_allocator_init(lc_engine_allocator *allocator);
 int lc_engine_client_open(const lc_engine_client_config *config,
                           lc_engine_client **out_client,

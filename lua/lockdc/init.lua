@@ -838,10 +838,13 @@ function Outbox:get_command_receipt(identity)
   return self._core:get_command_receipt(identity)
 end
 
+-- Reads one durable receipt by the component-generated command id.
 function Outbox:get_command_receipt_by_id(command_id)
   return self._core:get_command_receipt_by_id(command_id)
 end
 
+-- Waits only for a durable terminal receipt; it never performs dispatch.
+-- A positive timeout is a monotonic deadline, including each remote read.
 function Outbox:wait_command(command_id, timeout_ms)
   return self._core:wait_command(command_id, timeout_ms)
 end
@@ -870,6 +873,7 @@ function Outbox:resume_command(identity)
   return wrap_outbox_transaction(transaction), receipt_or_err
 end
 
+-- Resumes a pending receipt by command id for a supervisor-owned finalizer.
 function Outbox:resume_command_by_id(command_id)
   local transaction, receipt_or_err = self._core:resume_command_by_id(command_id)
 

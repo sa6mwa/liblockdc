@@ -784,6 +784,12 @@ static int lc_engine_perform_streaming(
 
   for (endpoint_index = 0U; endpoint_index < client->endpoint_count;
        ++endpoint_index) {
+    long request_timeout_ms;
+
+    if (!lc_engine_client_attempt_timeout_ms(client, &request_timeout_ms)) {
+      return lc_engine_set_transport_error(state->error,
+                                           "request deadline elapsed");
+    }
     memset(&read_state, 0, sizeof(read_state));
     read_state.reader = reader;
     read_state.reader_context = reader_context;
@@ -851,9 +857,7 @@ static int lc_engine_perform_streaming(
                      lc_engine_stream_header_callback);
     curl_easy_setopt(curl, CURLOPT_HEADERDATA, state);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-    if (client->timeout_ms > 0L) {
-      curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, client->timeout_ms);
-    }
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, request_timeout_ms);
     if (client->unix_socket_path != NULL &&
         client->unix_socket_path[0] != '\0') {
       curl_easy_setopt(curl, CURLOPT_UNIX_SOCKET_PATH,

@@ -1891,8 +1891,10 @@ static int lcdc_pouch_setting_u64(lua_State *L, int index, const char *name,
 }
 
 static int lcdc_pouch_setting_string(lua_State *L, int index, const char *name,
-                                     const char **out, int *present,
-                                     lc_error *error) {
+                                     int root_index, const char **out,
+                                     int *present, lc_error *error) {
+  index = lua_absindex(L, index);
+  root_index = lua_absindex(L, root_index);
   lua_getfield(L, index, name);
   if (lua_isnil(L, -1)) {
     lua_pop(L, 1);
@@ -1904,7 +1906,14 @@ static int lcdc_pouch_setting_string(lua_State *L, int index, const char *name,
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "pouch setting must be a string", name, NULL, "pouch");
   }
+  /* The source table may synthesize an otherwise unreferenced string through
+   * __index.  Copy it into the plain root before any later field lookup can
+   * allocate and collect that source value. */
+  lua_pushvalue(L, -1);
+  lua_setfield(L, root_index, name);
+  lua_getfield(L, root_index, name);
   *out = lua_tostring(L, -1);
+  lua_pop(L, 1);
   *present = 1;
   lua_pop(L, 1);
   return LC_OK;
@@ -1914,10 +1923,17 @@ static int lcdc_parse_pouch_settings(lua_State *L, int index,
                                      lc_pouch_settings *settings,
                                      lc_error *error) {
   const char *value;
+  int root_index;
   int present;
   int rc;
 
+  index = lua_absindex(L, index);
   lc_pouch_settings_init(settings);
+  /* Keep selected string settings rooted until lc_client_open() has copied
+   * them.  Metatable-backed fields are permitted, but their temporary strings
+   * must never escape a Lua stack lifetime. */
+  lua_newtable(L);
+  root_index = lua_gettop(L);
   rc = lcdc_pouch_settings_check_keys(L, index, error);
   if (rc != LC_OK)
     return rc;
@@ -1985,16 +2001,16 @@ static int lcdc_parse_pouch_settings(lua_State *L, int index,
     return rc;
   if (present)
     settings->set_mask |= LC_POUCH_SETTING_QUEUE_WATCH;
-  rc = lcdc_pouch_setting_string(L, index, "query_engine", &value, &present,
-                                 error);
+  rc = lcdc_pouch_setting_string(L, index, "query_engine", root_index, &value,
+                                 &present, error);
   if (rc != LC_OK)
     return rc;
   if (present) {
     settings->query_engine = value;
     settings->set_mask |= LC_POUCH_SETTING_QUERY_ENGINE;
   }
-  rc = lcdc_pouch_setting_string(L, index, "query_fallback_engine", &value,
-                                 &present, error);
+  rc = lcdc_pouch_setting_string(L, index, "query_fallback_engine", root_index,
+                                 &value, &present, error);
   if (rc != LC_OK)
     return rc;
   if (present) {
@@ -2008,16 +2024,16 @@ static int lcdc_parse_pouch_settings(lua_State *L, int index,
     return rc;
   if (present)
     settings->set_mask |= LC_POUCH_SETTING_QUERY_INDEXING;
-  rc = lcdc_pouch_setting_string(L, index, "crypto_key", &value, &present,
-                                 error);
+  rc = lcdc_pouch_setting_string(L, index, "crypto_key", root_index, &value,
+                                 &present, error);
   if (rc != LC_OK)
     return rc;
   if (present) {
     settings->crypto_key = value;
     settings->set_mask |= LC_POUCH_SETTING_CRYPTO_KEY;
   }
-  rc = lcdc_pouch_setting_string(L, index, "crypto_key_file", &value, &present,
-                                 error);
+  rc = lcdc_pouch_setting_string(L, index, "crypto_key_file", root_index,
+                                 &value, &present, error);
   if (rc != LC_OK)
     return rc;
   if (present) {
@@ -2031,8 +2047,8 @@ static int lcdc_parse_pouch_settings(lua_State *L, int index,
     return rc;
   if (present)
     settings->set_mask |= LC_POUCH_SETTING_CRYPTO_GENERATE_KEY_FILE;
-  rc = lcdc_pouch_setting_string(L, index, "compression", &value, &present,
-                                 error);
+  rc = lcdc_pouch_setting_string(L, index, "compression", root_index, &value,
+                                 &present, error);
   if (rc != LC_OK)
     return rc;
   if (present) {
@@ -2144,13 +2160,16 @@ static int lcdc_open(lua_State *L) {
     }
     rc = lcdc_parse_pouch_settings(L, lua_gettop(L), &pouch_settings, &error);
     if (rc != LC_OK) {
-      lua_pop(L, 1);
+      lua_pop(L, 2);
       lc_source_close(client_bundle_source);
       free(endpoints);
       lcdc_push_status_error(L, rc, &error);
       lc_error_cleanup(&error);
       return 3;
     }
+    /* Discard the user-controlled table but retain the normalized table left
+     * above it by the parser until lc_client_open() copies its strings. */
+    lua_remove(L, -2);
     config.pouch_settings = &pouch_settings;
   }
   {
@@ -5021,54 +5040,148 @@ static int lcdc_message_payload(lua_State *L) {
   return 2;
 }
 
-static void lcdc_parse_outbox_entry(lua_State *L, int index,
-                                    lc_outbox_entry *entry) {
+static int lcdc_parse_outbox_entry(lua_State *L, int index,
+                                   lc_outbox_entry *entry) {
+  int root_index;
+
   lc_outbox_entry_init(entry);
   luaL_checktype(L, index, LUA_TTABLE);
   lcdc_reject_field(L, index, "headers",
                     "outbox entry uses headers_json; headers is not supported");
-  lcdc_require_string_field(L, index, "operation_id", &entry->operation_id);
-  lcdc_require_string_field(L, index, "effect_id", &entry->effect_id);
-  lcdc_require_string_field(L, index, "effect_key", &entry->effect_key);
-  lcdc_require_string_field(L, index, "payload_digest", &entry->payload_digest);
-  entry->causation_id = lcdc_opt_string_field(L, index, "causation_id");
-  lcdc_require_string_field(L, index, "kind", &entry->kind);
-  entry->schema_version = lcdc_opt_string_field(L, index, "schema_version");
-  lcdc_require_string_field(L, index, "destination", &entry->destination);
-  entry->content_type = lcdc_opt_string_field(L, index, "content_type");
-  entry->headers_json = lcdc_opt_string_field(L, index, "headers_json");
-  entry->trace_context = lcdc_opt_string_field(L, index, "trace_context");
+  lua_newtable(L);
+  root_index = lua_gettop(L);
+  lcdc_normalize_string_field(L, index, root_index, "operation_id", 1);
+  lcdc_normalize_string_field(L, index, root_index, "effect_id", 1);
+  lcdc_normalize_string_field(L, index, root_index, "effect_key", 1);
+  lcdc_normalize_string_field(L, index, root_index, "payload_digest", 1);
+  lcdc_normalize_string_field(L, index, root_index, "causation_id", 0);
+  lcdc_normalize_string_field(L, index, root_index, "kind", 1);
+  lcdc_normalize_string_field(L, index, root_index, "schema_version", 0);
+  lcdc_normalize_string_field(L, index, root_index, "destination", 1);
+  lcdc_normalize_string_field(L, index, root_index, "content_type", 0);
+  lcdc_normalize_string_field(L, index, root_index, "headers_json", 0);
+  lcdc_normalize_string_field(L, index, root_index, "trace_context", 0);
+  entry->operation_id =
+      lcdc_normalized_string_value(L, root_index, "operation_id");
+  entry->effect_id = lcdc_normalized_string_value(L, root_index, "effect_id");
+  entry->effect_key = lcdc_normalized_string_value(L, root_index, "effect_key");
+  entry->payload_digest =
+      lcdc_normalized_string_value(L, root_index, "payload_digest");
+  entry->causation_id =
+      lcdc_normalized_string_value(L, root_index, "causation_id");
+  entry->kind = lcdc_normalized_string_value(L, root_index, "kind");
+  entry->schema_version =
+      lcdc_normalized_string_value(L, root_index, "schema_version");
+  entry->destination =
+      lcdc_normalized_string_value(L, root_index, "destination");
+  entry->content_type =
+      lcdc_normalized_string_value(L, root_index, "content_type");
+  entry->headers_json =
+      lcdc_normalized_string_value(L, root_index, "headers_json");
+  entry->trace_context =
+      lcdc_normalized_string_value(L, root_index, "trace_context");
+  return root_index;
 }
 
-static void lcdc_parse_command_identity(lua_State *L, int index,
-                                        lc_command_identity *identity) {
+static int lcdc_parse_command_identity(lua_State *L, int index,
+                                       lc_command_identity *identity) {
+  int root_index;
+
   lc_command_identity_init(identity);
   luaL_checktype(L, index, LUA_TTABLE);
-  lcdc_require_string_field(L, index, "scope", &identity->scope);
-  lcdc_require_string_field(L, index, "command_type", &identity->command_type);
-  lcdc_require_string_field(L, index, "idempotency_key",
-                            &identity->idempotency_key);
+  lua_newtable(L);
+  root_index = lua_gettop(L);
+  lcdc_normalize_string_field(L, index, root_index, "scope", 1);
+  lcdc_normalize_string_field(L, index, root_index, "command_type", 1);
+  lcdc_normalize_string_field(L, index, root_index, "idempotency_key", 1);
+  identity->scope = lcdc_normalized_string_value(L, root_index, "scope");
+  identity->command_type =
+      lcdc_normalized_string_value(L, root_index, "command_type");
+  identity->idempotency_key =
+      lcdc_normalized_string_value(L, root_index, "idempotency_key");
+  return root_index;
 }
 
-static void lcdc_parse_command_request(lua_State *L, int index,
-                                       lc_command_request *request) {
+static int lcdc_parse_command_request(lua_State *L, int index,
+                                      lc_command_request *request) {
+  int root_index;
+
   lc_command_request_init(request);
   luaL_checktype(L, index, LUA_TTABLE);
-  lcdc_require_string_field(L, index, "scope", &request->identity.scope);
-  lcdc_require_string_field(L, index, "command_type",
-                            &request->identity.command_type);
   lcdc_opt_boolean_field(L, index, "generate_idempotency_key",
                          &request->generate_idempotency_key);
-  if (request->generate_idempotency_key) {
-    request->identity.idempotency_key =
-        lcdc_opt_string_field(L, index, "idempotency_key");
-  } else {
-    lcdc_require_string_field(L, index, "idempotency_key",
-                              &request->identity.idempotency_key);
-  }
-  lcdc_require_string_field(L, index, "request_digest",
-                            &request->request_digest);
-  request->operation_id = lcdc_opt_string_field(L, index, "operation_id");
+  lua_newtable(L);
+  root_index = lua_gettop(L);
+  lcdc_normalize_string_field(L, index, root_index, "scope", 1);
+  lcdc_normalize_string_field(L, index, root_index, "command_type", 1);
+  lcdc_normalize_string_field(L, index, root_index, "idempotency_key",
+                              !request->generate_idempotency_key);
+  lcdc_normalize_string_field(L, index, root_index, "request_digest", 1);
+  lcdc_normalize_string_field(L, index, root_index, "operation_id", 0);
+  request->identity.scope =
+      lcdc_normalized_string_value(L, root_index, "scope");
+  request->identity.command_type =
+      lcdc_normalized_string_value(L, root_index, "command_type");
+  request->identity.idempotency_key =
+      lcdc_normalized_string_value(L, root_index, "idempotency_key");
+  request->request_digest =
+      lcdc_normalized_string_value(L, root_index, "request_digest");
+  request->operation_id =
+      lcdc_normalized_string_value(L, root_index, "operation_id");
+  return root_index;
+}
+
+static int lcdc_parse_inbox_message(lua_State *L, int index,
+                                    lc_inbox_message *message) {
+  int root_index;
+
+  lc_inbox_message_init(message);
+  luaL_checktype(L, index, LUA_TTABLE);
+  lua_newtable(L);
+  root_index = lua_gettop(L);
+  lcdc_normalize_string_field(L, index, root_index, "consumer_id", 1);
+  lcdc_normalize_string_field(L, index, root_index, "source_kind", 1);
+  lcdc_normalize_string_field(L, index, root_index, "source_id", 1);
+  lcdc_normalize_string_field(L, index, root_index, "message_id", 1);
+  lcdc_normalize_string_field(L, index, root_index, "payload_digest", 0);
+  lcdc_normalize_string_field(L, index, root_index, "operation_id", 0);
+  message->consumer_id =
+      lcdc_normalized_string_value(L, root_index, "consumer_id");
+  message->source_kind =
+      lcdc_normalized_string_value(L, root_index, "source_kind");
+  message->source_id = lcdc_normalized_string_value(L, root_index, "source_id");
+  message->message_id =
+      lcdc_normalized_string_value(L, root_index, "message_id");
+  message->payload_digest =
+      lcdc_normalized_string_value(L, root_index, "payload_digest");
+  message->operation_id =
+      lcdc_normalized_string_value(L, root_index, "operation_id");
+  return root_index;
+}
+
+static int
+lcdc_parse_outbox_participant_request(lua_State *L, int index,
+                                      lc_outbox_participant_request *request) {
+  int root_index;
+
+  lc_outbox_participant_request_init(request);
+  luaL_checktype(L, index, LUA_TTABLE);
+  lua_newtable(L);
+  root_index = lua_gettop(L);
+  lcdc_normalize_string_field(L, index, root_index, "namespace", 0);
+  lcdc_normalize_string_field(L, index, root_index, "key", 1);
+  lcdc_normalize_string_field(L, index, root_index, "owner", 0);
+  request->acquire.ns =
+      lcdc_normalized_string_value(L, root_index, "namespace");
+  request->acquire.key = lcdc_normalized_string_value(L, root_index, "key");
+  request->acquire.owner = lcdc_normalized_string_value(L, root_index, "owner");
+  lcdc_opt_integer_field(L, index, "ttl_seconds",
+                         &request->acquire.ttl_seconds);
+  lcdc_opt_integer_field(L, index, "block_seconds",
+                         &request->acquire.block_seconds);
+  lcdc_opt_boolean_field(L, index, "if_not_exists",
+                         &request->acquire.if_not_exists);
+  return root_index;
 }
 
 static void lcdc_push_command_receipt(lua_State *L,
@@ -5425,9 +5538,10 @@ static int lcdc_outbox_append(lua_State *L) {
   lc_outbox_transaction *transaction = NULL;
   lc_source *payload = NULL;
   lc_error error;
+  int root_index;
   int rc;
 
-  lcdc_parse_outbox_entry(L, 2, &entry);
+  root_index = lcdc_parse_outbox_entry(L, 2, &entry);
   lc_outbox_receipt_init(&receipt);
   lc_error_init(&error);
   rc = lcdc_source_from_value(L, 3, &payload, &error);
@@ -5436,6 +5550,7 @@ static int lcdc_outbox_append(lua_State *L) {
                           &error);
   }
   lc_source_close(payload);
+  lua_remove(L, root_index);
   if (rc != LC_OK) {
     lc_outbox_receipt_cleanup(&receipt);
     lcdc_push_status_error(L, rc, &error);
@@ -5459,20 +5574,15 @@ static int lcdc_outbox_accept_inbox(lua_State *L) {
   lc_inbox_accept_result result;
   lc_outbox_transaction *transaction = NULL;
   lc_error error;
+  int root_index;
   int rc;
 
-  lc_inbox_message_init(&message);
   memset(&result, 0, sizeof(result));
-  luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_require_string_field(L, 2, "consumer_id", &message.consumer_id);
-  lcdc_require_string_field(L, 2, "source_kind", &message.source_kind);
-  lcdc_require_string_field(L, 2, "source_id", &message.source_id);
-  lcdc_require_string_field(L, 2, "message_id", &message.message_id);
-  message.payload_digest = lcdc_opt_string_field(L, 2, "payload_digest");
-  message.operation_id = lcdc_opt_string_field(L, 2, "operation_id");
+  root_index = lcdc_parse_inbox_message(L, 2, &message);
   lc_error_init(&error);
   rc = lc_outbox_accept_inbox(ud->outbox, &message, &transaction, &result,
                               &error);
+  lua_remove(L, root_index);
   if (rc != LC_OK) {
     lcdc_push_status_error(L, rc, &error);
     lc_error_cleanup(&error);
@@ -5494,13 +5604,15 @@ static int lcdc_outbox_accept_command(lua_State *L) {
   lc_command_receipt receipt;
   lc_outbox_transaction *transaction = NULL;
   lc_error error;
+  int root_index;
   int rc;
 
-  lcdc_parse_command_request(L, 2, &request);
+  root_index = lcdc_parse_command_request(L, 2, &request);
   lc_command_receipt_init(&receipt);
   lc_error_init(&error);
   rc = lc_outbox_accept_command(ud->outbox, &request, &transaction, &receipt,
                                 &error);
+  lua_remove(L, root_index);
   if (rc != LC_OK) {
     lc_command_receipt_cleanup(&receipt);
     lcdc_push_status_error(L, rc, &error);
@@ -5522,12 +5634,14 @@ static int lcdc_outbox_get_command_receipt(lua_State *L) {
   lc_command_identity identity;
   lc_command_receipt receipt;
   lc_error error;
+  int root_index;
   int rc;
 
-  lcdc_parse_command_identity(L, 2, &identity);
+  root_index = lcdc_parse_command_identity(L, 2, &identity);
   lc_command_receipt_init(&receipt);
   lc_error_init(&error);
   rc = lc_outbox_get_command_receipt(ud->outbox, &identity, &receipt, &error);
+  lua_remove(L, root_index);
   if (rc != LC_OK) {
     lc_command_receipt_cleanup(&receipt);
     lcdc_push_status_error(L, rc, &error);
@@ -5569,12 +5683,18 @@ static int lcdc_outbox_wait_command(lua_State *L) {
   long timeout_ms;
   int rc;
 
-  timeout_ms = (long)luaL_checkinteger(L, 3);
+  timeout_ms = lcdc_check_long(L, 3, "outbox command wait timeout");
   lc_command_receipt_init(&receipt);
   lc_error_init(&error);
   rc = lc_outbox_wait_command(ud->outbox, luaL_checkstring(L, 2), timeout_ms,
                               &receipt, &error);
   if (rc != LC_OK) {
+    if (rc != LC_ERR_TIMEOUT) {
+      lc_command_receipt_cleanup(&receipt);
+      lcdc_push_status_error(L, rc, &error);
+      lc_error_cleanup(&error);
+      return 3;
+    }
     lcdc_push_command_receipt(L, &receipt);
     lc_command_receipt_cleanup(&receipt);
     lcdc_push_error(L, &error);
@@ -5593,9 +5713,15 @@ static int lcdc_outbox_write_command_result(lua_State *L) {
   lcdc_output output;
   lc_error error;
   size_t written = 0U;
+  int root_index;
   int rc;
 
-  lcdc_parse_command_identity(L, 2, &identity);
+  /* The parser roots its normalized identity. Reserve an omitted destination
+   * before that root is pushed so a buffered read is not mistaken for a sink.
+   */
+  if (lua_isnone(L, 3))
+    lua_pushnil(L);
+  root_index = lcdc_parse_command_identity(L, 2, &identity);
   lc_error_init(&error);
   rc = lcdc_init_output(L, 3, &output, &error);
   ud->streaming = rc == LC_OK;
@@ -5603,6 +5729,7 @@ static int lcdc_outbox_write_command_result(lua_State *L) {
     rc = lc_outbox_write_command_result(ud->outbox, &identity, output.sink,
                                         &written, &error);
   }
+  lua_remove(L, root_index);
   if (rc != LC_OK) {
     if (output.sink != NULL)
       lc_sink_close(output.sink);
@@ -5624,13 +5751,15 @@ static int lcdc_outbox_resume_command(lua_State *L) {
   lc_command_receipt receipt;
   lc_outbox_transaction *transaction = NULL;
   lc_error error;
+  int root_index;
   int rc;
 
-  lcdc_parse_command_identity(L, 2, &identity);
+  root_index = lcdc_parse_command_identity(L, 2, &identity);
   lc_command_receipt_init(&receipt);
   lc_error_init(&error);
   rc = lc_outbox_resume_command(ud->outbox, &identity, &transaction, &receipt,
                                 &error);
+  lua_remove(L, root_index);
   if (rc != LC_OK) {
     lc_command_receipt_cleanup(&receipt);
     lcdc_push_status_error(L, rc, &error);
@@ -6545,6 +6674,25 @@ static void lcdc_outbox_txn_note_staging_failure(lcdc_outbox_txn_ud *ud) {
     ud->callback_staging_failed = 1;
 }
 
+/* Lua argument failures longjmp and may be caught by the callback with pcall.
+ * Arm the callback as rollback-only before parsing a state-changing operation;
+ * only a fully successful operation restores the prior state. */
+static int lcdc_outbox_txn_begin_staging(lcdc_outbox_txn_ud *ud) {
+  int was_failed = 0;
+
+  if (ud != NULL && ud->callback_scoped) {
+    was_failed = ud->callback_staging_failed;
+    ud->callback_staging_failed = 1;
+  }
+  return was_failed;
+}
+
+static void lcdc_outbox_txn_finish_staging(lcdc_outbox_txn_ud *ud,
+                                           int was_failed) {
+  if (ud != NULL && ud->callback_scoped)
+    ud->callback_staging_failed = was_failed;
+}
+
 static void lcdc_outbox_txn_note_duplicate(lua_State *L, lcdc_outbox_txn_ud *ud,
                                            int result_index) {
   ud->callback_duplicate_seen = 1;
@@ -6569,19 +6717,16 @@ static int lcdc_outbox_txn_acquire(lua_State *L) {
   lc_outbox_participant_request request;
   lc_outbox_participant *participant = NULL;
   lc_error error;
+  int root_index;
+  int was_failed;
   int rc;
 
-  lc_outbox_participant_request_init(&request);
-  luaL_checktype(L, 2, LUA_TTABLE);
-  request.acquire.ns = lcdc_opt_string_field(L, 2, "namespace");
-  lcdc_require_string_field(L, 2, "key", &request.acquire.key);
-  request.acquire.owner = lcdc_opt_string_field(L, 2, "owner");
-  lcdc_opt_integer_field(L, 2, "ttl_seconds", &request.acquire.ttl_seconds);
-  lcdc_opt_integer_field(L, 2, "block_seconds", &request.acquire.block_seconds);
-  lcdc_opt_boolean_field(L, 2, "if_not_exists", &request.acquire.if_not_exists);
+  was_failed = lcdc_outbox_txn_begin_staging(ud);
+  root_index = lcdc_parse_outbox_participant_request(L, 2, &request);
   lc_error_init(&error);
   rc = lc_outbox_transaction_acquire(ud->transaction, &request, &participant,
                                      &error);
+  lua_remove(L, root_index);
   if (rc != LC_OK) {
     lcdc_outbox_txn_note_staging_failure(ud);
     lcdc_push_status_error(L, rc, &error);
@@ -6591,7 +6736,9 @@ static int lcdc_outbox_txn_acquire(lua_State *L) {
   ud->callback_has_fresh_participant = 1;
   ud->callback_has_domain_participant = 1;
   lc_error_cleanup(&error);
-  return lcdc_push_outbox_participant(L, participant, 1, ud);
+  rc = lcdc_push_outbox_participant(L, participant, 1, ud);
+  lcdc_outbox_txn_finish_staging(ud, was_failed);
+  return rc;
 }
 
 static int lcdc_outbox_txn_append(lua_State *L) {
@@ -6600,9 +6747,12 @@ static int lcdc_outbox_txn_append(lua_State *L) {
   lc_outbox_receipt receipt;
   lc_source *payload = NULL;
   lc_error error;
+  int root_index;
+  int was_failed;
   int rc;
 
-  lcdc_parse_outbox_entry(L, 2, &entry);
+  was_failed = lcdc_outbox_txn_begin_staging(ud);
+  root_index = lcdc_parse_outbox_entry(L, 2, &entry);
   lc_outbox_receipt_init(&receipt);
   lc_error_init(&error);
   rc = lcdc_source_from_value(L, 3, &payload, &error);
@@ -6613,6 +6763,7 @@ static int lcdc_outbox_txn_append(lua_State *L) {
     --ud->streaming_count;
   }
   lc_source_close(payload);
+  lua_remove(L, root_index);
   if (rc != LC_OK) {
     lcdc_outbox_txn_note_staging_failure(ud);
     lc_outbox_receipt_cleanup(&receipt);
@@ -6629,6 +6780,7 @@ static int lcdc_outbox_txn_append(lua_State *L) {
   }
   lc_outbox_receipt_cleanup(&receipt);
   lc_error_cleanup(&error);
+  lcdc_outbox_txn_finish_staging(ud, was_failed);
   return 1;
 }
 
@@ -6637,13 +6789,17 @@ static int lcdc_outbox_txn_accept_command(lua_State *L) {
   lc_command_request request;
   lc_command_receipt receipt;
   lc_error error;
+  int root_index;
+  int was_failed;
   int rc;
 
-  lcdc_parse_command_request(L, 2, &request);
+  was_failed = lcdc_outbox_txn_begin_staging(ud);
+  root_index = lcdc_parse_command_request(L, 2, &request);
   lc_command_receipt_init(&receipt);
   lc_error_init(&error);
   rc = lc_outbox_transaction_accept_command(ud->transaction, &request, &receipt,
                                             &error);
+  lua_remove(L, root_index);
   if (rc != LC_OK) {
     lcdc_outbox_txn_note_staging_failure(ud);
     lc_command_receipt_cleanup(&receipt);
@@ -6660,6 +6816,7 @@ static int lcdc_outbox_txn_accept_command(lua_State *L) {
   }
   lc_command_receipt_cleanup(&receipt);
   lc_error_cleanup(&error);
+  lcdc_outbox_txn_finish_staging(ud, was_failed);
   return 1;
 }
 
@@ -6668,20 +6825,17 @@ static int lcdc_outbox_txn_accept_inbox(lua_State *L) {
   lc_inbox_message message;
   lc_inbox_accept_result result;
   lc_error error;
+  int root_index;
+  int was_failed;
   int rc;
 
-  lc_inbox_message_init(&message);
+  was_failed = lcdc_outbox_txn_begin_staging(ud);
   memset(&result, 0, sizeof(result));
-  luaL_checktype(L, 2, LUA_TTABLE);
-  lcdc_require_string_field(L, 2, "consumer_id", &message.consumer_id);
-  lcdc_require_string_field(L, 2, "source_kind", &message.source_kind);
-  lcdc_require_string_field(L, 2, "source_id", &message.source_id);
-  lcdc_require_string_field(L, 2, "message_id", &message.message_id);
-  message.payload_digest = lcdc_opt_string_field(L, 2, "payload_digest");
-  message.operation_id = lcdc_opt_string_field(L, 2, "operation_id");
+  root_index = lcdc_parse_inbox_message(L, 2, &message);
   lc_error_init(&error);
   rc = lc_outbox_transaction_accept_inbox(ud->transaction, &message, &result,
                                           &error);
+  lua_remove(L, root_index);
   if (rc != LC_OK) {
     lcdc_outbox_txn_note_staging_failure(ud);
     lcdc_push_status_error(L, rc, &error);
@@ -6696,6 +6850,7 @@ static int lcdc_outbox_txn_accept_inbox(lua_State *L) {
     lcdc_push_inbox_result(L, &result);
   }
   lc_error_cleanup(&error);
+  lcdc_outbox_txn_finish_staging(ud, was_failed);
   return 1;
 }
 
@@ -6704,8 +6859,10 @@ static int lcdc_outbox_txn_terminal_command(lua_State *L, int failed) {
   lc_command_result result;
   lc_source *body = NULL;
   lc_error error;
+  int was_failed;
   int rc;
 
+  was_failed = lcdc_outbox_txn_begin_staging(ud);
   lc_command_result_init(&result);
   luaL_checktype(L, 2, LUA_TTABLE);
   if (failed) {
@@ -6748,6 +6905,7 @@ static int lcdc_outbox_txn_terminal_command(lua_State *L, int failed) {
   }
   lua_pushboolean(L, 1);
   lc_error_cleanup(&error);
+  lcdc_outbox_txn_finish_staging(ud, was_failed);
   return 1;
 }
 

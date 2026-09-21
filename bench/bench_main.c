@@ -890,6 +890,137 @@ static int bench_outbox_reconcile_compacted(long iterations) {
   return bench_outbox_reconcile_case(iterations, 3);
 }
 
+static int bench_outbox_command_wait(long iterations) {
+  bench_outbox_fixture fixture;
+  lc_outbox_config config;
+  lc_outbox *outbox;
+  lc_outbox_transaction *transaction;
+  lc_command_request request;
+  lc_command_receipt receipt;
+  lc_command_result result;
+  lc_outbox_commit_result commit_result;
+  lc_error error;
+  char idempotency_key[96];
+  char command_id[48];
+  double wait_seconds;
+  double started;
+  long completed_rows;
+  long rows;
+  long index;
+  int rc;
+
+  rows = iterations > 0L ? iterations : 64L;
+  memset(&fixture, 0, sizeof(fixture));
+  outbox = NULL;
+  transaction = NULL;
+  wait_seconds = 0.0;
+  completed_rows = 0L;
+  lc_error_init(&error);
+  lc_command_receipt_init(&receipt);
+  lc_outbox_commit_result_init(&commit_result);
+  rc = bench_outbox_fixture_open(&fixture, 0, 0L, &error);
+  if (rc != LC_OK || !fixture.is_pouch) {
+    if (rc == LC_OK) {
+      rc = lc_error_set(&error, LC_ERR_INVALID, 0L,
+                        "command wait benchmark requires Pouch", NULL, NULL,
+                        NULL);
+    }
+    goto done;
+  }
+  lc_outbox_config_init(&config);
+  config.ns = fixture.ns;
+  config.owner = "outbox-command-wait-benchmark";
+  rc = lc_client_new_outbox(fixture.client, &config, &outbox, &error);
+  for (index = 0L; rc == LC_OK && index < rows; ++index) {
+    if (snprintf(idempotency_key, sizeof(idempotency_key), "wait-%08ld",
+                 index) < 0) {
+      rc = LC_ERR_INVALID;
+      break;
+    }
+    transaction = NULL;
+    lc_command_receipt_cleanup(&receipt);
+    lc_command_receipt_init(&receipt);
+    lc_command_request_init(&request);
+    request.identity.scope = "outbox-command-wait-benchmark";
+    request.identity.command_type = "receipt.read.v1";
+    request.identity.idempotency_key = idempotency_key;
+    request.request_digest = "sha256:outbox-command-wait-benchmark";
+    rc = lc_outbox_accept_command(outbox, &request, &transaction, &receipt,
+                                  &error);
+    if (rc != LC_OK || transaction == NULL) {
+      if (rc == LC_OK)
+        rc = LC_ERR_INVALID;
+      break;
+    }
+    {
+      int written;
+
+      written =
+          snprintf(command_id, sizeof(command_id), "%s", receipt.command_id);
+      if (written < 0 || (size_t)written >= sizeof(command_id)) {
+        rc = LC_ERR_INVALID;
+        break;
+      }
+    }
+    rc = lc_outbox_transaction_commit(transaction, &commit_result, &error);
+    lc_outbox_commit_result_cleanup(&commit_result);
+    lc_outbox_transaction_close(transaction);
+    transaction = NULL;
+    if (rc != LC_OK)
+      break;
+    lc_command_receipt_cleanup(&receipt);
+    lc_command_receipt_init(&receipt);
+    rc = lc_outbox_resume_command_by_id(outbox, command_id, &transaction,
+                                        &receipt, &error);
+    if (rc != LC_OK || transaction == NULL) {
+      if (rc == LC_OK)
+        rc = LC_ERR_INVALID;
+      break;
+    }
+    lc_command_result_init(&result);
+    result.result_code = "completed";
+    rc = lc_outbox_transaction_complete_command(transaction, &result, &error);
+    if (rc == LC_OK)
+      rc = lc_outbox_transaction_commit(transaction, &commit_result, &error);
+    lc_outbox_commit_result_cleanup(&commit_result);
+    lc_outbox_transaction_close(transaction);
+    transaction = NULL;
+    if (rc != LC_OK)
+      break;
+    lc_command_receipt_cleanup(&receipt);
+    lc_command_receipt_init(&receipt);
+    started = bench_now_seconds();
+    rc = lc_outbox_wait_command(outbox, command_id, 0L, &receipt, &error);
+    wait_seconds += bench_now_seconds() - started;
+    if (rc != LC_OK || receipt.state != LC_COMMAND_COMPLETED) {
+      if (rc == LC_OK)
+        rc = LC_ERR_INVALID;
+      break;
+    }
+    completed_rows += 1L;
+  }
+  printf("metric=outbox-command-wait backend=pouch terminal_receipts=%ld "
+         "terminal_read_ms=%.3f terminal_reads_per_second=%.3f rc=%d\n",
+         completed_rows, wait_seconds * 1000.0,
+         wait_seconds > 0.0 ? (double)completed_rows / wait_seconds : 0.0, rc);
+
+done:
+  if (transaction != NULL)
+    lc_outbox_transaction_close(transaction);
+  if (outbox != NULL)
+    lc_outbox_close(outbox);
+  lc_outbox_commit_result_cleanup(&commit_result);
+  lc_command_receipt_cleanup(&receipt);
+  bench_outbox_fixture_close(&fixture);
+  if (rc != LC_OK && error.message != NULL) {
+    fprintf(
+        stderr, "outbox-command-wait failed: code=%d message=%s detail=%s\n",
+        error.code, error.message, error.detail == NULL ? "" : error.detail);
+  }
+  lc_error_cleanup(&error);
+  return rc == LC_OK ? 0 : 1;
+}
+
 static int bench_outbox_dispatcher_child(const bench_outbox_fixture *fixture,
                                          unsigned long dispatcher_index,
                                          long page_capacity, int start_fd,
@@ -2185,6 +2316,7 @@ static const bench_case *bench_cases(void) {
       {"outbox-reconcile-multi", 256L, bench_outbox_reconcile_multi},
       {"outbox-reconcile-multi-compacted", 256L,
        bench_outbox_reconcile_multi_compacted},
+      {"outbox-command-wait", 64L, bench_outbox_command_wait},
       {"pouch-query-eq-sparse-index-keys", 1024L,
        bench_pouch_query_eq_sparse_index_keys},
       {"pouch-query-eq-sparse-scan-keys", 1024L,

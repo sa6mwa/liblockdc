@@ -12,6 +12,7 @@ foreach(required_snippet
     "lcdc_opt_version_field(L, 2, \"if_version\", &request.if_version)"
     "static void lcdc_set_version_field(lua_State *L, const char *name,"
     "timeout_ms = lcdc_check_long(L, 2, \"outbox dispatcher next timeout\")"
+    "timeout_ms = lcdc_check_long(L, 3, \"outbox command wait timeout\")"
     "long ttl_seconds = lcdc_check_long(L, 2, \"outbox renewal ttl\")"
     "static int lcdc_set_size_field(lua_State *L, const char *name, size_t value,"
     "static int lcdc_set_uint64_field(lua_State *L, const char *name,"

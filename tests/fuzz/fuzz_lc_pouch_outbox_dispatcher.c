@@ -30,12 +30,16 @@ static void outbox_fuzz_run(const uint8_t *data, size_t size,
   lc_outbox_entry entry;
   lc_outbox_receipt receipt;
   lc_outbox_commit_result commit_result;
+  lc_command_receipt command_receipt;
+  lc_command_request command_request;
+  lc_command_result command_result;
   lc_outbox_transaction *transaction;
   lc_outbox_dispatcher *dispatcher;
   lc_outbox_job *job;
   lc_source *payload;
   lc_client *client;
   lc_error error;
+  char command_id[48];
   unsigned int knobs;
 
   if (!lc_test_tmp_mkdtemp(template_path, root, sizeof(root),
@@ -86,6 +90,7 @@ static void outbox_fuzz_run(const uint8_t *data, size_t size,
     entry.destination = "fuzz://outbox";
     entry.content_type = "text/plain";
     lc_outbox_receipt_init(&receipt);
+    lc_command_receipt_init(&command_receipt);
     outbox_fuzz_require(lc_source_from_memory(data, size, &payload, &error),
                         &error, "payload");
     outbox_fuzz_require(lc_outbox_append(attached_outbox, &entry, payload,
@@ -115,6 +120,70 @@ static void outbox_fuzz_run(const uint8_t *data, size_t size,
     transaction = NULL;
     lc_outbox_commit_result_cleanup(&commit_result);
     lc_outbox_receipt_cleanup(&receipt);
+
+    lc_command_request_init(&command_request);
+    command_request.identity.scope = "outbox-fuzz";
+    command_request.identity.command_type = "fuzz.command.v1";
+    command_request.identity.idempotency_key = "outbox-fuzz-command";
+    command_request.request_digest = "sha256:outbox-fuzz-command";
+    outbox_fuzz_require(lc_outbox_accept_command(outbox, &command_request,
+                                                 &transaction, &command_receipt,
+                                                 &error),
+                        &error, "accept-command");
+    if (transaction == NULL || command_receipt.command_id == NULL)
+      abort();
+    if (snprintf(command_id, sizeof(command_id), "%s",
+                 command_receipt.command_id) < 0 ||
+        strlen(command_id) != strlen(command_receipt.command_id))
+      abort();
+    outbox_fuzz_require(
+        lc_outbox_transaction_commit(transaction, &commit_result, &error),
+        &error, "commit-command-pending");
+    lc_outbox_commit_result_cleanup(&commit_result);
+    lc_outbox_transaction_close(transaction);
+    transaction = NULL;
+    lc_command_receipt_cleanup(&command_receipt);
+    lc_command_receipt_init(&command_receipt);
+    if (lc_outbox_wait_command(outbox, command_id, 0L, &command_receipt,
+                               &error) != LC_ERR_TIMEOUT ||
+        command_receipt.state != LC_COMMAND_PENDING)
+      abort();
+    lc_error_cleanup(&error);
+    lc_error_init(&error);
+    lc_command_receipt_cleanup(&command_receipt);
+    lc_command_receipt_init(&command_receipt);
+    outbox_fuzz_require(
+        lc_outbox_resume_command_by_id(outbox, command_id, &transaction,
+                                       &command_receipt, &error),
+        &error, "resume-command");
+    if (transaction == NULL || command_receipt.state != LC_COMMAND_PENDING)
+      abort();
+    lc_command_result_init(&command_result);
+    command_result.result_code = "fuzz-terminal";
+    if ((knobs & 16U) != 0U) {
+      outbox_fuzz_require(lc_outbox_transaction_fail_command(
+                              transaction, &command_result, &error),
+                          &error, "fail-command");
+    } else {
+      outbox_fuzz_require(lc_outbox_transaction_complete_command(
+                              transaction, &command_result, &error),
+                          &error, "complete-command");
+    }
+    outbox_fuzz_require(
+        lc_outbox_transaction_commit(transaction, &commit_result, &error),
+        &error, "commit-command-terminal");
+    lc_outbox_commit_result_cleanup(&commit_result);
+    lc_outbox_transaction_close(transaction);
+    transaction = NULL;
+    lc_command_receipt_cleanup(&command_receipt);
+    lc_command_receipt_init(&command_receipt);
+    outbox_fuzz_require(lc_outbox_wait_command(outbox, command_id, 0L,
+                                               &command_receipt, &error),
+                        &error, "wait-command-terminal");
+    if (command_receipt.state !=
+        (((knobs & 16U) != 0U) ? LC_COMMAND_FAILED : LC_COMMAND_COMPLETED))
+      abort();
+    lc_command_receipt_cleanup(&command_receipt);
     outbox_fuzz_require(
         lc_outbox_dispatcher_next(dispatcher, 5000L, &job, &error), &error,
         "next");

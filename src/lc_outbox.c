@@ -68,6 +68,9 @@ lc_outbox_test_hook_fn lc_outbox_test_before_dispatcher_wait_hook = NULL;
 void *lc_outbox_test_before_dispatcher_wait_context = NULL;
 lc_outbox_test_hook_fn lc_outbox_test_before_next_wait_hook = NULL;
 void *lc_outbox_test_before_next_wait_context = NULL;
+lc_outbox_test_hook_fn lc_outbox_test_after_command_wait_pending_read_hook =
+    NULL;
+void *lc_outbox_test_after_command_wait_pending_read_context = NULL;
 lc_outbox_test_hook_fn lc_outbox_test_before_next_release_hook = NULL;
 void *lc_outbox_test_before_next_release_context = NULL;
 lc_outbox_test_hook_fn lc_outbox_test_after_dispatcher_core_retain_hook = NULL;
@@ -3686,7 +3689,7 @@ static int lc_outbox_claim_outbox(lc_outbox_handle *outbox, const char *key,
 
     rc = lc_client_clone_remote_for_outbox(outbox->client,
                                            lc_outbox_host_job_timeout(outbox),
-                                           &job_client_public, error);
+                                           NULL, &job_client_public, error);
     if (rc == LC_OK)
       job_client = (lc_client_handle *)job_client_public;
   }
@@ -5668,22 +5671,21 @@ static int lc_outbox_get_command_receipt_method(
   return rc;
 }
 
-static int lc_outbox_get_command_receipt_by_id_method(
-    lc_outbox *self, const char *command_id, lc_command_receipt *receipt,
-    lc_error *error) {
-  lc_outbox_handle *outbox = (lc_outbox_handle *)self;
+static int lc_outbox_get_command_receipt_by_id_from_client(
+    lc_outbox_handle *outbox, lc_client_handle *client, const char *command_id,
+    lc_command_receipt *receipt, lc_error *error) {
   lc_outbox_command_record record;
   lc_get_opts options;
   lc_get_res result;
   lonejson *runtime;
   char *key;
+  char command_id_copy[48];
   int rc;
 
-  if (outbox == NULL || receipt == NULL)
+  if (outbox == NULL || client == NULL || receipt == NULL)
     return lc_error_set(error, LC_ERR_INVALID, 0L,
                         "outbox and command receipt output are required", NULL,
                         NULL, NULL);
-  lc_command_receipt_cleanup(receipt);
   memset(&record, 0, sizeof(record));
   memset(&result, 0, sizeof(result));
   runtime = NULL;
@@ -5691,11 +5693,15 @@ static int lc_outbox_get_command_receipt_by_id_method(
   rc = lc_outbox_command_key_from_id(command_id, &key, error);
   if (rc != LC_OK)
     return rc;
-  rc = lc_outbox_require_json_runtime(outbox->client, &runtime, error);
+  /* `command_id` may alias receipt->command_id. Derive both the durable key
+   * and this stable comparison value before replacing the caller's output. */
+  memcpy(command_id_copy, command_id, sizeof(command_id_copy));
+  lc_command_receipt_cleanup(receipt);
+  rc = lc_outbox_require_json_runtime(client, &runtime, error);
   if (rc == LC_OK) {
     lc_get_opts_init(&options);
     options.public_read = 1;
-    rc = lc_load_in_namespace(&outbox->client->pub, outbox->ns, key,
+    rc = lc_load_in_namespace(&client->pub, outbox->ns, key,
                               &lc_outbox_command_record_map, &record, &options,
                               &result, error);
   }
@@ -5704,7 +5710,7 @@ static int lc_outbox_get_command_receipt_by_id_method(
                       "command receipt does not exist", NULL, NULL, NULL);
   }
   if (rc == LC_OK && (record.command_id == NULL ||
-                      strcmp(record.command_id, command_id) != 0)) {
+                      strcmp(record.command_id, command_id_copy) != 0)) {
     rc = lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                       "command receipt does not match command id", NULL, NULL,
                       NULL);
@@ -5718,15 +5724,35 @@ static int lc_outbox_get_command_receipt_by_id_method(
   return rc;
 }
 
+static int lc_outbox_get_command_receipt_by_id_method(
+    lc_outbox *self, const char *command_id, lc_command_receipt *receipt,
+    lc_error *error) {
+  lc_outbox_handle *outbox = (lc_outbox_handle *)self;
+
+  if (outbox == NULL)
+    return lc_error_set(error, LC_ERR_INVALID, 0L,
+                        "outbox and command receipt output are required", NULL,
+                        NULL, NULL);
+  return lc_outbox_get_command_receipt_by_id_from_client(
+      outbox, outbox->client, command_id, receipt, error);
+}
+
 static int lc_outbox_wait_command_method(lc_outbox *self,
                                          const char *command_id,
                                          long timeout_ms,
                                          lc_command_receipt *receipt,
                                          lc_error *error) {
   struct timespec started;
+  struct timespec deadline;
   struct timespec now;
+  lc_outbox_handle *outbox;
+  lc_client *wait_client_public;
+  lc_client_handle *wait_client;
+  char command_id_copy[48];
+  char *command_key;
   long elapsed_ms;
   long delay_ms;
+  long remaining_ms;
   int rc;
 
   if (self == NULL || receipt == NULL || timeout_ms < -1L)
@@ -5734,14 +5760,88 @@ static int lc_outbox_wait_command_method(lc_outbox *self,
         error, LC_ERR_INVALID, 0L,
         "outbox, receipt output, and valid timeout are required", NULL, NULL,
         NULL);
+  outbox = (lc_outbox_handle *)self;
+  command_key = NULL;
+  rc = lc_outbox_command_key_from_id(command_id, &command_key, error);
+  if (rc != LC_OK)
+    return rc;
+  memcpy(command_id_copy, command_id, sizeof(command_id_copy));
+  free(command_key);
   if (clock_gettime(CLOCK_MONOTONIC, &started) != 0)
     return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
                         "failed to read command wait clock", NULL, NULL, NULL);
+  deadline = started;
+  if (timeout_ms > 0L)
+    lc_outbox_timespec_add_milliseconds_saturating(&deadline, timeout_ms);
+  lc_command_receipt_cleanup(receipt);
   for (;;) {
-    rc = lc_outbox_get_command_receipt_by_id_method(self, command_id, receipt,
-                                                    error);
-    if (rc != LC_OK || receipt->state != LC_COMMAND_PENDING)
+    lc_command_receipt observed;
+
+    lc_command_receipt_init(&observed);
+    wait_client_public = NULL;
+    wait_client = outbox->client;
+    if (timeout_ms > 0L) {
+      if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return lc_error_set(error, LC_ERR_PROTOCOL, 0L,
+                            "failed to read command wait clock", NULL, NULL,
+                            NULL);
+      elapsed_ms = (long)((now.tv_sec - started.tv_sec) * 1000L +
+                          (now.tv_nsec - started.tv_nsec) / 1000000L);
+      if (elapsed_ms >= timeout_ms)
+        return lc_error_set(error, LC_ERR_TIMEOUT, 0L,
+                            "command remains pending", NULL, NULL, NULL);
+      remaining_ms = timeout_ms - elapsed_ms;
+      if (!outbox->client->is_pouch) {
+        rc = lc_client_clone_remote_for_outbox(outbox->client, remaining_ms,
+                                               &deadline, &wait_client_public,
+                                               error);
+        if (rc != LC_OK) {
+          lc_command_receipt_cleanup(&observed);
+          return rc;
+        }
+        wait_client = (lc_client_handle *)wait_client_public;
+      }
+    }
+    rc = lc_outbox_get_command_receipt_by_id_from_client(
+        outbox, wait_client, command_id_copy, &observed, error);
+    if (wait_client_public != NULL)
+      lc_client_close(wait_client_public);
+    if (rc != LC_OK) {
+      lc_command_receipt_cleanup(&observed);
+      if (timeout_ms > 0L && clock_gettime(CLOCK_MONOTONIC, &now) == 0 &&
+          ((now.tv_sec > deadline.tv_sec) ||
+           (now.tv_sec == deadline.tv_sec &&
+            now.tv_nsec >= deadline.tv_nsec)) &&
+          receipt->state == LC_COMMAND_PENDING) {
+        lc_error_cleanup(error);
+        return lc_error_set(error, LC_ERR_TIMEOUT, 0L,
+                            "command remains pending", NULL, NULL, NULL);
+      }
       return rc;
+    }
+    if (timeout_ms > 0L && clock_gettime(CLOCK_MONOTONIC, &now) == 0 &&
+        ((now.tv_sec > deadline.tv_sec) ||
+         (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec))) {
+      if (observed.state == LC_COMMAND_PENDING) {
+        lc_command_receipt_cleanup(receipt);
+        *receipt = observed;
+        lc_command_receipt_init(&observed);
+      }
+      lc_command_receipt_cleanup(&observed);
+      return lc_error_set(error, LC_ERR_TIMEOUT, 0L, "command remains pending",
+                          NULL, NULL, NULL);
+    }
+    lc_command_receipt_cleanup(receipt);
+    *receipt = observed;
+    lc_command_receipt_init(&observed);
+    if (receipt->state != LC_COMMAND_PENDING)
+      return LC_OK;
+#ifdef LOCKDC_TEST_BUILD
+    if (lc_outbox_test_after_command_wait_pending_read_hook != NULL) {
+      lc_outbox_test_after_command_wait_pending_read_hook(
+          lc_outbox_test_after_command_wait_pending_read_context);
+    }
+#endif
     if (timeout_ms == 0L)
       return lc_error_set(error, LC_ERR_TIMEOUT, 0L, "command remains pending",
                           NULL, NULL, NULL);
@@ -6819,7 +6919,7 @@ static int lc_outbox_new(lc_client *self, const lc_outbox_config *config,
   } else {
     lc_client *dispatcher_client = NULL;
     rc = lc_client_clone_remote_for_outbox(client, outbox->shutdown_timeout_ms,
-                                           &dispatcher_client, error);
+                                           NULL, &dispatcher_client, error);
     if (rc != LC_OK) {
       lc_outbox_close_method(&outbox->pub);
       return rc;

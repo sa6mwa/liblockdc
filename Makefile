@@ -134,6 +134,7 @@ OUTBOX_BENCH_PAYLOAD_BYTES ?= 4096
 OUTBOX_BENCH_PAGE_CAPACITY ?= 16
 OUTBOX_BENCH_TIMEOUT ?= 10m
 OUTBOX_BENCH_HARDENING_DISPATCHERS ?= 2
+OUTBOX_COMMAND_WAIT_BENCH_ROWS ?= 64
 OUTBOX_BENCH_REMOTE_ENDPOINT ?= https://localhost:19441
 OUTBOX_BENCH_REMOTE_FAILOVER_ENDPOINT ?= https://localhost:19442
 OUTBOX_BENCH_REMOTE_BUNDLE ?= $(ROOT)/devenv/volumes/lockd-disk-a-config/client.pem
@@ -172,7 +173,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	__build-debug __build-host __build-x86_64-linux-gnu-release __build-release __build-e2e __build-coverage __build-fuzz \
 	__test-debug __test-pouch-outbox-preflight __test-host __test-cross __test-e2e __test-install-tree __example-smoke-local __test-all __test-coverage \
 	__format \
-	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __pouch-integration-fuzz __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-outbox-prepare __benchmark-outbox-pouch __benchmark-outbox-hardening __benchmark-outbox-remote __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate __benchmark-pouch-go-core-soak __pouch-replay-capture-churn __pouch-core-hardening \
+	__finalize-slice __valgrind __coverage __fuzz __fuzz-smoke __fuzz-long __pouch-integration-fuzz __bench __benchmarks __bench-check __bench-gate __benchmarks-go __perf-gate __benchmark-pouch-perf-prepare __benchmark-pouch-perf __benchmark-outbox-prepare __benchmark-outbox-pouch __benchmark-outbox-command-wait __benchmark-outbox-hardening __benchmark-outbox-remote __benchmark-pouch-routine __benchmark-pouch-go-prepare __benchmark-pouch-go __benchmark-pouch-go-run __benchmark-pouch-go-fast __benchmark-pouch-go-medium __benchmark-pouch-go-acceptance __benchmark-pouch-go-production __benchmark-pouch-go-durable __benchmark-pouch-go-compaction __benchmark-pouch-go-concurrency __benchmark-pouch-go-parity-gate __benchmark-pouch-go-durable-gate __benchmark-pouch-go-core-soak __pouch-replay-capture-churn __pouch-core-hardening \
 	__package __package-source __package-source-smoke __package-checksums __package-verify __verify-release-privacy __clean-dist \
 	__lua-rock __lua-test __lua-env __release-lua-artifacts \
 	__dev-up __dev-down __dev-reset __dev-ps __dev-logs __cross-build __cross-preset-test __cross-test \
@@ -181,7 +182,7 @@ LOCKD_GO_MODULE_DIR := $(ROOT)/.cache/go/pkg/mod/pkt.systems/lockd@$(LOCKD_GO_VE
 	build build-debug build-host build-release build-e2e build-coverage build-fuzz \
 	test test-debug test-pouch-outbox-preflight test-host test-cross test-e2e test-install-tree example-smoke-local test-all test-coverage \
 	format \
-	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long pouch-integration-fuzz bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-outbox-pouch benchmark-outbox-hardening benchmark-outbox-remote benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate benchmark-pouch-go-core-soak pouch-replay-capture-churn \
+	finalize-slice valgrind coverage fuzz fuzz-smoke fuzz-long pouch-integration-fuzz bench benchmarks bench-check bench-gate benchmarks-go perf-gate benchmark-pouch-perf benchmark-outbox-pouch benchmark-outbox-command-wait benchmark-outbox-hardening benchmark-outbox-remote benchmark-pouch-routine benchmark-pouch-perf-index-docs benchmark-pouch-perf-full-text-keys benchmark-pouch-perf-full-text-reopen-keys benchmark-pouch-perf-flush-intermediate benchmark-pouch-perf-flush-reopen benchmark-pouch-go benchmark-pouch-go-fast benchmark-pouch-go-medium benchmark-pouch-go-acceptance benchmark-pouch-go-production benchmark-pouch-go-durable benchmark-pouch-go-compaction benchmark-pouch-go-concurrency benchmark-pouch-go-parity-gate benchmark-pouch-go-durable-gate benchmark-pouch-go-core-soak pouch-replay-capture-churn \
 	package package-source package-source-smoke package-checksums package-verify verify-release-archives verify-release-privacy clean-dist \
 	lua-rock lua-test lua-env release-lua-artifacts \
 	dev-up dev-down dev-reset dev-ps dev-logs cross-build cross-preset-test cross-test \
@@ -230,6 +231,7 @@ help:
 		'make perf-gate          Enforce Pouch-vs-lockd core-operation performance thresholds for default and strict-durable I/O.' \
 		'make benchmark-pouch-perf Prepare native artifacts, then run one sub-minute pouch perf case (POUCH_PERF_CASE=$(POUCH_PERF_CASE), POUCH_PERF_ROWS=$(POUCH_PERF_ROWS), POUCH_PERF_CRYPTO=$(POUCH_PERF_CRYPTO)).' \
 		'make benchmark-outbox-pouch Run the large-outbox indexed-reconciliation benchmark against a fresh, un-compacted Pouch root.' \
+		'make benchmark-outbox-command-wait Measure terminal command-receipt reads through the Pouch wait_command observer.' \
 		'make benchmark-outbox-hardening Run persisted-index, compacted, and shared-writer Pouch outbox reconciliation hardening cases serially.' \
 		'make benchmark-outbox-remote Start the compose devenv, then run the same outbox reconciliation workload through the disk lockd endpoint.' \
 		'make benchmark-pouch-routine Prepare benchmark artifacts, then run all bounded native phase probes plus production and shared-root concurrency comparison in at most $(POUCH_GO_ROUTINE_TIMEOUT).' \
@@ -561,6 +563,14 @@ __benchmark-outbox-pouch:
 	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
 	    $(OUTBOX_BENCH_ROWS) outbox-reconcile
 
+benchmark-outbox-command-wait: __benchmark-outbox-prepare
+	$(TIMED) benchmark-outbox-command-wait timeout --kill-after=5s \
+	  '$(OUTBOX_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-outbox-command-wait
+
+__benchmark-outbox-command-wait:
+	./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
+	  $(OUTBOX_COMMAND_WAIT_BENCH_ROWS) outbox-command-wait
+
 benchmark-outbox-hardening: __benchmark-outbox-prepare
 	$(TIMED) benchmark-outbox-hardening timeout --kill-after=5s \
 	  '$(OUTBOX_BENCH_TIMEOUT)' $(MAKE_RECURSE) __benchmark-outbox-hardening
@@ -598,6 +608,8 @@ __benchmark-outbox-hardening:
 	  LOCKDC_OUTBOX_BENCH_DISPATCHERS='$(OUTBOX_BENCH_HARDENING_DISPATCHERS)' \
 	  ./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
 	    $(OUTBOX_BENCH_ROWS) outbox-reconcile-multi-compacted
+	./build/$(X86_64_GNU_RELEASE_PRESET)/bench/lockdc_bench \
+	  $(OUTBOX_COMMAND_WAIT_BENCH_ROWS) outbox-command-wait
 
 benchmark-outbox-remote: __benchmark-outbox-prepare
 	$(MAKE_RECURSE) __dev-reset

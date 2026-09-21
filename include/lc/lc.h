@@ -2695,9 +2695,10 @@ struct lc_outbox {
                                    lc_command_receipt *out, lc_error *error);
   /**
    * Waits for a command receipt to become terminal without claiming work or
-   * invoking host code. `timeout_ms` is zero for a one-shot read, negative to
-   * wait without a deadline, or positive for a monotonic deadline. A timeout
-   * returns `LC_ERR_TIMEOUT` and the latest pending receipt in `out`.
+   * invoking host code. `timeout_ms` is zero for a one-shot read, `-1` to wait
+   * without a deadline, or positive for a monotonic deadline that also bounds
+   * each remote receipt read. A timeout returns `LC_ERR_TIMEOUT` and the
+   * latest pending receipt in `out`.
    */
   int (*wait_command)(lc_outbox *self, const char *command_id, long timeout_ms,
                       lc_command_receipt *out, lc_error *error);
@@ -3877,7 +3878,9 @@ int lc_outbox_get_command_receipt_by_id(lc_outbox *outbox,
                                         lc_error *error);
 /**
  * Waits for a command receipt to become terminal without performing dispatch.
- * A timeout returns `LC_ERR_TIMEOUT` and the latest pending receipt in `out`.
+ * `timeout_ms` is zero for one read, `-1` for no deadline, or positive for a
+ * monotonic deadline that also bounds each remote receipt read. A timeout
+ * returns `LC_ERR_TIMEOUT` and the latest pending receipt in `out`.
  */
 int lc_outbox_wait_command(lc_outbox *outbox, const char *command_id,
                            long timeout_ms, lc_command_receipt *out,

@@ -14,6 +14,7 @@
 
 #include <cmocka.h>
 
+#include "../support/lc_test_outbox_hooks.h"
 #include "../support/lc_test_tmp.h"
 #include "lc/lc.h"
 #include "lc_pouch.h"
@@ -174,6 +175,48 @@ typedef struct pouch_e2e_outbox_child {
   int claimed_read;
   int release_write;
 } pouch_e2e_outbox_child;
+
+typedef enum pouch_e2e_command_child_mode {
+  POUCH_E2E_COMMAND_CHILD_COMPLETE = 0,
+  POUCH_E2E_COMMAND_CHILD_CRASH_AFTER_FOREIGN_EFFECT = 1,
+  POUCH_E2E_COMMAND_CHILD_CRASH_AFTER_COMMAND_COMMIT = 2
+} pouch_e2e_command_child_mode;
+
+typedef struct pouch_e2e_command_child_result {
+  int rc;
+  int stage;
+  int performed_foreign_effect;
+  int saw_terminal_command;
+  char command_id[48];
+  char error_message[256];
+} pouch_e2e_command_child_result;
+
+typedef struct pouch_e2e_command_child {
+  pid_t pid;
+  int ready_read;
+  int start_write;
+  int result_read;
+  int phase_read;
+  int release_write;
+} pouch_e2e_command_child;
+
+typedef struct pouch_e2e_command_waiter_result {
+  int rc;
+  int state;
+  char error_message[256];
+} pouch_e2e_command_waiter_result;
+
+typedef struct pouch_e2e_command_waiter {
+  pid_t pid;
+  int ready_read;
+  int pending_read;
+  int result_read;
+} pouch_e2e_command_waiter;
+
+typedef struct pouch_e2e_command_wait_hook {
+  int pending_fd;
+  int signaled;
+} pouch_e2e_command_wait_hook;
 
 static int query_keys_e2e_begin(void *context, lc_error *error) {
   query_keys_e2e_capture *capture;
@@ -4284,7 +4327,7 @@ static void test_pouch_direct_query_indexing_disabled_roundtrip(void **state) {
 }
 
 static void test_pouch_direct_route_command_wait_roundtrip(void **state) {
-  char root[256], endpoint[512], command_id[48];
+  char root[256], endpoint[512], command_id[48], failed_command_id[48];
   lc_client *client;
   lc_outbox *outbox;
   lc_outbox_dispatcher *dispatcher;
@@ -4386,6 +4429,50 @@ static void test_pouch_direct_route_command_wait_roundtrip(void **state) {
       lc_outbox_wait_command(outbox, command_id, 1000L, &receipt, &error),
       &error);
   assert_int_equal(receipt.state, LC_COMMAND_COMPLETED);
+  lc_command_receipt_cleanup(&receipt);
+  lc_command_request_init(&command);
+  command.identity.scope = "tenant-route";
+  command.identity.command_type = "orders.create.v1";
+  command.identity.idempotency_key = "route-command-failure";
+  command.request_digest = "route-command-failure-digest";
+  assert_lc_ok(lc_outbox_accept_command(outbox, &command, &transaction,
+                                        &receipt, &error),
+               &error);
+  assert_non_null(transaction);
+  assert_true(snprintf(failed_command_id, sizeof(failed_command_id), "%s",
+                       receipt.command_id) > 0);
+  assert_lc_ok(
+      lc_outbox_transaction_commit(transaction, &commit_result, &error),
+      &error);
+  lc_outbox_commit_result_cleanup(&commit_result);
+  lc_outbox_transaction_close(transaction);
+  transaction = NULL;
+  assert_int_equal(
+      lc_outbox_wait_command(outbox, failed_command_id, 0L, &receipt, &error),
+      LC_ERR_TIMEOUT);
+  assert_int_equal(receipt.state, LC_COMMAND_PENDING);
+  lc_error_cleanup(&error);
+  lc_error_init(&error);
+  assert_lc_ok(lc_outbox_resume_command_by_id(outbox, failed_command_id,
+                                              &transaction, &receipt, &error),
+               &error);
+  assert_non_null(transaction);
+  lc_command_result_init(&result);
+  result.failure_code = "declined";
+  result.failure_message = "route request was declined";
+  assert_lc_ok(lc_outbox_transaction_fail_command(transaction, &result, &error),
+               &error);
+  assert_lc_ok(
+      lc_outbox_transaction_commit(transaction, &commit_result, &error),
+      &error);
+  lc_outbox_commit_result_cleanup(&commit_result);
+  lc_outbox_transaction_close(transaction);
+  transaction = NULL;
+  assert_lc_ok(
+      lc_outbox_wait_command(outbox, failed_command_id, 0L, &receipt, &error),
+      &error);
+  assert_int_equal(receipt.state, LC_COMMAND_FAILED);
+  assert_string_equal(receipt.failure_code, "declined");
   lc_outbox_receipt_cleanup(&outbox_receipt);
   lc_command_receipt_cleanup(&receipt);
   lc_source_close(payload);
@@ -5438,6 +5525,574 @@ pouch_e2e_collect_shared_outbox_child(pouch_e2e_outbox_child *child) {
   return result;
 }
 
+static int pouch_e2e_command_effect_once(const char *root,
+                                         const char *command_id,
+                                         int *performed) {
+  char effects_dir[384];
+  char marker[448];
+
+  if (root == NULL || command_id == NULL || performed == NULL ||
+      snprintf(effects_dir, sizeof(effects_dir), "%s/command-effects", root) <
+          0 ||
+      snprintf(marker, sizeof(marker), "%s/%s", effects_dir, command_id) < 0) {
+    return LC_ERR_INVALID;
+  }
+  if (mkdir(effects_dir, 0700) != 0 && errno != EEXIST) {
+    return LC_ERR_TRANSPORT;
+  }
+  if (mkdir(marker, 0700) == 0) {
+    *performed = 1;
+    return LC_OK;
+  }
+  if (errno == EEXIST) {
+    *performed = 0;
+    return LC_OK;
+  }
+  return LC_ERR_TRANSPORT;
+}
+
+static int pouch_e2e_seed_shared_command(const char *root, const char *ns,
+                                         const char *idempotency_key,
+                                         char command_id[48], lc_error *error) {
+  lc_client *client;
+  lc_outbox *outbox;
+  lc_outbox_config config;
+  lc_command_request command;
+  lc_command_receipt command_receipt;
+  lc_outbox_transaction *transaction;
+  lc_outbox_entry entry;
+  lc_outbox_receipt outbox_receipt;
+  lc_outbox_commit_result commit_result;
+  lc_source *payload;
+  char operation_id[128];
+  char effect_key[128];
+  int rc;
+
+  client = NULL;
+  outbox = NULL;
+  transaction = NULL;
+  payload = NULL;
+  lc_command_receipt_init(&command_receipt);
+  lc_outbox_receipt_init(&outbox_receipt);
+  lc_outbox_commit_result_init(&commit_result);
+  rc = pouch_e2e_open_shared_client(root, &client, error);
+  if (rc != LC_OK)
+    goto done;
+  lc_outbox_config_init(&config);
+  config.ns = ns;
+  config.owner = "pouch-e2e-command-producer";
+  config.notification_capacity = 8U;
+  config.claim_ttl_seconds = 1L;
+  config.recovery_interval_seconds = 1L;
+  rc = lc_client_new_outbox(client, &config, &outbox, error);
+  if (rc != LC_OK)
+    goto done;
+  lc_command_request_init(&command);
+  command.identity.scope = "pouch-e2e-command";
+  command.identity.command_type = "effects.create.v1";
+  command.identity.idempotency_key = idempotency_key;
+  command.request_digest = "sha256:pouch-e2e-command";
+  rc = lc_outbox_accept_command(outbox, &command, &transaction,
+                                &command_receipt, error);
+  if (rc != LC_OK || transaction == NULL)
+    goto done;
+  if (snprintf(command_id, 48U, "%s", command_receipt.command_id) <= 0) {
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  lc_outbox_entry_init(&entry);
+  if (snprintf(operation_id, sizeof(operation_id), "operation-%s",
+               idempotency_key) < 0 ||
+      snprintf(effect_key, sizeof(effect_key), "effect-%s", idempotency_key) <
+          0) {
+    rc = LC_ERR_INVALID;
+    goto done;
+  }
+  entry.operation_id = operation_id;
+  entry.effect_id = "final-effect";
+  entry.effect_key = effect_key;
+  entry.payload_digest = "sha256:pouch-e2e-command-effect";
+  entry.kind = "pouch-e2e-command";
+  entry.destination = "test://pouch-e2e-command";
+  entry.content_type = "application/json";
+  rc = lc_source_from_memory("{}", 2U, &payload, error);
+  if (rc != LC_OK)
+    goto done;
+  rc = lc_outbox_transaction_append(transaction, &entry, payload,
+                                    &outbox_receipt, error);
+  if (rc != LC_OK)
+    goto done;
+  rc = lc_outbox_transaction_commit(transaction, &commit_result, error);
+
+done:
+  if (transaction != NULL)
+    lc_outbox_transaction_close(transaction);
+  if (payload != NULL)
+    lc_source_close(payload);
+  lc_outbox_commit_result_cleanup(&commit_result);
+  lc_outbox_receipt_cleanup(&outbox_receipt);
+  lc_command_receipt_cleanup(&command_receipt);
+  if (outbox != NULL)
+    lc_outbox_close(outbox);
+  if (client != NULL)
+    lc_client_close(client);
+  return rc;
+}
+
+static int pouch_e2e_shared_command_child(
+    const char *root, const char *ns, const char *owner,
+    pouch_e2e_command_child_mode mode, int ready_fd, int start_fd, int phase_fd,
+    int release_fd, pouch_e2e_command_child_result *result) {
+  lc_client *client;
+  lc_outbox *outbox;
+  lc_outbox_config config;
+  lc_outbox_dispatcher *dispatcher;
+  lc_outbox_job *job;
+  lc_command_receipt receipt;
+  lc_outbox_transaction *transaction;
+  lc_command_result command_result;
+  lc_outbox_commit_result commit_result;
+  char start;
+  int rc;
+
+  client = NULL;
+  outbox = NULL;
+  dispatcher = NULL;
+  job = NULL;
+  transaction = NULL;
+  start = '\0';
+  rc = LC_ERR_INVALID;
+  memset(result, 0, sizeof(*result));
+  result->rc = LC_ERR_INVALID;
+  result->stage = 1;
+  lc_command_receipt_init(&receipt);
+  lc_outbox_commit_result_init(&commit_result);
+  {
+    lc_error error;
+
+    lc_error_init(&error);
+    rc = pouch_e2e_open_shared_client(root, &client, &error);
+    if (rc == LC_OK) {
+      lc_outbox_config_init(&config);
+      config.ns = ns;
+      config.owner = owner;
+      config.claim_ttl_seconds = 1L;
+      config.notification_capacity = 8U;
+      config.recovery_interval_seconds = 1L;
+      rc = lc_client_new_outbox(client, &config, &outbox, &error);
+    }
+    if (rc == LC_OK)
+      rc = lc_outbox_dispatcher_get_or_start(outbox, &dispatcher, &error);
+    result->stage = 2;
+    if (rc == LC_OK &&
+        (!pouch_e2e_write_exact(ready_fd, "r", 1U) ||
+         !pouch_e2e_read_exact(start_fd, &start, 1U) || start != 's')) {
+      rc = LC_ERR_INVALID;
+    }
+    if (rc == LC_OK) {
+      result->stage = 3;
+      rc = lc_outbox_dispatcher_next(dispatcher, -1L, &job, &error);
+    }
+    if (rc == LC_OK && (job == NULL || job->command_id == NULL ||
+                        snprintf(result->command_id, sizeof(result->command_id),
+                                 "%s", job->command_id) <= 0)) {
+      rc = LC_ERR_INVALID;
+    }
+    if (rc == LC_OK)
+      rc = lc_outbox_get_command_receipt_by_id(outbox, job->command_id,
+                                               &receipt, &error);
+    if (rc == LC_OK && receipt.state == LC_COMMAND_PENDING) {
+      rc = pouch_e2e_command_effect_once(root, job->command_id,
+                                         &result->performed_foreign_effect);
+      if (rc == LC_OK &&
+          mode == POUCH_E2E_COMMAND_CHILD_CRASH_AFTER_FOREIGN_EFFECT) {
+        char release;
+
+        result->stage = 4;
+        if (!pouch_e2e_write_exact(phase_fd, "f", 1U) ||
+            !pouch_e2e_read_exact(release_fd, &release, 1U)) {
+          rc = LC_ERR_INVALID;
+        }
+      }
+      if (rc == LC_OK) {
+        lc_command_receipt_cleanup(&receipt);
+        rc = lc_outbox_resume_command_by_id(outbox, job->command_id,
+                                            &transaction, &receipt, &error);
+      }
+      if (rc == LC_OK && transaction == NULL) {
+        result->saw_terminal_command = 1;
+      } else if (rc == LC_OK) {
+        lc_command_result_init(&command_result);
+        command_result.result_code = "created";
+        rc = lc_outbox_transaction_complete_command(transaction,
+                                                    &command_result, &error);
+        if (rc == LC_OK)
+          rc =
+              lc_outbox_transaction_commit(transaction, &commit_result, &error);
+        lc_outbox_commit_result_cleanup(&commit_result);
+        lc_outbox_transaction_close(transaction);
+        transaction = NULL;
+      }
+      if (rc == LC_OK &&
+          mode == POUCH_E2E_COMMAND_CHILD_CRASH_AFTER_COMMAND_COMMIT) {
+        char release;
+
+        result->stage = 5;
+        if (!pouch_e2e_write_exact(phase_fd, "t", 1U) ||
+            !pouch_e2e_read_exact(release_fd, &release, 1U)) {
+          rc = LC_ERR_INVALID;
+        }
+      }
+    } else if (rc == LC_OK) {
+      result->saw_terminal_command = 1;
+    }
+    if (rc == LC_OK) {
+      result->stage = 6;
+      rc = lc_outbox_job_complete(job, NULL, &error);
+      if (rc == LC_OK)
+        job = NULL;
+    }
+    if (rc != LC_OK && error.message != NULL) {
+      (void)snprintf(result->error_message, sizeof(result->error_message), "%s",
+                     error.message);
+    }
+    lc_error_cleanup(&error);
+  }
+  if (transaction != NULL)
+    lc_outbox_transaction_close(transaction);
+  if (job != NULL)
+    lc_outbox_job_close(job);
+  lc_outbox_commit_result_cleanup(&commit_result);
+  lc_command_receipt_cleanup(&receipt);
+  if (dispatcher != NULL)
+    lc_outbox_dispatcher_close(dispatcher);
+  if (outbox != NULL)
+    lc_outbox_close(outbox);
+  if (client != NULL)
+    lc_client_close(client);
+  result->rc = rc;
+  return rc == LC_OK;
+}
+
+static void pouch_e2e_command_child_init(pouch_e2e_command_child *child) {
+  memset(child, 0, sizeof(*child));
+  child->pid = -1;
+  child->ready_read = -1;
+  child->start_write = -1;
+  child->result_read = -1;
+  child->phase_read = -1;
+  child->release_write = -1;
+}
+
+static int pouch_e2e_launch_shared_command_child(
+    const char *root, const char *ns, const char *owner,
+    pouch_e2e_command_child_mode mode, pouch_e2e_command_child *child) {
+  int ready_pipe[2];
+  int start_pipe[2];
+  int result_pipe[2];
+  int phase_pipe[2];
+  int release_pipe[2];
+  pid_t pid;
+
+  ready_pipe[0] = ready_pipe[1] = -1;
+  start_pipe[0] = start_pipe[1] = -1;
+  result_pipe[0] = result_pipe[1] = -1;
+  phase_pipe[0] = phase_pipe[1] = -1;
+  release_pipe[0] = release_pipe[1] = -1;
+  pouch_e2e_command_child_init(child);
+  if (pipe(ready_pipe) != 0 || pipe(start_pipe) != 0 ||
+      pipe(result_pipe) != 0 || pipe(phase_pipe) != 0 ||
+      pipe(release_pipe) != 0) {
+    goto failed;
+  }
+  pid = fork();
+  if (pid < 0)
+    goto failed;
+  if (pid == 0) {
+    pouch_e2e_command_child_result result;
+    int ok;
+
+    (void)close(ready_pipe[0]);
+    (void)close(start_pipe[1]);
+    (void)close(result_pipe[0]);
+    (void)close(phase_pipe[0]);
+    (void)close(release_pipe[1]);
+    ok = pouch_e2e_shared_command_child(root, ns, owner, mode, ready_pipe[1],
+                                        start_pipe[0], phase_pipe[1],
+                                        release_pipe[0], &result);
+    (void)pouch_e2e_write_exact(result_pipe[1], &result, sizeof(result));
+    (void)close(ready_pipe[1]);
+    (void)close(start_pipe[0]);
+    (void)close(result_pipe[1]);
+    (void)close(phase_pipe[1]);
+    (void)close(release_pipe[0]);
+    _exit(ok ? 0 : 1);
+  }
+  (void)close(ready_pipe[1]);
+  (void)close(start_pipe[0]);
+  (void)close(result_pipe[1]);
+  (void)close(phase_pipe[1]);
+  (void)close(release_pipe[0]);
+  child->pid = pid;
+  child->ready_read = ready_pipe[0];
+  child->start_write = start_pipe[1];
+  child->result_read = result_pipe[0];
+  child->phase_read = phase_pipe[0];
+  child->release_write = release_pipe[1];
+  return LC_OK;
+
+failed:
+  if (ready_pipe[0] >= 0)
+    (void)close(ready_pipe[0]);
+  if (ready_pipe[1] >= 0)
+    (void)close(ready_pipe[1]);
+  if (start_pipe[0] >= 0)
+    (void)close(start_pipe[0]);
+  if (start_pipe[1] >= 0)
+    (void)close(start_pipe[1]);
+  if (result_pipe[0] >= 0)
+    (void)close(result_pipe[0]);
+  if (result_pipe[1] >= 0)
+    (void)close(result_pipe[1]);
+  if (phase_pipe[0] >= 0)
+    (void)close(phase_pipe[0]);
+  if (phase_pipe[1] >= 0)
+    (void)close(phase_pipe[1]);
+  if (release_pipe[0] >= 0)
+    (void)close(release_pipe[0]);
+  if (release_pipe[1] >= 0)
+    (void)close(release_pipe[1]);
+  return LC_ERR_INVALID;
+}
+
+static void
+pouch_e2e_wait_shared_command_child_ready(pouch_e2e_command_child *child) {
+  char ready;
+
+  assert_true(pouch_e2e_read_exact(child->ready_read, &ready, 1U));
+  assert_int_equal(ready, 'r');
+  assert_int_equal(close(child->ready_read), 0);
+  child->ready_read = -1;
+}
+
+static void
+pouch_e2e_start_shared_command_child(pouch_e2e_command_child *child) {
+  assert_true(pouch_e2e_write_exact(child->start_write, "s", 1U));
+  assert_int_equal(close(child->start_write), 0);
+  child->start_write = -1;
+}
+
+static pouch_e2e_command_child_result
+pouch_e2e_collect_shared_command_child(pouch_e2e_command_child *child) {
+  pouch_e2e_command_child_result result;
+  int status;
+
+  memset(&result, 0, sizeof(result));
+  assert_true(
+      pouch_e2e_read_exact(child->result_read, &result, sizeof(result)));
+  assert_int_equal(close(child->result_read), 0);
+  child->result_read = -1;
+  assert_int_equal(close(child->phase_read), 0);
+  child->phase_read = -1;
+  assert_int_equal(close(child->release_write), 0);
+  child->release_write = -1;
+  assert_int_equal(waitpid(child->pid, &status, 0), child->pid);
+  child->pid = -1;
+  assert_true(WIFEXITED(status));
+  if (result.rc != LC_OK) {
+    print_message("shared command child failed at stage %d: %s\n", result.stage,
+                  result.error_message);
+  }
+  assert_int_equal(result.rc, LC_OK);
+  assert_int_equal(WEXITSTATUS(status), 0);
+  return result;
+}
+
+static void
+pouch_e2e_kill_shared_command_child(pouch_e2e_command_child *child) {
+  int status;
+
+  assert_int_equal(kill(child->pid, SIGKILL), 0);
+  assert_int_equal(waitpid(child->pid, &status, 0), child->pid);
+  child->pid = -1;
+  assert_true(WIFSIGNALED(status));
+  assert_int_equal(WTERMSIG(status), SIGKILL);
+  assert_int_equal(close(child->result_read), 0);
+  child->result_read = -1;
+  assert_int_equal(close(child->phase_read), 0);
+  child->phase_read = -1;
+  assert_int_equal(close(child->release_write), 0);
+  child->release_write = -1;
+}
+
+static void pouch_e2e_command_wait_pending_hook(void *context) {
+  pouch_e2e_command_wait_hook *hook = (pouch_e2e_command_wait_hook *)context;
+
+  if (hook != NULL && !hook->signaled) {
+    hook->signaled = 1;
+    (void)pouch_e2e_write_exact(hook->pending_fd, "p", 1U);
+  }
+}
+
+static int pouch_e2e_command_waiter_child(
+    const char *root, const char *ns, const char *command_id, long timeout_ms,
+    int ready_fd, int pending_fd, pouch_e2e_command_waiter_result *result) {
+  lc_client *client;
+  lc_outbox *outbox;
+  lc_outbox_config config;
+  lc_command_receipt receipt;
+  lc_error error;
+  pouch_e2e_command_wait_hook hook;
+  int rc;
+
+  client = NULL;
+  outbox = NULL;
+  memset(result, 0, sizeof(*result));
+  result->rc = LC_ERR_INVALID;
+  lc_error_init(&error);
+  lc_command_receipt_init(&receipt);
+  memset(&hook, 0, sizeof(hook));
+  hook.pending_fd = pending_fd;
+  rc = pouch_e2e_open_shared_client(root, &client, &error);
+  if (rc == LC_OK) {
+    lc_outbox_config_init(&config);
+    config.ns = ns;
+    config.owner = "pouch-e2e-command-waiter";
+    rc = lc_client_new_outbox(client, &config, &outbox, &error);
+  }
+  if (rc == LC_OK && !pouch_e2e_write_exact(ready_fd, "r", 1U))
+    rc = LC_ERR_INVALID;
+  if (rc == LC_OK) {
+    lc_outbox_test_after_command_wait_pending_read_hook =
+        pouch_e2e_command_wait_pending_hook;
+    lc_outbox_test_after_command_wait_pending_read_context = &hook;
+    rc = lc_outbox_wait_command(outbox, command_id, timeout_ms, &receipt,
+                                &error);
+    lc_outbox_test_after_command_wait_pending_read_hook = NULL;
+    lc_outbox_test_after_command_wait_pending_read_context = NULL;
+  }
+  result->rc = rc;
+  result->state = receipt.state;
+  if (rc != LC_OK && error.message != NULL) {
+    (void)snprintf(result->error_message, sizeof(result->error_message), "%s",
+                   error.message);
+  }
+  lc_command_receipt_cleanup(&receipt);
+  lc_error_cleanup(&error);
+  if (outbox != NULL)
+    lc_outbox_close(outbox);
+  if (client != NULL)
+    lc_client_close(client);
+  return rc == LC_OK;
+}
+
+static void pouch_e2e_command_waiter_init(pouch_e2e_command_waiter *waiter) {
+  memset(waiter, 0, sizeof(*waiter));
+  waiter->pid = -1;
+  waiter->ready_read = -1;
+  waiter->pending_read = -1;
+  waiter->result_read = -1;
+}
+
+static int pouch_e2e_launch_command_waiter(const char *root, const char *ns,
+                                           const char *command_id,
+                                           long timeout_ms,
+                                           pouch_e2e_command_waiter *waiter) {
+  int ready_pipe[2];
+  int pending_pipe[2];
+  int result_pipe[2];
+  pid_t pid;
+
+  ready_pipe[0] = ready_pipe[1] = -1;
+  pending_pipe[0] = pending_pipe[1] = -1;
+  result_pipe[0] = result_pipe[1] = -1;
+  pouch_e2e_command_waiter_init(waiter);
+  if (pipe(ready_pipe) != 0 || pipe(pending_pipe) != 0 ||
+      pipe(result_pipe) != 0) {
+    goto failed;
+  }
+  pid = fork();
+  if (pid < 0)
+    goto failed;
+  if (pid == 0) {
+    pouch_e2e_command_waiter_result result;
+    int ok;
+
+    (void)close(ready_pipe[0]);
+    (void)close(pending_pipe[0]);
+    (void)close(result_pipe[0]);
+    ok =
+        pouch_e2e_command_waiter_child(root, ns, command_id, timeout_ms,
+                                       ready_pipe[1], pending_pipe[1], &result);
+    (void)pouch_e2e_write_exact(result_pipe[1], &result, sizeof(result));
+    (void)close(ready_pipe[1]);
+    (void)close(pending_pipe[1]);
+    (void)close(result_pipe[1]);
+    _exit(ok ? 0 : 1);
+  }
+  (void)close(ready_pipe[1]);
+  (void)close(pending_pipe[1]);
+  (void)close(result_pipe[1]);
+  waiter->pid = pid;
+  waiter->ready_read = ready_pipe[0];
+  waiter->pending_read = pending_pipe[0];
+  waiter->result_read = result_pipe[0];
+  return LC_OK;
+
+failed:
+  if (ready_pipe[0] >= 0)
+    (void)close(ready_pipe[0]);
+  if (ready_pipe[1] >= 0)
+    (void)close(ready_pipe[1]);
+  if (pending_pipe[0] >= 0)
+    (void)close(pending_pipe[0]);
+  if (pending_pipe[1] >= 0)
+    (void)close(pending_pipe[1]);
+  if (result_pipe[0] >= 0)
+    (void)close(result_pipe[0]);
+  if (result_pipe[1] >= 0)
+    (void)close(result_pipe[1]);
+  return LC_ERR_INVALID;
+}
+
+static void
+pouch_e2e_wait_command_waiter_ready(pouch_e2e_command_waiter *waiter) {
+  char ready;
+
+  assert_true(pouch_e2e_read_exact(waiter->ready_read, &ready, 1U));
+  assert_int_equal(ready, 'r');
+  assert_int_equal(close(waiter->ready_read), 0);
+  waiter->ready_read = -1;
+}
+
+static void
+pouch_e2e_wait_command_waiter_pending(pouch_e2e_command_waiter *waiter) {
+  char pending;
+
+  assert_true(pouch_e2e_read_exact(waiter->pending_read, &pending, 1U));
+  assert_int_equal(pending, 'p');
+  assert_int_equal(close(waiter->pending_read), 0);
+  waiter->pending_read = -1;
+}
+
+static pouch_e2e_command_waiter_result
+pouch_e2e_collect_command_waiter(pouch_e2e_command_waiter *waiter) {
+  pouch_e2e_command_waiter_result result;
+  int status;
+
+  memset(&result, 0, sizeof(result));
+  assert_true(
+      pouch_e2e_read_exact(waiter->result_read, &result, sizeof(result)));
+  assert_int_equal(close(waiter->result_read), 0);
+  waiter->result_read = -1;
+  assert_int_equal(waitpid(waiter->pid, &status, 0), waiter->pid);
+  waiter->pid = -1;
+  assert_true(WIFEXITED(status));
+  assert_int_equal(result.rc, LC_OK);
+  assert_int_equal(WEXITSTATUS(status), 0);
+  return result;
+}
+
 static unsigned long pouch_e2e_shared_outbox_full_mask(size_t count) {
   assert_true(count < sizeof(unsigned long) * 8U);
   return (1UL << count) - 1UL;
@@ -5637,6 +6292,258 @@ static void test_pouch_shared_outbox_abandoned_claim_recovers(void **state) {
   recovered = pouch_e2e_collect_shared_outbox_child(&recovering_instance);
   assert_int_equal(recovered.delivered, 1U);
   assert_int_equal(recovered.delivered_mask, 1UL);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void pouch_e2e_assert_shared_command_state(const char *root,
+                                                  const char *ns,
+                                                  const char *command_id,
+                                                  int expected_rc,
+                                                  int expected_state) {
+  lc_client *client;
+  lc_outbox *outbox;
+  lc_outbox_config config;
+  lc_command_receipt receipt;
+  lc_error error;
+  int rc;
+
+  client = NULL;
+  outbox = NULL;
+  lc_error_init(&error);
+  lc_command_receipt_init(&receipt);
+  assert_lc_ok(pouch_e2e_open_shared_client(root, &client, &error), &error);
+  lc_outbox_config_init(&config);
+  config.ns = ns;
+  config.owner = "pouch-e2e-command-observer";
+  assert_lc_ok(lc_client_new_outbox(client, &config, &outbox, &error), &error);
+  rc = lc_outbox_wait_command(outbox, command_id, 0L, &receipt, &error);
+  assert_int_equal(rc, expected_rc);
+  assert_int_equal(receipt.state, expected_state);
+  lc_command_receipt_cleanup(&receipt);
+  lc_error_cleanup(&error);
+  lc_outbox_close(outbox);
+  lc_client_close(client);
+}
+
+static void pouch_e2e_assert_command_effect_marker(const char *root,
+                                                   const char *command_id) {
+  char marker[448];
+  struct stat st;
+
+  assert_true(snprintf(marker, sizeof(marker), "%s/command-effects/%s", root,
+                       command_id) > 0);
+  assert_int_equal(stat(marker, &st), 0);
+  assert_true(S_ISDIR(st.st_mode));
+}
+
+static void pouch_e2e_assert_no_command_effect_marker(const char *root,
+                                                      const char *command_id) {
+  char marker[448];
+  struct stat st;
+
+  assert_true(snprintf(marker, sizeof(marker), "%s/command-effects/%s", root,
+                       command_id) > 0);
+  assert_int_equal(stat(marker, &st), -1);
+  assert_int_equal(errno, ENOENT);
+}
+
+static void test_pouch_shared_command_competing_instances(void **state) {
+  const char *ns = "command-competing";
+  char root[256];
+  char endpoint[320];
+  char first_id[48];
+  char second_id[48];
+  pouch_e2e_command_child first;
+  pouch_e2e_command_child second;
+  pouch_e2e_command_child_result first_result;
+  pouch_e2e_command_child_result second_result;
+  lc_error error;
+
+  (void)state;
+  lc_error_init(&error);
+  make_pouch_root("command-competing", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  assert_lc_ok(
+      pouch_e2e_seed_shared_command(root, ns, "first", first_id, &error),
+      &error);
+  assert_lc_ok(
+      pouch_e2e_seed_shared_command(root, ns, "second", second_id, &error),
+      &error);
+  assert_lc_ok(pouch_e2e_launch_shared_command_child(
+                   root, ns, "command-worker-a",
+                   POUCH_E2E_COMMAND_CHILD_COMPLETE, &first),
+               &error);
+  assert_lc_ok(pouch_e2e_launch_shared_command_child(
+                   root, ns, "command-worker-b",
+                   POUCH_E2E_COMMAND_CHILD_COMPLETE, &second),
+               &error);
+  pouch_e2e_wait_shared_command_child_ready(&first);
+  pouch_e2e_wait_shared_command_child_ready(&second);
+  pouch_e2e_start_shared_command_child(&first);
+  pouch_e2e_start_shared_command_child(&second);
+  first_result = pouch_e2e_collect_shared_command_child(&first);
+  second_result = pouch_e2e_collect_shared_command_child(&second);
+  assert_true(first_result.performed_foreign_effect);
+  assert_true(second_result.performed_foreign_effect);
+  assert_int_not_equal(
+      strcmp(first_result.command_id, second_result.command_id), 0);
+  assert_true((strcmp(first_result.command_id, first_id) == 0 &&
+               strcmp(second_result.command_id, second_id) == 0) ||
+              (strcmp(first_result.command_id, second_id) == 0 &&
+               strcmp(second_result.command_id, first_id) == 0));
+  pouch_e2e_assert_shared_command_state(root, ns, first_id, LC_OK,
+                                        LC_COMMAND_COMPLETED);
+  pouch_e2e_assert_shared_command_state(root, ns, second_id, LC_OK,
+                                        LC_COMMAND_COMPLETED);
+  pouch_e2e_assert_command_effect_marker(root, first_id);
+  pouch_e2e_assert_command_effect_marker(root, second_id);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void
+test_pouch_shared_command_recovers_after_foreign_effect_crash(void **state) {
+  const char *ns = "command-foreign-crash";
+  char root[256];
+  char endpoint[320];
+  char command_id[48];
+  char phase;
+  pouch_e2e_command_child failed;
+  pouch_e2e_command_child recovered;
+  pouch_e2e_command_child_result recovered_result;
+  lc_error error;
+
+  (void)state;
+  lc_error_init(&error);
+  make_pouch_root("command-foreign-crash", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  assert_lc_ok(pouch_e2e_seed_shared_command(root, ns, "foreign-crash",
+                                             command_id, &error),
+               &error);
+  assert_lc_ok(pouch_e2e_launch_shared_command_child(
+                   root, ns, "command-foreign-failed",
+                   POUCH_E2E_COMMAND_CHILD_CRASH_AFTER_FOREIGN_EFFECT, &failed),
+               &error);
+  pouch_e2e_wait_shared_command_child_ready(&failed);
+  pouch_e2e_start_shared_command_child(&failed);
+  assert_true(pouch_e2e_read_exact(failed.phase_read, &phase, 1U));
+  assert_int_equal(phase, 'f');
+  pouch_e2e_kill_shared_command_child(&failed);
+  pouch_e2e_assert_shared_command_state(root, ns, command_id, LC_ERR_TIMEOUT,
+                                        LC_COMMAND_PENDING);
+  assert_lc_ok(pouch_e2e_launch_shared_command_child(
+                   root, ns, "command-foreign-recovered",
+                   POUCH_E2E_COMMAND_CHILD_COMPLETE, &recovered),
+               &error);
+  pouch_e2e_wait_shared_command_child_ready(&recovered);
+  pouch_e2e_start_shared_command_child(&recovered);
+  recovered_result = pouch_e2e_collect_shared_command_child(&recovered);
+  assert_false(recovered_result.performed_foreign_effect);
+  assert_false(recovered_result.saw_terminal_command);
+  pouch_e2e_assert_shared_command_state(root, ns, command_id, LC_OK,
+                                        LC_COMMAND_COMPLETED);
+  pouch_e2e_assert_command_effect_marker(root, command_id);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void
+test_pouch_shared_command_terminal_commit_survives_job_crash(void **state) {
+  const char *ns = "command-terminal-crash";
+  char root[256];
+  char endpoint[320];
+  char command_id[48];
+  char phase;
+  pouch_e2e_command_child failed;
+  pouch_e2e_command_child recovered;
+  pouch_e2e_command_child_result recovered_result;
+  lc_error error;
+
+  (void)state;
+  lc_error_init(&error);
+  make_pouch_root("command-terminal-crash", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  assert_lc_ok(pouch_e2e_seed_shared_command(root, ns, "terminal-crash",
+                                             command_id, &error),
+               &error);
+  assert_lc_ok(pouch_e2e_launch_shared_command_child(
+                   root, ns, "command-terminal-failed",
+                   POUCH_E2E_COMMAND_CHILD_CRASH_AFTER_COMMAND_COMMIT, &failed),
+               &error);
+  pouch_e2e_wait_shared_command_child_ready(&failed);
+  pouch_e2e_start_shared_command_child(&failed);
+  assert_true(pouch_e2e_read_exact(failed.phase_read, &phase, 1U));
+  assert_int_equal(phase, 't');
+  pouch_e2e_assert_shared_command_state(root, ns, command_id, LC_OK,
+                                        LC_COMMAND_COMPLETED);
+  pouch_e2e_kill_shared_command_child(&failed);
+  assert_lc_ok(pouch_e2e_launch_shared_command_child(
+                   root, ns, "command-terminal-recovered",
+                   POUCH_E2E_COMMAND_CHILD_COMPLETE, &recovered),
+               &error);
+  pouch_e2e_wait_shared_command_child_ready(&recovered);
+  pouch_e2e_start_shared_command_child(&recovered);
+  recovered_result = pouch_e2e_collect_shared_command_child(&recovered);
+  assert_false(recovered_result.performed_foreign_effect);
+  assert_true(recovered_result.saw_terminal_command);
+  pouch_e2e_assert_shared_command_state(root, ns, command_id, LC_OK,
+                                        LC_COMMAND_COMPLETED);
+  pouch_e2e_assert_command_effect_marker(root, command_id);
+  lc_error_cleanup(&error);
+  cleanup_pouch_root(root);
+}
+
+static void
+test_pouch_shared_command_waiter_blocks_until_terminal(void **state) {
+  const char *ns = "command-waiter";
+  const char *keys[2] = {"wait-infinite", "wait-deadline"};
+  const long timeouts[2] = {-1L, 5000L};
+  char root[256];
+  char endpoint[320];
+  char command_ids[2][48];
+  pouch_e2e_command_waiter waiters[2];
+  pouch_e2e_command_waiter_result waiter_results[2];
+  pouch_e2e_command_child workers[2];
+  pouch_e2e_command_child_result worker_results[2];
+  lc_error error;
+  size_t index;
+
+  (void)state;
+  lc_error_init(&error);
+  make_pouch_root("command-waiter", root, sizeof(root), endpoint,
+                  sizeof(endpoint));
+  for (index = 0U; index < 2U; ++index) {
+    assert_lc_ok(pouch_e2e_seed_shared_command(root, ns, keys[index],
+                                               command_ids[index], &error),
+                 &error);
+    assert_lc_ok(pouch_e2e_launch_command_waiter(root, ns, command_ids[index],
+                                                 timeouts[index],
+                                                 &waiters[index]),
+                 &error);
+    pouch_e2e_wait_command_waiter_ready(&waiters[index]);
+    /* The hook runs after the waiter has reread a pending receipt.  Only then
+     * may this separate supervisor claim and terminalize the command effect. */
+    pouch_e2e_wait_command_waiter_pending(&waiters[index]);
+    pouch_e2e_assert_no_command_effect_marker(root, command_ids[index]);
+  }
+  for (index = 0U; index < 2U; ++index) {
+    assert_lc_ok(pouch_e2e_launch_shared_command_child(
+                     root, ns, "command-waiter-supervisor",
+                     POUCH_E2E_COMMAND_CHILD_COMPLETE, &workers[index]),
+                 &error);
+    pouch_e2e_wait_shared_command_child_ready(&workers[index]);
+  }
+  for (index = 0U; index < 2U; ++index)
+    pouch_e2e_start_shared_command_child(&workers[index]);
+  for (index = 0U; index < 2U; ++index) {
+    worker_results[index] =
+        pouch_e2e_collect_shared_command_child(&workers[index]);
+    assert_true(worker_results[index].performed_foreign_effect);
+    waiter_results[index] = pouch_e2e_collect_command_waiter(&waiters[index]);
+    assert_int_equal(waiter_results[index].state, LC_COMMAND_COMPLETED);
+    pouch_e2e_assert_command_effect_marker(root, command_ids[index]);
+  }
   lc_error_cleanup(&error);
   cleanup_pouch_root(root);
 }
@@ -7026,7 +7933,13 @@ int main(void) {
       cmocka_unit_test(test_pouch_shared_outbox_competing_instances),
       cmocka_unit_test(test_pouch_shared_outbox_independent_namespaces),
       cmocka_unit_test(test_pouch_shared_outbox_rolling_handoff),
-      cmocka_unit_test(test_pouch_shared_outbox_abandoned_claim_recovers)};
+      cmocka_unit_test(test_pouch_shared_outbox_abandoned_claim_recovers),
+      cmocka_unit_test(test_pouch_shared_command_competing_instances),
+      cmocka_unit_test(
+          test_pouch_shared_command_recovers_after_foreign_effect_crash),
+      cmocka_unit_test(
+          test_pouch_shared_command_terminal_commit_survives_job_crash),
+      cmocka_unit_test(test_pouch_shared_command_waiter_blocks_until_terminal)};
   return cmocka_run_group_tests(tests, setup_pouch_e2e_group,
                                 teardown_pouch_e2e_group);
 }

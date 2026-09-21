@@ -80,6 +80,7 @@ foreach(target
         bench-check
         benchmarks-go
         perf-gate
+        benchmark-outbox-command-wait
         benchmark-outbox-hardening
         dev-ps
         dev-logs
@@ -101,6 +102,8 @@ assert_contains(root_makefile "outbox-reconcile-multi"
     "outbox hardening shared-writer case")
 assert_contains(root_makefile "outbox-reconcile-multi-compacted"
     "outbox hardening shared-writer compacted case")
+assert_contains(root_makefile "outbox-command-wait"
+    "outbox terminal command-wait benchmark")
 
 foreach(script
         scripts/dev-logs.sh

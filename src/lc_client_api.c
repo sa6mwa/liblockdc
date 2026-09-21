@@ -2825,6 +2825,7 @@ int lc_client_watch_queue_method(lc_client *self, const lc_watch_queue_req *req,
 }
 
 int lc_client_clone_remote_for_outbox(lc_client_handle *source, long timeout_ms,
+                                      const struct timespec *request_deadline,
                                       lc_client **out, lc_error *error) {
   lc_client_config config;
   int rc;
@@ -2864,6 +2865,11 @@ int lc_client_clone_remote_for_outbox(lc_client_handle *source, long timeout_ms,
   config.allocator = source->allocator;
   rc = lc_client_open(&config, out, error);
   lc_source_close(config.client_bundle_source);
+  if (rc == LC_OK && request_deadline != NULL) {
+    lc_client_handle *clone = (lc_client_handle *)*out;
+
+    lc_engine_client_set_request_deadline(clone->engine, request_deadline);
+  }
   return rc;
 }
 
